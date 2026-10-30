@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use carbide_rpc_utils::dhcp::{HostConfig, InterfaceInfo, InterfaceInfoV6};
+use carbide_rpc_utils::dhcp::{HostConfig, InterfaceInfo, InterfaceInfoV6, ServiceReservation};
 use carbide_uuid::machine::MachineInterfaceId;
 use lru::LruCache;
 use rpc::forge::{DhcpDiscovery, DhcpRecord, MessageKind};
@@ -96,6 +96,34 @@ fn from_host_conf_v6(
 
 #[async_trait]
 impl DhcpMode for Dpu {
+    /// Resolves a reservation by receiving interface and MAC, rejecting unmatched clients on
+    /// configured service interfaces to prevent host DHCP fallback.
+    fn service_reservation<'a>(
+        &self,
+        config: &'a Config,
+        receiving_interface: &str,
+        client_mac: &str,
+    ) -> Result<Option<&'a ServiceReservation>, DhcpError> {
+        let service_config = config.service_config();
+        // Only explicitly configured service interfaces suppress normal host discovery.
+        if !service_config.has_interface(receiving_interface) {
+            return Ok(None);
+        }
+
+        let client_mac = client_mac.parse().map_err(|error| {
+            DhcpError::InvalidInput(format!("invalid service client MAC {client_mac}: {error}"))
+        })?;
+        // A configured service interface fails closed when chaddr has no exact reservation.
+        service_config
+            .get(receiving_interface, &client_mac)
+            .map(Some)
+            .ok_or_else(|| {
+                DhcpError::MissingArgument(format!(
+                    "no service reservation for MAC {client_mac} on {receiving_interface}"
+                ))
+            })
+    }
+
     async fn discover_dhcp(
         &self,
         discovery_request: DhcpDiscovery,
@@ -223,11 +251,29 @@ pub async fn get_host_config(
 mod tests {
     use std::net::Ipv4Addr;
 
-    use carbide_rpc_utils::dhcp::InterfaceInfoV6;
+    use carbide_rpc_utils::dhcp::{
+        InterfaceInfoV6, ServiceConfig, ServiceInterfaceReservations, ServiceLink, ServiceLinkV4,
+    };
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    /// Builds one valid service reservation so lookup tests exercise interface and MAC selection
+    /// rather than validation.
+    fn service_reservation() -> ServiceReservation {
+        ServiceReservation {
+            attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
+            interface_ordinal: 0,
+            internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
+            mac_address: "02:00:00:00:00:01".parse().unwrap(),
+            link: ServiceLink::Ipv4(ServiceLinkV4 {
+                address: "192.0.2.11".parse().unwrap(),
+                prefix: "192.0.2.10/31".parse().unwrap(),
+                gateway: "192.0.2.10".parse().unwrap(),
+            }),
+        }
+    }
 
     fn summarize_ipv4_config(
         interface: InterfaceInfo,
@@ -252,6 +298,55 @@ mod tests {
         );
         let interface = serde_yaml::from_str(&yaml).map_err(drop)?;
         validate_interface_presence(interface)
+    }
+
+    /// Verifies DPU service lookup requires both the receiving slot and chaddr while an unreserved
+    /// interface still permits host fallback.
+    #[test]
+    fn service_lookup_reserves_configured_interfaces() {
+        // Configure one populated service interface and one explicit empty slot, leaving an unrelated interface outside service ownership.
+        let reservation = service_reservation();
+        let service_config = ServiceConfig::try_new(vec![
+            ServiceInterfaceReservations {
+                receiving_interface: "pf0sf1".to_string(),
+                reservations: vec![reservation.clone()],
+            },
+            ServiceInterfaceReservations {
+                receiving_interface: "pf0sf2".to_string(),
+                reservations: vec![],
+            },
+        ])
+        .unwrap();
+        let config = Config::new(
+            Default::default(),
+            None,
+            67,
+            rpc::forge_tls_client::ForgeClientConfig::new(String::new(), None),
+        )
+        .with_service_config(service_config);
+        let mode = Dpu {};
+
+        // The exact pair resolves without consulting host configuration.
+        assert_eq!(
+            mode.service_reservation(&config, "pf0sf1", "02:00:00:00:00:01")
+                .unwrap(),
+            Some(&reservation)
+        );
+
+        // Unknown clients and explicit empty service slots fail closed, while unrelated interfaces remain eligible for host lookup.
+        assert!(
+            mode.service_reservation(&config, "pf0sf1", "02:00:00:00:00:02")
+                .is_err()
+        );
+        assert!(
+            mode.service_reservation(&config, "pf0sf2", "02:00:00:00:00:01")
+                .is_err()
+        );
+        assert_eq!(
+            mode.service_reservation(&config, "host0", "02:00:00:00:00:01")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

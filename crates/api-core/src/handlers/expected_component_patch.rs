@@ -16,7 +16,8 @@
  */
 
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::fmt::Display;
+use std::net::{IpAddr, Ipv4Addr};
 
 use mac_address::MacAddress;
 use model::metadata::Metadata;
@@ -227,6 +228,32 @@ pub(super) fn parse_bmc_ip(address: &str) -> Result<Option<IpAddr>, CarbideError
         .parse()
         .map(Some)
         .map_err(|_| CarbideError::InvalidArgument("invalid bmc_ip_address".to_string()))
+}
+
+/// Rejects a fixed address that cannot identify a single interface. Without
+/// this check, such an address is reserved on `static-assignments` and blocks
+/// every other declaration that uses it.
+pub(super) fn validate_single_interface_address(
+    field: impl Display,
+    address: Option<IpAddr>,
+) -> Result<(), CarbideError> {
+    match address {
+        Some(address) if !identifies_single_interface(address) => {
+            Err(CarbideError::InvalidArgument(format!(
+                "{field} {address} must not be an unspecified, multicast or IPv4 limited-broadcast address"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Matches the REST API's `ValidateExpectedBmcIPAddress`, including its
+/// treatment of IPv4-mapped IPv6 addresses.
+fn identifies_single_interface(address: IpAddr) -> bool {
+    let address = address.to_canonical();
+    !(address.is_unspecified()
+        || address.is_multicast()
+        || address == IpAddr::V4(Ipv4Addr::BROADCAST))
 }
 
 #[cfg(test)]

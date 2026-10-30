@@ -12,7 +12,7 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
 #[command(
-    long_about = "Read or atomically change the live NIC firmware profiles selected for a host and its cards. These commands manage stored intent, not firmware execution. Use desired to inspect resolution against stored device facts.",
+    long_about = "Read or atomically change the live NIC firmware profiles selected for a host and its cards. These commands manage stored intent, not firmware execution. Use firmware nic desired to inspect resolution against stored device facts.",
     after_long_help = "\
 EXAMPLES:
 

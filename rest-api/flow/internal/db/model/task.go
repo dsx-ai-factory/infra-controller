@@ -383,6 +383,26 @@ func ListPowerTasksForRack(
 	return tasks, nil
 }
 
+// ListTaskContextForRack loads nonterminal metadata in creation/UUID order.
+// No operation payloads or reports are read. Overflow returns no partial list.
+func ListTaskContextForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID) ([]Task, error) {
+	tasks := make([]Task, 0)
+	err := idb.NewSelect().Model(&tasks).
+		Column("id", "type", "rack_id", "attributes", "status", "created_at").
+		Where("rack_id = ?", rackID).
+		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
+		OrderExpr("created_at ASC, id ASC").
+		Limit(taskcommon.MaxTaskContextPerRack + 1).
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) > taskcommon.MaxTaskContextPerRack {
+		return nil, &taskcommon.TaskContextLimitError{RackID: rackID}
+	}
+	return tasks, nil
+}
+
 // ListTasksForRacksByStatus returns tasks for the requested racks matching any
 // of the given statuses.
 func ListTasksForRacksByStatus(

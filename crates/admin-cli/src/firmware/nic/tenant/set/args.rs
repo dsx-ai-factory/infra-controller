@@ -25,13 +25,23 @@ This stores a requirement for future selected SPX attachments and does not \
 flash firmware or change the profile definition. Until SPX attachment \
 preparation is supported \
 (https://github.com/dsx-ai-factory/infra-controller/issues/6686), the selection \
-prevents allocations requesting SPX attachments and changes to nonempty SPX \
-attachments on existing instances. Unchanged or cleared attachments and \
-allocations without SPX attachments remain allowed.
+prevents allocations requesting SPX attachments. Allocations without SPX \
+attachments are not blocked by this check.
 
-This is a read-time check: a request already past the selection read may \
-complete after a later selection commits. Finish upgrading all Core replicas \
-before setting a selection; do not roll back to Core versions that ignore it.
+Allocations with saved firmware requirements keep them after tenant selection \
+or profile edits. Removals and partition edits are allowed if retained \
+attachments keep their saved device bindings. Adding attachments is rejected \
+when the saved requirements include a tenant profile.
+
+Instances without saved requirements use the live tenant selection. With a \
+profile selected, edits that leave a nonempty SPX attachment list are rejected. \
+Unchanged attachments and clearing the list are not blocked. Both saved and \
+live firmware-check rejections return FAILED_PRECONDITION.
+
+The live tenant-selection check is read-time: a request already past the \
+selection read may complete after a later selection commits. Finish upgrading \
+all Core replicas before setting a selection; do not roll back to Core versions \
+that ignore it.
 
 The CLI neither fetches a fresh token nor retries a failed write. After a \
 connection error, inspect firmware nic tenant show before another write; the \

@@ -61,7 +61,7 @@ use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
+use carbide_resource_pool::PoolDefinitionSource;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
@@ -330,11 +330,20 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     let (rms_client, site_explorer_machine_info_provider, switch_system_image_rms_api) =
         match carbide_config.rms.api_url.clone() {
             Some(url) if !url.is_empty() => {
-                let rms_client_config = librms::client_config::RmsClientConfig::new(
+                let mut rms_client_config = librms::client_config::RmsClientConfig::new(
                     carbide_config.rms.root_ca_path.clone(),
                     carbide_config.rms.client_cert.clone(),
                     carbide_config.rms.client_key.clone(),
                     carbide_config.rms.enforce_tls,
+                );
+                let audit_log_filter = dynamic_settings.log_filter.clone();
+                rms_observability::configure(
+                    &mut rms_client_config,
+                    Some(dynamic_settings.tracing_enabled.clone()),
+                    Some(Arc::new(move || {
+                        audit_log_filter
+                            .enables(rms_observability::AUDIT_TARGET, &tracing::Level::DEBUG)
+                    })),
                 );
                 let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
                 let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);
@@ -387,9 +396,28 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     } else {
         PoolDefinitionSource::SeedConfiguration
     };
-    let registry =
-        ResourcePoolRegistry::resolve(pool_definition_source, &mut txn, &pool_config.selections)
-            .await?;
+    // Production selection remains Integrated-only, including bindings left
+    // behind after their pool disappears from configuration. The lower
+    // registry initialization is also exercised with remote providers in tests.
+    for binding in db::resource_pool::binding::all(txn.as_pgconn()).await? {
+        eyre::ensure!(
+            binding.backend_kind == ResourcePoolBackendKind::Integrated,
+            "resource pool `{}` has a saved gRPC binding; v2.4 requires integrated allocation",
+            binding.pool_name,
+        );
+    }
+    let mut resource_pool_monitor = crate::resource_pool::ResourcePoolMonitor::new(
+        db_pool.clone(),
+        &carbide_config.resource_pool_backends,
+    )?;
+    let registry = resource_pool_monitor
+        .resolve_registry(
+            pool_definition_source,
+            &mut txn,
+            &pool_config.selections,
+            &work_lock_manager_handle,
+        )
+        .await?;
     // Ordinary seed definitions keep their stored values when TOML ranges or
     // types change. PKey initialization adds configured integer ranges later,
     // so it must not reuse a pool that already contains IP addresses.
@@ -407,10 +435,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // Pool inventory is the set of values, such as VNIs or IP addresses,
         // that NICo can allocate. Seed new pools here, preserving existing
         // inventory when its configured ranges change. `create_common_pools`
-        // below requires the mandatory pools to exist and have free values
-        // before it builds the handles used by the API and controllers. Route
-        // servers and site prefixes also need to reflect the config before
-        // the API starts serving requests.
+        // below requires free values for mandatory Integrated or unbound pools,
+        // and accepted definitions for remote pools, before it builds the handles
+        // used by the API and controllers. Route servers and site prefixes also
+        // need to reflect the config before the API starts serving requests.
         db::resource_pool::reconcile_pool_defs(&mut txn, &seed_data.initial_pools).await?;
         // We'll always update whatever route servers are in the config
         // to the database, and then leverage the enable_route_servers
@@ -457,6 +485,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         }
     }
     txn.commit().await?;
+
+    resource_pool_monitor
+        .register_pools(&registry, pool_definition_source, &cancel_token)
+        .await?;
 
     if !carbide_config.listen_only {
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
@@ -579,6 +611,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .rotate_switch_nvos_credentials
             .clone(),
         carbide_config.site_explorer.explore_mode,
+        carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
     );
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
@@ -641,9 +674,13 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         }
         result = initialize_dpf_sdk(
             &carbide_config,
-            credential_manager.clone(),
-            db_pool.clone(),
-            join_set,
+            crate::dpf_services::COMPILE_TIME_HELM_VERSION,
+            initialize_dpf_resources(
+                &carbide_config,
+                credential_manager.clone(),
+                db_pool.clone(),
+                join_set,
+            ),
         ) => result?,
     };
 
@@ -727,6 +764,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         certificate_provider,
         common_pools,
         resource_pool_registry: registry,
+        resource_pool_monitor,
         credential_manager,
         node_jwt_validator,
         database_connection: db_pool.clone(),
@@ -1000,6 +1038,7 @@ fn build_dpf_init_config(
         .interfaces(interfaces)
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
+        .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
         .deployment_type(deployment_type);
     if let Some(bluefield_software) = bluefield_software {
         builder = builder.bluefield_software(bluefield_software);
@@ -1018,14 +1057,12 @@ fn build_dpf_init_config(
     })
 }
 
-/// Initialize the DPF SDK and create all required Kubernetes CRs.
-///
-/// Returns `None` (with a deprecation warning) when DPF is disabled.
+/// Validates DPF startup before lazily constructing resources and reconciles the configured IPv4
+/// platform release before returning operations to callers.
 async fn initialize_dpf_sdk(
     carbide_config: &CarbideConfig,
-    credential_manager: Arc<dyn CredentialManager>,
-    db_pool: PgPool,
-    join_set: &mut JoinSet<()>,
+    platform_helm_version: &str,
+    resource_initialization: impl std::future::Future<Output = eyre::Result<Arc<dyn DpfOperations>>>,
 ) -> eyre::Result<Option<Arc<dyn DpfOperations>>> {
     // Astra is a BF4+CX9-only deployment with a distinct interface inventory.
     // Reject unsafe global ServiceInterfaces even when DPF is disabled so a dormant Astra
@@ -1034,6 +1071,7 @@ async fn initialize_dpf_sdk(
     // Reject incompatible service-VPC topology even when DPF is disabled.
     carbide_config.validate_service_vpc_slots()?;
 
+    // Disabled DPF configurations ignore platform management without constructing Kubernetes state.
     if !carbide_config.dpf.enabled {
         tracing::warn!(
             docs = "https://docs.nvidia.com/infra-controller/documentation/getting-started/installation-options/dpf-setup",
@@ -1042,6 +1080,40 @@ async fn initialize_dpf_sdk(
         return Ok(None);
     }
 
+    let platform_service_vpc_ipv4 = crate::dpf_services::platform_service_vpc_ipv4(
+        &carbide_config.dpf.resolved_mandatory_services().dhcp_server,
+        platform_helm_version,
+    )
+    .map_err(|error| {
+        eyre::eyre!("invalid IPv4 service-VPC platform release configuration: {error}")
+    })?;
+
+    let dpf_sdk = resource_initialization.await?;
+
+    // Omission must leave a stable release from an earlier configuration untouched, while any
+    // explicitly configured release must reconcile before callers receive DPF operations.
+    if let Some(platform_service) = platform_service_vpc_ipv4.as_ref() {
+        crate::dpf_services::reconcile_platform_service_vpc_ipv4(
+            dpf_sdk.as_ref(),
+            platform_service,
+        )
+        .await
+        .map_err(|error| {
+            eyre::eyre!("failed to reconcile the IPv4 service-VPC platform release: {error}")
+        })?;
+    }
+
+    Ok(Some(dpf_sdk))
+}
+
+/// Initializes the enabled DPF SDK and required Kubernetes CRs only after startup validation
+/// completes, preventing malformed platform management from performing Kubernetes I/O.
+async fn initialize_dpf_resources(
+    carbide_config: &CarbideConfig,
+    credential_manager: Arc<dyn CredentialManager>,
+    db_pool: PgPool,
+    join_set: &mut JoinSet<()>,
+) -> eyre::Result<Arc<dyn DpfOperations>> {
     let mut deployments = vec!["bf3", "bf3_gb200"];
     if carbide_config.dpf.deployments.bf4_generic.is_some() {
         deployments.push("bf4_generic");
@@ -1226,7 +1298,7 @@ async fn initialize_dpf_sdk(
         .map(|config| config.astra.clone())
         .unwrap_or_default();
 
-    Ok(Some(Arc::new(DpfSdkOps::new(
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(DpfSdkOps::new(
         Arc::new(sdk),
         carbide_dpf::AstraRoutePrefixes {
             rail_route_prefix_len: astra_config.underlay_rail_route_prefix_len,
@@ -1234,7 +1306,9 @@ async fn initialize_dpf_sdk(
         },
         db_pool,
         join_set,
-    )?)))
+    )?);
+
+    Ok(dpf_sdk)
 }
 
 /// Build per-deployment-type node selector labels for the DPF labeler registry.
@@ -1760,12 +1834,25 @@ async fn initialize_and_start_controllers<'a>(
         txn.commit().await?;
     }
 
+    let resource_pool_stats = crate::resource_pool::metrics::start_pool_stats(
+        api_service.resource_pool_monitor.clone(),
+        common_pools,
+        join_set,
+        cancel_token.clone(),
+    )?;
     let health_pool = db_pool.clone();
     start_export_service_health_metrics(ServiceHealthContext {
         meter: meter.clone(),
         database_pool: health_pool,
-        resource_pool_stats: common_pools.pool_stats.clone(),
+        resource_pool_stats,
     });
+
+    api_service.resource_pool_monitor.start_recovery(
+        &api_service.resource_pool_registry,
+        meter.clone(),
+        join_set,
+        cancel_token.clone(),
+    )?;
 
     if let Some(seed_data) = seed_data {
         if !seed_data.initial_vpcs.is_empty() {
@@ -2546,6 +2633,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::path::Path;
 
+    use carbide_dpf::DpfError;
+    use carbide_machine_controller::dpf::MockDpfOperations;
     use carbide_network::virtualization::VpcVirtualizationType;
     use carbide_test_support::Outcome::{FailsWith, Yields};
     use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
@@ -2563,6 +2652,277 @@ mod tests {
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
     use crate::cfg::load::{merged_carbide_config_figment, parse_carbide_config};
+
+    /// Verifies disabled DPF bypasses malformed platform values, absent packaged chart metadata, and
+    /// resource construction because these inputs are irrelevant until DPF management is enabled.
+    #[tokio::test]
+    async fn disabled_dpf_bypasses_platform_service_vpc_ipv4_initialization() {
+        // Leave a malformed explicit platform control dormant behind disabled DPF.
+        let mut config = crate::test_support::default_config::get();
+        config.dpf.enabled = false;
+        config.dpf.services.dhcp_server.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": "true",
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Return an error if polled so the future exposes unwanted DPF resource construction.
+        let resource_initialization = async {
+            Err::<Arc<dyn DpfOperations>, eyre::Report>(eyre::eyre!(
+                "DPF resource construction sentinel"
+            ))
+        };
+
+        // Omit the packaged chart version while invoking the disabled startup branch.
+        let initialized_dpf_sdk = initialize_dpf_sdk(&config, "", resource_initialization)
+            .await
+            .expect("disabled DPF must ignore platform management and resource construction");
+
+        // Disabled startup returns no operations without touching the resource future.
+        assert!(initialized_dpf_sdk.is_none());
+    }
+
+    /// Verifies DPF startup validates platform management before resource initialization because
+    /// malformed controls must not construct a Kubernetes client or write CRs.
+    #[tokio::test]
+    async fn dpf_resource_initialization_validates_platform_service_vpc_ipv4() {
+        // Use a malformed explicit control so production selection must reject the configuration.
+        let mut config = crate::test_support::default_config::get();
+        config.dpf.enabled = true;
+        config.dpf.services.dhcp_server.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": "true",
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Fail if startup polls resource construction before validating the platform control.
+        let resource_initialization = async {
+            Err::<Arc<dyn DpfOperations>, eyre::Report>(eyre::eyre!(
+                "DPF resource construction sentinel"
+            ))
+        };
+
+        // Invoke the production coordinator and require its field-specific validation failure.
+        let error = initialize_dpf_sdk(&config, "test-platform-version", resource_initialization)
+            .await
+            .expect_err("malformed platform management must stop DPF initialization");
+
+        // This diagnostic proves platform validation won before the sentinel future was polled.
+        let message = error.to_string();
+        assert!(
+            message.contains("serviceVpcNetworks.ipv4.enabled must be a Boolean"),
+            "{message}"
+        );
+    }
+
+    /// Verifies DPF startup with omitted platform management performs no DPUService I/O because
+    /// legacy deployment-only sites must leave any stable object untouched.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_startup_omission_performs_no_dpf_io() {
+        // Enable DPF while omitting the tri-state platform control.
+        let mut config = crate::test_support::default_config::get();
+        config.dpf.enabled = true;
+        config.dpf.services.dhcp_server.extra_helm_values = None;
+
+        // Reject every platform DPUService operation so any omitted-path I/O fails the test.
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk.expect_get_dpu_service().times(0);
+        dpf_sdk.expect_create_dpu_service().times(0);
+        dpf_sdk.expect_patch_dpu_service().times(0);
+        dpf_sdk.expect_delete_dpu_service().times(0);
+        let dpf_sdk = Arc::new(dpf_sdk) as Arc<dyn DpfOperations>;
+
+        // Complete startup without a configured platform release.
+        let initialized_dpf_sdk =
+            initialize_dpf_sdk(&config, "test-platform-version", async move { Ok(dpf_sdk) })
+                .await
+                .expect("omitted platform management must remain free of DPUService I/O");
+
+        // Confirm omission still returns the initialized DPF operations.
+        assert!(initialized_dpf_sdk.is_some());
+    }
+
+    /// Verifies successful DPF startup reconciles the platform release selected from production
+    /// configuration because explicit management must not disappear between parsing and startup.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_startup_reconciles_selected_release() {
+        // Enable explicit platform management through the same configuration consumed at startup.
+        let mut config = crate::test_support::default_config::get();
+        config.dpf.enabled = true;
+        config.dpf.services.dhcp_server.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": true,
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Require startup to create the explicitly enabled release with Core's packaged chart
+        // when no observation exists.
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .withf(|name| name == crate::dpf_services::PLATFORM_SERVICE_VPC_NAME)
+            .returning(|_| Ok(None));
+        dpf_sdk
+            .expect_create_dpu_service()
+            .times(1)
+            .returning(|service| {
+                assert_eq!(service.helm_chart.version.as_str(), "test-platform-version");
+                assert_eq!(
+                    service
+                        .helm_chart
+                        .values
+                        .as_ref()
+                        .expect("platform Helm values")["serviceVpcNetworks"]["ipv4"]["enabled"]
+                        .as_bool(),
+                    Some(true)
+                );
+                Ok(crate::dpf_services::platform_service_observation(service))
+            });
+        dpf_sdk.expect_patch_dpu_service().times(0);
+        dpf_sdk.expect_delete_dpu_service().times(0);
+        let dpf_sdk = Arc::new(dpf_sdk) as Arc<dyn DpfOperations>;
+
+        // Complete production selection and reconciliation with the initialized operations.
+        let initialized_dpf_sdk = initialize_dpf_sdk(&config, "test-platform-version", async {
+            Ok(dpf_sdk.clone())
+        })
+        .await
+        .expect("valid platform management must complete startup")
+        .expect("enabled DPF initialization must return operations");
+
+        // Startup must return the same operations only after its create expectation is satisfied.
+        assert!(Arc::ptr_eq(&initialized_dpf_sdk, &dpf_sdk));
+    }
+
+    /// Verifies explicit IPv4 disablement remains distinct from omission during DPF startup because
+    /// startup must reconcile an existing enabled release before returning DPF operations.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_startup_reconciles_disabled_release() {
+        // Set false explicitly because omission follows the separate legacy-preservation path.
+        let mut config = crate::test_support::default_config::get();
+        config.dpf.enabled = true;
+        config.dpf.services.dhcp_server.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": false,
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Model an owned stable release whose IPv4 NAD remains enabled from an earlier startup.
+        let desired = crate::dpf_services::platform_service_vpc_ipv4(
+            &config.dpf.resolved_mandatory_services().dhcp_server,
+            "test-platform-version",
+        )
+        .expect("explicit false platform management must be valid")
+        .expect("explicit false platform management must select the stable release");
+        let mut previously_enabled = crate::dpf_services::platform_service_observation(&desired);
+        *previously_enabled
+            .helm_chart
+            .values
+            .as_mut()
+            .expect("observed Helm values")
+            .get_mut("serviceVpcNetworks")
+            .expect("observed service-VPC values")
+            .pointer_mut("/ipv4/enabled")
+            .expect("observed IPv4 enablement") = serde_json::json!(true);
+        // Supply the observed generation required by the resource-version-fenced update path.
+        previously_enabled.resource_version = Some("17".to_string());
+        let reconciled = crate::dpf_services::platform_service_observation(&desired);
+
+        // Require startup to update the enabled release instead of treating false as omission.
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .withf(|name| name == crate::dpf_services::PLATFORM_SERVICE_VPC_NAME)
+            .return_once(move |_| Ok(Some(previously_enabled)));
+        dpf_sdk.expect_create_dpu_service().times(0);
+        dpf_sdk
+            .expect_patch_dpu_service()
+            .times(1)
+            .withf(|name, _| name == crate::dpf_services::PLATFORM_SERVICE_VPC_NAME)
+            .return_once(move |_, _| Ok(reconciled));
+        dpf_sdk.expect_delete_dpu_service().times(0);
+        let dpf_sdk = Arc::new(dpf_sdk) as Arc<dyn DpfOperations>;
+
+        // Return operations only after the explicit false state completes reconciliation.
+        let initialized_dpf_sdk = initialize_dpf_sdk(&config, "test-platform-version", async {
+            Ok(dpf_sdk.clone())
+        })
+        .await
+        .expect("explicit false platform management must complete reconciliation")
+        .expect("enabled DPF initialization must return operations");
+
+        // Confirm explicit disablement returns the initialized DPF operations after reconciliation.
+        assert!(Arc::ptr_eq(&initialized_dpf_sdk, &dpf_sdk));
+    }
+
+    /// Verifies explicit platform management propagates DPUService reconciliation failures because
+    /// startup must not return initialized operations when the required platform-service read fails.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_startup_propagates_reconciliation_failure() {
+        // Set the explicit control while defaults provide the remaining valid chart metadata.
+        let mut config = crate::test_support::default_config::get();
+        config.dpf.enabled = true;
+        config.dpf.services.dhcp_server.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": true,
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Fail the first platform read so startup must preserve the reconciliation context.
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .withf(|name| name == crate::dpf_services::PLATFORM_SERVICE_VPC_NAME)
+            .returning(|_| {
+                Err(DpfError::InvalidState(
+                    "injected platform reconciliation failure".to_string(),
+                ))
+            });
+        dpf_sdk.expect_create_dpu_service().times(0);
+        dpf_sdk.expect_patch_dpu_service().times(0);
+        dpf_sdk.expect_delete_dpu_service().times(0);
+        let dpf_sdk = Arc::new(dpf_sdk) as Arc<dyn DpfOperations>;
+
+        // Select the explicit release through production configuration and propagate its failure.
+        let error =
+            initialize_dpf_sdk(&config, "test-platform-version", async move { Ok(dpf_sdk) })
+                .await
+                .expect_err("platform reconciliation failure must stop startup");
+
+        // Preserve both startup reconciliation context and the injected DPF error in the diagnostic.
+        let message = error.to_string();
+        assert!(
+            message.contains("failed to reconcile the IPv4 service-VPC platform release"),
+            "{message}"
+        );
+        assert!(
+            message.contains("injected platform reconciliation failure"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn scoped_service_interface_detection_requires_a_scoped_name_and_selector() {

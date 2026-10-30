@@ -18,6 +18,7 @@ pub mod allocation;
 pub mod binding;
 pub mod common;
 pub mod define;
+pub mod registration;
 pub mod remote;
 
 use std::fmt;

@@ -74,6 +74,7 @@ use tonic::Request;
 use crate::api::Api;
 use crate::attestation as attest;
 use crate::tests::common;
+use crate::tests::dpf::phase_observation;
 
 async fn get_partition_status(api: &Api, ib_partition_id: IBPartitionId) -> IbPartitionStatus {
     let segment = api
@@ -1162,8 +1163,8 @@ async fn dpf_force_delete_test_env(pool: sqlx::PgPool, mut mock: MockDpfOperatio
     mock.expect_deployment_type_for_dpu()
         .returning(|__, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(carbide_dpf::DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(carbide_dpf::DpuPhase::Ready)));
 
     // Enable the BF3 deployment required for the managed host to use DPF ingestion.
     let mut config = get_config();

@@ -126,13 +126,17 @@ func VpcTypeSupportsAutoInterface(virtType *string) bool {
 
 // VpcRouteTarget is the persisted representation of a routing-profile route target.
 type VpcRouteTarget struct {
-	ASN uint32 `json:"asn"`
-	VNI uint32 `json:"vni"`
+	ASN     uint32 `json:"asn"`
+	VNI     uint32 `json:"vni"`
+	VniSelf bool   `json:"vniSelf,omitempty"`
 }
 
 // ToProto converts a persisted route target to its Core representation.
 func (target VpcRouteTarget) ToProto() *corev1.RouteTarget {
-	return &corev1.RouteTarget{Asn: target.ASN, Vni: target.VNI}
+	if target.VniSelf {
+		return &corev1.RouteTarget{Asn: target.ASN, VniSelf: true}
+	}
+	return &corev1.RouteTarget{Asn: target.ASN, Vni: cutil.GetPtr(target.VNI)}
 }
 
 // FromProto populates a persisted route target from its Core representation.
@@ -142,7 +146,10 @@ func (target *VpcRouteTarget) FromProto(protoTarget *corev1.RouteTarget) {
 		return
 	}
 	target.ASN = protoTarget.Asn
-	target.VNI = protoTarget.Vni
+	target.VniSelf = protoTarget.GetVniSelf()
+	if !target.VniSelf {
+		target.VNI = protoTarget.GetVni()
+	}
 }
 
 // VpcRoutingProfileOverrides contains presence-aware properties set directly on a VPC.

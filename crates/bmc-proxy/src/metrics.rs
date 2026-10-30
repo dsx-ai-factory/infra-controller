@@ -350,6 +350,26 @@ pub(crate) struct UpstreamAuthRetried {
     pub(crate) bmc_ip_address: String,
 }
 
+/// The target's certificate failed verification, so the proxy sent it no
+/// request: `[tls.switch]` does not cover the switch's certificate, or the
+/// address no longer belongs to the switch it is cached as.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_upstream_certificate_rejected",
+    metric_name = "carbide_bmc_proxy_upstream_certificate_rejected_total",
+    component = "nico-bmc-proxy",
+    log = warn,
+    metric = counter,
+    message = "upstream certificate failed verification; the request was not sent",
+    describe = "Number of attempts the proxy did not send because the target's certificate failed verification against tls.switch"
+)]
+pub(crate) struct UpstreamCertificateRejected {
+    #[context]
+    pub(crate) bmc_ip_address: String,
+    #[context]
+    pub(crate) error: String,
+}
+
 /// nico-api denied the proxy's probe for the switch at a proxied address, so
 /// the proxy took the address for a BMC's. Expected only while nico-api
 /// predates the proxy's switch support; from a current nico-api it means its

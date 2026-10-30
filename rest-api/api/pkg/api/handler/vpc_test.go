@@ -583,8 +583,9 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+	// Use a symbolic import so create proves the caller's VNI source survives dispatch and persistence.
 	routingProfileOverrides := &model.APIVpcRoutingProfileOverrides{
-		RouteTargetImports:           &model.APIVpcRouteTargets{{ASN: 64512, VNI: 559}},
+		RouteTargetImports:           &model.APIVpcRouteTargets{{ASN: 64512, VniSelf: true}},
 		LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
 		AllowedAnycastPrefixes:       &[]string{"192.0.2.1/24"},
 	}
@@ -1696,6 +1697,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				assert.Equal(t, uint32(6), persistedVpc.EffectiveRoutingProfile.AccessTier)
 			}
 
+			// Verify create dispatch preserves request-owned fields and the symbolic VNI source.
 			assert.True(t, tsc.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "CreateVPCV2", mock.MatchedBy(func(req *corev1.VpcCreationRequest) bool {
 				if req == nil {
 					return false
@@ -1709,6 +1711,12 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 				}
 				if !proto.Equal(req.RoutingProfileOverrides, tt.args.reqData.RoutingProfileOverrides.ToDB().ToProto()) {
 					return false
+				}
+				if tt.args.reqData.RoutingProfileOverrides != nil {
+					targets := req.GetRoutingProfileOverrides().GetRouteTargetImports().GetValues()
+					if len(targets) != 1 || !targets[0].VniSelf || targets[0].Vni != nil {
+						return false
+					}
 				}
 				if tt.args.reqData.SlaacEnabled == nil {
 					if req.SlaacEnabled != nil {
@@ -1879,8 +1887,9 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
+	// Use a symbolic export target to distinguish VPC-relative VNI intent; the remaining fields retain existing override coverage.
 	updateRoutingProfileOverrides := &model.APIVpcRoutingProfileOverrides{
-		RouteTargetsOnExports:         &model.APIVpcRouteTargets{{ASN: 64513, VNI: 61}},
+		RouteTargetsOnExports:         &model.APIVpcRouteTargets{{ASN: 64513, VniSelf: true}},
 		TenantLeakCommunitiesAccepted: cutil.GetPtr(true),
 		AcceptedLeaksFromUnderlay:     &[]string{},
 	}
@@ -2483,6 +2492,11 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			}
 			if tt.expectedRoutingProfileOverrides != nil {
 				assert.True(t, proto.Equal(tt.expectedRoutingProfileOverrides.ToDB().ToProto(), lastUpdateVPCReq.RoutingProfileOverrides))
+				// Preserve symbolic request intent instead of deriving expectations from persistence.
+				sentTargets := lastUpdateVPCReq.GetRoutingProfileOverrides().GetRouteTargetsOnExports().GetValues()
+				require.Len(t, sentTargets, 1)
+				assert.True(t, sentTargets[0].VniSelf)
+				assert.Nil(t, sentTargets[0].Vni)
 			}
 
 			if tt.verifyChildSpanner {
@@ -2982,7 +2996,13 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 
 	vpc := testVPCBuildVPC(t, dbSession, "test-vpc", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, map[string]string{"zone": "west1"}, cdbm.VpcStatusReady, tnu1)
 	assert.NotNil(t, vpc)
-	vpc.RoutingProfileOverrides = &cdbm.VpcRoutingProfileOverrides{LeakDefaultRouteFromUnderlay: cutil.GetPtr(false)}
+	// Persist a symbolic import as the behavior under test; the remaining profile fields retain existing response coverage.
+	vpc.RoutingProfileOverrides = &cdbm.VpcRoutingProfileOverrides{
+		RouteTargetImports: &[]cdbm.VpcRouteTarget{
+			{ASN: 64_512, VniSelf: true},
+		},
+		LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
+	}
 	vpc.EffectiveRoutingProfile = &cdbm.VpcEffectiveRoutingProfile{LeakDefaultRouteFromUnderlay: true, Internal: true, AccessTier: 5}
 	testUpdateVPC(t, dbSession, vpc)
 
@@ -3234,7 +3254,9 @@ func TestGetVPCHandler_Handle(t *testing.T) {
 			assert.Equal(t, tt.expectEffectiveRoutingProfile, rst.EffectiveRoutingProfile != nil)
 			assert.Equal(t, tt.expectEffectiveRoutingProfile, strings.Contains(rec.Body.String(), "effectiveRoutingProfile"))
 			if tt.args.reqVPC.RoutingProfileOverrides != nil {
-				assert.NotNil(t, rst.RoutingProfileOverrides)
+				expectedOverrides := &model.APIVpcRoutingProfileOverrides{}
+				expectedOverrides.FromDB(tt.args.reqVPC.RoutingProfileOverrides)
+				assert.Equal(t, expectedOverrides, rst.RoutingProfileOverrides)
 			}
 
 			if tt.expectedTenantOrg != nil {

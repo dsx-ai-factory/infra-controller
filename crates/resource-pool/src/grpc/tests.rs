@@ -9,14 +9,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use carbide_resource_pool_api::testing::verify_provider;
+use carbide_resource_pool_api::testing::{LocalProvider, verify_provider};
 use carbide_resource_pool_api::v1::operation_status::State;
 use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, ResourcePoolServer};
 use carbide_resource_pool_api::v1::{
     AllocateExactRequest, AllocateExactResponse, AllocateRequest, AllocateResponse, CancelRequest,
     CancelResponse, DefineRequest, DefineResponse, DescribeRequest, DescribeResponse, Empty,
-    LookupRequest, LookupResponse, OperationIdentity, PoolStats, RecoverRequest, RecoverResponse,
-    ReleaseRequest, ReleaseResponse, StatsRequest, StatsResponse,
+    LookupRequest, LookupResponse, OperationIdentity, PoolBinding, PoolStats, RecoverRequest,
+    RecoverResponse, ReleaseRequest, ReleaseResponse, StatsRequest, StatsResponse, ValueDomain,
 };
 use opentelemetry::trace::{TraceContextExt, TracerProvider};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -357,24 +357,36 @@ async fn public_operations_reject_malformed_successful_responses() {
 
 #[tokio::test]
 async fn request_encoding_accepts_four_mib_and_rejects_one_more_byte() {
-    let provider = FaultProvider::new(provider(), Fault::None);
+    let mut request = DescribeRequest {
+        pool_alias: "p".repeat(MESSAGE_LIMIT),
+    };
+    let overhead = request.encoded_len() - MESSAGE_LIMIT;
+    request.pool_alias.truncate(MESSAGE_LIMIT - overhead);
+    assert_eq!(request.encoded_len(), MESSAGE_LIMIT);
+    // Register the large alias so the provider accepts the boundary request.
+    let provider = LocalProvider::new(
+        PoolBinding {
+            logical_pool: request.pool_alias.clone(),
+            ..pool()
+        },
+        ValueDomain::Integer,
+        Vec::new(),
+        None,
+    )
+    .expect("create provider with a large alias");
+    let provider = FaultProvider::new(provider, Fault::None);
     // A larger server limit isolates the client's encoding bound.
     let service =
         ResourcePoolServer::new(provider.clone()).max_decoding_message_size(2 * MESSAGE_LIMIT);
     let server = TestServer::start_service(service, None).await;
     let client = backend(&server);
-    let mut request = describe_request();
-    request.site_id = "s".repeat(MESSAGE_LIMIT);
-    let overhead = request.encoded_len() - MESSAGE_LIMIT;
-    request.site_id.truncate(MESSAGE_LIMIT - overhead);
-    assert_eq!(request.encoded_len(), MESSAGE_LIMIT);
     let response = bounded(client.describe(request.clone()))
         .await
         .expect("send exactly four MiB");
     assert_eq!(response.authority_id, pool().authority_id);
     assert_eq!(provider.describe_calls.load(Ordering::SeqCst), 1);
 
-    request.site_id.push('s');
+    request.pool_alias.push('p');
     assert_eq!(request.encoded_len(), MESSAGE_LIMIT + 1);
     // Hyper reports an outbound body error as an INTERNAL_ERROR stream reset.
     assert_rpc_code(
@@ -384,9 +396,11 @@ async fn request_encoding_accepts_four_mib_and_rejects_one_more_byte() {
         Code::Internal,
     );
     assert_eq!(provider.describe_calls.load(Ordering::SeqCst), 1);
-    bounded(client.describe(describe_request()))
-        .await
-        .expect("reuse client after encoding rejection");
+    bounded(client.describe(DescribeRequest {
+        pool_alias: pool().pool_id,
+    }))
+    .await
+    .expect("reuse client after encoding rejection");
     assert_eq!(provider.describe_calls.load(Ordering::SeqCst), 2);
     drop(client);
     server.stop().await;
@@ -685,7 +699,6 @@ fn identity(request_id: &str) -> OperationIdentity {
 fn describe_request() -> DescribeRequest {
     let pool = pool();
     DescribeRequest {
-        site_id: pool.site_id,
         pool_alias: pool.logical_pool,
     }
 }

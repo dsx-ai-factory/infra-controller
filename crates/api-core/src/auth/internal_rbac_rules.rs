@@ -297,6 +297,7 @@ impl InternalRBACRules {
                 SiteHealthProbe,
             ],
         );
+        x.perm("FindHostStatesByIds", vec![ForgeAdminCLI, SiteHealthProbe]);
         x.perm("FindConnectedDevicesByDpuMachineIds", vec![ForgeAdminCLI]);
         x.perm("FindMachineIdsByBmcIps", vec![ForgeAdminCLI, Flow]);
         x.perm("FindMachineHealthHistories", vec![ForgeAdminCLI, SiteAgent]);
@@ -365,6 +366,7 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron],
         );
         x.perm("AdminListResourcePools", vec![ForgeAdminCLI]);
+        x.perm("AdminInspectResourcePools", vec![ForgeAdminCLI]);
         x.perm("AdminGrowResourcePool", vec![ForgeAdminCLI]);
         x.perm("SetMaintenance", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("SetDynamicConfig", vec![ForgeAdminCLI, Machineatron]);
@@ -737,6 +739,7 @@ impl InternalRBACRules {
         x.perm("UpdateSkuMetadata", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateMachineHardwareInfo", vec![ForgeAdminCLI]);
         x.perm("ReplaceSku", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ReplaceSkuComponents", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetManagedHostQuarantineState",
             vec![ForgeAdminCLI, SiteAgent],
@@ -1043,6 +1046,11 @@ impl InternalRBACRules {
         x.perm("DeleteSpxPartition", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindSpxPartitionIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindSpxPartitionsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetMachineSpxMultiplane", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm(
+            "UpdateMachineSpxMultiplaneMaintenance",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("FindNVLinkPartitionIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindNVLinkPartitionsByIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("NVLinkPartitionsForTenant", vec![ForgeAdminCLI, SiteAgent]);
@@ -1235,6 +1243,8 @@ mod rbac_rule_tests {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
+    use carbide_test_support::{Check, check_values, value_scenarios};
+
     use super::*;
     use crate::auth::Principal;
 
@@ -1276,6 +1286,38 @@ mod rbac_rule_tests {
                 );
             }
         }
+    }
+
+    /// Pool inspection exposes allocator details to operators; unrelated services
+    /// and requests without an authenticated principal must remain denied.
+    #[test]
+    fn resource_pool_inspection_operator_permissions() {
+        check_values(
+            [
+                Check {
+                    scenario: "admin CLI may inspect pools",
+                    input: vec![Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "nico-cli-client".into(),
+                        None,
+                    ))],
+                    expect: true,
+                },
+                Check {
+                    scenario: "DNS service has no operator access",
+                    input: vec![Principal::SpiffeServiceIdentifier("nico-dns".into())],
+                    expect: false,
+                },
+                Check {
+                    scenario: "no authenticated principal",
+                    input: vec![],
+                    expect: false,
+                },
+            ],
+            |principals| {
+                InternalRBACRules::allowed_from_static("AdminInspectResourcePools", &principals)
+            },
+        );
     }
 
     #[test]
@@ -1434,13 +1476,13 @@ mod rbac_rule_tests {
         }
     }
 
-    /// The probe's service identity can call exactly its two read RPCs, and a
-    /// write RPC stays denied — so dropping SiteHealthProbe from the read
-    /// vectors or pasting it onto a write RPC fails here.
+    /// The probe's service identity can call its read RPCs, and a write RPC
+    /// stays denied — so dropping SiteHealthProbe from the read vectors or
+    /// pasting it onto a write RPC fails here.
     #[test]
     fn site_health_probe_reads_machines_and_nothing_else() {
         let probe = Principal::SpiffeServiceIdentifier("nico-site-health-probe".to_string());
-        for method in ["FindMachineIds", "FindMachinesByIds"] {
+        for method in ["FindMachineIds", "FindMachinesByIds", "FindHostStatesByIds"] {
             assert!(
                 InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&probe)),
                 "{method}"
@@ -1450,6 +1492,31 @@ mod rbac_rule_tests {
             "SetMaintenance",
             std::slice::from_ref(&probe),
         ));
+    }
+
+    /// The compact host read is for operators and the probe only.
+    #[test]
+    fn find_host_states_by_ids_permissions() {
+        let service = |name: &str| vec![Principal::SpiffeServiceIdentifier(name.to_string())];
+        let admin_cli = vec![Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-cli-client".into(),
+            None,
+        ))];
+        value_scenarios!(
+            run = |principals: Vec<Principal>| {
+                InternalRBACRules::allowed_from_static("FindHostStatesByIds", &principals)
+            };
+            "the admin CLI and the probe" {
+                admin_cli => true,
+                service("nico-site-health-probe") => true,
+            }
+            "other services and no principal" {
+                service("elektra-site-agent") => false,
+                service("machine-a-tron") => false,
+                vec![] => false,
+            }
+        );
     }
 
     #[test]
@@ -1490,6 +1557,14 @@ mod rbac_rule_tests {
                 "{method} should reject unrelated services"
             );
         }
+    }
+
+    #[test]
+    fn sku_replacement_methods_have_the_same_permissions() {
+        assert_eq!(
+            INTERNAL_RBAC_RULES.perms["ReplaceSkuComponents"].principals,
+            INTERNAL_RBAC_RULES.perms["ReplaceSku"].principals,
+        );
     }
 
     #[test]

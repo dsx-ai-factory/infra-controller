@@ -62,7 +62,17 @@ fn for_host(host: &HostMachineInfo) -> DiscoveryInfo {
         HardwareType::DellPowerEdgeR760Bf4 => dell_poweredge(host, "PowerEdge R760", "2.2.7"),
         HardwareType::WiwynnGB200Nvl => wiwynn_gb200(host),
         HardwareType::LenovoGB300Nvl => lenovo_gb300(host),
+        // Both GB300 identities are needed for a successful measured-boot
+        // collector pass. DMI also selects vendor-specific controller paths,
+        // including the Supermicro unlock/reboot sequence.
         HardwareType::NvidiaDgxGb300 => DiscoveryInfo {
+            dmi_data: Some(DmiData {
+                product_serial: host.serial.clone(),
+                chassis_serial: host.serial.clone(),
+                product_name: "GB300 Titania-Bianca Compute Tray".into(),
+                sys_vendor: "NVIDIA".into(),
+                ..Default::default()
+            }),
             network_interfaces: vec![generic_nic(
                 required_dpu(host).host_mac_address,
                 0x0006_0003,
@@ -72,12 +82,21 @@ fn for_host(host: &HostMachineInfo) -> DiscoveryInfo {
             )],
             ..Default::default()
         },
+        HardwareType::SupermicroGb300Nvl => DiscoveryInfo {
+            dmi_data: Some(DmiData {
+                product_serial: host.serial.clone(),
+                chassis_serial: host.serial.clone(),
+                product_name: "GB NVL".into(),
+                sys_vendor: "Supermicro".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
         HardwareType::NvidiaDgxH100 => nvidia_dgx_h100(host),
         HardwareType::HpeProliantDl380aGen11 => hpe_proliant(host),
-        HardwareType::GenericAmi
-        | HardwareType::GenericSupermicro
-        | HardwareType::SupermicroGb300Nvl
-        | HardwareType::NvidiaDgxVr => DiscoveryInfo::default(),
+        HardwareType::GenericAmi | HardwareType::GenericSupermicro | HardwareType::NvidiaDgxVr => {
+            DiscoveryInfo::default()
+        }
         HardwareType::LiteOnPowerShelf
         | HardwareType::DeltaPowerShelf
         | HardwareType::NvidiaSwitchNd5200Ld
@@ -936,6 +955,7 @@ mod tests {
 
     use bmc_mock::mac_address_pool::{Config, MacAddressPool, PoolConfig};
     use bmc_mock::{DpuMachineInfo, DpuSettings, RackInfo, RackType};
+    use carbide_test_support::{Check, check_values};
 
     use super::*;
 
@@ -963,6 +983,44 @@ mod tests {
 
     fn lenovo_host() -> MachineInfo {
         host_for_platform(HardwareType::LenovoGB300Nvl)
+    }
+
+    #[test]
+    fn gb300_discovery_includes_dmi_identity() {
+        check_values(
+            [
+                Check {
+                    scenario: "NVIDIA GB300",
+                    input: HardwareType::NvidiaDgxGb300,
+                    expect: Some(DmiData {
+                        sys_vendor: "NVIDIA".into(),
+                        product_name: "GB300 Titania-Bianca Compute Tray".into(),
+                        product_serial: "gb300-discovery".into(),
+                        chassis_serial: "gb300-discovery".into(),
+                        ..Default::default()
+                    }),
+                },
+                Check {
+                    scenario: "Supermicro GB300",
+                    input: HardwareType::SupermicroGb300Nvl,
+                    expect: Some(DmiData {
+                        sys_vendor: "Supermicro".into(),
+                        product_name: "GB NVL".into(),
+                        product_serial: "gb300-discovery".into(),
+                        chassis_serial: "gb300-discovery".into(),
+                        ..Default::default()
+                    }),
+                },
+            ],
+            |platform| {
+                let mut machine = host_for_platform(platform);
+                let MachineInfo::Host(host) = &mut machine else {
+                    unreachable!("GB300 must be a host");
+                };
+                host.serial = "gb300-discovery".into();
+                for_machine(&machine).dmi_data
+            },
+        );
     }
 
     #[test]

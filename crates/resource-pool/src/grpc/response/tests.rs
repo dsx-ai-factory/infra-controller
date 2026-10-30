@@ -8,7 +8,6 @@ use wire::operation_status::State;
 
 fn pool() -> wire::PoolBinding {
     wire::PoolBinding {
-        site_id: "site".into(),
         authority_id: "authority".into(),
         pool_id: "pool".into(),
         binding_id: "binding".into(),
@@ -334,7 +333,7 @@ fn recover_validates_allocated_identity_and_saved_failure() {
         }
         "nested assignment must belong to the queried identity" {
             State::Allocated(changed_allocation(|a| a.operation.as_mut().unwrap().request_id = "other-request".into())) => Fails,
-            State::Allocated(changed_allocation(|a| a.operation.as_mut().unwrap().pool.as_mut().unwrap().site_id = "other-site".into())) => Fails,
+            State::Allocated(changed_allocation(|a| a.operation.as_mut().unwrap().pool.as_mut().unwrap().binding_id = "other-binding".into())) => Fails,
         }
         "failure must have a recognized definite code and diagnostic" {
             State::Failed(wire::Failure { code: 0, message: "rejected".into() }) => Fails,

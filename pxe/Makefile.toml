@@ -1112,19 +1112,21 @@ args = ["-R", "${REPO_ROOT}/pxe/nvinit_setup", "${BUILD_LOCATION}"]
 
 [tasks.bfb-add-scout-to-bfb-ci]
 category = "iPXE Kernel"
-description = "Add the scout to the BFB"
+description = "Add Scout and its firmware supervisor to the BFB"
 command = "cp"
 args = [
   "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-scout",
+  "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor",
   "${BUILD_LOCATION}",
 ]
 
 [tasks.bfb-add-scout-to-bfb]
 category = "iPXE Kernel"
-description = "Add the scout to the BFB"
+description = "Add Scout and its firmware supervisor to the BFB"
 command = "cp"
 args = [
   "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-scout",
+  "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor",
   "${BUILD_LOCATION}",
 ]
 dependencies = [

@@ -56,7 +56,7 @@ Use Grafana to understand whether this is one object or a fleet-wide issue.
 | `carbide_machines_per_state` | Count hosts by state. Transient states should not accumulate. |
 | `carbide_machines_time_in_state_seconds` | Average dwell time by state. |
 | `carbide_machines_per_state_above_sla` | Hosts past SLA in a state. |
-| `carbide_machines_with_state_handling_errors_per_state` | Handler errors grouped by state. |
+| `carbide_machines_with_state_handling_errors_per_state` | Hosts whose last handler run failed, by state, substate, and error. `error="any"` is the total for each state and substate; exclude it when summing over `error`. |
 | `carbide_network_segments_per_state_above_sla` | Network segment lifecycle stalls. |
 | `carbide_ib_partitions_per_state_above_sla` | InfiniBand lifecycle stalls. |
 

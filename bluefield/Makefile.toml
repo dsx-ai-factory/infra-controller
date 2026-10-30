@@ -249,7 +249,7 @@ description = "Download go"
 workspace = false
 condition = { files_not_exist = ["{REPO_ROOT}/bluefield/otel/go"] }
 script = '''
-  GO_VERSION="1.26.4"
+  GO_VERSION="1.27.3"
   PLATFORM=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
   TARFILE=go${GO_VERSION}.linux-${PLATFORM}.tar.gz
   OTEL=${REPO_ROOT}/bluefield/otel
@@ -290,7 +290,7 @@ script = '''
   export PATH="${GOROOT}/bin:${PATH}"
   export GOPATH="${OTEL}/go/gopath"
   export GOCACHE="${OTEL}/go/gocache"
-  # Generate Go source only — skip go mod tidy to keep the module graph
+  # Generate Go source only. Skip go mod tidy to keep the module graph
   # deterministic. The committed ocb-generated/go.mod and go.sum (produced by
   # update-ocb-modules.sh) are copied in afterwards to pin exact versions.
   ./ocb --config ocb_config.yaml --skip-compilation --skip-get-modules

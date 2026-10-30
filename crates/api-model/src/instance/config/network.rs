@@ -28,6 +28,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ConfigValidationError;
+use crate::extension_service::ServiceVpcAddressFamily;
 
 // Specifies whether a network interface is physical network function (PF)
 // or a virtual network function
@@ -167,6 +168,22 @@ impl InstanceServiceInterfaceConfig {
         {
             return Err(ConfigValidationError::InvalidValue(format!(
                 "service link prefix {} must be a canonical IPv4 /31 or IPv6 /127",
+                self.link_prefix
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validates the canonical `link_prefix` against the registered service-interface family so an
+    /// IPv4 registration cannot contain an IPv6 prefix, or vice versa.
+    pub fn validate_for_family(
+        &self,
+        family: ServiceVpcAddressFamily,
+    ) -> Result<(), ConfigValidationError> {
+        self.validate()?;
+        if self.link_prefix.is_ipv4() != matches!(family, ServiceVpcAddressFamily::Ipv4) {
+            return Err(ConfigValidationError::InvalidValue(format!(
+                "service link prefix {} does not match registered {family:?} family",
                 self.link_prefix
             )));
         }
@@ -1053,9 +1070,8 @@ mod tests {
 
     use super::*;
 
-    /// Verifies durable service interfaces accept only canonical point-to-point
-    /// prefixes, because malformed stored links cannot be projected safely by
-    /// later allocation and networking stages.
+    /// Verifies durable service interfaces require canonical point-to-point prefixes matching their
+    /// registered family so malformed stored links cannot reach allocation or networking.
     #[test]
     fn service_vpc_interface_validates_canonical_link_prefixes() {
         let service_interface = |link_prefix: &str| InstanceServiceInterfaceConfig {
@@ -1081,6 +1097,20 @@ mod tests {
         // A canonical IPv6 /127 is the corresponding valid IPv6 shape.
         let ipv6 = service_interface("2001:db8::/127");
         ipv6.validate().expect("canonical IPv6 service prefix");
+
+        // Registered family validation accepts matching links and rejects cross-family reuse.
+        ipv4.validate_for_family(ServiceVpcAddressFamily::Ipv4)
+            .expect("IPv4 registration matches IPv4 link");
+        ipv6.validate_for_family(ServiceVpcAddressFamily::Ipv6)
+            .expect("IPv6 registration matches IPv6 link");
+        assert!(
+            ipv4.validate_for_family(ServiceVpcAddressFamily::Ipv6)
+                .is_err()
+        );
+        assert!(
+            ipv6.validate_for_family(ServiceVpcAddressFamily::Ipv4)
+                .is_err()
+        );
 
         // Both family forms must survive the JSONB representation unchanged.
         for service_interface in [&ipv4, &ipv6] {

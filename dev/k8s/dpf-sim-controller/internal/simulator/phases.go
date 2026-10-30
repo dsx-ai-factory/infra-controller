@@ -70,6 +70,10 @@ const (
 	GateHold
 	// GateReboot: set the reboot-required annotation, stay until NICo clears it.
 	GateReboot
+	// GateInstall: stay until the BFB install task on the DPU BMC completes.
+	// Gate never returns it: the reconciler applies it to OS Installing only
+	// when the Redfish install is enabled.
+	GateInstall
 )
 
 // Gate returns how a given phase should be gated.

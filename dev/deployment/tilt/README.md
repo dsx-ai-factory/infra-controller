@@ -210,18 +210,38 @@ mock on port 443.
 
 ## Image builds
 
-Core uses the existing Dockerfiles under
-[`dev/deployment/devspace/`](../devspace); mat-k8s-controller uses its existing
-[`Dockerfile`](../../k8s/machine-a-tron-controller/Dockerfile). REST and MCP
-use the existing Dockerfiles under
-[`rest-api/docker/local/`](../../../rest-api/docker/local).
-The Tilt setup does not add or modify a Dockerfile.
+Tilt owns its service Dockerfiles and build-context ignore files in this directory.
+The shared compiler-container Dockerfile remains under `dev/docker`, where CI and
+other development workflows also use it. Their existing service Dockerfiles
+remain independent of Tilt.
+
+All Tilt runtime images derive from one digest-pinned Debian Bookworm slim base
+with CA certificates. Service images install their additional runtime packages;
+the compiler toolchains remain in build stages. DHCP uses the Kea version in
+`dev/docker/kea.version`, matching the compiler container.
+
+`Dockerfile.core` has separate targets for API, BMC proxy, DHCP,
+machine-a-tron, SSH console, and the MAT protocol gateway. Each target builds
+and packages its own binary (or DHCP hook library), sharing locked Cargo
+dependency and target caches. Tilt's Rust build stages use `line-tables-only`
+debug information for development and release profiles, retaining source-line
+backtraces without full debugger type and variable information. The API image
+contains a copy of nico-admin-cli for convenience.
+
+The MAT controller and its gateway also use separate images in Tilt. Other chart
+users keep the combined controller image unless they set
+`mat-k8s-controller.gateway.image.repository` or `.tag`; each empty field falls
+back to the corresponding controller image field, and both containers use the
+controller image pull policy. REST API images contain only the API service
+binary, without the debugging CLI.
 
 Each deployable image has its own Tilt resource and rebuild control. Images build
 once during startup, then wait for their resource's update button before
 rebuilding. REST build contexts are restricted to the source directories copied
 by that image's Dockerfile. Docker and Cargo or Go build caches are reused across
-rebuilds.
+rebuilds. Repeated changed-source builds still retain historical layers until
+Docker, Tilt, or the cluster removes them; this layout does not set storage
+retention policies.
 
 ## Optional profiles
 

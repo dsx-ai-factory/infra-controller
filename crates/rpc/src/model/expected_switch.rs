@@ -94,7 +94,11 @@ impl TryFrom<rpc::forge::ExpectedSwitch> for ExpectedSwitch {
         let bmc_ip_address = if rpc.bmc_ip_address.is_empty() {
             None
         } else {
-            rpc.bmc_ip_address.parse().ok()
+            Some(
+                rpc.bmc_ip_address
+                    .parse()
+                    .map_err(|_| RpcDataConversionError::InvalidIpAddress(rpc.bmc_ip_address))?,
+            )
         };
         let nvos_ip_address = rpc
             .nvos_ip_address
@@ -163,5 +167,43 @@ impl From<LinkedExpectedSwitch> for rpc::forge::LinkedExpectedSwitch {
             explored_endpoint_address: l.address.map(|addr| addr.to_string()),
             rack_id: l.rack_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    #[test]
+    fn expected_switch_bmc_ip_conversion() {
+        scenarios!(
+            run = |address: &str| {
+                ExpectedSwitch::try_from(rpc::forge::ExpectedSwitch {
+                    bmc_mac_address: "02:00:00:00:00:01".to_string(),
+                    bmc_ip_address: address.to_string(),
+                    ..Default::default()
+                })
+                .map(|switch| switch.bmc_ip_address)
+                .map_err(|error| match error {
+                    RpcDataConversionError::InvalidIpAddress(address) => address,
+                    other => panic!("unexpected conversion error: {other}"),
+                })
+            };
+            "empty means no address" {
+                "" => Yields(None),
+            }
+            "both address families are accepted" {
+                "192.0.2.10" => Yields(Some("192.0.2.10".parse::<IpAddr>().unwrap())),
+                "2001:db8::10" => Yields(Some("2001:db8::10".parse::<IpAddr>().unwrap())),
+            }
+            "malformed nonempty addresses retain the invalid input" {
+                "not-an-ip" => FailsWith("not-an-ip".to_string()),
+            }
+        );
     }
 }

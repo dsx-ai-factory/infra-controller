@@ -7,16 +7,17 @@
 //! assignment. Its consumer still owns admission and atomic entity attachment.
 //! Recovery expires foreground attachment deadlines, saves recovered results,
 //! and finishes cancellation or release already recorded. It never creates an
-//! entity or dispatches a new allocation. Consumers record release with
-//! `db::resource_pool::remote::request_release` in their entity transaction;
-//! recovery performs the provider cleanup after that transaction commits.
-//! Production registration of this coordinator and its cleanup sampler is tracked
-//! in [#7140](https://github.com/dsx-ai-factory/infra-controller/issues/7140).
+//! entity or dispatches a new allocation. Consumers use
+//! [`OwnedAllocation::release`](crate::OwnedAllocation::release) to save release
+//! intent in their entity transaction. Recovery performs provider cleanup after
+//! that transaction commits.
+//! API startup owns the recovery task and cleanup sampler; both stop with its
+//! cancellation token.
 
 mod metrics;
 #[cfg(test)]
 mod tests;
-mod wire;
+pub(crate) mod wire;
 
 use std::future::Future;
 use std::num::NonZeroU16;
@@ -45,6 +46,7 @@ use uuid::Uuid;
 use v1::operation_status::State;
 
 use crate::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError};
+use crate::transaction::{DATABASE_WAIT_TIMEOUT, database_transaction};
 use crate::value::{ResourcePoolEligibility, ValueConversionError};
 
 // Match the client's 32 admitted calls without adding a waiting queue. One
@@ -53,7 +55,6 @@ const MAX_OPERATIONS: usize = 32;
 const FOREGROUND_ROUNDS: usize = 3;
 const FOREGROUND_TIMEOUT: Duration = Duration::from_secs(30);
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
-const DATABASE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 const PAGE_SIZE: NonZeroU16 = NonZeroU16::new(16).unwrap();
@@ -68,8 +69,7 @@ struct RecoveryCursor {
 }
 
 /// `RemoteResourcePool` executes requests for one known provider authority.
-/// Clones share admission capacity and the provider's connection pool. The
-/// request supplies its saved site identity; construction never invents one.
+/// Clones share admission capacity and the provider's connection pool.
 #[derive(Clone)]
 pub struct RemoteResourcePool {
     pool: PgPool,
@@ -149,6 +149,18 @@ impl RemoteResourcePool {
         }
     }
 
+    /// `authority_id` identifies the provider used by this coordinator.
+    /// Registry resolution checks it against the pool's saved binding.
+    pub fn authority_id(&self) -> &str {
+        &self.authority_id
+    }
+
+    /// `provider` borrows the shared client used to register this provider's pools.
+    /// Registration and allocation therefore use the same connection and credentials.
+    pub fn provider(&self) -> &GrpcResourcePoolBackend {
+        &self.provider
+    }
+
     /// `allocate` saves automatic or manual intent, then recovers or executes
     /// that exact request. It attempts at most three rounds with 100/200 ms
     /// backoff. Each round recovers and may allocate once. A dispatch returning
@@ -172,8 +184,9 @@ impl RemoteResourcePool {
     ///
     /// `eligibility` must describe the request's accepted revision. A returned
     /// assignment is not attachment permission: the consumer must recheck its
-    /// admission and completion authority in the entity transaction using
-    /// `db::resource_pool::remote::attach`. Attached and terminal replays fail.
+    /// admission before calling [`Allocation::allocate`](crate::Allocation::allocate)
+    /// in the entity transaction. That operation checks completion authority
+    /// through `db::resource_pool::remote::attach`. Attached and terminal replays fail.
     pub async fn allocate(
         &self,
         request: &RemoteAllocationRequest,
@@ -249,10 +262,9 @@ impl RemoteResourcePool {
                 remaining(deadline)?.min(DATABASE_WAIT_TIMEOUT),
             )
             .await?;
-        // Hold the lease before publishing intent so recovery cannot overtake
-        // the foreground. Commit immutable intent before any provider call.
-        // A conflicting replay belongs to another request; cancellation is safe
-        // only after begin confirms that the saved intent matches this caller.
+        // Preparation may already have saved this request. Under the lease,
+        // insert or verify its intent before any provider call. Cancellation is
+        // safe only after begin confirms that the saved inputs match this caller.
         wait(
             cancel,
             remaining(deadline)?.min(DATABASE_WAIT_TIMEOUT),
@@ -1017,23 +1029,6 @@ fn remaining(deadline: Instant) -> Result<Duration, RemoteResourcePoolError> {
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
         .ok_or(RemoteResourcePoolError::Incomplete)
-}
-
-async fn database_transaction(pool: &PgPool) -> Result<Transaction<'_>, DatabaseError> {
-    let mut txn = Transaction::begin(pool).await?;
-    // A dropped SQLx query can retain its pooled connection and any work-lock
-    // fence until PostgreSQL finishes the statement and runs the queued rollback.
-    // Bound statements to five seconds, preserving any shorter operator limit.
-    sqlx::query(
-        "SELECT set_config('statement_timeout', \
-            LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
-         FROM pg_settings WHERE name = 'statement_timeout'",
-    )
-    .bind(DATABASE_WAIT_TIMEOUT.as_millis().to_string())
-    .execute(txn.as_pgconn())
-    .await
-    .map_err(|error| DatabaseError::query("set remote allocation statement timeout", error))?;
-    Ok(txn)
 }
 
 fn call<T>(

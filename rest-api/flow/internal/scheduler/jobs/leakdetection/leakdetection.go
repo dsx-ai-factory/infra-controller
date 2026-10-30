@@ -16,9 +16,37 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
+
+// Query core to get IDs of leaking racks and submit power-off tasks for each.
+func runLeakDetectionOneRack(
+	ctx context.Context,
+	nicoClient nicoapi.Client,
+	taskMgr taskmanager.Manager,
+) {
+	log.Info().Msg("Running leak detection for racks")
+
+	leakingRackIDs, err := nicoClient.GetLeakingRackIds(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("Unable to retrieve leaking rack IDs from NICo")
+		return
+	}
+
+	log.Info().Msgf("Found %d leaking rack IDs", len(leakingRackIDs))
+
+	for _, rackID := range leakingRackIDs {
+		log.Info().Msgf("Leaking rack ID: %s, submitting force power-off task", rackID)
+
+		err := submitRackPowerOffTask(ctx, taskMgr, rackID)
+		if err != nil {
+			log.Error().Err(err).Str("rack_id", rackID).
+				Msg("Failed to submit power-off task for leaking rack")
+		}
+	}
+}
 
 // Query core to get IDs of leaking machines and submit power-off tasks for each
 func runLeakDetectionOneMachine(
@@ -88,6 +116,7 @@ func runLeakDetectionOne(
 ) {
 	log.Info().Msg("Running leak detection")
 
+	runLeakDetectionOneRack(ctx, nicoClient, taskMgr)
 	runLeakDetectionOneMachine(ctx, nicoClient, taskMgr, pool)
 	runLeakDetectionOneSwitch(ctx, nicoClient, taskMgr, pool)
 }
@@ -206,6 +235,53 @@ func submitPowerOffTask(
 		Str("component_type", componentType.String()).
 		Int("task_count", len(taskIDs)).
 		Msg("Power-off task submitted for leaking component")
+
+	return nil
+}
+
+func submitRackPowerOffTask(
+	ctx context.Context,
+	taskMgr taskmanager.Manager,
+	rackExternalID string,
+) error {
+	info := &operations.PowerControlTaskInfo{
+		Operation: operations.PowerOperationForcePowerOff,
+		Forced:    true,
+	}
+
+	raw, err := info.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed to marshal power control info: %w", err)
+	}
+
+	req := &operation.Request{
+		Operation: operation.Wrapper{
+			Type: info.Type(),
+			Code: info.CodeString(),
+			Info: raw,
+		},
+		TargetSpec: operation.TargetSpec{
+			Racks: []operation.RackTarget{{
+				Identifier: identifier.Identifier{ExternalID: rackExternalID},
+			}},
+		},
+		Description:      fmt.Sprintf("Leak detection: force power-off rack %s", rackExternalID),
+		ConflictStrategy: operation.ConflictStrategyQueue,
+	}
+
+	taskIDs, err := taskMgr.SubmitTask(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to submit task: %w", err)
+	}
+
+	if len(taskIDs) == 0 {
+		return fmt.Errorf("failed to create any power-off tasks for leaking rack %s", rackExternalID)
+	}
+
+	log.Info().
+		Str("rack_external_id", rackExternalID).
+		Int("task_count", len(taskIDs)).
+		Msg("Power-off task submitted for leaking rack")
 
 	return nil
 }

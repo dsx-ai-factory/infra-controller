@@ -35,13 +35,13 @@ type ExpectedMachine struct {
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
 	// Expected host NIC declarations in their configured order
 	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
-	// Optional ID of the SKU associated with this Expected Machine
+	// Stored SKU ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site, including when inventory synchronization imports an entry configured directly in Core.
 	SkuId NullableString `json:"skuId,omitempty"`
-	// SKU information for this Expected Machine (populated when includeRelation=Sku is specified)
+	// SKU information included when `includeRelation=Sku` is specified and the associated SKU belongs to this Expected Machine's Site. For an association to another Site's SKU, REST omits `sku` and returns the stored `skuId`.
 	Sku *Sku `json:"sku,omitempty"`
-	// Optional ID of the Machine associated with this Expected Machine
+	// Stored Machine ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site.
 	MachineId NullableString `json:"machineId,omitempty"`
-	// Machine information for this Expected Machine (populated when includeRelation=Machine is specified)
+	// Machine information included when `includeRelation=Machine` is specified and the associated Machine is found at this Expected Machine's Site. For an association to another Site's Machine, REST omits `machine` and returns the stored `machineId`.
 	Machine *MachineSummary `json:"machine,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`

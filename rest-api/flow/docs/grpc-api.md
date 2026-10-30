@@ -181,6 +181,8 @@
   - [PowerResetRackRequest](#v1-PowerResetRackRequest)
   - [PowerTaskDetails](#v1-PowerTaskDetails)
   - [PowerTaskDetailsList](#v1-PowerTaskDetailsList)
+  - [PowerTaskExternalTargets](#v1-PowerTaskExternalTargets)
+  - [PowerTaskWaitingContext](#v1-PowerTaskWaitingContext)
   - [PurgeComponentRequest](#v1-PurgeComponentRequest)
   - [PurgeComponentResponse](#v1-PurgeComponentResponse)
   - [PurgeRackRequest](#v1-PurgeRackRequest)
@@ -201,6 +203,7 @@
   - [StringQueryInfo](#v1-StringQueryInfo)
   - [SubmitTaskResponse](#v1-SubmitTaskResponse)
   - [Task](#v1-Task)
+  - [TaskBrief](#v1-TaskBrief)
   - [TaskOperation](#v1-TaskOperation)
   - [TaskSchedule](#v1-TaskSchedule)
   - [TaskScheduleScope](#v1-TaskScheduleScope)
@@ -247,6 +250,7 @@
   - [RackOrderByField](#v1-RackOrderByField)
   - [ScheduleSpecType](#v1-ScheduleSpecType)
   - [TaskExecutorType](#v1-TaskExecutorType)
+  - [TaskKind](#v1-TaskKind)
   - [TaskStatus](#v1-TaskStatus)
   - [Flow](#v1-Flow)
 - [Scalar Value Types](#scalar-value-types)
@@ -2074,6 +2078,8 @@ Informational task details with recorded identities, not inferred live targets.
 | updated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 | started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Present only if the task store recorded an execution start. |
 | relevance | [PowerTaskRelevance](#v1-PowerTaskRelevance) |  |  |
+| waiting_context | [PowerTaskWaitingContext](#v1-PowerTaskWaitingContext) |  | Populated for Waiting tasks; absent for Pending/Running (not applicable). On a Waiting task, absence means the service did not provide context. |
+| external_targets | [PowerTaskExternalTargets](#v1-PowerTaskExternalTargets) |  | Inventory identifiers for REST consumers. Absent on older services/proxies; a present result has every member of targets or a categorized error. Failure here does not remove the task or change its recorded UUID targets. |
 
 <a name="v1-PowerTaskDetailsList"></a>
 
@@ -2085,12 +2091,49 @@ a former rack are excluded. Only recorded selections or power-shelf tasks
 affecting this rack are included; tasks with no recorded targets are excluded.
 More than 256 outstanding rack power tasks makes this entire section unavailable,
 even if fewer target this tray. Error is absent on success, including empty;
-entries is empty on failure. Non-power tasks and execution reports are excluded.
+entries is empty on failure. Entries contain only power tasks; other task kinds
+can appear as brief waiting-context references. Execution reports are excluded.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | entries | [PowerTaskDetails](#v1-PowerTaskDetails) | repeated |  |
 | error | [PowerDetailsReadError](#v1-PowerDetailsReadError) | optional |  |
+
+<a name="v1-PowerTaskExternalTargets"></a>
+
+### PowerTaskExternalTargets
+
+External identities read from retained inventory, including soft-deleted rows.
+These are the identities available at read time, not a historical copy saved
+with the task. A component may have moved racks since the task was recorded.
+Error is absent on success, including an empty recorded selection. On failure,
+rack_id and targets are empty; no partial selection or Flow UUID fallback is
+returned. Lookup shares the power-details request&#39;s existing read deadline.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| rack_id | [string](#string) |  | External identifier of the task&#39;s recorded rack; nonempty on success. |
+| targets | [ExternalRef](#v1-ExternalRef) | repeated | Membership and order match the existing PowerTaskDetails.targets field, which is ordered by type and UUID, not by external ID. Each type is explicit and matches the selected type. |
+| error | [PowerDetailsReadError](#v1-PowerDetailsReadError) | optional | NotLinked means a rack or component identity is missing, empty, or purged. InvalidResponse means a selected type is unknown or disagrees with the inventory type, a target UUID is malformed, or the retained rack reply has wrong identity or cardinality. DeadlineExceeded/ReadFailed mean lookup failed; Unsupported means the dependency does not implement the read. LimitExceeded means external identity lookup was skipped because the UUID text alone cannot fit, or the result was removed to fit the response limit. |
+
+<a name="v1-PowerTaskWaitingContext"></a>
+
+### PowerTaskWaitingContext
+
+Nearby work observed for a Waiting power task, not a saved reason for waiting.
+Tasks can change between the power-task read and this metadata read. Both lists
+are ordered by creation time, then ID, ascending. Error is absent on success,
+including empty lists; lists are empty on failure. More than 256 nonterminal
+tasks in the rack makes context unavailable without discarding power tasks.
+If a tray response exceeds its byte limit, populated context lists are replaced
+with LimitExceeded before the complete task section can be discarded.
+A task can also wait for linked inventory; this context is not a readiness check.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| active_conflicts | [TaskBrief](#v1-TaskBrief) | repeated | Pending or Running tasks that match Flow&#39;s current conflict rules. |
+| earlier_waiting | [TaskBrief](#v1-TaskBrief) | repeated | Waiting tasks of any kind in the same rack with strictly earlier creation times. Equal timestamps are excluded. These references do not establish exact blockers, queue position, historical causes, or execution order. |
+| error | [PowerDetailsReadError](#v1-PowerDetailsReadError) | optional | Absent on success. LimitExceeded means the metadata row limit was exceeded or context references were removed to fit the response byte limit. DeadlineExceeded or ReadFailed means the metadata could not be read. |
 
 <a name="v1-PurgeComponentRequest"></a>
 
@@ -2320,6 +2363,18 @@ form &#34;&lt;schedule name&gt; — &lt;RFC3339 timestamp&gt;&#34;.
 | started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
 | report | [string](#string) |  | report is a versioned JSON document with structured execution progress. |
 
+<a name="v1-TaskBrief"></a>
+
+### TaskBrief
+
+A task reference without its operation payload, report, or description.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [UUID](#v1-UUID) |  | The stored Flow task UUID, not a Core action or component identity. |
+| kind | [TaskKind](#v1-TaskKind) |  | Unspecified when the stored task type has no known API kind. |
+| status | [TaskStatus](#v1-TaskStatus) |  | Pending or Running in active_conflicts; Waiting in earlier_waiting. |
+
 <a name="v1-TaskOperation"></a>
 
 ### TaskOperation
@@ -2390,25 +2445,28 @@ TaskStats counts non-terminal Tasks currently associated with an inventory resou
 
 ### TrayPowerDetails
 
-Flow inventory identity remains usable before a managed Core ID exists.
+Power details remain readable by MAC before a managed Core ID exists.
 Every section is populated with either its value or a categorized error.
 Inventory and both child reads share at most 30 seconds from RPC entry, capped
 at one second before a caller deadline. Completed sections survive another
 section&#39;s failure. Core hardware, policy, and actions may describe different
 instants from Flow tasks; Running tasks do not imply active Core actions.
 The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).
-An oversized task section is replaced with LimitExceeded; if the rest exceeds the
+If the response is oversized, populated waiting-context lists are replaced
+with context-level LimitExceeded first, then successful external target results
+are replaced with LimitExceeded. If it still exceeds the limit, the entire
+task section is replaced with LimitExceeded. If the rest still exceeds the
 limit, the RPC returns ResourceExhausted. No task targets are truncated.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| flow_component_id | [UUID](#v1-UUID) |  |  |
-| core_component_id | [string](#string) | optional | Absent until the inventory member has a managed Core identity. |
+| component_id | [string](#string) | optional | External inventory ID, matching Component.component_id. Absent until the inventory member has a managed Core identity. |
 | component_type | [ComponentType](#v1-ComponentType) |  |  |
 | rack_id | [UUID](#v1-UUID) |  | Absent when this member has no Flow rack assignment. |
 | actual | [PowerActualDetails](#v1-PowerActualDetails) |  |  |
 | desired | [PowerDesiredDetails](#v1-PowerDesiredDetails) |  |  |
 | operations | [PowerOperations](#v1-PowerOperations) |  |  |
+| rack_external_id | [string](#string) | optional | The inventory rack identifier used by REST rack and tray resources. Includes retained soft-deleted racks. Absent when no rack identity can be read; older services or proxies also omit it. Never uses the Flow UUID. |
 
 <a name="v1-TriggerTaskScheduleRequest"></a>
 
@@ -2865,13 +2923,13 @@ Dependency error strings and credentials are never included.
 | Name | Number | Description |
 | ---- | ------ | ----------- |
 | POWER_DETAILS_READ_ERROR_UNSPECIFIED | 0 | Not emitted as an error by this RPC. |
-| POWER_DETAILS_READ_ERROR_NOT_LINKED | 1 | The section lacks its required identity: a managed Core ID for Core sections, or a Flow rack assignment for tasks. |
+| POWER_DETAILS_READ_ERROR_NOT_LINKED | 1 | The section lacks its required identity: a managed Core ID for Core sections, a Flow rack assignment for tasks, or a retained external component/rack identifier for an external target result. |
 | POWER_DETAILS_READ_ERROR_NOT_CONFIGURED | 2 | Flow has no NICo provider client. |
 | POWER_DETAILS_READ_ERROR_UNSUPPORTED | 3 | Core lacks the RPC or did not provide this section. |
 | POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED | 4 | A child read exceeded its caller or provider deadline. |
 | POWER_DETAILS_READ_ERROR_READ_FAILED | 5 | The dependency returned an error other than unsupported/deadline. |
-| POWER_DETAILS_READ_ERROR_INVALID_RESPONSE | 6 | A dependency returned the wrong identity/cardinality, an absent required value, or task data that cannot be converted to the declared operation. |
-| POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED | 7 | The rack task count or encoded response exceeded its documented bound. |
+| POWER_DETAILS_READ_ERROR_INVALID_RESPONSE | 6 | A dependency returned the wrong identity/cardinality, an absent required value, an inventory type that differs from the selected type, or task data that cannot be converted to the declared operation or UUID. |
+| POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED | 7 | The rack power-task count, waiting-context task count, or encoded response exceeded its documented bound. |
 
 <a name="v1-PowerTaskRelevance"></a>
 
@@ -2930,6 +2988,21 @@ RackOrderByField represents the supported order by field types for rack queries
 | ---- | ------ | ----------- |
 | TASK_EXECUTOR_TYPE_UNKNOWN | 0 |  |
 | TASK_EXECUTOR_TYPE_TEMPORAL | 1 |  |
+
+<a name="v1-TaskKind"></a>
+
+### TaskKind
+
+Task kinds include rack lifecycle work not represented by OperationType.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| TASK_KIND_UNSPECIFIED | 0 | The stored task type has no known API kind. |
+| TASK_KIND_POWER_CONTROL | 1 | Power control for selected rack components. |
+| TASK_KIND_FIRMWARE_CONTROL | 2 | Firmware control for selected rack components. |
+| TASK_KIND_BRING_UP | 3 | Rack bring-up work. |
+| TASK_KIND_DECOMMISSION | 4 | Rack decommissioning work. |
+| TASK_KIND_INJECT_EXPECTATION | 5 | Installing expected inventory for a rack. |
 
 <a name="v1-TaskStatus"></a>
 

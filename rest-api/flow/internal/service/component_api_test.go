@@ -38,6 +38,7 @@ type mockManager struct {
 	racks           map[uuid.UUID]*rack.Rack
 	domainRacks     map[uuid.UUID][]*rack.Rack
 	drifts          []inventorystore.ComponentDrift
+	componentPatch  inventorymanager.ComponentPatch
 }
 
 func newMockManager() *mockManager {
@@ -166,9 +167,63 @@ func (m *mockManager) AddComponent(_ context.Context, comp *component.Component)
 	return comp.Info.ID, nil
 }
 
-func (m *mockManager) PatchComponent(_ context.Context, comp *component.Component) error {
-	m.components[comp.Info.ID] = comp
+func (m *mockManager) PatchComponent(_ context.Context, patch inventorymanager.ComponentPatch) error {
+	comp := m.components[patch.ID]
+	if patch.FirmwareVersion != nil {
+		comp.FirmwareVersion = *patch.FirmwareVersion
+	}
+	if patch.Description != nil {
+		comp.Info.Description = *patch.Description
+	}
+	if patch.RackID != nil {
+		comp.RackID = *patch.RackID
+	}
+	if patch.SlotID != nil {
+		comp.Position.SlotID = *patch.SlotID
+	}
+	if patch.TrayIndex != nil {
+		comp.Position.TrayIndex = *patch.TrayIndex
+	}
+	if patch.HostID != nil {
+		comp.Position.HostID = *patch.HostID
+	}
+	if len(patch.BMCsByType) > 0 {
+		comp.BmcsByType = mergeBMCs(comp.BmcsByType, patch.BMCsByType)
+	}
+	m.componentPatch = patch
 	return nil
+}
+
+func mergeBMCs(
+	current map[devicetypes.BMCType][]bmc.BMC,
+	updates map[devicetypes.BMCType][]bmc.BMC,
+) map[devicetypes.BMCType][]bmc.BMC {
+	if current == nil {
+		current = make(map[devicetypes.BMCType][]bmc.BMC)
+	}
+	for bmcType, updatedBMCs := range updates {
+		for _, updatedBMC := range updatedBMCs {
+			matched := false
+			for existingType, existingBMCs := range current {
+				for i := range existingBMCs {
+					if existingBMCs[i].MAC.String() != updatedBMC.MAC.String() {
+						continue
+					}
+					existingBMCs[i] = updatedBMC
+					current[existingType] = existingBMCs
+					matched = true
+					break
+				}
+				if matched {
+					break
+				}
+			}
+			if !matched {
+				current[bmcType] = append(current[bmcType], updatedBMC)
+			}
+		}
+	}
+	return current
 }
 
 func (m *mockManager) DeleteComponent(_ context.Context, id uuid.UUID) error {
@@ -505,6 +560,17 @@ func TestPatchComponent_Success(t *testing.T) {
 	assert.Equal(t, 3, updated.Position.SlotID)
 	assert.Equal(t, 2, updated.Position.TrayIndex)
 	assert.Equal(t, 5, updated.Position.HostID)
+	assert.Equal(t, compID, mgr.componentPatch.ID)
+	require.NotNil(t, mgr.componentPatch.FirmwareVersion)
+	require.NotNil(t, mgr.componentPatch.SlotID)
+	require.NotNil(t, mgr.componentPatch.TrayIndex)
+	require.NotNil(t, mgr.componentPatch.HostID)
+	assert.Equal(t, newFW, *mgr.componentPatch.FirmwareVersion)
+	assert.Equal(t, 3, *mgr.componentPatch.SlotID)
+	assert.Equal(t, 2, *mgr.componentPatch.TrayIndex)
+	assert.Equal(t, 5, *mgr.componentPatch.HostID)
+	assert.Nil(t, mgr.componentPatch.Description)
+	assert.Nil(t, mgr.componentPatch.RackID)
 }
 
 func TestPatchComponent_PositionMask(t *testing.T) {
@@ -579,6 +645,13 @@ func TestPatchComponent_PositionMask(t *testing.T) {
 			assert.Equal(t, tc.wantPosition, mgr.components[compID].Position)
 			if tc.wantCode != codes.OK {
 				assert.Equal(t, "original", mgr.components[compID].FirmwareVersion)
+				assert.Empty(t, mgr.componentPatch)
+			} else {
+				path := tc.updateMask.Paths[0]
+				assert.Equal(t, compID, mgr.componentPatch.ID)
+				assert.Equal(t, path == "position.slot_id", mgr.componentPatch.SlotID != nil)
+				assert.Equal(t, path == "position.tray_idx", mgr.componentPatch.TrayIndex != nil)
+				assert.Equal(t, path == "position.host_id", mgr.componentPatch.HostID != nil)
 			}
 		})
 	}
@@ -662,12 +735,16 @@ func TestPatchComponent_WithBMCs(t *testing.T) {
 	compID := uuid.New()
 	rackID := uuid.New()
 	mac, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+	otherMAC, _ := net.ParseMAC("aa:bb:cc:dd:ee:00")
 	mgr.components[compID] = &component.Component{
 		Type:   devicetypes.ComponentTypeCompute,
 		Info:   deviceinfo.DeviceInfo{ID: compID, Name: "node-01"},
 		RackID: rackID,
 		BmcsByType: map[devicetypes.BMCType][]bmc.BMC{
-			devicetypes.BMCTypeHost: {{MAC: bmc.MACAddress{HardwareAddr: mac}, IP: net.ParseIP("10.0.0.1")}},
+			devicetypes.BMCTypeHost: {
+				{MAC: bmc.MACAddress{HardwareAddr: mac}, IP: net.ParseIP("10.0.0.1")},
+				{MAC: bmc.MACAddress{HardwareAddr: otherMAC}, IP: net.ParseIP("10.0.0.2")},
+			},
 		},
 	}
 
@@ -690,8 +767,9 @@ func TestPatchComponent_WithBMCs(t *testing.T) {
 	require.NotNil(t, resp)
 
 	updated := mgr.components[compID]
-	require.Len(t, updated.BmcsByType[devicetypes.BMCTypeHost], 1)
+	require.Len(t, updated.BmcsByType[devicetypes.BMCTypeHost], 2)
 	assert.Equal(t, "10.0.0.99", updated.BmcsByType[devicetypes.BMCTypeHost][0].IP.String())
+	assert.Equal(t, "10.0.0.2", updated.BmcsByType[devicetypes.BMCTypeHost][1].IP.String())
 }
 
 func TestPatchComponent_BMCsNotProvidedPreservesExisting(t *testing.T) {

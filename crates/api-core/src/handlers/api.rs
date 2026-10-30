@@ -27,7 +27,10 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
 fn advertised_build_capabilities() -> Vec<i32> {
-    vec![rpc::BuildCapability::VpcSlaac as i32]
+    vec![
+        rpc::BuildCapability::VpcSlaac as i32,
+        rpc::BuildCapability::ReplaceSkuComponents as i32,
+    ]
 }
 
 pub(crate) async fn version(
@@ -222,11 +225,13 @@ mod tests {
 
     /// Keeps the Version response aligned with every optional behavior Core implements.
     #[test]
-    fn advertised_build_capabilities_include_supported_optional_behaviors() {
-        // Read the exact capability list returned by the Version handler.
+    fn advertised_build_capabilities_include_supported_features() {
         let capabilities = advertised_build_capabilities();
-
-        // The VPC SLAAC contract remains advertised.
-        assert!(capabilities.contains(&(rpc::BuildCapability::VpcSlaac as i32)));
+        for capability in [
+            rpc::BuildCapability::VpcSlaac,
+            rpc::BuildCapability::ReplaceSkuComponents,
+        ] {
+            assert!(capabilities.contains(&(capability as i32)));
+        }
     }
 }

@@ -97,19 +97,25 @@ pub async fn create_or_update(
     Ok(())
 }
 
+/// `find_configs` loads configurations whose name appears in `names`. Missing
+/// names contribute no entries; empty `names` lists all configurations. The result
+/// order is unspecified. Query failures retain their SQLx source and query.
 pub async fn find_configs(
     txn: impl DbReader<'_>,
+    names: &[String],
 ) -> DatabaseResult<Vec<MachineValidationExternalConfig>> {
     let query = format!(
-        "SELECT {} FROM machine_validation_external_config",
+        "SELECT {} FROM machine_validation_external_config
+         WHERE cardinality($1::text[]) = 0 OR name = ANY($1)",
         MachineValidationExternalConfig::db_table_columns(),
     );
 
-    let names = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+    let configs = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(names)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))?;
-    Ok(names)
+    Ok(configs)
 }
 
 /// `remove_config` deletes and returns a named external configuration. Only a

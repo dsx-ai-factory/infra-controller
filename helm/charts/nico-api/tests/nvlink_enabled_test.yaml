@@ -1,0 +1,30 @@
+suite: NVLink partitioning config
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: leaves nvlink_config.enabled to nico-api's default when unset
+    documentIndex: 0
+    asserts:
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[nvlink_config\]'
+
+  - it: renders nvlink.enabled true into the base configuration
+    documentIndex: 0
+    set:
+      nvlink.enabled: true
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[nvlink_config\]\nenabled = true'
+
+  - it: renders nvlink.enabled false so a shared default can be overridden
+    documentIndex: 0
+    set:
+      nvlink.enabled: false
+    asserts:
+      - matchRegex:
+          path: data["carbide-api-config.toml"]
+          pattern: '\[nvlink_config\]\nenabled = false'

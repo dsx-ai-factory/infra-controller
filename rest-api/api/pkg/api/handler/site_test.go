@@ -518,7 +518,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				createdSiteID, perr := uuid.Parse(rst.ID)
 				require.NoError(t, perr)
 				createdSite, gerr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(
-					context.Background(), nil, createdSiteID, nil, false,
+					context.Background(), nil, createdSiteID, nil, false, false,
 				)
 				require.NoError(t, gerr)
 				require.NotNil(t, createdSite.Config)
@@ -1036,13 +1036,13 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 				assert.Contains(t, rec.Body.String(), tt.respMessage)
 			}
 			if tt.verifyVpcSlaac {
-				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false)
+				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
 				require.NoError(t, getErr)
 				require.NotNil(t, storedSite.Config)
 				assert.True(t, storedSite.Config.VpcSlaac)
 			}
 			if tt.verifyFlow {
-				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false)
+				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
 				require.NoError(t, getErr)
 				require.NotNil(t, storedSite.Config)
 				assert.True(t, storedSite.Config.Flow)
@@ -1527,6 +1527,12 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 	testSiteSetupSchema(t, dbSession)
+	require.NoError(t, dbSession.DB.ResetModel(ctx,
+		(*cdbm.Machine)(nil),
+		(*cdbm.MachineCapability)(nil),
+		(*cdbm.AllocationConstraint)(nil),
+		(*cdbm.TenantAccount)(nil),
+	))
 
 	ipOrg := "test-provider-org"
 	ipOrg2 := "test-provider-org-2"
@@ -1673,6 +1679,7 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 		wantRespCode           int
 		wantFirstEntry         *cdbm.Site
 		wantMachineStats       map[string]int
+		wantEmptyMachineStats  bool
 		wantGpuStatsRequested  bool
 		wantGpuStatsForSite    string
 		wantGpuStats           map[string]int
@@ -1998,9 +2005,10 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 				user:             su,
 				isServiceAccount: true,
 			},
-			wantCount:      1,
-			wantTotalCount: 1,
-			wantRespCode:   http.StatusOK,
+			wantCount:             1,
+			wantTotalCount:        1,
+			wantRespCode:          http.StatusOK,
+			wantEmptyMachineStats: true,
 		},
 		{
 			name: "get all Sites by Tenant with machine status, failure",
@@ -2286,7 +2294,7 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 
 				if tt.wantMachineStats != nil {
 					statsLen := len(tt.wantMachineStats)
-					assert.NotNil(t, apist.MachineStats)
+					require.NotNil(t, apist.MachineStats)
 					assert.GreaterOrEqual(t, apist.MachineStats.Total, 1)
 					assert.GreaterOrEqual(t, len(apist.MachineStats.TotalByStatus), statsLen)
 
@@ -2296,6 +2304,22 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 					}
 
 					assert.NotNil(t, apist.MachineStats.TotalByAllocation)
+				}
+
+				if tt.wantEmptyMachineStats {
+					assert.Equal(t, &model.APISiteMachineStats{
+						TotalByStatus:          map[string]int{},
+						TotalByHealth:          map[string]int{},
+						TotalByStatusAndHealth: map[string]map[string]int{},
+						TotalByAllocation: map[string]int{
+							model.MachineStatsAllocatedInUse:    0,
+							model.MachineStatsAllocatedNotInUse: 0,
+							model.MachineStatsUnallocated:       0,
+						},
+					}, apist.MachineStats)
+				}
+				if tt.args.query.Get("includeMachineStats") == "" {
+					assert.Nil(t, apist.MachineStats)
 				}
 
 				if tt.wantGpuStatsRequested {

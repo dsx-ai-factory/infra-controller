@@ -597,6 +597,7 @@ impl NmxtCollector {
                     let labels = self.build_labels(&sample_labels);
                     self.emit_event(CollectorEvent::Metric(
                         MetricSample {
+                            semantics: crate::sink::MetricSemantics::Gauge,
                             key: format!("cable_temperature_celsius:{}", port_num),
                             name: NMXT_METRIC_NAME.to_string(),
                             metric_type: "cable_temperature_celsius".to_string(),
@@ -624,6 +625,7 @@ impl NmxtCollector {
                         labels.push((Cow::Borrowed("state"), (*state).to_string()));
                         self.emit_event(CollectorEvent::Metric(
                             MetricSample {
+                                semantics: crate::sink::MetricSemantics::Gauge,
                                 key: format!("down_blame:{}:{}", port_num, state),
                                 name: NMXT_METRIC_NAME.to_string(),
                                 metric_type: "down_blame".to_string(),
@@ -657,6 +659,7 @@ impl NmxtCollector {
 
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: metric_key,
                     name: NMXT_METRIC_NAME.to_string(),
                     metric_type: metric_type.to_string(),

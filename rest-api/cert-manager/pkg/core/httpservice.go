@@ -234,12 +234,16 @@ func HTTPAddVersionRoute(ctx context.Context, r *mux.Router) {
 	r.Path("/version").Handler(HTTPVersionHandler(ctx)).Methods("GET")
 }
 
+// Version is the service release version, set by the build system. Builds without
+// version metadata report dev.
+var Version = "dev"
+
 // HTTPVersionHandler handles the version ep
 func HTTPVersionHandler(_ context.Context) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log := GetLogger(r.Context())
 		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte("0.1.0" + "\n"))
+		_, err := w.Write([]byte(Version + "\n"))
 		if err != nil {
 			log.Error(err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -372,6 +376,10 @@ func WithTelemetry(serverName string) HTTPMiddlewareOption {
 //
 //   - Collects <latencyMetricsName>_http_duration_seconds metrics with
 //     {path,method} dimensions, if latencyMetricsName is specified
+//
+//   - Counts requests in both <latencyMetricsName>_http_request_counts and
+//     <latencyMetricsName>_http_requests_total, with {path,method,status_code}
+//     dimensions, if latencyMetricsName is specified
 //
 // - Wraps handler with http.TimeoutHandler with `handlerTimeout`.
 //
@@ -525,16 +533,20 @@ func loggingMiddleware(rootCtx context.Context) mux.MiddlewareFunc {
 
 func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 	var latency *prometheus.HistogramVec
-	var count *prometheus.CounterVec
+	var counts []*prometheus.CounterVec
 	if latencyMetricsName != "" {
 		latency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Name: fmt.Sprintf("%s_http_duration_seconds", latencyMetricsName),
 			Help: "Duration of HTTP requests.",
 		}, []string{"path", "method"})
-		count = promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: fmt.Sprintf("%s_http_request_counts", latencyMetricsName),
-			Help: "Counter of HTTP requests.",
-		}, []string{"path", "method", "status_code"})
+		// `http_requests_total` is canonical; keep `http_request_counts` for
+		// existing dashboards and alerts.
+		for _, name := range []string{"http_request_counts", "http_requests_total"} {
+			counts = append(counts, promauto.NewCounterVec(prometheus.CounterOpts{
+				Name: fmt.Sprintf("%s_%s", latencyMetricsName, name),
+				Help: "Counter of HTTP requests.",
+			}, []string{"path", "method", "status_code"}))
+		}
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -543,7 +555,7 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 			w := getRRW(rw)
 			defer func() {
 				log.WithField("status_code", w.statusCode).Debugf("Handler finished")
-				if count != nil {
+				for _, count := range counts {
 					count.WithLabelValues(r.URL.Path, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
 				}
 				// Return the writer back to the pool

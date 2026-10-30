@@ -114,17 +114,31 @@ client_key = "/var/run/secrets/spiffe.io/tls.key"
 api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
 ```
 
-Static BMC endpoints are supported for local, mock, or special deployments:
+Static BMC endpoints use a shared credentials file for local, mock, or special deployments:
 
 ```toml
+[endpoint_sources]
+static_credentials_file = "/run/secrets/bmc/credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.0.1"
 port = 443
 mac = "aa:bb:cc:dd:ee:ff"
-username = "admin"
-password = "secret"
+credentials_profile = "bmc"
 labels = { site = "rno-dev7", cluster = "cluster-01", environment = "development" }
 ```
+
+Static endpoints reject inline `username` and `password` fields. Move those
+values into the shared file and select a profile, or supply a per-MAC override.
+The JSON file contains optional `profiles` (named username/password sets) and
+`overrides` (partial credentials keyed by MAC, ignoring letter case). Each field
+uses the per-MAC override first, then the explicitly selected profile; there is
+no default profile. A username must resolve; passwords are optional.
+
+Replace the file atomically. File events and 60-second polling reload the cached
+credentials; failed reloads retain the last valid snapshot. Collectors refresh
+credentials after authentication fails. Target lists and profile selections in
+the main configuration still require a restart.
 
 Configure direct switch host endpoints separately when desired:
 
@@ -133,16 +147,14 @@ Configure direct switch host endpoints separately when desired:
 ip = "10.0.1.2"
 port = 443
 mac = "11:22:33:44:55:77"
-username = "admin"
-password = "secret"
+credentials_profile = "switch"
 switch = { serial = "SN-SWITCH-HOST-001", is_primary = true }
 ```
 
 This list is optional. Each entry requires `switch` metadata. The
 `endpoint_role` field defaults to `host`, and only `host` is accepted in this
 list. Switch host entries under `static_bmc_endpoints` use the same `host`
-default when `endpoint_role` is omitted. MAC addresses in
-`static_switch_host_endpoints` must be unique across both static lists.
+default when `endpoint_role` is omitted. MAC addresses must be unique across both static lists.
 
 For a switch host entry, `port` selects the NVUE REST HTTPS port and defaults
 to `443`. The gNMI and NMX-C ports use the global

@@ -20,21 +20,21 @@
 //! 2. Wait for watcher callbacks (DPU ready, reboot required)
 //! 3. Handle cleanup on error/reprovisioning
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 
-use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase, dpu_node_cr_name};
-use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
+use carbide_dpf::{
+    DpfError, DpuDeploymentType, DpuFailureObservation, DpuPhase, DpuPhaseObservation,
+    dpu_node_cr_name,
+};
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use libredfish::SystemPowerControl;
 use model::expected_machine::ExpectedMachine;
-use model::hardware_info::HardwareInfo;
 use model::machine::{
     DpfState, DpuInitState, DpuMachine, DpuReprovisionStates, FailureCause, FailureDetails,
     FailureSource, InstanceState, Machine, ManagedHostState, ManagedHostStateSnapshot,
     PerformPowerOperation, ReprovisionState, StateMachineArea,
 };
-use model::rack_type::{RackProductFamily, select_dpu_nvconfig_profile};
 use state_controller::state_handler::{
     ExternalServiceError, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -43,6 +43,10 @@ use super::helpers::{DpuInitStateHelper, ManagedHostStateHelper, ReprovisionStat
 use super::{handler_host_power_control, host_power_state};
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::DpfOperations;
+use crate::dpf::deployment::{
+    DEPLOYMENT_MIGRATION_SOURCE, DEPLOYMENT_MIGRATION_TARGET, consistent_deployment_type,
+    deployment_types_for_host,
+};
 
 /// Keep suppression and the controller transition in the same transaction, including
 /// exits through reset, restart, and failure handling outside the DPF handlers.
@@ -87,11 +91,6 @@ pub(super) async fn update_exploration_suppression(
     }.boxed()).await?
 }
 
-// `deployment_type_for_dpu_profile` currently refines exactly one deployment:
-// generic BF3 becomes GB200 BF3. Only that forward migration is supported.
-const DEPLOYMENT_MIGRATION_SOURCE: DpuDeploymentType = DpuDeploymentType::Bf3;
-const DEPLOYMENT_MIGRATION_TARGET: DpuDeploymentType = DpuDeploymentType::Bf3Gb200;
-
 fn dpf_error(error: DpfError) -> StateHandlerError {
     ExternalServiceError::with_source("dpf", "", error.to_string(), "dpf_error", error).into()
 }
@@ -126,104 +125,6 @@ fn dpf_id(machine: &Machine<impl MachineIdSubtypeTrait>) -> Result<String, State
     machine.dpf_id().ok_or_else(|| {
         StateHandlerError::InvalidState(format!("BMC MAC is not set for machine {}", machine.id))
     })
-}
-
-/// Returns the product family reported by Site Explorer, or falls back to the
-/// configured rack profile when that report does not name a known family.
-async fn host_product_family(
-    state: &ManagedHostStateSnapshot,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-) -> Result<Option<RackProductFamily>, StateHandlerError> {
-    let mut conn = ctx.services.db_pool.acquire().await?;
-
-    if let Some(host_bmc_ip) = state.host_snapshot.status.bmc_info.ip {
-        let endpoints =
-            db::explored_endpoints::find_by_ips(conn.as_mut(), vec![host_bmc_ip]).await?;
-        if let Some(product_family) = endpoints
-            .first()
-            .and_then(|endpoint| endpoint.report.model())
-            .as_deref()
-            .and_then(RackProductFamily::from_hardware_model)
-        {
-            return Ok(Some(product_family));
-        }
-    }
-
-    let Some(rack_id) = state.host_snapshot.rack_id.as_ref() else {
-        return Ok(None);
-    };
-    let Some(rack) = db::rack::find_by(
-        conn.as_mut(),
-        db::ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
-    )
-    .await?
-    .pop() else {
-        return Ok(None);
-    };
-    let Some(profile_id) = rack.rack_profile_id.as_ref() else {
-        return Ok(None);
-    };
-    let Some(profile) = ctx
-        .services
-        .site_config
-        .rack_profiles
-        .get(profile_id.as_str())
-    else {
-        return Ok(None);
-    };
-
-    Ok(profile.product_family.clone())
-}
-
-async fn deployment_types_for_host(
-    state: &ManagedHostStateSnapshot,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-    dpf_sdk: &dyn DpfOperations,
-    astra_nics: bool,
-) -> Result<Vec<DpuDeploymentType>, StateHandlerError> {
-    let product_family = host_product_family(state, ctx).await?;
-    state
-        .dpu_snapshots
-        .iter()
-        .map(|dpu| {
-            let base = dpf_sdk
-                .deployment_type_for_dpu(dpu, astra_nics)
-                .map_err(dpf_error)?;
-            Ok::<_, StateHandlerError>(deployment_type_for_dpu_profile(
-                base,
-                product_family.as_ref(),
-                dpu.status.hardware_info.as_ref(),
-            ))
-        })
-        .collect()
-}
-
-fn deployment_type_for_dpu_profile(
-    base: DpuDeploymentType,
-    product_family: Option<&RackProductFamily>,
-    hardware_info: Option<&HardwareInfo>,
-) -> DpuDeploymentType {
-    match select_dpu_nvconfig_profile(product_family, hardware_info) {
-        Some(DpuNvConfigProfile::Gb200B3240V1) if base == DpuDeploymentType::Bf3 => {
-            DpuDeploymentType::Bf3Gb200
-        }
-        Some(DpuNvConfigProfile::Gb200B3240V1) | None => base,
-    }
-}
-
-fn consistent_deployment_type(
-    deployment_types: &[DpuDeploymentType],
-) -> Result<DpuDeploymentType, String> {
-    let Some(first) = deployment_types.first().copied() else {
-        return Err(
-            "cannot determine DPF deployment type for a host without attached DPUs".to_string(),
-        );
-    };
-    if deployment_types.iter().all(|candidate| *candidate == first) {
-        Ok(first)
-    } else {
-        Err("host has mixed DPF deployment types across attached DPUs".to_string())
-    }
 }
 
 /// Returns whether any attached DPU reprovision request has started.
@@ -567,6 +468,50 @@ fn make_failure_state(
     }
 }
 
+fn dpf_provisioning_failed(
+    state: &ManagedHostStateSnapshot,
+    dpu_id: DpuMachineId,
+    failure: Option<&DpuFailureObservation>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    tracing::error!(
+        machine_id = %state.host_snapshot.id,
+        dpu_machine_id = %dpu_id,
+        "DPU entered error phase during DPF provisioning"
+    );
+    let mut err = format!("DPU {dpu_id} entered error phase during DPF provisioning");
+    if let Some(failure) = failure {
+        let diagnostics = serde_json::to_string(failure)
+            .map_err(DpfError::from)
+            .map_err(dpf_error)?;
+        err.push_str(": ");
+        err.push_str(&diagnostics);
+    }
+    let details = FailureDetails {
+        cause: FailureCause::DpfProvisioning { err },
+        failed_at: chrono::Utc::now(),
+        source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
+    };
+    Ok(StateHandlerOutcome::transition(make_failure_state(
+        state,
+        details,
+        dpu_id.into(),
+    )))
+}
+
+fn dpf_failure_from_observations(
+    state: &ManagedHostStateSnapshot,
+    observations: &BTreeMap<String, DpuPhaseObservation>,
+) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
+    for dpu in &state.dpu_snapshots {
+        if let Some(observation) = observations.get(&dpf_id(dpu)?)
+            && observation.phase == DpuPhase::Error
+        {
+            return dpf_provisioning_failed(state, dpu.id, observation.failure.as_ref()).map(Some);
+        }
+    }
+    Ok(None)
+}
+
 fn dpf_cr_creation_failed(
     state: &ManagedHostStateSnapshot,
     err: &StateHandlerError,
@@ -779,8 +724,8 @@ async fn handle_dpf_handle_reboot(
     }
 }
 
-/// Handle DpfState::WaitingForReady: release hold, reboot handling,
-/// phase/error checks, and per-DPU transition to DeviceReady.
+/// Handle `DpfState::WaitingForReady`: record failures, release the hold,
+/// handle reboots, and advance ready DPUs to `DeviceReady`.
 async fn handle_dpf_waiting_for_ready(
     state: &ManagedHostStateSnapshot,
     dpu_snapshot: &DpuMachine,
@@ -796,19 +741,32 @@ async fn handle_dpf_waiting_for_ready(
     // deterministic DPU name. Read ownership, phase, and Ready conformance from
     // one observation scoped to the target so an old source DPU cannot release
     // the hold, trigger a reboot, or satisfy target readiness.
-    let current_phase = match if deployment_type == DEPLOYMENT_MIGRATION_TARGET {
+    let observation = match if deployment_type == DEPLOYMENT_MIGRATION_TARGET {
         let dpu_device_names = dpu_device_names(state)?;
-        dpf_sdk
-            .get_dpu_phases_for_deployment_type(&dpu_device_names, &node_name, deployment_type)
-            .await
-            .map(|phases| phases.and_then(|phases| phases.get(&dpu_device_name).cloned()))
+        let observations = dpf_sdk
+            .get_dpu_phase_observations_for_deployment_type(
+                &dpu_device_names,
+                &node_name,
+                deployment_type,
+            )
+            .await;
+        // The shared hold and reboot affect every DPU. Save an observed peer
+        // failure before selecting the DPU whose substate we are advancing.
+        if let Ok(Some(observations)) = &observations
+            && let Some(failure) = dpf_failure_from_observations(state, observations)?
+        {
+            return Ok(failure);
+        }
+        observations.map(|observations| {
+            observations.and_then(|mut observations| observations.remove(&dpu_device_name))
+        })
     } else {
         dpf_sdk
-            .get_dpu_phase(&dpu_device_name, &node_name)
+            .get_dpu_phase_observation(&dpu_device_name, &node_name)
             .await
             .map(Some)
     } {
-        Ok(Some(phase)) => phase,
+        Ok(Some(observation)) => observation,
         Ok(None) => {
             return Ok(StateHandlerOutcome::wait(
                 "Waiting for DPF to recreate the DPU from the GB200 deployment".to_string(),
@@ -827,16 +785,56 @@ async fn handle_dpf_waiting_for_ready(
         Err(err) => return Err(dpf_error(err)),
     };
 
-    // A DPU with a deletionTimestamp is a terminating old CR (get_dpu_phase maps that to
-    // Deleting; its status.phase is still stale, often Ready or Error). Do nothing until
-    // the operator has deleted it and created the fresh CR: don't release the maintenance
-    // hold, don't trigger a reboot, and don't read Ready/Error off it. This is what lets a
-    // reprovision of an *errored* DPU proceed instead of immediately re-failing on the old
-    // CR's stale Error phase.
+    let current_phase = observation.phase;
+
+    // `deletionTimestamp` overrides stale `Ready` or `Error` status. Wait for the
+    // replacement CR before releasing the hold or triggering a reboot, so an old
+    // `Error` cannot fail the new provisioning attempt.
     if current_phase == DpuPhase::Deleting {
         return Ok(StateHandlerOutcome::wait(
             "DPU CR is being deleted (reprovision in progress); waiting for the new CR".to_string(),
         ));
+    }
+
+    // Save terminal diagnostics without DPUNode hold or reboot calls. An error
+    // from either operation must not prevent us from recording this failure.
+    if current_phase == DpuPhase::Error {
+        return dpf_provisioning_failed(state, dpu_snapshot.id, observation.failure.as_ref());
+    }
+
+    if deployment_type != DEPLOYMENT_MIGRATION_TARGET {
+        // Check `WaitingForReady` peers before shared hold or reboot calls.
+        // An untouched DPU or one still in `Reprovisioning` can retain an old
+        // `Error` until its CR is deleted.
+        for peer in &state.dpu_snapshots {
+            let waiting_for_ready = match &state.managed_state {
+                ManagedHostState::DPUInit { dpu_states } => matches!(
+                    dpu_states.states.get(&peer.id),
+                    Some(DpuInitState::DpfStates {
+                        state: DpfState::WaitingForReady { .. }
+                    })
+                ),
+                _ => matches!(
+                    state.managed_state.as_reprovision_state(&peer.id),
+                    Some(ReprovisionState::DpfStates {
+                        substate: DpfState::WaitingForReady { .. }
+                    })
+                ),
+            };
+            if peer.id == dpu_machine_id || !waiting_for_ready {
+                continue;
+            }
+            match dpf_sdk
+                .get_dpu_phase_observation(&dpf_id(peer)?, &node_name)
+                .await
+            {
+                Ok(observation) if observation.phase == DpuPhase::Error => {
+                    return dpf_provisioning_failed(state, peer.id, observation.failure.as_ref());
+                }
+                Ok(_) | Err(DpfError::NotFound { .. }) => {}
+                Err(error) => return Err(dpf_error(error)),
+            }
+        }
     }
 
     dpf_sdk
@@ -880,30 +878,8 @@ async fn handle_dpf_waiting_for_ready(
         return Ok(StateHandlerOutcome::transition(next));
     }
 
-    if current_phase == carbide_dpf::DpuPhase::Error {
-        tracing::error!(
-            machine_id = %state.host_snapshot.id,
-            dpu_machine_id = %dpu_snapshot.id,
-            "DPU entered error phase during DPF provisioning"
-        );
-        let details = FailureDetails {
-            cause: FailureCause::DpfProvisioning {
-                err: format!(
-                    "DPU {} entered error phase during DPF provisioning",
-                    dpu_snapshot.id
-                ),
-            },
-            failed_at: chrono::Utc::now(),
-            source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
-        };
-        return Ok(StateHandlerOutcome::transition(make_failure_state(
-            state,
-            details,
-            dpu_snapshot.id.into(),
-        )));
-    }
     // wait for dpf to report that the dpu is ready
-    if current_phase != carbide_dpf::DpuPhase::Ready {
+    if current_phase != DpuPhase::Ready {
         return update_phase_detail_or_wait(
             state,
             &dpu_machine_id,
@@ -959,16 +935,14 @@ pub(super) async fn handle_dpf_deployment_migration(
     }
 
     let expected_machine = super::get_expected_machine_for_mh(state, ctx).await?;
-    // This boolean tells deployment selection whether expected inventory has CX9 NICs,
-    // so migration checks use the appropriate Astra or generic deployment type.
-    let astra_nics = expected_machine.as_ref().is_some_and(|machine| {
-        machine
-            .data
-            .interfaces
-            .iter()
-            .any(|nic| nic.nic_type.as_deref() == Some("CX9"))
-    });
-    let deployment_types = deployment_types_for_host(state, ctx, dpf_sdk, astra_nics).await?;
+    let deployment_types = deployment_types_for_host(
+        state,
+        &ctx.services.db_pool,
+        &ctx.services.site_config.rack_profiles,
+        dpf_sdk,
+        expected_machine.as_ref(),
+    )
+    .await?;
     let desired_deployment = match consistent_deployment_type(&deployment_types) {
         Ok(deployment_type) => deployment_type,
         Err(error) => return Ok(dpf_deployment_selection_failed(state, error.as_str())),
@@ -1003,18 +977,24 @@ pub(super) async fn handle_dpf_deployment_migration(
         .await
         .map_err(dpf_error)?;
 
-    // Keep the durable parked state until one DPF observation contains every
-    // target DPU. Controllers from before migration support ignore this state,
+    // Keep the durable parked state until every target DPU has been
+    // observed. Controllers from before migration support ignore this state,
     // so they cannot accept a source DPU recreated during the selector handoff.
     match dpf_sdk
-        .get_dpu_phases_for_deployment_type(
+        .get_dpu_phase_observations_for_deployment_type(
             &dpu_device_names,
             &node_name,
             DEPLOYMENT_MIGRATION_TARGET,
         )
         .await
     {
-        Ok(Some(_)) => {}
+        Ok(Some(observations)) => {
+            // The next iteration may observe a replacement CR. Preserve a
+            // terminal failure from this target set before leaving the checkpoint.
+            if let Some(failure) = dpf_failure_from_observations(state, &observations)? {
+                return Ok(failure);
+            }
+        }
         Ok(None) | Err(DpfError::NotFound { .. }) => {
             return Ok(StateHandlerOutcome::wait(
                 "Waiting for DPF to recreate every DPU from the GB200 deployment".to_string(),
@@ -1117,15 +1097,14 @@ pub(super) async fn handle_dpf_state(
     // Use expected inventory before discovered DPA interfaces are populated.
     // Keep this credential-bearing entry out of tracing and Debug-derived structs.
     let expected_machine = super::get_expected_machine_for_mh(state, ctx).await?;
-    let astra_nics = expected_machine.as_ref().is_some_and(|machine| {
-        machine
-            .data
-            .interfaces
-            .iter()
-            .any(|nic| nic.nic_type.as_deref() == Some("CX9"))
-    });
-
-    let deployment_types = deployment_types_for_host(state, ctx, dpf_sdk, astra_nics).await?;
+    let deployment_types = deployment_types_for_host(
+        state,
+        &ctx.services.db_pool,
+        &ctx.services.site_config.rack_profiles,
+        dpf_sdk,
+        expected_machine.as_ref(),
+    )
+    .await?;
     let mut deployment_type = match consistent_deployment_type(&deployment_types) {
         Ok(deployment_type) => deployment_type,
         Err(error) => {
@@ -1264,7 +1243,6 @@ pub(super) async fn handle_dpf_state(
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
-    use model::hardware_info::DpuData;
     use model::machine::ReprovisionRequest;
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
@@ -1347,16 +1325,6 @@ mod tests {
         );
     }
 
-    fn hardware_info(part_number: &str) -> HardwareInfo {
-        HardwareInfo {
-            dpu_info: Some(DpuData {
-                part_number: part_number.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
     fn parked_deployment_migration_state(used_for_ingestion: bool) -> ManagedHostStateSnapshot {
         let mut state = managed_host_state_snapshot();
         state.host_snapshot.config.dpf.used_for_ingestion = used_for_ingestion;
@@ -1402,111 +1370,6 @@ mod tests {
                     used_for_ingestion,
                 ))
             },
-        );
-    }
-
-    #[test]
-    fn gb200_b3240_profile_selects_only_the_specialized_bf3_deployment() {
-        /// Hardware and rack inputs used to refine one base DPF deployment class.
-        struct ProfileInput {
-            base: DpuDeploymentType,
-            product_family: Option<RackProductFamily>,
-            hardware_info: Option<HardwareInfo>,
-        }
-
-        check_values(
-            [
-                Check {
-                    scenario: "GB200 B3240 BF3",
-                    input: ProfileInput {
-                        base: DpuDeploymentType::Bf3,
-                        product_family: Some(RackProductFamily::Gb200),
-                        hardware_info: Some(hardware_info("900-9D3B6-00CN-AB0")),
-                    },
-                    expect: DpuDeploymentType::Bf3Gb200,
-                },
-                Check {
-                    scenario: "non-GB200 B3240 BF3",
-                    input: ProfileInput {
-                        base: DpuDeploymentType::Bf3,
-                        product_family: Some(RackProductFamily::Other("other".to_string())),
-                        hardware_info: Some(hardware_info("900-9D3B6-00CN-AB0")),
-                    },
-                    expect: DpuDeploymentType::Bf3,
-                },
-                Check {
-                    scenario: "GB200 other BF3",
-                    input: ProfileInput {
-                        base: DpuDeploymentType::Bf3,
-                        product_family: Some(RackProductFamily::Gb200),
-                        hardware_info: Some(hardware_info("900-9D3B6-00CV-AA0")),
-                    },
-                    expect: DpuDeploymentType::Bf3,
-                },
-                Check {
-                    scenario: "BF3 without rack profile or hardware information",
-                    input: ProfileInput {
-                        base: DpuDeploymentType::Bf3,
-                        product_family: None,
-                        hardware_info: None,
-                    },
-                    expect: DpuDeploymentType::Bf3,
-                },
-                Check {
-                    scenario: "GB200 BF4 remains BF4",
-                    input: ProfileInput {
-                        base: DpuDeploymentType::Bf4Generic,
-                        product_family: Some(RackProductFamily::Gb200),
-                        hardware_info: Some(hardware_info("900-9D3B6-00CN-AB0")),
-                    },
-                    expect: DpuDeploymentType::Bf4Generic,
-                },
-                Check {
-                    scenario: "Astra remains Astra",
-                    input: ProfileInput {
-                        base: DpuDeploymentType::Bf4Astra,
-                        product_family: Some(RackProductFamily::Gb200),
-                        hardware_info: Some(hardware_info("900-9D3B6-00CN-AB0")),
-                    },
-                    expect: DpuDeploymentType::Bf4Astra,
-                },
-            ],
-            |input| {
-                deployment_type_for_dpu_profile(
-                    input.base,
-                    input.product_family.as_ref(),
-                    input.hardware_info.as_ref(),
-                )
-            },
-        );
-    }
-
-    #[test]
-    fn attached_dpus_require_one_consistent_deployment_type() {
-        check_values(
-            [
-                Check {
-                    scenario: "ordinary BF3 pair",
-                    input: vec![DpuDeploymentType::Bf3, DpuDeploymentType::Bf3],
-                    expect: Some(DpuDeploymentType::Bf3),
-                },
-                Check {
-                    scenario: "GB200 BF3 pair",
-                    input: vec![DpuDeploymentType::Bf3Gb200, DpuDeploymentType::Bf3Gb200],
-                    expect: Some(DpuDeploymentType::Bf3Gb200),
-                },
-                Check {
-                    scenario: "mixed GB200 eligibility",
-                    input: vec![DpuDeploymentType::Bf3Gb200, DpuDeploymentType::Bf3],
-                    expect: None,
-                },
-                Check {
-                    scenario: "host without attached DPUs",
-                    input: vec![],
-                    expect: None,
-                },
-            ],
-            |deployment_types| consistent_deployment_type(&deployment_types).ok(),
         );
     }
 }

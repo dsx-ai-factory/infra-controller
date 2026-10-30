@@ -748,10 +748,19 @@ async fn failed_vni_release_preserves_active_partition(pool: sqlx::PgPool) {
         .await
         .expect_err("release failure prevents deletion");
     assert_eq!(error.code(), tonic::Code::Internal);
-    assert!(
-        error.message().contains("reject_spx_vni_release"),
-        "{error}"
-    );
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error)
+        .expect("database status source")
+        .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+        .expect("Carbide error source");
+    let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    let database_error = annotated
+        .source
+        .as_database_error()
+        .expect("database constraint error");
+    assert_eq!(database_error.constraint(), Some("reject_spx_vni_release"));
     assert_eq!(deletion_records(&env, id).await, before);
 
     sqlx::query("ALTER TABLE resource_pool DROP CONSTRAINT reject_spx_vni_release")

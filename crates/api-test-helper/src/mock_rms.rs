@@ -184,6 +184,10 @@ pub struct MockRmsApi {
     batch_reset_switch_factory_default_calls:
         Mutex<Vec<rms::BatchResetSwitchFactoryDefaultRequest>>,
 
+    batch_disable_switch_mtls_responses:
+        Mutex<VecDeque<Result<rms::BatchDisableSwitchMtlsResponse, RackManagerError>>>,
+    batch_disable_switch_mtls_calls: Mutex<Vec<rms::BatchDisableSwitchMtlsRequest>>,
+
     get_job_status_responses: Mutex<VecDeque<Result<rms::GetJobStatusResponse, RackManagerError>>>,
     get_job_status_calls: Mutex<Vec<rms::GetJobStatusRequest>>,
 
@@ -330,6 +334,8 @@ impl MockRmsApi {
             batch_reset_switch_sdn_factory_default_calls: Default::default(),
             batch_reset_switch_factory_default_responses: Default::default(),
             batch_reset_switch_factory_default_calls: Default::default(),
+            batch_disable_switch_mtls_responses: Default::default(),
+            batch_disable_switch_mtls_calls: Default::default(),
             get_job_status_responses: Default::default(),
             get_job_status_calls: Default::default(),
             get_firmware_job_status_responses: Default::default(),
@@ -688,6 +694,15 @@ impl MockRmsApi {
         batch_reset_switch_factory_default_calls,
         rms::BatchResetSwitchFactoryDefaultRequest,
         rms::BatchResetSwitchFactoryDefaultResponse
+    );
+
+    impl_enqueue_inspect!(
+        enqueue_batch_disable_switch_mtls,
+        batch_disable_switch_mtls_calls,
+        batch_disable_switch_mtls_responses,
+        batch_disable_switch_mtls_calls,
+        rms::BatchDisableSwitchMtlsRequest,
+        rms::BatchDisableSwitchMtlsResponse
     );
 
     impl_enqueue_inspect!(
@@ -1490,12 +1505,16 @@ impl RmsApi for MockRmsApi {
 
     async fn batch_disable_switch_mtls(
         &self,
-        _cmd: rms::BatchDisableSwitchMtlsRequest,
+        cmd: rms::BatchDisableSwitchMtlsRequest,
     ) -> Result<rms::BatchDisableSwitchMtlsResponse, RackManagerError> {
-        Err(
-            tonic::Status::unimplemented("BatchDisableSwitchMtls is not implemented by MockRmsApi")
-                .into(),
-        )
+        self.batch_disable_switch_mtls_calls.lock().await.push(cmd);
+
+        // An empty queue reports the RPC as unimplemented, as an older RMS would.
+        let mut responses = self.batch_disable_switch_mtls_responses.lock().await;
+
+        responses.pop_front().unwrap_or_else(|| {
+            Err(tonic::Status::unimplemented("no BatchDisableSwitchMtls response queued").into())
+        })
     }
 
     async fn get_configure_switch_certificate_job_status(

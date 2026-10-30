@@ -75,6 +75,12 @@ pub struct IntegrationTestEnvironment {
     pub db_pool: Pool<Postgres>,
     pub metrics: MetricsSetup,
     pub credential_config: CredentialConfig,
+    /// Enable the SPDM controller and the machine controller's SPDM measuring paths.
+    /// Defaults to false. [`start_api_server`] captures this value for each API
+    /// server it starts; changing it does not reconfigure running servers.
+    /// NRAS endpoints use deliberately nonfunctional loopback port 9, so this
+    /// fixture cannot complete verification.
+    pub spdm_enabled: bool,
     pub _vault_handle: Arc<Vault>,
 }
 
@@ -131,6 +137,7 @@ impl IntegrationTestEnvironment {
             root_dir,
             carbide_metrics_addrs,
             credential_config,
+            spdm_enabled: false,
             db_url,
             db_pool,
             metrics: {
@@ -194,6 +201,19 @@ pub struct TestApiServerArgs {
 
 pub async fn start_api_server(
     test_env: &mut IntegrationTestEnvironment,
+    args: TestApiServerArgs,
+    cancel_token: CancellationToken,
+) -> eyre::Result<ApiServerHandle> {
+    start_api_server_with_config(test_env, args, cancel_token, toml::Table::new()).await
+}
+
+/// Starts Core with overrides merged into the standard integration configuration.
+///
+/// Nested tables merge recursively; supplied scalars and arrays replace defaults.
+/// An empty table preserves the configuration used by [`start_api_server`].
+/// Core validates the final configuration before reporting readiness.
+pub async fn start_api_server_with_config(
+    test_env: &mut IntegrationTestEnvironment,
     TestApiServerArgs {
         bmc_proxy,
         firmware_directory,
@@ -202,6 +222,7 @@ pub async fn start_api_server(
         insecure_discovery,
     }: TestApiServerArgs,
     cancel_token: CancellationToken,
+    overrides: toml::Table,
 ) -> eyre::Result<ApiServerHandle> {
     let api_address = *test_env
         .carbide_api_addrs
@@ -215,6 +236,7 @@ pub async fn start_api_server(
     let db_url = test_env.db_url.clone();
     let root_dir = test_env.root_dir.clone();
     let credential_config = test_env.credential_config.clone();
+    let spdm_enabled = test_env.spdm_enabled;
 
     // SAFETY: Initial lint enablement: these test settings are installed before the API
     // server task is spawned, but callers already run in multi-threaded test processes.
@@ -259,18 +281,22 @@ pub async fn start_api_server(
         let root_dir = root_dir.clone();
         let cancel_token = cancel_token.clone();
         async move {
-            api_server::start(StartArgs {
-                addr: api_address,
-                metrics_addr: metrics_address,
-                root_dir,
-                db_url,
-                bmc_proxy,
-                firmware_directory,
-                cancel_token,
-                ready_channel: ready_tx,
-                credential_config,
-                insecure_discovery,
-            })
+            api_server::start_with_config(
+                StartArgs {
+                    addr: api_address,
+                    metrics_addr: metrics_address,
+                    root_dir,
+                    db_url,
+                    bmc_proxy,
+                    firmware_directory,
+                    cancel_token,
+                    ready_channel: ready_tx,
+                    credential_config,
+                    insecure_discovery,
+                    spdm_enabled,
+                },
+                overrides,
+            )
             .await
             .inspect_err(|e| {
                 eprintln!("Failed to start API server: {e:#}");

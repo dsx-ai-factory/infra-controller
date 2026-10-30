@@ -22,27 +22,15 @@
 //! image/configuration contents or establish that flashing would be safe.
 
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
 use std::time::Duration;
 
+use carbide_libmlx_model::device::identity::MlxDeviceSelector;
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::{Child, Command};
-use tokio::time::Instant;
 
 use super::config::FirmwareSpec;
-use crate::device::discovery::parse_mlxfwmanager_xml;
-
-// Match the libmlx command runner's default. This is one complete read-only
-// query, including output collection, with no automatic retry.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
-// A query selects one device, not a fleet. Stop malformed tool output from
-// retaining an unbounded buffer before XML parsing.
-const MAX_QUERY_OUTPUT_BYTES: u64 = 1024 * 1024;
-// Keep the tool's explanation on failures without copying a full output buffer
-// into an operator-facing error.
-const MAX_QUERY_DIAGNOSTIC_BYTES: usize = 4096;
+use crate::device::discovery::{DeviceDiscoveryError, QUERY_TIMEOUT, discover_device_with_program};
+use crate::runner::FirmwareToolExecutor;
 
 /// `LocalFirmwareFiles` borrows the caller's digest-checked staging paths.
 ///
@@ -82,6 +70,9 @@ pub struct FirmwarePreflightResult {
 /// Failures before a read-only firmware comparison can be reported.
 #[derive(Debug, Error)]
 pub enum FirmwarePreflightError {
+    /// Device-query failure, including process cleanup and unusable-report diagnostics.
+    #[error(transparent)]
+    Discovery(#[from] DeviceDiscoveryError),
     /// A requested locator or target field is unusable.
     #[error("invalid firmware preflight request: {0}")]
     InvalidRequest(String),
@@ -96,27 +87,10 @@ pub enum FirmwarePreflightError {
     /// A staged path does not refer to a nonempty regular file.
     #[error("staged firmware input is not a nonempty regular file: {0}")]
     InvalidInput(PathBuf),
-    /// The tool could not be spawned, read, waited for, or terminated.
-    #[error("mlxfwmanager query I/O failed: {0}")]
-    QueryIo(#[from] std::io::Error),
-    /// The single query exceeded its complete attempt deadline.
-    #[error("mlxfwmanager query exceeded its {0:?} deadline")]
-    QueryTimeout(Duration),
-    /// The tool failed, exceeded its output bound, or returned unusable XML.
-    #[error("invalid mlxfwmanager query result: {0}")]
-    InvalidReport(String),
-    /// The tool's XML output is not valid UTF-8.
-    #[error("mlxfwmanager query output is not UTF-8: {source}; stderr: {stderr}")]
-    ReportEncoding {
-        /// Invalid XML bytes retained with their decoding failure.
-        source: std::string::FromUtf8Error,
-        /// Tool diagnostics, limited to the first 4 KiB.
-        stderr: String,
-    },
     /// Returned device identity does not match the requested target.
     #[error("device {field} does not match: expected {expected:?}, observed {observed:?}")]
     IdentityMismatch {
-        /// Identity field that failed: PCI address, part number, or PSID.
+        /// Identity field that failed: PCI address, part number, PSID, base MAC, or base GUID.
         field: &'static str,
         /// Requested identity value.
         expected: String,
@@ -136,8 +110,14 @@ pub enum FirmwarePreflightError {
 /// and free of control characters. Unknown installed firmware is an error.
 ///
 /// Runs only `mlxfwmanager --dev <device> --query-format xml`, with a 30-second
-/// overall query deadline and no retries. Timeout kills and waits for the child;
-/// dropping this future requests child termination through `kill_on_drop`.
+/// overall query deadline and no retries. Linux and a sibling
+/// `mlx-firmware-supervisor` executable are required. Successful completion waits
+/// for the tool, all descendants, and both output streams within that deadline.
+/// Failure or timeout requests termination and allows up to five seconds for
+/// cleanup, then up to five more seconds for result delivery. Dropping this
+/// future requests termination without waiting for cleanup confirmation; the
+/// helper continues independently unless it is also terminated. Other platforms
+/// fail before spawning.
 /// Each output stream is limited to 1 MiB; unusable-query errors include at most
 /// the first 4 KiB of stderr. No download, configuration apply, lock/unlock,
 /// burn, reset, or binary-content validation is performed.
@@ -146,7 +126,33 @@ pub async fn inspect_prepared_firmware(
     desired: &FirmwareSpec,
     files: LocalFirmwareFiles<'_>,
 ) -> Result<FirmwarePreflightResult, FirmwarePreflightError> {
-    inspect_with_command(device, desired, files, query_command(device)).await
+    inspect_prepared_firmware_with_executor(
+        device,
+        desired,
+        files,
+        &FirmwareToolExecutor::default(),
+    )
+    .await
+}
+
+/// `inspect_prepared_firmware_with_executor` uses the caller's supervisor
+/// location, with the same read-only checks and limits as
+/// [`inspect_prepared_firmware`].
+pub async fn inspect_prepared_firmware_with_executor(
+    device: &str,
+    desired: &FirmwareSpec,
+    files: LocalFirmwareFiles<'_>,
+    executor: &FirmwareToolExecutor,
+) -> Result<FirmwarePreflightResult, FirmwarePreflightError> {
+    inspect_with_program(
+        device,
+        desired,
+        files,
+        Path::new("mlxfwmanager"),
+        QUERY_TIMEOUT,
+        executor,
+    )
+    .await
 }
 
 /// `validate_preflight_request` checks a PCI locator and literal target fields
@@ -166,7 +172,7 @@ pub fn validate_preflight_request(
         ("PSID", &desired.psid),
         ("firmware version", &desired.version),
     ] {
-        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        if !is_usable_literal(value) {
             return Err(FirmwarePreflightError::InvalidRequest(format!(
                 "{field} must be nonempty, unpadded, and free of control characters"
             )));
@@ -175,159 +181,96 @@ pub fn validate_preflight_request(
     Ok(())
 }
 
-async fn inspect_with_command(
+/// Literal firmware identifiers and versions must be present without padding
+/// or control characters; callers compare accepted values without normalization.
+pub(super) fn is_usable_literal(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value && !value.chars().any(char::is_control)
+}
+
+/// Check only the exact part number and PSID. Locator policy belongs to callers:
+/// preflight requires a PCI address, while the flasher also accepts MFT aliases.
+pub(super) fn check_hardware_identity(
+    device: &MlxDeviceInfo,
+    desired: &FirmwareSpec,
+) -> Result<(), FirmwarePreflightError> {
+    for (field, expected, observed) in [
+        (
+            "part number",
+            desired.part_number.as_str(),
+            device.part_number.as_deref(),
+        ),
+        ("PSID", desired.psid.as_str(), device.psid.as_deref()),
+    ] {
+        if observed != Some(expected) {
+            return Err(FirmwarePreflightError::IdentityMismatch {
+                field,
+                expected: expected.into(),
+                observed: observed.map(str::to_owned),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Compare the frozen card selector with the existing pre-mutation query.
+/// A replacement with the same part number and PSID must not inherit this work.
+pub(super) fn check_expected_device(
+    device: &MlxDeviceInfo,
+    expected: &MlxDeviceSelector,
+) -> Result<(), FirmwarePreflightError> {
+    if expected.matches(device) {
+        return Ok(());
+    }
+    let (field, expected, observed) = match expected {
+        MlxDeviceSelector::Mac(mac) => (
+            "base MAC",
+            mac.to_string(),
+            device.base_mac.map(|mac| mac.to_string()),
+        ),
+        MlxDeviceSelector::Guid(guid) => ("base GUID", guid.clone(), device.base_guid.clone()),
+    };
+    Err(FirmwarePreflightError::IdentityMismatch {
+        field,
+        expected,
+        observed,
+    })
+}
+
+async fn inspect_with_program(
     device: &str,
     desired: &FirmwareSpec,
     files: LocalFirmwareFiles<'_>,
-    command: Command,
+    program: &Path,
+    timeout: Duration,
+    executor: &FirmwareToolExecutor,
 ) -> Result<FirmwarePreflightResult, FirmwarePreflightError> {
     validate_preflight_request(device, desired)?;
 
     // Check the image and any supplied configuration before asking the hardware
     // anything. The caller keeps the checked files available through inspection;
     // a successful query must not hide a missing input.
-    files.check_readable().await?;
-    let report = query_device(command, QUERY_TIMEOUT).await?;
+    for path in std::iter::once(files.image).chain(files.device_config) {
+        check_readable_file(path).await?;
+    }
+    let report = discover_device_with_program(program, device, timeout, executor).await?;
     compare_device(report, device, desired)
 }
 
-impl LocalFirmwareFiles<'_> {
-    async fn check_readable(self) -> Result<(), FirmwarePreflightError> {
-        for path in std::iter::once(self.image).chain(self.device_config) {
-            let io_error = |source| FirmwarePreflightError::InputIo {
-                path: path.to_path_buf(),
-                source,
-            };
-            // Reject directories and special files before opening: a FIFO open
-            // could otherwise wait indefinitely. The staging owner keeps these
-            // paths unchanged for the duration of the call.
-            let metadata = tokio::fs::metadata(path).await.map_err(io_error)?;
-            if !metadata.is_file() || metadata.len() == 0 {
-                return Err(FirmwarePreflightError::InvalidInput(path.to_path_buf()));
-            }
-            tokio::fs::File::open(path).await.map_err(io_error)?;
-        }
-        Ok(())
-    }
-}
-
-fn query_command(device: &str) -> Command {
-    let mut command = Command::new("mlxfwmanager");
-    command.args(["--dev", device, "--query-format", "xml"]);
-    command
-}
-
-async fn query_device(
-    command: Command,
-    timeout: Duration,
-) -> Result<MlxDeviceInfo, FirmwarePreflightError> {
-    let deadline = Instant::now() + timeout;
-    let child = spawn_query(command)?;
-    parse_query_output(collect_query_output(child, deadline, timeout).await?)
-}
-
-fn spawn_query(mut command: Command) -> std::io::Result<Child> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-}
-
-async fn collect_query_output(
-    mut child: Child,
-    deadline: Instant,
-    timeout: Duration,
-) -> Result<Output, FirmwarePreflightError> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("mlxfwmanager stdout pipe is unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| std::io::Error::other("mlxfwmanager stderr pipe is unavailable"))?;
-    let result = tokio::time::timeout_at(deadline, async {
-        tokio::try_join!(
-            async { child.wait().await.map_err(FirmwarePreflightError::QueryIo) },
-            read_query_output(stdout),
-            read_query_output(stderr)
-        )
-    })
-    .await;
-
-    let (status, stdout, stderr) = match result {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            child.kill().await?;
-            return Err(error);
-        }
-        Err(_) => {
-            child.kill().await?;
-            return Err(FirmwarePreflightError::QueryTimeout(timeout));
-        }
-    };
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-fn parse_query_output(output: Output) -> Result<MlxDeviceInfo, FirmwarePreflightError> {
-    let Output {
-        status,
-        stdout: xml,
-        stderr: diagnostics,
-    } = output;
-    let diagnostics = if diagnostics.len() > MAX_QUERY_DIAGNOSTIC_BYTES {
-        format!(
-            "{} [truncated]",
-            String::from_utf8_lossy(&diagnostics[..MAX_QUERY_DIAGNOSTIC_BYTES])
-        )
-    } else {
-        String::from_utf8_lossy(&diagnostics).into_owned()
-    };
-    // MFT can return code 1 with usable XML, including devices in lockdown.
-    // Required facts below still have to be present and match the target. Keep
-    // stderr when that XML cannot be used, since it may explain the query failure.
-    if !matches!(status.code(), Some(0) | Some(1)) {
-        return Err(FirmwarePreflightError::InvalidReport(format!(
-            "query exited with {status}: {diagnostics}"
-        )));
-    }
-    let xml = String::from_utf8(xml).map_err(|source| FirmwarePreflightError::ReportEncoding {
+/// Checks that the path is a readable, nonempty regular file, not its digest.
+/// The caller keeps the staged path unchanged until the check returns.
+pub(super) async fn check_readable_file(path: &Path) -> Result<(), FirmwarePreflightError> {
+    let io_error = |source| FirmwarePreflightError::InputIo {
+        path: path.to_path_buf(),
         source,
-        stderr: diagnostics.clone(),
-    })?;
-    let devices = parse_mlxfwmanager_xml(&xml).map_err(|error| {
-        FirmwarePreflightError::InvalidReport(format!("{error}; stderr: {diagnostics}"))
-    })?;
-    let [device]: [MlxDeviceInfo; 1] =
-        devices.try_into().map_err(|devices: Vec<MlxDeviceInfo>| {
-            FirmwarePreflightError::InvalidReport(format!(
-                "expected one device, received {}; stderr: {diagnostics}",
-                devices.len()
-            ))
-        })?;
-    Ok(device)
-}
-
-async fn read_query_output(
-    reader: impl AsyncRead + Unpin,
-) -> Result<Vec<u8>, FirmwarePreflightError> {
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_QUERY_OUTPUT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .await?;
-    if bytes.len() as u64 > MAX_QUERY_OUTPUT_BYTES {
-        return Err(FirmwarePreflightError::InvalidReport(
-            "query output exceeded 1 MiB per stream".into(),
-        ));
+    };
+    // Reject directories and special files before opening: a FIFO open could
+    // otherwise wait indefinitely. The staging owner keeps the path unchanged.
+    let metadata = tokio::fs::metadata(path).await.map_err(io_error)?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(FirmwarePreflightError::InvalidInput(path.to_path_buf()));
     }
-    Ok(bytes)
+    tokio::fs::File::open(path).await.map_err(io_error)?;
+    Ok(())
 }
 
 fn compare_device(
@@ -347,30 +290,11 @@ fn compare_device(
             observed: Some(device.pci_name),
         });
     }
-    for (field, expected, observed) in [
-        (
-            "part number",
-            desired.part_number.as_str(),
-            device.part_number.as_deref(),
-        ),
-        ("PSID", desired.psid.as_str(), device.psid.as_deref()),
-    ] {
-        if observed != Some(expected) {
-            return Err(FirmwarePreflightError::IdentityMismatch {
-                field,
-                expected: expected.into(),
-                observed: observed.map(str::to_owned),
-            });
-        }
-    }
+    check_hardware_identity(&device, desired)?;
     let installed = device
         .fw_version_current
         .as_deref()
-        .filter(|version| {
-            !version.is_empty()
-                && version.trim() == *version
-                && !version.chars().any(char::is_control)
-        })
+        .filter(|version| is_usable_literal(version))
         .ok_or(FirmwarePreflightError::UnknownFirmwareVersion)?;
     let comparison = if installed == desired.version {
         FirmwareComparison::ExactMatch
@@ -381,33 +305,13 @@ fn compare_device(
 }
 
 fn normalize_pci_address(address: &str) -> Option<String> {
-    // Validate the entire locator before dropping a zero domain. Otherwise
-    // `0000:0001:ab:01.0` could be accepted as a second, valid-looking domain.
-    let (domain, address) = match address.len() {
-        7 => (None, address),
-        12 if address.is_ascii() && address.as_bytes()[4] == b':' => {
-            (Some(&address[..4]), &address[5..])
-        }
-        _ => return None,
-    };
-    let bytes = address.as_bytes();
-    if !address.is_ascii()
-        || bytes[2] != b':'
-        || bytes[5] != b'.'
-        || !bytes[..2]
-            .iter()
-            .chain(&bytes[3..5])
-            .all(u8::is_ascii_hexdigit)
-        || !matches!(bytes[6], b'0'..=b'7')
-        || u8::from_str_radix(&address[3..5], 16).ok()? > 31
-        || domain.is_some_and(|value| !value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    {
-        return None;
-    }
-    Some(match domain {
-        Some("0000") | None => address.to_ascii_lowercase(),
-        Some(domain) => format!("{domain}:{address}").to_ascii_lowercase(),
-    })
+    let address = crate::device::discovery::normalize_pci_address(address)?;
+    Some(
+        address
+            .strip_prefix("0000:")
+            .unwrap_or(&address)
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -457,8 +361,52 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    const DEVICE_XML: &str = r#"<Devices><Device pciName="ab:01.0" type="BlueField3" partNumber="part" psid="PSID"><Versions><FW current="32.43.1014"/></Versions></Device></Devices>"#;
+    /// A GUID can identify a card without a MAC, but mismatched or missing
+    /// selector fields must preserve exact diagnostic evidence for the caller.
+    #[test]
+    fn expected_device_preserves_guid_and_missing_mac_evidence() {
+        use MlxDeviceSelector::{Guid, Mac};
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::scenarios;
+
+        scenarios!(
+            run = |(selector, device): (MlxDeviceSelector, MlxDeviceInfo)| {
+                // Dropping the reported GUID, changing the diagnostic field,
+                // or accepting a mismatch must fail these exact comparisons.
+                check_expected_device(&device, &selector).map_err(|error| match error {
+                    FirmwarePreflightError::IdentityMismatch { field, expected, observed } => {
+                        (field, expected, observed)
+                    }
+                    other => panic!("unexpected preflight error: {other}"),
+                })
+            };
+            "an exact GUID does not require a MAC" {
+                (
+                    Guid("opaque-Base_Guid".into()),
+                    MlxDeviceInfo {
+                        base_guid: Some("opaque-Base_Guid".into()),
+                        base_mac: None,
+                        ..device()
+                    }
+                ) => Yields(()),
+            }
+            "a GUID mismatch preserves the reported spelling" {
+                (
+                    Guid("opaque-Base_Guid".into()),
+                    MlxDeviceInfo {
+                        base_guid: Some("opaque-base_guid".into()),
+                        ..device()
+                    }
+                ) => FailsWith(("base GUID", "opaque-Base_Guid".into(), Some("opaque-base_guid".into()))),
+            }
+            "an absent MAC remains absent instead of falling back to the GUID" {
+                (
+                    Mac("02:00:00:00:00:01".parse().unwrap()),
+                    MlxDeviceInfo { base_mac: None, ..device() }
+                ) => FailsWith(("base MAC", "02:00:00:00:00:01".into(), None)),
+            }
+        );
+    }
 
     /// Identity and known firmware are prerequisites; both upgrades and downgrades
     /// require a change.
@@ -591,126 +539,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn query_command_only_requests_the_selected_device() {
-        let command = query_command("ab:01.0");
-        assert_eq!(command.as_std().get_program(), "mlxfwmanager");
-        assert_eq!(
-            command.as_std().get_args().collect::<Vec<_>>(),
-            ["--dev", "ab:01.0", "--query-format", "xml"]
-        );
-    }
-
-    /// Exit status, cardinality and stderr truncation apply to the collected `Output`.
-    #[cfg(unix)]
-    #[test]
-    fn query_results_preserve_exit_policy_and_bounded_diagnostics() {
-        use std::os::unix::process::ExitStatusExt;
-        use std::process::ExitStatus;
-
-        for (name, raw_status, xml, stderr, expected_error) in [
-            ("successful query", 0, DEVICE_XML.as_bytes(), String::new(), None),
-            ("usable code one", 1 << 8, DEVICE_XML.as_bytes(), String::new(), None),
-            (
-                "two devices",
-                0,
-                br#"<Devices><Device pciName="ab:01.0" type="BlueField3"/><Device pciName="ab:02.0" type="BlueField3"/></Devices>"#.as_slice(),
-                String::new(),
-                Some("expected one device, received 2"),
-            ),
-            (
-                "failed command despite usable XML",
-                2 << 8,
-                DEVICE_XML.as_bytes(),
-                "query unavailable".into(),
-                Some("query exited with"),
-            ),
-            (
-                "code one without XML",
-                1 << 8,
-                b"".as_slice(),
-                "permission denied for selected device".into(),
-                Some("permission denied for selected device"),
-            ),
-            (
-                "truncated stderr",
-                1 << 8,
-                b"".as_slice(),
-                format!("{}hidden-tail", "0".repeat(5000)),
-                Some("[truncated]"),
-            ),
-            (
-                "signal despite usable XML",
-                9,
-                DEVICE_XML.as_bytes(),
-                String::new(),
-                Some("query exited with"),
-            ),
-            (
-                "invalid UTF-8 retains diagnostics",
-                0,
-                b"\xff".as_slice(),
-                "invalid output from device".into(),
-                Some("query output is not UTF-8"),
-            ),
-        ] {
-            let result = parse_query_output(Output {
-                status: ExitStatus::from_raw(raw_status),
-                stdout: xml.to_vec(),
-                stderr: stderr.as_bytes().to_vec(),
-            });
-            match expected_error {
-                None => {
-                    let report = result.unwrap_or_else(|error| panic!("{name}: {error}"));
-                    assert_eq!(report.pci_name, "ab:01.0", "{name}");
-                    assert_eq!(
-                        report.fw_version_current.as_deref(),
-                        Some("32.43.1014"),
-                        "{name}"
-                    );
-                }
-                Some(expected) => {
-                    let message = result.unwrap_err().to_string();
-                    assert!(message.contains(expected), "{name}: {message}");
-                    if stderr.len() > 4096 {
-                        assert!(message.ends_with(&format!("{} [truncated]", "0".repeat(4096))), "{name}: {message}");
-                        assert!(!message.contains(&"0".repeat(4097)), "{name}: {message}");
-                        assert!(!message.contains("hidden-tail"), "{name}: {message}");
-                    } else {
-                        assert!(message.ends_with(&stderr), "{name}: {message}");
-                    }
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn output_reader_enforces_the_exact_byte_limit() {
-        for (name, size, accepted) in [
-            ("at the limit", MAX_QUERY_OUTPUT_BYTES as usize, true),
-            ("one byte over", MAX_QUERY_OUTPUT_BYTES as usize + 1, false),
-        ] {
-            let bytes = vec![b'x'; size];
-            let result = read_query_output(bytes.as_slice()).await;
-            if accepted {
-                assert_eq!(result.unwrap(), bytes, "{name}");
-            } else {
-                assert!(
-                    matches!(result, Err(FirmwarePreflightError::InvalidReport(_))),
-                    "{name}: {result:?}"
-                );
-            }
-        }
-    }
-
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     mod process {
+        use std::os::unix::fs::PermissionsExt;
+
         use tempfile::TempDir;
 
         use super::*;
 
         struct PreparedFixture {
-            directory: TempDir,
+            _directory: TempDir,
             image: PathBuf,
             config: PathBuf,
         }
@@ -723,7 +561,7 @@ mod tests {
                 std::fs::write(&image, b"checked image").unwrap();
                 std::fs::write(&config, b"checked config").unwrap();
                 Self {
-                    directory,
+                    _directory: directory,
                     image,
                     config,
                 }
@@ -737,61 +575,41 @@ mod tests {
             }
         }
 
-        /// Exercise file validation, process collection, parsing and comparison
-        /// together with a system executable reading an ordinary data fixture.
+        /// Rejected prepared inputs never query hardware. The same query fixture
+        /// must return live facts and a comparison without changing valid inputs.
         #[tokio::test]
-        async fn inspection_uses_checked_files_and_query_output() {
-            let fixture = PreparedFixture::new();
-            let report_path = fixture.directory.path().join("report.xml");
-            let observed_version = "32.42.1000";
-            std::fs::write(
-                &report_path,
-                DEVICE_XML.replace("32.43.1014", observed_version),
+        async fn prepared_inputs_gate_the_query_and_preserve_successful_comparison() {
+            let directory = tempfile::tempdir().unwrap();
+            let program = directory.path().join("mlxfwmanager");
+            let invocations = directory.path().join("invocations");
+            // Isolate the writable executable descriptor from concurrent test
+            // spawns, which could otherwise inherit it and cause ETXTBSY.
+            let status = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::process::Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        "umask 077; printf '%s' \"$2\" > \"$1\"",
+                        "fixture-writer",
+                    ])
+                    .arg(&program)
+                    .arg(
+                        r#"#!/bin/sh
+set -eu
+cd -- "${0%/*}"
+printf '%s\n' "$@" >> invocations
+printf '%s' '<Devices><Device pciName="ab:01.0" type="BlueField3" partNumber="part" psid="PSID"><Versions><FW current="32.42.1000"/></Versions></Device></Devices>'
+"#,
+                    )
+                    .kill_on_drop(true)
+                    .status(),
             )
+            .await
+            .expect("fixture writer finishes within its watchdog")
             .unwrap();
-            let mut command = Command::new("cat");
-            command.arg(&report_path);
-            let report = inspect_with_command("ab:01.0", &desired(), fixture.files(), command)
-                .await
-                .unwrap();
-            assert_eq!(report.comparison, FirmwareComparison::ChangeRequired);
-            assert_eq!(report.device.pci_name, "ab:01.0");
-            assert_eq!(
-                report.device.fw_version_current.as_deref(),
-                Some(observed_version)
-            );
-            assert_eq!(std::fs::read(&fixture.image).unwrap(), b"checked image");
-            assert_eq!(std::fs::read(&fixture.config).unwrap(), b"checked config");
-        }
+            assert!(status.success());
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        /// A failing installed command supplies real stderr and a nonzero status
-        /// so collection cannot silently discard either before parsing.
-        #[tokio::test]
-        async fn query_failure_preserves_status_and_diagnostics() {
-            let fixture = PreparedFixture::new();
-            let missing_path = fixture.directory.path().join("missing-report.xml");
-            let mut command = Command::new("cat");
-            command.arg(&missing_path);
-            let deadline = Instant::now() + QUERY_TIMEOUT;
-            let output =
-                collect_query_output(spawn_query(command).unwrap(), deadline, QUERY_TIMEOUT)
-                    .await
-                    .unwrap();
-
-            assert_eq!(output.status.code(), Some(1));
-            let diagnostics = String::from_utf8(output.stderr.clone()).unwrap();
-            assert!(
-                diagnostics.contains(missing_path.to_str().unwrap()),
-                "{diagnostics}"
-            );
-            let error = parse_query_output(output).unwrap_err();
-            assert!(error.to_string().contains(diagnostics.trim()), "{error}");
-        }
-
-        /// `touch` records execution without a generated application. Valid inputs
-        /// establish that the marker is created; invalid inputs must leave it absent.
-        #[tokio::test]
-        async fn invalid_prepared_inputs_do_not_run_the_tool() {
             enum InputFault {
                 None,
                 MissingConfiguration,
@@ -800,14 +618,19 @@ mod tests {
                 InvalidTarget,
             }
             for (name, fault) in [
-                ("valid inputs reach the command", InputFault::None),
+                // A supplied configuration is checked as well as the image.
                 ("missing configuration", InputFault::MissingConfiguration),
+                // A present image must contain bytes and be a regular file.
                 ("empty image", InputFault::EmptyImage),
                 ("nonregular image", InputFault::NonregularImage),
+                // Request validation takes precedence over filesystem errors.
                 (
                     "invalid target before missing image",
                     InputFault::InvalidTarget,
                 ),
+                // This positive control proves every absence check uses a
+                // working invocation record and exercises the complete query.
+                ("valid inputs reach the command", InputFault::None),
             ] {
                 let fixture = PreparedFixture::new();
                 let mut desired = desired();
@@ -826,17 +649,38 @@ mod tests {
                         std::fs::remove_file(&fixture.image).unwrap();
                     }
                 }
-                let marker = fixture.directory.path().join("invoked");
-                let mut command = Command::new("touch");
-                command.arg(&marker);
-                let result =
-                    inspect_with_command("ab:01.0", &desired, fixture.files(), command).await;
-                assert_eq!(marker.exists(), matches!(fault, InputFault::None), "{name}");
+                let result = inspect_with_program(
+                    "ab:01.0",
+                    &desired,
+                    fixture.files(),
+                    &program,
+                    QUERY_TIMEOUT,
+                    &crate::runner::test_firmware_executor(),
+                )
+                .await;
+                assert_eq!(
+                    invocations.exists(),
+                    matches!(fault, InputFault::None),
+                    "{name}"
+                );
                 match fault {
-                    InputFault::None => assert!(
-                        matches!(result, Err(FirmwarePreflightError::InvalidReport(_))),
-                        "{name}: {result:?}"
-                    ),
+                    InputFault::None => {
+                        let report = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+                        assert_eq!(report.device.pci_name, "ab:01.0");
+                        assert_eq!(report.device.part_number.as_deref(), Some("part"));
+                        assert_eq!(report.device.psid.as_deref(), Some("PSID"));
+                        assert_eq!(
+                            report.device.fw_version_current.as_deref(),
+                            Some("32.42.1000")
+                        );
+                        assert_eq!(report.comparison, FirmwareComparison::ChangeRequired);
+                        assert_eq!(
+                            std::fs::read_to_string(&invocations).unwrap(),
+                            "--dev\nab:01.0\n--query-format\nxml\n"
+                        );
+                        assert_eq!(std::fs::read(&fixture.image).unwrap(), b"checked image");
+                        assert_eq!(std::fs::read(&fixture.config).unwrap(), b"checked config");
+                    }
                     InputFault::MissingConfiguration => assert!(
                         matches!(result, Err(FirmwarePreflightError::InputIo { .. })),
                         "{name}: {result:?}"
@@ -851,110 +695,6 @@ mod tests {
                     ),
                 }
             }
-        }
-
-        /// `dd` continuously fills either pipe. An overflow must return an error
-        /// and leave no child process to reap.
-        #[cfg(target_os = "linux")]
-        #[tokio::test]
-        async fn excessive_output_stops_the_child_on_either_stream() {
-            use std::os::fd::AsFd;
-
-            for stream in ["/dev/stdout", "/dev/stderr"] {
-                let mut command = Command::new("dd");
-                command
-                    .args(["if=/dev/zero", "bs=65536", "status=none"])
-                    .arg(format!("of={stream}"));
-                let deadline = Instant::now() + QUERY_TIMEOUT;
-                let child = spawn_query(command).unwrap();
-                let pid = child.id().unwrap();
-                assert!(
-                    Path::new("/proc").join(pid.to_string()).exists(),
-                    "{stream}"
-                );
-                // Keep a reader open so dropping the collector's pipe cannot
-                // terminate `dd` through SIGPIPE instead of the explicit kill.
-                let _reader = if stream == "/dev/stdout" {
-                    child.stdout.as_ref().unwrap().as_fd().try_clone_to_owned()
-                } else {
-                    child.stderr.as_ref().unwrap().as_fd().try_clone_to_owned()
-                }
-                .unwrap();
-                let error = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    collect_query_output(child, deadline, QUERY_TIMEOUT),
-                )
-                .await
-                .expect("overflowing query must terminate promptly")
-                .unwrap_err();
-                assert!(
-                    matches!(&error, FirmwarePreflightError::InvalidReport(message)
-                        if message.contains("query output exceeded 1 MiB")),
-                    "{stream}: {error}"
-                );
-                assert!(
-                    !Path::new("/proc").join(pid.to_string()).exists(),
-                    "{stream}"
-                );
-            }
-        }
-
-        /// Timeout waits for termination; cancellation requests it and Tokio
-        /// reaps asynchronously.
-        #[cfg(target_os = "linux")]
-        #[tokio::test]
-        async fn query_timeout_and_cancellation_stop_the_child() {
-            let timeout = Duration::from_millis(100);
-            let mut command = Command::new("sleep");
-            command.arg("30");
-            let error =
-                tokio::time::timeout(Duration::from_secs(5), query_device(command, timeout))
-                    .await
-                    .expect("query must enforce its timeout")
-                    .unwrap_err();
-            assert!(
-                matches!(error, FirmwarePreflightError::QueryTimeout(duration) if duration == timeout)
-            );
-
-            let mut command = Command::new("sleep");
-            command.arg("30");
-            let deadline = Instant::now() + timeout;
-            let child = spawn_query(command).unwrap();
-            let pid = child.id().unwrap();
-            assert!(Path::new("/proc").join(pid.to_string()).exists());
-            let error = tokio::time::timeout(
-                Duration::from_secs(5),
-                collect_query_output(child, deadline, timeout),
-            )
-            .await
-            .expect("timed-out query must terminate promptly")
-            .unwrap_err();
-            assert!(
-                matches!(error, FirmwarePreflightError::QueryTimeout(duration) if duration == timeout)
-            );
-            assert!(!Path::new("/proc").join(pid.to_string()).exists());
-
-            let mut command = Command::new("sleep");
-            command.arg("30");
-            let child = spawn_query(command).unwrap();
-            let pid_path = Path::new("/proc").join(child.id().unwrap().to_string());
-            assert!(pid_path.exists());
-            // `biased` polls collection before the ready cancellation branch,
-            // so this drops an active collector with its pipes already taken.
-            tokio::select! {
-                biased;
-                result = collect_query_output(child, Instant::now() + QUERY_TIMEOUT, QUERY_TIMEOUT) => {
-                    panic!("sleep exited before cancellation: {result:?}");
-                }
-                () = std::future::ready(()) => {}
-            }
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while pid_path.exists() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("cancelled query process must exit");
         }
     }
 }

@@ -110,6 +110,8 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 		id               uuid.UUID
 		includeRelations bool
 		includeDeleted   bool
+		forUpdate        bool
+		withTx           bool
 	}
 
 	// Define tests
@@ -122,6 +124,34 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 		wantErrVal         error
 		verifyChildSpanner bool
 	}{
+		{
+			name: "locking a Site requires a transaction",
+			fields: fields{
+				dbSession: dbSession,
+			},
+			args: args{
+				ctx:       ctx,
+				id:        st1.ID,
+				forUpdate: true,
+			},
+			want:       st1,
+			wantErr:    true,
+			wantErrVal: db.ErrInvalidValue,
+		},
+		{
+			name: "lock a Site by ID with its Infrastructure Provider relation",
+			fields: fields{
+				dbSession: dbSession,
+			},
+			args: args{
+				ctx:              ctx,
+				id:               st1.ID,
+				includeRelations: true,
+				forUpdate:        true,
+				withTx:           true,
+			},
+			want: st1,
+		},
 		{
 			name: "get a Site by ID",
 			fields: fields{
@@ -190,17 +220,30 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 				tt.want.InfrastructureProvider = nil
 			}
 
-			got, err := ssd.GetByID(tt.args.ctx, nil, tt.args.id, relations, tt.args.includeDeleted)
+			var tx *db.Tx
+			if tt.args.withTx {
+				tx, err = db.BeginTx(tt.args.ctx, dbSession, nil)
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer func() { assert.NoError(t, tx.Rollback()) }()
+			}
+			got, err := ssd.GetByID(tt.args.ctx, tx, tt.args.id, relations, tt.args.includeDeleted, tt.args.forUpdate)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SiteSQLDAO.GetByID()\nerror = %v,\nwantErr = %v", err, tt.wantErr)
 				return
 			}
 			if tt.wantErr {
-				assert.Equal(t, tt.wantErrVal, err)
+				assert.ErrorIs(t, err, tt.wantErrVal)
 				return
 			}
 			if got.ID != tt.want.ID {
 				t.Errorf("SiteSQLDAO.GetByID()\ngotID = %v,\nwantID = %v", got.ID, tt.want.ID)
+			}
+			if tt.args.includeRelations {
+				if assert.NotNil(t, got.InfrastructureProvider) {
+					assert.Equal(t, ip.ID, got.InfrastructureProvider.ID)
+				}
 			}
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

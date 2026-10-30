@@ -26,7 +26,7 @@ use crate::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
     ScaleUpFabricManagerJobStatus, ScaleUpFabricServiceStatuses, ScaleUpFabricStatus,
     SwitchCertificateEndpoint, SwitchEndpoint, SwitchFactoryResetJobStatus,
-    SwitchFactoryResetState, SwitchPasswordRotationState,
+    SwitchFactoryResetState, SwitchMtlsDisableJobStatus, SwitchPasswordRotationState,
 };
 use crate::power_shelf_manager::{Backend as PowerShelfBackend, PowerShelfManager};
 use crate::rms::{RmsSwitchSystemImageStatusApi, validate_rms_backend_rack_profiles};
@@ -490,6 +490,40 @@ impl ComponentManager {
     ) -> Result<ConfigureSwitchCertificateJobStatus, ComponentManagerError> {
         self.nv_switch
             .get_configure_switch_certificate_job_status(job_id)
+            .await
+    }
+
+    /// Delegates asynchronous mTLS removal to
+    /// [`NvSwitchManager::batch_disable_switch_mtls`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged. Only
+    /// [`ComponentManagerError::Unsupported`] and
+    /// [`ComponentManagerError::RejectedBeforeDispatch`] establish that no work was
+    /// dispatched.
+    pub async fn batch_disable_switch_mtls(
+        &self,
+        endpoints: &[SwitchEndpoint],
+        services: &[i32],
+    ) -> Result<String, ComponentManagerError> {
+        self.nv_switch
+            .batch_disable_switch_mtls(endpoints, services)
+            .await
+    }
+
+    /// Delegates mTLS-disable job status reads to
+    /// [`NvSwitchManager::get_disable_switch_mtls_job_status`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged.
+    pub async fn get_disable_switch_mtls_job_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+        self.nv_switch
+            .get_disable_switch_mtls_job_status(job_id)
             .await
     }
 
@@ -1206,6 +1240,7 @@ mod tests {
         // Automatic callers defer non-Ready racks; operator callers may
         // explicitly opt into recovering a rack from Error.
         let error_state = RackState::Error {
+            certificate_failure: None,
             cause: "test".into(),
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         };

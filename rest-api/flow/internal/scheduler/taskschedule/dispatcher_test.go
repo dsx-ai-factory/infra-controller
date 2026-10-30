@@ -1331,3 +1331,8 @@ func TestFireNow(t *testing.T) {
 		require.ErrorContains(t, err, "db error")
 	})
 }
+
+// ListTaskContextForRack fails unexpected context reads in scheduling tests.
+func (m *mockTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	panic("unexpected task context read")
+}

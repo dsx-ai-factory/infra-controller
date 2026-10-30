@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -202,6 +203,74 @@ func (cd *Component) Patch(ctx context.Context, idb bun.IDB) error {
 	return err
 }
 
+// ComponentPatch contains values explicitly supplied by a component patch.
+// Nil fields are omitted from the UPDATE.
+type ComponentPatch struct {
+	ID              uuid.UUID
+	FirmwareVersion *string
+	Description     *map[string]any
+	RackID          *uuid.UUID
+	SlotID          *int
+	TrayIndex       *int
+	HostID          *int
+}
+
+func (patch *ComponentPatch) apply(component *Component) []string {
+	columns := make([]string, 0, 6)
+	if patch.FirmwareVersion != nil {
+		component.FirmwareVersion = *patch.FirmwareVersion
+		columns = append(columns, "firmware_version")
+	}
+	if patch.Description != nil {
+		component.Description = *patch.Description
+		columns = append(columns, "description")
+	}
+	if patch.RackID != nil {
+		component.RackID = *patch.RackID
+		columns = append(columns, "rack_id")
+	}
+	if patch.SlotID != nil {
+		component.SlotID = *patch.SlotID
+		columns = append(columns, "slot_id")
+	}
+	if patch.TrayIndex != nil {
+		component.TrayIndex = *patch.TrayIndex
+		columns = append(columns, "tray_index")
+	}
+	if patch.HostID != nil {
+		component.HostID = *patch.HostID
+		columns = append(columns, "host_id")
+	}
+	return columns
+}
+
+// Patch updates only explicitly supplied component fields. Runtime state
+// owned by reconciliation loops cannot be selected through ComponentPatch.
+func (patch *ComponentPatch) Patch(ctx context.Context, idb bun.IDB) error {
+	component := &Component{ID: patch.ID}
+	columns := patch.apply(component)
+	if len(columns) == 0 {
+		return nil
+	}
+
+	result, err := idb.NewUpdate().
+		Model(component).
+		Column(columns...).
+		Where("id = ?", patch.ID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("patch component %s affected %d rows", patch.ID, rowsAffected)
+	}
+	return nil
+}
+
 // GetIncludingDeleted retrieves a component by ID regardless of soft-delete status.
 func (cd *Component) GetIncludingDeleted(ctx context.Context, idb bun.IDB) (*Component, error) {
 	var comp Component
@@ -234,14 +303,25 @@ func (cd *Component) ForceDelete(ctx context.Context, idb bun.IDB) error {
 // the patched component. If there is no change on patchable fields, it returns
 // nil.
 func (cd *Component) BuildPatch(cur *Component) *Component {
+	patch := cd.BuildColumnPatch(cur)
+	if patch == nil {
+		return nil
+	}
+
+	patchedComp := *cur
+	patch.apply(&patchedComp)
+	return &patchedComp
+}
+
+// BuildColumnPatch returns only patchable component fields whose supplied
+// values differ from the current row. The result is safe to pass to Patch
+// without rewriting state owned by reconciliation loops.
+func (cd *Component) BuildColumnPatch(cur *Component) *ComponentPatch {
 	if cd == nil || cur == nil {
 		return nil
 	}
 
-	// Make a copy fo the current component which serves as the base for the
-	// patched component.
-	patchedComp := *cur
-	patched := false
+	patch := &ComponentPatch{ID: cur.ID}
 
 	// Go through the patchable fields which include:
 	// Description
@@ -251,42 +331,38 @@ func (cd *Component) BuildPatch(cur *Component) *Component {
 	// TrayIndex
 	// HostID
 
-	if len(cd.FirmwareVersion) > 0 &&
-		patchedComp.FirmwareVersion != cd.FirmwareVersion {
-		patchedComp.FirmwareVersion = cd.FirmwareVersion
-		patched = true
+	if len(cd.FirmwareVersion) > 0 && cur.FirmwareVersion != cd.FirmwareVersion {
+		patch.FirmwareVersion = &cd.FirmwareVersion
 	}
 
-	if desc := utils.CompareAndCopyMaps(cd.Description, cur.Description); desc != nil {
-		patchedComp.Description = desc
-		patched = true
+	desc := utils.CompareAndCopyMaps(cd.Description, cur.Description)
+	if desc != nil {
+		patch.Description = &desc
 	}
 
 	if cd.RackID != uuid.Nil && cd.RackID != cur.RackID {
-		patchedComp.RackID = cd.RackID
-		patched = true
+		patch.RackID = &cd.RackID
 	}
 
 	if cd.SlotID >= 0 && cd.SlotID != cur.SlotID {
-		patchedComp.SlotID = cd.SlotID
-		patched = true
+		patch.SlotID = &cd.SlotID
 	}
 
 	if cd.TrayIndex >= 0 && cd.TrayIndex != cur.TrayIndex {
-		patchedComp.TrayIndex = cd.TrayIndex
-		patched = true
+		patch.TrayIndex = &cd.TrayIndex
 	}
 
 	if cd.HostID >= 0 && cd.HostID != cur.HostID {
-		patchedComp.HostID = cd.HostID
-		patched = true
+		patch.HostID = &cd.HostID
 	}
 
-	if !patched {
+	if patch.FirmwareVersion == nil && patch.Description == nil &&
+		patch.RackID == nil && patch.SlotID == nil &&
+		patch.TrayIndex == nil && patch.HostID == nil {
 		return nil
 	}
 
-	return &patchedComp
+	return patch
 }
 
 // SerialInfo returns the serial number information of the component.

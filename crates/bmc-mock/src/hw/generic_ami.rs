@@ -105,8 +105,13 @@ impl GenericAmi<'_> {
                 processors: None,
                 memory: None,
                 base_bios: Some(
-                    redfish::bios::builder(&redfish::bios::resource(system_id))
-                        .with_attributes(json!({"EndlessBoot":""})),
+                    redfish::bios::builder(&redfish::bios::resource(system_id)).with_attributes(
+                        json!({
+                            "EndlessBoot": "",
+                            "KCSACP": "Allow All",
+                            "USB000": "Enabled",
+                        }),
+                    ),
                 ),
                 serial_console: None,
                 secure_boot_available: false,

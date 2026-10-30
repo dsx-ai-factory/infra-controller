@@ -89,7 +89,6 @@ impl Harness {
             request_id: Uuid::new_v4(),
             binding_id: binding.binding_id,
             pool: RemotePoolIdentity {
-                site_id: Uuid::new_v4(),
                 authority_id: binding.authority_id.clone(),
                 pool_id: pool().pool_id,
                 logical_pool: binding.pool_name,
@@ -122,7 +121,6 @@ impl Harness {
         client
             .define(v1::DefineRequest {
                 pool: Some(v1::PoolBinding {
-                    site_id: request.pool.site_id.to_string(),
                     authority_id: request.pool.authority_id.clone(),
                     pool_id: request.pool.pool_id.clone(),
                     binding_id: request.binding_id.to_string(),
@@ -330,10 +328,22 @@ async fn lost_reply_and_restart_recover_one_assignment(database: PgPool) -> Test
             mode: ProviderRouteTargetMode::Replace,
             imports: Some(vec![]),
             exports: Some(vec![
-                RouteTargetConfig { asn: 64512, vni: 1 },
-                RouteTargetConfig { asn: 64512, vni: 1 },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(1),
+                    vni_self: false,
+                },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(1),
+                    vni_self: false,
+                },
             ]),
-            peer_identity: vec![RouteTargetConfig { asn: 64512, vni: 1 }],
+            peer_identity: vec![RouteTargetConfig {
+                asn: 64512,
+                vni: Some(1),
+                vni_self: false,
+            }],
         }),
     );
     assert_eq!(harness.fault.allocation_calls.load(Ordering::SeqCst), 1);
@@ -361,7 +371,7 @@ async fn lost_release_reply_is_recovered_without_releasing_a_reused_value(
 ) -> TestResult {
     let mut harness = Harness::new(database, provider(), Fault::ReleaseReplyUnavailableOnce).await;
     let deadline: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() + interval '5 seconds'")
+        sqlx::query_scalar("SELECT clock_timestamp() + interval '5 minutes'")
             .fetch_one(&harness.database)
             .await?;
     harness.authority = CompletionAuthority::Foreground {
@@ -386,14 +396,6 @@ async fn lost_release_reply_is_recovered_without_releasing_a_reused_value(
     };
     assert_eq!(request.selection, harness.request.selection);
     harness.attach(&allocated).await;
-    sqlx::query(
-        "SELECT pg_sleep(GREATEST(
-            EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp())), 0
-        )::double precision)",
-    )
-    .bind(deadline)
-    .execute(&harness.database)
-    .await?;
     let recover_calls = harness.fault.recover_calls.load(Ordering::SeqCst);
     assert!(matches!(
         harness
@@ -1323,7 +1325,12 @@ async fn recovery_continues_after_a_record_uses_its_entire_budget(database: PgPo
     let shutdown = CancellationToken::new();
     remote.start(&mut tasks, shutdown.clone())?;
     bounded(gate.entered.notified()).await;
-    tokio::time::timeout(super::RECONCILE_TIMEOUT + Duration::from_secs(10), async {
+    // Advance past the coordinator's deadline while the longer provider
+    // deadline remains pending. Resume real time for the remaining database work.
+    tokio::time::pause();
+    tokio::time::advance(super::RECONCILE_TIMEOUT + Duration::from_millis(1)).await;
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(10), async {
         while harness.saved().await.state != AllocationState::Released {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -1875,7 +1882,7 @@ async fn foreground_expiry_cleans_up_after_abandonment_cannot_be_saved(
     )
     .await;
     let deadline: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() + interval '10 seconds'")
+        sqlx::query_scalar("SELECT clock_timestamp() + interval '2 seconds'")
             .fetch_one(&harness.database)
             .await?;
     harness.authority = CompletionAuthority::Foreground {
@@ -1919,6 +1926,9 @@ async fn foreground_expiry_cleans_up_after_abandonment_cannot_be_saved(
             &harness.database, blocker_pid, "UPDATE resource_pool_allocations",
         )) => {}
     }
+    tokio::time::pause();
+    tokio::time::advance(super::CANCELLATION_TIMEOUT + Duration::from_millis(1)).await;
+    tokio::time::resume();
     assert!(matches!(
         tokio::time::timeout(
             super::CANCELLATION_TIMEOUT + Duration::from_secs(3),
@@ -1988,7 +1998,7 @@ async fn foreground_expiry_while_waiting_for_a_reply_preserves_the_result_for_cl
     )
     .await;
     let deadline: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() + interval '5 seconds'")
+        sqlx::query_scalar("SELECT clock_timestamp() + interval '2 seconds'")
             .fetch_one(&harness.database)
             .await?;
     harness.authority = CompletionAuthority::Foreground {
@@ -2185,16 +2195,20 @@ async fn foreground_budget_stops_waiting_and_records_cleanup(database: PgPool) -
         harness.request.pool.authority_id.clone(),
         slow_client,
     );
-    let result = tokio::time::timeout(
-        super::FOREGROUND_TIMEOUT + Duration::from_secs(5),
-        remote.allocate(
-            &harness.request,
-            &harness.authority,
-            &harness.eligibility,
-            &harness.cancel,
-        ),
-    )
-    .await?;
+    let mut pending = Box::pin(remote.allocate(
+        &harness.request,
+        &harness.authority,
+        &harness.eligibility,
+        &harness.cancel,
+    ));
+    tokio::select! {
+        result = &mut pending => panic!("allocation did not reach the provider gate: {result:?}"),
+        () = bounded(gate.entered.notified()) => {}
+    }
+    tokio::time::pause();
+    tokio::time::advance(super::FOREGROUND_TIMEOUT + Duration::from_millis(1)).await;
+    tokio::time::resume();
+    let result = bounded(pending).await;
     assert!(matches!(result, Err(RemoteResourcePoolError::Incomplete)));
     assert_eq!(
         harness.saved().await.state,

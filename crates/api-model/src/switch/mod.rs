@@ -309,6 +309,29 @@ pub enum InitializingState {
     WaitForOsMachineInterface,
 }
 
+/// Sub-states of `ConfiguringState::DisableMtls`.
+///
+/// `Start` submits an RMS job that resets existing mTLS bindings over the
+/// switch's SSH workflow, which does not require a working NVUE endpoint.
+/// `WaitForComplete` polls the returned job id until the operation finishes.
+/// Only after it completes does initial ingestion install current certificates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisableMtlsState {
+    Start,
+    WaitForComplete { job_id: String },
+}
+
+impl std::fmt::Display for DisableMtlsState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DisableMtlsState::Start => write!(f, "Start"),
+            DisableMtlsState::WaitForComplete { job_id } => {
+                write!(f, "WaitForComplete({job_id})")
+            }
+        }
+    }
+}
+
 /// Sub-states of `ConfiguringState::ConfigureCertificate`.
 ///
 /// `Start` submits certificate configuration via the component manager.
@@ -333,6 +356,12 @@ impl std::fmt::Display for ConfigureCertificateState {
 /// Sub-state for SwitchControllerState::Configuring
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfiguringState {
+    /// Initial ingestion only: reset stale mTLS bindings before installing
+    /// certificates. Variants are additive, so states persisted before this
+    /// variant existed still deserialize.
+    DisableMtls {
+        disable_mtls: DisableMtlsState,
+    },
     ConfigureCertificate {
         configure_certificate: ConfigureCertificateState,
     },
@@ -1081,6 +1110,26 @@ mod tests {
         let state = SwitchControllerState::Ready;
         let serialized = serde_json::to_string(&state).unwrap();
         assert_eq!(serialized, r#"{"state":"ready"}"#);
+        assert_eq!(
+            serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
+            state
+        );
+    }
+
+    #[test]
+    fn disable_mtls_state_persists_job_id() {
+        let state = SwitchControllerState::Configuring {
+            config_state: ConfiguringState::DisableMtls {
+                disable_mtls: DisableMtlsState::WaitForComplete {
+                    job_id: "job-1".to_string(),
+                },
+            },
+        };
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"state":"configuring","config_state":{"DisableMtls":{"disable_mtls":{"WaitForComplete":{"job_id":"job-1"}}}}}"#
+        );
         assert_eq!(
             serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
             state

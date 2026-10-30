@@ -341,7 +341,6 @@ mod tests {
         pool: Option<String>,
         requested_vni: Option<String>,
         error: Option<String>,
-        counter_delta: f64,
     }
 
     #[test]
@@ -371,7 +370,6 @@ mod tests {
                         pool: Some(DPA_VNI.to_string()),
                         requested_vni: None,
                         error: None,
-                        counter_delta: 1.0,
                     },
                 },
                 Check {
@@ -400,7 +398,6 @@ mod tests {
                         error: Some(
                             "resource-pool `dpa-vni` has no explicit allocation range".to_string(),
                         ),
-                        counter_delta: 1.0,
                     },
                 },
                 Check {
@@ -427,7 +424,6 @@ mod tests {
                         pool: Some(DPA_VNI.to_string()),
                         requested_vni: Some("42".to_string()),
                         error: None,
-                        counter_delta: 1.0,
                     },
                 },
                 Check {
@@ -453,7 +449,6 @@ mod tests {
                         pool: Some(DPA_VNI.to_string()),
                         requested_vni: None,
                         error: Some("internal error: database unavailable".to_string()),
-                        counter_delta: 1.0,
                     },
                 },
                 Check {
@@ -479,7 +474,6 @@ mod tests {
                         pool: Some(DPA_VNI.to_string()),
                         requested_vni: None,
                         error: Some(PARSE_ERROR.to_string()),
-                        counter_delta: 1.0,
                     },
                 },
             ],
@@ -500,6 +494,32 @@ mod tests {
                 assert_eq!(logs.len(), 1);
                 let log = &logs[0];
 
+                let observed = metrics.counter_delta(
+                    RESOURCE_POOL_LIFECYCLE_FAILURES_METRIC,
+                    &[
+                        ("operation", "allocate"),
+                        ("failure", input.failure.failure_label()),
+                        ("failure_policy", "required"),
+                        ("allocation_mode", input.allocation_mode()),
+                        ("value_type", "integer"),
+                    ],
+                );
+                match input.failure {
+                    DpaVniFailureInput::Exhausted
+                    | DpaVniFailureInput::MissingRange
+                    | DpaVniFailureInput::RequestedUnavailable => {
+                        // VPC tests emit these labels without a `MetricsCapture`.
+                        // The log capture above checks this mapper's event.
+                        assert!(
+                            observed >= 1.0,
+                            "expected at least one {input:?} allocation failure, observed {observed}"
+                        );
+                    }
+                    DpaVniFailureInput::RequestedDatabase | DpaVniFailureInput::Generic => {
+                        assert_eq!(observed, 1.0, "{input:?}");
+                    }
+                }
+
                 DpaVniFailureObservation {
                     status_code: status.code(),
                     status_message: status.message().to_string(),
@@ -517,16 +537,6 @@ mod tests {
                     pool: log.field("pool").map(str::to_string),
                     requested_vni: log.field("requested_vni").map(str::to_string),
                     error: log.field("error").map(str::to_string),
-                    counter_delta: metrics.counter_delta(
-                        RESOURCE_POOL_LIFECYCLE_FAILURES_METRIC,
-                        &[
-                            ("operation", "allocate"),
-                            ("failure", input.failure.failure_label()),
-                            ("failure_policy", "required"),
-                            ("allocation_mode", input.allocation_mode()),
-                            ("value_type", "integer"),
-                        ],
-                    ),
                 }
             },
         );

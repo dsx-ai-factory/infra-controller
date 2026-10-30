@@ -25,14 +25,23 @@ card selections unchanged.
 This stores a requirement for future selected SPX attachments and does not \
 flash firmware. Until SPX attachment preparation is supported \
 (https://github.com/dsx-ai-factory/infra-controller/issues/6686), a tenant with \
-a selection cannot allocate an instance requesting SPX attachments or add or \
-change nonempty SPX attachments on an existing instance. Unchanged or cleared \
-attachments and allocations without SPX attachments remain allowed.
+a selection cannot allocate an instance requesting SPX attachments. Allocations \
+without SPX attachments are not blocked by this check.
 
-This is a read-time check: a request already past the selection read may \
-complete after a later selection commits. Finish upgrading all Core replicas \
-before setting tenant selections; do not roll back to Core versions that \
-ignore them.
+Allocations with saved firmware requirements keep them after tenant selection \
+or profile edits. Removals and partition edits are allowed if retained \
+attachments keep their saved device bindings. Adding attachments is rejected \
+when the saved requirements include a tenant profile.
+
+Instances without saved requirements use the live tenant selection. With a \
+profile selected, edits that leave a nonempty SPX attachment list are rejected. \
+Unchanged attachments and clearing the list are not blocked. Both saved and \
+live firmware-check rejections return FAILED_PRECONDITION.
+
+The live tenant-selection check is read-time: a request already past the \
+selection read may complete after a later selection commits. Finish upgrading \
+all Core replicas before setting tenant selections; do not roll back to Core \
+versions that ignore them.
 
 Show, set, and clear return one object with tenant_org_id, profile_id, and \
 config_version in JSON/YAML. An unset profile is null. Table/CSV always returns one \

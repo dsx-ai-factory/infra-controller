@@ -337,8 +337,9 @@ func TestNewAPIInstance(t *testing.T) {
 		expectedSecondaryVpcIDs []string
 	}
 	tests := []struct {
-		name string
-		args args
+		name                   string
+		args                   args
+		wantSSHKeyGroupIDsJSON string
 	}{
 		{
 			name: "test new API Instance initializer",
@@ -352,6 +353,7 @@ func TestNewAPIInstance(t *testing.T) {
 				dbskg:                   []cdbm.SSHKeyGroup{dbskg, dbskg2},
 				expectedSecondaryVpcIDs: []string{secondaryVpcID1.String(), secondaryVpcID2.String()},
 			},
+			wantSSHKeyGroupIDsJSON: fmt.Sprintf(`[%q,%q]`, dbskg.ID.String(), dbskg2.ID.String()),
 		},
 		{
 			name: "test new API Instance initializer with power status change",
@@ -362,6 +364,7 @@ func TestNewAPIInstance(t *testing.T) {
 				dbis:   []cdbm.Interface{dbis2},
 				dbdesd: []cdbm.DpuExtensionServiceDeployment{dbdesd2},
 			},
+			wantSSHKeyGroupIDsJSON: `[]`,
 		},
 	}
 	for _, tt := range tests {
@@ -424,7 +427,7 @@ func TestNewAPIInstance(t *testing.T) {
 			if got.Interfaces[0].MacAddress != nil {
 				assert.Equal(t, *tt.args.dbis[0].MacAddress, *got.Interfaces[0].MacAddress)
 			}
-			assert.Equal(t, tt.args.dbis[0].IPAddresses, got.Interfaces[0].IPAddresses)
+			assert.Equal(t, append([]string{}, tt.args.dbis[0].IPAddresses...), got.Interfaces[0].IPAddresses)
 			assert.Equal(t, append([]string{}, tt.args.dbis[0].IPPrefixes...), got.Interfaces[0].IPPrefixes)
 			assert.Equal(t, tt.args.dbis[0].Status, got.Interfaces[0].Status)
 			assert.Equal(t, tt.args.dbis[0].Created, got.Interfaces[0].Created)
@@ -458,11 +461,12 @@ func TestNewAPIInstance(t *testing.T) {
 
 			assert.Equal(t, *tt.args.dbic.TpmEkCertificate, *got.TpmEkCertificate)
 
-			jsonResp, err := json.Marshal(got)
-			assert.NoError(t, err)
-			var attrMap map[string]interface{}
-			err = json.Unmarshal(jsonResp, &attrMap)
-			assert.NoError(t, err)
+			var attrMap map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(marshalled, &attrMap))
+			require.Contains(t, attrMap, "networkSecurityGroupPropagationDetails")
+			assert.JSONEq(t, "null", string(attrMap["networkSecurityGroupPropagationDetails"]))
+			require.Contains(t, attrMap, "sshKeyGroupIds")
+			assert.JSONEq(t, tt.wantSSHKeyGroupIDsJSON, string(attrMap["sshKeyGroupIds"]))
 		})
 	}
 

@@ -66,8 +66,9 @@ spec:
           {{- end }}
         {{- if .Values.gateway.enabled }}
         {{- $gatewayName := include "mat-k8s-controller.gateway.fullname" . }}
+        {{- $gatewayImage := .Values.gateway.image | default dict }}
         - name: gateway
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ $gatewayImage.repository | default .Values.image.repository }}:{{ $gatewayImage.tag | default .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /mat-protocol-gateway

@@ -23,6 +23,7 @@ pub mod domain;
 pub mod instance;
 pub mod machine;
 pub mod machine_a_tron;
+pub mod measured_boot;
 pub mod metrics;
 pub mod mock_rms;
 pub mod scout_stream;

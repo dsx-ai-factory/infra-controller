@@ -85,6 +85,7 @@ BOOT_REQUIRED_OUTPUTS: dict[str, tuple[str, ...]] = {
         "pxe/static/blobs/internal/apt/pool/base/f/forge-dpu/forge-dpu_*_arm64.deb",
         "pxe/static/blobs/internal/apt/pool/base/f/forge-scout/forge-scout_*_arm64.deb",
         "target/aarch64-unknown-linux-gnu/release/forge-scout",
+        "target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor",
         "target/debs/forge-dpu_*_arm64.deb",
         "target/debs/forge-scout_*_arm64.deb",
     ),

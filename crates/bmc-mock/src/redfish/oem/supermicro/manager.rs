@@ -47,6 +47,11 @@ impl Default for SupermicroState {
 }
 
 impl SupermicroState {
+    pub(crate) fn reset_to_defaults(&self) {
+        *self.kcs_interface.lock().expect("mutex poisoned") = json!({});
+        *self.sys_lockdown.lock().expect("mutex poisoned") = json!({});
+    }
+
     fn kcs_interface(&self, base: serde_json::Value) -> serde_json::Value {
         base.patch(self.kcs_interface.lock().expect("mutex poisoned").clone())
     }

@@ -245,10 +245,11 @@ async fn migration_and_bootstrap_preserve_legacy_resources_and_snapshots(
     pool: PgPool,
 ) -> eyre::Result<()> {
     let mut txn = pool.begin().await?;
-    // Remove the newer allocation table before exercising the binding migration
-    // against its predecessor schema.
+    // Remove both newer tables that reference the binding before exercising
+    // its migration against the predecessor schema.
     sqlx::raw_sql(
-        "DROP TABLE resource_pool_allocations;
+        "DROP TABLE resource_pool_registration;
+         DROP TABLE resource_pool_allocations;
          DROP TABLE resource_pool_binding;",
     )
     .execute(&mut *txn)

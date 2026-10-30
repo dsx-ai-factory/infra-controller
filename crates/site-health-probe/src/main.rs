@@ -20,11 +20,56 @@
 //! site-health-probe runs synthetic probes against a NICo site's APIs and
 //! exposes the results as Prometheus metrics (issue #5360).
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
+mod api;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
+mod census;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
+mod clock;
 mod config;
 mod framework;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
+mod gate;
 mod logging;
 mod metrics;
+#[expect(dead_code, reason = "the state readers are wired in later")]
+mod nico;
 mod probes;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
+mod readers;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
+mod rest;
+#[expect(dead_code, reason = "the state readers are wired in later")]
+mod snapshot;
+#[expect(dead_code, reason = "the state readers are wired in later")]
+mod state;
+#[expect(dead_code, reason = "the state readers are wired in later")]
+mod state_metrics;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
+mod store;
+#[expect(dead_code, reason = "the state readers are wired in later")]
+mod summary;
 
 use std::sync::Arc;
 
@@ -58,15 +103,6 @@ async fn run() -> eyre::Result<()> {
     let cfg = config::Config::load(&args.config).wrap_err("configuration")?;
     let listen_addr = cfg.listen_addr()?;
 
-    let enabled = build_probes(&cfg).wrap_err("build probes")?;
-    if enabled.is_empty() {
-        return Err(eyre!(
-            "no probes enabled — refusing to run a monitor that monitors nothing"
-        ));
-    }
-    let names: Vec<&str> = enabled.iter().map(|p| p.name()).collect();
-    tracing::info!(probes = ?names, metrics_listen = %listen_addr, "starting");
-
     // The global meter stays unset on purpose: instrumented clients in linked
     // crates would otherwise add series beyond the probe's documented set.
     let metrics_setup = metrics_endpoint::new_metrics_setup("site-health-probe", "nico", false)?;
@@ -74,6 +110,27 @@ async fn run() -> eyre::Result<()> {
     // pipeline below is running.
     metrics_setup.health_controller.set_ready(false);
     let sink = Arc::new(metrics::Metrics::new(&metrics_setup.meter));
+
+    let gates = gate::Gates::new(&cfg.state.caps);
+    gates.count_calls(
+        &metrics_setup
+            .meter
+            .u64_counter("carbide_site_health_probe_calls")
+            .with_description(
+                "Calls to each API (nico-api, nico-rest-api, metrics-store) by call and result \
+                 (ok, error, timeout, pushback, cancelled). cancelled is a started call whose \
+                 future was dropped before it returned, e.g. by the probe's own timeout.",
+            )
+            .build(),
+    );
+    let enabled = build_probes(&cfg, &gates).wrap_err("build probes")?;
+    if enabled.is_empty() {
+        return Err(eyre!(
+            "no probes enabled — refusing to run a monitor that monitors nothing"
+        ));
+    }
+    let names: Vec<&str> = enabled.iter().map(|p| p.name()).collect();
+    tracing::info!(probes = ?names, metrics_listen = %listen_addr, "starting");
 
     // Two shutdown stages: probes stop and drain first, the metrics endpoint
     // last — so the final results of a shutdown still land in /metrics-served
@@ -170,22 +227,29 @@ async fn run() -> eyre::Result<()> {
 
 /// Assembles the enabled probe set from configuration. nico-api (gRPC) and
 /// nico-rest-api probes come from distinct modules, each owning its
-/// transport/auth machinery.
-fn build_probes(cfg: &config::Config) -> eyre::Result<Vec<Arc<dyn framework::Probe>>> {
+/// transport/auth machinery. Every probe calls its API through that API's
+/// gate.
+fn build_probes(
+    cfg: &config::Config,
+    gates: &gate::Gates,
+) -> eyre::Result<Vec<Arc<dyn framework::Probe>>> {
     let mut out: Vec<Arc<dyn framework::Probe>> = Vec::new();
     if cfg.probes.grpc_machines.enabled {
         out.push(Arc::new(probes::nicoapi::MachinesProbe::new(
             cfg.probes.grpc_machines.clone(),
+            Arc::clone(&gates.nico_api),
         )));
     }
     if cfg.probes.rest_machines.enabled {
         out.push(Arc::new(probes::restapi::new_machines_probe(
             cfg.probes.rest_machines.clone(),
+            Arc::clone(&gates.rest),
         )?));
     }
     if cfg.probes.rest_instances.enabled {
         out.push(Arc::new(probes::restapi::new_instances_probe(
             cfg.probes.rest_instances.clone(),
+            Arc::clone(&gates.rest),
         )?));
     }
     Ok(out)
@@ -200,7 +264,6 @@ mod tests {
 
     fn config_with(grpc: bool, rest_machines: bool, rest_instances: bool) -> Config {
         Config {
-            metrics_listen: String::new(),
             probes: Probes {
                 grpc_machines: GrpcProbe {
                     enabled: grpc,
@@ -215,6 +278,7 @@ mod tests {
                     ..RestProbe::default()
                 },
             },
+            ..Config::default()
         }
     }
 
@@ -251,7 +315,8 @@ mod tests {
                 },
             ],
             |(grpc, rest_machines, rest_instances)| {
-                build_probes(&config_with(grpc, rest_machines, rest_instances))
+                let cfg = config_with(grpc, rest_machines, rest_instances);
+                build_probes(&cfg, &gate::Gates::new(&cfg.state.caps))
                     .expect("build succeeds")
                     .iter()
                     .map(|p| p.name())

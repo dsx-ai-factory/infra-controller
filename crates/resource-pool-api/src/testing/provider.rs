@@ -36,7 +36,7 @@ struct ProviderState {
     inventory: Vec<Value>,
     route_target_policy: Option<RouteTargetPolicy>,
     definitions: Vec<DefineRequest>,
-    operations: HashMap<(String, String), SavedOperation>,
+    operations: HashMap<String, SavedOperation>,
     pending_cancellation: bool,
     provisioned_allocations: HashSet<String>,
 }
@@ -70,7 +70,7 @@ impl LocalProvider {
     /// `new` creates one provider pool with known available values.
     ///
     /// `Describe` accepts the pool's `logical_pool` or `pool_id` as its alias.
-    /// Other site and binding identities can use the same authority and pool.
+    /// Other binding identities can use the same authority and pool.
     /// Inventory must contain unique values of `domain`; the optional route
     /// target policy is copied into every successful allocation.
     pub fn new(
@@ -191,7 +191,7 @@ impl LocalProvider {
             .ok_or_else(|| Status::invalid_argument("operation pool is required"))?;
         pool.validate()?;
         validate_identifier(&operation.request_id, "request_id")?;
-        let key = (pool.site_id.clone(), operation.request_id.clone());
+        let key = operation.request_id.clone();
         if let Some(saved) = state.operations.get_mut(&key) {
             if saved.identity.pool.as_ref() != Some(pool)
                 || saved
@@ -249,7 +249,6 @@ impl ResourcePool for LocalProvider {
         request: Request<DescribeRequest>,
     ) -> Result<Response<DescribeResponse>, Status> {
         let request = request.into_inner();
-        validate_identifier(&request.site_id, "site_id")?;
         validate_identifier(&request.pool_alias, "pool_alias")?;
         let state = self.state.lock().expect("provider fixture mutex poisoned");
         if request.pool_alias != state.pool.logical_pool && request.pool_alias != state.pool.pool_id
@@ -283,7 +282,7 @@ impl ResourcePool for LocalProvider {
             prior
                 .pool
                 .as_ref()
-                .is_some_and(|prior_pool| prior_pool.same_binding(pool))
+                .is_some_and(|prior_pool| prior_pool.binding_id == pool.binding_id)
                 && prior.eligibility_revision == request.eligibility_revision
         }) {
             if prior != &request {
@@ -311,7 +310,7 @@ impl ResourcePool for LocalProvider {
             prior
                 .pool
                 .as_ref()
-                .is_some_and(|prior_pool| prior_pool.same_binding(pool))
+                .is_some_and(|prior_pool| prior_pool.binding_id == pool.binding_id)
         });
         if request.previous_revision.as_deref()
             != previous.map(|prior| prior.eligibility_revision.as_str())
@@ -536,15 +535,16 @@ impl ResourcePool for LocalProvider {
 
 impl ProviderState {
     /// `operation_key` checks the pool binding against any saved operation
-    /// before returning the `(site_id, request_id)` key.
-    fn operation_key(&self, identity: &OperationIdentity) -> Result<(String, String), Status> {
+    /// before returning its request ID. This fixture serves one authority, so
+    /// the ID must stay unique across every binding that shares its inventory.
+    fn operation_key(&self, identity: &OperationIdentity) -> Result<String, Status> {
         let pool = identity
             .pool
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("pool is required"))?;
         pool.validate()?;
         validate_identifier(&identity.request_id, "request_id")?;
-        let key = (pool.site_id.clone(), identity.request_id.clone());
+        let key = identity.request_id.clone();
         if let Some(saved) = self.operations.get(&key) {
             saved.check_identity(identity)?;
         }
@@ -706,13 +706,8 @@ impl SavedState {
 }
 
 impl PoolBinding {
-    fn same_binding(&self, other: &Self) -> bool {
-        self.site_id == other.site_id && self.binding_id == other.binding_id
-    }
-
     fn validate(&self) -> Result<(), Status> {
         for (value, field) in [
-            (&self.site_id, "site_id"),
             (&self.authority_id, "authority_id"),
             (&self.pool_id, "pool_id"),
             (&self.binding_id, "binding_id"),
@@ -778,7 +773,6 @@ mod tests {
     #[test]
     fn empty_inventory_does_not_allow_an_unspecified_domain() {
         let pool = PoolBinding {
-            site_id: "site".to_string(),
             authority_id: "provider".to_string(),
             pool_id: "vnis".to_string(),
             binding_id: "binding".to_string(),
@@ -793,7 +787,6 @@ mod tests {
     #[tokio::test]
     async fn pending_cancellation_keeps_inventory_and_provisioning_until_cleanup() {
         let pool = PoolBinding {
-            site_id: "site".into(),
             authority_id: "provider".into(),
             pool_id: "vnis".into(),
             binding_id: "binding".into(),

@@ -268,8 +268,7 @@ fn validate_echoed_identity<'a>(
 
 fn validate_pool(pool: Option<&PoolBinding>) -> Result<(), GrpcResourcePoolError> {
     let pool = pool.ok_or(InvalidResponse("pool binding is required"))?;
-    if !is_valid_text(&pool.site_id)
-        || !is_valid_text(&pool.authority_id)
+    if !is_valid_text(&pool.authority_id)
         || !is_valid_text(&pool.pool_id)
         || !is_valid_text(&pool.binding_id)
         || !is_valid_text(&pool.logical_pool)

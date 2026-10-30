@@ -273,7 +273,8 @@ where
     Ok(converted)
 }
 
-fn wire_domain(domain: ResourcePoolValueDomain) -> v1::ValueDomain {
+/// `wire_domain` maps the saved Core value family to its provider API enum.
+pub(crate) fn wire_domain(domain: ResourcePoolValueDomain) -> v1::ValueDomain {
     match domain {
         ResourcePoolValueDomain::Integer => v1::ValueDomain::Integer,
         ResourcePoolValueDomain::IpAddress => v1::ValueDomain::IpAddress,

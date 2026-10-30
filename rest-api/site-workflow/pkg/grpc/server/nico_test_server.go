@@ -1457,9 +1457,15 @@ func jwksDocumentForKeys(kms []*identityKeyMaterial, use string) (string, error)
 		if km == nil || km.privateKey == nil {
 			return "", fmt.Errorf("nil key material")
 		}
-		pub := km.privateKey.PublicKey
-		xb := pub.X.FillBytes(make([]byte, p256CoordinateLen))
-		yb := pub.Y.FillBytes(make([]byte, p256CoordinateLen))
+		encoded, err := km.privateKey.PublicKey.Bytes()
+		if err != nil {
+			return "", fmt.Errorf("encode public key: %w", err)
+		}
+		if len(encoded) != 1+2*p256CoordinateLen {
+			return "", fmt.Errorf("expected P-256 public key, got %d encoded bytes", len(encoded))
+		}
+		xb := encoded[1 : 1+p256CoordinateLen]
+		yb := encoded[1+p256CoordinateLen:]
 		jwks = append(jwks, map[string]string{
 			"kty": "EC",
 			"crv": "P-256",

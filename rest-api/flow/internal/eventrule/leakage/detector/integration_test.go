@@ -33,10 +33,12 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 	tests := map[string]struct {
 		strategy eventrule.TargetStrategy
 		scope    eventrule.Scope
+		reader   staticLeakReader
 		wantIDs  func(sourceID, belowID, aboveID uuid.UUID) []uuid.UUID
 	}{
 		"immutable affected-components default": {
 			strategy: eventrule.TargetStrategyAffectedComponents,
+			reader:   staticLeakReader{machines: []string{"machine-1"}},
 			wantIDs: func(sourceID, belowID, _ uuid.UUID) []uuid.UUID {
 				return []uuid.UUID{sourceID, belowID}
 			},
@@ -44,6 +46,7 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 		"site component override": {
 			strategy: eventrule.TargetStrategyComponent,
 			scope:    eventrule.Scope{Type: eventrule.ScopeTypeSite},
+			reader:   staticLeakReader{machines: []string{"machine-1"}},
 			wantIDs: func(sourceID, _, _ uuid.UUID) []uuid.UUID {
 				return []uuid.UUID{sourceID}
 			},
@@ -51,6 +54,14 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 		"rack override": {
 			strategy: eventrule.TargetStrategyRack,
 			scope:    eventrule.Scope{Type: eventrule.ScopeTypeRack},
+			reader:   staticLeakReader{machines: []string{"machine-1"}},
+			wantIDs: func(sourceID, belowID, aboveID uuid.UUID) []uuid.UUID {
+				return []uuid.UUID{sourceID, belowID, aboveID}
+			},
+		},
+		"rack leak targets all rack components": {
+			strategy: eventrule.TargetStrategyAffectedComponents,
+			reader:   staticLeakReader{racks: []string{"rack-1"}},
 			wantIDs: func(sourceID, belowID, aboveID uuid.UUID) []uuid.UUID {
 				return []uuid.UUID{sourceID, belowID, aboveID}
 			},
@@ -103,7 +114,7 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 			require.NoError(t, ruleManager.Start(ctx))
 			defer func() { require.NoError(t, ruleManager.Stop()) }()
 
-			leakDetector, err := detector.New(staticLeakReader{machines: []string{"machine-1"}})
+			leakDetector, err := detector.New(test.reader)
 			require.NoError(t, err)
 
 			ingestionConfig := ingestion.DefaultConfig()
@@ -153,7 +164,12 @@ func leakageRule(strategy eventrule.TargetStrategy) eventrule.RuleCreate {
 }
 
 type staticLeakReader struct {
+	racks    []string
 	machines []string
+}
+
+func (r staticLeakReader) GetLeakingRackIds(context.Context) ([]string, error) {
+	return slices.Clone(r.racks), nil
 }
 
 func (r staticLeakReader) GetLeakingMachineIds(context.Context) ([]string, error) {

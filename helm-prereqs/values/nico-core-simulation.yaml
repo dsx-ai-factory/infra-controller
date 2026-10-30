@@ -53,7 +53,8 @@ global:
     pullPolicy: IfNotPresent
 
   ## setup.sh creates a secret named `imagepullsecret` in nico-system from
-  ## REGISTRY_PULL_SECRET (host nvcr.io). Reference that name here.
+  ## REGISTRY_PULL_SECRET for the host part of NICO_IMAGE_REGISTRY. Reference
+  ## that name here.
   imagePullSecrets:
     - name: imagepullsecret
 

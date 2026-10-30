@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -67,7 +67,7 @@ async fn preflight_cleans_up_when_the_query_is_unavailable() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("mlxfwmanager query I/O failed: No such file or directory"),
+        stderr.contains("mlxfwmanager query failed: command mlxfwmanager --dev 03:00.0 --query-format xml did not start: No such file or directory"),
         "{stderr}"
     );
     assert_eq!(fetches.load(Ordering::SeqCst), 1);

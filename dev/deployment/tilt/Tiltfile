@@ -11,10 +11,10 @@ if not cluster_context.startswith('kind-'):
 
 repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), '../../..'))
 tilt_dir = os.path.join(repo_root, 'dev/deployment/tilt')
-devspace_dir = os.path.join(repo_root, 'dev/deployment/devspace')
 core_charts = os.path.join(repo_root, 'helm/charts')
 rest_charts = os.path.join(repo_root, 'helm/rest')
 rest_api_dir = os.path.join(repo_root, 'rest-api')
+rest_api_docker_local = os.path.join(rest_api_dir, 'docker/local')
 values_file = os.path.join(tilt_dir, 'values.yaml')
 kea_version = str(read_file(os.path.join(repo_root, 'dev/docker/kea.version'))).strip()
 
@@ -47,6 +47,7 @@ nico_dhcp_values = all_values['nico-dhcp']
 nico_dhcp_values['config']['kea']['serverIdentifier'] = machine_a_tron_dhcp_server_ip
 
 machine_a_tron_values = all_values['nico-machine-a-tron']
+enable_mat_gateway = machine_a_tron_values.get('mat-k8s-controller', {}).get('gateway', {}).get('enabled', False)
 machine_a_tron_configs = machine_a_tron_values['configFiles']['matConfigs']
 if machine_a_tron_dhcp_pod not in machine_a_tron_configs:
     fail('Tilt DHCP relay mode requires a MAT config for pod %s' % machine_a_tron_dhcp_pod)
@@ -188,12 +189,11 @@ def rest_image(name, dockerfile, only):
     docker_build(
         'localhost/%s' % name,
         rest_api_dir,
-        dockerfile=os.path.join(rest_api_dir, 'docker/local', dockerfile),
+        dockerfile=os.path.join(rest_api_docker_local, dockerfile),
         only=only + [
             'go.mod',
             'go.sum',
             'sdk/standard/go.mod',
-            'docker/local/%s' % dockerfile,
         ],
     )
 
@@ -842,6 +842,12 @@ local_resource(
 )
 
 docker_build(
+    'nico-tilt-runtime-base',
+    tilt_dir,
+    dockerfile=os.path.join(tilt_dir, 'Dockerfile.runtime-base'),
+    only=['Dockerfile.runtime-base'],
+)
+docker_build(
     'build-container-localdev',
     os.path.join(repo_root, 'dev/docker'),
     dockerfile=os.path.join(
@@ -850,61 +856,34 @@ docker_build(
     ),
     build_args={'KEA_VERSION': kea_version},
 )
-docker_build(
-    'nico-devspace-core-artifacts',
-    repo_root,
-    dockerfile=os.path.join(
-        devspace_dir,
-        'Dockerfile.core-artifacts',
-    ),
-    ignore=['dev/deployment/tilt'],
-)
+# A target packages only the service being refreshed. Cargo caches are shared.
+core_images = [
+    ('nico-api', 'api'),
+    ('nico-bmc-proxy', 'bmc-proxy'),
+    ('nico-dhcp', 'dhcp'),
+    ('machine-a-tron', 'machine-a-tron'),
+    ('nico-ssh-console', 'ssh-console'),
+]
+if enable_mat_gateway:
+    core_images.append(('mat-protocol-gateway', 'mat-protocol-gateway'))
 if enable_observability:
+    core_images.append(('nico-postgres-exporter', 'nico-postgres-exporter'))
+for image, target in core_images:
     docker_build(
-        'nico-postgres-exporter',
+        image,
         repo_root,
-        dockerfile=os.path.join(devspace_dir, 'Dockerfile.postgres-exporter'),
-        ignore=['dev/deployment/tilt'],
+        dockerfile=os.path.join(tilt_dir, 'Dockerfile.core'),
+        target=target,
+        build_args={'KEA_VERSION': kea_version},
     )
-docker_build(
-    'nico-api',
-    repo_root,
-    dockerfile=os.path.join(devspace_dir, 'Dockerfile.api'),
-    ignore=['dev/deployment/tilt'],
-)
-docker_build(
-    'nico-bmc-proxy',
-    repo_root,
-    dockerfile=os.path.join(devspace_dir, 'Dockerfile.bmc-proxy'),
-    ignore=['dev/deployment/tilt'],
-)
-docker_build(
-    'nico-dhcp',
-    repo_root,
-    dockerfile=os.path.join(devspace_dir, 'Dockerfile.dhcp'),
-    ignore=['dev/deployment/tilt'],
-)
-docker_build(
-    'machine-a-tron',
-    repo_root,
-    dockerfile=os.path.join(devspace_dir, 'Dockerfile.machine-a-tron'),
-    ignore=['dev/deployment/tilt'],
-)
 docker_build(
     'mat-k8s-controller',
     repo_root,
     dockerfile=os.path.join(
-        repo_root,
-        'dev/k8s/machine-a-tron-controller/Dockerfile',
+        tilt_dir,
+        'Dockerfile.mat-k8s-controller',
     ),
-    only=[
-        'Cargo.toml',
-        'Cargo.lock',
-        'rust-toolchain.toml',
-        '.cargo',
-        'crates',
-        'dev/k8s/machine-a-tron-controller',
-    ],
+    only=['dev/k8s/machine-a-tron-controller'],
 )
 
 rest_image(
@@ -964,7 +943,7 @@ rest_image(
 rest_image(
     'nico-rest-cert-manager',
     'Dockerfile.nico-rest-cert-manager',
-    ['cert-manager'],
+    ['common', 'cert-manager'],
 )
 rest_image(
     'nico-mcp',
@@ -1111,6 +1090,18 @@ k8s_resource(
     pod_readiness='ignore',
 )
 
+machine_a_tron_images = ['machine-a-tron', 'mat-k8s-controller']
+machine_a_tron_image_keys = [
+    ('image.repository', 'image.tag'),
+    ('mat-k8s-controller.image.repository', 'mat-k8s-controller.image.tag'),
+]
+if enable_mat_gateway:
+    machine_a_tron_images.append('mat-protocol-gateway')
+    machine_a_tron_image_keys.append((
+        'mat-k8s-controller.gateway.image.repository',
+        'mat-k8s-controller.gateway.image.tag',
+    ))
+
 helm_chart(
     name='nico-machine-a-tron',
     chart=os.path.join(core_charts, 'nico-machine-a-tron'),
@@ -1121,14 +1112,8 @@ helm_chart(
         'nico-dhcp-machine-a-tron',
         'nico-machine-a-tron-dhcp-relay',
     ],
-    image_deps=['machine-a-tron', 'mat-k8s-controller'],
-    image_keys=[
-        ('image.repository', 'image.tag'),
-        (
-            'mat-k8s-controller.image.repository',
-            'mat-k8s-controller.image.tag',
-        ),
-    ],
+    image_deps=machine_a_tron_images,
+    image_keys=machine_a_tron_image_keys,
     port_forwards=[port_forward(1266, 1266)],
     links=[link('https://localhost:1266/', 'Machine-A-Tron UI')],
     manual=True,
@@ -1145,7 +1130,7 @@ helm_chart(
         'nico-api',
         'nico-machine-a-tron-ssh',
     ],
-    image_deps=['nico-api'],
+    image_deps=['nico-ssh-console'],
     image_keys=[('global.image.repository', 'global.image.tag')],
     port_forwards=[
         port_forward(3222, 22),

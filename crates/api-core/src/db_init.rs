@@ -18,9 +18,7 @@
 use std::collections::HashMap;
 
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_resource_pool::{
-    ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
-};
+use carbide_resource_pool::{ResourcePoolRegistry, ResourcePoolRegistryError};
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
 use db::dns::domain;
@@ -280,11 +278,10 @@ pub(crate) async fn create_initial_vpcs(
             .await
         {
             Ok(Some(backend)) => {
-                let selected_pool = ResourcePoolWithBackend::new(vni_pool, backend.as_ref());
-                selected_pool
-                    .backend()
+                backend
+                    .require_integrated()?
                     .allocate(
-                        selected_pool.pool(),
+                        vni_pool,
                         &mut txn,
                         resource_pool::OwnerType::Vpc,
                         &owner_id,
@@ -356,11 +353,10 @@ pub(crate) async fn ensure_static_assignments_segment(
     subdomain_id: Option<carbide_uuid::domain::DomainId>,
 ) -> Result<(), CarbideError> {
     let segment_name = network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME;
-    if db::network_segment::find_by_name(txn, segment_name)
-        .await
-        .is_ok()
-    {
-        return Ok(());
+    match db::network_segment::find_by_name(txn, segment_name).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
     }
 
     let ns = NewNetworkSegment {

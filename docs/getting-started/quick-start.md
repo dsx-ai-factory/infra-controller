@@ -389,6 +389,10 @@ All IPs must be within the `IPAddressPool` ranges you defined in `values/metallb
 - **nico-dns Note**: Use `perPodAnnotations` (a list) rather than `annotations` because each replica gets its own VIP.
 - **nico-api IP and DNS Note**: The nico-api VIP must resolve in external DNS to the `hostname` you set in Step 3c.
 
+For the SSH Console endpoint, DNS, host-key verification, and Tenant access,
+see [SSH Console Setup and Access](../configuration/ssh-console.md).
+The Site's REST console fields do not deploy or enable the service.
+
 ### 3i. (Optional) Pre-set the Site UUID
 
 On a fresh install, you normally leave `NICO_SITE_UUID` unset. `setup.sh` resolves the UUID in several ways: it tries to reuse the UUID from a prior install (site-agent ConfigMap); if that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself (see Step 5). You only need to set the UUID explicitly to bind the site-agent to a site that already exists:
@@ -478,7 +482,7 @@ before continuing.
 | 5b | DPF stack for DPU provisioning (default; `--skip-dpf` to opt out) |
 | 5c | RMS (Rack Management Service) (default; `--skip-rms` to opt out) |
 | 6 | **NICo Core** (nico helm release) |
-| 7a-7g | **NICo REST** base stack (source and CA setup, PostgreSQL, Keycloak, Temporal, REST services) |
+| 7a-7g | **NICo REST** base stack (source and CA setup, Keycloak, Temporal, REST services) |
 | 7h | **NICo Flow** |
 | 7i | **NICo REST site-agent** |
 
@@ -504,9 +508,9 @@ nico-prereqs               (this Helm chart - nico-system namespace)
 NICo Core                  (../helm - nico-core.yaml values)
 NICo REST                  (../helm/rest/nico-rest)
   ├── nico-rest-ca-issuer   (ClusterIssuer - cert-manager.io)
-  ├── postgres StatefulSet  (temporal + keycloak databases)
-  ├── keycloak              (dev OIDC IdP, nico-dev realm)
-  ├── temporal              (temporal-helm/temporal, mTLS)
+  ├── postgres StatefulSet  (deprecated standalone DB, only while Temporal or Keycloak uses it)
+  ├── keycloak              (dev OIDC IdP, nico realm, DB on nico-pg-cluster unless useHaPostgres resolves to false)
+  ├── temporal              (temporal-helm/temporal, mTLS, DB on nico-pg-cluster unless useHaPostgres resolves to false)
   └── nico-rest             (API, cert-manager, workflow, site-manager)
 NICo Flow                  (../helm/nico-flow)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)

@@ -42,7 +42,24 @@ const ARTIFACT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 pub(crate) enum FirmwareAction {
     #[command(
         about = "Verify firmware files and compare a live NIC with an exact target",
-        long_about = "Verify the image and optional device-config SHA-256 digests, then inspect the selected live NIC's part number, PSID, and firmware version. Requires --mode standalone. The query must report the same PCI address; MST aliases are not resolved.\n\nAn exact version match and a change needed both exit successfully; unavailable or incompatible device facts and download/checksum failures return an error. A newer installed version still means a change is needed. This does not interpret image or device-config contents, approve flashing, or change hardware.\n\nEach present input is staged and checked before the device query. Temporary files are removed on completion or catchable SIGINT/SIGTERM cancellation, not guaranteed after SIGKILL or power loss. Each artifact has a 600-second download/retry deadline (hashing follows it); the subsequent read-only device query has a 30-second deadline."
+        long_about = "Verify the image and optional device-config SHA-256 digests, then inspect \
+            the selected live NIC's part number, PSID, and firmware version. Requires --mode \
+            standalone. The query must report the same PCI address; MST aliases are not \
+            resolved.\n\n\
+            An exact version match and a change needed both exit successfully; unavailable or \
+            incompatible device facts and download/checksum failures return an error. A newer \
+            installed version still means a change is needed. This does not interpret image or \
+            device-config contents, approve flashing, or change hardware.\n\n\
+            Each present input is staged and checked before the device query. Temporary files \
+            are removed on completion or catchable SIGINT/SIGTERM cancellation, not guaranteed \
+            after SIGKILL or power loss. Each artifact has a 600-second download/retry deadline \
+            (hashing follows it). The subsequent read-only device query requires Linux and \
+            mlx-firmware-supervisor beside forge-scout. Its 30-second deadline includes the \
+            tool, all descendants, and output collection. Each output stream is capped at \
+            1 MiB. Query failure or timeout allows up to five seconds for cleanup and five \
+            more seconds to receive the result. Cancellation requests cleanup independently \
+            without waiting for confirmation. Terminating the helper, including the whole \
+            service control group, prevents its cleanup."
     )]
     Preflight(PreflightArgs),
 }
@@ -117,7 +134,7 @@ impl PreflightArgs {
         };
         validate_preflight_request(&self.device, &desired)?;
         let report = self
-            .inspect_with(async |files| {
+            .inspect_with(FirmwareStaging::new, async |files| {
                 Ok(inspect_prepared_firmware(&self.device, &desired, files).await?)
             })
             .await?;
@@ -149,7 +166,11 @@ impl PreflightArgs {
 
     /// `inspect_with` keeps each present checked input alive through the
     /// inspector's await. A failed config download must not inspect a partial set.
-    async fn inspect_with<F, T>(&self, inspect: F) -> eyre::Result<T>
+    async fn inspect_with<F, T>(
+        &self,
+        new_staging: impl FnOnce() -> Result<FirmwareStaging, Box<dyn std::error::Error + Send + Sync>>,
+        inspect: F,
+    ) -> eyre::Result<T>
     where
         F: for<'files> AsyncFnOnce(LocalFirmwareFiles<'files>) -> eyre::Result<T>,
     {
@@ -163,7 +184,7 @@ impl PreflightArgs {
             }))
             .build()
             .wrap_err("failed to create artifact HTTP client")?;
-        let mut staging = FirmwareStaging::new().map_err(|error| eyre::eyre!(error))?;
+        let mut staging = new_staging().map_err(|error| eyre::eyre!(error))?;
         let image = staging
             .stage(
                 &client,
@@ -506,6 +527,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn preflight_rejects_invalid_urls_before_creating_staging() {
+        let args = PreflightArgs {
+            device: "03:00.0".to_string(),
+            part_number: "test-part".to_string(),
+            psid: "test-psid".to_string(),
+            version: "1.2.3".to_string(),
+            image_url: "https://user:secret-marker@example.test/image.bin".to_string(),
+            image_sha256: DIGEST.to_string(),
+            device_config_url: None,
+            device_config_sha256: None,
+        };
+        let staging_calls = Cell::new(0);
+        let error = args
+            .inspect_with(
+                || {
+                    staging_calls.set(staging_calls.get() + 1);
+                    Err(std::io::Error::other("staging unavailable").into())
+                },
+                async |_| Ok(()),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(staging_calls.get(), 0);
+        assert_eq!(
+            error.to_string(),
+            "invalid --image-url: artifact URL must not include authentication, query, or fragment"
+        );
+        assert!(!format!("{error:#}").contains("secret-marker"));
+    }
+
     /// Exercise the real staging consumer: either bad digest prevents all live
     /// inspection, while success passes local bytes without a second fetch.
     #[tokio::test]
@@ -608,7 +661,7 @@ mod tests {
             };
             let inspections = Cell::new(0);
             let result: eyre::Result<Vec<PathBuf>> = args
-                .inspect_with(async |files| {
+                .inspect_with(FirmwareStaging::new, async |files| {
                     inspections.set(inspections.get() + 1);
                     assert_eq!(
                         tokio::fs::read(files.image).await.unwrap(),
@@ -744,10 +797,16 @@ mod tests {
             };
             let inspections = Cell::new(0);
             let result = args
-                .inspect_with(async |_| {
-                    inspections.set(inspections.get() + 1);
-                    Ok(())
-                })
+                .inspect_with(
+                    || {
+                        FirmwareStaging::new()
+                            .map(|staging| staging.with_retry_backoff(Duration::from_millis(10)))
+                    },
+                    async |_| {
+                        inspections.set(inspections.get() + 1);
+                        Ok(())
+                    },
+                )
                 .await;
             stop.cancel();
             server.await.unwrap();

@@ -24,7 +24,7 @@ use super::proto::{self, PathElem};
 use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
 
 type MetricKey = (String, String, String);
-type SourcePath = Vec<(String, BTreeMap<String, String>)>;
+pub(super) type SourcePath = Vec<(String, BTreeMap<String, String>)>;
 
 pub(super) type SharedMetricSources =
     Arc<Mutex<HashMap<MetricKey, (SourcePath, Option<MetricSample>)>>>;
@@ -50,6 +50,18 @@ impl MetricReconciler {
             eligible: Mutex::new(HashMap::new()),
             sink,
             context,
+        }
+    }
+
+    /// Visits retained metric sources while holding the source lock.
+    pub(super) fn for_each_source(&self, mut visit: impl FnMut(&SourcePath)) {
+        let sources = self
+            .sources
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        for (source, _) in sources.values() {
+            visit(source);
         }
     }
 

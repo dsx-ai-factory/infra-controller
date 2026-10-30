@@ -21,12 +21,14 @@ original observed --if-version-match token and advances the edit version
 on success. For an unknown profile, Core returns server status
 NOT_FOUND; stale versions return server status FAILED_PRECONDITION.
 
-Core also rejects removal of hardware support required by existing
-selections with server status FAILED_PRECONDITION. Compatibility checks
-precede the stored-version check. The command preserves the server
-diagnostic and does not read a fresh version or retry the update. After
-a connection error, inspect the profile; the change may have committed.
-Keep the original token when repeating the same request.
+Core also rejects removal of hardware support required by existing site,
+machine, or card selections with server status FAILED_PRECONDITION.
+Tenant selections do not bind hardware and do not impose this
+compatibility check. Compatibility checks precede the stored-version
+check. The command preserves the server diagnostic and does not read a
+fresh version or retry the update. After a connection error, inspect the
+profile; the change may have committed. Keep the original token when
+repeating the same request.
 
 This changes the live definition used by existing selections, without
 fetching artifacts or starting firmware updates. Use --format

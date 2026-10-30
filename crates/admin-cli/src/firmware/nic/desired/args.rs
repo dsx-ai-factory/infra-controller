@@ -18,7 +18,7 @@ physical-card identity, observation freshness, or update eligibility.
 Use matching v2.4 Core and CLI schemas; finish upgrading all Core replicas before \
 relying on saved card selections or these desired-firmware diagnostics.
 
-Core resolves card > machine > allocation > site selections. The optional \
+Core resolves selections in precedence order: card, machine, allocation, then site. The optional \
 allocation profile previews one requirement against every usable, non-managed-DPU \
 device; it does not persist an allocation. Conflicts with card or machine \
 selections, invalid selections, and excluded devices remain per-device errors \

@@ -617,6 +617,50 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
 }
 
 #[crate::sqlx_test]
+async fn test_static_assignment_initialization_preserves_lookup_failure(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(db_pool).await;
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await?;
+
+    let snapshot_query = "SELECT jsonb_build_object(
+        'segments', (SELECT jsonb_agg(ns ORDER BY id) FROM network_segments ns),
+        'prefixes', (SELECT jsonb_agg(np ORDER BY id) FROM network_prefixes np))";
+    let original: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(&env.pool)
+        .await?;
+
+    let mut txn = db::Transaction::begin(&env.pool).await?;
+    let error = db_init::ensure_static_assignments_segment(&env.api, &mut txn, None)
+        .await
+        .expect_err("a failed anchor lookup must stop initialization");
+    let crate::CarbideError::DBError(annotated) = &error else {
+        panic!("expected DBError, got {error:?}");
+    };
+    let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+        panic!("expected ColumnDecode, got {error:?}");
+    };
+    assert_eq!(index, "\"allocation_strategy\"");
+    assert!(source.to_string().contains("unsupported"), "{source:?}");
+
+    // The decode failure must leave this transaction usable and unchanged.
+    let pending: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(txn.as_pgconn())
+        .await?;
+    assert_eq!(pending, original);
+    txn.commit().await?;
+
+    let persisted: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(persisted, original);
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_initial_network_restart_does_not_restore_deleted_static_assignment_zones(
     db_pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -806,7 +850,6 @@ struct InitialVpcAllocationFailureRecord {
     owner_id_is_vpc: bool,
     pool: Option<String>,
     error: Option<String>,
-    counter_delta: f64,
 }
 
 #[crate::sqlx_test]
@@ -838,7 +881,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     owner_id_is_vpc: true,
                     pool: Some("initial-vpc-empty".to_string()),
                     error: None,
-                    counter_delta: 1.0,
                 }),
             },
             Case {
@@ -865,7 +907,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         "`42` not an available value for resource-pool `initial-vpc-requested`"
                             .to_string(),
                     ),
-                    counter_delta: 1.0,
                 }),
             },
             Case {
@@ -892,7 +933,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         "resource-pool `initial-vpc-unconfigured` has no automatic allocation range"
                             .to_string(),
                     ),
-                    counter_delta: 1.0,
                 }),
             },
         ],
@@ -983,6 +1023,15 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 assert_eq!(event_logs.len(), 1);
                 let log = event_logs[0];
 
+                // Tests without a `MetricsCapture` can increment this shared
+                // counter. The log capture above checks this request's event.
+                let observed =
+                    metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels());
+                assert!(
+                    observed >= 1.0,
+                    "expected at least one {failure:?} allocation failure, observed {observed}"
+                );
+
                 Ok::<_, ()>(InitialVpcAllocationFailureRecord {
                     error_kind,
                     error_message: returned_error.to_string(),
@@ -1001,8 +1050,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         .is_some_and(|owner_id| VpcId::from_str(owner_id).is_ok()),
                     pool: log.field("pool").map(str::to_string),
                     error: log.field("error").map(str::to_string),
-                    counter_delta: metrics
-                        .counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels()),
                 })
             }
         },

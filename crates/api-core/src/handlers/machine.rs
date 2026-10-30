@@ -463,11 +463,11 @@ async fn force_delete_cleanup_txn(
     let _admin_admission = db::machine_interface::admin_lock_admission().await;
     let mut txn = api.txn_begin().await?;
 
-    // Advisory-lock the admin segments before any row locks so the deletion
-    // follows the allocator lock order -- segment advisory lock first, then
-    // machine interface/address rows (the convention
+    // Advisory-lock the admin segments exclusively before any row locks so
+    // the deletion follows the allocator lock order -- segment advisory lock
+    // first, then machine interface/address rows (the convention
     // `reconcile_admin_addresses_for_host` documents). This serializes the
-    // deletion against the allocator, reconcile, and discovery transactions
+    // deletion against the creation, allocation, and reconcile transactions
     // that hold those locks while they touch interface rows, so the two
     // sides can't hold segment locks and interface rows in opposite orders.
     // All admin segments, rather than a set computed from this machine's
@@ -957,11 +957,10 @@ pub(crate) async fn admin_force_delete_machine(
         if let Some(instance_id) = instance_id {
             response.instance_id = instance_id.to_string();
 
-            // The Machine lock makes concurrent Instance allocation visible here.
-            // TODO(#6125): Endpoint publication must add an Instance-to-Machine
-            // eligibility fence before activation. Reconcile existing
-            // Machine-to-Instance writers first; its address-table and Instance
-            // locks alone do not participate in this Machine lock.
+            // The Machine lock makes concurrent Instance allocation visible because service-VPC
+            // activation takes the same lock before storing an attachment's service interfaces.
+            // TODO(#6133): Validate observed external cleanup before reclaiming the final
+            // attachment and allowing force deletion to advance.
             // Without explicit orphan consent, rejecting before commit rolls back ForceDeletion
             // and leaves endpoint cleanup owned by the retained Instance service attachments.
             if !request.allow_delete_with_orphaned_dpf_crds
