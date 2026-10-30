@@ -33,6 +33,47 @@ func TestNewArrangesBuiltInRules(t *testing.T) {
 	require.Equal(t, expected, actual)
 }
 
+func TestManager_GetEventHandling(t *testing.T) {
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+
+	tests := map[string]struct {
+		eventType eventrule.Type
+		wantErr   bool
+	}{
+		"supported event type": {
+			eventType: leakage.TypeHardwareLeakDetected,
+		},
+		"invalid event type": {
+			eventType: "Invalid",
+			wantErr:   true,
+		},
+		"unregistered event type": {
+			eventType: "hardware.temperature.high",
+			wantErr:   true,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := manager.GetEventHandling(
+				t.Context(),
+				test.eventType,
+				eventrule.ResourceKindRack,
+				uuid.New(),
+				1,
+				nil,
+			)
+			if test.wantErr {
+				require.ErrorIs(t, err, eventrule.ErrInvalidRuleInput)
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestManagerUnifiedReadsAndMutationRouting(t *testing.T) {
 	ctx := context.Background()
 	rackID := uuid.New()
@@ -513,6 +554,45 @@ func TestManagerValidatesConfiguredActionExecutors(t *testing.T) {
 	}
 }
 
+func TestManagerScopePolicyLifecycle(t *testing.T) {
+	ctx := context.Background()
+	manager, err := New(testManagerConfig())
+	require.NoError(t, err)
+	scope := eventrule.Scope{Type: eventrule.ScopeTypeSite}
+	input := testRuleCreate(leakage.TypeHardwareLeakDetected, "REST leakage policy")
+
+	created, err := manager.SetOverride(ctx, input, scope)
+	require.NoError(t, err)
+	require.True(t, created.Enabled)
+
+	repeated, err := manager.SetOverride(ctx, input, scope)
+	require.NoError(t, err)
+	require.Equal(t, created.ID, repeated.ID)
+
+	effective, err := manager.GetEffectiveForScope(ctx, leakage.TypeHardwareLeakDetected, scope)
+	require.NoError(t, err)
+	require.Equal(t, created.ID, effective.ID)
+
+	require.NoError(t, manager.DeleteOverride(ctx, leakage.TypeHardwareLeakDetected, scope))
+	require.NoError(t, manager.DeleteOverride(ctx, leakage.TypeHardwareLeakDetected, scope))
+	effective, err = manager.GetEffectiveForScope(ctx, leakage.TypeHardwareLeakDetected, scope)
+	require.NoError(t, err)
+	require.Equal(t, leakage.DefaultRule().ID, effective.ID)
+
+	externalInput := testRuleCreate(leakage.TypeHardwareLeakDetected, "generic API policy")
+	external, err := manager.Create(ctx, externalInput)
+	require.NoError(t, err)
+	_, err = manager.Bind(ctx, external.ID, scope)
+	require.NoError(t, err)
+	replaced, err := manager.SetOverride(ctx, input, scope)
+	require.NoError(t, err)
+	require.Equal(t, external.ID, replaced.ID)
+	require.Equal(t, input.Metadata.Name, replaced.Name)
+	require.NoError(t, manager.DeleteOverride(ctx, leakage.TypeHardwareLeakDetected, scope))
+	_, err = manager.GetByID(ctx, external.ID)
+	require.ErrorIs(t, err, eventrule.ErrRuleNotFound)
+}
+
 func testManagerConfig() Config {
 	return Config{
 		Store: memory.New(),
@@ -521,8 +601,9 @@ func testManagerConfig() Config {
 			Runtime:    eventscheduler.DefaultRuntimeConfig(),
 			Policy:     eventscheduler.DefaultPolicyConfig(),
 		},
-		Inventory:   testInventory{},
-		TaskManager: configTaskManager{},
+		Inventory:      testInventory{},
+		TaskManager:    configTaskManager{},
+		HandlingReader: configHandlingReader{},
 	}
 }
 

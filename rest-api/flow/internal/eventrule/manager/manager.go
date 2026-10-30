@@ -22,13 +22,14 @@ import (
 // Manager is the event-rule subsystem facade. It owns rule management and the
 // internally assembled event-processing runtime.
 type Manager struct {
-	builtIns  *builtInRegistry
-	store     eventrule.Store
-	targets   *target.Registry
-	executors *eventexecutor.Registry
-	processor *eventprocessor.Processor
-	scheduler *eventscheduler.Scheduler
-	inventory *inventoryresolver.Resolver
+	builtIns       *builtInRegistry
+	store          eventrule.Store
+	targets        *target.Registry
+	executors      *eventexecutor.Registry
+	processor      *eventprocessor.Processor
+	scheduler      *eventscheduler.Scheduler
+	inventory      *inventoryresolver.Resolver
+	handlingReader HandlingReader
 }
 
 // New constructs a fully assembled event-rule manager.
@@ -77,13 +78,14 @@ func New(config Config) (*Manager, error) {
 	}
 
 	return &Manager{
-		builtIns:  builtIns,
-		store:     config.Store,
-		targets:   targets,
-		executors: executors,
-		processor: processor,
-		scheduler: executionScheduler,
-		inventory: inventoryresolver.New(config.Inventory),
+		builtIns:       builtIns,
+		store:          config.Store,
+		targets:        targets,
+		executors:      executors,
+		processor:      processor,
+		scheduler:      executionScheduler,
+		inventory:      inventoryresolver.New(config.Inventory),
+		handlingReader: config.HandlingReader,
 	}, nil
 }
 
@@ -175,6 +177,30 @@ func (m *Manager) Stop() error {
 // Process delegates one collected event to the internally assembled processor.
 func (m *Manager) Process(ctx context.Context, envelope eventrule.Envelope) error {
 	return m.processor.Process(ctx, envelope)
+}
+
+// GetEventHandling returns one page of handling history for an event type and
+// inventory resource.
+func (m *Manager) GetEventHandling(
+	ctx context.Context,
+	eventType eventrule.Type,
+	resourceType eventrule.ResourceKind,
+	resourceID uuid.UUID,
+	limit int,
+	cursor *eventrule.HandlingCursor,
+) ([]eventrule.Handling, bool, error) {
+	if err := m.validateSupportedEventType(eventType); err != nil {
+		return nil, false, invalidRuleInput(err)
+	}
+
+	return m.handlingReader.GetEventHandling(
+		ctx,
+		eventType,
+		resourceType,
+		resourceID,
+		limit,
+		cursor,
+	)
 }
 
 // GetByID looks in persisted rules and then built-ins.
@@ -528,6 +554,113 @@ func (m *Manager) GetBindingForScope(
 	}
 
 	return m.store.GetForScope(ctx, eventType, scope)
+}
+
+// SetOverride atomically creates or replaces the rule override occupying a
+// scope slot.
+func (m *Manager) SetOverride(
+	ctx context.Context,
+	input eventrule.RuleCreate,
+	scope eventrule.Scope,
+) (*eventrule.Rule, error) {
+	if err := input.Validate(); err != nil {
+		return nil, invalidRuleInput(err)
+	}
+
+	if err := scope.Validate(); err != nil {
+		return nil, invalidRuleInput(err)
+	}
+
+	if err := m.validateSupportedEventType(input.EventType); err != nil {
+		return nil, invalidRuleInput(err)
+	}
+
+	if err := m.validateBindingScope(ctx, scope); err != nil {
+		return nil, err
+	}
+
+	rule := &eventrule.Rule{
+		ID:          uuid.New(),
+		Origin:      eventrule.RuleOriginPersisted,
+		Name:        input.Metadata.Name,
+		Description: input.Metadata.Description,
+		Enabled:     true,
+		EventType:   input.EventType,
+		Policy:      input.Policy.Clone(),
+	}
+	if err := m.validateRuntimeRule(rule); err != nil {
+		return nil, invalidRuleInput(err)
+	}
+
+	binding := eventrule.Binding{
+		ID:        uuid.New(),
+		RuleID:    rule.ID,
+		EventType: rule.EventType,
+		Scope:     scope,
+	}
+	return m.store.SetRuleOverride(ctx, rule, binding)
+}
+
+// GetEffectiveForScope returns the effective rule at a site or rack scope.
+func (m *Manager) GetEffectiveForScope(
+	ctx context.Context,
+	eventType eventrule.Type,
+	scope eventrule.Scope,
+) (*eventrule.Rule, error) {
+	if err := m.validateSupportedEventType(eventType); err != nil {
+		return nil, invalidRuleInput(err)
+	}
+
+	if err := scope.Validate(); err != nil {
+		return nil, invalidRuleInput(err)
+	}
+
+	if scope.Type == eventrule.ScopeTypeSite {
+		binding, err := m.store.GetForScope(ctx, eventType, scope)
+		if err != nil {
+			return nil, err
+		}
+
+		if binding != nil {
+			rule, err := m.store.GetByID(ctx, binding.RuleID)
+			if err != nil {
+				return nil, err
+			}
+
+			if rule.Enabled {
+				return rule, nil
+			}
+		}
+
+		return m.builtIns.GetByEventType(ctx, eventType)
+	}
+
+	return m.GetEffective(
+		ctx,
+		eventType,
+		eventrule.ResourceIdentity{
+			Kind: eventrule.ResourceKindRack,
+			ID:   scope.ID,
+		},
+	)
+}
+
+// DeleteOverride removes the rule override occupying a scope slot and is
+// idempotent when the slot is already empty.
+func (m *Manager) DeleteOverride(
+	ctx context.Context,
+	eventType eventrule.Type,
+	scope eventrule.Scope,
+) error {
+	if err := m.validateSupportedEventType(eventType); err != nil {
+		return invalidRuleInput(err)
+	}
+
+	if err := scope.Validate(); err != nil {
+		return invalidRuleInput(err)
+	}
+
+	return m.store.DeleteRuleOverride(ctx, eventType, scope)
 }
 
 func (m *Manager) rejectBuiltInID(ctx context.Context, id uuid.UUID) error {

@@ -78,9 +78,10 @@ func TestNewAPIRoutes(t *testing.T) {
 		"sku":                       5,
 		"task":                      3,
 		"rule":                      5,
+		"leakage":                   4,
 		"run":                       8,
 		"domain":                    6,
-		"rack":                      16,
+		"rack":                      19,
 		"tray":                      13,
 		"stats":                     4,
 		"identity-config":           3,
@@ -194,6 +195,15 @@ func TestNewAPIRoutes(t *testing.T) {
 			taskPath := "/org/:orgName/" + cfg.GetAPIName() + "/task"
 			assertRouteExists(t, got, http.MethodGet, taskPath)
 			assertRouteBefore(t, got, http.MethodGet, taskPath, http.MethodGet, taskPath+"/:id")
+			leakagePolicyPath := "/org/:orgName/" + cfg.GetAPIName() + "/leakage/policy"
+			assertRouteExists(t, got, http.MethodGet, leakagePolicyPath)
+			assertRouteExists(t, got, http.MethodPut, leakagePolicyPath)
+			assertRouteExists(t, got, http.MethodDelete, leakagePolicyPath)
+			assertRouteExists(t, got, http.MethodGet, "/org/:orgName/"+cfg.GetAPIName()+"/leakage/handling")
+			rackLeakagePolicyPath := "/org/:orgName/" + cfg.GetAPIName() + "/rack/:rackId/leakage/policy"
+			assertRouteExists(t, got, http.MethodGet, rackLeakagePolicyPath)
+			assertRouteExists(t, got, http.MethodPut, rackLeakagePolicyPath)
+			assertRouteExists(t, got, http.MethodDelete, rackLeakagePolicyPath)
 			tenantPath := "/org/:orgName/" + cfg.GetAPIName() + "/tenant"
 			assertRouteExists(t, got, http.MethodGet, tenantPath+"/current/routing-profile")
 			vpcRoutingProfilePath := "/org/:orgName/" + cfg.GetAPIName() + "/vpc/:id/routing-profile"

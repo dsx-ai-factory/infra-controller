@@ -224,6 +224,13 @@ type BindingStore interface {
 	GetForScope(context.Context, Type, Scope) (*Binding, error)
 }
 
+// OverrideStore atomically sets or clears the rule override occupying one
+// event-type and scope slot.
+type OverrideStore interface {
+	SetRuleOverride(context.Context, *Rule, Binding) (*Rule, error)
+	DeleteRuleOverride(context.Context, Type, Scope) error
+}
+
 // EventPlanStore owns the source-event duplicate fast path and atomic event-plan
 // commit. Implementations own all persistence timestamps.
 type EventPlanStore interface {
@@ -276,4 +283,5 @@ type Store interface {
 	BindingStore
 	EventPlanStore
 	ExecutionStore
+	OverrideStore
 }

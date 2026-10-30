@@ -343,6 +343,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.DeleteEventRuleOverrideRequest"><span class="badge">M</span>DeleteEventRuleOverrideRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.DeleteEventRuleRequest"><span class="badge">M</span>DeleteEventRuleRequest</a>
                 </li>
 
@@ -391,6 +395,14 @@
                 </li>
 
                 <li>
+                  <a href="#v1.EventHandling"><span class="badge">M</span>EventHandling</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventHandlingTask"><span class="badge">M</span>EventHandlingTask</a>
+                </li>
+
+                <li>
                   <a href="#v1.EventRule"><span class="badge">M</span>EventRule</a>
                 </li>
 
@@ -420,6 +432,10 @@
 
                 <li>
                   <a href="#v1.EventRuleScope"><span class="badge">M</span>EventRuleScope</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventRuleScopeSelector"><span class="badge">M</span>EventRuleScopeSelector</a>
                 </li>
 
                 <li>
@@ -471,7 +487,19 @@
                 </li>
 
                 <li>
+                  <a href="#v1.GetEffectiveEventRuleForScopeRequest"><span class="badge">M</span>GetEffectiveEventRuleForScopeRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.GetEffectiveEventRuleRequest"><span class="badge">M</span>GetEffectiveEventRuleRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetEventHandlingRequest"><span class="badge">M</span>GetEventHandlingRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetEventHandlingResponse"><span class="badge">M</span>GetEventHandlingResponse</a>
                 </li>
 
                 <li>
@@ -955,6 +983,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.SetEventRuleOverrideRequest"><span class="badge">M</span>SetEventRuleOverrideRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.SetRuleAsDefaultRequest"><span class="badge">M</span>SetRuleAsDefaultRequest</a>
                 </li>
 
@@ -1061,6 +1093,10 @@
 
                 <li>
                   <a href="#v1.DiffType"><span class="badge">E</span>DiffType</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventResourceType"><span class="badge">E</span>EventResourceType</a>
                 </li>
 
                 <li>
@@ -2586,6 +2622,37 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
 
 
 
+        <h3 id="v1.DeleteEventRuleOverrideRequest">DeleteEventRuleOverrideRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Required. Must be an event type registered by Flow. </p></td>
+                </tr>
+
+                <tr>
+                  <td>scope</td>
+                  <td><a href="#v1.EventRuleScopeSelector">EventRuleScopeSelector</a></td>
+                  <td></td>
+                  <td><p>Required Site or Rack policy slot to clear. An empty slot succeeds. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.DeleteEventRuleRequest">DeleteEventRuleRequest</h3>
         <p></p>
 
@@ -2913,6 +2980,104 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
 
 
 
+        <h3 id="v1.EventHandling">EventHandling</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Stable UUID for the source event that caused this handling decision. </p></td>
+                </tr>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Registered event type handled by the rule. </p></td>
+                </tr>
+
+                <tr>
+                  <td>resource_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Current public identifier of the resource whose event was handled. </p></td>
+                </tr>
+
+                <tr>
+                  <td>resource_type</td>
+                  <td><a href="#v1.EventResourceType">EventResourceType</a></td>
+                  <td></td>
+                  <td><p>Kind of inventory resource identified by resource_id. </p></td>
+                </tr>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.EventHandlingTask">EventHandlingTask</a></td>
+                  <td>repeated</td>
+                  <td><p>Tasks created by event-rule actions, ordered by creation time then UUID
+ascending. Empty when handling created no Tasks. </p></td>
+                </tr>
+
+                <tr>
+                  <td>handled_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p>Time Flow first applied an event rule for this source event. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.EventHandlingTask">EventHandlingTask</h3>
+        <p>EventHandlingTask summarizes a Task created by one event-rule action.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Stable Flow Task UUID. </p></td>
+                </tr>
+
+                <tr>
+                  <td>status</td>
+                  <td><a href="#v1.TaskStatus">TaskStatus</a></td>
+                  <td></td>
+                  <td><p>Current Task lifecycle status. </p></td>
+                </tr>
+
+                <tr>
+                  <td>created_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p>Time Flow created the Task. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.EventRule">EventRule</h3>
         <p></p>
 
@@ -3226,6 +3391,44 @@ severities is also non-empty, both field conditions must match (AND). </p></td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td></td>
                   <td><p>Required for rack scope and omitted for site scope. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.EventRuleScopeSelector">EventRuleScopeSelector</h3>
+        <p>EventRuleScopeSelector identifies a Site scope or a Rack scope. Site</p><p>selectors must omit rack_identifier; Rack selectors must set exactly one</p><p>canonical Flow UUID or external inventory ID. Flow resolves external Rack IDs</p><p>before calling the event rule manager, whose scope representation always uses</p><p>canonical UUIDs.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>type</td>
+                  <td><a href="#v1.EventRuleScopeType">EventRuleScopeType</a></td>
+                  <td></td>
+                  <td><p>Required. SITE or RACK. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Canonical Flow Rack UUID. Valid only for RACK. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>External inventory Rack ID resolved by Flow. Valid only for RACK. </p></td>
                 </tr>
 
             </tbody>
@@ -3692,6 +3895,37 @@ backend applies the update. </p></td>
 
 
 
+        <h3 id="v1.GetEffectiveEventRuleForScopeRequest">GetEffectiveEventRuleForScopeRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Required. Must be an event type registered by Flow. </p></td>
+                </tr>
+
+                <tr>
+                  <td>scope</td>
+                  <td><a href="#v1.EventRuleScopeSelector">EventRuleScopeSelector</a></td>
+                  <td></td>
+                  <td><p>Required Site or Rack scope at which to resolve inheritance. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.GetEffectiveEventRuleRequest">GetEffectiveEventRuleRequest</h3>
         <p></p>
 
@@ -3722,6 +3956,90 @@ backend applies the update. </p></td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td></td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetEventHandlingRequest">GetEventHandlingRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Required. Must be an event type registered by Flow. </p></td>
+                </tr>
+
+                <tr>
+                  <td>resource_type</td>
+                  <td><a href="#v1.EventResourceType">EventResourceType</a></td>
+                  <td></td>
+                  <td><p>Required kind of resource whose handling history is requested. </p></td>
+                </tr>
+
+                <tr>
+                  <td>resource_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Required current public identifier of the resource. </p></td>
+                </tr>
+
+                <tr>
+                  <td>limit</td>
+                  <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p>Maximum records to return. Zero defaults to one; accepted range is 1-100. </p></td>
+                </tr>
+
+                <tr>
+                  <td>cursor</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Opaque continuation cursor returned by the previous response. Empty starts
+from the newest handling. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetEventHandlingResponse">GetEventHandlingResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>handlings</td>
+                  <td><a href="#v1.EventHandling">EventHandling</a></td>
+                  <td>repeated</td>
+                  <td><p>Handling records in descending handled_at and event UUID order. </p></td>
+                </tr>
+
+                <tr>
+                  <td>next_cursor</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Opaque continuation cursor. Empty means no more records remain. </p></td>
                 </tr>
 
             </tbody>
@@ -8071,6 +8389,58 @@ Defaults to &#34;UTC&#34;. Ignored for interval and one-time specs. </p></td>
 
 
 
+        <h3 id="v1.SetEventRuleOverrideRequest">SetEventRuleOverrideRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Required. Must be an event type registered by Flow. </p></td>
+                </tr>
+
+                <tr>
+                  <td>scope</td>
+                  <td><a href="#v1.EventRuleScopeSelector">EventRuleScopeSelector</a></td>
+                  <td></td>
+                  <td><p>Required Site or Rack policy slot to replace. </p></td>
+                </tr>
+
+                <tr>
+                  <td>name</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Required rule name. </p></td>
+                </tr>
+
+                <tr>
+                  <td>description</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Optional human-readable rule description. </p></td>
+                </tr>
+
+                <tr>
+                  <td>actions</td>
+                  <td><a href="#v1.EventRuleAction">EventRuleAction</a></td>
+                  <td>repeated</td>
+                  <td><p>Required event-rule actions. Event-specific validation applies. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.SetRuleAsDefaultRequest">SetRuleAsDefaultRequest</h3>
         <p></p>
 
@@ -9324,6 +9694,35 @@ Wire value 1 preserves backward compatibility with the former bool true (queue).
                 <td>DIFF_TYPE_MISMATCH</td>
                 <td>3</td>
                 <td><p>In both but with field differences</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.EventResourceType">EventResourceType</h3>
+        <p>EventResourceType identifies the inventory resource that emitted an event.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>EVENT_RESOURCE_TYPE_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_RESOURCE_TYPE_COMPONENT</td>
+                <td>1</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_RESOURCE_TYPE_RACK</td>
+                <td>2</td>
+                <td><p></p></td>
               </tr>
 
           </tbody>
@@ -10854,6 +11253,37 @@ When pagination is omitted, offset defaults to 0 and limit defaults to 100.</p><
                 <td><a href="#v1.DeleteEventRuleBindingRequest">DeleteEventRuleBindingRequest</a></td>
                 <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">.google.protobuf.Empty</a></td>
                 <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>SetEventRuleOverride</td>
+                <td><a href="#v1.SetEventRuleOverrideRequest">SetEventRuleOverrideRequest</a></td>
+                <td><a href="#v1.EventRule">EventRule</a></td>
+                <td><p>Atomically creates or replaces the override in one event-type and scope
+slot, regardless of which client or API created the existing rule.</p></td>
+              </tr>
+
+              <tr>
+                <td>GetEffectiveEventRuleForScope</td>
+                <td><a href="#v1.GetEffectiveEventRuleForScopeRequest">GetEffectiveEventRuleForScopeRequest</a></td>
+                <td><a href="#v1.EventRule">EventRule</a></td>
+                <td><p>Returns the effective enabled rule for one Site or Rack scope.</p></td>
+              </tr>
+
+              <tr>
+                <td>DeleteEventRuleOverride</td>
+                <td><a href="#v1.DeleteEventRuleOverrideRequest">DeleteEventRuleOverrideRequest</a></td>
+                <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">.google.protobuf.Empty</a></td>
+                <td><p>Idempotently removes the override in one event-type and scope slot.</p></td>
+              </tr>
+
+              <tr>
+                <td>GetEventHandling</td>
+                <td><a href="#v1.GetEventHandlingRequest">GetEventHandlingRequest</a></td>
+                <td><a href="#v1.GetEventHandlingResponse">GetEventHandlingResponse</a></td>
+                <td><p>Returns event-rule handling records for one resource and event type.
+Results are ordered by handling time then event ID, descending, and use
+an opaque cursor for pagination. Limit defaults to one.</p></td>
               </tr>
 
               <tr>

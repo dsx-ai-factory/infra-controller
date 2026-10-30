@@ -91,8 +91,9 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 					Runtime:    eventrulescheduler.DefaultRuntimeConfig(),
 					Policy:     eventrulescheduler.DefaultPolicyConfig(),
 				},
-				Inventory:   inventory,
-				TaskManager: tasks,
+				Inventory:      inventory,
+				TaskManager:    tasks,
+				HandlingReader: emptyHandlingReader{},
 			})
 			require.NoError(t, err)
 
@@ -144,6 +145,19 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 			}, 100*time.Millisecond, time.Millisecond)
 		})
 	}
+}
+
+type emptyHandlingReader struct{}
+
+func (emptyHandlingReader) GetEventHandling(
+	context.Context,
+	eventrule.Type,
+	eventrule.ResourceKind,
+	uuid.UUID,
+	int,
+	*eventrule.HandlingCursor,
+) ([]eventrule.Handling, bool, error) {
+	return nil, false, nil
 }
 
 func leakageRule(strategy eventrule.TargetStrategy) eventrule.RuleCreate {
