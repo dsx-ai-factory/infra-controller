@@ -246,9 +246,9 @@ pub(crate) struct CapSeries<'a> {
 
 /// Joins count, time and capability samples on `(source, timestamp)`. A
 /// point needs a sweep end, a sweep start and a process start; a missing
-/// count series is 0. Counts add up in integers: every sample, and every
-/// sum, is a whole number from 0 to [`MAX_COUNT`], or the store is not
-/// showing the probe's series.
+/// count series is 0, as `Plan::fetch` reads counts after times. Counts
+/// add up in integers: every sample, and every sum, is a whole number from
+/// 0 to [`MAX_COUNT`], or the store is not showing the probe's series.
 pub(crate) fn join_points(
     counts: &[RawSeries],
     count_dims: &[&str],
@@ -943,7 +943,12 @@ struct Plan<'a> {
 }
 
 impl Plan<'_> {
-    /// Fetches `(at - range, at]` of every selector.
+    /// Fetches `(at - range, at]` of every selector. Sweep times come
+    /// first: a scrape lands in the store whole, so one whose times this
+    /// read sees is whole by the count and flag reads after it, and a count
+    /// missing there is a 0, never a scrape still landing. A scrape that
+    /// lands between the reads shows a count but no times, so it is not a
+    /// point until a later fetch reads its times.
     async fn fetch(
         &mut self,
         at: SystemTime,
@@ -954,12 +959,12 @@ impl Plan<'_> {
         let budget = self.state.sample_budget;
         self.count.range = range;
         self.times.range = range;
-        let reply = store.raw(&self.count, at).await.map_err(store_error)?;
-        let reply = into.admit(reply, budget)?;
-        merge(&mut into.counts, reply);
         let reply = store.raw(&self.times, at).await.map_err(store_error)?;
         let reply = into.admit(reply, budget)?;
         merge(&mut into.times, reply);
+        let reply = store.raw(&self.count, at).await.map_err(store_error)?;
+        let reply = into.admit(reply, budget)?;
+        merge(&mut into.counts, reply);
         into.caps.resize_with(self.caps.len(), BTreeMap::new);
         for (i, (query, _, _)) in self.caps.iter_mut().enumerate() {
             query.range = range;
@@ -2687,6 +2692,90 @@ mod tests {
         // The only scrape after the end lands 2.75 s after the request,
         // between two polls 2.5 s apart.
         final_poll_finds(|site| site.scrape(2.75, 2.0, -5.3, &[])).await;
+    }
+
+    /// The fake store, plus one scrape that becomes queryable right after
+    /// the `after`-th request whose query time is at or after it.
+    struct Landing {
+        store: Arc<FakeStore>,
+        scrape: Arc<FakeStore>,
+        scrape_ms: i64,
+        after: usize,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl MetricsStore for Landing {
+        async fn raw(
+            &self,
+            query: &RawQuery,
+            at: SystemTime,
+        ) -> Result<Vec<RawSeries>, StoreError> {
+            use std::sync::atomic::Ordering;
+            let landed = self.reads.load(Ordering::SeqCst) >= self.after;
+            let mut series: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>> =
+                BTreeMap::new();
+            let mut replies = vec![self.store.raw(query, at).await?];
+            if landed {
+                replies.push(self.scrape.raw(query, at).await?);
+            }
+            for reply in replies {
+                for s in reply {
+                    series.entry(s.labels).or_default().extend(s.samples);
+                }
+            }
+            if millis(at) >= self.scrape_ms {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(flatten(&series))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_poll_reads_a_scrape_landing_between_two_requests() {
+        // The only scrape after the end shows count 2 and lands between two
+        // requests of one poll, or between two polls: its count is read
+        // with its times, never as 0, and is never a second count of a
+        // sweep seen before the end.
+        for (after, seen_before) in [(1, false), (1, true), (2, false), (2, true)] {
+            let landing = site();
+            let mut site = site();
+            site.scrape(-40.3, 1.0, -45.0, &[]);
+            if seen_before {
+                site.scrape(-1.3, 2.0, -5.3, &[]);
+            }
+            landing.scrape(2.75, 2.0, -5.3, &[]);
+            let cfg = MetricsStoreConfig {
+                selector: site.state.selector.iter().cloned().collect(),
+                ..MetricsStoreConfig::default()
+            };
+            let store = Landing {
+                store: Arc::clone(&site.store),
+                scrape: Arc::clone(&landing.store),
+                scrape_ms: site.ms(2.75),
+                after,
+                reads: Default::default(),
+            };
+            site.state = SummaryState::new(Arc::new(store), &cfg, Arc::clone(&site.state.clock));
+            let reply = summarize(
+                &site.state,
+                &spec(READY),
+                &site.params(-60.3, -0.3, 0, 2, Direction::Up),
+                INTERVAL,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("after {after}, seen {seen_before}: {err:?}"));
+            assert!(reply.final_scrape_seen, "after {after}, seen {seen_before}");
+            assert_eq!(
+                reply.final_count,
+                Some(2),
+                "after {after}, seen {seen_before}"
+            );
+            assert_eq!(
+                reply.crossings[0].reached_at,
+                Some(DateTime::<Utc>::from(site.at(-5.3)))
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

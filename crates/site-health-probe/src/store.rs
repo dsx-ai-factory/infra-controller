@@ -18,7 +18,9 @@
 //! The metrics store `/v1/summary` reads the probe's own series back from:
 //! any Prometheus-compatible store with the instant query API. A range
 //! selector in an instant query returns the raw samples, so the summary sees
-//! every scrape, not a resampled curve.
+//! every scrape, not a resampled curve. The summary also needs the store to
+//! make each scrape queryable whole, as Prometheus does, and never to hide
+//! a sample one query already returned.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
