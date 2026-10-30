@@ -26,6 +26,24 @@ global:
 namespaceOverride: ""
 
 replicas: 2
+
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline. The chart default adds SYS_PTRACE.
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it.
+## nico-dns binds port 53, which restricted-v2 only allows with an explicit
+## NET_BIND_SERVICE capability (it permits that one). Helm merges maps but
+## replaces lists, so an override setting other fields still keeps the default
+## capabilities.add — replace the list explicitly (or null it to drop it):
+##   containerSecurityContext:
+##     capabilities:
+##       add: [NET_BIND_SERVICE]   # or `add: null` plus a lower service port
+## Set the whole value to null only when combined with an unprivileged
+## service.targetPort (see below); the baseline is still applied.
+containerSecurityContext:
+  capabilities:
+    add:
+      - SYS_PTRACE
+
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-dns.name" . }}, {{ include "nico-dns.name" . }}-config'
 
@@ -34,6 +52,14 @@ annotations:
 listenAddress: "[::]:53"
 
 service:
+  # Allow configuring a different targetPort (e.g. 5353 when running as
+  # unprivileged user under OpenShift restricted-v2 SCC). Applies to the
+  # cluster-internal Service and the per-pod external LoadBalancer Services.
+  # ⚠ The Services route to the container port; the listener itself is set by
+  # listenAddress above — when changing targetPort, change listenAddress to
+  # match (e.g. targetPort: 5353 + listenAddress: "[::]:5353"), or traffic is
+  # sent to a port where nico-dns is not listening.
+  targetPort: null  # defaults to the service port when null
   ports:
     - port: 53
       name: tcp

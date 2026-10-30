@@ -45,6 +45,29 @@ legacyAlias:
 
 replicas: 1
 
+## Pod-level security context. The artifact init containers need root to copy
+## from their images; only the serving container runs as UID/GID 10001. The
+## final artifact init container chgrps the blobs to this fsGroup (default
+## 10001) so the restrictive source modes stay readable by the serving
+## container. On OpenShift, restricted SCCs assign fsGroup from the namespace
+## range; keep the value aligned with containerSecurityContext above when
+## overriding. Null drops the pod securityContext entirely.
+podSecurityContext:
+  fsGroup: 10001
+
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline. The chart default keeps the
+## non-root UID/GID; OpenShift's restricted Security Context Constraints (SCC)
+## assign UIDs from the namespace range, so override there:
+##   containerSecurityContext:
+##     runAsNonRoot: true
+##     runAsUser: null
+##     runAsGroup: null
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+
 ## Soft open-file limit applied before startup. Clamped to the runtime hard
 ## limit when it exceeds it. null falls back to 65536; non-null values must be
 ## a positive integer (validated at render).

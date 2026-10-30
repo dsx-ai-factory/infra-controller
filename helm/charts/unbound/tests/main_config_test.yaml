@@ -1,0 +1,50 @@
+suite: unbound mainConfig mount (unbound.mainConfig)
+templates:
+  - deployment.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: omits the main-config volume and mount when mainConfig is empty (default)
+    set:
+      image:
+        repository: registry.example/unbound
+        tag: "1.0"
+      exporter:
+        enabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers[0].volumeMounts
+          count: 2
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+
+  - it: mounts mainConfig at /etc/unbound/main.cfg when set
+    set:
+      image:
+        repository: registry.example/unbound
+        tag: "1.0"
+      exporter:
+        enabled: false
+      unbound:
+        mainConfig: |
+          server:
+              interface: 0.0.0.0@5353
+              chroot: ""
+              username: ""
+              pidfile: ""
+          include: "/etc/unbound/local.conf.d/*.conf"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: main-config
+            mountPath: /etc/unbound/main.cfg
+            subPath: unbound.cfg
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: main-config
+            configMap:
+              name: unbound-local-config
