@@ -3375,6 +3375,21 @@ impl PreingestionManagerStatic {
             }
         };
 
+        // Re-ingested XCC hosts may retain firmware lockdown from their
+        // previous lifecycle. HostInit restores policy after pre-ingestion.
+        if endpoint_clone.report.vendor == Some(bmc_vendor::BMCVendor::Lenovo)
+            && let Err(error) = redfish_client
+                .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
+                .await
+        {
+            tracing::warn!(
+                bmc_ip_address = %endpoint_clone.address,
+                %error,
+                "Failed to unlock Lenovo firmware updates; upload deferred"
+            );
+            return Ok(false);
+        }
+
         tracing::debug!(
             bmc_ip_address = %endpoint_clone.address,
             "Started firmware upload"

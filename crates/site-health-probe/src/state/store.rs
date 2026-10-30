@@ -100,6 +100,10 @@ pub(crate) struct SnapshotStore {
     /// waiting for it, for tests that need to see a lookup blocked.
     #[cfg(test)]
     lock_contended: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Runs after a lookup by ID found its snapshot, outside the lock, for
+    /// tests that expire it before the caller uses it.
+    #[cfg(test)]
+    pub(crate) after_lookup: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl SnapshotStore {
@@ -116,6 +120,8 @@ impl SnapshotStore {
             mid_publish: Mutex::new(None),
             #[cfg(test)]
             lock_contended: Mutex::new(None),
+            #[cfg(test)]
+            after_lookup: Mutex::new(None),
         }
     }
 
@@ -142,18 +148,35 @@ impl SnapshotStore {
     /// The snapshot `snapshot_id` of `family`: the current one, or a replaced
     /// one still within its keep time. `None` once it expired.
     pub(crate) fn by_id(&self, family: Family, snapshot_id: &str) -> Option<Arc<dyn AnySnapshot>> {
-        let mut snapshots = self.snapshots(family);
-        if let Some(current) = &snapshots.current
-            && current.meta().snapshot_id() == snapshot_id
+        let found = {
+            let mut snapshots = self.snapshots(family);
+            match &snapshots.current {
+                Some(current) if current.meta().snapshot_id() == snapshot_id => {
+                    Some(Arc::clone(current))
+                }
+                _ => {
+                    self.expire(&mut snapshots.superseded);
+                    snapshots
+                        .superseded
+                        .iter()
+                        .find(|(snap, _)| snap.meta().snapshot_id() == snapshot_id)
+                        .map(|(snap, _)| Arc::clone(snap))
+                }
+            }
+        };
+        #[cfg(test)]
+        if found.is_some()
+            && let Some(hook) = self.after_lookup.lock().unwrap().as_ref()
         {
-            return Some(Arc::clone(current));
+            hook();
         }
-        self.expire(&mut snapshots.superseded);
-        snapshots
-            .superseded
-            .iter()
-            .find(|(snap, _)| snap.meta().snapshot_id() == snapshot_id)
-            .map(|(snap, _)| Arc::clone(snap))
+        found
+    }
+
+    /// Drops every kept snapshot of `family`, as their expiry would.
+    #[cfg(test)]
+    pub(crate) fn drop_kept(&self, family: Family) {
+        self.snapshots(family).superseded.clear();
     }
 
     /// How many replaced snapshots of `family` are kept.

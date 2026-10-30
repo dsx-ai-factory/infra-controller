@@ -3512,6 +3512,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "carbide-rpc",
  "carbide-site-health-probe-api",
  "carbide-test-support",
@@ -3525,15 +3526,18 @@ dependencies = [
  "metrics-endpoint",
  "opentelemetry 0.32.0",
  "prometheus",
+ "regex",
  "reqwest 0.13.4",
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-util",
  "tonic",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -7199,7 +7203,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.19#e42f2c515e7fb1f71fbecf88b5889a155ee23e03"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.22#6ab23d1e5d24c8e7812beec44bd5907cadd4cbae"
 dependencies = [
  "chrono",
  "clap",

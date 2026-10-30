@@ -24,6 +24,11 @@
     not(test),
     expect(dead_code, reason = "the state readers are wired in later")
 )]
+mod api;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
 mod census;
 #[cfg_attr(
     not(test),
@@ -47,7 +52,10 @@ mod probes;
     expect(dead_code, reason = "the state readers are wired in later")
 )]
 mod readers;
-#[expect(dead_code, reason = "the state readers are wired in later")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
 mod rest;
 #[expect(dead_code, reason = "the state readers are wired in later")]
 mod snapshot;
@@ -55,6 +63,13 @@ mod snapshot;
 mod state;
 #[expect(dead_code, reason = "the state readers are wired in later")]
 mod state_metrics;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
+mod store;
+#[expect(dead_code, reason = "the state readers are wired in later")]
+mod summary;
 
 use std::sync::Arc;
 

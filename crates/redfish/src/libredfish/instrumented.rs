@@ -284,6 +284,7 @@ impl Redfish for InstrumentedRedfish {
         fn is_bios_setup<'a>(&'a self, boot_interface: Option<BootInterfaceRef<'a>>) -> bool;
         fn set_machine_password_policy<'a>(&'a self) -> ();
         fn lockdown<'a>(&'a self, target: EnabledDisabled) -> ();
+        fn lockdown_has_boot_latched_controls<'a>(&'a self) -> bool;
         fn lockdown_status<'a>(&'a self) -> Status;
         fn setup_serial_console<'a>(&'a self) -> ();
         fn serial_console_status<'a>(&'a self) -> Status;
@@ -430,6 +431,18 @@ impl Redfish for InstrumentedRedfish {
         ))
     }
 
+    fn enable_ipmi_account_access<'a>(
+        &'a self,
+        account_id: &'a str,
+        password: &'a str,
+    ) -> RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(self.instrumented_redfish(
+            "enable_ipmi_account_access",
+            [password],
+            self.inner.enable_ipmi_account_access(account_id, password),
+        ))
+    }
+
     fn create_user<'a>(
         &'a self,
         username: &'a str,
@@ -500,6 +513,31 @@ mod tests {
             .await
             .expect("sim client");
         InstrumentedRedfish::new(client, Vec::new())
+    }
+
+    #[tokio::test]
+    async fn boot_latched_lockdown_capability_is_delegated_without_caching() {
+        let sim = RedfishSim::default();
+        let client = sim_client(&sim).await;
+        for required in [false, true] {
+            sim.set_lockdown_has_boot_latched_controls(required);
+            assert_eq!(
+                client.lockdown_has_boot_latched_controls().await.unwrap(),
+                required
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ipmi_account_access_is_delegated() {
+        let sim = RedfishSim::default();
+        sim.seed_user("1", "site_pass");
+        let client = sim_client(&sim).await;
+        client
+            .enable_ipmi_account_access("1", "site_pass")
+            .await
+            .unwrap();
+        assert!(sim.ipmi_account_access_enabled("1"));
     }
 
     #[tokio::test]
