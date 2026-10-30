@@ -65,6 +65,8 @@ type APIClient struct {
 
 	DomainAPI *DomainAPIService
 
+	EventAPI *EventAPIService
+
 	ExpectedMachineAPI *ExpectedMachineAPIService
 
 	ExpectedPowerShelfAPI *ExpectedPowerShelfAPIService
@@ -171,6 +173,7 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.DPUExtensionServiceAPI = (*DPUExtensionServiceAPIService)(&c.common)
 	c.DPUMachineAPI = (*DPUMachineAPIService)(&c.common)
 	c.DomainAPI = (*DomainAPIService)(&c.common)
+	c.EventAPI = (*EventAPIService)(&c.common)
 	c.ExpectedMachineAPI = (*ExpectedMachineAPIService)(&c.common)
 	c.ExpectedPowerShelfAPI = (*ExpectedPowerShelfAPIService)(&c.common)
 	c.ExpectedRackAPI = (*ExpectedRackAPIService)(&c.common)

@@ -168,6 +168,20 @@ var reservedBodyFlagNames = map[string]bool{
 // commandPathAliases adds concise aliases for generated commands. The original
 // generated paths remain available for compatibility.
 var commandPathAliases = map[string][]string{
+	"get-all-event-policy":                              {"event", "policy", "list"},
+	"create-event-policy":                               {"event", "policy", "create"},
+	"get-event-policy":                                  {"event", "policy", "get"},
+	"update-event-policy":                               {"event", "policy", "update"},
+	"delete-event-policy":                               {"event", "policy", "delete"},
+	"get-all-event-policy-binding":                      {"event", "policy", "binding", "list"},
+	"get-site-event-policy-binding":                     {"event", "policy", "binding", "site", "get"},
+	"put-site-event-policy-binding":                     {"event", "policy", "binding", "site", "put"},
+	"delete-site-event-policy-binding":                  {"event", "policy", "binding", "site", "delete"},
+	"get-rack-event-policy-binding":                     {"event", "policy", "binding", "rack", "get"},
+	"put-rack-event-policy-binding":                     {"event", "policy", "binding", "rack", "put"},
+	"delete-rack-event-policy-binding":                  {"event", "policy", "binding", "rack", "delete"},
+	"get-all-event-handling":                            {"event", "handling", "list"},
+	"get-all-event-handling-task":                       {"event", "handling", "task", "list"},
 	"get-machine-spectrumx-multiplane":                  {"machine", "spectrumx-multiplane", "get"},
 	"update-machine-spectrumx-multiplane":               {"machine", "spectrumx-multiplane", "update"},
 	"bringup-rack":                                      {"rack", "bringup"},
@@ -624,7 +638,9 @@ func detectPrimaryResource(ops []resolvedOp) string {
 	best := ""
 	bestCount := 0
 	for suffix, count := range counts {
-		if count > bestCount || (count == bestCount && len(suffix) < len(best)) {
+		// Equal-count, equal-length resources must not let map iteration choose
+		// different command paths on each invocation.
+		if count > bestCount || (count == bestCount && (len(suffix) < len(best) || (len(suffix) == len(best) && suffix < best))) {
 			bestCount = count
 			best = suffix
 		}

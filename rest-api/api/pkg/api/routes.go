@@ -1264,6 +1264,77 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteTaskRuleHandler(dbSession, tc, scp, cfg),
 		},
+		{
+			Path:    apiPathPrefix + "/event/policy",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllEventPolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateEventPolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/binding",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllEventPolicyBindingHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/binding/site",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetSiteEventPolicyBindingHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/binding/site",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewPutSiteEventPolicyBindingHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/binding/site",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteSiteEventPolicyBindingHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/binding/rack/:rackId",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetRackEventPolicyBindingHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/binding/rack/:rackId",
+			Method:  http.MethodPut,
+			Handler: apiHandler.NewPutRackEventPolicyBindingHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/binding/rack/:rackId",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteRackEventPolicyBindingHandler(dbSession, scp, cfg),
+		},
+
+		{
+			Path:    apiPathPrefix + "/event/policy/:policyId",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetEventPolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/:policyId",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateEventPolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/policy/:policyId",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteEventPolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/handling/task",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllEventHandlingTaskHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/event/handling",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllEventHandlingHandler(dbSession, scp, cfg),
+		},
 		// Run endpoints (Flow). A run is a phased, policy-gated execution of
 		// one operation across many racks; Flow calls it an operation run.
 		{

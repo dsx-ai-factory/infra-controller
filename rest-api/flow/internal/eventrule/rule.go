@@ -72,6 +72,7 @@ type RuleMetadata struct {
 
 // RuleCreate contains the caller-provided fields for a persisted rule.
 type RuleCreate struct {
+	Enabled   bool
 	Metadata  RuleMetadata
 	EventType Type
 	Policy    Policy
@@ -180,6 +181,42 @@ type Binding struct {
 	RuleID    uuid.UUID
 	EventType Type
 	Scope     Scope
+}
+
+// BindingPutResult reports the saved assignment and whether its scope slot was created.
+type BindingPutResult struct {
+	Binding *Binding
+	Created bool
+}
+
+// BindingListRequest filters explicit assignments before deterministic pagination.
+// Empty selectors impose no constraint; disabled policies' bindings are included.
+type BindingListRequest struct {
+	EventType Type
+	RuleID    uuid.UUID
+	ScopeType ScopeType
+	RackID    uuid.UUID
+	Offset    int
+	Limit     int
+}
+
+// Validate checks scope selectors and pagination bounds.
+func (q BindingListRequest) Validate() error {
+	if q.EventType != "" {
+		err := q.EventType.Validate()
+		if err != nil {
+			return err
+		}
+	}
+	switch q.ScopeType {
+	case "", ScopeTypeSite, ScopeTypeRack:
+	default:
+		return fmt.Errorf("unknown binding scope type %q", q.ScopeType)
+	}
+	if q.ScopeType == ScopeTypeSite && q.RackID != uuid.Nil {
+		return fmt.Errorf("rack ID cannot be combined with Site scope")
+	}
+	return (RuleListRequest{Offset: q.Offset, Limit: q.Limit}).Validate()
 }
 
 // Validate checks binding identity, event type, and scope.

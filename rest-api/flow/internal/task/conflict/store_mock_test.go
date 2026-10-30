@@ -11,6 +11,7 @@ import (
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
+	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 )
 
@@ -18,6 +19,7 @@ import (
 // conflict package tests. Only the methods exercised by this package are
 // functional; the rest panic to catch unexpected calls.
 type mockStore struct {
+	taskstore.Store
 	activeTasks      map[uuid.UUID][]*taskdef.Task
 	waitingTasks     map[uuid.UUID][]*taskdef.Task
 	racksWithWaiting []uuid.UUID

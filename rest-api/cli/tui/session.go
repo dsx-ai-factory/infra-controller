@@ -115,6 +115,7 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("tray", s.fetchTrays)
 	s.Resolver.RegisterFetcher("ipxe-template", s.fetchIPXETemplates)
 	s.Resolver.RegisterFetcher("rule", s.fetchRules)
+	s.Resolver.RegisterFetcher("event-policy", s.fetchEventPolicies)
 	s.Resolver.RegisterFetcher("task-run", s.fetchRuns)
 	s.Resolver.RegisterFetcher("vpc-peering", s.fetchVPCPeerings)
 	s.Resolver.RegisterFetcher("tenant", s.fetchTenants)
@@ -1129,6 +1130,44 @@ func (s *Session) fetchRulesForSite(ctx context.Context, siteID string) ([]Named
 				"operationCode": str(m, "operationCode"),
 			},
 			Raw: m,
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchEventPolicies(ctx context.Context) ([]NamedItem, error) {
+	siteID := strings.TrimSpace(s.Scope.SiteID)
+	if siteID == "" {
+		return nil, fmt.Errorf("select a site before resolving an event policy")
+	}
+	return s.fetchEventPoliciesForSite(ctx, siteID)
+}
+
+func (s *Session) fetchEventPoliciesForSite(ctx context.Context, siteID string) ([]NamedItem, error) {
+	items, err := s.fetchAll(ctx, apiPath(s, "event/policy"), map[string]string{"siteId": siteID})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NamedItem, len(items))
+	for i, m := range items {
+		id := str(m, "id")
+		name := strings.TrimSpace(str(m, "name"))
+		if name == "" {
+			name = id
+		}
+		enabled, _ := m["enabled"].(bool)
+		readOnly, _ := m["readOnly"].(bool)
+		status := "Disabled"
+		if enabled {
+			status = "Enabled"
+		}
+		if readOnly {
+			status += ", Read-only"
+		}
+		result[i] = NamedItem{
+			Name: name, ID: id, Status: id + "; " + status,
+			Extra: map[string]string{"siteId": siteID, "eventType": str(m, "eventType")},
+			Raw:   m,
 		}
 	}
 	return result, nil

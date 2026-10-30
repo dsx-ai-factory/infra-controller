@@ -28,6 +28,7 @@ var generatedBodySessionResourceTypes = map[string]struct{}{
 	"health-report-source":          {},
 	"instance-type-machine":         {},
 	"rule":                          {},
+	"event-policy":                  {},
 }
 
 func (terminalGeneratedBodyFormPrompter) Text(label string, required bool) (string, error) {

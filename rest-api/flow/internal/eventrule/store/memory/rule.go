@@ -45,6 +45,16 @@ func (s *Store) List(
 		if err != nil {
 			return eventrule.RuleListPage{}, err
 		}
+		bound := false
+		for _, binding := range s.bindings {
+			if binding.RuleID == rule.ID {
+				bound = true
+				break
+			}
+		}
+		if request.Filter.Bound != nil && *request.Filter.Bound != bound {
+			continue
+		}
 		if request.Filter.Matches(rule) {
 			rules = append(rules, rule)
 		}
@@ -92,47 +102,19 @@ func (s *Store) Create(
 	return &canonical, nil
 }
 
-// UpdateMetadata updates one persisted rule's metadata.
-func (s *Store) UpdateMetadata(
-	_ context.Context,
-	id uuid.UUID,
-	metadata eventrule.RuleMetadata,
-) error {
-	return s.updateRule(id, func(rule *eventrule.Rule) {
-		rule.Name = metadata.Name
-		rule.Description = metadata.Description
-	})
-}
-
-// ReplaceActions replaces all actions belonging to one persisted rule.
-func (s *Store) ReplaceActions(
-	_ context.Context,
-	id uuid.UUID,
-	actions []eventrule.Action,
-) error {
-	return s.updateRule(id, func(rule *eventrule.Rule) {
-		rule.Actions = eventrule.CloneActions(actions)
-	})
-}
-
-// Delete atomically deletes a persisted rule and all of its bindings.
+// Delete rejects a policy with any explicit assignment.
 func (s *Store) Delete(_ context.Context, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if _, ok := s.rules[id]; !ok {
-		return fmt.Errorf("%w: %s", eventrule.ErrRuleNotFound, id)
+		return eventrule.ErrRuleNotFound
 	}
-	bindingIDs := make([]uuid.UUID, 0)
-	for bindingID, persisted := range s.bindings {
-		if persisted.RuleID == id {
-			bindingIDs = append(bindingIDs, bindingID)
+	for _, binding := range s.bindings {
+		if binding.RuleID == id {
+			return fmt.Errorf("%w: policy still has bindings", eventrule.ErrBindingConflict)
 		}
 	}
 	delete(s.rules, id)
-	for _, bindingID := range bindingIDs {
-		delete(s.bindings, bindingID)
-	}
 	return nil
 }
 
@@ -161,27 +143,5 @@ func (s *Store) SetEnabled(_ context.Context, id uuid.UUID, enabled bool) error 
 	}
 	s.rules[id] = *updated
 
-	return nil
-}
-
-func (s *Store) updateRule(id uuid.UUID, mutate func(*eventrule.Rule)) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	persisted, ok := s.rules[id]
-	if !ok {
-		return fmt.Errorf("%w: %s", eventrule.ErrRuleNotFound, id)
-	}
-	rule, err := converterdao.EventRuleFrom(&persisted)
-	if err != nil {
-		return err
-	}
-	mutate(rule)
-	rule.UpdatedAt = s.now().UTC()
-	updated, err := converterdao.EventRuleTo(rule)
-	if err != nil {
-		return err
-	}
-	s.rules[id] = *updated
 	return nil
 }

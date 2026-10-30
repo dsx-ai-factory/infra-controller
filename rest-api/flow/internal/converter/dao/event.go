@@ -6,6 +6,7 @@ package dao
 import (
 	"fmt"
 
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	eventrulecodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
@@ -29,9 +30,11 @@ func EventTo(event *eventrule.Event) (*dbmodel.Event, error) {
 		EventType:       string(event.Type),
 		ResourceID:      event.Resource.ID,
 		ResourceKind:    string(event.Resource.Kind),
+		RackID:          cutil.GetPtrIfNotZero(event.RackID),
 		AppliedRuleID:   event.AppliedRuleID,
 		EffectivePolicy: policy,
 		Summary:         event.Summary,
+		FirstObservedAt: cutil.GetPtrIfNotZero(event.FirstObservedAt),
 		Observations:    event.Observations,
 		CreatedAt:       event.CreatedAt,
 		LastObservedAt:  event.LastObservedAt,
@@ -60,11 +63,15 @@ func EventFrom(persisted *dbmodel.Event) (*eventrule.Event, error) {
 		AppliedRuleID:   persisted.AppliedRuleID,
 		EffectivePolicy: policy,
 		Summary:         persisted.Summary,
+		FirstObservedAt: optionalTimeFromPersistence(persisted.FirstObservedAt),
 		Observations:    persisted.Observations,
 		CreatedAt:       timeFromPersistence(persisted.CreatedAt),
 		LastObservedAt:  timeFromPersistence(persisted.LastObservedAt),
 	}
 
+	if persisted.RackID != nil {
+		event.RackID = *persisted.RackID
+	}
 	if err := event.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", eventrule.ErrInvalidPersistedEvent, err)
 	}

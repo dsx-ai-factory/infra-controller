@@ -318,6 +318,14 @@ func TestDetectPrimaryResource(t *testing.T) {
 			want: "allocation",
 		},
 		{
+			name: "equal count and length use lexical order",
+			opIDs: []string{
+				"get-tray", "delete-tray",
+				"get-rack", "delete-rack",
+			},
+			want: "rack",
+		},
+		{
 			name: "instance wins with more operations",
 			opIDs: []string{
 				"get-all-instance", "create-instance", "get-instance", "update-instance", "delete-instance",
@@ -2312,6 +2320,7 @@ func testNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
 	}
 }
 
+// TestNewApp covers the generated command tree and its REST requests.
 func TestNewApp(t *testing.T) {
 	clearAllNicoEnv(t)
 	previousConfigPath := configOverridePath
@@ -2338,7 +2347,7 @@ func TestNewApp(t *testing.T) {
 		{name: "site bootstrap command", run: testNewAppIncludesSiteBootstrapCommand},
 		{name: "preserves repeated query flags", run: testNewAppPreservesRepeatedQueryFlags},
 		{name: "preserves repeated filters across pages", run: testNewAppListAllPreservesRepeatedFilters},
-		{name: "power commands", run: testNewAppPowerCommands},
+		{name: "power and event requests", run: testNewAppPowerAndEventRequests},
 		{
 			name: "array enum values in help",
 			run:  testNewAppArrayEnumHelp,
@@ -2350,7 +2359,7 @@ func TestNewApp(t *testing.T) {
 	}
 }
 
-func testNewAppPowerCommands(t *testing.T) {
+func testNewAppPowerAndEventRequests(t *testing.T) {
 	const siteID = "550e8400-e29b-41d4-a716-446655440000"
 	const trayID = "aa:bb:cc:dd:ee:ff"
 	tests := []struct {
@@ -2358,9 +2367,9 @@ func testNewAppPowerCommands(t *testing.T) {
 		command   []string
 		args      []string
 		method    string
+		wantPath  string
 		wantQuery string
 		wantBody  string
-		wantPath  string
 	}{
 		{
 			// The OpenAPI getter must produce an executable command with a
@@ -2369,8 +2378,8 @@ func testNewAppPowerCommands(t *testing.T) {
 			command:   []string{"tray", "power-state", "get"},
 			args:      []string{"--site-id", siteID, trayID},
 			method:    http.MethodGet,
+			wantPath:  "/tray/" + trayID + "/power",
 			wantQuery: "siteId=" + siteID,
-			wantPath:  "/v2/org/test-org/nico/tray/" + trayID + "/power",
 		},
 		{
 			// Adding a getter at the same REST path must preserve the
@@ -2379,8 +2388,8 @@ func testNewAppPowerCommands(t *testing.T) {
 			command:  []string{"tray", "power"},
 			args:     []string{"--site-id", siteID, "--state", "On", trayID},
 			method:   http.MethodPatch,
+			wantPath: "/tray/" + trayID + "/power",
 			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
-			wantPath: "/v2/org/test-org/nico/tray/" + trayID + "/power",
 		},
 		{
 			// The rack getter must execute the new operation from the embedded OpenAPI spec.
@@ -2389,7 +2398,7 @@ func testNewAppPowerCommands(t *testing.T) {
 			args:      []string{"--site-id", siteID, "rack-01"},
 			method:    http.MethodGet,
 			wantQuery: "siteId=" + siteID,
-			wantPath:  "/v2/org/test-org/nico/rack/rack-01/power",
+			wantPath:  "/rack/rack-01/power",
 		},
 		{
 			// The existing rack power alias must keep sending PATCH after GET is added.
@@ -2398,7 +2407,64 @@ func testNewAppPowerCommands(t *testing.T) {
 			args:     []string{"--site-id", siteID, "--state", "On", "rack-01"},
 			method:   http.MethodPatch,
 			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
-			wantPath: "/v2/org/test-org/nico/rack/rack-01/power",
+			wantPath: "/rack/rack-01/power",
+		},
+		{
+			name: "list event policies", command: []string{"event", "policy", "list"},
+			args: []string{"--site-id", siteID}, method: http.MethodGet,
+			wantPath: "/event/policy", wantQuery: "siteId=" + siteID,
+		},
+		{
+			name: "list all event bindings", command: []string{"event", "policy", "binding", "list"},
+			args: []string{"--site-id", siteID}, method: http.MethodGet,
+			wantPath: "/event/policy/binding", wantQuery: "siteId=" + siteID,
+		},
+		{
+			name: "list Rack event bindings", command: []string{"event", "policy", "binding", "list"},
+			args: []string{"--site-id", siteID, "--scope-type", "Rack", "--event-type", "hardware.leak.detected", "--policy-id", siteID}, method: http.MethodGet,
+			wantPath: "/event/policy/binding", wantQuery: "eventType=hardware.leak.detected&policyId=" + siteID + "&scopeType=Rack&siteId=" + siteID,
+		},
+		{
+			name: "read Site event binding", command: []string{"event", "policy", "binding", "site", "get"},
+			args: []string{"--site-id", siteID, "--event-type", "hardware.leak.detected"}, method: http.MethodGet,
+			wantPath: "/event/policy/binding/site", wantQuery: "eventType=hardware.leak.detected&siteId=" + siteID,
+		},
+		{
+			name: "delete Site binding", command: []string{"event", "policy", "binding", "site", "delete"},
+			args: []string{"--site-id", siteID, "--event-type", "hardware.leak.detected"}, method: http.MethodDelete,
+			wantPath: "/event/policy/binding/site", wantQuery: "eventType=hardware.leak.detected&siteId=" + siteID,
+		},
+		{
+			name:     "assign Site event policy",
+			command:  []string{"event", "policy", "binding", "site", "put"},
+			args:     []string{"--site-id", siteID, "--event-type", "hardware.leak.detected", "--policy-id", siteID},
+			method:   http.MethodPut,
+			wantPath: "/event/policy/binding/site",
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","eventType":"hardware.leak.detected","policyId":"550e8400-e29b-41d4-a716-446655440000"}`,
+		},
+		{
+			name:     "Rack event binding body scope and path ID",
+			command:  []string{"event", "policy", "binding", "rack", "put"},
+			args:     []string{"--site-id", siteID, "--event-type", "hardware.leak.detected", "--policy-id", siteID, "rack-17"},
+			method:   http.MethodPut,
+			wantPath: "/event/policy/binding/rack/rack-17",
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","eventType":"hardware.leak.detected","policyId":"550e8400-e29b-41d4-a716-446655440000"}`,
+		},
+		{
+			name: "disable policy explicitly", command: []string{"event", "policy", "update"},
+			args: []string{"--site-id", siteID, "--enabled", "false", siteID}, method: http.MethodPatch,
+			wantPath: "/event/policy/" + siteID,
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","enabled":false}`,
+		},
+		{
+			name: "list event handlings", command: []string{"event", "handling", "list"},
+			args: []string{"--site-id", siteID, "--policy-id", siteID}, method: http.MethodGet,
+			wantPath: "/event/handling", wantQuery: "policyId=" + siteID + "&siteId=" + siteID,
+		},
+		{
+			name: "list event Tasks", command: []string{"event", "handling", "task", "list"},
+			args: []string{"--site-id", siteID, "--rack-id", "rack-17"}, method: http.MethodGet,
+			wantPath: "/event/handling/task", wantQuery: "rackId=rack-17&siteId=" + siteID,
 		},
 	}
 
@@ -2407,7 +2473,7 @@ func testNewAppPowerCommands(t *testing.T) {
 			var requestCount atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 				assert.Equal(t, test.method, request.Method)
-				assert.Equal(t, test.wantPath, request.URL.Path)
+				assert.Equal(t, "/v2/org/test-org/nico"+test.wantPath, request.URL.Path)
 				assert.Equal(t, test.wantQuery, request.URL.RawQuery)
 				body, err := io.ReadAll(request.Body)
 				assert.NoError(t, err)
@@ -2418,7 +2484,13 @@ func testNewAppPowerCommands(t *testing.T) {
 				}
 				requestCount.Add(1)
 				w.Header().Set("Content-Type", "application/json")
-				_, err = w.Write([]byte(`{}`))
+				if test.method == http.MethodDelete {
+					w.WriteHeader(http.StatusNoContent)
+				} else if test.method == http.MethodGet && (test.wantPath == "/event/policy" || test.wantPath == "/event/policy/binding" || strings.HasPrefix(test.wantPath, "/event/handling")) {
+					_, err = w.Write([]byte(`[]`))
+				} else {
+					_, err = w.Write([]byte(`{}`))
+				}
 				assert.NoError(t, err)
 			}))
 			t.Cleanup(server.Close)

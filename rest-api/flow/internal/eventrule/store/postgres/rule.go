@@ -12,7 +12,6 @@ import (
 	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	eventrulecodec "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/codec"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )
@@ -86,6 +85,13 @@ func eventRuleListQuery(
 	if filter.EventType != nil {
 		query = query.Where("er.event_type = ?", string(*filter.EventType))
 	}
+	if filter.Bound != nil {
+		predicate := "EXISTS (SELECT 1 FROM event_rule_bindings AS binding WHERE binding.rule_id = er.id)"
+		if !*filter.Bound {
+			predicate = "NOT " + predicate
+		}
+		query = query.Where(predicate)
+	}
 	if filter.Enabled != nil {
 		query = query.Where("er.enabled = ?", *filter.Enabled)
 	}
@@ -119,60 +125,27 @@ func (s *Store) Create(
 	return converterdao.EventRuleFrom(record)
 }
 
-// UpdateMetadata updates one persisted rule's descriptive fields.
-func (s *Store) UpdateMetadata(
-	ctx context.Context,
-	id uuid.UUID,
-	metadata eventrule.RuleMetadata,
-) error {
-	if err := metadata.Validate(); err != nil {
-		return err
-	}
-
-	return s.updateRule(
-		ctx,
-		id,
-		"name = ?, description = ?",
-		metadata.Name,
-		metadata.Description,
-	)
-}
-
-// ReplaceActions replaces all actions belonging to one persisted rule.
-func (s *Store) ReplaceActions(
-	ctx context.Context,
-	id uuid.UUID,
-	actions []eventrule.Action,
-) error {
-	if err := eventrule.ValidateActions(actions); err != nil {
-		return err
-	}
-
-	policy, err := eventrulecodec.MarshalPolicy(eventrule.Policy{
-		Actions: eventrule.CloneActions(actions),
-	})
-	if err != nil {
-		return err
-	}
-
-	return s.updateRule(ctx, id, "policy = ?", policy)
-}
-
-// Delete atomically deletes a persisted rule and its cascading bindings.
+// Delete locks the parent just as binding writers do, preventing check/delete races.
 func (s *Store) Delete(ctx context.Context, id uuid.UUID) error {
-	result, err := s.pg.DB.NewDelete().
-		Model((*dbmodel.EventRule)(nil)).
-		Where("id = ?", id).
-		Exec(ctx)
-	if err != nil {
+	return s.runInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		var rule dbmodel.EventRule
+		err := tx.NewSelect().Model(&rule).Where("er.id = ?", id).For("UPDATE").Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			return eventrule.ErrRuleNotFound
+		}
+		if err != nil {
+			return err
+		}
+		bound, err := tx.NewSelect().Model((*dbmodel.EventRuleBinding)(nil)).Where("erb.rule_id = ?", id).Exists(ctx)
+		if err != nil {
+			return err
+		}
+		if bound {
+			return fmt.Errorf("%w: policy still has bindings", eventrule.ErrBindingConflict)
+		}
+		_, err = tx.NewDelete().Model((*dbmodel.EventRule)(nil)).Where("id = ?", id).Exec(ctx)
 		return err
-	}
-
-	if err := requireRuleMutation(result, id); err != nil {
-		return err
-	}
-
-	return nil
+	})
 }
 
 // SetEnabled changes one persisted rule's enabled state.
@@ -216,35 +189,6 @@ func (s *Store) SetEnabled(
 
 		return requireRuleMutation(result, id)
 	})
-}
-
-func (s *Store) updateRule(
-	ctx context.Context,
-	id uuid.UUID,
-	assignment string,
-	args ...any,
-) error {
-	now, err := s.timestamp(ctx, s.pg.DB)
-	if err != nil {
-		return err
-	}
-
-	query := s.pg.DB.NewUpdate().
-		Model((*dbmodel.EventRule)(nil)).
-		Set(assignment, args...).
-		Set("updated_at = ?", now).
-		Where("id = ?", id)
-
-	result, err := query.Exec(ctx)
-	if err != nil {
-		return err
-	}
-
-	if err := requireRuleMutation(result, id); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func requireRuleMutation(result sql.Result, id uuid.UUID) error {

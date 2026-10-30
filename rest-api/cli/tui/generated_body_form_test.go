@@ -623,7 +623,7 @@ func TestGeneratedBodyFormTrayFilterResourceMappings(t *testing.T) {
 	}
 }
 
-func TestGeneratedBodyFormRuleSelectorIsSupported(t *testing.T) {
+func testGeneratedBodyFormRuleSelectorIsSupported(t *testing.T) {
 	info := generatedCommandInfoByName(t, "tray power-control-trays power-control-trays")
 	field := requireGeneratedBodyFormField(t, info, "ruleId")
 	session := &Session{Resolver: NewResolver(NewCache())}
@@ -792,4 +792,51 @@ func testBuildGeneratedBodyFormObjectRestoresScopeAfterSKUFailure(t *testing.T) 
 	assert.Equal(t, "machine-site", scopeAtFetch.SiteID)
 	assert.Empty(t, scopeAtFetch.SiteName)
 	assert.Equal(t, originalScope, session.Scope)
+}
+
+func testGeneratedBodyFieldResourceDescriptor_EventPolicyBinding(t *testing.T) {
+	const siteID = "550e8400-e29b-41d4-a716-446655440000"
+	const policyID = "63f1c140-81c9-4711-8c3a-1664aaed2cd9"
+	requests := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Path
+		assert.Equal(t, "/v2/org/acme/nico/event/policy", r.URL.Path)
+		assert.Equal(t, siteID, r.URL.Query().Get("siteId"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `[{"id":%q,"name":"Staged policy","enabled":false,"readOnly":false}]`, policyID)
+	}))
+	defer server.Close()
+	session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+	session.Scope.SiteID = "another-site"
+	session.Cache.Set("event-policy", []NamedItem{{ID: "stale-policy", Name: "Staged policy"}})
+	info := generatedCommandInfoByName(t, "event policy binding site put")
+	field := requireGeneratedBodyFormField(t, info, "policyId")
+	values := map[string]string{"siteId": siteID}
+	descriptor, supported := generatedBodyFieldResourceDescriptor(session, info, field.JSONName, values)
+	require.True(t, supported)
+	assert.Equal(t, "event-policy", descriptor.ResourceType)
+	assert.Equal(t, "siteId", descriptor.ScopeParameter)
+	var value any
+	var set bool
+	var err error
+	_ = captureStdout(func() {
+		value, set, err = promptGeneratedBodyField(session, info, field, values, &queuedGeneratedBodyPrompter{})
+	})
+	require.NoError(t, err)
+	assert.True(t, set)
+	assert.Equal(t, policyID, value)
+	assert.Len(t, requests, 1)
+	assert.Equal(t, "another-site", session.Scope.SiteID)
+}
+
+func TestGeneratedBodyFieldResourceDescriptor(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "operation rule", run: testGeneratedBodyFormRuleSelectorIsSupported},
+		{name: "event policy uses body Site", run: testGeneratedBodyFieldResourceDescriptor_EventPolicyBinding},
+	} {
+		t.Run(test.name, test.run)
+	}
 }

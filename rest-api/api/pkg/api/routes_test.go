@@ -81,6 +81,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"sku":                       5,
 		"task":                      3,
 		"rule":                      5,
+		"event":                     14,
 		"run":                       8,
 		"domain":                    7,
 		"rack":                      18,
@@ -201,6 +202,14 @@ func TestNewAPIRoutes(t *testing.T) {
 				{"power control rack named task", http.MethodPatch, "/rack/task/power", apiHandler.NewUpdateRackPowerStateHandler(tt.args.dbSession, tc, scp, cfg)},
 				// A valid task lookup continues to reach the original task handler.
 				{"rack task lookup", http.MethodGet, "/rack/task/00000000-0000-4000-8000-000000000001", apiHandler.NewGetTaskHandler(tt.args.dbSession, tc, scp, cfg)},
+				// Site and Rack bindings use distinct handlers for every operation.
+				{"list event bindings", http.MethodGet, "/event/policy/binding", apiHandler.NewGetAllEventPolicyBindingHandler(tt.args.dbSession, scp, cfg)},
+				{"get Site event binding", http.MethodGet, "/event/policy/binding/site", apiHandler.NewGetSiteEventPolicyBindingHandler(tt.args.dbSession, scp, cfg)},
+				{"put Site event binding", http.MethodPut, "/event/policy/binding/site", apiHandler.NewPutSiteEventPolicyBindingHandler(tt.args.dbSession, scp, cfg)},
+				{"delete Site event binding", http.MethodDelete, "/event/policy/binding/site", apiHandler.NewDeleteSiteEventPolicyBindingHandler(tt.args.dbSession, scp, cfg)},
+				{"get Rack event binding", http.MethodGet, "/event/policy/binding/rack/rack-17", apiHandler.NewGetRackEventPolicyBindingHandler(tt.args.dbSession, scp, cfg)},
+				{"put Rack event binding", http.MethodPut, "/event/policy/binding/rack/rack-17", apiHandler.NewPutRackEventPolicyBindingHandler(tt.args.dbSession, scp, cfg)},
+				{"delete Rack event binding", http.MethodDelete, "/event/policy/binding/rack/rack-17", apiHandler.NewDeleteRackEventPolicyBindingHandler(tt.args.dbSession, scp, cfg)},
 			} {
 				t.Run(selection.name, func(t *testing.T) {
 					request := httptest.NewRequest(selection.method, "/org/test-org/"+cfg.GetAPIName()+selection.path, nil)
@@ -252,6 +261,24 @@ func TestNewAPIRoutes(t *testing.T) {
 			taskPath := "/org/:orgName/" + cfg.GetAPIName() + "/task"
 			assertRouteExists(t, got, http.MethodGet, taskPath)
 			assertRouteBefore(t, got, http.MethodGet, taskPath, http.MethodGet, taskPath+"/:id")
+			eventPath := "/org/:orgName/" + cfg.GetAPIName() + "/event"
+			for _, path := range []string{"/policy", "/policy/binding", "/policy/binding/site", "/policy/binding/rack/:rackId", "/policy/:policyId", "/handling", "/handling/task"} {
+				assertRouteExists(t, got, http.MethodGet, eventPath+path)
+			}
+			assertRouteBefore(t, got, http.MethodGet, eventPath+"/policy/binding", http.MethodGet, eventPath+"/policy/:policyId")
+			assertRouteExists(t, got, http.MethodPost, eventPath+"/policy")
+			assertRouteExists(t, got, http.MethodPatch, eventPath+"/policy/:policyId")
+			assertRouteExists(t, got, http.MethodDelete, eventPath+"/policy/:policyId")
+			for _, path := range []string{"/policy/binding/site", "/policy/binding/rack/:rackId"} {
+				assertRouteExists(t, got, http.MethodPut, eventPath+path)
+				assertRouteExists(t, got, http.MethodDelete, eventPath+path)
+				assertRouteBefore(t, got, http.MethodGet, eventPath+path, http.MethodGet, eventPath+"/policy/:policyId")
+			}
+			for _, route := range got {
+				assert.NotContains(t, route.Path, "/leakage/")
+				assert.NotContains(t, route.Path, "/event/handling/pause")
+				assert.NotContains(t, route.Path, "/event/handling/resume")
+			}
 			tenantPath := "/org/:orgName/" + cfg.GetAPIName() + "/tenant"
 			assertRouteExists(t, got, http.MethodGet, tenantPath+"/current/routing-profile")
 			vpcRoutingProfilePath := "/org/:orgName/" + cfg.GetAPIName() + "/vpc/:id/routing-profile"

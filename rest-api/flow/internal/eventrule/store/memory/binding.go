@@ -4,8 +4,12 @@
 package memory
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
+
+	"github.com/google/uuid"
 
 	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
@@ -138,4 +142,94 @@ func bindingRecordMatchesScope(
 	default:
 		return false
 	}
+}
+
+// PutBinding atomically replaces one assignment without changing either policy.
+func (s *Store) PutBinding(_ context.Context, binding eventrule.Binding) (*eventrule.BindingPutResult, error) {
+	err := binding.Validate()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rule, ok := s.rules[binding.RuleID]
+	if !ok {
+		return nil, eventrule.ErrRuleNotFound
+	}
+	if rule.EventType != string(binding.EventType) {
+		return nil, fmt.Errorf("%w: policy event type does not match binding", eventrule.ErrInvalidRuleInput)
+	}
+	now := s.now().UTC()
+	created := now
+	wasCreated := true
+	for id, record := range s.bindings {
+		if !bindingRecordMatchesScope(record, binding.EventType, binding.Scope) {
+			continue
+		}
+		if record.RuleID == binding.RuleID {
+			saved, err := converterdao.EventRuleBindingFrom(&record)
+			return &eventrule.BindingPutResult{Binding: saved}, err
+		}
+		binding.ID = id
+		wasCreated = false
+		created = record.CreatedAt
+		break
+	}
+	record, err := converterdao.EventRuleBindingTo(binding, created, now)
+	if err != nil {
+		return nil, err
+	}
+	s.bindings[binding.ID] = *record
+	return &eventrule.BindingPutResult{Binding: &binding, Created: wasCreated}, nil
+}
+
+// ListBindings orders explicit references before pagination.
+func (s *Store) ListBindings(_ context.Context, request eventrule.BindingListRequest) ([]eventrule.Binding, int, error) {
+	err := request.Validate()
+	if err != nil {
+		return nil, 0, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]eventrule.Binding, 0)
+	for _, record := range s.bindings {
+		if request.RuleID != uuid.Nil && record.RuleID != request.RuleID {
+			continue
+		}
+		if request.EventType != "" && record.EventType != string(request.EventType) {
+			continue
+		}
+		if request.ScopeType != "" && record.ScopeType != string(request.ScopeType) {
+			continue
+		}
+		if request.RackID != uuid.Nil && (record.ScopeType != string(eventrule.ScopeTypeRack) || record.ScopeID == nil || *record.ScopeID != request.RackID) {
+			continue
+		}
+		binding, err := converterdao.EventRuleBindingFrom(&record)
+		if err != nil {
+			return nil, 0, err
+		}
+		result = append(result, *binding)
+	}
+	slices.SortFunc(result, func(a, b eventrule.Binding) int {
+		if a.Scope.Type != b.Scope.Type {
+			if a.Scope.Type == eventrule.ScopeTypeSite {
+				return -1
+			}
+			return 1
+		}
+		n := cmp.Compare(a.Scope.ID.String(), b.Scope.ID.String())
+		if n != 0 {
+			return n
+		}
+		n = cmp.Compare(a.EventType, b.EventType)
+		if n != 0 {
+			return n
+		}
+		return cmp.Compare(a.ID.String(), b.ID.String())
+	})
+	offset, limit := request.Offset, request.Limit
+	total := len(result)
+	start := min(offset, total)
+	return result[start : start+min(limit, total-start)], total, nil
 }

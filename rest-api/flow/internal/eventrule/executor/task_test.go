@@ -27,30 +27,48 @@ func TestTaskExecutorExecute(t *testing.T) {
 }
 
 func testTaskExecutorSubmit(t *testing.T) {
-	rackID := uuid.New()
-	componentID := uuid.New()
-	request := submitTaskExecutionRequest(t, rackID, componentID)
-	manager := &recordingTaskManager{taskIDs: []uuid.UUID{uuid.New()}}
-	executor := &TaskExecutor{manager: manager}
+	pinnedRule := uuid.New()
+	for _, test := range []struct {
+		name   string
+		ruleID *uuid.UUID
+	}{
+		{name: "default rule resolution"},
+		{name: "pinned operation rule", ruleID: &pinnedRule},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rackID := uuid.New()
+			componentID := uuid.New()
+			request := submitTaskExecutionRequest(t, rackID, componentID)
+			if test.ruleID != nil {
+				op := &operations.PowerControlTaskInfo{Operation: operations.PowerOperationForcePowerOff, RuleID: test.ruleID.String()}
+				info, err := op.Marshal()
+				require.NoError(t, err)
+				request.Plan.(*eventrule.SubmitTaskPlan).Operation.Info = info
+			}
+			manager := &recordingTaskManager{taskIDs: []uuid.UUID{uuid.New()}}
+			executor := &TaskExecutor{manager: manager}
 
-	require.NoError(t, executor.Execute(context.Background(), request))
-	require.Len(t, manager.requests, 1)
+			require.NoError(t, executor.Execute(context.Background(), request))
+			require.Len(t, manager.requests, 1)
 
-	submitted := manager.requests[0]
+			submitted := manager.requests[0]
+			require.Equal(t, test.ruleID, submitted.RuleID)
 
-	require.Equal(t, rackID, submitted.RequiredRackID)
-	require.Equal(t, taskIdempotencyKey(request.ExecutionID, rackID), submitted.IdempotencyKey)
-	require.Equal(t, operation.TriggerTypeEventRuleExecution, submitted.TriggerType)
-	require.Equal(t, request.ExecutionID, *submitted.TriggerID)
-	require.Equal(t, operation.TargetSpec{
-		Components: []operation.ComponentTarget{{UUID: componentID}},
-	}, submitted.TargetSpec)
+			require.Equal(t, rackID, submitted.RequiredRackID)
+			require.Equal(t, taskIdempotencyKey(request.ExecutionID, rackID), submitted.IdempotencyKey)
+			require.Equal(t, operation.TriggerTypeEventRuleExecution, submitted.TriggerType)
+			require.Equal(t, request.ExecutionID, *submitted.TriggerID)
+			require.Equal(t, operation.TargetSpec{
+				Components: []operation.ComponentTarget{{UUID: componentID}},
+			}, submitted.TargetSpec)
 
-	// A retry resubmits the same idempotency key so the task manager can return
-	// the existing task.
-	require.NoError(t, executor.Execute(context.Background(), request))
-	require.Len(t, manager.requests, 2)
-	require.Equal(t, submitted.IdempotencyKey, manager.requests[1].IdempotencyKey)
+			// A retry resubmits the same idempotency key so the task manager can return
+			// the existing task.
+			require.NoError(t, executor.Execute(context.Background(), request))
+			require.Len(t, manager.requests, 2)
+			require.Equal(t, submitted.IdempotencyKey, manager.requests[1].IdempotencyKey)
+		})
+	}
 }
 
 func testTaskExecutorClassifiesFailures(t *testing.T) {

@@ -61,6 +61,7 @@ func TestBindingScansIgnoreUnrelatedInvalidRecords(t *testing.T) {
 	found, err := store.GetForScope(ctx, rule.EventType, scope)
 	require.NoError(t, err)
 	require.Equal(t, &binding, found)
+	require.NoError(t, store.Unbind(ctx, rule.EventType, scope))
 	require.NoError(t, store.Delete(ctx, rule.ID))
 }
 

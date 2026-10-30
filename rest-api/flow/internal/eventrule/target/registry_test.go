@@ -25,33 +25,14 @@ func TestRegistry_Lookup(t *testing.T) {
 		wantLookupErr string
 	}{
 		{
-			name: "component",
-			request: targetRequest(
-				eventrule.TargetStrategyComponent,
-				eventrule.ResolvedResource{
-					Kind:          eventrule.ResourceKindComponent,
-					ID:            componentID,
-					RackID:        rackID,
-					ComponentType: flowtypes.ComponentTypeCompute,
-				},
-			),
-			want: []Target{{
-				Kind:   eventrule.ResourceKindComponent,
-				ID:     componentID,
-				RackID: rackID,
-			}},
+			name:    "source from component",
+			request: targetRequest(eventrule.TargetStrategySource, eventrule.ResolvedResource{Kind: eventrule.ResourceKindComponent, ID: componentID, RackID: rackID, ComponentType: flowtypes.ComponentTypeCompute}),
+			want:    []Target{{Kind: eventrule.ResourceKindComponent, ID: componentID, RackID: rackID}},
 		},
 		{
-			name: "component rejects rack resource",
-			request: targetRequest(
-				eventrule.TargetStrategyComponent,
-				eventrule.ResolvedResource{
-					Kind:   eventrule.ResourceKindRack,
-					ID:     rackID,
-					RackID: rackID,
-				},
-			),
-			wantErr: "requires a component resource",
+			name:    "source from rack",
+			request: targetRequest(eventrule.TargetStrategySource, eventrule.ResolvedResource{Kind: eventrule.ResourceKindRack, ID: rackID, RackID: rackID}),
+			want:    []Target{{Kind: eventrule.ResourceKindRack, ID: rackID, RackID: rackID}},
 		},
 		{
 			name: "rack from component",
@@ -152,12 +133,12 @@ func TestRegistry_Lookup(t *testing.T) {
 		registry := New()
 		require.NoError(t, registry.Register(
 			"hardware.leak.detected",
-			eventrule.TargetStrategyComponent,
+			eventrule.TargetStrategySource,
 			&staticResolver{targets: want},
 		))
 
 		request := targetRequest(
-			eventrule.TargetStrategyComponent,
+			eventrule.TargetStrategySource,
 			eventrule.ResolvedResource{
 				Kind:          eventrule.ResourceKindComponent,
 				ID:            componentID,
@@ -200,7 +181,7 @@ func TestRegistry_Register(t *testing.T) {
 	t.Run("override generic strategy", func(t *testing.T) {
 		require.NoError(t, New().Register(
 			"hardware.leak.detected",
-			eventrule.TargetStrategyComponent,
+			eventrule.TargetStrategySource,
 			resolver,
 		))
 	})
@@ -249,7 +230,7 @@ func TestRegistry_ValidateRule(t *testing.T) {
 	})
 	t.Run("generic resolver", func(t *testing.T) {
 		for _, strategy := range []eventrule.TargetStrategy{
-			eventrule.TargetStrategyComponent,
+			eventrule.TargetStrategySource,
 			eventrule.TargetStrategyRack,
 			eventrule.TargetStrategyAffectedComponents,
 		} {
@@ -266,7 +247,7 @@ func TestRegistry_ValidateRule(t *testing.T) {
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
-				rule := targetRule(eventrule.TargetStrategyComponent)
+				rule := targetRule(eventrule.TargetStrategySource)
 				rule.Actions[0] = eventrule.Action{
 					Name: "action",
 					Spec: test.spec,

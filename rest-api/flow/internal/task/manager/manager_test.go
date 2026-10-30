@@ -25,6 +25,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/conflict"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -1468,6 +1469,7 @@ func testIngestOperation(t *testing.T, ruleID *uuid.UUID) operation.Wrapper {
 }
 
 type managerTaskStore struct {
+	taskstore.Store
 	activeTasksByRack              map[uuid.UUID][]*taskdef.Task
 	taskByIdempotencyKey           map[string]*taskdef.Task
 	listActiveCalls                int
