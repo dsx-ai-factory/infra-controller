@@ -73,7 +73,7 @@ impl BucketLimiter {
     /// * `max_jitter` - Maximum random delay to spread requests
     pub fn new(capacity: usize, replenish_interval: Duration, max_jitter: Duration) -> Self {
         let epoch = Instant::now();
-        let capacity = (capacity as u64) * TOKEN_SCALE;
+        let capacity = (capacity as u64).saturating_mul(TOKEN_SCALE);
 
         Self {
             tokens: Arc::new(AtomicU64::new(capacity)),
@@ -139,7 +139,11 @@ impl BucketLimiter {
             {
                 self.tokens
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        Some((current + tokens_to_add_fixed).min(self.capacity))
+                        Some(
+                            current
+                                .saturating_add(tokens_to_add_fixed)
+                                .min(self.capacity),
+                        )
                     })
                     .ok();
             }
@@ -172,5 +176,25 @@ mod tests {
             assert!(jitter <= Duration::from_secs(1));
             assert!(jitter >= Duration::from_millis(0));
         }
+    }
+
+    #[test]
+    fn burst_above_token_scale_range_saturates_capacity() {
+        let limiter = BucketLimiter::new(usize::MAX, Duration::from_millis(30), Duration::ZERO);
+
+        assert_eq!(limiter.capacity, u64::MAX);
+        assert_eq!(limiter.tokens.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn replenish_near_token_limit_saturates_at_capacity() {
+        // Leaves less than one token of headroom below u64::MAX.
+        let limiter =
+            BucketLimiter::new(18_446_744_073_709, Duration::from_nanos(1), Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
+
+        limiter.replenish_tokens();
+
+        assert_eq!(limiter.tokens.load(Ordering::Relaxed), limiter.capacity);
     }
 }
