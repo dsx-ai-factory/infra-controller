@@ -29,7 +29,7 @@ use ::rpc::forge::ManagedHostNetworkConfigResponse;
 use ::rpc::forge_tls_client::ForgeClientConfig;
 use ::rpc::{forge as rpc, forge_tls_client};
 use carbide_host_support::agent_config::AgentConfig;
-use carbide_host_support::lldp_snapshot_cache::LldpSnapshotCache;
+use carbide_host_support::lldp_snapshot_cache::classify_against_accepted_snapshot;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_rpc_utils::dhcp::{DhcpTimestamps, DhcpTimestampsFilePath};
 use carbide_systemd::systemd;
@@ -488,7 +488,6 @@ pub(super) async fn setup_and_run(
         ca_republish_time: std::time::Instant::now(),
         started_at: std::time::Instant::now(),
         inventory_updater_config,
-        lldp_cache: LldpSnapshotCache::new(),
         latest_lldp,
         options,
         agent_config,
@@ -572,7 +571,6 @@ struct MainLoop {
     inventory_updater_time: std::time::Instant,
     ca_republish_time: std::time::Instant,
     inventory_updater_config: MachineInventoryUpdaterConfig,
-    lldp_cache: LldpSnapshotCache,
     latest_lldp: carbide_host_support::lldp_collector_task::LatestLldpCollection,
     options: command_line::RunOptions,
     agent_config: AgentConfig,
@@ -724,6 +722,7 @@ impl CurrentNetworkVersion {
         config.dpu_extension_services.clear();
         config.astra_config = None;
         config.use_admin_network_changed = None;
+        config.accepted_lldp_snapshot_fingerprint = None;
 
         // DHCP is reconciled before this HBN skip decision on every iteration.
         config.ntp_servers.clear();
@@ -1097,6 +1096,7 @@ impl MainLoop {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
         };
 
         // `read` does not block
@@ -1516,21 +1516,21 @@ impl MainLoop {
                 // Absent until the collector task finishes its first attempt.
                 // The status push still happens; it just carries no LLDP, which
                 // is a legal wire state and is what an unobserved topology is.
-                let lldp = self
-                    .latest_lldp
-                    .latest()
-                    .map(|collected| self.lldp_cache.classify(collected));
-                status_out.lldp = lldp.clone();
-
-                if let Ok(response) = record_network_status(
+                if let Some(lldp) = self.latest_lldp.latest().map(|collected| {
+                    classify_against_accepted_snapshot(
+                        collected,
+                        conf.accepted_lldp_snapshot_fingerprint.as_deref(),
+                    )
+                }) {
+                    status_out.lldp = Some(lldp.report);
+                    status_out.lldp_snapshot_fingerprint = lldp.snapshot_fingerprint;
+                }
+                let _ = record_network_status(
                     status_out,
                     &self.forge_api_server,
                     &self.forge_client_config,
                 )
-                .await
-                {
-                    confirm_lldp_if_accepted(&mut self.lldp_cache, lldp, response);
-                }
+                .await;
                 self.seen_blank = false;
             }
             None => {
@@ -1893,58 +1893,12 @@ fn fmds_reply_routes(
     Ok(routes)
 }
 
-/// Sends status through the original RPC and preserves its existing successful
-/// LLDP acceptance behavior.
-async fn record_network_status_with_original_rpc(
-    client: &mut forge_tls_client::ForgeClientT,
-    status: rpc::DpuNetworkStatus,
-    lldp_attached: bool,
-) -> Result<rpc::DpuNetworkStatusResponse, eyre::Report> {
-    client
-        .record_dpu_network_status(tonic::Request::new(status))
-        .await
-        .map(|_| rpc::DpuNetworkStatusResponse {
-            lldp_accepted: lldp_attached.then_some(true),
-        })
-        .map_err(eyre::Report::from)
-}
-
-/// Sends status through the acknowledgment RPC, relying on Core's contract
-/// that Unimplemented is returned only before request processing starts.
-async fn record_network_status_with_acknowledgment(
-    client: &mut forge_tls_client::ForgeClientT,
-    status: rpc::DpuNetworkStatus,
-    lldp_attached: bool,
-) -> Result<rpc::DpuNetworkStatusResponse, eyre::Report> {
-    match client
-        .record_dpu_network_status_with_lldp_acknowledgment(tonic::Request::new(status.clone()))
-        .await
-    {
-        Ok(response) => {
-            let response = response.into_inner();
-            if lldp_attached && response.lldp_accepted.is_none() {
-                Err(eyre::eyre!(
-                    "RecordDpuNetworkStatusWithLldpAcknowledgment returned no LLDP acknowledgment for an attached report"
-                ))
-            } else {
-                Ok(response)
-            }
-        }
-        // Capability-advertising Core implementations reserve Unimplemented
-        // for pre-processing rejection, which makes this replay safe.
-        Err(error) if error.code() == tonic::Code::Unimplemented => {
-            record_network_status_with_original_rpc(client, status, lldp_attached).await
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Pushes DPU network status through the method advertised by Core.
+/// Pushes DPU network status through the existing Core RPC.
 async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,
     forge_client_config: &forge_tls_client::ForgeClientConfig,
-) -> Result<rpc::DpuNetworkStatusResponse, eyre::Report> {
+) -> Result<(), eyre::Report> {
     let mut client = match forge_tls_client::ForgeTlsClient::new(forge_client_config)
         .build(forge_api)
         .await
@@ -1960,71 +1914,21 @@ async fn record_network_status(
         }
     };
 
-    let lldp_attached = status.lldp.is_some();
-    let result = match client
-        .version(tonic::Request::new(rpc::VersionRequest {
-            display_config: false,
-        }))
+    match client
+        .record_dpu_network_status(tonic::Request::new(status))
         .await
     {
-        Ok(response) => {
-            if response
-                .get_ref()
-                .capabilities
-                .contains(&(rpc::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32))
-            {
-                record_network_status_with_acknowledgment(&mut client, status, lldp_attached).await
-            } else {
-                record_network_status_with_original_rpc(&mut client, status, lldp_attached).await
-            }
-        }
-        Err(error)
-            if matches!(
-                error.code(),
-                tonic::Code::PermissionDenied | tonic::Code::Unauthenticated
-            ) =>
-        {
-            Err(error.into())
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                grpc_status_code = ?error.code(),
-                "Unable to query Core capabilities; using the original network status RPC"
-            );
-            record_network_status_with_original_rpc(&mut client, status, lldp_attached).await
-        }
-    };
-
-    match result {
-        Ok(response) => {
+        Ok(_) => {
             NetworkStatus::Succeeded.emit();
-            Ok(response)
+            Ok(())
         }
         Err(err) => {
             NetworkStatus::RpcFailed {
                 error: format!("{err:#}"),
             }
             .emit();
-            Err(err)
+            Err(err.into())
         }
-    }
-}
-
-/// Confirms a sent LLDP snapshot only when Core established its acceptance.
-///
-/// Legacy success is normalized to explicit acceptance by
-/// [`record_network_status`]; rejection or absence leaves the snapshot pending.
-fn confirm_lldp_if_accepted(
-    lldp_cache: &mut LldpSnapshotCache,
-    lldp: Option<rpc::LldpReport>,
-    response: rpc::DpuNetworkStatusResponse,
-) {
-    let Some(lldp) = lldp else {
-        return;
-    };
-    if response.lldp_accepted == Some(true) {
-        lldp_cache.confirm_reported(lldp);
     }
 }
 

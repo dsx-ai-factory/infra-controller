@@ -144,8 +144,6 @@ pub(super) fn setup_agent_run_options(
     Ok(opts)
 }
 
-/// Starts a TLS-enabled in-process gRPC router so tests outside this module can
-/// exercise generated clients against precise rolling-upgrade wire behavior.
 pub(crate) async fn run_grpc_server(
     app: axum::Router<()>,
 ) -> eyre::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {

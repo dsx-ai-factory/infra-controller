@@ -139,6 +139,7 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
         agent_version_superseded_at: None,
         instance_network_observation: None,
         fabric_interfaces: vec![],
+        accepted_lldp_snapshot_fingerprint: None,
     };
 
     let health_report = health_report::HealthReport {

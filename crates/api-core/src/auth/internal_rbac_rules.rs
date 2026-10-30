@@ -162,10 +162,6 @@ impl InternalRBACRules {
         );
         x.perm("RecordDpuNetworkStatus", vec![Agent, Machineatron]);
         x.perm(
-            "RecordDpuNetworkStatusWithLldpAcknowledgment",
-            vec![Agent, Machineatron],
-        );
-        x.perm(
             "ListMachineHealthReports",
             vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs],
         );
@@ -1509,18 +1505,6 @@ mod rbac_rule_tests {
                 "{deprecated} should mirror {canonical}"
             );
         }
-    }
-
-    /// The acknowledgment-aware status method must not expand or narrow the
-    /// identities permitted to perform the original status mutation.
-    #[test]
-    fn dpu_network_status_methods_have_identical_permissions() {
-        // Compare the complete principal lists so future permission changes
-        // cannot update one rolling-upgrade path without the other.
-        assert_eq!(
-            INTERNAL_RBAC_RULES.perms["RecordDpuNetworkStatus"].principals,
-            INTERNAL_RBAC_RULES.perms["RecordDpuNetworkStatusWithLldpAcknowledgment"].principals,
-        );
     }
 
     /// RSA can insert NVLink domain, machine, switch, and power shelf health

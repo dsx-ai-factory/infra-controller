@@ -124,6 +124,7 @@ async fn record_dpu_network_status(
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
         }))
         .await
         .unwrap();
@@ -2479,6 +2480,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
         }))
         .await
         .expect_err("Should fail");

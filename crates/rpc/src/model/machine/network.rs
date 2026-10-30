@@ -133,6 +133,7 @@ impl TryFrom<rpc::DpuNetworkStatus> for MachineNetworkStatusObservation {
             agent_version_superseded_at: None,
             instance_network_observation,
             fabric_interfaces: obs.fabric_interfaces.into_iter().map(Into::into).collect(),
+            accepted_lldp_snapshot_fingerprint: None,
         })
     }
 }
@@ -162,6 +163,7 @@ impl From<MachineNetworkStatusObservation> for rpc::DpuNetworkStatus {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
         }
     }
 }

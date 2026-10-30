@@ -55,6 +55,9 @@ pub struct MachineNetworkStatusObservation {
     pub instance_network_observation: Option<InstanceNetworkStatusObservation>,
     #[serde(default)]
     pub fabric_interfaces: Vec<DpuFabricInterfaceStatusObservation>,
+    /// Fingerprint of the last complete LLDP snapshot committed by Core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_lldp_snapshot_fingerprint: Option<Vec<u8>>,
 }
 
 impl MachineNetworkStatusObservation {
@@ -226,6 +229,7 @@ mod tests {
             agent_version_superseded_at: None,
             instance_network_observation,
             fabric_interfaces: Vec::new(),
+            accepted_lldp_snapshot_fingerprint: None,
         }
     }
 

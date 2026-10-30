@@ -202,16 +202,11 @@ service Forge {
 
   // forge-dpu-agent -> carbide-api
   rpc GetManagedHostNetworkConfig(ManagedHostNetworkConfigRequest) returns (ManagedHostNetworkConfigResponse);
-  // Records operational status. A rejected attached LLDP report fails this
-  // legacy RPC after the operational status and follow-up work have completed.
+  // Records operational status and optional LLDP. When a fingerprint-aware
+  // agent's LLDP is rejected, Core commits operational status but leaves the
+  // accepted fingerprint unchanged. Requests without a fingerprint retain the
+  // legacy non-OK result after operational status and follow-up work complete.
   rpc RecordDpuNetworkStatus(DpuNetworkStatus) returns (google.protobuf.Empty);
-  // Records the same operational status while reporting attached LLDP
-  // acceptance separately. Agents select this method when Version advertises
-  // its capability. Implementations advertising that capability must reserve
-  // Unimplemented for rejecting this method before processing starts, because
-  // agents retry the legacy RPC only for that status; authorization and all
-  // other failures are final.
-  rpc RecordDpuNetworkStatusWithLldpAcknowledgment(DpuNetworkStatus) returns (DpuNetworkStatusResponse);
   // Lists all health report sources for a Machine
   rpc ListMachineHealthReports(common.MachineId) returns (ListHealthReportResponse);
   // Adds a health report source for a Machine
@@ -1974,8 +1969,8 @@ message VersionRequest {
 enum BuildCapability {
   BUILD_CAPABILITY_UNSPECIFIED = 0;
   BUILD_CAPABILITY_VPC_SLAAC = 1;
-  // Core supports explicit LLDP acceptance on DPU network-status reports.
-  BUILD_CAPABILITY_DPU_NETWORK_STATUS_LLDP_ACKNOWLEDGMENT = 2;
+  // ReplaceSkuComponents preserves metadata omitted by the caller.
+  BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS = 2;
 }
 
 message BuildInfo {
@@ -5693,6 +5688,11 @@ message ManagedHostNetworkConfigResponse {
   // not supply an inventory; present and empty means the deployment has zero
   // service slots.
   optional ServiceVpcSlotInventory service_vpc_slot_inventory = 122;
+
+  // Identifies the last complete LLDP snapshot Core committed for this DPU.
+  // Absent means Core cannot confirm any snapshot. Agents may report UNCHANGED
+  // only when this value matches the fingerprint of their current snapshot.
+  optional bytes accepted_lldp_snapshot_fingerprint = 123;
 }
 
 // Resolved network state for one service interface on the receiving DPU.
@@ -6663,17 +6663,10 @@ message DpuNetworkStatus {
   // LLDP neighbors this DPU sees, attached to the status push rather than sent
   // on its own RPC. Absent when the agent did not attempt a collection.
   optional LldpReport lldp = 18;
-}
-
-// Reports LLDP acceptance independently from the operational status write for
-// RecordDpuNetworkStatusWithLldpAcknowledgment.
-message DpuNetworkStatusResponse {
-  // Absent when the request carried no LLDP report. True means the attached
-  // report was accepted and the outer status transaction committed. False
-  // means LLDP was rolled back while the outer status transaction committed.
-  // COLLECTION_FAILED is accepted when its existing keep-last-known-topology
-  // semantics were processed; it does not mean neighbor collection succeeded.
-  optional bool lldp_accepted = 1;
+  // Stable fingerprint of the complete attached LLDP snapshot. New agents set
+  // this for UPDATED and UNCHANGED reports. Core recomputes it for UPDATED
+  // reports and advances its accepted fingerprint only with committed writes.
+  optional bytes lldp_snapshot_fingerprint = 19;
 }
 
 message LastDhcpRequest {

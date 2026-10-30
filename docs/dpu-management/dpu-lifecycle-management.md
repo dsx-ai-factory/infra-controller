@@ -24,7 +24,7 @@ The DPU agent runs as a daemon on the DPU. A systemd deployment uses
 and centralized logs identify it as `nico-dpu-agent`. This documentation uses
 `dpu-agent` when the distinction does not matter.
 
-The agent periodically calls `GetManagedHostNetworkConfig` to fetch the desired configuration from NICo Core. It applies the configuration locally, runs health checks, and queries `Version` before each status report. When Core advertises LLDP acknowledgment support, the agent sends applied configuration versions, DPU health, and attached LLDP through `RecordDpuNetworkStatusWithLldpAcknowledgment`; Core returns whether it accepted the LLDP. When the capability is absent or a non-authorization capability lookup fails, the agent uses `RecordDpuNetworkStatus` directly. After selecting the acknowledgment-aware method, it falls back to the original method only if that call returns `Unimplemented`.
+The agent periodically calls `GetManagedHostNetworkConfig` to fetch the desired configuration from NICo Core. It applies the configuration locally, runs health checks, and reports applied configuration versions, DPU health, and attached LLDP through `RecordDpuNetworkStatus`. Core exposes the fingerprint of its last committed LLDP snapshot in a later configuration response, so RPC success alone does not confirm the agent's current snapshot.
 
 The agent is responsible for:
 
@@ -237,7 +237,7 @@ DPU health is part of aggregate host health. NICo combines reports from `dpu-age
 
 ### What `dpu-agent` Checks
 
-The `dpu-agent` runs periodic health checks and includes the results in every status report. It queries `Version` before reporting: an advertised LLDP acknowledgment capability selects `RecordDpuNetworkStatusWithLldpAcknowledgment`, which sends attached LLDP and returns Core's acceptance; an absent capability or non-authorization lookup failure selects `RecordDpuNetworkStatus` directly. Only `Unimplemented` from the selected acknowledgment-aware method triggers a fallback to the original method. The checks cover:
+The `dpu-agent` runs periodic health checks and includes the results in every `RecordDpuNetworkStatus` report. The checks cover:
 
 | Health probe | What it checks |
 |---|---|

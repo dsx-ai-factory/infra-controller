@@ -1189,8 +1189,9 @@ impl From<MachineObservationNotCurrent> for DatabaseError {
 
 /// Stores a network observation when its timestamp is at least as recent as the
 /// stored one, or no timestamp is stored. Compares both JSON timestamps at
-/// PostgreSQL's microsecond precision. Returns `NotApplied` for a missing
-/// machine or rejected timestamp.
+/// PostgreSQL's microsecond precision. The server-owned accepted LLDP
+/// fingerprint is preserved from the locked row. Returns `NotApplied` for a
+/// missing machine or rejected timestamp.
 pub async fn update_network_status_observation(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
@@ -1198,11 +1199,21 @@ pub async fn update_network_status_observation(
 ) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
     // Parse both timestamps from JSON so they round alike. SQLx truncates
     // separately bound timestamps to microseconds.
-    let query = "UPDATE machines SET network_status_observation = $1::json WHERE id = $2 AND
+    let query = "UPDATE machines SET network_status_observation =
+                    ($1::jsonb - 'accepted_lldp_snapshot_fingerprint')
+                    || CASE
+                        WHEN network_status_observation ? 'accepted_lldp_snapshot_fingerprint'
+                        THEN jsonb_build_object(
+                            'accepted_lldp_snapshot_fingerprint',
+                            network_status_observation->'accepted_lldp_snapshot_fingerprint'
+                        )
+                        ELSE '{}'::jsonb
+                    END
+                WHERE id = $2 AND
                 (
                     (network_status_observation->>'observed_at' IS NULL)
                     OR ((network_status_observation->>'observed_at')::timestamp
-                        <= ($1::json->>'observed_at')::timestamp)
+                        <= ($1::jsonb->>'observed_at')::timestamp)
                 ) RETURNING id";
     let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
@@ -1218,6 +1229,40 @@ pub async fn update_network_status_observation(
     debug_failed_machine_status_update(txn, machine_id, "network_status_observation", observation)
         .await;
     Ok(ConditionalWrite::NotApplied(MachineObservationNotCurrent))
+}
+
+/// Advances the LLDP fingerprint only after the matching replacement succeeds
+/// in the caller's transaction.
+pub async fn update_accepted_lldp_snapshot_fingerprint(
+    txn: &mut PgConnection,
+    machine_id: &DpuMachineId,
+    fingerprint: &[u8],
+) -> Result<(), DatabaseError> {
+    let query = r#"
+        UPDATE machines
+        SET network_status_observation = jsonb_set(
+            network_status_observation,
+            '{accepted_lldp_snapshot_fingerprint}',
+            $1::jsonb,
+            true
+        )
+        WHERE id = $2
+          AND network_status_observation IS NOT NULL
+    "#;
+    let result = sqlx::query(query)
+        .bind(sqlx::types::Json(fingerprint))
+        .bind(machine_id)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    if result.rows_affected() == 0 {
+        return Err(DatabaseError::NotFoundError {
+            kind: "machine network status observation",
+            id: machine_id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// `ExtensionServiceObservationNotCurrent` means the conditional observation
@@ -4333,6 +4378,7 @@ mod test {
             agent_version_superseded_at: None,
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
+            accepted_lldp_snapshot_fingerprint: None,
         };
         assert!(matches!(
             super::update_network_status_observation(writer.as_mut(), &dpu_id, &observation)
@@ -4751,6 +4797,7 @@ mod test {
                 agent_version_superseded_at: None,
                 instance_network_observation: None,
                 fabric_interfaces: Vec::new(),
+                accepted_lldp_snapshot_fingerprint: None,
             };
             let mut txn = pool.begin().await?;
             let result =
@@ -4767,6 +4814,92 @@ mod test {
                     .await?;
             assert_eq!(Some(persisted.0), expected, "{}", case.scenario);
         }
+        Ok(())
+    }
+
+    /// Proves operational observation input cannot replace the server-owned
+    /// accepted LLDP fingerprint stored in the same JSON document.
+    #[crate::sqlx_test]
+    async fn network_observation_update_preserves_server_owned_lldp_fingerprint(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::DpuMachineId;
+        use chrono::{DateTime, Duration, Utc};
+        use model::machine::network::MachineNetworkStatusObservation;
+
+        use super::{update_accepted_lldp_snapshot_fingerprint, update_network_status_observation};
+        use crate::ConditionalWrite::Applied;
+
+        let machine_id: DpuMachineId =
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng".parse()?;
+        let observed_at = DateTime::<Utc>::from_timestamp(1_722_000_000, 0).unwrap();
+        let fingerprint_a = vec![0x0a; 32];
+        let fingerprint_b = vec![0x0b; 32];
+
+        // Create the DPU and establish an ordinary observation before Core
+        // records accepted fingerprint A.
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        let initial = MachineNetworkStatusObservation {
+            machine_id,
+            agent_version: Some("initial-agent".to_string()),
+            observed_at,
+            network_config_version: None,
+            client_certificate_expiry: None,
+            agent_version_superseded_at: None,
+            instance_network_observation: None,
+            fabric_interfaces: Vec::new(),
+            accepted_lldp_snapshot_fingerprint: None,
+        };
+        assert_eq!(
+            update_network_status_observation(txn.as_mut(), &machine_id, &initial).await?,
+            Applied(())
+        );
+        update_accepted_lldp_snapshot_fingerprint(txn.as_mut(), &machine_id, &fingerprint_a)
+            .await?;
+        txn.commit().await?;
+
+        // Submit a newer operational observation whose model argument attempts
+        // to supply a different fingerprint.
+        let newer = MachineNetworkStatusObservation {
+            machine_id,
+            agent_version: Some("newer-agent".to_string()),
+            observed_at: observed_at + Duration::seconds(1),
+            network_config_version: None,
+            client_certificate_expiry: None,
+            agent_version_superseded_at: None,
+            instance_network_observation: None,
+            fabric_interfaces: Vec::new(),
+            accepted_lldp_snapshot_fingerprint: Some(fingerprint_b),
+        };
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            update_network_status_observation(txn.as_mut(), &machine_id, &newer).await?,
+            Applied(())
+        );
+        txn.commit().await?;
+
+        // Operational fields advance, but SQL restores fingerprint A from the
+        // row instead of trusting the model-owned value.
+        let persisted: sqlx::types::Json<MachineNetworkStatusObservation> =
+            sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await?;
+        let persisted = persisted.0;
+        assert_eq!(persisted.agent_version.as_deref(), Some("newer-agent"));
+        assert_eq!(
+            persisted.accepted_lldp_snapshot_fingerprint,
+            Some(fingerprint_a)
+        );
         Ok(())
     }
 

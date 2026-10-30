@@ -98,7 +98,6 @@ const (
 	Forge_FindInstanceByMachineID_FullMethodName                            = "/forge.Forge/FindInstanceByMachineID"
 	Forge_GetManagedHostNetworkConfig_FullMethodName                        = "/forge.Forge/GetManagedHostNetworkConfig"
 	Forge_RecordDpuNetworkStatus_FullMethodName                             = "/forge.Forge/RecordDpuNetworkStatus"
-	Forge_RecordDpuNetworkStatusWithLldpAcknowledgment_FullMethodName       = "/forge.Forge/RecordDpuNetworkStatusWithLldpAcknowledgment"
 	Forge_ListMachineHealthReports_FullMethodName                           = "/forge.Forge/ListMachineHealthReports"
 	Forge_InsertMachineHealthReport_FullMethodName                          = "/forge.Forge/InsertMachineHealthReport"
 	Forge_RemoveMachineHealthReport_FullMethodName                          = "/forge.Forge/RemoveMachineHealthReport"
@@ -719,16 +718,11 @@ type ForgeClient interface {
 	FindInstanceByMachineID(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*InstanceList, error)
 	// nico-dpu-agent -> nico-core-api
 	GetManagedHostNetworkConfig(ctx context.Context, in *ManagedHostNetworkConfigRequest, opts ...grpc.CallOption) (*ManagedHostNetworkConfigResponse, error)
-	// Records operational status. A rejected attached LLDP report fails this
-	// legacy RPC after the operational status and follow-up work have completed.
+	// Records operational status and optional LLDP. When a fingerprint-aware
+	// agent's LLDP is rejected, Core commits operational status but leaves the
+	// accepted fingerprint unchanged. Requests without a fingerprint retain the
+	// legacy non-OK result after operational status and follow-up work complete.
 	RecordDpuNetworkStatus(ctx context.Context, in *DpuNetworkStatus, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Records the same operational status while reporting attached LLDP
-	// acceptance separately. Agents select this method when Version advertises
-	// its capability. Implementations advertising that capability must reserve
-	// Unimplemented for rejecting this method before processing starts, because
-	// agents retry the legacy RPC only for that status; authorization and all
-	// other failures are final.
-	RecordDpuNetworkStatusWithLldpAcknowledgment(ctx context.Context, in *DpuNetworkStatus, opts ...grpc.CallOption) (*DpuNetworkStatusResponse, error)
 	// Lists all health report sources for a Machine
 	ListMachineHealthReports(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*ListHealthReportResponse, error)
 	// Adds a health report source for a Machine
@@ -2397,16 +2391,6 @@ func (c *forgeClient) RecordDpuNetworkStatus(ctx context.Context, in *DpuNetwork
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_RecordDpuNetworkStatus_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *forgeClient) RecordDpuNetworkStatusWithLldpAcknowledgment(ctx context.Context, in *DpuNetworkStatus, opts ...grpc.CallOption) (*DpuNetworkStatusResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(DpuNetworkStatusResponse)
-	err := c.cc.Invoke(ctx, Forge_RecordDpuNetworkStatusWithLldpAcknowledgment_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7240,16 +7224,11 @@ type ForgeServer interface {
 	FindInstanceByMachineID(context.Context, *MachineId) (*InstanceList, error)
 	// nico-dpu-agent -> nico-core-api
 	GetManagedHostNetworkConfig(context.Context, *ManagedHostNetworkConfigRequest) (*ManagedHostNetworkConfigResponse, error)
-	// Records operational status. A rejected attached LLDP report fails this
-	// legacy RPC after the operational status and follow-up work have completed.
+	// Records operational status and optional LLDP. When a fingerprint-aware
+	// agent's LLDP is rejected, Core commits operational status but leaves the
+	// accepted fingerprint unchanged. Requests without a fingerprint retain the
+	// legacy non-OK result after operational status and follow-up work complete.
 	RecordDpuNetworkStatus(context.Context, *DpuNetworkStatus) (*emptypb.Empty, error)
-	// Records the same operational status while reporting attached LLDP
-	// acceptance separately. Agents select this method when Version advertises
-	// its capability. Implementations advertising that capability must reserve
-	// Unimplemented for rejecting this method before processing starts, because
-	// agents retry the legacy RPC only for that status; authorization and all
-	// other failures are final.
-	RecordDpuNetworkStatusWithLldpAcknowledgment(context.Context, *DpuNetworkStatus) (*DpuNetworkStatusResponse, error)
 	// Lists all health report sources for a Machine
 	ListMachineHealthReports(context.Context, *MachineId) (*ListHealthReportResponse, error)
 	// Adds a health report source for a Machine
@@ -8384,9 +8363,6 @@ func (UnimplementedForgeServer) GetManagedHostNetworkConfig(context.Context, *Ma
 }
 func (UnimplementedForgeServer) RecordDpuNetworkStatus(context.Context, *DpuNetworkStatus) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecordDpuNetworkStatus not implemented")
-}
-func (UnimplementedForgeServer) RecordDpuNetworkStatusWithLldpAcknowledgment(context.Context, *DpuNetworkStatus) (*DpuNetworkStatusResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method RecordDpuNetworkStatusWithLldpAcknowledgment not implemented")
 }
 func (UnimplementedForgeServer) ListMachineHealthReports(context.Context, *MachineId) (*ListHealthReportResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListMachineHealthReports not implemented")
@@ -11148,24 +11124,6 @@ func _Forge_RecordDpuNetworkStatus_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).RecordDpuNetworkStatus(ctx, req.(*DpuNetworkStatus))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Forge_RecordDpuNetworkStatusWithLldpAcknowledgment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DpuNetworkStatus)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ForgeServer).RecordDpuNetworkStatusWithLldpAcknowledgment(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Forge_RecordDpuNetworkStatusWithLldpAcknowledgment_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).RecordDpuNetworkStatusWithLldpAcknowledgment(ctx, req.(*DpuNetworkStatus))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -19867,10 +19825,6 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RecordDpuNetworkStatus",
 			Handler:    _Forge_RecordDpuNetworkStatus_Handler,
-		},
-		{
-			MethodName: "RecordDpuNetworkStatusWithLldpAcknowledgment",
-			Handler:    _Forge_RecordDpuNetworkStatusWithLldpAcknowledgment_Handler,
 		},
 		{
 			MethodName: "ListMachineHealthReports",

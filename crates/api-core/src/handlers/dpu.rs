@@ -743,6 +743,10 @@ async fn get_managed_host_network_config_inner(
         // DPU when managed-host responses include service networking.
         service_interfaces: vec![],
         service_vpc_slot_inventory: None,
+        accepted_lldp_snapshot_fingerprint: dpu_snapshot
+            .network_status_observation
+            .as_ref()
+            .and_then(|status| status.accepted_lldp_snapshot_fingerprint.clone()),
         instance_id: snapshot.instance.as_ref().map(|instance| instance.id),
         asn,
         dhcp_servers: api
@@ -995,49 +999,74 @@ pub(crate) async fn update_agent_reported_inventory(
     Ok(Response::new(()))
 }
 
-/// Result of shared network-status processing before an RPC wrapper applies
-/// its rolling-upgrade LLDP acknowledgment contract.
-struct DpuNetworkStatusOutcome {
-    lldp_accepted: Option<bool>,
-    lldp_error: Option<CarbideError>,
-}
-
-/// Records DPU status through the original RPC contract, deferring any LLDP
-/// rejection until the operational status and follow-up work have completed.
+/// Records DPU status while preserving legacy LLDP error behavior for clients
+/// that do not send snapshot fingerprints.
 pub(crate) async fn record_dpu_network_status(
     api: &Api,
     request: Request<rpc::DpuNetworkStatus>,
 ) -> Result<Response<()>, tonic::Status> {
     log_request_data(&request);
 
-    let outcome = process_dpu_network_status(api, request.into_inner()).await?;
-    if let Some(error) = outcome.lldp_error {
+    let request = request.into_inner();
+    let supports_config_acknowledgment = request.lldp_snapshot_fingerprint.is_some();
+    let lldp_error = process_dpu_network_status(api, request).await?;
+    if !supports_config_acknowledgment && let Some(error) = lldp_error {
         return Err(error.into());
     }
 
     Ok(Response::new(()))
 }
 
-/// Records DPU status while returning explicit acceptance for an attached LLDP
-/// report, allowing newer agents to confirm only snapshots Core retained.
-pub(crate) async fn record_dpu_network_status_with_lldp_acknowledgment(
-    api: &Api,
-    request: Request<rpc::DpuNetworkStatus>,
-) -> Result<Response<rpc::DpuNetworkStatusResponse>, tonic::Status> {
-    log_request_data(&request);
+/// Processes an attached DPU LLDP report and advances its accepted fingerprint
+/// in the same savepoint as the corresponding neighbor replacement.
+async fn handle_dpu_lldp_report(
+    txn: &mut sqlx::PgConnection,
+    dpu_machine_id: &DpuMachineId,
+    report: rpc::LldpReport,
+    supplied_fingerprint: Option<&[u8]>,
+) -> Result<(), CarbideError> {
+    let result = rpc::LldpReportResult::try_from(report.result).map_err(|_| {
+        CarbideError::InvalidArgument(format!("unknown LLDP report result {}", report.result))
+    })?;
 
-    let outcome = process_dpu_network_status(api, request.into_inner()).await?;
-    Ok(Response::new(rpc::DpuNetworkStatusResponse {
-        lldp_accepted: outcome.lldp_accepted,
-    }))
+    let accepted_fingerprint = match result {
+        rpc::LldpReportResult::Updated => {
+            let computed = ::rpc::lldp_snapshot::fingerprint(&report.interfaces);
+            if let Some(supplied) = supplied_fingerprint
+                && supplied != computed.as_slice()
+            {
+                return Err(CarbideError::InvalidArgument(
+                    "LLDP snapshot fingerprint does not match the attached interfaces".to_string(),
+                ));
+            }
+            Some(computed)
+        }
+        rpc::LldpReportResult::Unchanged => None,
+        rpc::LldpReportResult::CollectionFailed => {
+            if supplied_fingerprint.is_some() {
+                return Err(CarbideError::InvalidArgument(
+                    "LLDP collection failure must not identify a snapshot".to_string(),
+                ));
+            }
+            None
+        }
+        rpc::LldpReportResult::Unspecified => None,
+    };
+
+    lldp::handle_lldp_report(txn, dpu_machine_id, report).await?;
+    if let Some(fingerprint) = accepted_fingerprint {
+        db::machine::update_accepted_lldp_snapshot_fingerprint(txn, dpu_machine_id, &fingerprint)
+            .await?;
+    }
+    Ok(())
 }
 
-/// Applies one DPU status report while keeping operational status, LLDP
-/// savepoint handling, commits, and follow-up work identical for both RPCs.
+/// Applies one DPU status report, retaining an LLDP rejection until operational
+/// status and existing post-commit follow-up work have completed.
 async fn process_dpu_network_status(
     api: &Api,
     mut request: rpc::DpuNetworkStatus,
-) -> Result<DpuNetworkStatusOutcome, tonic::Status> {
+) -> Result<Option<CarbideError>, tonic::Status> {
     let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
@@ -1192,12 +1221,18 @@ async fn process_dpu_network_status(
     // Keep the machine-row ordering owned by this transaction while allowing a
     // rejected LLDP report to roll back without discarding operational status.
     let mut lldp_error = None;
-    let lldp_accepted = if let Some(lldp) = request.lldp.take() {
+    if let Some(lldp) = request.lldp.take() {
         let mut lldp_savepoint = db::Transaction::begin_inner(txn.as_pgconn()).await?;
-        match lldp::handle_lldp_report(lldp_savepoint.as_pgconn(), &dpu_machine_id, lldp).await {
+        match handle_dpu_lldp_report(
+            lldp_savepoint.as_pgconn(),
+            &dpu_machine_id,
+            lldp,
+            request.lldp_snapshot_fingerprint.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
                 lldp_savepoint.commit().await?;
-                Some(true)
             }
             Err(error) => {
                 // An explicit rollback restores the outer transaction after SQL
@@ -1209,12 +1244,9 @@ async fn process_dpu_network_status(
                     "LLDP report rejected",
                 );
                 lldp_error = Some(error);
-                Some(false)
             }
         }
-    } else {
-        None
-    };
+    }
 
     txn.commit().await?;
 
@@ -1287,10 +1319,7 @@ async fn process_dpu_network_status(
         });
     }
 
-    Ok(DpuNetworkStatusOutcome {
-        lldp_accepted,
-        lldp_error,
-    })
+    Ok(lldp_error)
 }
 
 async fn wakeup_host_state_handler_by_dpu_id(

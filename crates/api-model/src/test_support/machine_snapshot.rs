@@ -409,6 +409,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
                 agent_version_superseded_at: None,
                 instance_network_observation: None,
                 fabric_interfaces: vec![],
+                accepted_lldp_snapshot_fingerprint: None,
             }
         }),
         infiniband_status_observation: Some(MachineInfinibandStatusObservation {
