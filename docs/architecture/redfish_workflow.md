@@ -117,7 +117,7 @@ Every configured serial must be discovered and its DPU ready before ingestion. A
 
 Before accepting a pairing, NICo validates:
 
-- **DPU mode**: Each matched DPU must be ready in its target DPU or NIC mode. Only devices running in DPU mode are attached as managed DPUs.
+- **DPU mode**: A successful mode-change request defers ingestion until a later pass. After mode checks succeed, devices reporting NIC mode count toward pairing completeness but are not attached as managed DPUs. A missing Redfish mode does not itself block attachment; supported BF4 devices can pair without reporting DPU or NIC mode.
 - **DPU model configuration**: Site Explorer resolves the target mode from the host's DPU policy and the device part number. Mode changes require a host power cycle, and ingestion waits for the changes to take effect.
 - **Completeness**: Every configured serial must have an explored DPU BMC, and every matched DPU must be ready. Ready matches must also cover the reported DPU count. Configured DPUs can fill unmatched reported slots when host serials are incorrect, without counting those slots twice. Inventory records without usable serials do not add slots. Incomplete pairings are deferred.
 
