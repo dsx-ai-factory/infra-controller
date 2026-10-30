@@ -3671,6 +3671,13 @@ mac = "00:11:22:33:44:55"
                 Box::new(Config::default()) => Yields(()),
 
                 config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 1,
+                        ..RateLimitConfig::default()
+                    });
+                }) => Yields(()),
+
+                config_with(|config| {
                     config.bmc_request_concurrency =
                         NonZeroUsize::new(Semaphore::MAX_PERMITS)
                             .expect("Tokio supports at least one semaphore permit");
@@ -3745,6 +3752,15 @@ mac = "00:11:22:33:44:55"
                 }) => FailsWith(
                     "bucket_replenish must be greater than 0 when rate limiting is enabled"
                         .to_string()
+                ),
+
+                config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 0,
+                        ..RateLimitConfig::default()
+                    });
+                }) => FailsWith(
+                    "bucket_burst must be greater than 0 when rate limiting is enabled".to_string()
                 ),
 
                 config_with(|config| {
