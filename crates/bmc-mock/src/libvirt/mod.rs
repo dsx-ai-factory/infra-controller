@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use nv_redfish::schema::resource::PowerState;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -31,8 +31,8 @@ use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{
-    ActionError, BmcState, BootOptionKind, Callbacks, ResourceResetType, VirtualMediaUpdate,
-    validate_power_reset,
+    ActionError, BmcEvent, BmcState, BootOptionKind, Callbacks, ResourceResetType,
+    VirtualMediaUpdate, validate_power_reset,
 };
 
 mod commands;
@@ -53,13 +53,13 @@ const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Additional grace period for reaping after a kill request, independent of the command deadline.
 const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Per power request, allow one five-second poll delay, a 30-second virsh
+/// attempt and five seconds of cleanup to obtain the first recognized state.
+/// Expiry fails before enqueueing a power command. Backend polling continues.
+const INITIALIZATION_WAIT: Duration = Duration::from_secs(40);
+
 /// Delay after each periodic observation; the actor retains at most one polling alarm.
-// Unit tests exercise polling and recovery without waiting for the production cadence.
-const POWER_POLL_INTERVAL: Duration = if cfg!(test) {
-    Duration::from_millis(20)
-} else {
-    Duration::from_secs(5)
-};
+const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -74,6 +74,7 @@ pub struct LibvirtActor {
     config: Config,
     refresh_pending: Arc<AtomicBool>,
     power_state: Arc<RwLock<PowerObservation>>,
+    initialized: watch::Sender<bool>,
 }
 
 impl LibvirtActor {
@@ -86,6 +87,7 @@ impl LibvirtActor {
             cycling: false,
         }));
         let (actor, mailbox) = Actor::new();
+        let (initialized, initialization) = watch::channel(false);
         (
             LibvirtActor {
                 actor,
@@ -93,19 +95,24 @@ impl LibvirtActor {
                 config,
                 refresh_pending: refresh_pending.clone(),
                 power_state: power_state.clone(),
+                initialized,
             },
             LibvirtCallbacks {
                 mailbox,
                 refresh_pending,
                 power_state,
+                initialized: initialization,
                 _stop: guard,
             },
         )
     }
 
+    /// Loads saved state and runs the supervised backend. The owner retains the
+    /// state Arc for the serving lifetime. Lifecycle publication uses only Weak
+    /// access, so it cannot keep the callbacks and backend alive.
     pub async fn run(
         self,
-        bmc_state: &BmcState<LibvirtCallbacks>,
+        bmc_state: &Arc<BmcState<LibvirtCallbacks>>,
         tasks: &mut JoinSet<()>,
         stop: CancellationToken,
     ) -> eyre::Result<()> {
@@ -121,6 +128,10 @@ impl LibvirtActor {
             config: self.config,
             restore_boot_after_power_on: false,
             system_state: None,
+            bmc_state: Arc::downgrade(bmc_state),
+            last_observed_power: None,
+            boot_pending: None,
+            initialized: self.initialized,
             applied_state: AppliedState::default(),
             refresh_pending: self.refresh_pending,
             power_state: self.power_state,
@@ -158,7 +169,11 @@ pub struct Config {
 /// after power commands and refresh notifications, and by polling with a five-second
 /// delay after each attempt. Actor work can delay polling; each virsh attempt has a 30-second
 /// deadline and up to five seconds of cleanup. Failed or unrecognized observations retain the last state.
-/// Power commands return once enqueued; execution failures are logged by the actor.
+/// Power commands wait up to 40 seconds for the first recognized domain observation
+/// before validation, then return once enqueued. Expiry returns an internal error
+/// without enqueueing. Backend exit closes the readiness channel, and the caller
+/// can cancel its wait. A later request can succeed after an observation recovers.
+/// Execution failures are logged by the actor.
 /// Virtual-media operations await execution and publish Redfish contents only on success.
 /// Resets are rejected while a power-cycle command is executing.
 /// Dropping the handle cancels the actor. Cancelling `LibvirtActor::run` during
@@ -168,6 +183,7 @@ pub struct LibvirtCallbacks {
     mailbox: ActorMailbox<LibvirtMessage>,
     refresh_pending: Arc<AtomicBool>,
     power_state: Arc<RwLock<PowerObservation>>,
+    initialized: watch::Receiver<bool>,
     _stop: DropGuard,
 }
 
@@ -192,9 +208,19 @@ struct LibvirtBackend {
     config: Config,
     restore_boot_after_power_on: bool,
     system_state: Option<Weak<SystemState<LibvirtCallbacks>>>,
+    bmc_state: Weak<BmcState<LibvirtCallbacks>>,
+    last_observed_power: Option<PowerState>,
+    boot_pending: Option<BootKind>,
+    initialized: watch::Sender<bool>,
     applied_state: AppliedState,
     refresh_pending: Arc<AtomicBool>,
     power_state: Arc<RwLock<PowerObservation>>,
+}
+
+#[derive(Clone, Copy)]
+enum BootKind {
+    Warm,
+    Cold,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -257,12 +283,9 @@ impl LibvirtBackend {
     }
 
     async fn restore_boot_after_start(&mut self) -> eyre::Result<()> {
-        let restore_boot = std::mem::take(&mut self.restore_boot_after_power_on);
-        if restore_boot {
-            if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
-                system_state.on_boot_completed();
-            }
+        if self.restore_boot_after_power_on {
             self.restore_persistent_boot_order().await?;
+            self.restore_boot_after_power_on = false;
         }
         Ok(())
     }
@@ -426,9 +449,36 @@ impl LibvirtBackend {
         }
     }
 
-    async fn refresh_power_state(&self) {
+    async fn refresh_power_state(&mut self) {
         if let Some(observed) = self.observe_power_state().await {
+            // Synthetic Off during a cycle is not an observed edge. Initial On
+            // seeds state without inventing a boot for a restored BFB task.
+            let boot = if observed == PowerState::On {
+                self.boot_pending.take().or_else(|| {
+                    (self.last_observed_power == Some(PowerState::Off)).then_some(BootKind::Cold)
+                })
+            } else {
+                None
+            };
+            self.last_observed_power = Some(observed);
             self.publish_power_state(observed);
+            self.initialized.send_replace(true);
+            if let Some(boot) = boot {
+                let used_saved_boot_configuration = matches!(boot, BootKind::Cold);
+                if let Some(state) = self.bmc_state.upgrade() {
+                    state.on_event(&BmcEvent::PowerOn);
+                    // Domain On is the standalone backend's boot-completion
+                    // inference, as for one-time boot-policy restoration.
+                    state.on_boot_completed(used_saved_boot_configuration);
+                }
+                // Publish this boot before yielding to XML cleanup. A later
+                // upload admitted during cleanup must wait for its own boot.
+                if used_saved_boot_configuration
+                    && let Err(error) = self.restore_boot_after_start().await
+                {
+                    tracing::error!(domain = %self.config.domain, %error, "could not restore persistent boot order");
+                }
+            }
         }
     }
 
@@ -439,19 +489,23 @@ impl LibvirtBackend {
         use ResourceResetType::*;
         // Only a cold start loads the saved domain XML. Reboot and reset keep
         // the running domain's boot configuration and their existing semantics.
-        if matches!(reset_type, On | ForceOn | PowerCycle) {
+        if matches!(reset_type, On | ForceOn | PowerCycle | FullPowerCycle) {
             self.reapply_effective_boot_order().await?;
         }
         for command in VirshCommand::power(reset_type)? {
-            let starts_domain = matches!(command, VirshCommand::Start);
+            let boot = match command {
+                VirshCommand::Start => Some(BootKind::Cold),
+                VirshCommand::Reset | VirshCommand::Reboot => Some(BootKind::Warm),
+                _ => None,
+            };
             self.virsh()
                 .execute(command)
                 .await
                 .map_err(ActionError::Internal)?;
-            if starts_domain {
-                self.restore_boot_after_start()
-                    .await
-                    .map_err(ActionError::Internal)?;
+            // The boot happened even if later boot-policy cleanup fails.
+            // Only confirmed On consumes this marker and publishes lifecycle.
+            if boot.is_some() {
+                self.boot_pending = boot;
             }
         }
         Ok(())
@@ -579,6 +633,21 @@ impl Callbacks for LibvirtCallbacks {
         reset_type: ResourceResetType,
     ) -> Result<(), ActionError> {
         {
+            let mut initialized = self.initialized.clone();
+            drop(
+                tokio::time::timeout(INITIALIZATION_WAIT, initialized.wait_for(|ready| *ready))
+                    .await
+                    .map_err(|error| {
+                        ActionError::Internal(
+                            eyre::Report::new(error).wrap_err(
+                                "timed out waiting for the first libvirt power observation",
+                            ),
+                        )
+                    })?
+                    .map_err(|error| ActionError::Internal(error.into()))?,
+            );
+        }
+        {
             let observation = self.power_state.read().expect("power state lock poisoned");
             if observation.cycling {
                 return Err(ActionError::BadRequest(eyre::eyre!(
@@ -602,129 +671,8 @@ impl Callbacks for LibvirtCallbacks {
     }
 }
 
+// Do not generate executable stub scripts in tests. A parallel test can fork while
+// another thread holds a script open for writing; inherited descriptors can race
+// with exec and cause ETXTBSY (Text file busy) or other unexpected failures.
 #[cfg(test)]
-mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
-    use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
-    use tower::ServiceExt;
-
-    use super::*;
-    use crate::test_support::host_info;
-    use crate::{HardwareType, MachineRouterOptions, machine_router};
-
-    #[tokio::test]
-    async fn observes_external_power_changes_and_recovers_from_unavailable_state() {
-        let directory = tempfile::tempdir().unwrap();
-        let virsh = directory.path().join("virsh");
-        std::fs::write(
-            &virsh,
-            r#"#!/bin/sh
-case "$3" in
-    domstate)
-        IFS= read -r state < "$0.state"
-        printf '%s\n' "$state" > "$0.observed"
-        [ "$state" != error ] || exit 1
-        printf '%s\n' "$state"
-        ;;
-    dumpxml) printf '%s\n' '<domain><os><type>hvm</type></os><devices/></domain>' ;;
-    define | attach-device) while IFS= read -r line; do :; done ;;
-    *) exit 2 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let state_file = directory.path().join("virsh.state");
-        std::fs::write(&state_file, "running").unwrap();
-        let mut tasks = JoinSet::new();
-        let stop = CancellationToken::new();
-        let (actor, callbacks) = LibvirtActor::new(
-            Config {
-                state_file: None,
-                virsh_path: virsh,
-                uri: "test:///default".to_string(),
-                domain: "test-domain".to_string(),
-                virtual_media_targets: [
-                    ("Cd".to_owned(), "sdb".to_owned()),
-                    ("ConfigCd".to_owned(), "sdc".to_owned()),
-                ]
-                .into(),
-            },
-            stop.clone().drop_guard(),
-        );
-        let callbacks = Arc::new(callbacks);
-        let (router, state) = machine_router(
-            &host_info(HardwareType::DellPowerEdgeR750),
-            callbacks.clone(),
-            "test-host".to_string(),
-            false,
-            MachineRouterOptions::default(),
-        );
-        actor.run(&state, &mut tasks, stop).await.unwrap();
-        // These changes happen outside the BMC: no reset or refresh is sent.
-        for (observation, expected) in [
-            ("running", serde_json::json!("On")),
-            ("shut off", serde_json::json!("Off")),
-            ("error", serde_json::json!("Off")),
-            ("running", serde_json::json!("On")),
-            ("unrecognized", serde_json::json!("On")),
-        ] {
-            let replacement = directory.path().join("next-state");
-            std::fs::write(&replacement, observation).unwrap();
-            std::fs::rename(replacement, &state_file).unwrap();
-            tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let response = router
-                        .clone()
-                        .oneshot(
-                            Request::builder()
-                                .uri("/redfish/v1/Systems/System.Embedded.1")
-                                .body(Body::empty())
-                                .unwrap(),
-                        )
-                        .await
-                        .unwrap();
-                    assert_eq!(response.status(), StatusCode::OK);
-                    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    if body.get("PowerState") == Some(&expected)
-                        && std::fs::read_to_string(directory.path().join("virsh.observed"))
-                            .unwrap_or_default()
-                            .trim()
-                            == observation
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            })
-            .await
-            .unwrap_or_else(|_| panic!("observation {observation:?} did not become {expected}"));
-            if expected.is_null() {
-                let response = router
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .method("POST")
-                            .uri("/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset")
-                            .header("content-type", "application/json")
-                            .body(Body::from(r#"{"ResetType":"ForceOff"}"#))
-                            .unwrap(),
-                    )
-                    .await;
-                assert_eq!(
-                    response.unwrap().status(),
-                    StatusCode::INTERNAL_SERVER_ERROR
-                );
-            }
-        }
-        drop(router);
-        drop(state);
-        drop(callbacks);
-        tokio::time::timeout(Duration::from_secs(1), tasks.join_all())
-            .await
-            .expect("dropping the backend must stop polling");
-    }
-}
+mod tests;

@@ -145,7 +145,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 
 	stDAO := cdbm.NewSiteDAO(mm.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received Machine inventory for unknown or deleted Site")
@@ -1151,11 +1151,12 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			statusMessage = "Machine is waiting for cleanup"
 		case controllerMachineStatePrefixMeasuring:
 			machineStatus = cdbm.MachineStatusInitializing
-			if controllerMachineSubstate == controllerMachineMeasuringSubstateWaitingForMeasurements {
+			switch controllerMachineSubstate {
+			case controllerMachineMeasuringSubstateWaitingForMeasurements:
 				statusMessage = "System is waiting to receive attestation measurements from Machine"
-			} else if controllerMachineSubstate == controllerMachineMeasuringSubstatePendingBundle {
+			case controllerMachineMeasuringSubstatePendingBundle:
 				statusMessage = "Machine did not match any approved measurements. Requires automated or manual approval"
-			} else {
+			default:
 				statusMessage = "Machine is undergoing measured boot attestation"
 			}
 		case controllerMachineStatePrefixPostAssignedMeasuring:
@@ -1167,15 +1168,16 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 				statusMessage = "Machine has failed SKU verification"
 			} else {
 				machineStatus = cdbm.MachineStatusInitializing
-				if controllerMachineSubstate == controllerMachineBomValidatingSubstateMatchingSku {
+				switch controllerMachineSubstate {
+				case controllerMachineBomValidatingSubstateMatchingSku:
 					statusMessage = "Machine is undergoing SKU matching"
-				} else if controllerMachineSubstate == controllerMachineBomValidatingSubstateUpdatingInventory {
+				case controllerMachineBomValidatingSubstateUpdatingInventory:
 					statusMessage = "Machine inventory is being updated"
-				} else if controllerMachineSubstate == controllerMachineBomValidatingSubstateVerifyingSku {
+				case controllerMachineBomValidatingSubstateVerifyingSku:
 					statusMessage = "Machine SKU is being verified"
-				} else if controllerMachineSubstate == controllerMachineBomValidatingSubstateWaitingForSkuAssignment {
+				case controllerMachineBomValidatingSubstateWaitingForSkuAssignment:
 					statusMessage = "Machine is awaiting SKU assignment"
-				} else {
+				default:
 					statusMessage = "Machine is undergoing BOM validation"
 				}
 			}
@@ -1204,15 +1206,16 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 			}
 		case controllerMachineStatePrefixFailed:
 			machineStatus = cdbm.MachineStatusError
-			if controllerMachineSubstate == controllerMachineFailedMeasurementsFailedSignatureCheck {
+			switch controllerMachineSubstate {
+			case controllerMachineFailedMeasurementsFailedSignatureCheck:
 				statusMessage = "Machine measurements failed signature check"
-			} else if controllerMachineSubstate == controllerMachineFailedMeasurementsRetired {
+			case controllerMachineFailedMeasurementsRetired:
 				statusMessage = "Machine matched retired measurements"
-			} else if controllerMachineSubstate == controllerMachineFailedMeasurementsRevoked {
+			case controllerMachineFailedMeasurementsRevoked:
 				statusMessage = "Machine matched revoked measurements"
-			} else if controllerMachineSubstate == controllerMachineFailedMachineValidation {
+			case controllerMachineFailedMachineValidation:
 				statusMessage = "Machine has failed machine validation"
-			} else {
+			default:
 				statusMessage = "Machine has encountered a failure"
 				if controllerMachineSubstate != "" {
 					statusMessage = fmt.Sprintf("%s: %s", statusMessage, controllerMachineSubstate)
@@ -1229,16 +1232,12 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 	}
 
 	// Calculate isMachineUsableByTenant based on the two rules (OR relationship)
-	isUsable := false
-
 	// Rule 1: Status is Ready/InUse/Initializing AND does NOT have Prevent alerts
-	if slices.Contains([]string{
+	isUsable := slices.Contains([]string{
 		cdbm.MachineStatusReady,
 		cdbm.MachineStatusInUse,
 		cdbm.MachineStatusInitializing,
-	}, machineStatus) && !hasPreventAlerts {
-		isUsable = true
-	}
+	}, machineStatus) && !hasPreventAlerts
 
 	// Rule 2: Has tenant AND has Maintenance+Degraded alert
 	if hasTenant && hasMaintenanceDegraded {

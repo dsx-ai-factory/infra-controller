@@ -68,6 +68,12 @@ type Store interface {
 	// that RPC callers must translate, not a gRPC status.
 	ListPowerTasksForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.PowerTaskDetails, error)
 
+	// ListTaskContextForRack returns nonterminal metadata ordered by creation
+	// time then UUID. It joins the current transaction and excludes operation
+	// payloads/reports. Overflow returns TaskContextLimitError and no rows;
+	// cancellation is preserved and other failures return sanitized Internal.
+	ListTaskContextForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.TaskContextMetadata, error)
+
 	// ListNonTerminalTasksForRacks returns Waiting, Pending, and Running tasks
 	// for the requested racks.
 	ListNonTerminalTasksForRacks(ctx context.Context, rackIDs []uuid.UUID) ([]*taskdef.Task, error)

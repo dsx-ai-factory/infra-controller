@@ -18,7 +18,6 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
@@ -78,7 +77,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	stDAO := cdbm.NewSiteDAO(mi.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received Machine inventory for unknown or deleted Site")
@@ -613,7 +612,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			cdbm.InfiniBandInterfaceFilterInput{
 				InstanceIDs: []uuid.UUID{instance.ID},
 			},
-			paginator.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
 			[]string{cdbm.InfiniBandPartitionRelationName},
 		)
 		if serr != nil {
@@ -737,7 +736,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			cdbm.SpectrumXAttachmentFilterInput{
 				InstanceIDs: []uuid.UUID{instance.ID},
 			},
-			paginator.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
 			nil,
 		)
 		if serr != nil {
@@ -1007,7 +1006,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			cdbm.NVLinkInterfaceFilterInput{
 				InstanceIDs: []uuid.UUID{instance.ID},
 			},
-			paginator.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
 			[]string{cdbm.NVLinkLogicalPartitionRelationName},
 		)
 
@@ -1768,7 +1767,7 @@ func NewManageInstanceLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb
 			prometheus.GaugeOpts{
 				Namespace: namespace,
 				Name:      "instance_operation_latency_seconds",
-				Help:      "Current latency of instance operations",
+				Help:      "Latency in seconds of the most recently recorded completed instance operation for each label set on this worker replica",
 			},
 			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
 		siteNames: cwm.NewSiteNameCache(),

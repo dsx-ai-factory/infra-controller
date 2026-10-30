@@ -29,10 +29,15 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
 clap = { features = ["derive", "env"], workspace = true }
 duration-str = { workspace = true }
 eyre = { workspace = true }
 opentelemetry = { workspace = true }
+prometheus = { workspace = true }
+regex = { workspace = true }
 reqwest = { default-features = false, features = [
   "json",
   "rustls",
@@ -40,24 +45,28 @@ reqwest = { default-features = false, features = [
 rustls-pemfile = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 url = { workspace = true }
 
 # [local-dependencies]
 carbide-rpc = { path = "../rpc" }
+carbide-site-health-probe-api = { path = "../site-health-probe-api" }
 carbide-tls = { path = "../tls" }
+carbide-uuid = { path = "../uuid" }
 logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 
 [dev-dependencies]
-axum = { workspace = true }
 carbide-test-support = { path = "../test-support" }
-prometheus = { workspace = true }
 tempfile = { workspace = true }
+tokio = { features = ["test-util"], workspace = true }
+tower = { workspace = true }
 
 [lints]
 workspace = true

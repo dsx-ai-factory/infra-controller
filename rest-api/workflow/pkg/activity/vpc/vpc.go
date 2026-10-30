@@ -56,7 +56,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 
 	stDAO := cdbm.NewSiteDAO(mv.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received VPC inventory for unknown or deleted Site")
@@ -795,7 +795,7 @@ func NewManageVpcLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Sess
 			prometheus.GaugeOpts{
 				Namespace: namespace,
 				Name:      "vpc_operation_latency_seconds",
-				Help:      "Current latency of vpc operations",
+				Help:      "Latency in seconds of the most recently recorded completed VPC operation for each label set on this worker replica",
 			},
 			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
 

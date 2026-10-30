@@ -20,6 +20,10 @@ const (
 
 	// APIErrorNotFound indicates that the requested path was not found
 	APIErrorNotFound = "The requested path was not found"
+
+	// MaxRequestBodyBytes is the largest request body the API accepts. The audit
+	// capture uses the same limit so every accepted body is audited in full.
+	MaxRequestBodyBytes = 10_000_000
 )
 
 var (
@@ -41,6 +45,7 @@ type APIError struct {
 	Data    error  `json:"data"`
 	// Omit unclassified recovery metadata to preserve existing error bodies.
 	Retryable *bool `json:"retryable,omitempty"`
+	cause     error
 }
 
 // Error implements the error interface so *APIError can flow through error
@@ -50,9 +55,12 @@ func (a *APIError) Error() string {
 	return a.Message
 }
 
-// Unwrap returns the internal error recorded in Data, so errors.Is and
-// errors.As reach the cause behind an APIError.
+// Unwrap lets errors.Is/As inspect the private cause without exposing it in
+// response data. Errors without a private cause still unwrap Data.
 func (a *APIError) Unwrap() error {
+	if a.cause != nil {
+		return a.cause
+	}
 	return a.Data
 }
 
@@ -72,6 +80,12 @@ func NewAPIError(code int, message string, data error) *APIError {
 		Message: message,
 		Data:    data,
 	}
+}
+
+// WithCause preserves the internal error chain without changing response data.
+func (a *APIError) WithCause(cause error) *APIError {
+	a.cause = cause
+	return a
 }
 
 // WithRetryable classifies a definite rejection. True permits a bounded retry;
@@ -138,9 +152,10 @@ func DefaultHTTPErrorHandler(err error, c echo.Context) {
 	}
 
 	// Override 404
-	if code == http.StatusNotFound {
+	switch code {
+	case http.StatusNotFound:
 		message = APIErrorNotFound
-	} else if code == http.StatusInternalServerError {
+	case http.StatusInternalServerError:
 		message = APIErrorInternalServer
 	}
 

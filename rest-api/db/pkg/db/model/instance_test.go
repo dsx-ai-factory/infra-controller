@@ -1670,17 +1670,18 @@ func TestInstanceSQLDAO_GetAll(t *testing.T) {
 			} else {
 				assert.Equal(t, tc.expectedCount, len(got))
 				for _, relation := range tc.paramRelations {
-					if relation == TenantRelationName {
+					switch relation {
+					case TenantRelationName:
 						assert.NotNil(t, got[0].Tenant)
-					} else if relation == InfrastructureProviderRelationName {
+					case InfrastructureProviderRelationName:
 						assert.NotNil(t, got[0].InfrastructureProvider)
-					} else if relation == SiteRelationName {
+					case SiteRelationName:
 						assert.NotNil(t, got[0].Site)
-					} else if relation == InstanceTypeRelationName {
+					case InstanceTypeRelationName:
 						assert.NotNil(t, got[0].InstanceType)
-					} else if relation == VpcRelationName {
+					case VpcRelationName:
 						assert.NotNil(t, got[0].Vpc)
-					} else if relation == OperatingSystemRelationName {
+					case OperatingSystemRelationName:
 						assert.NotNil(t, got[0].OperatingSystem)
 					}
 				}

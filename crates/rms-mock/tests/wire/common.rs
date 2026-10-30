@@ -66,6 +66,10 @@ pub(crate) async fn serve_inventory(
     config: RmsMockConfig,
 ) -> String {
     let mock = Arc::new(RmsMock::new(inventory, config));
+    serve_mock(mock).await
+}
+
+pub(crate) async fn serve_mock(mock: Arc<RmsMock>) -> String {
     let router = rms_mock::router(mock);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -84,6 +88,7 @@ pub(crate) fn node_info(node_id: &str, mac: &str) -> rms::NodeInfo {
 
 pub(crate) fn node_info_in_rack(rack_id: &str, node_id: &str, mac: &str) -> rms::NodeInfo {
     rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: node_id.to_string(),
         rack_id: rack_id.to_string(),
         // Left unset: the mock matches on address, not on declared type.

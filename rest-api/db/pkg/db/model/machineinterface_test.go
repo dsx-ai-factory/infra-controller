@@ -667,6 +667,7 @@ func TestMachineInterfaceSQLDAO_Delete(t *testing.T) {
 			IpAddresses:           []string{"192.168.0.1, 172.168.0.1"},
 		},
 	)
+	require.NoError(t, err)
 
 	mi2, err := miDAO.Create(
 		ctx,
@@ -683,6 +684,7 @@ func TestMachineInterfaceSQLDAO_Delete(t *testing.T) {
 			IpAddresses:           []string{"192.168.0.2, 172.168.0.2"},
 		},
 	)
+	require.NoError(t, err)
 
 	// Test with bad DB session
 	badSession, err := db.NewSession(context.Background(), "localhost", 1234, "postgres", "postgres", "postgres", "")

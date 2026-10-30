@@ -49,15 +49,17 @@ func TestNewAPIInterface(t *testing.T) {
 		ID:          uuid.New(),
 		InstanceID:  uuid.New(),
 		VpcPrefixID: cutil.GetPtr(uuid.New()),
+		IPAddresses: []string{},
 		Created:     time.Now(),
 		Updated:     time.Now(),
 	}
 
 	tests := []struct {
-		name             string
-		args             args
-		want             *APIInterface
-		wantPrefixesJSON string
+		name              string
+		args              args
+		want              *APIInterface
+		wantAddressesJSON string
+		wantPrefixesJSON  string
 	}{
 		{
 			name: "test new API Interface Subnet initializer",
@@ -75,7 +77,8 @@ func TestNewAPIInterface(t *testing.T) {
 				Created:            dbis.Created,
 				Updated:            dbis.Updated,
 			},
-			wantPrefixesJSON: `["192.0.2.0/24","2001:db8::/64"]`,
+			wantAddressesJSON: `["192.0.2.10"]`,
+			wantPrefixesJSON:  `["192.0.2.0/24","2001:db8::/64"]`,
 		},
 		{
 			name: "test new API Interface explicit VPC Prefix initializer",
@@ -86,12 +89,14 @@ func TestNewAPIInterface(t *testing.T) {
 				ID:          vpcPrefixInterface.ID.String(),
 				InstanceID:  vpcPrefixInterface.InstanceID.String(),
 				VpcPrefixID: cutil.GetPtr(vpcPrefixInterface.VpcPrefixID.String()),
+				IPAddresses: []string{},
 				IPPrefixes:  []string{},
 				Status:      vpcPrefixInterface.Status,
 				Created:     vpcPrefixInterface.Created,
 				Updated:     vpcPrefixInterface.Updated,
 			},
-			wantPrefixesJSON: `[]`,
+			wantAddressesJSON: `[]`,
+			wantPrefixesJSON:  `[]`,
 		},
 		{
 			name: "test new API Interface VPC selection initializer",
@@ -99,16 +104,18 @@ func TestNewAPIInterface(t *testing.T) {
 				dbis: vpcInterface,
 			},
 			want: &APIInterface{
-				ID:         vpcInterface.ID.String(),
-				InstanceID: vpcInterface.InstanceID.String(),
-				VpcID:      cutil.GetPtr(vpcID.String()),
-				IPFamilies: []IPFamily{IPFamilyIPv4, IPFamilyIPv6},
-				IPPrefixes: []string{},
-				Status:     vpcInterface.Status,
-				Created:    vpcInterface.Created,
-				Updated:    vpcInterface.Updated,
+				ID:          vpcInterface.ID.String(),
+				InstanceID:  vpcInterface.InstanceID.String(),
+				VpcID:       cutil.GetPtr(vpcID.String()),
+				IPFamilies:  []IPFamily{IPFamilyIPv4, IPFamilyIPv6},
+				IPAddresses: []string{},
+				IPPrefixes:  []string{},
+				Status:      vpcInterface.Status,
+				Created:     vpcInterface.Created,
+				Updated:     vpcInterface.Updated,
 			},
-			wantPrefixesJSON: `[]`,
+			wantAddressesJSON: `[]`,
+			wantPrefixesJSON:  `[]`,
 		},
 	}
 	for _, tt := range tests {
@@ -121,6 +128,8 @@ func TestNewAPIInterface(t *testing.T) {
 			require.NoError(t, err)
 			var response map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(encoded, &response))
+			require.Contains(t, response, "ipAddresses")
+			assert.JSONEq(t, tt.wantAddressesJSON, string(response["ipAddresses"]))
 			assert.JSONEq(t, tt.wantPrefixesJSON, string(response["ipPrefixes"]))
 		})
 	}

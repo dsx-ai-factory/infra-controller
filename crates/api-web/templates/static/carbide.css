@@ -221,10 +221,20 @@ nav ul ul a {
   color: var(--text-muted) !important;
 }
 
-nav a:not(#site-name):not(nav h3 a):hover {
+nav a:not(#site-name):not(nav h3 a):hover,
+nav a:not(#site-name):not(nav h3 a).active {
   background-color: var(--accent-green-light);
   color: var(--text-primary);
   border-left-color: var(--accent-green);
+}
+
+/* Link for the current page, marked by the sidebar script in base.html */
+nav a:not(#site-name):not(nav h3 a).active {
+  font-weight: 600;
+}
+
+nav ul ul a.active {
+  color: var(--text-primary) !important;
 }
 
 nav hr {

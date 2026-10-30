@@ -54,8 +54,10 @@ func testTxSetupSchema(t *testing.T, dbSession *Session) {
 	ctx := context.Background()
 	tx, err := BeginTx(context.Background(), dbSession, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	assert.Nil(t, err)
-	GetIDB(tx, dbSession).NewDropTable().Model(&TestTable{}).IfExists().Exec(ctx)
-	GetIDB(tx, dbSession).NewCreateTable().Model(&TestTable{}).IfNotExists().Exec(ctx)
+	_, err = GetIDB(tx, dbSession).NewDropTable().Model(&TestTable{}).IfExists().Exec(ctx)
+	require.NoError(t, err)
+	_, err = GetIDB(tx, dbSession).NewCreateTable().Model(&TestTable{}).IfNotExists().Exec(ctx)
+	require.NoError(t, err)
 	err = tx.Commit()
 	assert.Nil(t, err)
 }
@@ -252,7 +254,7 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 				assert.NotNil(t, tx3)
 				err = tx3.AcquireAdvisoryLock(ctx, uint64(123), false)
 				assert.Nil(t, err)
-				tx3.Rollback()
+				assert.NoError(t, tx3.Rollback())
 			case 5:
 				// reacquire lock success after rollback existing tx with lock
 				err = tx2.Rollback()
@@ -262,7 +264,7 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 				assert.NotNil(t, tx3)
 				err = tx3.AcquireAdvisoryLock(ctx, uint64(456), false)
 				assert.Nil(t, err)
-				tx3.Rollback()
+				assert.NoError(t, tx3.Rollback())
 			}
 		})
 	}
@@ -344,7 +346,7 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				err = tx1.TryAcquireAdvisoryLock(ctx, lockID, nil)
 				assert.Nil(t, err)
-				tx1.Rollback()
+				assert.NoError(t, tx1.Rollback())
 			case 2:
 				tx1, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
 				assert.Nil(t, err)
@@ -354,8 +356,8 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				err = tx2.TryAcquireAdvisoryLock(ctx, lockID, nil)
 				assert.NotNil(t, err)
-				tx1.Rollback()
-				tx2.Rollback()
+				assert.NoError(t, tx1.Rollback())
+				assert.NoError(t, tx2.Rollback())
 			case 3:
 				tx1, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
 				assert.Nil(t, err)
@@ -363,13 +365,16 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				tx2, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
 				assert.Nil(t, err)
+				rollbackDone := make(chan struct{})
+				defer func() { <-rollbackDone }()
 				go func() {
+					defer close(rollbackDone)
 					time.Sleep(150 * time.Millisecond)
-					tx1.Rollback()
+					assert.NoError(t, tx1.Rollback())
 				}()
 				err = tx2.TryAcquireAdvisoryLock(ctx, lockID, &LockRetryOptions{Retries: cutil.GetPtr(5)})
 				assert.Nil(t, err)
-				tx2.Rollback()
+				assert.NoError(t, tx2.Rollback())
 			}
 		})
 	}
@@ -740,7 +745,12 @@ func TestGetBunTx(t *testing.T) {
 	defer dbSession.Close()
 	ctx := context.Background()
 	tx1, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
-	defer tx1.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx1.Rollback)
 	assert.Nil(t, err)
 	buntxp := tx1.GetBunTx()
 	assert.NotNil(t, buntxp)

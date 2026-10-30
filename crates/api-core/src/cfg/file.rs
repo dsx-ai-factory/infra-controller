@@ -16,7 +16,7 @@
  */
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -58,6 +58,7 @@ use libmlx::profile::profile::MlxConfigProfile;
 use libmlx::profile::serialization::{
     deserialize_option_profile_map, serialize_option_profile_map,
 };
+use model::extension_service::ServiceVpcAddressFamily;
 use model::firmware::{
     AgentUpgradePolicyChoice, Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry,
 };
@@ -69,8 +70,8 @@ use model::network_security_group::{
 use model::network_segment::NetworkDefinition;
 use model::resource_pool::define::ResourcePoolConfig;
 use model::tenant::identity_config::SigningAlgorithm;
-use model::vpc::VpcConfig;
 pub use model::vpc::{PrefixFilterPolicyEntry, RouteTargetConfig};
+use model::vpc::{RouteTargetConfigError, VpcConfig};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -202,6 +203,15 @@ pub struct CarbideConfig {
         serialize_with = "as_std_duration"
     )]
     pub database_startup_retry_timeout: std::time::Duration,
+
+    /// Permits of the admission gate in front of the admin-segment advisory
+    /// locks: how many flows (DHCP discovery, machine discovery, Site
+    /// Explorer machine creation) may hold an open transaction while waiting
+    /// on those locks. Must be 1 to 256, and startup rejects other values. When
+    /// unset, the `ADMIN_LOCK_ADMISSION` environment variable applies, then
+    /// 16. Read at startup. A change needs a restart.
+    #[serde(default)]
+    pub admin_lock_admission_permits: Option<usize>,
 
     /// Bounds the number of API requests that may execute or wait for
     /// execution. The limits are shared by gRPC and admin HTTP traffic.
@@ -477,6 +487,7 @@ pub struct CarbideConfig {
     pub max_concurrent_machine_updates: Option<i32>,
 
     /// The interval at which the machine update manager checks for machine updates in seconds.
+    /// Unset means [`DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS`].
     pub machine_update_run_interval: Option<u64>,
 
     /// How long a retained boot interface pair (see the
@@ -1010,6 +1021,21 @@ pub struct CarbideConfig {
     /// store; absent means certs are issued from the credential Vault.
     #[serde(default)]
     pub certificates: CertificatesConfig,
+
+    /// How long to wait for the nico-api server to shut down gracefully before forcing background
+    /// tasks to abort.
+    #[serde(
+        default = "default_shutdown_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub shutdown_timeout: std::time::Duration,
+
+    /// Intended for integration testing: Whether to panic if a background task (for instance, state
+    /// controllers, site-explorer) finishes early before we've shut down. Not recommended for
+    /// production.
+    #[serde(default)]
+    pub panic_on_early_task_return: bool,
 }
 
 /// Global admission limits for business requests handled by nico-api.
@@ -1779,6 +1805,59 @@ pub enum ProviderConfig {
         #[serde(default)]
         transit_mount: Option<String>,
     },
+    /// A KMIP 1.4 server holding a non-exportable AES-256 KEK per kek_id;
+    /// DEKs are wrapped and unwrapped with the KMIP Encrypt and Decrypt
+    /// operations over mutually authenticated TLS, so KEK material never
+    /// leaves the server. Startup connects and verifies that the server
+    /// lists KMIP 1.4 and both operations and that every key is an Active
+    /// AES-256 key permitted to encrypt and decrypt, probes a wrap and
+    /// unwrap, and fails the boot otherwise.
+    Kmip {
+        /// `host:port` or `[v6-literal]:port` of the KMIP TLS listener; the
+        /// host must be a DNS name or IP address, an IPv6 literal must be
+        /// bracketed, and the port defaults to 5696 when omitted.
+        endpoint: String,
+        /// The name the server certificate must match. A DNS name is also
+        /// sent as SNI; an IP address is matched against the certificate's IP
+        /// SANs without SNI. Defaults to the host part of `endpoint`.
+        #[serde(default)]
+        server_name: Option<String>,
+        /// PEM bundle of the CA certificates trusted to sign the server
+        /// certificate. System roots are never used.
+        ca_bundle: std::path::PathBuf,
+        /// PEM client certificate chain presented to the server.
+        client_cert: std::path::PathBuf,
+        /// PEM private key (PKCS#8, PKCS#1 or SEC1) for `client_cert`.
+        client_key: std::path::PathBuf,
+        /// kek_id to the KMIP Unique Identifier of its key object. At least
+        /// one entry is required.
+        keys: std::collections::HashMap<String, String>,
+        /// Per-attempt bound on reading the TLS files, the TCP connect and
+        /// the TLS handshake together. Defaults to 5s; at most 60s.
+        #[serde(
+            default = "default_kmip_connect_timeout",
+            deserialize_with = "deserialize_duration",
+            serialize_with = "as_std_duration"
+        )]
+        connect_timeout: std::time::Duration,
+        /// Per-attempt bound on writing one request and reading its
+        /// complete response; also bounds waiting for the connection behind
+        /// another caller. Defaults to 10s; at most 120s.
+        #[serde(
+            default = "default_kmip_request_timeout",
+            deserialize_with = "deserialize_duration",
+            serialize_with = "as_std_duration"
+        )]
+        request_timeout: std::time::Duration,
+    },
+}
+
+const fn default_kmip_connect_timeout() -> std::time::Duration {
+    carbide_kmip::DEFAULT_CONNECT_TIMEOUT
+}
+
+const fn default_kmip_request_timeout() -> std::time::Duration {
+    carbide_kmip::DEFAULT_REQUEST_TIMEOUT
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1946,14 +2025,13 @@ pub struct DpfConfig {
     /// endpoints plus fixed allocations.
     #[serde(default = "default_dpf_pf_total_sf_reserved")]
     pub pf_total_sf_reserved: u32,
-    /// Whether carbide rolls a changed DPUService out on its own, by releasing
-    /// the DPF maintenance hold for hosts it has confirmed are already running
-    /// the software their DPUDeployment declares.
+    /// Whether carbide automatically releases DPF maintenance holds for changed
+    /// DPUDeployment-owned DPUService revisions whose upgrade policy enables NodeEffect.
     ///
-    /// This selects *who* opens the gate, never whether one exists. DPF is
-    /// always configured to park a changed DPUService behind a maintenance hold
-    /// (`upgradePolicy.applyNodeEffect`), so no service update ever reaches a DPU
-    /// without something having checked its side effects first.
+    /// This selects *who* opens an existing gate; it does not add one. NICo sets
+    /// `upgradePolicy.applyNodeEffect=false` for the DPU agent, DHCP server, FMDS, and OTel
+    /// Collector, so this setting does not gate those revisions. HBN, DTS, and extra services use
+    /// the gated default. Direct, detached DPUService objects do not use this setting.
     ///
     /// On by default. Setting it to false does not resume unchecked rollout: it
     /// means the held DPUs wait for an operator to release them deliberately,
@@ -2435,13 +2513,69 @@ fn default_dpf_max_sf_per_pf() -> u32 {
     carbide_dpf::DEFAULT_MAX_SF_PER_PF
 }
 
+/// Operator-declared service-VPC families for one DPF deployment.
+/// A set makes ordering irrelevant while custom deserialization rejects duplicates as configuration
+/// mistakes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ServiceVpcEnabledAddressFamilies(BTreeSet<ServiceVpcAddressFamily>);
+
+impl ServiceVpcEnabledAddressFamilies {
+    /// Returns whether a parsed test fixture contains `family`.
+    #[cfg(test)]
+    fn contains(&self, family: ServiceVpcAddressFamily) -> bool {
+        self.0.contains(&family)
+    }
+
+    /// Iterates enabled families in a stable order for controller context construction.
+    /// Stable ordering keeps diagnostics and serialized configuration deterministic.
+    pub fn iter(&self) -> impl Iterator<Item = ServiceVpcAddressFamily> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Returns whether this deployment enables no service-VPC family.
+    /// Omitted and explicitly empty configuration intentionally share this state.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<ServiceVpcAddressFamily> for ServiceVpcEnabledAddressFamilies {
+    /// Builds programmatic configuration with the same set semantics as parsed TOML.
+    /// Callers already hold typed values, so duplicate rejection remains a parsing-only diagnostic.
+    fn from_iter<T: IntoIterator<Item = ServiceVpcAddressFamily>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<'de> Deserialize<'de> for ServiceVpcEnabledAddressFamilies {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let configured = Vec::<ServiceVpcAddressFamily>::deserialize(deserializer)?;
+        let mut families = BTreeSet::new();
+
+        // A duplicate is almost certainly an operator typo, so fail instead of silently normalizing
+        // it.
+        for family in configured {
+            if !families.insert(family) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate service-VPC address family {family:?}"
+                )));
+            }
+        }
+        Ok(Self(families))
+    }
+}
+
 /// Per-deployment DPF configuration for named entries under `[dpf.deployments]`.
 ///
 /// `flavor_name`, `deployment_name`, and `node_label_key` are required when a
-/// `[dpf.deployments.<name>]` block is written; `bfb_url` and `services` are
-/// optional. When `services` is omitted, the deployment inherits the top-level
-/// `[dpf.services]` (see [`DpfConfig::resolved_services_for`]). Extra services
-/// are configured per deployment in `extra_services`.
+/// `[dpf.deployments.<name>]` block is written. A written BF3 block must also
+/// set `bfb_url`, while a written BF4 block must set `bluefield_software`.
+/// `services` remains optional. When it is omitted, the deployment inherits
+/// the top-level `[dpf.services]` (see [`DpfConfig::resolved_services_for`]).
+/// Extra services are configured per deployment in `extra_services`.
 ///
 /// The `Default` impl (BF3 values) is used when the entire
 /// `[dpf.deployments.bf3]` block is absent, via `#[serde(default)]` on the
@@ -2472,6 +2606,13 @@ pub struct DpfDeploymentConfig {
     /// The platform's SF BAR size gives the allocation, not physical firmware qualification.
     #[serde(default = "default_dpf_max_sf_per_pf")]
     pub max_sf_per_pf: u32,
+    /// Address families whose external DHCP CNI and raw NAD have been installed
+    /// and qualified for this deployment. The BF3 declaration also applies to
+    /// BF3 GB200. Registration is enabled globally when any supported non-Astra
+    /// deployment enables a family; omission retains this deployment and any
+    /// derivative in the map with no enabled family.
+    #[serde(default)]
+    pub service_vpc_enabled_address_families: ServiceVpcEnabledAddressFamilies,
     /// Optional per-deployment override of the mandatory Helm services. When set,
     /// these services are deployed for this deployment instead of the top-level
     /// [`DpfConfig::services`]. When absent, the top-level services are inherited.
@@ -2509,6 +2650,7 @@ impl Default for DpfDeploymentConfig {
             deployment_name: default_dpf_deployment_name(),
             node_label_key: default_dpf_node_label_key(),
             max_sf_per_pf: default_dpf_max_sf_per_pf(),
+            service_vpc_enabled_address_families: Default::default(),
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
@@ -2595,8 +2737,9 @@ pub struct DpfBlueFieldSoftwareConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DpfDeploymentsConfig {
-    /// BF3 deployment. Present by default with sensible values; override individual
-    /// fields in `[dpf.deployments.bf3]` when the site uses non-default names or BFBs.
+    /// BF3 deployment. The default applies only when the complete block is absent.
+    /// A written `[dpf.deployments.bf3]` block must include every required field
+    /// and a site-qualified `bfb_url`.
     #[serde(default)]
     pub bf3: DpfDeploymentConfig,
     /// BF4 generic deployment (NICo + BF4 via DPF).
@@ -2619,6 +2762,48 @@ impl DpfDeploymentsConfig {
             v.push(("bf4_astra", bf4_astra));
         }
         v
+    }
+
+    /// Groups configured address families by deployment type so later activation can authorize each
+    /// target DPU independently.
+    pub(crate) fn service_vpc_address_families(
+        &self,
+    ) -> BTreeMap<DpuDeploymentType, BTreeSet<ServiceVpcAddressFamily>> {
+        let mut families = BTreeMap::from([
+            (
+                DpuDeploymentType::Bf3,
+                self.bf3
+                    .service_vpc_enabled_address_families
+                    .iter()
+                    .collect(),
+            ),
+            (
+                DpuDeploymentType::Bf3Gb200,
+                self.bf3
+                    .service_vpc_enabled_address_families
+                    .iter()
+                    .collect(),
+            ),
+        ]);
+        if let Some(deployment) = &self.bf4_generic {
+            families.insert(
+                DpuDeploymentType::Bf4Generic,
+                deployment
+                    .service_vpc_enabled_address_families
+                    .iter()
+                    .collect(),
+            );
+        }
+        if let Some(deployment) = &self.bf4_astra {
+            families.insert(
+                DpuDeploymentType::Bf4Astra,
+                deployment
+                    .service_vpc_enabled_address_families
+                    .iter()
+                    .collect(),
+            );
+        }
+        families
     }
 
     /// Validates the final Kubernetes identifiers, their uniqueness, and reserved labels.
@@ -3170,6 +3355,51 @@ impl FnnRoutingProfileConfig {
 }
 
 impl FnnConfig {
+    /// Validates global and configured routing-profile targets before the API starts serving.
+    pub(crate) fn validate_route_targets(&self) -> eyre::Result<()> {
+        let validate_profile =
+            |path: &str, profile: &FnnRoutingProfileConfig| -> eyre::Result<()> {
+                for (field, targets) in [
+                    (
+                        "route_target_imports",
+                        profile.route_target_imports.as_deref(),
+                    ),
+                    (
+                        "route_targets_on_exports",
+                        profile.route_targets_on_exports.as_deref(),
+                    ),
+                ] {
+                    for (index, target) in targets.unwrap_or_default().iter().enumerate() {
+                        target
+                            .validate()
+                            .wrap_err_with(|| format!("{path}.{field}[{index}] is invalid"))?;
+                    }
+                }
+                Ok(())
+            };
+
+        // Global targets have no VPC context and therefore accept literals only.
+        if let Some(target) = &self.common_internal_route_target {
+            target
+                .resolve(None)
+                .wrap_err("fnn.common_internal_route_target is invalid")?;
+        }
+        for (index, target) in self.additional_route_target_imports.iter().enumerate() {
+            target.resolve(None).wrap_err_with(|| {
+                format!("fnn.additional_route_target_imports[{index}] is invalid")
+            })?;
+        }
+
+        if let Some(admin_vpc) = &self.admin_vpc {
+            validate_profile("fnn.admin_vpc.routing_profile", &admin_vpc.routing_profile)?;
+        }
+        for (name, profile) in &self.routing_profiles {
+            validate_profile(&format!("fnn.routing_profiles.{name}"), profile)?;
+        }
+
+        Ok(())
+    }
+
     /// Resolves the named routing profile and applies properties set on the VPC.
     pub(crate) fn resolve_vpc_routing_profile(
         &self,
@@ -3228,19 +3458,31 @@ impl FnnConfig {
     }
 }
 
-impl From<&FnnRoutingProfileConfig> for rpc::forge::RoutingProfile {
-    fn from(profile: &FnnRoutingProfileConfig) -> Self {
-        Self {
-            tenant_leak_communities_accepted: profile
+impl FnnRoutingProfileConfig {
+    /// Resolves route targets against one VPC while constructing the concrete DPU routing profile.
+    pub(crate) fn to_rpc(
+        &self,
+        vpc_vni: Option<u32>,
+    ) -> Result<rpc::forge::RoutingProfile, RouteTargetConfigError> {
+        let resolve_route_targets = |targets: Option<&[RouteTargetConfig]>| {
+            targets
+                .unwrap_or_default()
+                .iter()
+                .map(|target| target.resolve(vpc_vni).map(rpc::common::RouteTarget::from))
+                .collect::<Result<Vec<_>, RouteTargetConfigError>>()
+        };
+
+        Ok(rpc::forge::RoutingProfile {
+            tenant_leak_communities_accepted: self
                 .tenant_leak_communities_accepted
                 .unwrap_or_default(),
-            leak_default_route_from_underlay: profile
+            leak_default_route_from_underlay: self
                 .leak_default_route_from_underlay
                 .unwrap_or_default(),
-            leak_tenant_host_routes_to_underlay: profile
+            leak_tenant_host_routes_to_underlay: self
                 .leak_tenant_host_routes_to_underlay
                 .unwrap_or_default(),
-            accepted_leaks_from_underlay: profile
+            accepted_leaks_from_underlay: self
                 .accepted_leaks_from_underlay
                 .as_deref()
                 .unwrap_or_default()
@@ -3249,7 +3491,7 @@ impl From<&FnnRoutingProfileConfig> for rpc::forge::RoutingProfile {
                     prefix: entry.prefix.to_string(),
                 })
                 .collect(),
-            allowed_anycast_prefixes: profile
+            allowed_anycast_prefixes: self
                 .allowed_anycast_prefixes
                 .as_deref()
                 .unwrap_or_default()
@@ -3258,34 +3500,20 @@ impl From<&FnnRoutingProfileConfig> for rpc::forge::RoutingProfile {
                     prefix: entry.prefix.to_string(),
                 })
                 .collect(),
-            route_target_imports: profile
-                .route_target_imports
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|route_target| rpc::common::RouteTarget {
-                    asn: route_target.asn,
-                    vni: route_target.vni,
-                })
-                .collect(),
-            route_targets_on_exports: profile
-                .route_targets_on_exports
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|route_target| rpc::common::RouteTarget {
-                    asn: route_target.asn,
-                    vni: route_target.vni,
-                })
-                .collect(),
-        }
+            route_target_imports: resolve_route_targets(self.route_target_imports.as_deref())?,
+            route_targets_on_exports: resolve_route_targets(
+                self.route_targets_on_exports.as_deref(),
+            )?,
+        })
     }
-}
 
-impl From<&FnnRoutingProfileConfig> for rpc::forge::VpcEffectiveRoutingProfile {
-    fn from(profile: &FnnRoutingProfileConfig) -> Self {
-        let routing_profile = rpc::forge::RoutingProfile::from(profile);
-        Self {
+    /// Resolves the API effective profile with the same concrete route targets sent to DPUs.
+    pub(crate) fn to_effective_rpc(
+        &self,
+        vpc_vni: Option<u32>,
+    ) -> Result<rpc::forge::VpcEffectiveRoutingProfile, RouteTargetConfigError> {
+        let routing_profile = self.to_rpc(vpc_vni)?;
+        Ok(rpc::forge::VpcEffectiveRoutingProfile {
             route_target_imports: routing_profile.route_target_imports,
             route_targets_on_exports: routing_profile.route_targets_on_exports,
             leak_default_route_from_underlay: routing_profile.leak_default_route_from_underlay,
@@ -3294,9 +3522,9 @@ impl From<&FnnRoutingProfileConfig> for rpc::forge::VpcEffectiveRoutingProfile {
             tenant_leak_communities_accepted: routing_profile.tenant_leak_communities_accepted,
             accepted_leaks_from_underlay: routing_profile.accepted_leaks_from_underlay,
             allowed_anycast_prefixes: routing_profile.allowed_anycast_prefixes,
-            internal: profile.internal.unwrap_or_default(),
-            access_tier: profile.access_tier.unwrap_or_default(),
-        }
+            internal: self.internal.unwrap_or_default(),
+            access_tier: self.access_tier.unwrap_or_default(),
+        })
     }
 }
 
@@ -3434,7 +3662,26 @@ impl CarbideConfig {
         Ok(())
     }
 
+    /// Rejects an `admin_lock_admission_permits` value outside the gate's
+    /// accepted range before it becomes the active permit count.
+    pub(crate) fn validate_admin_lock_admission_permits(&self) -> eyre::Result<()> {
+        let range = db::machine_interface::ADMIN_LOCK_ADMISSION_PERMIT_RANGE;
+        match self.admin_lock_admission_permits {
+            Some(permits) if !range.contains(&permits) => Err(eyre::eyre!(
+                "admin_lock_admission_permits must be {} to {}, got {permits}",
+                range.start(),
+                range.end()
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn validate_service_vpc_slots(&self) -> eyre::Result<()> {
+        // Reject unrealizable capacity before startup creates DPF resources or launches
+        // controllers.
+        carbide_dpf::ServiceVpcSlots::new(self.dpu_config.service_vpc_slot_count)
+            .map_err(|error| eyre::eyre!("invalid service-VPC slot inventory: {error}"))?;
+
         // Endpoint capacity is unusable without a provisioned slot for its VPC.
         eyre::ensure!(
             self.dpu_config.max_active_service_vpc_interfaces_per_dpu == 0
@@ -3448,6 +3695,35 @@ impl CarbideConfig {
         eyre::ensure!(
             self.dpu_config.service_vpc_slot_count == 0 || self.site_global_vpc_vni.is_none(),
             "dpu_config.service_vpc_slot_count requires site_global_vpc_vni to be unset because service VPCs require distinct HBN VRFs"
+        );
+        let supported_family_enabled = !self
+            .dpf
+            .deployments
+            .bf3
+            .service_vpc_enabled_address_families
+            .is_empty()
+            || self
+                .dpf
+                .deployments
+                .bf4_generic
+                .as_ref()
+                .is_some_and(|deployment| {
+                    !deployment.service_vpc_enabled_address_families.is_empty()
+                });
+        eyre::ensure!(
+            !supported_family_enabled || self.dpu_config.service_vpc_slot_count > 0,
+            "dpf deployment service_vpc_enabled_address_families requires service_vpc_slot_count > 0"
+        );
+        eyre::ensure!(
+            self.dpf
+                .deployments
+                .bf4_astra
+                .as_ref()
+                .is_none_or(|deployment| deployment
+                    .service_vpc_enabled_address_families
+                    .is_empty()),
+            // xtask:allow-error-case: BF4 Astra is a deployment name
+            "BF4 Astra does not support service_vpc_enabled_address_families"
         );
         Ok(())
     }
@@ -3525,6 +3801,12 @@ impl CarbideConfig {
         }
     }
 
+    /// Seconds between machine update manager passes, as the manager applies it.
+    pub fn machine_update_run_interval_secs(&self) -> u64 {
+        self.machine_update_run_interval
+            .unwrap_or(DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS)
+    }
+
     pub fn is_ewethers_enabled(&self) -> bool {
         let Some(conf) = &self.ewethers_config else {
             return false;
@@ -3539,6 +3821,13 @@ impl CarbideConfig {
         };
 
         conf.svpc_enabled
+    }
+
+    /// Whether partial-multiplane maintenance is enabled for this site; defaults to true.
+    pub fn is_partial_multiplane_enabled(&self) -> bool {
+        self.ewethers_config
+            .as_ref()
+            .is_none_or(|config| config.partial_multiplane == PartialMultiplane::Enabled)
     }
 
     pub fn is_astra_enabled(&self) -> bool {
@@ -3950,6 +4239,12 @@ pub struct AuthConfig {
     /// Enable permissive mode in the authorization enforcer (for development).
     pub permissive_mode: bool,
 
+    /// Allow the authenticated machine-a-tron service to open ScoutStream RPCs.
+    /// Defaults to false. Only enable in isolated simulation environments: this
+    /// permission does not restrict the machine IDs the simulator may claim.
+    #[serde(default)]
+    pub allow_machineatron_scout_stream: bool,
+
     /// The Casbin policy file (in CSV format).
     pub casbin_policy_file: Option<PathBuf>,
 
@@ -4018,6 +4313,10 @@ pub const fn default_bmc_session_lockout_threshold() -> u32 {
 
 pub const fn default_bmc_max_sessions_per_caller() -> usize {
     4
+}
+
+pub const fn default_shutdown_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
 }
 
 /// Routing of core's own BMC Redfish traffic through nico-bmc-proxy.
@@ -4139,6 +4438,11 @@ pub struct DpuConfig {
     #[serde(default)]
     pub max_active_service_vpc_interfaces_per_dpu: u32,
 
+    /// Allows a tenant host interface and a service interface to use the same VPC (default false).
+    /// Existing overlapping bindings remain valid when this is false, but new overlap is rejected.
+    #[serde(default)]
+    pub allow_service_vpc_tenant_overlap: bool,
+
     /// Additional SF capacity that is not assigned to an HBN interface.
     #[serde(default)]
     pub additional_managed_sf: u32,
@@ -4195,6 +4499,8 @@ impl<'de> Deserialize<'de> for DpuConfig {
             #[serde(default)]
             max_active_service_vpc_interfaces_per_dpu: Option<u32>,
             #[serde(default)]
+            allow_service_vpc_tenant_overlap: Option<bool>,
+            #[serde(default)]
             additional_managed_sf: Option<u32>,
             #[serde(default)]
             restart_ovs_on_use_admin_network_change: Option<bool>,
@@ -4233,6 +4539,9 @@ impl<'de> Deserialize<'de> for DpuConfig {
             max_active_service_vpc_interfaces_per_dpu: partial
                 .max_active_service_vpc_interfaces_per_dpu
                 .unwrap_or(default.max_active_service_vpc_interfaces_per_dpu),
+            allow_service_vpc_tenant_overlap: partial
+                .allow_service_vpc_tenant_overlap
+                .unwrap_or(default.allow_service_vpc_tenant_overlap),
             additional_managed_sf: partial
                 .additional_managed_sf
                 .unwrap_or(default.additional_managed_sf),
@@ -4368,6 +4677,7 @@ impl Default for DpuConfig {
             num_of_vfs: DEFAULT_DPU_NUM_OF_VFS,
             service_vpc_slot_count: 0,
             max_active_service_vpc_interfaces_per_dpu: 0,
+            allow_service_vpc_tenant_overlap: false,
             additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         }
@@ -4469,6 +4779,9 @@ pub struct MachineUpdater {
     /// too many machines from being put into maintenance at any given time.  If both values are given, the lesser will be used.
     pub max_concurrent_machine_updates_percent: Option<i32>,
 }
+
+/// Seconds between machine update manager passes when `machine_update_run_interval` is unset.
+pub const DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS: u64 = 300;
 
 pub fn default_max_find_by_ids() -> u32 {
     100
@@ -4611,6 +4924,16 @@ impl From<VpcIsolationBehaviorType> for rpc::forge::VpcIsolationBehaviorType {
 #[allow(deprecated)] // nvue_enabled proto field is deprecated but still set for backwards compat
 impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
     fn from(value: CarbideConfig) -> Self {
+        let machine_update_policy = Some(rpc::forge::MachineUpdatePolicy {
+            effective_run_interval_seconds: value.machine_update_run_interval_secs(),
+            requires_manual_upgrade: value.firmware_global.requires_manual_upgrade,
+            max_concurrent_updates_absolute: value
+                .machine_updater
+                .max_concurrent_machine_updates_absolute,
+            max_concurrent_updates_percent: value
+                .machine_updater
+                .max_concurrent_machine_updates_percent,
+        });
         let site_fabric_null_routes = Some(rpc::common::StringList {
             items: value
                 .effective_site_fabric_null_routes()
@@ -4760,6 +5083,13 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                 .as_millis()
                 .try_into()
                 .unwrap_or_default(),
+            nvlink_partitioning_enabled: Some(
+                value
+                    .nvlink_config
+                    .as_ref()
+                    .map_or(NvLinkConfig::default().enabled, |config| config.enabled),
+            ),
+            machine_update_policy,
         }
     }
 }
@@ -4773,7 +5103,7 @@ fn default_mqtt_broker_port() -> u16 {
 }
 
 pub use carbide_dpa_manager::config::{
-    AstraConfig, EwEthersConfig, MqttAuthConfig, MqttAuthMode, SvpcConfig,
+    AstraConfig, EwEthersConfig, MqttAuthConfig, MqttAuthMode, PartialMultiplane, SvpcConfig,
 };
 use model::vpc::VpcDefinition;
 
@@ -5506,14 +5836,18 @@ path = "credentials.yaml"
         );
     }
 
-    /// Verifies existing routing-profile TOML values deserialize unchanged
-    /// after the fields become presence-aware.
+    /// Verifies numeric TOML remains compatible while symbolic targets retain
+    /// their unresolved VPC dependency.
     #[test]
     fn fnn_routing_profile_options_accept_existing_toml_syntax() {
+        // Parse one numeric target and one target requiring VPC-time resolution.
         let profile: FnnRoutingProfileConfig = Figment::new()
             .merge(Toml::string(
                 r#"
-                    route_target_imports = [{ asn = 64512, vni = 10 }]
+                    route_target_imports = [
+                        { asn = 64512, vni = 10 },
+                        { asn = 429000000, vni_self = true },
+                    ]
                     route_targets_on_exports = []
                     internal = true
                     leak_default_route_from_underlay = false
@@ -5527,14 +5861,23 @@ path = "credentials.yaml"
             .extract()
             .expect("existing routing-profile syntax must remain valid");
 
+        // Preserve every optional value while retaining both target representations.
         assert_eq!(
             profile,
             FnnRoutingProfileConfig {
                 tenant_prefix_overlap_eligible: false,
-                route_target_imports: Some(vec![RouteTargetConfig {
-                    asn: 64512,
-                    vni: 10,
-                }]),
+                route_target_imports: Some(vec![
+                    RouteTargetConfig {
+                        asn: 64512,
+                        vni: Some(10),
+                        vni_self: false,
+                    },
+                    RouteTargetConfig {
+                        asn: 429_000_000,
+                        vni: None,
+                        vni_self: true,
+                    },
+                ]),
                 route_targets_on_exports: Some(vec![]),
                 internal: Some(true),
                 leak_default_route_from_underlay: Some(false),
@@ -5545,6 +5888,66 @@ path = "credentials.yaml"
                 }]),
                 allowed_anycast_prefixes: Some(vec![]),
                 access_tier: Some(2),
+            }
+        );
+    }
+
+    /// Verifies only per-VPC profiles accept symbolic targets because global
+    /// settings have no unambiguous VPC VNI.
+    #[test]
+    fn fnn_route_target_validation_rejects_symbolic_global_settings() {
+        // Reuse one symbolic target so only its configuration location varies.
+        let symbolic_target = RouteTargetConfig {
+            asn: 429_000_000,
+            vni: None,
+            vni_self: true,
+        };
+
+        scenarios!(run = |config: FnnConfig| {
+            config.validate_route_targets().map_err(|error| error.to_string())
+        };
+            "unsupported global settings" {
+                // The common internal tag is shared by every VPC.
+                FnnConfig {
+                    admin_vpc: None,
+                    common_internal_route_target: Some(symbolic_target.clone()),
+                    additional_route_target_imports: vec![],
+                    routing_profiles: HashMap::new(),
+                    use_vpc_vrf_loopback: false,
+                } => Fails,
+
+                // Additional imports have no single VPC VNI for symbolic resolution.
+                FnnConfig {
+                    admin_vpc: None,
+                    common_internal_route_target: None,
+                    additional_route_target_imports: vec![symbolic_target.clone()],
+                    routing_profiles: HashMap::new(),
+                    use_vpc_vrf_loopback: false,
+                } => Fails,
+            }
+
+            "per-VPC profiles" {
+                // Named and admin profiles are resolved only after their VPC is known.
+                FnnConfig {
+                    admin_vpc: Some(AdminFnnConfig {
+                        enabled: true,
+                        vpc_vni: None,
+                        routing_profile: FnnRoutingProfileConfig {
+                            route_targets_on_exports: Some(vec![symbolic_target.clone()]),
+                            ..Default::default()
+                        },
+                    }),
+                    common_internal_route_target: None,
+                    additional_route_target_imports: vec![],
+                    routing_profiles: HashMap::from([(
+                        "SYMBOLIC".to_string(),
+                        FnnRoutingProfileConfig {
+                            route_target_imports: Some(vec![symbolic_target]),
+                            ..Default::default()
+                        },
+                    )]),
+                    use_vpc_vrf_loopback: false,
+                } => Yields(()),
             }
         );
     }
@@ -5603,13 +6006,21 @@ path = "credentials.yaml"
     #[test]
     fn vpc_routing_profile_overrides_are_presence_aware() {
         // Build a complete base and an override containing explicit default values.
-        let inherited_export = RouteTargetConfig { asn: 1, vni: 2 };
+        let inherited_export = RouteTargetConfig {
+            asn: 1,
+            vni: Some(2),
+            vni_self: false,
+        };
         let inherited_anycast = PrefixFilterPolicyEntry {
             prefix: "192.0.2.0/24".parse().expect("valid test prefix"),
         };
         let base = FnnRoutingProfileConfig {
             tenant_prefix_overlap_eligible: true,
-            route_target_imports: Some(vec![RouteTargetConfig { asn: 3, vni: 4 }]),
+            route_target_imports: Some(vec![RouteTargetConfig {
+                asn: 3,
+                vni: Some(4),
+                vni_self: false,
+            }]),
             route_targets_on_exports: Some(vec![inherited_export.clone()]),
             internal: Some(true),
             leak_default_route_from_underlay: Some(true),
@@ -6167,13 +6578,54 @@ path = "credentials.yaml"
         assert!(config.validate_web_ui_sidebar_tools().is_err());
     }
 
-    /// Verifies static slots cannot bypass site isolation rules or reserve endpoints without a bridge.
+    /// The admission permit count is bounded at startup: an out-of-range
+    /// value is rejected rather than clamped.
     #[test]
-    fn validate_service_vpc_slots_rejects_site_global_vpc_vni() {
+    fn admin_lock_admission_permits_are_bounded_at_startup() {
+        scenarios!(
+            run = |permits: Option<usize>| {
+                let mut config: CarbideConfig = Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .extract()
+                    .unwrap();
+                config.admin_lock_admission_permits = permits;
+                config.validate_admin_lock_admission_permits().map_err(drop)
+            };
+            "accepted" {
+                None => Yields(()),
+                Some(1) => Yields(()),
+                Some(256) => Yields(()),
+            }
+
+            "rejected" {
+                Some(0) => Fails,
+                Some(257) => Fails,
+            }
+        );
+    }
+
+    /// Rejects unrealizable slot counts, endpoint reservations without a bridge, and static slots
+    /// that conflict with site isolation settings before controller startup can perform external
+    /// work.
+    #[test]
+    fn validate_service_vpc_slots_rejects_invalid_capacity_and_site_isolation() {
         let mut config: CarbideConfig = Figment::new()
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
+
+        // Reject counts beyond HBN's fixed interface inventory during configuration preflight.
+        config.dpu_config.service_vpc_slot_count = 33;
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds the supported HBN interface maximum of 32")
+        );
+
+        // Restore zero slots so the remaining assertions isolate dependency and site conflicts.
+        config.dpu_config.service_vpc_slot_count = 0;
 
         // An endpoint reservation without slots is unusable even before DPF initialization.
         config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 1;
@@ -6207,6 +6659,128 @@ path = "credentials.yaml"
                 .unwrap_err()
                 .to_string()
                 .contains("requires site_global_vpc_vni to be unset")
+        );
+    }
+
+    /// Verifies family enablement requires fixed capacity and excludes Astra deployments.
+    /// These startup failures prevent a declaration from advertising infrastructure it cannot
+    /// safely use.
+    #[test]
+    fn validate_service_vpc_families_require_supported_slot_inventory() {
+        // Start from the minimal site fixture so only family and slot policy drive each result.
+        let mut config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .extract()
+            .unwrap();
+        // Remove the unrelated global-VNI conflict so this test isolates family capacity policy.
+        config.site_global_vpc_vni = None;
+        config
+            .dpf
+            .deployments
+            .bf3
+            .service_vpc_enabled_address_families =
+            [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+
+        // A qualified family without even one fixed bridge cannot create a usable registration
+        // path.
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("requires service_vpc_slot_count > 0")
+        );
+        // One fixed slot satisfies the capacity prerequisite for the enabled BF3 family.
+        config.dpu_config.service_vpc_slot_count = 1;
+        assert!(config.validate_service_vpc_slots().is_ok());
+
+        // Astra uses a separate networking model and must not opt into the slot-backed declaration.
+        let astra = DpfDeploymentConfig {
+            service_vpc_enabled_address_families: [ServiceVpcAddressFamily::Ipv4]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        config.dpf.deployments.bf4_astra = Some(astra);
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("BF4 Astra")
+        );
+    }
+
+    /// Verifies generic BF4 family enablement requires slot capacity without populating either
+    /// BF3 deployment entry.
+    #[test]
+    fn bf4_generic_service_vpc_family_requires_capacity_and_remains_isolated() {
+        // Configure only generic BF4 with no global VNI so its slot requirement is independent of
+        // BF3.
+        let mut config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .extract()
+            .unwrap();
+        config.site_global_vpc_vni = None;
+        config.dpu_config.service_vpc_slot_count = 0;
+        config
+            .dpf
+            .deployments
+            .bf3
+            .service_vpc_enabled_address_families = Default::default();
+        let mut bf4 = bf4_config(None, None);
+        bf4.service_vpc_enabled_address_families =
+            [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+        config.dpf.deployments.bf4_generic = Some(bf4);
+        config.dpf.deployments.bf4_astra = None;
+
+        // Reject generic BF4 family enablement until at least one fixed service slot exists.
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("requires service_vpc_slot_count > 0")
+        );
+
+        // Adding one slot satisfies generic BF4 capacity without broadening either BF3 variant.
+        config.dpu_config.service_vpc_slot_count = 1;
+        assert!(config.validate_service_vpc_slots().is_ok());
+        assert_eq!(
+            config.dpf.deployments.service_vpc_address_families(),
+            BTreeMap::from([
+                (DpuDeploymentType::Bf3, BTreeSet::new()),
+                (DpuDeploymentType::Bf3Gb200, BTreeSet::new()),
+                (
+                    DpuDeploymentType::Bf4Generic,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+            ])
+        );
+    }
+
+    /// Copies each BF3 service-VPC family to both BF3 deployment types so GB200 DPUs retain the
+    /// configured capability.
+    #[test]
+    fn bf3_service_vpc_family_applies_to_standard_and_gb200_deployments() {
+        // Configure only BF3 to isolate the shared BF3 and BF3 GB200 membership rule.
+        let mut deployments = DpfDeploymentsConfig::default();
+        deployments.bf3.service_vpc_enabled_address_families =
+            [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+
+        // Require both concrete BF3 deployment keys and no unrelated deployment entries.
+        assert_eq!(
+            deployments.service_vpc_address_families(),
+            BTreeMap::from([
+                (
+                    DpuDeploymentType::Bf3,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+                (
+                    DpuDeploymentType::Bf3Gb200,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+            ])
         );
     }
 
@@ -6402,7 +6976,7 @@ path = "credentials.yaml"
         );
     }
 
-    /// Verifies omitted configuration retains shipping defaults, including disabled service-VPC counts.
+    /// Verifies omitted configuration retains shipping defaults so service-VPC admission stays restrictive.
     #[test]
     fn deserialize_min_config() {
         // The fixture omits the entire DPU configuration block.
@@ -6410,12 +6984,13 @@ path = "credentials.yaml"
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
-        // An absent dpu_config block must not implicitly enable either service-VPC count.
+        // An absent dpu_config block must not enable service capacity or tenant overlap.
         assert_eq!(config.dpu_config.service_vpc_slot_count, 0);
         assert_eq!(
             config.dpu_config.max_active_service_vpc_interfaces_per_dpu,
             0
         );
+        assert!(!config.dpu_config.allow_service_vpc_tenant_overlap);
         assert_eq!(config.dpf.deployments.bf3.max_sf_per_pf, 126);
         assert_eq!(config.listen, "[::]:1081".parse().unwrap());
         assert_eq!(config.metrics_endpoint, None);
@@ -6752,6 +7327,7 @@ path = "credentials.yaml"
                 r#""https://rms.example.test""#,
             ),
             ("{{ .Values.rms.enforceTls }}", "true"),
+            ("{{ $nvlinkEnabled }}", "true"),
             (
                 r#"{{ .Values.bmcProxy.address | default (printf "nico-bmc-proxy.%s.svc.cluster.local:1079" (include "nico-api.namespace" .)) }}"#,
                 "nico-bmc-proxy.nico-system.svc.cluster.local:1079",
@@ -6910,9 +7486,9 @@ path = "credentials.yaml"
         assert_eq!(overridden.rack_profiles.rack_profiles.len(), profiles.len());
     }
 
-    fn rendered_deployment_site_config() -> String {
+    fn rendered_example_site_config() -> String {
         let mut config =
-            include_str!("../../../../deploy/files/nico-api/nico-api-site-config.toml").to_string();
+            include_str!("../../../../helm/examples/nico-api-site-config.toml").to_string();
         for (placeholder, value) in [
             ("MANAGED_HOST_IPMI_POOL_1_GATEWAY_IP", "203.0.113.1"),
             ("MANAGED_HOST_IPMI_POOL_1", "203.0.113.0/24"),
@@ -6932,28 +7508,25 @@ path = "credentials.yaml"
 
     #[test]
     fn deserialize_shipped_api_configurations() {
-        let repository_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-        let deploy_path =
-            format!("{repository_root}/deploy/nico-base/api/config-files/carbide-api-config.toml");
         let docker_config = include_str!("../../../../dev/docker-env/carbide-api-config.toml");
         let webdev_config = include_str!("../../../../dev/webdev-env/carbide-api-config.toml");
-        let site_config = rendered_deployment_site_config();
+        let site_config = rendered_example_site_config();
         let helm_config = rendered_helm_api_config();
 
-        let deploy_config = Figment::new()
-            .merge(Toml::file(&deploy_path))
+        let shipped_config = Figment::new()
+            .merge(Toml::string(&helm_config))
             .extract::<CarbideConfig>()
-            .expect("the shipped deployment config must match the strict schema");
+            .expect("the shipped Helm config must match the strict schema");
         assert_eq!(
-            deploy_config.dpu_config.dpu_nic_firmware_update_versions,
+            shipped_config.dpu_config.dpu_nic_firmware_update_versions,
             [BF2_NIC_VERSION.to_string(), BF3_NIC_VERSION.to_string()]
         );
 
         for (name, figment) in [
             (
-                "deployment base plus site override",
+                "Helm base plus example site override",
                 Figment::new()
-                    .merge(Toml::file(&deploy_path))
+                    .merge(Toml::string(&helm_config))
                     .merge(Toml::string(&site_config)),
             ),
             (
@@ -6967,10 +7540,6 @@ path = "credentials.yaml"
             (
                 "web development",
                 Figment::new().merge(Toml::string(webdev_config)),
-            ),
-            (
-                "rendered Helm",
-                Figment::new().merge(Toml::string(&helm_config)),
             ),
         ] {
             figment.extract::<CarbideConfig>().unwrap_or_else(|error| {
@@ -7272,6 +7841,66 @@ path = "credentials.yaml"
         );
     }
 
+    /// REST syncs its Site NVLink partition capability from this field, so it must be
+    /// present and report the effective setting, including the default when omitted.
+    #[test]
+    fn runtime_config_reports_effective_nvlink_partitioning_enabled() {
+        value_scenarios!(
+            run = |configured| {
+                let mut config = crate::test_support::default_config::get();
+                config.nvlink_config = configured.map(|enabled| NvLinkConfig {
+                    enabled,
+                    ..NvLinkConfig::default()
+                });
+                let runtime_config: rpc::forge::RuntimeConfig = config.into();
+                runtime_config.nvlink_partitioning_enabled
+            };
+            "runtime NVLink partitioning flag" {
+                None => Some(NvLinkConfig::default().enabled),
+                Some(false) => Some(false),
+                Some(true) => Some(true),
+            }
+        );
+    }
+
+    /// Version reports the update policy the manager applies, and keeps caps
+    /// absent when they are not configured.
+    #[test]
+    fn machine_update_policy_reports_effective_values() {
+        value_scenarios!(
+            run = |(interval, manual, absolute, percent)| {
+                let mut config = crate::test_support::default_config::get();
+                config.machine_update_run_interval = interval;
+                config.firmware_global.requires_manual_upgrade = manual;
+                config.machine_updater.max_concurrent_machine_updates_absolute = absolute;
+                config.machine_updater.max_concurrent_machine_updates_percent = percent;
+                let runtime_config: rpc::forge::RuntimeConfig = config.into();
+                runtime_config.machine_update_policy.map(|policy| {
+                    (
+                        policy.effective_run_interval_seconds,
+                        policy.requires_manual_upgrade,
+                        policy.max_concurrent_updates_absolute,
+                        policy.max_concurrent_updates_percent,
+                    )
+                })
+            };
+            "run interval" {
+                (None, false, None, None) => Some((300, false, None, None)),
+                (Some(60), false, None, None) => Some((60, false, None, None)),
+                (Some(0), false, None, None) => Some((0, false, None, None)),
+            }
+            "manual upgrade" {
+                (None, true, None, None) => Some((300, true, None, None)),
+            }
+            "caps" {
+                (None, false, Some(5), None) => Some((300, false, Some(5), None)),
+                (None, false, None, Some(20)) => Some((300, false, None, Some(20))),
+                (None, false, Some(5), Some(20)) => Some((300, false, Some(5), Some(20))),
+                (None, false, Some(0), None) => Some((300, false, Some(0), None)),
+            }
+        );
+    }
+
     /// Real-world site TOMLs may still carry the now-removed
     /// `force_dpu_nic_mode` setting (top-level and/or under
     /// `[site_explorer]`). Keep that one compatibility exception explicit.
@@ -7325,6 +7954,8 @@ path = "credentials.yaml"
                 "[fnn.routing_profiles.test]\nunknown_routing_profile_field = true" => Fails,
                 "[host_health]\nunknown_host_health_field = true" => Fails,
                 "[firmware_global]\nunknown_firmware_field = true" => Fails,
+                // The nested downloader schema must participate in Core's unknown-key handling.
+                "[firmware_global.downloads]\nunknown_download_field = true" => Fails,
                 "[machine_validation_config]\nunknown_validation_field = true" => Fails,
                 "[network_security_group]\nunknown_nsg_field = true" => Fails,
                 "[machine_identity]\nunknown_identity_field = true" => Fails,
@@ -7498,26 +8129,71 @@ enabled = true
     }
 
     #[test]
-    fn test_max_concurrent_updates() -> eyre::Result<()> {
-        let test = MaxConcurrentUpdates {
-            absolute: Some(10),
-            percent: None,
-        };
-        assert_eq!(test.max_concurrent_updates(1000, 5), Some(10));
-        let test = MaxConcurrentUpdates {
-            absolute: None,
-            percent: Some(10),
-        };
-        assert_eq!(test.max_concurrent_updates(0, 500), Some(50));
-        assert_eq!(test.max_concurrent_updates(7, 500), Some(43));
-        assert_eq!(test.max_concurrent_updates(50, 500), Some(0));
-        assert_eq!(test.max_concurrent_updates(0, 9), Some(1));
+    fn test_max_concurrent_updates() {
+        struct Input {
+            absolute: Option<i32>,
+            percent: Option<i32>,
+            unhealthy: i32,
+            out_of: i32,
+        }
 
-        Ok(())
+        value_scenarios!(
+            run = |Input { absolute, percent, unhealthy, out_of }| {
+                MaxConcurrentUpdates { absolute, percent }.max_concurrent_updates(unhealthy, out_of)
+            };
+            "absolute limit ignores health counts" {
+                Input { absolute: Some(10), percent: None, unhealthy: 1000, out_of: 5 } => Some(10),
+            }
+            "no configured limit" {
+                Input { absolute: None, percent: None, unhealthy: 0, out_of: 500 } => None,
+            }
+            "percentage budget accounts for unhealthy hosts" {
+                Input { absolute: None, percent: Some(10), unhealthy: 0, out_of: 500 } => Some(50),
+                Input { absolute: None, percent: Some(10), unhealthy: 7, out_of: 500 } => Some(43),
+                Input { absolute: None, percent: Some(10), unhealthy: 50, out_of: 500 } => Some(0),
+            }
+            "unhealthy hosts exceeding the budget saturate at zero" {
+                Input { absolute: None, percent: Some(10), unhealthy: 51, out_of: 500 } => Some(0),
+            }
+            "fractional percentage budget rounds up" {
+                Input { absolute: None, percent: Some(10), unhealthy: 0, out_of: 9 } => Some(1),
+            }
+            "nonpositive percentage disables updates despite an absolute limit" {
+                Input { absolute: Some(10), percent: Some(0), unhealthy: 0, out_of: 500 } => Some(0),
+                Input { absolute: Some(10), percent: Some(-1), unhealthy: 0, out_of: 500 } => Some(0),
+            }
+            "empty fleet has no percentage budget" {
+                Input { absolute: Some(10), percent: Some(10), unhealthy: 0, out_of: 0 } => Some(0),
+            }
+            "absolute limit caps the remaining percentage budget" {
+                Input { absolute: Some(20), percent: Some(10), unhealthy: 7, out_of: 500 } => Some(20),
+                Input { absolute: Some(45), percent: Some(10), unhealthy: 7, out_of: 500 } => Some(43),
+            }
+        );
     }
 
     #[test]
     fn deserialize_dpa_config() {
+        for (setting, expected) in [
+            ("", PartialMultiplane::Enabled),
+            ("partial-multiplane=\"enabled\"", PartialMultiplane::Enabled),
+            (
+                "partial-multiplane=\"disabled\"",
+                PartialMultiplane::Disabled,
+            ),
+        ] {
+            let config: EwEthersConfig = Figment::new()
+                .merge(Toml::string(setting))
+                .extract()
+                .unwrap();
+            assert_eq!(config.partial_multiplane, expected);
+        }
+        assert!(
+            Figment::new()
+                .merge(Toml::string("partial-multiplane=\"invalid\""))
+                .extract::<EwEthersConfig>()
+                .is_err()
+        );
         let toml = r#"
 enabled=true
 svpc_enabled=true
@@ -7535,6 +8211,7 @@ mqtt_endpoint = "mqtt.forge"
                 enabled: true,
                 svpc_enabled: true,
                 astra_enabled: false,
+                partial_multiplane: Default::default(),
                 monitor_run_interval: std::time::Duration::from_secs(60),
                 subnet_ip: Ipv4Addr::UNSPECIFIED,
                 subnet_mask: EwEthersConfig::default_subnet_mask(),
@@ -7584,10 +8261,10 @@ underlay_ip_software_plane_id_bit_len = 7
         assert_eq!(config.astra.underlay_ip_software_plane_id_bit_len, 7);
     }
 
-    /// Verifies explicit service limits survive partial assembly so provisioning reserves the requested SFs.
+    /// Verifies explicit service-VPC settings survive partial assembly so admission uses operator intent.
     #[test]
     fn deserialize_dpu_config() {
-        // Override only the service limits and selected existing fields; firmware defaults remain available.
+        // Override only service settings and selected existing fields; firmware defaults remain available.
         let toml = r#"
 [dpu_config]
 bootstrap_ca_source = "embedded"
@@ -7595,6 +8272,7 @@ dpu_enable_secure_boot = true
 num_of_vfs = 64
 service_vpc_slot_count = 5
 max_active_service_vpc_interfaces_per_dpu = 5
+allow_service_vpc_tenant_overlap = true
 additional_managed_sf = 2
 "#;
 
@@ -7616,28 +8294,59 @@ additional_managed_sf = 2
             config.dpu_config.max_active_service_vpc_interfaces_per_dpu,
             5
         );
+        assert!(config.dpu_config.allow_service_vpc_tenant_overlap);
         assert_eq!(config.dpu_config.additional_managed_sf, 2);
         assert!(!config.dpu_config.dpu_models.is_empty());
     }
 
-    /// Verifies partial blocks keep independent zero defaults so generic headroom cannot enable admission.
+    /// Verifies partial DPU blocks keep service-VPC defaults independent so setting slots,
+    /// `additional_managed_sf`, or overlap cannot enable any omitted service-VPC setting.
     #[test]
     fn service_vpc_counts_default_independently() {
         value_scenarios!(
             run = |input| {
                 // Deserialize the partial block through the production default assembly.
                 let config: DpuConfig = toml::from_str(input).expect("valid partial DPU configuration");
-                (config.service_vpc_slot_count, config.max_active_service_vpc_interfaces_per_dpu)
+                (
+                    config.service_vpc_slot_count,
+                    config.max_active_service_vpc_interfaces_per_dpu,
+                    config.allow_service_vpc_tenant_overlap,
+                )
             };
             "partial service configuration" {
                 // An explicitly empty block retains both disabled counts.
-                "" => (0, 0),
+                "" => (0, 0, false),
                 // Generic capacity remains independent of service-VPC provisioning and admission.
-                "additional_managed_sf = 5" => (0, 0),
+                "additional_managed_sf = 5" => (0, 0, false),
                 // Slots may be provisioned before any endpoint admission is enabled.
-                "service_vpc_slot_count = 5" => (5, 0),
+                "service_vpc_slot_count = 5" => (5, 0, false),
+                // Explicit false retains the same restrictive overlap policy as omission.
+                "allow_service_vpc_tenant_overlap = false" => (0, 0, false),
+                // The overlap escape hatch is independent of physical service capacity.
+                "allow_service_vpc_tenant_overlap = true" => (0, 0, true),
             }
         );
+    }
+
+    /// Verifies the overlap setting accepts only TOML booleans because silently coercing another
+    /// type could enable tenant connectivity to a service VPC unexpectedly.
+    #[test]
+    fn service_vpc_overlap_rejects_non_boolean_values() {
+        let cases = [
+            // An integer must not be interpreted as a conventional zero/one boolean.
+            ("integer", "allow_service_vpc_tenant_overlap = 1"),
+            // A quoted value must not be interpreted by its textual boolean spelling.
+            ("string", "allow_service_vpc_tenant_overlap = \"false\""),
+            // A collection must fail instead of collapsing to an empty or truthy value.
+            ("array", "allow_service_vpc_tenant_overlap = []"),
+        ];
+
+        for (scenario, input) in cases {
+            assert!(
+                toml::from_str::<DpuConfig>(input).is_err(),
+                "{scenario} must fail DPU configuration parsing"
+            );
+        }
     }
 
     #[test]
@@ -8539,6 +9248,14 @@ helm_repo_url = "oci://registry.example.test/doca"
             type = "transit"
             keys = ["my-transit-key"]
 
+            [secrets.kms.providers.hsm]
+            type = "kmip"
+            endpoint = "kms.example.com:5696"
+            ca_bundle = "/etc/nico/kmip/ca.pem"
+            client_cert = "/etc/nico/kmip/client.pem"
+            client_key = "/etc/nico/kmip/client.key"
+            keys.site-kek-1 = "a1b2c3"
+
             [secrets.routing]
             "/" = "default-key"
             "machines/bmc" = "bmc-key"
@@ -8549,7 +9266,7 @@ helm_repo_url = "oci://registry.example.test/doca"
 
         // Verify KMS config: the `type` field selects the enum variant.
         assert_eq!(secrets.kms.active, "local");
-        assert_eq!(secrets.kms.providers.len(), 2);
+        assert_eq!(secrets.kms.providers.len(), 3);
         assert!(matches!(
             &secrets.kms.providers["local"],
             ProviderConfig::Integrated { keys } if keys.len() == 2
@@ -8557,6 +9274,22 @@ helm_repo_url = "oci://registry.example.test/doca"
         assert!(matches!(
             &secrets.kms.providers["prod-transit"],
             ProviderConfig::Transit { keys, transit_mount: None } if keys == &["my-transit-key"]
+        ));
+        // The KMIP variant takes its defaults for the optional server name and
+        // both deadlines.
+        assert!(matches!(
+            &secrets.kms.providers["hsm"],
+            ProviderConfig::Kmip {
+                endpoint,
+                server_name: None,
+                keys,
+                connect_timeout,
+                request_timeout,
+                ..
+            } if endpoint == "kms.example.com:5696"
+                && keys.get("site-kek-1").map(String::as_str) == Some("a1b2c3")
+                && *connect_timeout == std::time::Duration::from_secs(5)
+                && *request_timeout == std::time::Duration::from_secs(10)
         ));
 
         // Verify routing.
@@ -8778,6 +9511,35 @@ helm_repo_url = "oci://registry.example.test/doca"
         assert!(toml::from_str::<Wrapper>(toml_str).is_err());
     }
 
+    // Verifies that a KMIP provider without its TLS material fails to parse:
+    // the certificate paths are required, not defaulted, so a half-configured
+    // provider cannot reach startup validation.
+    #[test]
+    fn secrets_config_rejects_kmip_without_tls_material() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[expect(dead_code)]
+            secrets: SecretsConfig,
+        }
+
+        let toml_str = r#"
+            [secrets.kms]
+            active = "hsm"
+
+            [secrets.kms.providers.hsm]
+            type = "kmip"
+            endpoint = "kms.example.com:5696"
+            client_cert = "/etc/nico/kmip/client.pem"
+            client_key = "/etc/nico/kmip/client.key"
+            keys.site-kek-1 = "a1b2c3"
+
+            [secrets.routing]
+            "/" = "site-kek-1"
+        "#;
+
+        assert!(toml::from_str::<Wrapper>(toml_str).is_err());
+    }
+
     // Verifies that secrets config is optional — a config without [secrets] should have None.
     #[test]
     fn secrets_config_absent_by_default() {
@@ -8800,6 +9562,7 @@ helm_repo_url = "oci://registry.example.test/doca"
             deployment_name: "bf4-dep".to_string(),
             node_label_key: "carbide.nvidia.com/bf4".to_string(),
             max_sf_per_pf: default_dpf_max_sf_per_pf(),
+            service_vpc_enabled_address_families: Default::default(),
             services: None,
             extra_services: BTreeMap::new(),
             extra_bfcfg_parameters: Vec::new(),
@@ -8820,6 +9583,68 @@ helm_repo_url = "oci://registry.example.test/doca"
 
         assert!(!defaulted.enable_delay_host_init);
         assert!(enabled.enable_delay_host_init);
+    }
+
+    /// Verifies family configuration is set-like and rejects ambiguous operator input.
+    /// This matters because deployment authorization must not depend on TOML ordering or silent
+    /// normalization.
+    #[test]
+    fn dpf_service_vpc_address_families_parse_as_unique_membership() {
+        // Parse one otherwise-complete deployment so each case isolates list membership semantics.
+        let deployment = |families: &str| {
+            toml::from_str::<DpfDeploymentConfig>(&format!(
+                r#"
+                    flavor_name = "flavor"
+                    deployment_name = "deployment"
+                    node_label_key = "example.com/dpu"
+                    {families}
+                "#
+            ))
+        };
+
+        scenarios!(
+            run = |families| {
+                deployment(families)
+                    .map(|deployment| {
+                        let configured = deployment.service_vpc_enabled_address_families;
+                        (
+                            configured.is_empty(),
+                            configured.contains(ServiceVpcAddressFamily::Ipv4),
+                            configured.contains(ServiceVpcAddressFamily::Ipv6),
+                        )
+                    })
+                    .map_err(drop)
+            };
+            "omitted field" {
+                // Omission exercises the serde default rather than explicit list parsing.
+                "" => Yields((true, false, false)),
+            }
+
+            "explicit empty list" {
+                // An explicit empty list must match omission without relying on the default.
+                "service_vpc_enabled_address_families = []" => Yields((true, false, false)),
+            }
+
+            "all known families" {
+                // The canonical ordering proves both accepted values become members.
+                "service_vpc_enabled_address_families = [\"ipv4\", \"ipv6\"]" => Yields((false, true, true)),
+            }
+
+            "reordered known families" {
+                // Reversing the declaration proves membership does not depend on TOML order.
+                "service_vpc_enabled_address_families = [\"ipv6\", \"ipv4\"]" => Yields((false, true, true)),
+            }
+
+            "duplicate family" {
+                // A repeated known value exercises duplicate rejection rather than enum validation.
+                "service_vpc_enabled_address_families = [\"ipv4\", \"ipv4\"]" => Fails,
+            }
+
+            "unknown family" {
+                // Reject an unknown value through enum validation rather than duplicate detection.
+                "service_vpc_enabled_address_families = [\"ipv5\"]" => Fails,
+            }
+        );
     }
 
     /// Verifies deployment selectors remain distinct from each other and NICo-owned labels.

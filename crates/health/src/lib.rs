@@ -36,6 +36,10 @@ pub mod otlp;
 pub mod processor;
 pub mod sharding;
 pub mod sink;
+mod static_credentials;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 mod tls;
 
@@ -70,6 +74,14 @@ pub enum HealthError {
     #[error("the API call to the carbide API server returned {0}")]
     ApiInvocationError(tonic::Status),
 
+    /// Failure from the shared credential reader.
+    #[error("credential error: {0}")]
+    CredentialError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// A static endpoint's profile or resolved username is invalid.
+    #[error("static credential resolution failed: {0}")]
+    StaticCredentialResolution(#[source] Box<dyn std::error::Error + Send + Sync>),
+
     #[error("generic error: {0}")]
     GenericError(String),
 
@@ -93,6 +105,10 @@ pub enum HealthError {
 
     #[error("BMC error: {0}")]
     BmcError(#[from] Box<dyn std::error::Error + Send + Sync>),
+
+    /// A request skipped while the BMC's connection circuit is open, for the BMC at this IP.
+    #[error("BMC {0} is unreachable; request skipped while the connection circuit breaker is open")]
+    BmcCircuitOpen(std::net::IpAddr),
 
     #[error("HTTP(S) error: {0}")]
     HttpError(String),
@@ -146,7 +162,7 @@ struct EndpointWiring {
     source: Arc<dyn EndpointSource>,
 }
 
-fn build_endpoint_wiring(
+async fn build_endpoint_wiring(
     config: &Config,
     bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
 ) -> Result<EndpointWiring, HealthError> {
@@ -154,6 +170,23 @@ fn build_endpoint_wiring(
         .map_err(BmcError::ReqwestError)?;
     let mut sources: Vec<Arc<dyn EndpointSource>> = Vec::new();
 
+    let file_provider = if let Some(path) = &config.endpoint_sources.static_credentials_file {
+        let targets = config
+            .endpoint_sources
+            .static_bmc_endpoints
+            .iter()
+            .chain(&config.endpoint_sources.static_switch_host_endpoints)
+            .filter_map(|cfg| {
+                let mac = cfg.mac.parse().ok()?;
+                Some((mac, cfg.credentials_profile.clone()))
+            })
+            .collect();
+        Some(Arc::new(
+            static_credentials::StaticCredentialProvider::new(path.clone(), targets).await?,
+        ))
+    } else {
+        None
+    };
     for endpoint_configs in [
         config.endpoint_sources.static_bmc_endpoints.as_slice(),
         config
@@ -172,6 +205,11 @@ fn build_endpoint_wiring(
             config.cache_size,
             config.bmc_request_concurrency,
             bmc_latency_metrics.clone(),
+            file_provider.clone().ok_or_else(|| {
+                HealthError::GenericError(
+                    "static endpoints require endpoint_sources.static_credentials_file".into(),
+                )
+            })?,
         );
         sources.push(Arc::new(static_source));
     }
@@ -442,7 +480,7 @@ pub async fn run_service(config: Config) -> Result<(), HealthError> {
 
     let EndpointWiring {
         source: endpoint_source,
-    } = build_endpoint_wiring(&config, bmc_latency_metrics)?;
+    } = build_endpoint_wiring(&config, bmc_latency_metrics).await?;
 
     let data_sink = build_data_sink(&config, metrics_manager.clone())?;
 
@@ -533,7 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn endpoint_wiring_loads_bmc_and_switch_host_static_endpoints() {
-        let config: Config = Figment::new()
+        let mut config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
             .merge(Toml::string(
                 r#"
@@ -544,23 +582,28 @@ enabled = false
 ip = "192.0.2.1"
 port = 8443
 mac = "00:11:22:33:44:55"
-username = "admin"
+credentials_profile = "test"
 switch = { serial = "switch-bmc", endpoint_role = "bmc" }
 
 [[endpoint_sources.static_switch_host_endpoints]]
 ip = "192.0.2.2"
 port = 9443
 mac = "00:11:22:33:44:66"
-username = "admin"
+credentials_profile = "test"
 switch = { serial = "switch-host" }
 "#,
             ))
             .extract()
             .expect("static endpoint config should parse");
 
+        let file = tempfile::NamedTempFile::new().unwrap();
+        crate::static_credentials::test_support::write_credentials(file.path(), "pass");
+        config.endpoint_sources.static_credentials_file = Some(file.path().into());
         config.validate().expect("test config should be valid");
 
-        let wiring = build_endpoint_wiring(&config, None).expect("endpoint wiring should build");
+        let wiring = build_endpoint_wiring(&config, None)
+            .await
+            .expect("endpoint wiring should build");
 
         let endpoints = wiring
             .source
@@ -581,5 +624,193 @@ switch = { serial = "switch-host" }
             roles.collect::<Vec<_>>(),
             vec![SwitchEndpointRole::Bmc, SwitchEndpointRole::Host]
         );
+    }
+
+    #[tokio::test]
+    async fn shared_credentials_file_wires_profiles_and_overrides_for_both_static_lists() {
+        use crate::endpoint::BmcCredentials;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "profiles": {
+    "bmc": {"username": "admin", "password": "shared"},
+    "switch": {"username": "cumulus", "password": "switch-password"}
+  },
+  "overrides": {
+    "AA:BB:CC:DD:EE:02": {"password": "individual"},
+    "AA:BB:CC:DD:EE:03": {"username": "passwordless"}
+  }
+}"#,
+        )
+        .unwrap();
+        let mut config: Config = Figment::new()
+            .merge(Toml::string(
+                r#"
+[endpoint_sources.nico_api]
+enabled = false
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "192.0.2.1"
+mac = "aa:bb:cc:dd:ee:01"
+credentials_profile = "bmc"
+[[endpoint_sources.static_switch_host_endpoints]]
+ip = "192.0.2.2"
+mac = "aa:bb:cc:dd:ee:02"
+credentials_profile = "switch"
+switch = {serial = "switch"}
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "192.0.2.3"
+mac = "aa:bb:cc:dd:ee:03"
+"#,
+            ))
+            .extract()
+            .unwrap();
+        config.endpoint_sources.static_credentials_file = Some(path);
+        config.validate().unwrap();
+        let wiring = build_endpoint_wiring(&config, None).await.unwrap();
+        let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
+        assert_eq!(endpoints.len(), 3);
+        let providers = endpoints
+            .iter()
+            .map(|e| e.bmc.credential_provider())
+            .collect::<Vec<_>>();
+        assert!(
+            providers
+                .iter()
+                .all(|provider| Arc::ptr_eq(&providers[0], provider))
+        );
+        for (index, username, password) in [
+            (0, "admin", Some("shared")),
+            (1, "passwordless", None),
+            (2, "cumulus", Some("individual")),
+        ] {
+            let mut addr = endpoints[index].addr.clone();
+            addr.ip = "198.51.100.1".parse().unwrap();
+            let actual = providers[index].fetch_credentials(&addr).await.unwrap();
+            let BmcCredentials::UsernamePassword {
+                username: actual_username,
+                password: actual_password,
+            } = actual
+            else {
+                panic!("file credentials must use username/password");
+            };
+            assert_eq!(actual_username, username);
+            assert_eq!(actual_password.as_deref(), password);
+        }
+    }
+
+    #[tokio::test]
+    async fn bundled_static_examples_load_their_credential_files() {
+        for (name, contents) in [
+            ("example", include_str!("../example/config.example.toml")),
+            ("mock", include_str!("../example/config.bmc-mock.toml")),
+            (
+                "mock-periodic",
+                include_str!("../example/config.bmc-mock-periodic.toml"),
+            ),
+            (
+                "mock-gpu-attrs",
+                include_str!("../example/config.bmc-mock-gpu-attrs.toml"),
+            ),
+        ] {
+            let mut config: Config = Figment::new()
+                .merge(Toml::string(contents))
+                .extract()
+                .unwrap();
+            config
+                .validate()
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let path = config
+                .endpoint_sources
+                .static_credentials_file
+                .as_mut()
+                .unwrap();
+            *path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(&*path);
+            config.endpoint_sources.carbide_api = Configurable::Disabled;
+            let wiring = build_endpoint_wiring(&config, None)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let endpoints = wiring.source.fetch_bmc_hosts().await.unwrap();
+            assert_eq!(
+                endpoints.len(),
+                config.endpoint_sources.static_bmc_endpoints.len()
+                    + config.endpoint_sources.static_switch_host_endpoints.len(),
+                "{name}"
+            );
+            for endpoint in endpoints {
+                endpoint
+                    .bmc
+                    .credential_provider()
+                    .fetch_credentials(&endpoint.addr)
+                    .await
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_credential_file_fails_wiring_once_with_its_path() {
+        use std::error::Error as _;
+
+        use carbide_instrument::testing::capture_logs_async;
+        for (scenario, contents, profile) in [
+            ("missing", None, None),
+            (
+                "malformed",
+                Some(r#"{"profiles":{"bmc":{"password":["sensitive"]}}}"#),
+                None,
+            ),
+            ("unknown profile", Some("{}"), Some("missing")),
+            ("missing username", Some("{}"), None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("credentials.json");
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let mut config = Config::default();
+            config.endpoint_sources.carbide_api = Configurable::Disabled;
+            config.endpoint_sources.static_credentials_file = Some(path.clone());
+            config.endpoint_sources.static_bmc_endpoints = (1..=2)
+                .map(|n| {
+                    serde_json::from_value(serde_json::json!({
+                        "ip": format!("192.0.2.{n}"), "mac": format!("00:11:22:33:44:{n:02x}"),
+                        "credentials_profile": profile,
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            let (result, logs) = capture_logs_async(build_endpoint_wiring(&config, None)).await;
+            assert!(result.is_err(), "{scenario}");
+            let errors = logs
+                .iter()
+                .filter(|log| log.message.ends_with("at startup"))
+                .collect::<Vec<_>>();
+            assert_eq!(errors.len(), 1, "{scenario}");
+            assert_eq!(
+                errors[0].field("path"),
+                Some(path.to_str().unwrap()),
+                "{scenario}"
+            );
+            let error = result.err().unwrap();
+            let source = error.source().expect("credential error retains its source");
+            if scenario == "missing" {
+                let io_error = std::iter::successors(Some(source), |&error| error.source())
+                    .find_map(|error| error.downcast_ref::<std::io::Error>())
+                    .expect("original I/O error remains in the source chain");
+                assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+            } else if scenario == "malformed" {
+                assert!(matches!(&error, HealthError::CredentialError(_)));
+            } else {
+                assert!(
+                    matches!(&error, HealthError::StaticCredentialResolution(_)),
+                    "{scenario}"
+                );
+            }
+            assert!(!format!("{error:?}").contains("sensitive"));
+        }
     }
 }

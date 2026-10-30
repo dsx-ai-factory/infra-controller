@@ -156,6 +156,7 @@ async fn power_and_lifecycle_batches_are_split_by_rack_and_their_parents_poll_th
     // and s2's part fails on its second poll.
     let batch = rms
         .batch_reset_switch_factory_default(BatchResetSwitchFactoryDefaultRequest {
+            allow_ssh_fallback: true,
             nodes: nodes(vec![s1(), s2()]),
             domain: None,
         })

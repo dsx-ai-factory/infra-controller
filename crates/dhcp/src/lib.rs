@@ -68,6 +68,13 @@ pub mod mock_api_server;
 mod tls;
 mod tracing_setup;
 
+/// Fixtures that register the DHCP certificate-expiry gauge and alias without
+/// starting the Kea hook.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use crate::metrics::metrics_setup_with_certificate_expiry;
+}
+
 static CONFIG: Lazy<RwLock<CarbideDhcpContext>> =
     Lazy::new(|| RwLock::new(CarbideDhcpContext::default()));
 
@@ -95,7 +102,7 @@ struct CarbideDhcpContext {
 
 // The request/drop/reply counters are `carbide-instrument` events declared in
 // `metrics.rs` and resolve from the global meter; this struct holds only the
-// state the certificate-expiry gauge reports.
+// state reported by the certificate-expiry gauge and its alias.
 #[derive(Debug, Clone)]
 struct CarbideDhcpMetrics {
     forge_client_config: ForgeClientConfig,

@@ -21,10 +21,10 @@ definition without fetching artifacts, selecting hardware, or starting
 updates. The returned profile includes its new edit version.
 
 Use --format ascii-table (default), csv, json, or yaml and --output PATH
-before the firmware subcommand. JSON/YAML returns a one-element array
-containing id, config, and version. Table/CSV shows one row per entry.
-The command does not retry creation; after a connection error, use show
-to inspect whether it committed.
+before the firmware subcommand. JSON and YAML output is a one-element
+array containing id, config, and version. Table and CSV output has one
+row per entry. The command does not retry creation; after a connection
+error, use show to inspect whether it committed.
 
 Output defaults to stdout. --output requires a path that does not exist;
 the file is created before the operation, even if the operation later
@@ -49,7 +49,7 @@ sha256; and approach set to the case-sensitive string "Scout". Part
 numbers, PSIDs, and firmware versions are literal, nonempty strings
 without surrounding whitespace or control characters. An older firmware
 version is a valid target. The optional device_config is omitted or null
-when absent, or has the same url/sha256 fields as image. Hardware
+when absent, or has the same url and sha256 fields as image. Hardware
 selection and resolution support at most 256 UTF-8 bytes per part number
 or PSID; catalog registration accepts longer strings.
 

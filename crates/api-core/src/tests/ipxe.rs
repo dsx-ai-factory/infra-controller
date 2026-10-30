@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::error::Error;
 
 use carbide_host_support::bootstrap_ca::BootstrapCaSource;
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
@@ -26,9 +27,10 @@ use config_version::ConfigVersion;
 use db::{self};
 use futures_util::FutureExt;
 use mac_address::MacAddress;
+use model::firmware::FirmwareComponentType;
 use model::machine::{
-    CleanupContext, DpuInitState, HostReprovisionState, MachineState, ManagedHostState,
-    ReadyBootConfigState, SetBootOrderInfo, SetBootOrderState,
+    CleanupContext, DpuInitState, HostReprovisionState, InstanceState, MachineState,
+    ManagedHostState, ReadyBootConfigState, SetBootOrderInfo, SetBootOrderState,
 };
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::test_support::ManagedHostConfig;
@@ -389,26 +391,41 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     .await;
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
-    move_machine_to_needed_state(
-        host_id.into(),
-        &ManagedHostState::HostReprovision {
-            reprovision_state: HostReprovisionState::WaitingForManualUpgrade {
-                manual_upgrade_started: Utc::now(),
-            },
-            retry_count: 0,
+    for reprovision_state in [
+        HostReprovisionState::CheckingFirmwareV2 {
+            firmware_type: None,
+            firmware_number: None,
         },
-        &env.pool,
-    )
-    .await;
+        HostReprovisionState::WaitingForManualUpgrade {
+            manual_upgrade_started: Utc::now(),
+        },
+        HostReprovisionState::NewFirmwareReportedWait {
+            final_version: "28.47.2682".to_string(),
+            firmware_type: FirmwareComponentType::Cx7,
+            firmware_number: None,
+            previous_reset_time: Some(Utc::now().timestamp()),
+            reset_retry_count: 0,
+        },
+    ] {
+        let state = ManagedHostState::HostReprovision {
+            reprovision_state,
+            retry_count: 0,
+        };
+        move_machine_to_needed_state(host_id.into(), &state, &env.pool).await;
 
-    let instructions = get_pxe_instructions(
-        &env,
-        host_interface_id,
-        rpc::forge::MachineArchitecture::X86,
-        None,
-    )
-    .await;
-    assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+        let instructions = get_pxe_instructions(
+            &env,
+            host_interface_id,
+            rpc::forge::MachineArchitecture::X86,
+            None,
+        )
+        .await;
+        assert!(
+            instructions.pxe_script.contains("x86_64/scout.efi"),
+            "a host in {state:?} must boot Scout: {}",
+            instructions.pxe_script
+        );
+    }
 
     move_machine_to_needed_state(
         host_id.into(),
@@ -448,6 +465,42 @@ async fn test_pxe_instance(pool: sqlx::PgPool) {
         .single_interface_network_config(segment_id)
         .build()
         .await;
+
+    move_machine_to_needed_state(
+        mh.host().id.into(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::HostReprovision {
+                reprovision_state: HostReprovisionState::NewFirmwareReportedWait {
+                    final_version: "28.47.2682".to_string(),
+                    firmware_type: FirmwareComponentType::Cx7,
+                    firmware_number: None,
+                    previous_reset_time: Some(Utc::now().timestamp()),
+                    reset_retry_count: 0,
+                },
+            },
+        },
+        &env.pool,
+    )
+    .await;
+
+    let instructions = host_interface
+        .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
+        .await;
+    assert!(
+        instructions.pxe_script.contains("x86_64/scout.efi"),
+        "an assigned host waiting for firmware must boot Scout: {}",
+        instructions.pxe_script
+    );
+
+    // Booting Scout must preserve the pending one-time tenant provisioning script.
+    move_machine_to_needed_state(
+        mh.host().id.into(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+        &env.pool,
+    )
+    .await;
 
     let instructions = host_interface
         .get_pxe_instructions(rpc::forge::MachineArchitecture::X86)
@@ -684,6 +737,97 @@ async fn test_cloud_init_url_overrides_for_external_host(pool: sqlx::PgPool) {
         Some("http://10.99.0.1:8080"),
         "expected pxe_url_override for external host cloud-init"
     );
+}
+
+#[crate::sqlx_test]
+async fn test_boot_instructions_reject_static_assignment_decode_failure(pool: sqlx::PgPool) {
+    let env = create_env_with_external_urls(pool).await;
+    let (_, ip) = preallocate_external_interface(&env, "AA:BB:CC:DD:EE:04", "10.99.0.52").await;
+
+    // Corrupt the anchor after allocation so both requests reach the URL lookup.
+    // Decoding leaves the transaction usable, so omitting overrides can look successful.
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    for (operation, result) in [
+        (
+            "PXE",
+            env.api
+                .get_pxe_instructions(tonic::Request::new(rpc::forge::PxeInstructionRequest {
+                    arch: rpc::forge::MachineArchitecture::X86 as i32,
+                    client_ip: Some(ip.clone()),
+                    ..Default::default()
+                }))
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "cloud-init",
+            env.api
+                .get_cloud_init_instructions(tonic::Request::new(CloudInitInstructionsRequest {
+                    ip,
+                }))
+                .await
+                .map(|_| ()),
+        ),
+    ] {
+        let status = result.expect_err("a failed anchor lookup must reject boot instructions");
+        assert_eq!(
+            status.code(),
+            tonic::Code::Internal,
+            "{operation}: {status}"
+        );
+        let error = status
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::errors::CarbideErrorWithLocation>())
+            .expect("boot-instruction failure should preserve its source");
+        let crate::CarbideError::DBError(annotated) = &error.error else {
+            panic!("{operation}: expected DBError, got {error:?}");
+        };
+        assert!(
+            matches!(&annotated.source, sqlx::Error::ColumnDecode { index, .. }
+                if index == "\"allocation_strategy\""),
+            "{operation}: {error:?}"
+        );
+    }
+}
+
+#[crate::sqlx_test]
+async fn test_boot_instructions_without_static_assignments_omit_url_overrides(pool: sqlx::PgPool) {
+    let env = create_env_with_external_urls(pool).await;
+    let (interface_id, ip) =
+        preallocate_external_interface(&env, "AA:BB:CC:DD:EE:05", "10.99.0.53").await;
+
+    // Keep the interface's segment, but remove the well-known anchor name.
+    sqlx::query("UPDATE network_segments SET name = 'legacy-static' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    let pxe = get_pxe_instructions(
+        &env,
+        interface_id,
+        rpc::forge::MachineArchitecture::X86,
+        None,
+    )
+    .await;
+    assert_eq!(pxe.api_url_override, None);
+    assert_eq!(pxe.pxe_url_override, None);
+    assert_eq!(pxe.static_pxe_url_override, None);
+
+    let cloud_init = env
+        .api
+        .get_cloud_init_instructions(tonic::Request::new(CloudInitInstructionsRequest { ip }))
+        .await
+        .expect("an absent anchor must allow cloud-init instructions")
+        .into_inner();
+    assert!(cloud_init.discovery_instructions.is_some());
+    assert_eq!(cloud_init.api_url_override, None);
+    assert_eq!(cloud_init.pxe_url_override, None);
 }
 
 #[crate::sqlx_test]

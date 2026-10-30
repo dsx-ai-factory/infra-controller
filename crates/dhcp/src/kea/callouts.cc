@@ -20,11 +20,13 @@
 #include <dhcp/option6_ia.h>
 #include <dhcp/option6_iaaddr.h>
 #include <dhcp/option6_status_code.h>
+#include <vector>
 
 isc::log::Logger logger("carbide-callouts");
 
 const int IPV4_ADDR_SIZEB = 4;
 const int IPV6_ADDR_SIZEB = 16;
+const char REQUESTED_PREFIX_IAIDS[] = "requested_prefix_iaids";
 
 const uint8_t *nullable_data(const OptionBuffer &buffer) {
   return buffer.empty() ? nullptr : buffer.data();
@@ -522,6 +524,12 @@ int get_carbide_lease6_address(CalloutHandle &handle, Lease6Ptr lease6,
   if (!lease6) {
     LOG_ERROR(logger, "LOG_CARBIDE_LEASE6_OVERRIDE: %1")
         .arg(hook_name + ": Missing lease6 argument");
+    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+    return 1;
+  }
+
+  // Lease-type policy must precede address comparison on every allocation path.
+  if (lease6->type_ != Lease::TYPE_NA) {
     handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
     return 1;
   }
@@ -1277,6 +1285,26 @@ int pkt6_receive(CalloutHandle &handle) {
       machine_free(ptr);
     });
     handle.setContext("machine", machinePtr);
+    // Existing leases can bypass lease6_select, and renewal SKIP still lets
+    // Kea return an old prefix. Keep IA_PD out of allocation entirely, then
+    // return an IA-scoped refusal without disrupting the address exchange.
+    std::vector<uint32_t> prefix_iaids;
+    const auto message_type = query6_ptr->getType();
+    if (query6_ptr->getOption(D6O_IA_NA) &&
+        (message_type == DHCPV6_SOLICIT || message_type == DHCPV6_REQUEST ||
+         message_type == DHCPV6_RENEW || message_type == DHCPV6_REBIND)) {
+      while (OptionPtr option = query6_ptr->getOption(D6O_IA_PD)) {
+        Option6IAPtr ia_pd = boost::dynamic_pointer_cast<Option6IA>(option);
+        if (!ia_pd) {
+          handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+          record_dropped_v6_request("invalid_packet");
+          return 1;
+        }
+        prefix_iaids.push_back(ia_pd->getIAID());
+        query6_ptr->delOption(D6O_IA_PD);
+      }
+    }
+    handle.setContext(REQUESTED_PREFIX_IAIDS, prefix_iaids);
     // CONFIRM cache hits must be visible as top-level Success in pkt6_send.
     if (query6_ptr->getType() == DHCPV6_CONFIRM) {
       handle.setContext("confirm_on_link", true);
@@ -1446,6 +1474,15 @@ int pkt6_send(CalloutHandle &handle) {
   // Kea does not synthesize this for the hook-managed CONFIRM cache path.
   if (confirm_on_link) {
     add_status6(response6_ptr, STATUS_Success, "success");
+  }
+
+  std::vector<uint32_t> prefix_iaids;
+  handle.getContext(REQUESTED_PREFIX_IAIDS, prefix_iaids);
+  for (const auto iaid : prefix_iaids) {
+    Option6IAPtr ia_pd(new Option6IA(D6O_IA_PD, iaid));
+    ia_pd->addOption(OptionPtr(new Option6StatusCode(
+        STATUS_NoPrefixAvail, "prefix delegation is not supported")));
+    response6_ptr->addOption(ia_pd);
   }
 
   set_options_v6(handle, query6_ptr, response6_ptr, machine.get(),

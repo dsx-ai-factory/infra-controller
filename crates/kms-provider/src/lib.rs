@@ -16,10 +16,12 @@
  */
 
 //! carbide_kms_provider provides a KmsBackend trait
-//! for envelope encryption key management. Two
+//! for envelope encryption key management. Three
 //! implementations are included:
 //! - IntegratedKmsProvider: local key material.
 //! - TransitKmsProvider: Vault/OpenBao Transit.
+//! - KmipKmsProvider: a KMIP 1.4 server holding a
+//!   non-exportable AES-256 key.
 
 use async_trait::async_trait;
 use zeroize::Zeroizing;
@@ -28,6 +30,7 @@ pub mod crypto;
 pub mod providers;
 
 pub use providers::integrated::{IntegratedKmsProvider, KeySource};
+pub use providers::kmip::KmipKmsProvider;
 pub use providers::multi::MultiKmsProvider;
 pub use providers::transit::{DEFAULT_TRANSIT_MOUNT, TransitKmsProvider};
 

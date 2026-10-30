@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_test_support::{Check, check_values};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::network::NetworkSegmentId;
 use model::allocation_type::AllocationType;
@@ -29,6 +30,46 @@ use model::network_segment::{
 
 use super::*;
 use crate as db;
+use crate::test_support::postgres::wait_for_blocked_query;
+
+#[test]
+fn admin_lock_admission_permit_count_prefers_the_configuration() {
+    check_values(
+        [
+            Check {
+                scenario: "the configured value wins over the environment",
+                input: (Some(32), Some("8")),
+                expect: 32,
+            },
+            Check {
+                scenario: "the environment applies when nothing is configured",
+                input: (None, Some("8")),
+                expect: 8,
+            },
+            Check {
+                scenario: "an unparsable environment value falls back to the default",
+                input: (None, Some("many")),
+                expect: 16,
+            },
+            Check {
+                scenario: "nothing set gives the default",
+                input: (None, None),
+                expect: 16,
+            },
+            Check {
+                scenario: "zero from the environment would deadlock every gated flow and becomes one",
+                input: (None, Some("0")),
+                expect: 1,
+            },
+            Check {
+                scenario: "a value above the ceiling from the environment is clamped",
+                input: (None, Some("1000")),
+                expect: 256,
+            },
+        ],
+        |(configured, environment)| admin_lock_admission_permit_count(configured, environment),
+    );
+}
 
 async fn create_static_assignments_segment(
     pool: &sqlx::PgPool,
@@ -100,28 +141,11 @@ async fn create_managed_segment(
     segment_type: NetworkSegmentType,
     allocation_strategy: AllocationStrategy,
 ) -> Result<NetworkSegmentId, Box<dyn std::error::Error>> {
-    let segment_id = NetworkSegmentId::new();
+    let definition = managed_segment(name, prefix, segment_type, allocation_strategy);
+    let segment_id = definition.id;
     let mut txn = db::Transaction::begin(pool).await?;
     db::network_segment::persist(
-        NewNetworkSegment {
-            id: segment_id,
-            name: name.to_string(),
-            subdomain_id: None,
-            vpc_id: None,
-            mtu: 1500,
-            prefixes: vec![NewNetworkPrefix {
-                prefix: prefix.parse()?,
-                gateway: None,
-                dhcpv6_link_address: None,
-                num_reserved: 0,
-            }],
-            vlan_id: None,
-            vni: None,
-            segment_type,
-            can_stretch: Some(false),
-            allocation_strategy,
-            infer_slaac_eui64_addresses: false,
-        },
+        definition,
         txn.as_pgconn(),
         NetworkSegmentControllerState::Ready,
     )
@@ -129,6 +153,585 @@ async fn create_managed_segment(
     txn.commit().await?;
 
     Ok(segment_id)
+}
+
+/// Build an unpersisted segment so each case can customize its prefixes and allocation policy.
+fn managed_segment(
+    name: &str,
+    prefix: &str,
+    segment_type: NetworkSegmentType,
+    allocation_strategy: AllocationStrategy,
+) -> NewNetworkSegment {
+    NewNetworkSegment {
+        id: NetworkSegmentId::new(),
+        name: name.to_string(),
+        subdomain_id: None,
+        vpc_id: None,
+        mtu: 1500,
+        prefixes: vec![NewNetworkPrefix {
+            prefix: prefix.parse().unwrap(),
+            gateway: None,
+            dhcpv6_link_address: None,
+            num_reserved: 0,
+        }],
+        vlan_id: None,
+        vni: None,
+        segment_type,
+        can_stretch: Some(false),
+        allocation_strategy,
+        infer_slaac_eui64_addresses: false,
+    }
+}
+
+/// Persist the DPU required for association and provide its host MAC through topology data.
+async fn create_proactive_discovery_dpu(
+    txn: &mut PgConnection,
+    mac: MacAddress,
+) -> Result<(MachineId, HardwareInfo), sqlx::Error> {
+    let dpu_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x78; 32],
+        MachineType::Dpu,
+    );
+    sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+        .bind(dpu_id)
+        .execute(txn)
+        .await?;
+    let hardware_info = HardwareInfo {
+        dpu_info: Some(model::hardware_info::DpuData {
+            factory_mac_address: mac.to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    Ok((dpu_id, hardware_info))
+}
+
+/// Proactive discovery retains a Static reservation on any Reserved admin candidate,
+/// not just the first.
+/// A second row for that MAC is ambiguous and must not silently change DPU ownership.
+#[crate::sqlx_test]
+async fn proactive_admin_discovery_preserves_existing_mac_ownership(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (name, prefix) in [
+        ("admin-a", "2001:db8:7178:a::/64"),
+        ("admin-b", "2001:db8:7178:b::/64"),
+    ] {
+        create_managed_segment(
+            &pool,
+            name,
+            prefix,
+            NetworkSegmentType::Admin,
+            AllocationStrategy::Reserved,
+        )
+        .await?;
+    }
+    let dpu_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x78; 32],
+        MachineType::Dpu,
+    );
+    let host_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x79; 32],
+        MachineType::Host,
+    );
+    let other_dpu_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x7a; 32],
+        MachineType::Dpu,
+    );
+    let mac: MacAddress = "02:00:00:00:71:78".parse()?;
+    let hardware_info = HardwareInfo {
+        dpu_info: Some(model::hardware_info::DpuData {
+            factory_mac_address: mac.to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut txn = pool.begin().await?;
+    for machine_id in [dpu_id, host_id, other_dpu_id] {
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+    }
+    let segments = db::network_segment::admin(&mut txn).await?;
+    assert_eq!(segments.len(), 2);
+    let reserved_address = segments[1].prefixes[0]
+        .prefix
+        .iter()
+        .nth(10)
+        .expect("the admin prefix has room for a static reservation");
+    let original = create(
+        &mut txn,
+        &segments[1..],
+        &mac,
+        true,
+        AddressSelectionStrategy::StaticAddress(reserved_address),
+        None,
+    )
+    .await?;
+    associate_interface_with_machine(
+        &original.id,
+        MachineInterfaceAssociation::Machine(host_id),
+        &mut txn,
+    )
+    .await?;
+    let discovered = create_host_machine_dpu_interface_proactively(
+        &mut txn,
+        Some(&hardware_info),
+        &dpu_id,
+        true,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
+    let mut txn = pool.begin().await?;
+    let persisted = find_one(&mut *txn, original.id).await?;
+    assert_eq!(discovered.id, original.id);
+    assert_eq!(persisted.segment_id, segments[1].id);
+    assert_eq!(persisted.addresses, vec![reserved_address]);
+    assert_eq!(persisted.machine_id, Some(host_id));
+    assert_eq!(persisted.attached_dpu_machine_id, Some(dpu_id.try_into()?));
+    let addresses =
+        db::machine_interface_address::find_for_interface(&mut txn, original.id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, reserved_address);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+
+    let duplicate = create_without_addresses(
+        &mut txn,
+        &segments[0],
+        &mac,
+        false,
+        InterfaceType::Data,
+        None,
+    )
+    .await?;
+    let error = create_host_machine_dpu_interface_proactively(
+        &mut txn,
+        Some(&hardware_info),
+        &other_dpu_id,
+        true,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        DatabaseError::NetworkSegmentDuplicateMacAddress(address) if address == mac
+    ));
+    let original_after_rejection = find_one(&mut *txn, original.id).await?;
+    assert_eq!(original_after_rejection.segment_id, persisted.segment_id);
+    assert_eq!(original_after_rejection.addresses, persisted.addresses);
+    assert_eq!(original_after_rejection.machine_id, persisted.machine_id);
+    assert_eq!(
+        original_after_rejection.attached_dpu_machine_id,
+        persisted.attached_dpu_machine_id,
+    );
+    let duplicate = find_one(&mut *txn, duplicate.id).await?;
+    assert!(duplicate.attached_dpu_machine_id.is_none());
+    assert!(duplicate.addresses.is_empty());
+    Ok(())
+}
+
+/// A known host MAC on another managed segment must not be adopted as a DPU admin link.
+#[crate::sqlx_test]
+async fn proactive_admin_discovery_rejects_foreign_managed_ownership(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_managed_segment(
+        &pool,
+        "admin",
+        "2001:db8:7178:a::/64",
+        NetworkSegmentType::Admin,
+        AllocationStrategy::Dynamic,
+    )
+    .await?;
+    let foreign_segment_id = create_managed_segment(
+        &pool,
+        "foreign-underlay",
+        "2001:db8:7178:b::/64",
+        NetworkSegmentType::Underlay,
+        AllocationStrategy::Dynamic,
+    )
+    .await?;
+    let mac: MacAddress = "02:00:00:00:71:78".parse()?;
+    let host_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x79; 32],
+        MachineType::Host,
+    );
+    let original_dpu_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x7a; 32],
+        MachineType::Dpu,
+    );
+    let mut txn = pool.begin().await?;
+    let (requesting_dpu_id, hardware_info) = create_proactive_discovery_dpu(&mut txn, mac).await?;
+    for machine_id in [host_id, original_dpu_id] {
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+    }
+    let foreign_segment = db::network_segment::find_by_name(&mut txn, "foreign-underlay").await?;
+    let original = create(
+        &mut txn,
+        std::slice::from_ref(&foreign_segment),
+        &mac,
+        true,
+        AddressSelectionStrategy::Automatic,
+        None,
+    )
+    .await?;
+    associate_interface_with_machine(
+        &original.id,
+        MachineInterfaceAssociation::Machine(host_id),
+        &mut txn,
+    )
+    .await?;
+    associate_interface_with_dpu_machine(&original.id, &original_dpu_id, &mut txn).await?;
+    txn.commit().await?;
+
+    let mut txn = pool.begin().await?;
+    let error = create_host_machine_dpu_interface_proactively(
+        &mut txn,
+        Some(&hardware_info),
+        &requesting_dpu_id,
+        true,
+        None,
+    )
+    .await
+    .expect_err("a known MAC on a foreign managed segment must reject discovery");
+    assert!(matches!(error, DatabaseError::Internal { message, .. }
+        if message.starts_with("Network segment mismatch for existing MAC address")));
+    txn.commit().await?;
+
+    let mut txn = pool.begin().await?;
+    let persisted = find_one(&mut *txn, original.id).await?;
+    assert_eq!(persisted.segment_id, foreign_segment_id);
+    assert_eq!(persisted.addresses, original.addresses);
+    assert_eq!(persisted.machine_id, Some(host_id));
+    assert_eq!(
+        persisted.attached_dpu_machine_id,
+        Some(original_dpu_id.try_into()?),
+    );
+    assert!(persisted.primary_interface);
+    assert_eq!(find_by_mac_address(&mut *txn, mac).await?.len(), 1);
+    txn.rollback().await?;
+    Ok(())
+}
+
+/// Discovery filters unusable candidates before checking allocation policy, then retains
+/// allocation fallback when the first eligible IPv6 segment has no free addresses.
+#[crate::sqlx_test]
+async fn proactive_admin_discovery_selects_eligible_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    struct Case {
+        name: &'static str,
+        admin_fnn_enabled: bool,
+        first_strategy: AllocationStrategy,
+        first_num_reserved: i32,
+        first_has_gatewayless_ipv4: bool,
+        available_prefix: &'static str,
+        available_gateway: Option<&'static str>,
+    }
+    let cases = [
+        // Without FNN, an IPv6-only candidate cannot provide the host's admin configuration.
+        Case {
+            name: "non-FNN ignores an earlier Dynamic IPv6 segment",
+            admin_fnn_enabled: false,
+            first_strategy: AllocationStrategy::Dynamic,
+            first_num_reserved: 0,
+            first_has_gatewayless_ipv4: false,
+            available_prefix: "192.0.2.0/24",
+            available_gateway: Some("192.0.2.1"),
+        },
+        // An ineligible family must not veto the usable IPv4 pool through Reserved policy.
+        Case {
+            name: "non-FNN ignores an earlier Reserved IPv6 segment",
+            admin_fnn_enabled: false,
+            first_strategy: AllocationStrategy::Reserved,
+            first_num_reserved: 0,
+            first_has_gatewayless_ipv4: false,
+            available_prefix: "192.0.2.0/24",
+            available_gateway: Some("192.0.2.1"),
+        },
+        // Reserving every address forces the real allocator to try the next eligible pool.
+        Case {
+            name: "FNN falls back after IPv6 pool exhaustion",
+            admin_fnn_enabled: true,
+            first_strategy: AllocationStrategy::Dynamic,
+            first_num_reserved: 2,
+            first_has_gatewayless_ipv4: false,
+            available_prefix: "2001:db8:7178:2::/126",
+            available_gateway: None,
+        },
+        // A valid IPv6 prefix does not rescue its gatewayless IPv4 sibling; use the next pool.
+        Case {
+            name: "FNN skips a dual-stack segment without an IPv4 gateway",
+            admin_fnn_enabled: true,
+            first_strategy: AllocationStrategy::Dynamic,
+            first_num_reserved: 0,
+            first_has_gatewayless_ipv4: true,
+            available_prefix: "2001:db8:7178:2::/126",
+            available_gateway: None,
+        },
+    ];
+    for case in cases {
+        let mut txn = pool.begin().await?;
+        let mut first = managed_segment(
+            "first-admin",
+            "2001:db8:7178:1::/127",
+            NetworkSegmentType::Admin,
+            case.first_strategy,
+        );
+        // Admin candidates are ordered by UUID, so the unusable pool must be considered first.
+        first.id = uuid::Uuid::from_u128(1).into();
+        // The /127 contains two addresses; reserving both exercises actual pool exhaustion.
+        first.prefixes[0].num_reserved = case.first_num_reserved;
+        if case.first_has_gatewayless_ipv4 {
+            first.prefixes.push(NewNetworkPrefix {
+                prefix: "192.0.2.0/24".parse()?,
+                gateway: None,
+                dhcpv6_link_address: None,
+                num_reserved: 0,
+            });
+        }
+        let mut available = managed_segment(
+            "available-admin",
+            case.available_prefix,
+            NetworkSegmentType::Admin,
+            AllocationStrategy::Dynamic,
+        );
+        available.id = uuid::Uuid::from_u128(2).into();
+        available.prefixes[0].gateway = case.available_gateway.map(str::parse).transpose()?;
+        let available_id = available.id;
+        for definition in [first, available] {
+            db::network_segment::persist(
+                definition,
+                &mut txn,
+                NetworkSegmentControllerState::Ready,
+            )
+            .await?;
+        }
+        let mac: MacAddress = "02:00:00:00:71:78".parse()?;
+        let (dpu_id, hardware_info) = create_proactive_discovery_dpu(&mut txn, mac).await?;
+        let discovered = create_host_machine_dpu_interface_proactively(
+            &mut txn,
+            Some(&hardware_info),
+            &dpu_id,
+            case.admin_fnn_enabled,
+            None,
+        )
+        .await?;
+        let persisted = find_one(&mut *txn, discovered.id).await?;
+        assert_eq!(persisted.segment_id, available_id, "{}", case.name);
+        assert_eq!(persisted.addresses.len(), 1, "{}", case.name);
+        let available_prefix: ipnetwork::IpNetwork = case.available_prefix.parse()?;
+        assert!(
+            available_prefix.contains(persisted.addresses[0]),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            persisted.attached_dpu_machine_id,
+            Some(dpu_id.try_into()?),
+            "{}",
+            case.name,
+        );
+        txn.rollback().await?;
+    }
+    Ok(())
+}
+
+/// An IPv6 prefix must not make a dual-stack segment without an IPv4 gateway eligible.
+#[crate::sqlx_test]
+async fn proactive_admin_discovery_requires_gateway_for_ipv4_prefix(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let mut definition = managed_segment(
+        "gatewayless-dual-stack-admin",
+        "2001:db8:7178::/64",
+        NetworkSegmentType::Admin,
+        AllocationStrategy::Dynamic,
+    );
+    definition.prefixes.push(NewNetworkPrefix {
+        prefix: "192.0.2.0/24".parse()?,
+        gateway: None,
+        dhcpv6_link_address: None,
+        num_reserved: 0,
+    });
+    db::network_segment::persist(definition, &mut txn, NetworkSegmentControllerState::Ready)
+        .await?;
+    let mac: MacAddress = "02:00:00:00:71:78".parse()?;
+    let (dpu_id, hardware_info) = create_proactive_discovery_dpu(&mut txn, mac).await?;
+    let error = create_host_machine_dpu_interface_proactively(
+        &mut txn,
+        Some(&hardware_info),
+        &dpu_id,
+        true,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, DatabaseError::AdminNetworkNotConfigured));
+    assert!(find_by_mac_address(&mut *txn, mac).await?.is_empty());
+    Ok(())
+}
+
+/// A topology MAC alone is not a reservation, even when another candidate has a Dynamic pool.
+#[crate::sqlx_test]
+async fn proactive_admin_discovery_rejects_unreserved_mac(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (name, include_dynamic) in [
+        // A sole Reserved segment cannot allocate from its pool for an unknown MAC.
+        ("only Reserved candidate", false),
+        // Check every candidate before allocation, including Reserved entries after a free pool.
+        ("Dynamic candidate precedes Reserved candidate", true),
+    ] {
+        let mut txn = pool.begin().await?;
+        let mut reserved = managed_segment(
+            "reserved-admin",
+            "2001:db8:7178::/64",
+            NetworkSegmentType::Admin,
+            AllocationStrategy::Reserved,
+        );
+        reserved.id = uuid::Uuid::from_u128(2).into();
+        db::network_segment::persist(reserved, &mut txn, NetworkSegmentControllerState::Ready)
+            .await?;
+        if include_dynamic {
+            let mut dynamic = managed_segment(
+                "dynamic-admin",
+                "2001:db8:7178:1::/64",
+                NetworkSegmentType::Admin,
+                AllocationStrategy::Dynamic,
+            );
+            // UUID ordering puts the usable Dynamic pool before the reservation requirement.
+            dynamic.id = uuid::Uuid::from_u128(1).into();
+            db::network_segment::persist(dynamic, &mut txn, NetworkSegmentControllerState::Ready)
+                .await?;
+        }
+        let mac: MacAddress = "02:00:00:00:71:78".parse()?;
+        let (dpu_id, hardware_info) = create_proactive_discovery_dpu(&mut txn, mac).await?;
+        let error = create_host_machine_dpu_interface_proactively(
+            &mut txn,
+            Some(&hardware_info),
+            &dpu_id,
+            true,
+            None,
+        )
+        .await
+        .expect_err(name);
+        let expected_message = format!(
+            "segment reserved-admin configured for static DHCP leases only; no static reservation for MAC {mac}",
+        );
+        assert!(
+            matches!(error, DatabaseError::Internal { message, .. } if message == expected_message),
+            "{name}",
+        );
+        assert!(
+            find_by_mac_address(&mut *txn, mac).await?.is_empty(),
+            "{name}"
+        );
+        txn.rollback().await?;
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn reconcile_interface_segment_preserves_static_assignment_lookup_failure(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_static_assignments_segment(&pool).await?;
+    create_test_segment(&pool, "reconciliation-candidate").await?;
+    let mut setup = pool.begin().await?;
+    let static_segment = db::network_segment::static_assignments(&mut setup).await?;
+    let candidate =
+        db::network_segment::find_by_name(&mut setup, "reconciliation-candidate").await?;
+    let original = create_without_addresses(
+        &mut setup,
+        &static_segment,
+        &"02:00:00:00:79:68".parse()?,
+        true,
+        InterfaceType::Data,
+        None,
+    )
+    .await?;
+    setup.commit().await?;
+
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE id = $1")
+        .bind(static_segment.id)
+        .execute(&pool)
+        .await?;
+
+    let mut txn = pool.begin().await?;
+    let mut existing_interface = original.clone();
+    let error =
+        reconcile_interface_segment_candidates(&mut txn, &mut existing_interface, &[candidate])
+            .await
+            .expect_err("a failed anchor lookup must stop segment reconciliation");
+    let DatabaseError::Sqlx(annotated) = &error else {
+        panic!("expected Sqlx, got {error:?}");
+    };
+    let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+        panic!("expected ColumnDecode, got {error:?}");
+    };
+    assert_eq!(index, "\"allocation_strategy\"");
+    assert!(source.to_string().contains("unsupported"), "{source:?}");
+
+    // Read before committing to prove the decode failure did not abort the transaction.
+    let pending = find_one(&mut *txn, original.id).await?;
+    txn.commit().await?;
+    let persisted = find_one(&pool, original.id).await?;
+    for (source, interface) in [
+        ("in-memory", existing_interface),
+        ("pending", pending),
+        ("persisted", persisted),
+    ] {
+        assert_eq!(interface.segment_id, original.segment_id, "{source}");
+        assert_eq!(interface.domain_id, original.domain_id, "{source}");
+        assert_eq!(interface.hostname, original.hostname, "{source}");
+        assert_eq!(interface.addresses, original.addresses, "{source}");
+    }
+    Ok(())
+}
+
+// The DHCP handler normally rejects an unknown DHCPv6 relay before this
+// helper runs, so exercise the helper's own guard directly.
+#[crate::sqlx_test]
+async fn observed_dhcp_unknown_relay_is_failed_precondition(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = db::Transaction::begin(&pool).await?;
+    let error = find_or_create_observed_machine_interface(
+        txn.as_pgconn(),
+        None,
+        "02:00:00:00:71:04".parse()?,
+        &["2001:db8:dead::1".parse()?],
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("an unknown relay should not create an observed interface");
+
+    assert!(
+        matches!(
+            &error,
+            DatabaseError::FailedPrecondition(message)
+                if message.starts_with("No network segment defined for relay addresses")
+        ),
+        "{error:?}"
+    );
+
+    Ok(())
 }
 
 #[crate::sqlx_test]
@@ -597,7 +1200,7 @@ async fn test_preallocate_machine_interface_is_idempotent_without_static_assignm
 
     preallocate_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
     let legacy_expected_interface = ExpectedInterface {
-        mac_address: mac,
+        mac_address: Some(mac),
         fixed_ip: Some(ip),
         ..Default::default()
     };
@@ -666,7 +1269,7 @@ async fn test_expected_declaration_does_not_reclassify_attached_dpu_interface(
     associate_interface_with_dpu_machine(&interface.id, &dpu_id, txn.as_pgconn()).await?;
 
     let expected_interface = ExpectedInterface {
-        mac_address: mac,
+        mac_address: Some(mac),
         role: ExpectedInterfaceRole::DpuBmc,
         ..Default::default()
     };
@@ -1024,7 +1627,7 @@ async fn test_retained_host_bmc_is_static_at_first_allocation(
     .await?;
     let mac_address: MacAddress = "7A:7B:7C:7D:7E:37".parse()?;
     let expected = ExpectedInterface {
-        mac_address,
+        mac_address: Some(mac_address),
         role: ExpectedInterfaceRole::HostBmc,
         ..Default::default()
     };
@@ -1078,7 +1681,7 @@ async fn expected_fixed_preserves_existing_and_removed_family_but_applies_role(
     )
     .await?;
     let expected = ExpectedInterface {
-        mac_address,
+        mac_address: Some(mac_address),
         role: ExpectedInterfaceRole::DpuBmc,
         ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
         fixed_ip: Some("192.0.2.100".parse()?),
@@ -1172,7 +1775,7 @@ async fn test_expected_interface_role_controls_fixed_preallocation(
         },
     ] {
         let expected_interface = ExpectedInterface {
-            mac_address: MacAddress::new([0x7a, 0x7b, 0x7c, 0x7d, 0x7e, suffix]),
+            mac_address: Some(MacAddress::new([0x7a, 0x7b, 0x7c, 0x7d, 0x7e, suffix])),
             role,
             ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
             network_segment_type: Some(NetworkSegmentType::Underlay),
@@ -1184,7 +1787,7 @@ async fn test_expected_interface_role_controls_fixed_preallocation(
         let mut txn = db::Transaction::begin(&pool).await?;
         preallocate_expected_machine_interface(txn.as_pgconn(), &expected_interface, None).await?;
         let interfaces =
-            find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address).await?;
+            find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address.unwrap()).await?;
         txn.commit().await?;
 
         assert_eq!(interfaces.len(), 1, "case: {name}");
@@ -1218,7 +1821,7 @@ async fn test_fixed_host_preallocation_does_not_override_machine_wide_primary_se
     )
     .await?;
     let expected_interface = ExpectedInterface {
-        mac_address: "7A:7B:7C:7D:7E:59".parse()?,
+        mac_address: Some("7A:7B:7C:7D:7E:59".parse()?),
         ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
         fixed_ip: Some("192.0.2.59".parse()?),
         ..Default::default()
@@ -1226,11 +1829,12 @@ async fn test_fixed_host_preallocation_does_not_override_machine_wide_primary_se
 
     let mut txn = db::Transaction::begin(&pool).await?;
     preallocate_expected_machine_interface(txn.as_pgconn(), &expected_interface, None).await?;
-    let interface_id = find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address)
-        .await?
-        .pop()
-        .expect("fixed Host preallocation should create an interface")
-        .id;
+    let interface_id =
+        find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address.unwrap())
+            .await?
+            .pop()
+            .expect("fixed Host preallocation should create an interface")
+            .id;
 
     // DHCP applies the ExpectedMachine-wide primary declaration. A later Site
     // Explorer pass must not replace it with the Host creation default.
@@ -1261,21 +1865,21 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
 
     let mut txn = db::Transaction::begin(&pool).await?;
     let legacy_hint = ExpectedInterface {
-        mac_address: "7A:7B:7C:7D:7E:61".parse()?,
+        mac_address: Some("7A:7B:7C:7D:7E:61".parse()?),
         ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
         nic_type: Some("onboard".to_string()),
         fixed_ip: Some("198.51.100.61".parse()?),
         ..Default::default()
     };
     preallocate_expected_machine_interface(txn.as_pgconn(), &legacy_hint, None).await?;
-    let interface = find_by_mac_address(txn.as_pgconn(), legacy_hint.mac_address)
+    let interface = find_by_mac_address(txn.as_pgconn(), legacy_hint.mac_address.unwrap())
         .await?
         .pop()
         .expect("legacy fixed interface should be preallocated");
     assert_eq!(interface.segment_id, underlay_segment);
     let reconciled = validate_existing_mac_and_create(
         txn.as_pgconn(),
-        legacy_hint.mac_address,
+        legacy_hint.mac_address.unwrap(),
         &["198.51.100.1".parse()?],
         Some(legacy_hint.clone()),
         None,
@@ -1287,16 +1891,17 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
     );
 
     let legacy_typed_segment = ExpectedInterface {
-        mac_address: "7A:7B:7C:7D:7E:64".parse()?,
+        mac_address: Some("7A:7B:7C:7D:7E:64".parse()?),
         network_segment_type: Some(NetworkSegmentType::Underlay),
         fixed_ip: Some("203.0.113.64".parse()?),
         ..Default::default()
     };
     preallocate_expected_machine_interface(txn.as_pgconn(), &legacy_typed_segment, None).await?;
-    let legacy_interface = find_by_mac_address(txn.as_pgconn(), legacy_typed_segment.mac_address)
-        .await?
-        .pop()
-        .expect("legacy fixed interface should be preallocated");
+    let legacy_interface =
+        find_by_mac_address(txn.as_pgconn(), legacy_typed_segment.mac_address.unwrap())
+            .await?
+            .pop()
+            .expect("legacy fixed interface should be preallocated");
     let static_assignments = db::network_segment::static_assignments(txn.as_pgconn()).await?;
     assert_eq!(
         legacy_interface.segment_id, static_assignments.id,
@@ -1304,14 +1909,14 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
     );
 
     let legacy_host_bmc = ExpectedInterface {
-        mac_address: "7A:7B:7C:7D:7E:69".parse()?,
+        mac_address: Some("7A:7B:7C:7D:7E:69".parse()?),
         role: ExpectedInterfaceRole::HostBmc,
         fixed_ip: Some("203.0.113.69".parse()?),
         ..Default::default()
     };
     preallocate_expected_machine_interface(txn.as_pgconn(), &legacy_host_bmc, None).await?;
     let legacy_host_bmc_interface =
-        find_by_mac_address(txn.as_pgconn(), legacy_host_bmc.mac_address)
+        find_by_mac_address(txn.as_pgconn(), legacy_host_bmc.mac_address.unwrap())
             .await?
             .pop()
             .expect("legacy Host BMC fixed interface should be preallocated");
@@ -1341,7 +1946,7 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
     )
     .await?;
     let misplaced_reservation = ExpectedInterface {
-        mac_address: misplaced_mac,
+        mac_address: Some(misplaced_mac),
         ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
         fixed_ip: Some(misplaced_ip),
         ..Default::default()
@@ -1402,7 +2007,7 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
         },
     ] {
         let expected_interface = ExpectedInterface {
-            mac_address: MacAddress::new([0x7a, 0x7b, 0x7c, 0x7d, 0x7e, case.suffix]),
+            mac_address: Some(MacAddress::new([0x7a, 0x7b, 0x7c, 0x7d, 0x7e, case.suffix])),
             role: case.role,
             ip_allocation: case.ip_allocation,
             fixed_ip: Some(format!("203.0.113.{}", case.suffix).parse()?),
@@ -1420,7 +2025,7 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
             case.name,
         );
         assert!(
-            find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address)
+            find_by_mac_address(txn.as_pgconn(), expected_interface.mac_address.unwrap())
                 .await?
                 .is_empty(),
             "case: {}",
@@ -1429,7 +2034,7 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
     }
 
     let wrong_guard = ExpectedInterface {
-        mac_address: "7A:7B:7C:7D:7E:62".parse()?,
+        mac_address: Some("7A:7B:7C:7D:7E:62".parse()?),
         ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
         network_segment_type: Some(NetworkSegmentType::Admin),
         fixed_ip: Some("198.51.100.62".parse()?),
@@ -1441,7 +2046,7 @@ async fn test_fixed_preallocation_resolves_managed_prefix_and_segment_type(
     assert!(matches!(error, DatabaseError::InvalidArgument(_)));
 
     let outside_guard = ExpectedInterface {
-        mac_address: "7A:7B:7C:7D:7E:63".parse()?,
+        mac_address: Some("7A:7B:7C:7D:7E:63".parse()?),
         ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
         network_segment_type: Some(NetworkSegmentType::Underlay),
         fixed_ip: Some("203.0.113.63".parse()?),
@@ -1480,7 +2085,7 @@ async fn test_explicit_policy_opts_existing_host_interface_into_segment_guard(
     preallocate_machine_interface(txn.as_pgconn(), mac_address, fixed_ip, None).await?;
 
     let legacy_interface = ExpectedInterface {
-        mac_address,
+        mac_address: Some(mac_address),
         network_segment_type: Some(NetworkSegmentType::Admin),
         ..Default::default()
     };
@@ -1576,7 +2181,7 @@ async fn test_expected_interface_role_controls_observed_interface_creation(
         },
     ] {
         let expected_interface = ExpectedInterface {
-            mac_address: MacAddress::new([0x7a, 0x7b, 0x7c, 0x7d, 0x7e, suffix]),
+            mac_address: Some(MacAddress::new([0x7a, 0x7b, 0x7c, 0x7d, 0x7e, suffix])),
             role,
             ip_allocation: Some(ExpectedInterfaceIpAllocation::Dynamic),
             network_segment_type: Some(NetworkSegmentType::Underlay),
@@ -1587,7 +2192,7 @@ async fn test_expected_interface_role_controls_observed_interface_creation(
         let interface = find_or_create_observed_machine_interface(
             txn.as_pgconn(),
             None,
-            expected_interface.mac_address,
+            expected_interface.mac_address.unwrap(),
             &[relay],
             Some(expected_interface),
             None,
@@ -1605,5 +2210,272 @@ async fn test_expected_interface_role_controls_observed_interface_creation(
         assert!(interface.addresses.is_empty(), "case: {name}");
     }
 
+    Ok(())
+}
+
+#[test]
+fn segment_lock_mode_cases() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        [
+            Check {
+                scenario: "no prefixes",
+                input: vec![],
+                expect: SegmentLockMode::Shared,
+            },
+            Check {
+                scenario: "IPv4 prefixes only",
+                input: vec!["192.0.2.0/24", "198.51.100.0/24"],
+                expect: SegmentLockMode::Shared,
+            },
+            Check {
+                scenario: "one IPv6 prefix among IPv4 prefixes",
+                input: vec!["192.0.2.0/24", "2001:db8::/64", "198.51.100.0/24"],
+                expect: SegmentLockMode::Exclusive,
+            },
+        ],
+        |prefixes: Vec<&str>| {
+            let prefixes = prefixes
+                .into_iter()
+                .map(|prefix| prefix.parse::<IpNetwork>().unwrap())
+                .collect::<Vec<_>>();
+            segment_lock_mode(&prefixes)
+        },
+    );
+}
+
+/// A Postgres error carrying only a SQLSTATE, as sqlx reports one, so the
+/// classifier can be exercised without a database.
+#[derive(Debug)]
+struct SqlState(&'static str);
+
+impl std::fmt::Display for SqlState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SQLSTATE {}", self.0)
+    }
+}
+
+impl std::error::Error for SqlState {}
+
+impl sqlx::error::DatabaseError for SqlState {
+    fn message(&self) -> &str {
+        "test error"
+    }
+
+    fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(std::borrow::Cow::Borrowed(self.0))
+    }
+
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+        self
+    }
+
+    fn kind(&self) -> sqlx::error::ErrorKind {
+        sqlx::error::ErrorKind::Other
+    }
+}
+
+fn sql_state_error(code: &'static str) -> DatabaseError {
+    DatabaseError::query(
+        "test query",
+        sqlx::Error::Database(Box::new(SqlState(code))),
+    )
+}
+
+#[test]
+fn transient_reconcile_failure_cases() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        [
+            Check {
+                scenario: "allocation lost a lock race",
+                input: DatabaseError::TryAgain,
+                expect: true,
+            },
+            Check {
+                scenario: "network config bump lost every swap",
+                input: DatabaseError::NetworkConfigVersionChanged {
+                    machine_id: MachineId::new(
+                        MachineIdSource::ProductBoardChassisSerial,
+                        [0x7b; 32],
+                        MachineType::Host,
+                    ),
+                    attempts: NETWORK_CONFIG_BUMP_ATTEMPTS,
+                },
+                expect: true,
+            },
+            Check {
+                scenario: "transaction aborted for a deadlock",
+                input: sql_state_error("40P01"),
+                expect: true,
+            },
+            Check {
+                scenario: "Postgres error that is not a lock conflict",
+                input: sql_state_error("23505"),
+                expect: false,
+            },
+            Check {
+                scenario: "pool connection timed out",
+                input: DatabaseError::query("test query", sqlx::Error::PoolTimedOut),
+                expect: false,
+            },
+            Check {
+                scenario: "host without a primary admin interface",
+                input: DatabaseError::internal("no primary admin interface".to_string()),
+                expect: false,
+            },
+        ],
+        |error| is_transient_reconcile_failure(&error),
+    );
+}
+
+/// Creates a ready Admin segment with `prefixes` and returns its id.
+async fn create_admin_segment(
+    pool: &sqlx::PgPool,
+    name: &str,
+    prefixes: &[&str],
+) -> Result<NetworkSegmentId, Box<dyn std::error::Error>> {
+    let segment_id = NetworkSegmentId::new();
+    let prefixes = prefixes
+        .iter()
+        .map(|prefix| {
+            Ok(NewNetworkPrefix {
+                prefix: prefix.parse()?,
+                gateway: None,
+                dhcpv6_link_address: None,
+                num_reserved: 0,
+            })
+        })
+        .collect::<Result<Vec<_>, ipnetwork::IpNetworkError>>()?;
+    let mut txn = db::Transaction::begin(pool).await?;
+    db::network_segment::persist(
+        NewNetworkSegment {
+            id: segment_id,
+            name: name.to_string(),
+            subdomain_id: None,
+            vpc_id: None,
+            mtu: 1500,
+            prefixes,
+            vlan_id: None,
+            vni: None,
+            segment_type: NetworkSegmentType::Admin,
+            can_stretch: Some(false),
+            allocation_strategy: AllocationStrategy::Dynamic,
+            infer_slaac_eui64_addresses: false,
+        },
+        txn.as_pgconn(),
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(segment_id)
+}
+
+/// Advisory lock modes the current session holds, sorted by mode.
+async fn held_advisory_lock_modes(conn: &mut PgConnection) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT mode FROM pg_locks \
+         WHERE pid = pg_backend_pid() AND locktype = 'advisory' AND granted \
+         ORDER BY mode",
+    )
+    .fetch_all(conn)
+    .await
+}
+
+/// At an IPv4-only site the allocation mode holds every admin segment shared:
+/// a second allocating transaction is admitted alongside the first, the
+/// reconcile's own pass re-acquires the keys without upgrading them, and an
+/// exclusive request waits for every holder.
+#[crate::sqlx_test]
+async fn allocation_mode_locks_ipv4_only_admin_segments_shared(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_admin_segment(&pool, "admin-v4-a", &["192.0.2.0/24"]).await?;
+    create_admin_segment(&pool, "admin-v4-b", &["198.51.100.0/24"]).await?;
+
+    let mut holder = pool.begin().await?;
+    let admin_segment_count =
+        db::network_segment::list_segment_ids(&mut holder, Some(NetworkSegmentType::Admin))
+            .await?
+            .len();
+    lock_all_admin_segments_for_allocation(&mut holder).await?;
+    let shared_modes = vec!["ShareLock".to_string(); admin_segment_count];
+    assert_eq!(held_advisory_lock_modes(&mut holder).await?, shared_modes);
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
+
+    let mut peer = pool.begin().await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        lock_all_admin_segments_for_allocation(&mut peer),
+    )
+    .await??;
+    let peer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *peer)
+        .await?;
+
+    // The locked reconcile pass takes the same set in the same mode: no wait
+    // behind the peer, and no exclusive lock appears.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        load_and_lock_all_admin_segments(&mut holder),
+    )
+    .await??;
+    assert_eq!(held_advisory_lock_modes(&mut holder).await?, shared_modes);
+
+    // The exclusive request waits for each holder in turn: still blocked by
+    // the peer once the holder is gone, admitted once the peer is gone too.
+    let mut teardown = pool.begin().await?;
+    let teardown_lock = async {
+        lock_all_admin_segments(&mut teardown).await?;
+        teardown.rollback().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let release = async {
+        wait_for_blocked_query(&pool, holder_pid, "pg_advisory_xact_lock(").await;
+        holder.rollback().await?;
+        wait_for_blocked_query(&pool, peer_pid, "pg_advisory_xact_lock(").await;
+        peer.rollback().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::try_join!(teardown_lock, release)
+    })
+    .await??;
+    Ok(())
+}
+
+/// One IPv6 admin prefix makes the allocation mode exclusive on every admin
+/// segment, the IPv4-only ones included, so no later IPv6 allocation upgrades
+/// a lock.
+#[crate::sqlx_test]
+async fn ipv6_admin_prefix_locks_every_admin_segment_exclusively(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_admin_segment(&pool, "admin-v4", &["192.0.2.0/24"]).await?;
+    create_admin_segment(&pool, "admin-dual", &["198.51.100.0/24", "2001:db8::/64"]).await?;
+
+    let mut holder = pool.begin().await?;
+    let admin_segment_count =
+        db::network_segment::list_segment_ids(&mut holder, Some(NetworkSegmentType::Admin))
+            .await?
+            .len();
+    lock_all_admin_segments_for_allocation(&mut holder).await?;
+    assert_eq!(
+        held_advisory_lock_modes(&mut holder).await?,
+        vec!["ExclusiveLock".to_string(); admin_segment_count]
+    );
+    holder.rollback().await?;
     Ok(())
 }

@@ -26,11 +26,8 @@ use crate::api::{Api, log_request_data};
 
 /// Per-RPC deadline for forwarding `GetVersion` to the RMS backend.
 ///
-/// `librms` applies per-stream connect/read/write timeouts at the transport
-/// layer, but those do not bound the total time an active stream can remain
-/// pending without completing.  This deadline caps the end-to-end duration of
-/// the RPC so a backend that keeps the stream open without responding does not
-/// hold the nico-api request indefinitely.
+/// Bounds the complete RPC, including connection setup, so an RMS backend that
+/// keeps the connection open without responding cannot hold the request indefinitely.
 const GET_VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 // The `nico-admin-cli backend rms status` classifier

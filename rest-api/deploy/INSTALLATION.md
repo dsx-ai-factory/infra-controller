@@ -427,6 +427,8 @@ helm install temporal temporal-helm/temporal \
 - mTLS on all internode and frontend communication using the cert secrets above
 - Frontend host overrides for `cloud.server.temporal.local` and `site.server.temporal.local` so that the cloud and site client namespaces use their dedicated server certificates
 - Schema setup and update jobs enabled (`schema.setup.enabled: true`, `schema.update.enabled: true`)
+- `worker.historyScannerDataMinAge: 72h` dynamic config, so history without a workflow is deleted after `72h` instead of `60` days
+- `worker.batcherRPS: 20` dynamic config for the `site` namespace, so the hourly cleanup of successful inventory workflows deletes up to `20` per second instead of `50`
 
 For a production deployment, copy `values-kind.yaml` and adjust resource limits, replica counts, and any environment-specific settings.
 
@@ -746,6 +748,8 @@ Each deployment sets `TEMPORAL_NAMESPACE` and `TEMPORAL_QUEUE` environment varia
 
 The cloud worker uses `siteManager.svcEndpoint` to roll each Site's OTP when its Site Agent Temporal certificate is within `10` days of expiry. If it is empty, the daily rotation run fails without rotating any Site.
 
+The site worker sets the `site` namespace retention to `temporal.siteNamespace.retention` on startup, `72h` by default. That's how long failed, canceled, terminated, and timed out workflows are kept. An hourly cron deletes successful inventory workflows sooner, once they are older than `temporal.siteNamespace.successfulInventoryRetention`, `24h` by default. It has to be shorter than a nonzero `temporal.siteNamespace.retention`, otherwise the cloud and site workers exit on startup. Set either value to `0` to turn it off. If Temporal rejects the retention update, the worker logs a warning and starts anyway. If the cron can't be started, the worker exits before it polls, so the pod restarts and tries again. Temporal only applies a new retention to workflows that close after the change.
+
 ### Secrets mounted at runtime
 
 | Secret | Description |
@@ -780,6 +784,17 @@ The site agent bootstrap flow is:
 4. The agent then connects to Temporal using those certs and starts polling its site-specific namespace and queue.
 
 The StatefulSet probes the agent on port `8080`. The agent checks Temporal and Core gRPC every `30s`, and Flow gRPC too when `FLOW_GRPC_ENABLED` is `true`. `/readyz` reports the latest results, so it succeeds only while its Temporal worker runs and every checked dependency is reachable. The same results back the `nico_rest_site_agent_temporal_connection_status`, `nico_rest_site_agent_carbide_health_status`, `nico_rest_site_agent_flow_grpc_health_status`, and `nico_rest_site_agent_health_status` metrics. `/healthz` fails once a Temporal connection attempt fails or the Temporal SDK stops the worker, and passes while an attempt is still in progress. It also fails once `site-registration` holds a `site-uuid` or `otp` the agent did not apply itself, as after a re-pair, because the agent reads that secret only at startup. Either way Kubernetes restarts the agent after three failed liveness probes, whether or not it is Ready. Until a site is configured below, the agent is not Ready and restarts after each failed connection attempt. So its pod shows `CrashLoopBackOff` between those restarts.
+
+Use the following gauges for aggregate and Temporal health queries and alerts. Their values can increase or decrease as health changes. The existing counter families remain available for compatibility. The Core and Flow gRPC health metrics listed above are already gauges.
+
+| Health | Gauge | Retained Counter |
+|---|---|---|
+| Aggregate Site Agent health: `0` unhealthy, `1` healthy | `nico_rest_site_agent_health` | `nico_rest_site_agent_health_status` |
+| Temporal connection health: `0` unhealthy, `1` healthy; `2` reserved for unknown | `nico_rest_site_agent_temporal_connection_health` | `nico_rest_site_agent_temporal_connection_status` |
+
+These names use the default `nico_rest_site_agent` namespace. The optional `METRICS_NAMESPACE` environment variable changes that prefix in both gauge and retained counter names. The `-metricsNamespace` flag overrides the environment variable; an empty final value uses the default namespace.
+
+The Site Agent exposes the stored Temporal component status unchanged. Initialization sets it to `0`, and connection and health checks write `0` or `1`. The shared component encoding reserves `2` for unknown; Temporal's production status updates do not produce it.
 
 Each agent pod also reports its own bootstrap, Temporal, and Core gRPC state as JSON at `/status`. [Check a Site Agent pod](../../docs/playbooks/stuck_objects/site_controller_health.md#check-a-site-agent-pod) shows how to reach one pod and describes each field.
 

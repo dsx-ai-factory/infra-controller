@@ -35,13 +35,12 @@ pub(super) enum StateBackend {
 fn parse_hardware_profile(value: &str) -> Result<HardwareType, String> {
     let hardware_type = serde_json::from_value(serde_json::Value::String(value.to_string()))
         .map_err(|_| format!("unknown hardware profile: {value}"))?;
+    // NVSwitch trays run as a host-role BMC: the machine model already gives
+    // them their switch chassis, NVOS MAC and serial, and no DPUs.
     match hardware_type {
-        HardwareType::LiteOnPowerShelf
-        | HardwareType::DeltaPowerShelf
-        | HardwareType::NvidiaSwitchNd5200Ld
-        | HardwareType::NvidiaSwitchN5700Ld => {
-            Err(format!("hardware profile is not a host or DPU: {value}"))
-        }
+        HardwareType::LiteOnPowerShelf | HardwareType::DeltaPowerShelf => Err(format!(
+            "hardware profile is not a host, DPU or NVSwitch tray: {value}"
+        )),
         hardware_type => Ok(hardware_type),
     }
 }

@@ -45,32 +45,6 @@ func TestAPILabels_MarshalJSON(t *testing.T) {
 	}
 }
 
-func TestAPIList_MarshalJSON(t *testing.T) {
-	tests := []struct {
-		name    string
-		items   any
-		want    string
-		wantErr bool
-	}{
-		{name: "nil", items: APIList[string](nil), want: `[]`},
-		{name: "empty", items: APIList[string]{}, want: `[]`},
-		{name: "populated preserves order", items: APIList[string]{"DPU002", "DPU001"}, want: `["DPU002","DPU001"]`},
-		{name: "unsupported element returns error", items: APIList[chan int]{make(chan int)}, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			raw, err := json.Marshal(tc.items)
-			if tc.wantErr {
-				var unsupported *json.UnsupportedTypeError
-				require.ErrorAs(t, err, &unsupported)
-				return
-			}
-			require.NoError(t, err)
-			assert.JSONEq(t, tc.want, string(raw))
-		})
-	}
-}
-
 // Each response must use the shared label type without omitempty. Exercise the
 // constructors as well so DB and protobuf conversion paths stay wired to it.
 func TestAPIResponseLabels(t *testing.T) {

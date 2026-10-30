@@ -30,7 +30,7 @@ use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::db;
+use super::{ObjectIdsFromDatabase, db};
 use crate::CheckApplied;
 use crate::config::IterationConfig;
 use crate::db_write_batch::DbWriteBatch;
@@ -74,6 +74,10 @@ pub(super) struct StateProcessor<IO: StateControllerIO> {
     pub(super) per_object_state: Option<PerObjectStateRecorder>,
 
     pub(super) object_metrics: HashMap<IO::ObjectId, CollectedMetrics<IO>>,
+    /// The latest complete database object-ID list used only to decide which
+    /// retained measurements contribute to aggregate metrics.
+    pub(super) object_ids_from_database:
+        Option<tokio::sync::watch::Receiver<Option<ObjectIdsFromDatabase<IO::ObjectId>>>>,
     pub(super) cancel_token: CancellationToken,
     pub(super) iteration_config: IterationConfig,
     /// Object handling tasks currently executing. Keeping them in a JoinSet ensures
@@ -277,9 +281,20 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let now = std::time::Instant::now();
         self.last_metric_emission_time = now;
 
+        // Filter totals using the latest ID list without removing cache entries.
+        // A newly processed ID may appear in the next database listing.
+        let object_ids_from_database = self
+            .object_ids_from_database
+            .as_ref()
+            .and_then(|receiver| receiver.borrow().clone());
         let mut aggregate = IterationMetrics::<IO>::default();
-        for object_metrics in self.object_metrics.values() {
-            aggregate.merge_object_handling_metrics(&object_metrics.metrics);
+        for (object_id, object_metrics) in &self.object_metrics {
+            if object_ids_from_database
+                .as_ref()
+                .is_none_or(|object_ids_from_database| object_ids_from_database.contains(object_id))
+            {
+                aggregate.merge_object_handling_metrics(&object_metrics.metrics);
+            }
         }
 
         // Remove metrics that have not been refreshed for the configured time
@@ -535,6 +550,8 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
             .map(|id| id.to_string())
             .collect();
 
+        // Replace completed claims with requested follow-up entries in one transaction so a failed
+        // commit cannot lose queued work.
         let mut txn = Transaction::begin(&self.pool).await?;
         let num_deleted = db::delete_queued_objects(
             &mut txn,
@@ -572,12 +589,12 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         // and remove them later in order to not forget about these in case there
         // is a transient database error
         self.completed_objects.insert(task_result.object_id.clone());
-        // If the state handler returned `Transition`, then run the handler again
-        // as soon as possible. An invalidated iteration also needs a fresh
-        // snapshot before it can make progress.
+        // Requeue transitions, invalidated snapshots, and committed Wait requests immediately so
+        // follow-up work does not depend on periodic scanning.
         if allow_requeue
             && (task_result.metrics.common.next_state.is_some()
-                || task_result.metrics.common.iteration_invalidated)
+                || task_result.metrics.common.iteration_invalidated
+                || task_result.metrics.common.requeue_immediately)
         {
             self.requeue_objects.insert(task_result.object_id.clone());
         }
@@ -809,7 +826,8 @@ async fn process_object<IO: StateControllerIO>(
         };
 
         if is_success {
-            // Commit transaction only when handler returned the Success.
+            // Commit handler state and outcome before exporting any follow-up scheduling request
+            // so the next pass cannot read uncommitted results.
             if !matches!(handler_outcome, Ok(StateHandlerOutcome::Deleted { .. })) {
                 let db_outcome =
                     PersistentStateHandlerOutcome::from_result(handler_outcome.as_ref());
@@ -829,6 +847,15 @@ async fn process_object<IO: StateControllerIO>(
         // Only emit the next state as metric if the transaction was actually
         // committed and we are sure we reached the next state
         metrics.common.next_state = next_state;
+        // Export the committed Wait request to queue finalization without persisting scheduling
+        // policy.
+        metrics.common.requeue_immediately = matches!(
+            &handler_outcome,
+            Ok(StateHandlerOutcome::Wait {
+                requeue_immediately: true,
+                ..
+            })
+        );
         if metrics.common.next_state.is_some() {
             metrics.common.state_entered_at = next_state_entered_at;
             metrics.common.sla = next_state_sla;

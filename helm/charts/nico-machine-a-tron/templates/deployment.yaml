@@ -44,15 +44,27 @@ spec:
       annotations:
         checksum/config: {{ include (print $root.Template.BasePath "/configmap.yaml") $root | sha256sum }}
     spec:
-      # Controller mode creates one Service per BMC (thousands); the default
-      # service-link env injection then breaks exec in ALL new namespace pods
-      # with E2BIG ("argument list too long").
+      # Controller mode at device granularity creates one Service per BMC
+      # (thousands); the default service-link env injection then breaks exec
+      # in ALL new namespace pods with E2BIG ("argument list too long").
       enableServiceLinks: false
       serviceAccountName: {{ include "nico-machine-a-tron.name" $root }}
       automountServiceAccountToken: {{ $root.Values.automountServiceAccountToken }}
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.topologySpread }}
+      {{- if .enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .maxSkew }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          nodeTaintsPolicy: {{ .nodeTaintsPolicy }}
+          labelSelector:
+            matchLabels:
+              {{- include "nico-machine-a-tron.selectorLabels" $root | nindent 14 }}
+      {{- end }}
       {{- end }}
       containers:
         - name: machine-a-tron

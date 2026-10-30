@@ -33,6 +33,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 // countMockCalls returns the number of recorded invocations of method on the testify mock.
@@ -633,8 +634,8 @@ func TestTenantIdentityPUT_WorkflowIDIncludesPayloadHash(t *testing.T) {
 	})
 }
 
-// TestCreateOrUpdateTenantIdentityPUT_StatusReflectsCreateVsUpdate verifies tenant identity and token-delegation PUT handlers return 201 on first create and 200 on subsequent update.
-func TestCreateOrUpdateTenantIdentityPUT_StatusReflectsCreateVsUpdate(t *testing.T) {
+// TestCreateOrUpdateTenantIdentityPUT_Status checks creation, update, and collision responses.
+func TestCreateOrUpdateTenantIdentityPUT_Status(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 
@@ -736,6 +737,7 @@ func TestCreateOrUpdateTenantIdentityPUT_StatusReflectsCreateVsUpdate(t *testing
 		echoCtx.SetParamNames("orgName", "siteID")
 		echoCtx.SetParamValues(tenantOrg, siteIDStr)
 		echoCtx.Set("user", tenantUser)
+		echoCtx.Set(cutil.APINameContextKey, "test-api")
 		require.NoError(t, NewCreateOrUpdateTenantIdentityConfigHandler(dbSession, siteClientPool).Handle(echoCtx))
 		return recorder
 	}
@@ -757,20 +759,89 @@ func TestCreateOrUpdateTenantIdentityPUT_StatusReflectsCreateVsUpdate(t *testing
 		return recorder
 	}
 
-	t.Run("tenant-identity/config first create returns 201", func(t *testing.T) {
-		recorder := doConfigPUT(t, "openbao-create")
-		assert.Equal(t, http.StatusCreated, recorder.Code, "body=%s", recorder.Body.String())
-	})
-	t.Run("tenant-identity/config subsequent update returns 200", func(t *testing.T) {
-		recorder := doConfigPUT(t, "openbao-update")
-		assert.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
-	})
-	t.Run("token-delegation first create returns 201", func(t *testing.T) {
-		recorder := doDelegationPUT(t, "https://auth-create.example.com/oauth2/token")
-		assert.Equal(t, http.StatusCreated, recorder.Code, "body=%s", recorder.Body.String())
-	})
-	t.Run("token-delegation subsequent update returns 200", func(t *testing.T) {
-		recorder := doDelegationPUT(t, "https://auth-update.example.com/oauth2/token")
-		assert.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
-	})
+	tests := []struct {
+		name           string
+		put            func(*testing.T, string) *httptest.ResponseRecorder
+		value          string
+		setupClient    func(*testing.T) *tmocks.Client
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name:           "tenant-identity/config first create returns 201",
+			put:            doConfigPUT,
+			value:          "openbao-create",
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name:           "tenant-identity/config subsequent update returns 200",
+			put:            doConfigPUT,
+			value:          "openbao-update",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "token-delegation first create returns 201",
+			put:            doDelegationPUT,
+			value:          "https://auth-create.example.com/oauth2/token",
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name:           "token-delegation subsequent update returns 200",
+			put:            doDelegationPUT,
+			value:          "https://auth-update.example.com/oauth2/token",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:  "tenant-identity/config collision returns one 409 error response",
+			put:   doConfigPUT,
+			value: "openbao-conflict",
+			setupClient: func(t *testing.T) *tmocks.Client {
+				collisionErr := swe.WrapErr(grpcstatus.Error(grpccodes.AlreadyExists, "tenant identity configuration already exists"))
+				var applicationErr *tp.ApplicationError
+				require.ErrorAs(t, collisionErr, &applicationErr)
+				require.Equal(t, swe.ErrTypeNICoAlreadyExists, applicationErr.Type())
+				require.True(t, applicationErr.NonRetryable())
+
+				// A Temporal failure round trip removes the gRPC status interface.
+				// REST must therefore recognize `NICoAlreadyExists` by its type.
+				failureConverter := tp.GetDefaultFailureConverter()
+				workflowErr := failureConverter.FailureToError(failureConverter.ErrorToFailure(collisionErr))
+				_, hasGRPCStatus := grpcstatus.FromError(workflowErr)
+				require.False(t, hasGRPCStatus)
+
+				collisionRun := &tmocks.WorkflowRun{}
+				collisionRun.Test(t)
+				collisionRun.On("GetID").Return("test-status-config-conflict-wf-id").Once()
+				collisionRun.On("Get", mock.Anything, mock.Anything).Return(workflowErr).Once()
+				collisionClient := &tmocks.Client{}
+				collisionClient.Test(t)
+				collisionClient.On("ExecuteWorkflow", mock.Anything, mock.Anything,
+					"CreateOrUpdateTenantIdentityConfiguration",
+					mock.MatchedBy(func(request *corev1.SetTenantIdentityConfigRequest) bool {
+						return request.GetOrganizationId() == tenantOrg && request.GetConfig().GetDefaultAudience() == "openbao-conflict"
+					}),
+				).Return(collisionRun, nil).Once()
+				t.Cleanup(func() {
+					collisionRun.AssertExpectations(t)
+					collisionClient.AssertExpectations(t)
+				})
+				return collisionClient
+			},
+			expectedStatus: http.StatusConflict,
+			expectedBody:   `{"source":"test-api","message":"Failed to create or update Tenant Identity Config","data":null}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			siteClientPool.IDClientMap[siteIDStr] = temporalClient
+			if tt.setupClient != nil {
+				siteClientPool.IDClientMap[siteIDStr] = tt.setupClient(t)
+			}
+			recorder := tt.put(t, tt.value)
+			assert.Equal(t, tt.expectedStatus, recorder.Code, "body=%s", recorder.Body.String())
+			if tt.expectedBody != "" {
+				assert.JSONEq(t, tt.expectedBody, recorder.Body.String())
+			}
+		})
+	}
 }

@@ -73,6 +73,7 @@ type options struct {
 	healthAddr             string
 	healthStaleAfter       time.Duration
 	enableStateAnnotations bool
+	serviceGranularity     controller.ServiceGranularity
 }
 
 // parseOptions parses args (without the program name) with environment
@@ -133,6 +134,10 @@ func parseOptions(args []string, lookupEnv func(string) (string, bool)) (*option
 		"How long the reconcile loop may go without completing a pass before /healthz reports a stall (0 disables the check)")
 	fs.BoolVar(&opts.enableStateAnnotations, "enable-state-annotations", envBoolOrDefault("ENABLE_STATE_ANNOTATIONS", false),
 		"Include machine state annotations (api-state, power-state) on Services; causes frequent updates")
+	var serviceGranularity string
+	fs.StringVar(&serviceGranularity, "service-granularity", envOrDefault("SERVICE_GRANULARITY", string(controller.ServiceGranularityDevice)),
+		"Services per machine-a-tron pod: \"device\" publishes one Service per BMC and per switch NVOS endpoint, "+
+			"\"pod\" publishes all BMC addresses of a pod in one Service and all NVOS addresses in another (no IPMI or SSH ports)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil, err
@@ -152,6 +157,11 @@ func parseOptions(args []string, lookupEnv func(string) (string, bool)) (*option
 	if opts.sourceListAddr != "" && !isLoopbackAddr(opts.sourceListAddr) {
 		return nil, fmt.Errorf("source-list-addr must be a loopback IP address such as %s, got %q", sourcelist.DefaultAddr, opts.sourceListAddr)
 	}
+	granularity, err := controller.ParseServiceGranularity(serviceGranularity)
+	if err != nil {
+		return nil, err
+	}
+	opts.serviceGranularity = granularity
 	return opts, nil
 }
 
@@ -201,6 +211,7 @@ func main() {
 		Str("health_addr", opts.healthAddr).
 		Dur("health_stale_after", opts.healthStaleAfter).
 		Bool("enable_state_annotations", opts.enableStateAnnotations).
+		Str("service_granularity", string(opts.serviceGranularity)).
 		Msg("starting controller")
 
 	// Create Kubernetes client
@@ -234,6 +245,8 @@ func main() {
 		Namespace:              opts.namespace,
 		BaseSelector:           parseSelector(opts.targetSelector),
 		EnableStateAnnotations: opts.enableStateAnnotations,
+		Granularity:            opts.serviceGranularity,
+		Logger:                 logger,
 	}
 
 	// Create deployment client for owner reference lookups

@@ -450,7 +450,6 @@ Runnable inputs and reference configurations that ship with the repository:
 | [`docs/`](docs/) | Source for the published documentation, including architecture, provisioning, and operations guides |
 | [`dev/`](dev/) | Local development tooling, including the DevSpace deployment with mock hardware |
 | [`bluefield/`](bluefield/) and [`pxe/`](pxe/) | DPU image components and PXE boot artifact generation |
-| [`deploy/`](deploy/) | Kubernetes manifests and Kustomize overlays |
 
 ## Roadmap
 

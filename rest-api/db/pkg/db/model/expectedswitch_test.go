@@ -58,14 +58,17 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 				SwitchSerialNumber: "serial-1",
 				BmcIpAddress:       "10.0.0.1",
 				RackId:             &corev1.RackId{Id: "rack-1"},
-				NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
-				Name:               cutil.GetPtr("obsolete-name"),
-				Description:        cutil.GetPtr("obsolete-description"),
-				Manufacturer:       cutil.GetPtr("ACME"),
-				Model:              cutil.GetPtr("M1"),
-				SlotId:             cutil.GetPtr(int32(4)),
-				TrayIdx:            cutil.GetPtr(int32(5)),
-				HostId:             cutil.GetPtr(int32(6)),
+				NvosInterfaces: []*corev1.ExpectedNvosInterface{
+					{MacAddress: "aa:bb:cc:dd:ee:01", IsPrimary: false},
+					{MacAddress: "aa:bb:cc:dd:ee:02", IsPrimary: true},
+				},
+				Name:         cutil.GetPtr("obsolete-name"),
+				Description:  cutil.GetPtr("obsolete-description"),
+				Manufacturer: cutil.GetPtr("ACME"),
+				Model:        cutil.GetPtr("M1"),
+				SlotId:       cutil.GetPtr(int32(4)),
+				TrayIdx:      cutil.GetPtr(int32(5)),
+				HostId:       cutil.GetPtr(int32(6)),
 				Metadata: &corev1.Metadata{
 					Name:        "component-1",
 					Description: "primary",
@@ -80,21 +83,22 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 				},
 			},
 			want: ExpectedSwitch{
-				ID:                 incomingID,
-				SiteID:             siteID,
-				BmcMacAddress:      "aa:bb:cc:dd:ee:ff",
-				SwitchSerialNumber: "serial-1",
-				BmcIpAddress:       cutil.GetPtr("10.0.0.1"),
-				RackID:             cutil.GetPtr("rack-1"),
-				Name:               cutil.GetPtr("component-1"),
-				Description:        cutil.GetPtr("primary"),
-				Manufacturer:       cutil.GetPtr("ACME"),
-				Model:              cutil.GetPtr("M1"),
-				SlotID:             cutil.GetPtr(int32(4)),
-				TrayIdx:            cutil.GetPtr(int32(5)),
-				HostID:             cutil.GetPtr(int32(6)),
-				Labels:             Labels{"manufacturer": "NVIDIA", "model": "model-1", "slot_id": "1", "tray_idx": "2", "host_id": "3", "env": "prod"},
-				NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+				ID:                    incomingID,
+				SiteID:                siteID,
+				BmcMacAddress:         "aa:bb:cc:dd:ee:ff",
+				SwitchSerialNumber:    "serial-1",
+				BmcIpAddress:          cutil.GetPtr("10.0.0.1"),
+				RackID:                cutil.GetPtr("rack-1"),
+				Name:                  cutil.GetPtr("component-1"),
+				Description:           cutil.GetPtr("primary"),
+				Manufacturer:          cutil.GetPtr("ACME"),
+				Model:                 cutil.GetPtr("M1"),
+				SlotID:                cutil.GetPtr(int32(4)),
+				TrayIdx:               cutil.GetPtr(int32(5)),
+				HostID:                cutil.GetPtr(int32(6)),
+				Labels:                Labels{"manufacturer": "NVIDIA", "model": "model-1", "slot_id": "1", "tray_idx": "2", "host_id": "3", "env": "prod"},
+				NvosMacAddresses:      []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+				NvosPrimaryMacAddress: cutil.GetPtr("aa:bb:cc:dd:ee:02"),
 			},
 		},
 		{
@@ -127,10 +131,11 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 func TestExpectedSwitch_ToProto(t *testing.T) {
 	id := uuid.New()
 	es := &ExpectedSwitch{
-		ID:                 id,
-		BmcMacAddress:      "aa:bb:cc:dd:ee:ff",
-		SwitchSerialNumber: "SSN-1",
-		NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+		ID:                    id,
+		BmcMacAddress:         "aa:bb:cc:dd:ee:ff",
+		SwitchSerialNumber:    "SSN-1",
+		NvosMacAddresses:      []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+		NvosPrimaryMacAddress: cutil.GetPtr("aa:bb:cc:dd:ee:02"),
 	}
 
 	proto := es.ToProto(ExpectedSwitchCredentials{})
@@ -138,7 +143,58 @@ func TestExpectedSwitch_ToProto(t *testing.T) {
 	assert.Equal(t, id.String(), proto.ExpectedSwitchId.GetValue())
 	assert.Equal(t, "aa:bb:cc:dd:ee:ff", proto.BmcMacAddress)
 	assert.Equal(t, "SSN-1", proto.SwitchSerialNumber)
-	assert.Equal(t, []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}, proto.NvosMacAddresses)
+	interfaces := proto.GetNvosInterfaces()
+	if assert.Len(t, interfaces, 2) {
+		assert.Equal(t, "aa:bb:cc:dd:ee:01", interfaces[0].GetMacAddress())
+		assert.False(t, interfaces[0].GetIsPrimary())
+		assert.Equal(t, "aa:bb:cc:dd:ee:02", interfaces[1].GetMacAddress())
+		assert.True(t, interfaces[1].GetIsPrimary())
+	}
+}
+
+func TestExpectedSwitch_NvosInterfaces(t *testing.T) {
+	tests := []struct {
+		desc    string
+		macs    []string
+		primary *string
+		want    []NvosInterface
+	}{
+		{
+			desc: "nil MAC list yields nil",
+			macs: nil,
+			want: nil,
+		},
+		{
+			desc:    "explicit primary is flagged regardless of order",
+			macs:    []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+			primary: cutil.GetPtr("AA-BB-CC-DD-EE-02"),
+			want: []NvosInterface{
+				{MacAddress: "aa:bb:cc:dd:ee:01", IsPrimary: false},
+				{MacAddress: "aa:bb:cc:dd:ee:02", IsPrimary: true},
+			},
+		},
+		{
+			desc: "no primary set defaults the first port on a multi-port switch",
+			macs: []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+			want: []NvosInterface{
+				{MacAddress: "aa:bb:cc:dd:ee:01", IsPrimary: true},
+				{MacAddress: "aa:bb:cc:dd:ee:02", IsPrimary: false},
+			},
+		},
+		{
+			desc: "lone port is primary implicitly",
+			macs: []string{"aa:bb:cc:dd:ee:01"},
+			want: []NvosInterface{
+				{MacAddress: "aa:bb:cc:dd:ee:01", IsPrimary: true},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			es := &ExpectedSwitch{NvosMacAddresses: tc.macs, NvosPrimaryMacAddress: tc.primary}
+			assert.Equal(t, tc.want, es.NvosInterfaces())
+		})
+	}
 }
 
 // reset the tables needed for ExpectedSwitch tests

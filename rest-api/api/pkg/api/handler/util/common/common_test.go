@@ -1019,7 +1019,12 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"
@@ -1245,7 +1250,12 @@ func TestGetSiteMachineCountStats(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"
@@ -2393,7 +2403,12 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"

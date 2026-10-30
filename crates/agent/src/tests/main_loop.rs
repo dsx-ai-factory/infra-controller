@@ -17,6 +17,201 @@
 
 use super::*;
 
+#[path = "fmds_routing.rs"]
+mod fmds_routing;
+
+/// Astra failures must retract readiness without replacing an earlier
+/// HBN/DHCP diagnostic in the shared network status.
+#[test]
+fn astra_status_reporting_maps_results_and_preserves_network_errors() {
+    use carbide_test_support::value_scenarios;
+
+    #[derive(Debug)]
+    struct Row {
+        configured: bool,
+        result: eyre::Result<rpc::AstraConfigStatus>,
+        previous_error: Option<&'static str>,
+    }
+
+    let config = rpc::AstraConfig::default();
+    let ready_status = rpc::AstraConfigStatus {
+        astra_attachments_status: vec![rpc::AstraAttachmentStatus {
+            mac_address: "02:00:00:00:00:01".to_string(),
+            vni: 42,
+            revision: "V2-T100".to_string(),
+            status: Some(rpc::AstraStatus {
+                phase: rpc::AstraPhase::PhaseReady.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    value_scenarios!(run = |row: Row| {
+        // HBN/DHCP can record an error before Astra reconciliation runs.
+        let mut status_out = rpc::DpuNetworkStatus {
+            network_config_error: row.previous_error.map(str::to_string),
+            ..Default::default()
+        };
+
+        set_astra_config_status(
+            row.configured.then_some(&config),
+            row.result,
+            &mut status_out,
+        );
+        (status_out.astra_config_status, status_out.network_config_error)
+    };
+        "absent configuration leaves Astra status absent" {
+            Row {
+                configured: false,
+                result: Ok(rpc::AstraConfigStatus::default()),
+                previous_error: None,
+            } => (None, None),
+        }
+        "successful reconciliation preserves its observations" {
+            Row {
+                configured: true,
+                result: Ok(ready_status.clone()),
+                previous_error: None,
+            } => (Some(ready_status.clone()), None),
+        }
+        "successful reconciliation keeps an earlier network error" {
+            Row {
+                configured: true,
+                result: Ok(ready_status.clone()),
+                previous_error: Some("HBN update failed"),
+            } => (Some(ready_status), Some("HBN update failed".to_string())),
+        }
+        // Core retracts old readiness for an explicit empty report; an omitted
+        // report would leave those observations unchanged after failure.
+        "failed reconciliation reports no ready attachments" {
+            Row {
+                configured: true,
+                result: Err(eyre::eyre!("astra list failed")),
+                previous_error: None,
+            } => (
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
+                Some("astra list failed".to_string()),
+            ),
+        }
+        "an earlier network error keeps its diagnostic" {
+            Row {
+                configured: true,
+                result: Err(eyre::eyre!("astra list failed")),
+                previous_error: Some("HBN update failed"),
+            } => (
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
+                Some("HBN update failed".to_string()),
+            ),
+        }
+    );
+}
+
+/// IPv6 tenant prefixes must produce replies from FMDS's configured endpoint,
+/// not its link-local address, without changing IPv4 or enabling IPv6 by default.
+#[test]
+fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
+    use forge_dpu_agent_utils::FMDS_IPV6_GATEWAY;
+
+    let mut config = comparison_network_config();
+    config.tenant_interfaces = vec![comparison_interface("metadata-host", 274, 1001)];
+    // A routing-only loopback has no tenant subnet and must not create a reply route.
+    config.tenant_interfaces[0]
+        .addresses
+        .push(rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            tenant_vrf_loopback_ip: Some("2001:db8:ffff::1".to_string()),
+            ..Default::default()
+        });
+    let prefixes = fmds_tenant_routes(&config).expect("tenant prefixes");
+    assert_eq!(
+        prefixes,
+        vec![
+            "10.0.0.0/24".parse::<IpNetwork>().expect("IPv4 prefix"),
+            "2001:db8::/127".parse::<IpNetwork>().expect("IPv6 prefix"),
+        ]
+    );
+
+    // The link-local address comes first, as it can on a real interface. IPv4
+    // deliberately differs from the default to protect its existing override.
+    let mut interfaces: Vec<IpInterface> = serde_json::from_value(serde_json::json!([{
+        "ifindex": 7, "ifname": "fmds0", "flags": ["UP"], "mtu": 1500,
+        "qdisc": "noqueue", "operstate": "UP", "group": "default",
+        "address": "02:00:00:00:00:07", "broadcast": "ff:ff:ff:ff:ff:ff",
+        "addr_info": [
+            {"family": "inet6", "local": "fe80::7", "prefixlen": 64,
+             "scope": "link", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32},
+            {"family": "inet", "local": "169.254.169.250", "prefixlen": 29,
+             "scope": "global", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32},
+            {"family": "inet6", "local": "fd00:76b9::254", "prefixlen": 127,
+             "scope": "global", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32}
+        ]
+    }]))
+    .expect("observed interface");
+    let gateway = Ipv6Network::new(FMDS_IPV6_GATEWAY, 127).expect("metadata peer");
+    let routes = fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+        .expect("dual-stack reply routes");
+    assert_eq!(routes.len(), 2);
+    assert_eq!(
+        routes[0].prefsrc,
+        Some("169.254.169.250".parse().expect("IPv4 source"))
+    );
+    assert_eq!(
+        routes[0].gateway,
+        Some("169.254.169.253".parse().expect("IPv4 peer"))
+    );
+    assert_eq!(routes[1].dst, prefixes[1]);
+    assert_eq!(routes[1].prefsrc, Some(IpAddr::V6(FMDS_IPV6_ADDRESS)));
+    assert_eq!(routes[1].gateway, Some(IpAddr::V6(FMDS_IPV6_GATEWAY)));
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.dev.as_deref() == Some("fmds0"))
+    );
+
+    // An IPv6 tenant does not itself enable metadata transport on older deployments.
+    assert_eq!(
+        fmds_reply_routes("fmds0", &interfaces, &prefixes, None).expect("IPv4-only opt-out"),
+        vec![routes[0].clone()],
+    );
+
+    // Omitting IPv4 on the metadata link must retain the old skip behavior,
+    // independently of whether the tenant configuration still lists IPv4.
+    interfaces[0]
+        .addr_info
+        .retain(|address| address.local.is_ipv6());
+    assert_eq!(
+        fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+            .expect("IPv6-only metadata link"),
+        vec![routes[1].clone()],
+    );
+
+    // An explicitly enabled endpoint must be installed before acknowledging the
+    // routes; falling back to the remaining link-local address would hide failure.
+    interfaces[0]
+        .addr_info
+        .retain(|address| address.local != IpAddr::V6(FMDS_IPV6_ADDRESS));
+    let error = fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+        .expect_err("missing enabled metadata source");
+    assert!(
+        error
+            .to_string()
+            .contains("fmds0 has no metadata source address for 2001:db8::/127")
+    );
+}
+
 #[test]
 fn ipv6_only_network_requires_dhcp_acceptance() {
     for (scenario, loopback, dhcp_changed, expected_error) in [
@@ -92,21 +287,25 @@ fn comparison_routing_profile() -> rpc::RoutingProfile {
         route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_001,
-                vni: 101,
+                vni: Some(101),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_002,
-                vni: 102,
+                vni: Some(102),
+                vni_self: false,
             },
         ],
         route_targets_on_exports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_003,
-                vni: 103,
+                vni: Some(103),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_004,
-                vni: 104,
+                vni: Some(104),
+                vni_self: false,
             },
         ],
         leak_default_route_from_underlay: false,
@@ -279,16 +478,19 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         datacenter_asn: 65_100,
         common_internal_route_target: Some(::rpc::common::RouteTarget {
             asn: 65_200,
-            vni: 5_000,
+            vni: Some(5_000),
+            vni_self: false,
         }),
         additional_route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_201,
-                vni: 5_001,
+                vni: Some(5_001),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_202,
-                vni: 5_002,
+                vni: Some(5_002),
+                vni_self: false,
             },
         ],
         network_security_policy_overrides: vec![
@@ -820,7 +1022,17 @@ impl NonHbnInputChange {
                         ..Default::default()
                     });
             }
-            Self::AstraConfig => config.astra_config = Some(rpc::AstraConfig::default()),
+            Self::AstraConfig => {
+                config.astra_config = Some(rpc::AstraConfig {
+                    multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                        logical_ifname: "eth_r2_p6".to_string(),
+                        cfg_maintenance_mode: Some(false),
+                        revision: "V2-T1791792000000000".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+            }
             Self::AdminNetworkTransition => config.use_admin_network_changed = Some(true),
         }
     }
@@ -940,4 +1152,47 @@ async fn test_get_fabric_interfaces_data() {
     // should pass on any Linux host with real hardware or a virtualized PCI
     // network interface.
     // assert!(fabric_interfaces_data.len() > 0);
+}
+
+#[test]
+fn multiplane_delivery_preserves_optional_mode_without_attachments() {
+    use prost::Message;
+    for mode in [None, Some(true), Some(false)] {
+        let response = ManagedHostNetworkConfigResponse {
+            astra_config: Some(rpc::AstraConfig {
+                astra_attachments: Vec::new(),
+                is_attachment_config_present: Some(false),
+                is_maintenance_config_present: Some(true),
+                multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                    logical_ifname: "eth_r2_p6".to_string(),
+                    cfg_maintenance_mode: mode,
+                    reference: Some("https://tickets.example.com/SPX-42".to_string()),
+                    revision: "V2-T1791792000000000".to_string(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let received =
+            ManagedHostNetworkConfigResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+        let configuration = received.astra_config.unwrap();
+        assert!(configuration.astra_attachments.is_empty());
+        assert_eq!(configuration.is_attachment_config_present, Some(false));
+        assert_eq!(configuration.is_maintenance_config_present, Some(true));
+        assert_eq!(
+            configuration.multiplane_interfaces[0].cfg_maintenance_mode,
+            mode
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].logical_ifname,
+            "eth_r2_p6"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].revision,
+            "V2-T1791792000000000"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].reference.as_deref(),
+            Some("https://tickets.example.com/SPX-42")
+        );
+    }
 }

@@ -8,7 +8,7 @@ This document contains frequently asked questions about NVIDIA Infra Controller 
 
 NICo commonly runs on a Kubernetes cluster (with 3 or 5 control plane nodes recommended), though there is no requirement to do so. NICo runs as a set of microservices for API, DNS, DHCP, Hardware Monitoring, BMC Console, Rack Management, etc.
 
-NICo can be deployed with Helm charts (located in the `/helm`) directory or with Kubernetes Kustomize manifests.
+NICo is deployed with the Helm charts in the `helm/` directory.
 
 **Does NICo install Cumulus Linux onto Ethernet switches?**
 
@@ -176,7 +176,7 @@ When a Machine is assigned to a tenant as an Instance it reports `InUse`. An `Er
 
 **Are there SLAs defined for Instance lifecycle state transitions?**
 
-SLAs are defined per Machine lifecycle state. When a Machine remains in a given state longer than the configured SLA threshold, the gRPC API sets `time_in_state_above_sla: true` on that object. This condition is also surfaced in the admin web UI. The metric `nico_machines_per_state_above_sla` tracks the count of Machines exceeding SLA thresholds per state.
+SLAs are defined per Machine lifecycle state. When a Machine remains in a given state longer than the configured SLA threshold, the gRPC API sets `time_in_state_above_sla: true` on that object. This condition is also surfaced in the admin web UI. The metric `carbide_machines_per_state_above_sla` tracks the count of Machines exceeding SLA thresholds per state.
 
 **What validation is performed after an Instance reports `Ready`?**
 
@@ -239,6 +239,6 @@ Deletion is accepted immediately but the Instance must run through all defined d
 
 **What metrics and dashboards are available for monitoring NICo deployments?**
 
-A subset of NICo metrics is documented in the [Core Metrics reference](observability/core_metrics.md). Key metrics for operational monitoring include per-state machine counts and `nico_machines_per_state_above_sla`.
+A subset of NICo metrics is documented in the [Core Metrics reference](observability/core_metrics.md). Key metrics for operational monitoring include per-state machine counts and `carbide_machines_per_state_above_sla`. When `alt_metric_prefix` is set in the `nico-api` configuration, each `carbide_` metric is also exposed under that prefix; the Helm chart sets it to `nico_`.
 
 Grafana dashboard definitions for NICo deployments are maintained separately from the open-source package. A dashboard JSON for deployment on a site-local Grafana Instance is available in the NICo Helm chart distribution.

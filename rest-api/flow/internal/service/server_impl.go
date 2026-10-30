@@ -48,6 +48,7 @@ import (
 // It acts as an adapter between gRPC protobuf messages and the internal managers,
 // handling protobuf conversion and delegating business logic to the InventoryManager.
 type FlowServerImpl struct {
+	powerReader                componentPowerReader        // Shared NICo client for passive power details
 	inventoryManager           inventorymanager.Manager    // Business logic manager for inventory operations
 	taskManager                taskmanager.Manager         // Task manager for orchestrating task lifecycle
 	taskStore                  taskstore.Store             // Task store for task queries
@@ -68,6 +69,7 @@ type FlowServerImpl struct {
 //   - taskManager: The Task manager for orchestrating task lifecycle
 //   - taskStore: The task store for task queries
 //   - operationRunManager: The operation-run manager for planning and persisting operation runs
+//   - powerReader: Shared passive Core reader, or nil when the NICo provider is absent
 //
 // Returns:
 //   - *FlowServerImpl: A new server implementation instance
@@ -81,6 +83,7 @@ func newServerImplementation(
 	operationRunManager operationrunmanager.Manager,
 	eventRuleManager eventRuleManager,
 	dataCipher *secret.Cipher,
+	powerReader componentPowerReader,
 ) (*FlowServerImpl, error) {
 	return &FlowServerImpl{
 		inventoryManager:       inventoryManager,
@@ -91,6 +94,7 @@ func newServerImplementation(
 		operationRunManager:    operationRunManager,
 		eventRuleManager:       eventRuleManager,
 		dataCipher:             dataCipher,
+		powerReader:            powerReader,
 		conflictResolver:       conflict.NewResolver(taskStore),
 	}, nil
 }
@@ -429,31 +433,34 @@ func (rs *FlowServerImpl) PatchComponent(
 		return nil, status.Errorf(codes.InvalidArgument, "rack_id %v", err)
 	}
 
-	// Get the existing component
-	existing, err := rs.inventoryManager.GetComponentByID(ctx, compID)
+	// Confirm the component exists before validating related resources.
+	_, err = rs.inventoryManager.GetComponentByID(ctx, compID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get component: %w", err)
 	}
 
-	// Apply patch fields
+	patch := inventorymanager.ComponentPatch{ID: compID}
 	if req.FirmwareVersion != nil {
-		existing.FirmwareVersion = *req.FirmwareVersion
+		patch.FirmwareVersion = req.FirmwareVersion
 	}
 
 	if req.Position != nil {
 		if positionPaths == nil || positionPaths["position.slot_id"] {
-			existing.Position.SlotID = int(req.Position.SlotId)
+			slotID := int(req.Position.SlotId)
+			patch.SlotID = &slotID
 		}
 		if positionPaths == nil || positionPaths["position.tray_idx"] {
-			existing.Position.TrayIndex = int(req.Position.TrayIdx)
+			trayIndex := int(req.Position.TrayIdx)
+			patch.TrayIndex = &trayIndex
 		}
 		if positionPaths == nil || positionPaths["position.host_id"] {
-			existing.Position.HostID = int(req.Position.HostId)
+			hostID := int(req.Position.HostId)
+			patch.HostID = &hostID
 		}
 	}
 
 	if req.Description != nil {
-		existing.Info.Description = *req.Description
+		patch.Description = req.Description
 	}
 
 	if rackID != nil {
@@ -461,15 +468,15 @@ func (rs *FlowServerImpl) PatchComponent(
 		if err != nil {
 			return nil, fmt.Errorf("rack not found: %w", err)
 		}
-		existing.RackID = *rackID
+		patch.RackID = rackID
 	}
 
 	if len(req.GetBmcs()) > 0 {
-		existing.BmcsByType = protobuf.BMCsFrom(req.GetBmcs())
+		patch.BMCsByType = protobuf.BMCsFrom(req.GetBmcs())
 	}
 
 	// Persist the update
-	if err := rs.inventoryManager.PatchComponent(ctx, existing); err != nil {
+	if err := rs.inventoryManager.PatchComponent(ctx, patch); err != nil {
 		return nil, fmt.Errorf("failed to patch component: %w", err)
 	}
 

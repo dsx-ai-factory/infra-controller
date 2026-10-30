@@ -31,7 +31,7 @@ use prost::Message as _;
 use rpc::admin_cli::OutputFormat;
 use rpc::forge::{BuildInfo, RuntimeConfig as RpcRuntimeConfig, VersionRequest};
 use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, RetryConfig};
 use tokio::net::TcpListener;
 
 use crate::async_write::CapturedOutput;
@@ -39,6 +39,7 @@ use crate::cfg::cli_options::{CliCommand, CliOptions, SortField};
 use crate::cfg::dispatch::Dispatch;
 use crate::cfg::runtime::{RuntimeConfig, RuntimeContext};
 use crate::rpc::ApiClient;
+use crate::version::VerificationFallback;
 
 /// Runs the public version command against a controlled Core response so the
 /// test covers argument parsing, RPC dispatch, and the operator's actual table.
@@ -211,4 +212,90 @@ async fn public_version_command_prints_populated_empty_and_unsupported_effective
         assert_eq!(cells.get(1), Some(&"site_fabric_null_routes"), "{scenario}");
         assert_eq!(cells.get(2), Some(&expected_value), "{scenario}: {row}");
     }
+}
+
+/// Whatever makes the verifying attempt fail, `version` must still print the
+/// server's info, taken from the fallback client.
+#[tokio::test]
+async fn version_falls_back_when_the_verified_attempt_fails() {
+    let options = CliOptions::try_parse_from(["nico-admin-cli", "version"])
+        .expect("public version command parses");
+    let Some(CliCommand::Version(command)) = options.commands else {
+        panic!("expected the public version command path");
+    };
+
+    // A port whose listener was dropped refuses every connection at once,
+    // standing in for a server the verified attempt cannot talk to.
+    let refused = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve refused destination")
+        .local_addr()
+        .expect("reserved address");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock version listener binds");
+    let served = listener.local_addr().expect("mock listener has an address");
+    let server = tokio::spawn(async move {
+        let (connection, _) = listener.accept().await.expect("mock accepts a client");
+        http2::Builder::new(TokioExecutor::new())
+            .serve_connection(
+                TokioIo::new(connection),
+                service_fn(|request| mock_version_request(request, None)),
+            )
+            .await
+            .expect("mock serves the version connection");
+    });
+
+    let request_timeout = Duration::from_secs(5);
+    let client_config = ForgeClientConfig {
+        request_timeout: Some(request_timeout),
+        connect_retries_max: Some(0),
+        ..Default::default()
+    };
+    let no_retries = RetryConfig {
+        retries: 0,
+        interval: Duration::from_millis(10),
+    };
+    let mut captured = CapturedOutput::new();
+    let ctx = RuntimeContext {
+        api_client: ApiClient(ForgeApiClient::new(
+            &ApiConfig::new(&format!("http://{refused}"), &client_config)
+                .with_retry_config(no_retries),
+        )),
+        config: RuntimeConfig {
+            format: OutputFormat::AsciiTable,
+            request_timeout: client_config.request_timeout,
+            page_size: 25,
+            extended: false,
+            cloud_unsafe_op: None,
+            sort_by: SortField::PrimaryId,
+        },
+        output_file: std::mem::replace(captured.writer(), Box::new(tokio::io::sink())),
+    };
+    let fallback = VerificationFallback {
+        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+            &format!("http://{served}"),
+            &client_config,
+        ))),
+        root_ca_path: "/path/to/root-ca.pem".to_string(),
+    };
+
+    tokio::time::timeout(
+        request_timeout,
+        super::run_verified_first(command, ctx, fallback),
+    )
+    .await
+    .expect("version completes within five seconds")
+    .expect("version succeeds through the fallback");
+    server.abort();
+
+    let output = String::from_utf8(captured.into_bytes().await).expect("version output is UTF-8");
+    assert!(
+        output.contains("carbide-api:"),
+        "no server version: {output}"
+    );
+    assert!(
+        output.contains("nico-admin-cli:"),
+        "no client version: {output}"
+    );
 }

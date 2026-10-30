@@ -10,7 +10,6 @@ import (
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
@@ -19,11 +18,11 @@ import (
 
 // ManageVpcPrefix is an activity wrapper for VpcPrefix management
 type ManageVpcPrefix struct {
-	coreGrpcAtomicClient *client.CoreGrpcAtomicClient
+	coreGrpcAtomicClient *cClient.CoreGrpcAtomicClient
 }
 
 // NewManageVpcPrefix returns a new ManageVpcPrefix client
-func NewManageVpcPrefix(coreGrpcAtomicClient *client.CoreGrpcAtomicClient) ManageVpcPrefix {
+func NewManageVpcPrefix(coreGrpcAtomicClient *cClient.CoreGrpcAtomicClient) ManageVpcPrefix {
 	return ManageVpcPrefix{
 		coreGrpcAtomicClient: coreGrpcAtomicClient,
 	}
@@ -53,7 +52,7 @@ func (mvp *ManageVpcPrefix) CreateVpcPrefixOnSite(ctx context.Context, request *
 	// Call Core gRPC API endpoint
 	grpcClient := mvp.coreGrpcAtomicClient.GetClient()
 	if grpcClient == nil {
-		return client.ErrCoreGrpcClientNotConnected
+		return cClient.ErrCoreGrpcClientNotConnected
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
@@ -91,7 +90,7 @@ func (mvp *ManageVpcPrefix) UpdateVpcPrefixOnSite(ctx context.Context, request *
 	// Call Core gRPC API endpoint
 	grpcClient := mvp.coreGrpcAtomicClient.GetClient()
 	if grpcClient == nil {
-		return client.ErrCoreGrpcClientNotConnected
+		return cClient.ErrCoreGrpcClientNotConnected
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 
@@ -129,7 +128,7 @@ func (mvp *ManageVpcPrefix) DeleteVpcPrefixOnSite(ctx context.Context, request *
 	// Call Core gRPC API endpoint
 	grpcClient := mvp.coreGrpcAtomicClient.GetClient()
 	if grpcClient == nil {
-		return client.ErrCoreGrpcClientNotConnected
+		return cClient.ErrCoreGrpcClientNotConnected
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 

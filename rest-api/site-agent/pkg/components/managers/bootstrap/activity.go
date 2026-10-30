@@ -79,7 +79,7 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 	logger.Info().Str("Secret", bootstrapSecretName).Msg("Successfully updated OTP in bootstrap secret")
 
 	// Proceed to download and store credentials, passing the decrypted OTP
-	err = ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(decryptedOtp)
+	err = ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(ctx, decryptedOtp)
 	if err != nil {
 		logger.Error().Err(err).Msg("Failed to download and store credentials")
 		return err
@@ -125,7 +125,7 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 
 	logger.Info().Msgf("Certificate expiration date: %v", certExpiry)
 
-	siteID := ManagerAccess.Data.EB.Managers.Bootstrap.Config.UUID
+	siteID := ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig().UUID
 	workflowOptions := client.StartWorkflowOptions{
 		ID:        "update-agent-cert-expiry-" + siteID,
 		TaskQueue: ManagerAccess.Conf.EB.Temporal.TemporalPublishQueue,

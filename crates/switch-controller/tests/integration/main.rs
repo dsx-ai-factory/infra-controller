@@ -19,5 +19,6 @@ mod bmc_rotation;
 mod common;
 mod health;
 mod maintenance;
+mod mtls_disable;
 mod nvos_password_rotation;
 mod state_controller;

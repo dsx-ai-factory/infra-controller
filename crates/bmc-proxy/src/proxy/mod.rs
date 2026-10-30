@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-//! The BMC proxy: authenticated callers name a BMC, and the proxy forwards
-//! their Redfish request to it with credentials it resolves from nico-api.
+//! The BMC proxy: authenticated callers name a management endpoint, a BMC or
+//! a switch's NVOS interface, and the proxy forwards their HTTP request to it
+//! with credentials it resolves from nico-api.
 //!
 //! The modules follow a request's path:
 //!
@@ -25,21 +26,29 @@
 //!   minutes. Failed reloads retain the previous configuration and retry after
 //!   thirty seconds. A client certificate is optional here.
 //! - `guard`: identifies the caller from its certificate, then checks the
-//!   principal allow-list and the per-principal ACL.
-//! - `target`: resolves the BMC the `Forwarded` header names to its IP.
-//! - `admission`: holds a request until its BMC has a slot for it, when its
-//!   class or the per-BMC limit caps how many requests the BMC receives.
-//! - `credentials`: the BMC's credentials, fetched from nico-api and cached
-//!   by IP.
-//! - `upstream`: sends the request to the BMC with the caller's headers and
-//!   body, resolving credentials for each attempt.
+//!   principal allow-list, rejects ambiguous paths, and checks the per-principal ACL.
+//! - `target`: resolves the address the `Forwarded` header names, a BMC's
+//!   or a switch's NVOS interface's, to its IP.
+//! - `admission`: holds a request until its target has a slot for it, when
+//!   its class or the per-BMC limit caps how many requests the target
+//!   receives.
+//! - `credentials`: the credentials for the address, fetched from nico-api
+//!   and cached by IP: a BMC's, or a switch's NVOS admin credentials when
+//!   the address is the switch's NVOS management interface.
+//! - `upstream`: sends the request to the target with the caller's headers
+//!   and body, resolving credentials for each attempt.
+//! - `switch_tls`: when `[tls.switch]` is set, the client a switch's NVOS
+//!   interface is reached on, presenting the proxy's client certificate and
+//!   verifying the switch's against the switch CA. Its files are checked
+//!   again every five minutes, and reloaded when they changed.
 //! - `response`: builds the caller's answer. A 4xx or 5xx body is scrubbed
 //!   of the credential its attempt used, or replaced when it cannot be
 //!   inspected; other bodies stream through unchanged.
 //!
-//! [`proxy_request_inner`] runs a request from the ACL on. When the BMC
-//! answers 401 or 403 and the body can be sent again, it drops the cached
-//! credentials and sends the request once more with fresh ones.
+//! [`proxy_request_inner`] runs a request from the path check and ACL on. When the BMC
+//! answers 401 or 403, or the target's certificate fails verification, it
+//! drops the cached credentials and, when the body can be sent again, sends
+//! the request once more with fresh ones.
 
 mod admission;
 mod credentials;
@@ -49,6 +58,7 @@ mod guard;
 mod ingress;
 mod response;
 mod slo;
+mod switch_tls;
 mod target;
 #[cfg(test)]
 mod test_support;
@@ -80,16 +90,17 @@ use crate::config::Trip;
 use crate::metrics::{MethodLabel, UpstreamAuthRetried};
 use crate::proxy::admission::{Admission, Slot};
 use crate::proxy::credentials::{
-    CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, evict_cached_credentials, get_bmc_credentials,
+    CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, SwitchProbe, TargetCredentials,
+    evict_cached_credentials, resolve_credentials,
 };
-use crate::proxy::guard::{authorize_proxy_request, cert_description_layer};
+use crate::proxy::guard::{authorize_proxy_request, cert_description_layer, reject_ambiguous_path};
 use crate::proxy::ingress::{BmcProxy, RefreshableTlsAcceptor};
 use crate::proxy::response::{BmcOrigins, build_response, prepare_response_body};
 use crate::proxy::target::{
     IP_CACHE_TTL, LookupToIpCache, forwarded_header_value, ip_for_forwarded_target,
 };
 use crate::proxy::upstream::{
-    AttemptFailed, BmcFailure, UpstreamBody, UpstreamResponse, build_http_client,
+    AttemptFailed, BmcFailure, UpstreamBody, UpstreamClients, UpstreamResponse,
     method_supports_body, send_upstream,
 };
 
@@ -103,6 +114,8 @@ pub(crate) enum BmcProxyError {
     InternalProxying(String),
     #[error("no credentials found for BMC IP address: {0}")]
     NoCredentials(IpAddr),
+    #[error("the NVOS MAC address at {0} belongs to more than one switch")]
+    AmbiguousNvosAddress(IpAddr),
     #[error("error spawning listener: {0}")]
     Listen(std::io::Error),
     #[error("error loading TLS config: {0}")]
@@ -118,15 +131,24 @@ struct BmcProxyState {
     config: Arc<crate::Config>,
     api_client: ForgeApiClient,
     credential_cache: CredentialCache,
-    /// One client for every upstream: reqwest pools connections per host
-    /// internally, so per-BMC clients bought nothing and grew without bound.
-    http_client: reqwest_middleware::ClientWithMiddleware,
+    upstream_clients: Arc<UpstreamClients>,
     ip_cache: LookupToIpCache,
     admission: Arc<Admission>,
+    /// Whether nico-api lets the proxy tell a switch's address from a BMC's.
+    switch_probe: Arc<SwitchProbe>,
 }
 
 /// Upper bound on cached entries; sized far above any realistic BMC fleet.
 const CACHE_MAX_ENTRIES: u64 = 100_000;
+
+/// How long TLS material loaded from files serves before they are checked
+/// again: the proxy's own identity and trusted CAs, on the next inbound
+/// connection, and `[tls.switch]`, on the next request to a switch.
+const TLS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// After a failed reload of TLS material, how long until it is retried. The
+/// material loaded before stays in use meanwhile.
+const TLS_RELOAD_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn bounded_cache<K, V>(ttl: Duration) -> MokaCache<K, V>
 where
@@ -165,6 +187,7 @@ pub(crate) async fn start(
         build_version = carbide_version::v!(build_version),
         build_date = carbide_version::v!(build_date),
         rust_version = carbide_version::v!(rust_version),
+        switch_tls = config.tls.switch.is_some(),
         "Start carbide BMC proxy",
     );
 
@@ -189,12 +212,16 @@ pub(crate) async fn start(
         join_set,
     );
     let state = BmcProxyState {
-        http_client: build_http_client(config.redirects.mode)?,
+        upstream_clients: Arc::new(UpstreamClients::new(
+            config.redirects.mode,
+            config.tls.switch.as_ref(),
+        )?),
         config,
         api_client,
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         ip_cache: bounded_cache(IP_CACHE_TTL),
         admission,
+        switch_probe: Arc::new(SwitchProbe::default()),
     };
 
     let app = proxy_routes(state.clone())
@@ -299,6 +326,7 @@ fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
         otel.status_code = tracing::field::Empty,
         bmc.ip_address = tracing::field::Empty,
         bmc_proxy.class = tracing::field::Empty,
+        bmc_proxy.target = tracing::field::Empty,
         logfmt.suppress = true,
     );
     set_span_parent_from_headers(&request_span, request.headers());
@@ -324,6 +352,10 @@ async fn proxy_request_inner(
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
     let arrived = tokio::time::Instant::now();
+    if let Some(response) = reject_ambiguous_path(&request) {
+        return Ok(response);
+    }
+
     let Some(principals) = state.authorized_caller(&request) else {
         return Ok(error_response((StatusCode::FORBIDDEN, "Forbidden").into()));
     };
@@ -390,9 +422,14 @@ async fn proxy_request_inner(
     // credentials and waiting for a slot there. Resolving them first means
     // only a BMC nico-api knows takes a slot, and the lookup holds none.
     let deadline = tokio::time::Instant::now() + class.upstream_timeout;
-    tokio::time::timeout_at(
+    let TargetCredentials { target, .. } = tokio::time::timeout_at(
         deadline,
-        get_bmc_credentials(target_ip, &state.api_client, &state.credential_cache),
+        resolve_credentials(
+            target_ip,
+            &state.api_client,
+            &state.credential_cache,
+            &state.switch_probe,
+        ),
     )
     .await
     .map_err(|_elapsed| {
@@ -405,6 +442,7 @@ async fn proxy_request_inner(
         )
     })?
     .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
+    tracing::Span::current().record("bmc_proxy.target", target.as_str());
     let streamed = !upstream_body.is_replayable();
     let mut slot = state
         .admission
@@ -417,7 +455,7 @@ async fn proxy_request_inner(
         )
         .await
         .map_err(|refused| error_response((refused.status(), refused.to_string()).into()))?;
-    let mut upstream_response = send_upstream(
+    let attempt = send_upstream(
         &state,
         target_ip,
         &parts,
@@ -425,23 +463,32 @@ async fn proxy_request_inner(
         &mut upstream_body,
         deadline,
     )
-    .await
-    .map_err(|failed| answer_failed_attempt(&mut slot, failed, class, streamed))?;
+    .await;
 
-    // A BMC that rejects the credential the proxy cached (an expired Redfish
-    // session, a rotated password) gets one replay with freshly resolved
-    // credentials, so callers never see a stale-session 401. Only replayable
-    // bodies qualify; a streamed body was consumed by the first attempt.
+    // The cache may hold an address for what it no longer is: a BMC rejects
+    // the credential the proxy cached (an expired Redfish session, a rotated
+    // password), or a target's certificate fails verification (a switch's
+    // NVOS address handed to a BMC, whose self-signed certificate the switch
+    // client refuses). Either gets one replay with freshly resolved
+    // credentials, which also pick the client for what the address is now,
+    // so callers never see a stale-session 401. Only replayable bodies
+    // qualify; a streamed body was consumed by the first attempt.
     let rejected = |status: reqwest::StatusCode| {
         status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
     };
-    if rejected(upstream_response.response.status()) && upstream_body.is_replayable() {
+    let stale = match &attempt {
+        Ok(upstream) => rejected(upstream.response.status()),
+        Err(failed) => failed.certificate_rejected,
+    };
+    let attempt = if stale && upstream_body.is_replayable() {
         evict_cached_credentials(target_ip, &state.credential_cache).await;
-        emit(UpstreamAuthRetried {
-            method: MethodLabel::from(&parts.method),
-            bmc_ip_address: target_ip.to_string(),
-        });
-        upstream_response = send_upstream(
+        if attempt.is_ok() {
+            emit(UpstreamAuthRetried {
+                method: MethodLabel::from(&parts.method),
+                bmc_ip_address: target_ip.to_string(),
+            });
+        }
+        send_upstream(
             &state,
             target_ip,
             &parts,
@@ -450,13 +497,22 @@ async fn proxy_request_inner(
             tokio::time::Instant::now() + class.upstream_timeout,
         )
         .await
-        .map_err(|failed| answer_failed_attempt(&mut slot, failed, class, streamed))?;
+    } else {
+        attempt
+    };
+    // A rejected certificate on the last attempt leaves the cache too, so
+    // the next request resolves the address afresh.
+    if attempt
+        .as_ref()
+        .is_err_and(|failed| failed.certificate_rejected)
+    {
+        evict_cached_credentials(target_ip, &state.credential_cache).await;
     }
 
     let UpstreamResponse {
         response,
         sensitive_values,
-    } = upstream_response;
+    } = attempt.map_err(|failed| answer_failed_attempt(&mut slot, failed, class, streamed))?;
     let status = response.status();
     report(&mut slot, class, Trip::Status(status));
     slot.answered();

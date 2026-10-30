@@ -19,7 +19,7 @@
 
 use async_trait::async_trait;
 use carbide_uuid::rack::RackId;
-use health_report::HealthReport;
+use health_report::{HealthReport, HealthReportApplyMode};
 use sqlx::PgTransaction;
 use state_controller::db_write_batch::WriteOp;
 use state_controller::state_handler::StateHandlerError;
@@ -41,6 +41,52 @@ impl WriteOp for PersistRackHealthHistory {
             db::health_history::HealthHistoryTableId::Rack,
             &self.rack_id,
             &self.health_report,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Stores the rack controller's current component health report.
+pub(crate) struct PersistRackComponentHealth {
+    pub(crate) rack_id: RackId,
+    pub(crate) health_report: HealthReport,
+}
+
+#[async_trait]
+impl WriteOp for PersistRackComponentHealth {
+    async fn apply<'a, 't: 'a>(
+        self: Box<Self>,
+        txn: &'a mut PgTransaction<'t>,
+    ) -> Result<(), StateHandlerError> {
+        db::rack::insert_health_report(
+            txn,
+            &self.rack_id,
+            HealthReportApplyMode::Merge,
+            &self.health_report,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Removes the rack controller's component health report.
+pub(crate) struct RemoveRackComponentHealth {
+    pub(crate) rack_id: RackId,
+    pub(crate) source: &'static str,
+}
+
+#[async_trait]
+impl WriteOp for RemoveRackComponentHealth {
+    async fn apply<'a, 't: 'a>(
+        self: Box<Self>,
+        txn: &'a mut PgTransaction<'t>,
+    ) -> Result<(), StateHandlerError> {
+        db::rack::remove_health_report(
+            txn,
+            &self.rack_id,
+            HealthReportApplyMode::Merge,
+            self.source,
         )
         .await?;
         Ok(())

@@ -292,3 +292,105 @@ func TestPostgresStore_ListPowerTasksForRack(t *testing.T) {
 		})
 	}
 }
+
+// TestPostgresStore_ListTaskContextForRack keeps database/scan text out of
+// responses and logs while preserving scheduling metadata and useful failure
+// categories, so a failed context read cannot become misleading nearby work.
+func TestPostgresStore_ListTaskContextForRack(t *testing.T) {
+	createdAt := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name              string
+		count             int
+		queryError        error
+		invalidAttributes bool
+		cancel            bool
+	}{
+		// A nonzero creation time must survive or earlier-waiter comparisons change.
+		{name: "metadata survives", count: 1},
+		// The caller needs the typed overflow to mark context unavailable.
+		{name: "context overflow survives", count: 257},
+		// Preserve SQLSTATE while hiding driver messages and details.
+		{name: "safe database failure", queryError: &pgconn.PgError{
+			Code: "42703", Message: "private-context-data", Detail: "private-context-data",
+		}},
+		// Attribute decoding can include the rejected stored key in its error.
+		{name: "safe attribute scan failure", count: 1, invalidAttributes: true},
+		// An abandoned read must retain cancellation rather than appear as an outage.
+		{name: "caller cancellation", cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var diagnostics bytes.Buffer
+			previousLogger := log.Logger
+			log.Logger = zerolog.New(&diagnostics)
+			t.Cleanup(func() { log.Logger = previousLogger })
+
+			sqlDB, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			db := bun.NewDB(sqlDB, pgdialect.New())
+			t.Cleanup(func() {
+				mock.ExpectClose()
+				require.NoError(t, db.Close())
+			})
+			rackID, taskID, targetID := uuid.New(), uuid.New(), uuid.New()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.cancel {
+				cancel()
+			} else {
+				expectation := mock.ExpectQuery(`FROM "task" AS "t".* LIMIT 257$`)
+				if tc.queryError != nil {
+					expectation.WillReturnError(tc.queryError)
+				} else {
+					attributes := `{"components_by_type":{"Compute":["` + targetID.String() + `"]}}`
+					if tc.invalidAttributes {
+						attributes = `{"components_by_type":{"private-context-data":[]}}`
+						var decoded taskcommon.TaskAttributes
+						decodeErr := json.Unmarshal([]byte(attributes), &decoded)
+						require.ErrorContains(t, decodeErr, "private-context-data")
+					}
+					rows := sqlmock.NewRows([]string{"id", "type", "rack_id", "attributes", "status", "created_at"})
+					for range tc.count {
+						rows.AddRow(taskID, taskcommon.TaskTypeBringUp, rackID, attributes, taskcommon.TaskStatusPending, createdAt)
+					}
+					expectation.WillReturnRows(rows)
+				}
+			}
+
+			got, err := NewPostgres(&cdb.Session{DB: db}).ListTaskContextForRack(ctx, rackID)
+
+			require.NotContains(t, diagnostics.String(), "private-context-data")
+			switch {
+			case tc.queryError != nil || tc.invalidAttributes:
+				require.Equal(t, codes.Internal, status.Code(err))
+				require.NotContains(t, err.Error(), "private-context-data")
+				require.Nil(t, got)
+				var fields map[string]any
+				require.NoError(t, json.Unmarshal(diagnostics.Bytes(), &fields))
+				require.Equal(t, rackID.String(), fields["rack_id"])
+				require.Equal(t, "database_read", fields["failure_stage"])
+				require.NotEmpty(t, fields["error_type"])
+				if tc.queryError != nil {
+					require.Equal(t, "42703", fields["sqlstate"])
+				}
+			case tc.cancel:
+				require.ErrorIs(t, err, context.Canceled)
+				require.Nil(t, got)
+				require.Empty(t, diagnostics.String())
+			case tc.count == 257:
+				var limitError *taskcommon.TaskContextLimitError
+				require.ErrorAs(t, err, &limitError)
+				require.Equal(t, rackID, limitError.RackID)
+				require.Nil(t, got)
+				require.Empty(t, diagnostics.String())
+			default:
+				require.NoError(t, err)
+				require.Empty(t, diagnostics.String())
+				require.Equal(t, []taskdef.TaskContextMetadata{{ID: taskID, RackID: rackID, Type: taskcommon.TaskTypeBringUp, Status: taskcommon.TaskStatusPending,
+					Attributes: taskcommon.TaskAttributes{ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{devicetypes.ComponentTypeCompute: {targetID}}},
+					CreatedAt:  createdAt,
+				}}, got)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}

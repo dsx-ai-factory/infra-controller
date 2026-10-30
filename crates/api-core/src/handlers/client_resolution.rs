@@ -590,11 +590,11 @@ pub(super) async fn resolve_cloud_init_instructions(
             // reach carbide-api and carbide-pxe services. Just to reiterate,
             // these can be either routable IPs, or externally resolvable
             // hostnames to routable IPs.
-            let is_external = machine_interface.segment_id
-                == db::network_segment::static_assignments(&mut *conn)
-                    .await
-                    .map(|s| s.id)
-                    .unwrap_or_default();
+            let is_external = match db::network_segment::static_assignments(&mut *conn).await {
+                Ok(segment) => machine_interface.segment_id == segment.id,
+                Err(error) if error.is_not_found() => false,
+                Err(error) => return Err(error.into()),
+            };
 
             let (api_url_override, pxe_url_override) = if is_external {
                 (

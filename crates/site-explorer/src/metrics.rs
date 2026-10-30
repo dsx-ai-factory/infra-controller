@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use ::carbide_utils::metrics::SharedMetricsHolder;
 use carbide_instrument::{Event, LabelValue};
 use carbide_metrics_utils::OtelView;
-use carbide_uuid::machine::MachineType;
+use carbide_uuid::machine::{HostMachineId, MachineType};
 use mac_address::MacAddress;
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::site_explorer::{EndpointExplorationError, MachineExpectation};
@@ -32,6 +32,7 @@ use opentelemetry::metrics::{Histogram, Meter};
 use opentelemetry_sdk::metrics::{Aggregation, InstrumentKind};
 
 use super::config::SiteExplorerConfig;
+use crate::rack_order::RackHostFill;
 
 /// Reasons why a host fails to pair with its DPU(s).
 /// These are issues that require manual intervention.
@@ -138,6 +139,9 @@ pub struct SiteExplorationMetrics {
     pub site_explorer_phase_latency: Vec<(&'static str, Duration)>,
     /// Counts from the update_explored_endpoints phase in the last run.
     pub update_explored_endpoints_counts: HashMap<&'static str, usize>,
+    /// Rack host fill before the last create_machines phase; `None` when
+    /// machine creation is disabled.
+    pub(crate) rack_host_fill: Option<RackHostFill>,
     /// Total amount of managedhosts that has been identified via Site Exploration
     pub exploration_identified_managed_hosts: usize,
     /// The amount of Machine pairs (Host + DPU) that have been created by Site Explorer
@@ -200,6 +204,7 @@ impl SiteExplorationMetrics {
             endpoint_exploration_step_latency: Vec::new(),
             site_explorer_phase_latency: Vec::new(),
             update_explored_endpoints_counts: HashMap::new(),
+            rack_host_fill: None,
             exploration_identified_managed_hosts: 0,
             created_machines: 0,
             create_machines_latency: None,
@@ -382,6 +387,107 @@ pub(crate) enum SiteExplorerIterationFinished {
         #[context]
         error: String,
     },
+}
+
+/// How one `create_machines` attempt on an identified managed host ended, as
+/// a bounded metric label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(crate) enum ManagedHostCreationOutcome {
+    /// A host machine and its DPU machines were created.
+    Created,
+    /// Every DPU already had a machine; the host's links were repaired in place.
+    Repaired,
+    /// No `expected_machines` record matched the host.
+    SkippedUnexpected,
+    Failed,
+}
+
+/// One finished managed host creation attempt in `create_machines`. The
+/// `_count` series, split by outcome, is the per-host progress counter inside
+/// an iteration; `_sum` over `_count` is the per-host cost.
+#[derive(Event)]
+#[event(
+    event_name = "site_explorer_managed_host_creation_finished",
+    metric_name = "carbide_site_explorer_managed_host_creation_latency_milliseconds",
+    component = "site-explorer",
+    metric = histogram,
+    describe = "Time one Site Explorer managed host creation attempt took, from admission to \
+                the end of the after-commit repair, by outcome; the _count series, split by \
+                outcome, is the per-host creation and failure rate.",
+    labels(outcome: ManagedHostCreationOutcome),
+)]
+pub(crate) enum ManagedHostCreationFinished {
+    #[event(
+        labels(outcome = ManagedHostCreationOutcome::Created),
+        log = info,
+        message = "Created managed host from explored endpoint"
+    )]
+    Created {
+        #[observation]
+        latency: Duration,
+        #[context]
+        host_bmc_ip_address: IpAddr,
+        #[context]
+        host_machine_id: HostMachineId,
+        #[context]
+        dpu_count: usize,
+    },
+
+    #[event(labels(outcome = ManagedHostCreationOutcome::Repaired), log = off)]
+    Repaired {
+        #[observation]
+        latency: Duration,
+    },
+
+    #[event(labels(outcome = ManagedHostCreationOutcome::SkippedUnexpected), log = off)]
+    SkippedUnexpected {
+        #[observation]
+        latency: Duration,
+    },
+
+    #[event(
+        labels(outcome = ManagedHostCreationOutcome::Failed),
+        log = error,
+        message = "Failed to create managed host"
+    )]
+    Failed {
+        #[observation]
+        latency: Duration,
+        #[context]
+        host_bmc_ip_address: IpAddr,
+        #[context]
+        error: String,
+    },
+}
+
+/// The stages of one managed host creation attempt: the wait for an
+/// admin-lock admission permit, the creation transaction from begin to commit
+/// or error, and the admin address repair that runs after the commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(crate) enum ManagedHostCreationStage {
+    AdmissionWait,
+    Transaction,
+    AfterCommitRepair,
+}
+
+/// One finished stage of a managed host creation attempt. Metric only: the
+/// per-host Event above carries the log line.
+#[derive(Event)]
+#[event(
+    event_name = "site_explorer_managed_host_creation_stage_finished",
+    metric_name = "carbide_site_explorer_managed_host_creation_stage_latency_milliseconds",
+    component = "site-explorer",
+    log = off,
+    metric = histogram,
+    describe = "Time one stage of a Site Explorer managed host creation attempt took, by stage: \
+                the admission permit wait, the creation transaction, and the after-commit \
+                admin address repair.",
+)]
+pub(crate) struct ManagedHostCreationStageFinished {
+    #[label]
+    pub(crate) stage: ManagedHostCreationStage,
+    #[observation]
+    pub(crate) latency: Duration,
 }
 
 /// Selection mechanisms Site Explorer currently uses for managed hosts with
@@ -977,9 +1083,39 @@ impl SiteExplorerInstruments {
         {
             let metrics = shared_metrics.clone();
             meter
+                .u64_observable_gauge("carbide_site_explorer_rack_host_fill_count")
+                .with_description(
+                    "Racks with expected hosts before the last create_machines phase, by kind: \
+                     expected, all_hosts_ingested (every expected host has a machine), and \
+                     completable_this_run (every expected host still without a machine was \
+                     identified for creation in that run)",
+                )
+                .with_callback(move |observer| {
+                    metrics.if_available(|metrics, attrs| {
+                        let Some(fill) = metrics.rack_host_fill else {
+                            return;
+                        };
+                        for (kind, count) in [
+                            ("expected", fill.expected),
+                            ("all_hosts_ingested", fill.all_hosts_ingested),
+                            ("completable_this_run", fill.completable_this_run),
+                        ] {
+                            observer.observe(
+                                count as u64,
+                                &[attrs, &[KeyValue::new("kind", kind)]].concat(),
+                            );
+                        }
+                    })
+                })
+                .build();
+        }
+
+        {
+            let metrics = shared_metrics.clone();
+            meter
                 .u64_observable_gauge("carbide_site_explorer_created_machines_count")
                 .with_description(
-                    "Number of machine pairs created by Site Explorer after identification",
+                    "Number of machine pairs created by Site Explorer after identification in the last SiteExplorer run",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
@@ -1117,7 +1253,7 @@ impl SiteExplorerInstruments {
             meter
                 .u64_observable_gauge("carbide_site_explorer_created_power_shelves_count")
                 .with_description(
-                    "Number of power shelves created by Site Explorer after identification",
+                    "Number of power shelves created by Site Explorer after identification in the last SiteExplorer run",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
@@ -1186,12 +1322,12 @@ impl SiteExplorerInstruments {
 
         if let Some(latency) = metrics.create_power_shelves_latency {
             self.site_explorer_create_power_shelves_latency
-                .record(1000.0 * latency.as_secs_f64(), &[]);
+                .record(latency.as_secs_f64(), &[]);
         }
 
         if let Some(latency) = metrics.create_switches_latency {
             self.site_explorer_create_switches_latency
-                .record(1000.0 * latency.as_secs_f64(), &[]);
+                .record(latency.as_secs_f64(), &[]);
         }
 
         for duration in metrics.endpoint_exploration_duration.iter() {
@@ -1249,24 +1385,39 @@ pub(super) fn exploration_error_to_metric_label(error: &EndpointExplorationError
     .to_string()
 }
 
+/// How long past the run interval, or past the iteration that set the cycle
+/// time, the last iteration's metrics stay visible to the observable gauges.
+const METRICS_HOLD_MARGIN: Duration = Duration::from_secs(60);
+
+/// How long to hold the metrics of an iteration that took `iteration_duration`:
+/// one more cycle up to a quarter longer than this one, plus the margin. The
+/// next iteration starts after the run interval or when this one ends,
+/// whichever is later, and a stuck explorer still ages out.
+fn metrics_hold_period(run_interval: Duration, iteration_duration: Duration) -> Duration {
+    run_interval
+        .max(iteration_duration.saturating_add(iteration_duration / 4))
+        .saturating_add(METRICS_HOLD_MARGIN)
+}
+
 /// Stores Metric data shared between SiteExplorer and the OpenTelemetry background task
 pub(super) struct MetricHolder {
     instruments: SiteExplorerInstruments,
     last_iteration_metrics: SharedMetricsHolder<SiteExplorationMetrics>,
+    run_interval: Duration,
 }
 
 impl MetricHolder {
-    pub(super) fn new(
-        meter: Meter,
-        hold_period: std::time::Duration,
-        config: &SiteExplorerConfig,
-    ) -> Self {
-        let last_iteration_metrics = SharedMetricsHolder::with_hold_period(hold_period);
+    pub(super) fn new(meter: Meter, config: &SiteExplorerConfig) -> Self {
+        let last_iteration_metrics = SharedMetricsHolder::with_hold_period(metrics_hold_period(
+            config.run_interval,
+            Duration::ZERO,
+        ));
         let instruments =
             SiteExplorerInstruments::new(meter, last_iteration_metrics.clone(), config);
         Self {
             instruments,
             last_iteration_metrics,
+            run_interval: config.run_interval,
         }
     }
 
@@ -1278,8 +1429,11 @@ impl MetricHolder {
         metrics.endpoint_exploration_duration.clear();
         metrics.endpoint_exploration_step_latency.clear();
         metrics.site_explorer_phase_latency.clear();
-        // And store the remaining metrics
-        self.last_iteration_metrics.update(metrics);
+        // And store the remaining metrics until the next iteration can replace them
+        let hold_period =
+            metrics_hold_period(self.run_interval, metrics.recording_started_at.elapsed());
+        self.last_iteration_metrics
+            .update_held_for(metrics, hold_period);
     }
 }
 
@@ -1294,6 +1448,44 @@ mod tests {
     use prometheus::{Encoder, TextEncoder};
 
     use super::*;
+
+    #[test]
+    fn metrics_hold_period_covers_the_longer_of_interval_and_iteration() {
+        let secs = Duration::from_secs;
+        // input: (run interval, iteration duration); expect: hold period
+        check_values(
+            [
+                Check {
+                    scenario: "a short iteration holds for the interval plus the margin",
+                    input: (secs(30), secs(10)),
+                    expect: secs(90),
+                },
+                Check {
+                    scenario: "a long iteration holds for a quarter more than its length plus the margin",
+                    input: (secs(30), secs(14 * 60)),
+                    expect: secs(14 * 60 + 210 + 60),
+                },
+                Check {
+                    scenario: "an iteration that grows by a quarter is still covered when it ends",
+                    input: (secs(30), secs(60 * 60)),
+                    expect: secs(75 * 60 + 60),
+                },
+                Check {
+                    scenario: "a hold at the duration limit saturates",
+                    input: (Duration::MAX, secs(10)),
+                    expect: Duration::MAX,
+                },
+                Check {
+                    scenario: "an iteration at the duration limit saturates",
+                    input: (secs(30), Duration::MAX),
+                    expect: Duration::MAX,
+                },
+            ],
+            |(run_interval, iteration_duration)| {
+                metrics_hold_period(run_interval, iteration_duration)
+            },
+        );
+    }
 
     struct LatencyHistogramTestMeter {
         meter_provider: SdkMeterProvider,
@@ -1346,6 +1538,137 @@ mod tests {
             "NIC policy registration keeps the legacy label" {
                 DpuMigrationSignal::RegisteredZeroDpuForNic =>
                     "registered_zero_dpu_for_nic_mode".to_string(),
+            }
+        );
+    }
+
+    struct ManagedHostCreationCase {
+        event: ManagedHostCreationFinished,
+        outcome: &'static str,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ManagedHostCreationObservation {
+        log_count: usize,
+        level: Option<tracing::Level>,
+        event_name: Option<String>,
+        host_bmc_ip_address: Option<String>,
+        histogram_count_delta: u64,
+    }
+
+    #[test]
+    fn managed_host_creation_outcomes_have_bounded_labels_and_expected_logs() {
+        const METRIC: &str = "carbide_site_explorer_managed_host_creation_latency_milliseconds";
+        let host_bmc_ip_address: IpAddr = "192.0.2.10".parse().unwrap();
+        let host_machine_id: HostMachineId = carbide_uuid::machine::MachineId::new(
+            carbide_uuid::machine::MachineIdSource::ProductBoardChassisSerial,
+            [7u8; 32],
+            MachineType::Host,
+        )
+        .try_into()
+        .unwrap();
+        let latency = Duration::from_millis(1500);
+
+        value_scenarios!(
+            run = |ManagedHostCreationCase { event, outcome }| {
+                let metrics = MetricsCapture::start();
+                let logs = capture_logs(|| emit(event));
+                let log = logs.first();
+
+                ManagedHostCreationObservation {
+                    log_count: logs.len(),
+                    level: log.map(|log| log.level),
+                    event_name: log
+                        .and_then(|log| log.field("event_name"))
+                        .map(str::to_string),
+                    host_bmc_ip_address: log
+                        .and_then(|log| log.field("host_bmc_ip_address"))
+                        .map(str::to_string),
+                    histogram_count_delta: metrics
+                        .histogram_count_delta(METRIC, &[("outcome", outcome)]),
+                }
+            };
+            "a created host logs at info with its BMC address" {
+                ManagedHostCreationCase {
+                    event: ManagedHostCreationFinished::Created {
+                        latency,
+                        host_bmc_ip_address,
+                        host_machine_id,
+                        dpu_count: 2,
+                    },
+                    outcome: "created",
+                } => ManagedHostCreationObservation {
+                    log_count: 1,
+                    level: Some(tracing::Level::INFO),
+                    event_name: Some("site_explorer_managed_host_creation_finished".to_string()),
+                    host_bmc_ip_address: Some("192.0.2.10".to_string()),
+                    histogram_count_delta: 1,
+                },
+            }
+            "a repaired host is metric-only" {
+                ManagedHostCreationCase {
+                    event: ManagedHostCreationFinished::Repaired { latency },
+                    outcome: "repaired",
+                } => ManagedHostCreationObservation {
+                    log_count: 0,
+                    level: None,
+                    event_name: None,
+                    host_bmc_ip_address: None,
+                    histogram_count_delta: 1,
+                },
+            }
+            "a host without an expected machine is metric-only" {
+                ManagedHostCreationCase {
+                    event: ManagedHostCreationFinished::SkippedUnexpected { latency },
+                    outcome: "skipped_unexpected",
+                } => ManagedHostCreationObservation {
+                    log_count: 0,
+                    level: None,
+                    event_name: None,
+                    host_bmc_ip_address: None,
+                    histogram_count_delta: 1,
+                },
+            }
+            "a failed attempt logs at error with its BMC address" {
+                ManagedHostCreationCase {
+                    event: ManagedHostCreationFinished::Failed {
+                        latency,
+                        host_bmc_ip_address,
+                        error: "deadline exceeded".to_string(),
+                    },
+                    outcome: "failed",
+                } => ManagedHostCreationObservation {
+                    log_count: 1,
+                    level: Some(tracing::Level::ERROR),
+                    event_name: Some("site_explorer_managed_host_creation_finished".to_string()),
+                    host_bmc_ip_address: Some("192.0.2.10".to_string()),
+                    histogram_count_delta: 1,
+                },
+            }
+        );
+    }
+
+    /// The stage label values are the series operators and samplers query.
+    #[test]
+    fn managed_host_creation_stage_labels_stay_stable() {
+        const METRIC: &str =
+            "carbide_site_explorer_managed_host_creation_stage_latency_milliseconds";
+
+        value_scenarios!(
+            run = |stage: ManagedHostCreationStage| {
+                let metrics = MetricsCapture::start();
+                emit(ManagedHostCreationStageFinished {
+                    stage,
+                    latency: Duration::from_millis(20),
+                });
+                ["admission_wait", "transaction", "after_commit_repair"]
+                    .into_iter()
+                    .find(|label| metrics.histogram_count_delta(METRIC, &[("stage", label)]) == 1)
+            };
+            "each stage records under its own label" {
+                ManagedHostCreationStage::AdmissionWait => Some("admission_wait"),
+                ManagedHostCreationStage::Transaction => Some("transaction"),
+                ManagedHostCreationStage::AfterCommitRepair => Some("after_commit_repair"),
             }
         );
     }
@@ -1831,6 +2154,58 @@ mod tests {
     }
 
     #[test]
+    fn site_explorer_creation_latencies_use_declared_units() {
+        let test_meter = LatencyHistogramTestMeter::new("carbide_site_explorer_*_latency");
+        let metric_holder = MetricHolder::new(
+            test_meter.meter_provider.meter("site-explorer-test"),
+            &SiteExplorerConfig::default(),
+        );
+
+        metric_holder.update_metrics(SiteExplorationMetrics {
+            create_machines_latency: Some(Duration::from_millis(375)),
+            create_power_shelves_latency: Some(Duration::from_millis(125)),
+            create_switches_latency: Some(Duration::from_millis(1250)),
+            ..Default::default()
+        });
+
+        let families = test_meter.registry.gather();
+        check_values(
+            [
+                Check {
+                    scenario: "machine creation",
+                    input: "carbide_site_explorer_create_machines_latency_milliseconds",
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 375.0),
+                },
+                Check {
+                    scenario: "power-shelf creation",
+                    input: "site_explorer_create_power_shelves_latency_seconds",
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 0.125),
+                },
+                Check {
+                    scenario: "switch creation",
+                    input: "site_explorer_create_switches_latency_seconds",
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 1.25),
+                },
+            ],
+            |name| {
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == name)
+                    .unwrap_or_else(|| panic!("missing {name} histogram"));
+                assert_eq!(family.get_metric().len(), 1, "{name}: series count");
+                let metric = &family.get_metric()[0];
+                assert!(metric.get_label().is_empty(), "{name}: unexpected labels");
+                let histogram = metric.get_histogram();
+                (
+                    family.get_field_type(),
+                    histogram.get_sample_count(),
+                    histogram.get_sample_sum(),
+                )
+            },
+        );
+    }
+
+    #[test]
     fn site_explorer_latency_histogram_views_build() {
         scenarios!(
             run = |name_filter: &'static str| {
@@ -1848,6 +2223,10 @@ mod tests {
 
             "endpoint exploration duration" {
                 "carbide_endpoint_exploration_duration" => Yields(()),
+            }
+
+            "endpoint exploration step latency" {
+                "carbide_endpoint_exploration_step_latency" => Yields(()),
             }
         );
     }

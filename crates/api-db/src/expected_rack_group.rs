@@ -152,6 +152,27 @@ pub async fn create(
 }
 
 pub async fn update(txn: &mut PgConnection, group: &ExpectedRackGroup) -> DatabaseResult<()> {
+    let lock = "SELECT rack_group_id FROM expected_rack_groups WHERE rack_group_id=$1 FOR UPDATE";
+    sqlx::query(lock)
+        .bind(&group.rack_group_id)
+        .execute(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(lock, e))?;
+    if let Some(existing) = find_by_rack_group_id(&mut *txn, &group.rack_group_id).await?
+        && existing.racks != group.racks
+    {
+        let query = "SELECT EXISTS (SELECT 1 FROM expected_nvlink_domains WHERE rack_group_id=$1)";
+        let used: bool = sqlx::query_scalar(query)
+            .bind(&group.rack_group_id)
+            .fetch_one(&mut *txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+        if used {
+            return Err(DatabaseError::FailedPrecondition(
+                "delete expected NVLink domains before changing their rack group's racks".into(),
+            ));
+        }
+    }
     let query = "UPDATE expected_rack_groups SET topology=$1, protocol=$2, racks=$3, metadata_name=$4, metadata_description=$5, metadata_labels=$6 WHERE rack_group_id=$7";
     let result = sqlx::query(query)
         .bind(group.topology.as_str())
@@ -180,7 +201,7 @@ pub async fn delete(txn: &mut PgConnection, rack_group_id: &RackGroupId) -> Data
         .bind(rack_group_id)
         .execute(txn)
         .await
-        .map_err(|err| DatabaseError::query(query, err))?;
+        .map_err(|err| group_dependency_error(query, err))?;
     if result.rows_affected() == 0 {
         return Err(DatabaseError::NotFoundError {
             kind: "expected_rack_group",
@@ -203,7 +224,20 @@ pub async fn clear(txn: &mut PgConnection) -> DatabaseResult<()> {
         .execute(txn)
         .await
         .map(|_| ())
-        .map_err(|err| DatabaseError::query(query, err))
+        .map_err(|err| group_dependency_error(query, err))
+}
+
+fn group_dependency_error(query: &str, error: sqlx::Error) -> DatabaseError {
+    if error
+        .as_database_error()
+        .is_some_and(|e| e.is_foreign_key_violation())
+    {
+        DatabaseError::FailedPrecondition(
+            "cannot delete or replace rack groups while dependent records exist".into(),
+        )
+    } else {
+        DatabaseError::query(query, error)
+    }
 }
 
 #[cfg(test)]

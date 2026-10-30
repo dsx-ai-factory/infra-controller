@@ -110,6 +110,7 @@ x509-parser = { workspace = true }
 # [local-dependencies]
 carbide-health-report = { path = "../health-report" }
 carbide-rpc = { path = "../rpc" }
+carbide-secrets = { path = "../secrets" }
 carbide-tls = { path = "../tls" }
 carbide-version = { path = "../version" }
 carbide-utils = { path = "../utils" }
@@ -122,9 +123,10 @@ tonic-prost-build = { workspace = true }
 
 [features]
 bench-hooks = []
+test-support = []
 
 [dev-dependencies]
-axum = { workspace = true }
+axum = { workspace = true, features = ["http2"] }
 bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }

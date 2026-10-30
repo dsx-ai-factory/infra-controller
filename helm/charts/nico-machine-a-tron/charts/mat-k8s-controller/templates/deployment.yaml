@@ -20,9 +20,9 @@ spec:
       labels:
         {{- include "mat-k8s-controller.selectorLabels" . | nindent 8 }}
     spec:
-      # Controller mode creates one Service per BMC (thousands); the default
-      # service-link env injection then breaks exec in ALL new namespace pods
-      # with E2BIG ("argument list too long").
+      # Controller mode at device granularity creates one Service per BMC
+      # (thousands); the default service-link env injection then breaks exec
+      # in ALL new namespace pods with E2BIG ("argument list too long").
       enableServiceLinks: false
       serviceAccountName: {{ include "mat-k8s-controller.serviceAccountName" . }}
       {{- if .Values.gateway.enabled }}
@@ -47,6 +47,7 @@ spec:
             - --log-level={{ .Values.config.logLevel }}
             - --target-selector={{ include "mat-k8s-controller.targetSelector" . }}
             - --enable-state-annotations={{ .Values.config.enableStateAnnotations }}
+            - --service-granularity={{ .Values.config.serviceGranularity }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
@@ -65,8 +66,9 @@ spec:
           {{- end }}
         {{- if .Values.gateway.enabled }}
         {{- $gatewayName := include "mat-k8s-controller.gateway.fullname" . }}
+        {{- $gatewayImage := .Values.gateway.image | default dict }}
         - name: gateway
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ $gatewayImage.repository | default .Values.image.repository }}:{{ $gatewayImage.tag | default .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /mat-protocol-gateway

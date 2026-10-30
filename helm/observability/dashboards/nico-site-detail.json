@@ -3102,7 +3102,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(${metric_prefix}_hosts_alerts_suppressed_count{job=~\"$job\",fresh=\"true\"} == 1) or vector(0)",
+          "expr": "count(max by (machine_id) (${metric_prefix}_hosts_alerts_suppressed_count{job=~\"$job\",fresh=\"true\"} == 1)) or vector(0)",
           "legendFormat": "hosts",
           "range": true,
           "instant": false,
@@ -3286,7 +3286,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(${metric_prefix}_hosts_with_scout_heartbeat_timeout{job=~\"$job\",fresh=\"true\"} == 1) or vector(0)",
+          "expr": "count(max by (host_machine_id) (${metric_prefix}_hosts_with_scout_heartbeat_timeout{job=~\"$job\",fresh=\"true\"} == 1)) or vector(0)",
           "legendFormat": "hosts",
           "range": true,
           "instant": false,
@@ -14284,7 +14284,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(${metric_prefix}_dns_negative_cache_eviction_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "sum(rate(${metric_prefix}_dns_negative_cache_eviction_count_total{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "evictions/s",
           "range": true,
           "instant": false,
@@ -14706,7 +14706,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Dropped stream lines, BMC transport errors and recovery attempts.",
+      "description": "Dropped stream line and BMC transport error rates, plus the sum of current recovery retry numbers across BMC clients. Retry numbers reset when clients are recreated.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -14821,8 +14821,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(ssh_console_bmc_recovery_attempts{job=~\"$job\"}[$__rate_interval]))",
-          "legendFormat": "recovery attempts/s",
+          "expr": "sum(ssh_console_bmc_recovery_attempts{job=~\"$job\"})",
+          "legendFormat": "recovery attempts",
           "range": true,
           "instant": false,
           "refId": "D"

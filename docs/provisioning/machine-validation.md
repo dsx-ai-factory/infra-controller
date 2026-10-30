@@ -208,9 +208,8 @@ legacy container tests configured with `tests add`.
 ### 1. Allow the plugin runtime profile in site configuration
 
 Add the policy to the site's existing Machine Validation configuration, then
-roll out the normal site configuration deployment. With Helm, this is the TOML
-in `nico-api.siteConfig.nicoApiSiteConfig`; with Kustomize, it is
-`deploy/files/nico-api/nico-api-site-config.toml`. Keep the rest of the site
+roll out the normal site configuration deployment. This is the TOML in
+`nico-api.siteConfig.nicoApiSiteConfig`. Keep the rest of the site
 configuration intact.
 
 ```toml

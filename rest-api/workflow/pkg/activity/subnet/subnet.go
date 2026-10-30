@@ -60,7 +60,7 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 
 	stDAO := cdbm.NewSiteDAO(ms.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received Subnet inventory for unknown or deleted Site")
@@ -138,6 +138,14 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 
 		if subnet == nil {
 			if controllerSegment.GetConfig().GetSegmentType() != corev1.NetworkSegmentType_TENANT {
+				continue
+			}
+			// Current Core reports CAN_STRETCH for tenant-visible Subnets and NO_OP for
+			// generated FNN linknets. Segments with missing flags remain eligible for
+			// compatibility with older inventory producers.
+			segmentFlags := controllerSegment.GetStatus().GetFlags()
+			if len(segmentFlags) > 0 &&
+				!slices.Contains(segmentFlags, corev1.NetworkSegmentFlag_CAN_STRETCH) {
 				continue
 			}
 
@@ -848,7 +856,7 @@ func NewManageSubnetLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.S
 			prometheus.GaugeOpts{
 				Namespace: namespace,
 				Name:      "subnet_operation_latency_seconds",
-				Help:      "Current latency of subnet operations",
+				Help:      "Latency in seconds of the most recently recorded completed subnet operation for each label set on this worker replica",
 			},
 			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
 

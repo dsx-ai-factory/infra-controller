@@ -55,25 +55,36 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		assert.Contains(t, body, "interfaces")
 	})
 
-	t.Run("populated interfaces preserve optional CX9 data", func(t *testing.T) {
+	t.Run("populated interfaces preserve identifiers and optional CX9 data", func(t *testing.T) {
+		mac := "02:00:00:00:00:09"
 		nicType := "CX9"
 		fixedIP := "192.0.2.9"
 		mask, gateway, segment, role, allocation := "255.255.255.0", "192.0.2.1", "HostInband", "Host", "Fixed"
 		primary := true
+		logicalName := "eth_r0_p0"
 		req := ExpectedMachineUpdateRequest{Interfaces: []ExpectedMachineInterface{{
-			MacAddress: "02:00:00:00:00:09",
+			Identifier: &ExpectedMachineInterfaceIdentifier{MacAddress: &mac},
+			MacAddress: &mac,
 			NicType:    &nicType,
 			FixedIP:    &fixedIP,
 			FixedMask:  &mask, FixedGateway: &gateway, Primary: &primary,
 			NetworkSegmentType: &segment, Role: &role, IPAllocation: &allocation,
+		}, {
+			Identifier: &ExpectedMachineInterfaceIdentifier{Astra: &ExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1", LogicalName: &logicalName}},
+			NicType:    &nicType,
 		}}}
 
 		apiReq := toStandardExpectedMachineUpdateRequest(req)
 
-		require.Len(t, apiReq.Interfaces, 1)
-		assert.Equal(t, "02:00:00:00:00:09", apiReq.Interfaces[0].MacAddress)
+		require.Len(t, apiReq.Interfaces, 2)
+		assert.Equal(t, &mac, apiReq.Interfaces[0].Identifier.Get().MacAddress.Get())
+		assert.Equal(t, &mac, apiReq.Interfaces[0].MacAddress.Get())
 		assert.Equal(t, &nicType, apiReq.Interfaces[0].NicType.Get())
 		assert.Equal(t, &fixedIP, apiReq.Interfaces[0].FixedIp.Get())
+		astra := apiReq.Interfaces[1].Identifier.Get().Astra.Get()
+		require.NotNil(t, astra)
+		assert.Equal(t, "C1-1-L1", astra.PhysicalName)
+		assert.Equal(t, &logicalName, astra.LogicalName.Get())
 		body, err := json.Marshal(apiReq)
 		require.NoError(t, err)
 		var response standard.ExpectedMachine

@@ -57,6 +57,7 @@ use model::resource_pool::common::CommonPools;
 use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 
 use self::metrics::ApiMetricsEmitter;
@@ -65,6 +66,7 @@ use crate::cfg::file::CarbideConfig;
 use crate::dynamic_settings::DynamicSettings;
 use crate::ethernet_virtualization::EthVirtData;
 use crate::logging::log_limiter::LogLimiter;
+use crate::resource_pool::ResourcePoolMonitor;
 use crate::scout_stream::ConnectionRegistry;
 use crate::{CarbideError, CarbideResult};
 
@@ -89,6 +91,8 @@ pub struct Api {
     pub(crate) common_pools: Arc<CommonPools>,
     /// Pool backends resolved at startup; runtime lookups also see later growth.
     pub(crate) resource_pool_registry: ResourcePoolRegistry,
+    /// Shared inventory and provider observations for admin inspection and metrics.
+    pub(crate) resource_pool_monitor: ResourcePoolMonitor,
     pub(crate) ib_fabric_manager: Arc<dyn IBFabricManager>,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI for config-derived display.
     pub runtime_config: Arc<CarbideConfig>,
@@ -116,6 +120,7 @@ pub struct Api {
     /// listener.
     pub(crate) node_jwt_validator: Option<Arc<crate::node_auth::NodeJwtValidator>>,
     pub(crate) console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    pub(crate) cancel_token: CancellationToken,
 }
 
 pub(crate) type ScoutStreamType =
@@ -409,6 +414,20 @@ impl Forge for Api {
         request: Request<rpc::SpxPartitionsByIdsRequest>,
     ) -> Result<Response<rpc::SpxPartitionList>, Status> {
         crate::handlers::spx_partition::find_by_ids(self, request).await
+    }
+
+    async fn get_machine_spx_multiplane(
+        &self,
+        request: Request<rpc::MachineSpxMultiplaneRequest>,
+    ) -> Result<Response<rpc::MachineSpxMultiplane>, Status> {
+        crate::handlers::spx_multiplane::get(self, request).await
+    }
+
+    async fn update_machine_spx_multiplane_maintenance(
+        &self,
+        request: Request<rpc::MachineSpxMultiplaneMaintenanceUpdateRequest>,
+    ) -> Result<Response<rpc::MachineSpxMultiplane>, Status> {
+        crate::handlers::spx_multiplane::update(self, request).await
     }
 
     async fn find_ib_partition_ids(
@@ -884,6 +903,20 @@ impl Forge for Api {
         crate::handlers::tenant::update(self, request).await
     }
 
+    async fn get_tenant_nic_firmware_config(
+        &self,
+        request: Request<rpc::GetTenantNicFirmwareConfigRequest>,
+    ) -> Result<Response<rpc::GetTenantNicFirmwareConfigResponse>, Status> {
+        crate::handlers::tenant::get_nic_firmware_config(self, request).await
+    }
+
+    async fn set_tenant_nic_firmware_config(
+        &self,
+        request: Request<rpc::SetTenantNicFirmwareConfigRequest>,
+    ) -> Result<Response<rpc::SetTenantNicFirmwareConfigResponse>, Status> {
+        crate::handlers::tenant::set_nic_firmware_config(self, request).await
+    }
+
     async fn find_tenants_by_organization_ids(
         &self,
         request: Request<rpc::TenantByOrganizationIdsRequest>,
@@ -1008,6 +1041,13 @@ impl Forge for Api {
         request: Request<::rpc::forge::MachinesByIdsRequest>,
     ) -> Result<Response<::rpc::MachineList>, Status> {
         crate::handlers::machine::find_machines_by_ids(self, request).await
+    }
+
+    async fn find_host_states_by_ids(
+        &self,
+        request: Request<rpc::HostStatesByIdsRequest>,
+    ) -> Result<Response<rpc::HostStateList>, Status> {
+        crate::handlers::host_state::find_host_states_by_ids(self, request).await
     }
 
     async fn find_machine_state_histories(
@@ -1366,6 +1406,13 @@ impl Forge for Api {
         request: Request<rpc::GrowResourcePoolRequest>,
     ) -> Result<Response<rpc::GrowResourcePoolResponse>, Status> {
         crate::handlers::resource_pool::grow(self, request).await
+    }
+
+    async fn admin_inspect_resource_pools(
+        &self,
+        request: Request<rpc::InspectResourcePoolsRequest>,
+    ) -> Result<Response<rpc::InspectResourcePoolsResponse>, Status> {
+        crate::handlers::resource_pool::inspect(self, request).await
     }
 
     async fn admin_list_resource_pools(
@@ -2091,6 +2138,41 @@ impl Forge for Api {
         request: Request<()>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
+    }
+
+    async fn create_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::CreateExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
+        crate::handlers::expected_nvlink_domain::create(self, request).await
+    }
+
+    async fn delete_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_nvlink_domain::delete(self, request).await
+    }
+
+    async fn get_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
+        crate::handlers::expected_nvlink_domain::get(self, request).await
+    }
+
+    async fn find_expected_nv_link_domain_ids(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainSearchFilter>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomainIdList>, Status> {
+        crate::handlers::expected_nvlink_domain::find_ids(self, request).await
+    }
+
+    async fn find_expected_nv_link_domains_by_ids(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainsByIdsRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomainList>, Status> {
+        crate::handlers::expected_nvlink_domain::find_by_ids(self, request).await
     }
 
     async fn add_expected_rack_group(
@@ -3172,6 +3254,13 @@ impl Forge for Api {
         crate::handlers::sku::replace_sku(self, request).await
     }
 
+    async fn replace_sku_components(
+        &self,
+        request: Request<rpc::ReplaceSkuComponentsRequest>,
+    ) -> Result<Response<rpc::Sku>, Status> {
+        crate::handlers::sku::replace_sku_components(self, request).await
+    }
+
     async fn set_managed_host_quarantine_state(
         &self,
         request: Request<rpc::SetManagedHostQuarantineStateRequest>,
@@ -4240,9 +4329,7 @@ impl Api {
             let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
                 Err(err) => {
                     tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                    return Err(CarbideError::InvalidArgument(
-                        "err loading machine".to_string(),
-                    ));
+                    return Err(err.into());
                 }
                 Ok(None) => {
                     tracing::info!(%machine_id, "machine not found");

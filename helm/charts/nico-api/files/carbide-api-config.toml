@@ -332,3 +332,10 @@ client_cert = {{ . | quote }}
 client_key = {{ . | quote }}
 {{- end }}
 {{- end }}
+{{- $nvlinkEnabled := index (.Values.nvlink | default dict) "enabled" }}
+{{- if kindIs "bool" $nvlinkEnabled }}
+
+# NVLink partitioning; a site configuration value takes precedence.
+[nvlink_config]
+enabled = {{ $nvlinkEnabled }}
+{{- end }}

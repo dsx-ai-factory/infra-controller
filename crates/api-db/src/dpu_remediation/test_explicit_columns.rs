@@ -68,15 +68,17 @@ async fn exercise_remediation_queries(
     )
     .await?;
 
-    // Both INSERT statements return a remediation. Nonempty metadata also
-    // catches omitted columns that `FromRow` would otherwise default away.
-    for metadata in [
-        None,
-        Some(Metadata {
-            name: "repair-interface".to_string(),
-            description: "restore DPU interface configuration".to_string(),
-            labels: HashMap::from([("component".to_string(), "network".to_string())]),
-        }),
+    // Both INSERT statements return a remediation.
+    for (metadata, status) in [
+        (None, HashMap::new()),
+        (
+            Some(Metadata {
+                name: "repair-interface".to_string(),
+                description: "restore DPU interface configuration".to_string(),
+                labels: HashMap::from([("component".to_string(), "network".to_string())]),
+            }),
+            HashMap::from([("detail".to_string(), "interface restored".to_string())]),
+        ),
     ] {
         let mut expected = persist_remediation(
             NewRemediation {
@@ -121,7 +123,6 @@ async fn exercise_remediation_queries(
         assert_eq!(found.enabled, expected.enabled);
         assert_eq!(found.creation_time, expected.creation_time);
 
-        let status = HashMap::from([("detail".to_string(), "interface restored".to_string())]);
         let applied = persist_applied_remediation(
             NewAppliedRemediation {
                 id: expected.id,

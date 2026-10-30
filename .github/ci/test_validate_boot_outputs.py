@@ -10,6 +10,7 @@ Run from the repository root with
 from __future__ import annotations
 
 import io
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -153,13 +154,13 @@ class ValidateBootOutputsTests(unittest.TestCase):
                 self.assertEqual(optional & disabled, set())
 
     def test_required_outputs_are_inside_the_uploaded_paths(self) -> None:
-        # This mirrors the `Upload artifacts` path list in
-        # build-boot-artifacts.yml. Update both when that list changes.
-        upload_paths = (
-            "pxe/static/blobs/",
-            "target/debs/",
-            "target/aarch64-unknown-linux-gnu/release/forge-scout",
-        )
+        # Read the actual step so removing an upload path cannot leave a copied
+        # test inventory passing while CI silently drops a required artifact.
+        workflow = (Path(__file__).resolve().parents[1] / "workflows/build-boot-artifacts.yml").read_text()
+        step = workflow.split("      - name: Upload artifacts\n", 1)[1].split("      - name:", 1)[0]
+        paths = re.search(r"(?m)^          path: \|\n((?:            .+\n)+)", step)
+        self.assertIsNotNone(paths, "Upload artifacts must declare its path list")
+        upload_paths = tuple(line.strip() for line in paths.group(1).splitlines())
 
         for build_identity, contract in CONTRACTS.items():
             with self.subTest(build_identity=build_identity):
@@ -178,6 +179,20 @@ class ValidateBootOutputsTests(unittest.TestCase):
                     populate_contract(root, contract, include_optional=True)
 
                     self.assertEqual(validate_outputs(root, contract), [])
+
+    def test_aarch64_boot_requires_the_firmware_supervisor(self) -> None:
+        """Reject a boot upload that includes Scout but omits its supervisor."""
+
+        contract = CONTRACTS[EXPECTED_BUILD_IDENTITIES[("boot", "aarch64")]]
+        supervisor = "target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            populate_contract(root, contract, omit=supervisor)
+
+            self.assertEqual(
+                validate_outputs(root, contract),
+                [f"missing required output: {supervisor}"],
+            )
 
     def test_ephemeral_contracts_keep_downloaded_boot_inputs(self) -> None:
         # Keep this inventory independent from the production constants. A

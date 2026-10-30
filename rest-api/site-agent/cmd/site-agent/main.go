@@ -63,8 +63,5 @@ func main() {
 	// Wait forever
 	termChan := make(chan os.Signal, 1)
 	signal.Notify(termChan, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case <-termChan:
-		return
-	}
+	<-termChan
 }

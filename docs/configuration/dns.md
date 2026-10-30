@@ -125,7 +125,7 @@ unbound:
 
 This string replaces the existing `access_control.conf` value. Merge all required site access rules into it, including any source addresses introduced by network address translation (NAT). `do-ip6: yes` also permits outbound IPv6 DNS traffic. You can still use existing IPv4 forwarders. Apply listener configuration first, restart the resolver through the site's normal rollout workflow, and verify it before enabling the Service's IPv6 exposure. Interface changes require a restart. A configuration reload alone is insufficient. The [Unbound configuration reference](https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html) describes listener and access-control semantics.
 
-For Kustomize, configure the image through the existing `deploy/nico-unbound-base/local.conf.d/access_control.conf` and change only `nico-unbound`'s Service `ipFamilyPolicy` to `PreferDualStack` in the site overlay, retaining its IPv4 primary family and all three ports. The base remains IPv4-only. The root deployment publishes this combined Service through a LoadBalancer, so IPv6 enablement also requires compatible virtual IP address (VIP) allocation and routing there. For Helm, configure the separate [Unbound External Services](#unbound-external-services). An internal dual-stack Service does not provide an external IPv6 resolver VIP for bare-metal hosts.
+Configure the separate [Unbound External Services](#unbound-external-services) for external exposure. An internal dual-stack Service does not provide an external IPv6 resolver VIP for bare-metal hosts.
 
 Before advertising an IPv6 resolver to clients, validate the deployed images from an intended client network:
 

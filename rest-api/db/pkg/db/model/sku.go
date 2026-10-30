@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -242,6 +243,8 @@ type SkuDAO interface {
 	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, updated time.Time) (bool, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) ([]SKU, int, error)
+	// GetForAttachment locks requested SKUs on a Site until tx completes.
+	GetForAttachment(ctx context.Context, tx *db.Tx, siteID uuid.UUID, skuIDs []string) ([]SKU, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, skuID string) (*SKU, error)
 }
@@ -301,6 +304,30 @@ func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (_ *SKU, ret
 	}
 
 	return sk, nil
+}
+
+// GetForAttachment returns requested SKUs belonging to the Site and holds them
+// until the transaction completes. Missing or foreign SKUs are absent from the
+// result. An empty ID list selects nothing; a transaction is always required.
+func (ssd SkuSQLDAO) GetForAttachment(ctx context.Context, tx *db.Tx, siteID uuid.UUID, skuIDs []string) (_ []SKU, retErr error) {
+	if tx == nil {
+		return nil, errors.New("transaction is required to lock SKU attachments")
+	}
+	if len(skuIDs) == 0 {
+		return []SKU{}, nil
+	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.GetForAttachment")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+
+	// `Update` never changes `SiteID`, so moving a SKU requires deletion and
+	// recreation. KEY SHARE makes that deletion wait until this transaction
+	// ends while ordinary metadata updates can proceed. Lock rows in ID order.
+	skus := []SKU{}
+	err := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(&skus).
+		Where("sk.site_id = ?", siteID).
+		Where("sk.id IN (?)", bun.In(skuIDs)).
+		OrderExpr("sk.id ASC").For("KEY SHARE").Scan(ctx)
+	return skus, err
 }
 
 // setQueryWithFilter populates the lookup query based on specified filter

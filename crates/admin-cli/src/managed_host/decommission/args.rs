@@ -28,6 +28,6 @@ Start decommissioning a ready managed host:
 
 ")]
 pub(crate) struct Args {
-    #[clap(help = "ID of the ready managed host to decommission")]
+    #[clap(help = "ID of the managed host to decommission. It must be ready and have no instance")]
     pub(crate) machine_id: StableHostMachineId,
 }

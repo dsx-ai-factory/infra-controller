@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 
 # Docker automatically provides these args during multi-platform builds
 ARG TARGETOS=linux
@@ -39,7 +39,7 @@ WORKDIR /workspace/site-manager
 RUN VERSION=${VERSION} && \
     BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S") && \
     go build \
-        -ldflags "-extldflags '-static' -w -s" \
+        -ldflags "-extldflags '-static' -w -s -X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}" \
         -o /app/sitemgr \
         ./cmd/sitemgr
 

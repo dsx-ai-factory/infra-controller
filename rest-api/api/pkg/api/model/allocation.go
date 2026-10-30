@@ -135,14 +135,15 @@ func NewAPIAllocation(dba *cdbm.Allocation, dbsds []cdbm.StatusDetail, acs []cdb
 	apiAllocation.AllocationConstraints = []APIAllocationConstraint{}
 	for _, ac := range acs {
 		tmpAC := ac
-		if ac.ResourceType == cdbm.AllocationResourceTypeInstanceType {
+		switch ac.ResourceType {
+		case cdbm.AllocationResourceTypeInstanceType:
 			dbinstanceType, ok := dbacsInstaceTypeMap[ac.ID]
 			if ok {
 				apiAllocation.AllocationConstraints = append(apiAllocation.AllocationConstraints, *NewAPIAllocationConstraint(&tmpAC, dbinstanceType, nil))
 			} else {
 				apiAllocation.AllocationConstraints = append(apiAllocation.AllocationConstraints, *NewAPIAllocationConstraint(&tmpAC, nil, nil))
 			}
-		} else if ac.ResourceType == cdbm.AllocationResourceTypeIPBlock {
+		case cdbm.AllocationResourceTypeIPBlock:
 			dbipb, ok := dbacsIPBlockMap[ac.ID]
 			if ok {
 				apiAllocation.AllocationConstraints = append(apiAllocation.AllocationConstraints, *NewAPIAllocationConstraint(&tmpAC, nil, dbipb))

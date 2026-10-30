@@ -58,6 +58,18 @@ pub(crate) async fn decommission_managed_host(
         .into());
     }
 
+    // Keep this a separate statement after the row lock. Under READ COMMITTED it sees an
+    // instance committed while this request waited for the lock, which the locking read above
+    // may not. Do not fold it into that query.
+    if let Some(instance_id) =
+        db::instance::find_id_by_machine_id(&mut txn, machine_id.as_machine_id()).await?
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "managed host {machine_id} cannot be decommissioned while instance {instance_id} exists"
+        ))
+        .into());
+    }
+
     let dpus = db::machine::find_dpus_by_host_machine_id(&mut txn, &machine_id).await?;
     let unsupported_dpus = dpus
         .iter()

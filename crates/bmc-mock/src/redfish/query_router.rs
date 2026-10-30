@@ -381,7 +381,6 @@ mod tests {
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use carbide_test_support::{Check, check_values};
     use tower::ServiceExt;
 
     use super::*;
@@ -502,61 +501,49 @@ mod tests {
             value: value.to_owned(),
             least,
         };
-        check_values(
-            [
-                Check {
-                    scenario: "no collection option",
-                    input: "only&excerpt&vendor=1",
-                    expect: Ok(None),
-                },
-                Check {
-                    scenario: "$expand alone is the expander's",
-                    input: "$expand=*",
-                    expect: Ok(None),
-                },
-                Check {
-                    scenario: "paging options",
-                    input: "$skip=2&$top=5",
-                    expect: Ok(Some(Paging {
-                        skip: 2,
-                        top: Some(5),
-                    })),
-                },
-                Check {
-                    scenario: "an unsupported $ parameter is refused",
-                    input: "$select=Id",
-                    expect: Err(QueryError::Unsupported {
-                        parameter: "$select".to_owned(),
-                    }),
-                },
-                Check {
-                    scenario: "a non-integer $skip",
-                    input: "$skip=many",
-                    expect: Err(bad("$skip", "many")),
-                },
-                Check {
-                    scenario: "a negative $skip",
-                    input: "$skip=-1",
-                    expect: Err(low("$skip", "-1", 0)),
-                },
-                Check {
-                    scenario: "$top=0 would never make progress",
-                    input: "$top=0",
-                    expect: Err(low("$top", "0", 1)),
-                },
-                Check {
-                    scenario: "a $top beyond any collection is out of range, not malformed",
-                    input: "$top=99999999999999999999",
-                    expect: Err(low("$top", "99999999999999999999", 1)),
-                },
-                Check {
-                    scenario: "a $filter the grammar does not cover",
-                    input: "$filter=Created%20ge%20yesterday",
-                    expect: Err(bad("$filter", "Created ge yesterday")),
-                },
-            ],
-            parse,
-        );
+        for (scenario, input, expected) in [
+            ("no collection option", "only&excerpt&vendor=1", Ok(None)),
+            ("$expand alone is the expander's", "$expand=*", Ok(None)),
+            (
+                "paging options",
+                "$skip=2&$top=5",
+                Ok(Some(Paging {
+                    skip: 2,
+                    top: Some(5),
+                })),
+            ),
+            (
+                "an unsupported $ parameter is refused",
+                "$select=Id",
+                Err(QueryError::Unsupported {
+                    parameter: "$select".to_owned(),
+                }),
+            ),
+            (
+                "a non-integer $skip",
+                "$skip=many",
+                Err(bad("$skip", "many")),
+            ),
+            ("a negative $skip", "$skip=-1", Err(low("$skip", "-1", 0))),
+            (
+                "$top=0 would never make progress",
+                "$top=0",
+                Err(low("$top", "0", 1)),
+            ),
+            (
+                "a $top beyond any collection is out of range, not malformed",
+                "$top=99999999999999999999",
+                Err(low("$top", "99999999999999999999", 1)),
+            ),
+            (
+                "a $filter the grammar does not cover",
+                "$filter=Created%20ge%20yesterday",
+                Err(bad("$filter", "Created ge yesterday")),
+            ),
+        ] {
+            let actual = parse(input);
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     #[test]

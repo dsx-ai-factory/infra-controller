@@ -7,7 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -134,7 +134,7 @@ func getUserDataFromNGC(baseURL string, ngcToken string, logger zerolog.Logger) 
 		return nil, fmt.Errorf("invalid response code: %v returned by NGC API", resp.StatusCode)
 	}
 
-	respData, err := ioutil.ReadAll(resp.Body)
+	respData, err := io.ReadAll(resp.Body)
 	defer resp.Body.Close()
 
 	if err != nil {

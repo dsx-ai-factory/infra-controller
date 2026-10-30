@@ -69,6 +69,9 @@ opentelemetry-prometheus = { workspace = true }
 prometheus = { workspace = true }
 
 bmc-vendor = { path = "../bmc-vendor" }
+carbide-api-db = { path = "../api-db", default-features = false, features = [
+  "test-support",
+] }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }

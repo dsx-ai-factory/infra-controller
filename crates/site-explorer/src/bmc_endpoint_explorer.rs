@@ -120,6 +120,8 @@ pub struct BmcEndpointExplorer {
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     mode: SiteExplorerExploreMode,
+    /// Whether nv-redfish reports include drive firmware inventory entries.
+    explore_drive_firmware: bool,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
     /// [`Self::set_bmc_root_credentials`]). `None` only for the standalone
@@ -140,8 +142,16 @@ impl BmcEndpointExplorer {
             bmc_client,
             rotate_switch_nvos_credentials,
             mode,
+            explore_drive_firmware: false,
             database_connection,
         }
+    }
+
+    /// Sets whether nv-redfish reports include drive firmware inventory
+    /// entries; off unless set.
+    pub fn with_drive_firmware(mut self, explore_drive_firmware: bool) -> Self {
+        self.explore_drive_firmware = explore_drive_firmware;
+        self
     }
 
     async fn get_sitewide_bmc_password(
@@ -382,7 +392,12 @@ impl BmcEndpointExplorer {
             SiteExplorerExploreMode::NvRedfish => {
                 self.bmc_client
                     .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, access, boot_interface)
+                    .nv_generate_exploration_report(
+                        bmc_ip_address,
+                        access,
+                        boot_interface,
+                        self.explore_drive_firmware,
+                    )
                     .await
             }
             SiteExplorerExploreMode::CompareResult => {
@@ -399,7 +414,12 @@ impl BmcEndpointExplorer {
                 let nvredfish = self
                     .bmc_client
                     .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, access, boot_interface)
+                    .nv_generate_exploration_report(
+                        bmc_ip_address,
+                        access,
+                        boot_interface,
+                        self.explore_drive_firmware,
+                    )
                     .await;
                 match (&libredfish, &nvredfish) {
                     (Ok(report), Ok(nv_report)) => warn_report_diff(report, nv_report),
@@ -502,6 +522,7 @@ impl BmcEndpointExplorer {
         bmc_ip_address: SocketAddr,
         bmc_mac_address: MacAddress,
         username: &str,
+        vendor: RedfishVendor,
     ) -> Result<Credentials, EndpointExplorationError> {
         tracing::info!(
             %bmc_ip_address, %bmc_mac_address,
@@ -528,6 +549,11 @@ impl BmcEndpointExplorer {
         self.bmc_client
             .redfish_client
             .validate_bmc_credentials(bmc_ip_address, credentials.clone())
+            .await?;
+
+        self.bmc_client
+            .redfish_client
+            .restore_bmc_root_ipmi_access(bmc_ip_address, vendor, credentials.clone())
             .await?;
 
         self.set_bmc_root_credentials(bmc_mac_address, &credentials, Some(version))
@@ -893,6 +919,7 @@ impl EndpointExplorer for BmcEndpointExplorer {
                             bmc_ip_address,
                             bmc_mac_address,
                             bmc_cred_data.username,
+                            vendor,
                         )
                         .await?
                     }
@@ -1944,6 +1971,7 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use axum::Router;
+    use bmc_mock::test_support::nvidia_gh200_swapped_managers_router;
     use bmc_mock::{CombinedServer, ListenerOrAddress};
     use carbide_instrument::Outcome;
     use carbide_instrument::testing::{
@@ -2165,6 +2193,12 @@ mod tests {
                     interface.id.as_deref() == Some("disabled") && interface.mac_address.is_none()
                 })
         );
+    }
+
+    #[tokio::test]
+    async fn explorer_chooses_correct_manager() {
+        let report = explore_router_in_default_mode(nvidia_gh200_swapped_managers_router()).await;
+        assert_eq!(report.managers[0].id, "BMC_0");
     }
 
     #[tokio::test]
@@ -2502,6 +2536,61 @@ mod tests {
             reingest_with_sitewide_password,
         )
         .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovered_lenovo_credentials_require_ipmi_repair_before_storage() {
+        let _metrics_window = MetricsCapture::start();
+        let fixture = prepare_reingestion_fixture(DpuGeneration {
+            product: "BlueField-3 DPU",
+            username: "root",
+        })
+        .await
+        .unwrap();
+        // Model a Lenovo whose password changed before the IPMI repair completed.
+        fixture.sim.seed_user("1", SITEWIDE_PASSWORD);
+        fixture
+            .sim
+            .fail_next_ipmi_access("transient IPMI repair failure");
+        let result = fixture
+            .explorer
+            .try_sitewide_bmc_root_credentials(
+                fixture.bmc_ip_address,
+                fixture.interface.mac_address,
+                "1",
+                RedfishVendor::Lenovo,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!fixture.sim.ipmi_account_access_enabled("1"));
+        assert!(
+            fixture
+                .credential_manager
+                .get_credentials(&fixture.per_bmc_credential_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        fixture
+            .explorer
+            .try_sitewide_bmc_root_credentials(
+                fixture.bmc_ip_address,
+                fixture.interface.mac_address,
+                "1",
+                RedfishVendor::Lenovo,
+            )
+            .await
+            .unwrap();
+        assert!(fixture.sim.ipmi_account_access_enabled("1"));
+        assert_eq!(
+            fixture
+                .credential_manager
+                .get_credentials(&fixture.per_bmc_credential_key)
+                .await
+                .unwrap(),
+            Some(Credentials::new("1", SITEWIDE_PASSWORD))
+        );
     }
 
     // Authentication failures are throttled, so pause time to test rejection without waiting.

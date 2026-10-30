@@ -67,6 +67,11 @@ struct Cli {
     /// Boot interface MAC address (e.g. 02:03:04:05:06:07)
     #[arg(long)]
     boot_mac: Option<MacAddress>,
+
+    /// Report each drive's firmware version as a `Drive_...` firmware
+    /// inventory entry (nv-redfish exploration only)
+    #[arg(long)]
+    explore_drive_firmware: bool,
 }
 
 #[tokio::main]
@@ -121,7 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode,
         // Standalone debug tool: no database, so rotation bookkeeping is skipped.
         None,
-    );
+    )
+    .with_drive_firmware(args.explore_drive_firmware);
 
     let ip = args.bmc_ip.parse()?;
     let port = args.bmc_port;

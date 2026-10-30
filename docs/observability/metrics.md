@@ -45,7 +45,7 @@ The BlueField `nico-otelcol` chart defaults the Boolean `prometheusRemoteAccess`
 
 The collector uses `hostNetwork: true`, so enabling remote access exposes unauthenticated metrics on DPU host interfaces. Inbound routing and firewall rules determine reachability. Its existing OpenTelemetry Protocol (OTLP) export to the site gateway remains enabled and does not require `prometheusRemoteAccess`. The separate gateway scrape procedure uses this OTLP path.
 
-The DSX and hardware-health binaries default to `[::]:9009`, and PXE defaults to `[::]:8080`. These defaults live in the binaries, so chart-only upgrades with `--reuse-values` retain an older pinned image's IPv4 defaults. Explicit `CARBIDE_DSX_CONSUMER__METRICS__ENDPOINT`, `CARBIDE_HEALTH__METRICS__ENDPOINT`, and `PXE_BIND_ADDRESS` entries in `env` take precedence. For DSX and hardware-health, environment settings override the optional TOML file, which overrides binary defaults. PXE uses its bind address for both HTTP boot traffic and metrics. `PXE_BIND_PORT` overrides port 8080.
+The DSX and hardware-health binaries default to `[::]:9009`, and PXE defaults to `[::]:8080`. Explicit `CARBIDE_DSX_CONSUMER__METRICS__ENDPOINT`, `CARBIDE_HEALTH__METRICS__ENDPOINT`, and `PXE_BIND_ADDRESS` entries in `env` take precedence. For DSX and hardware-health, environment settings override the optional TOML file, which overrides binary defaults. PXE uses its bind address for both HTTP boot traffic and metrics. `PXE_BIND_PORT` overrides port 8080.
 
 The shared TCP listener explicitly enables IPv4-mapped connections for an IPv6 wildcard, including on nodes with `net.ipv6.bindv6only=1`. If IPv6 socket creation or dual-stack configuration fails, it logs the cause and binds the IPv4 wildcard on the same port. Explicit addresses retain their family. Bind and listen errors propagate. Refer to [Deploy DHCPv6](../provisioning/dhcpv6-deployment.md) for the opt-in workload and metrics port contract.
 
@@ -55,7 +55,7 @@ Legacy Kubernetes `Endpoints` discovery exposes only a Service's primary address
 
 For the bundled kube-prometheus-stack 59.1.0 installation, apply the optional [IPv6 scrape overlay](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/values-nico-ipv6-scraping.yaml). It uses Prometheus 2.52's `additionalScrapeConfigs` and grants its service account read access to EndpointSlices. The pinned Operator 0.74.0 and existing custom resource definitions (CRDs) do not need an upgrade.
 
-Upgrade the NICo chart first: its primary ServiceMonitors must carry `app.kubernetes.io/metrics`. The overlay excludes those labeled monitors from this Prometheus and replaces them with one IPv6-only primary-metrics job. Other collectors can continue selecting the same monitor objects. Optional hardware-health `/telemetry` and API per-object monitors retain their existing discovery. This recipe does not migrate those optional paths to IPv6.
+Before applying the overlay, deploy the NICo chart and Core image from the same repository revision, following the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). The chart's primary ServiceMonitors must carry `app.kubernetes.io/metrics`. The overlay excludes those labeled monitors from this Prometheus and replaces them with one IPv6-only primary-metrics job. Other collectors can continue selecting the same monitor objects. Optional hardware-health `/telemetry` and API per-object monitors retain their existing discovery. This recipe does not migrate those optional paths to IPv6.
 
 If the optional DPU gateway is installed (`WITH_DPU=true`), first configure its wildcard metrics listener and apply the [metrics-only Service](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/otel-collector-gateway-metrics.yaml). The [bundled gateway values](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/values-otel-collector-gateway.yaml) bind the exporter on all pod interfaces using `ports.prometheus.containerPort` (bundled default 9999). Existing installations that bind only the primary pod address need an endpoint update. The gateway pod must have a reachable IPv6 address in addition to its primary IPv4 address. The separate Service requests `PreferDualStack`, exposes TCP 9999, and targets the named `prometheus` pod port. The existing OTLP LoadBalancer and receiver retain their configuration.
 
@@ -71,7 +71,7 @@ kubectl apply -f helm-prereqs/observability/otel-collector-gateway-metrics.yaml
 
 The quoted `--set-string` value follows the installed `ports.prometheus.containerPort` override. `--reuse-values` retains the installed image, certificates, site label, ports, and LoadBalancer settings. If you use the upstream chart's `alternateConfig`, apply the same endpoint change there because it replaces `config` entirely. If you use a custom gateway release, namespace, or `nameOverride`, also adjust the metrics Service selector and scrape discovery. The IPv6 scrape overlay replaces the gateway's static DNS target with IPv6 EndpointSlices from this metrics-only Service. It discovers no gateway targets until that Service has IPv6 endpoints.
 
-Before switching Prometheus, verify that every selected pod has a reachable IPv6 address and that its `/metrics` endpoint responds through that address from the collector's network. Upgrade or configure DSX, hardware-health, and PXE to accept IPv6 metrics connections. A chart-only upgrade preserves an older pinned image's IPv4 listener defaults. Unbound additionally requires `unbound.ipv6.enabled=true`. Keep the existing collection until these checks pass.
+Before switching Prometheus, verify that every selected pod has a reachable IPv6 address and that its `/metrics` endpoint responds through that address from the collector's network. Check any explicit DSX, hardware-health, and PXE listener overrides to ensure they accept IPv6 metrics connections. Unbound additionally requires `unbound.ipv6.enabled=true`. Keep the existing collection until these checks pass.
 
 After verifying the NICo endpoints and configuring any installed gateway, switch Prometheus:
 
@@ -523,7 +523,7 @@ operator needs when the overview shows a problem but not its cause. It uses the 
 workload panels at the end.
 
 **Service health** - API status, build version, open tracing spans, Postgres connection
-pool and resource pool utilization. A pool at 1 means new allocations fail.
+pool and resource pool utilization. A pool at 100% utilization means new allocations from it fail.
 
 **Capacity and tenancy** - Host and GPU totals split into usable and in-use, per-tenant
 allocation, SKU and device-type breakdown, managed entity counts, and IP addresses per
@@ -534,10 +534,10 @@ and exit rates, mean time in state, and reboot attempts during discovery boot.
 
 **Host health** - Healthy percentage with maintenance and suppressed-alerting hosts
 discounted, probe and classification breakdowns, operator overrides, hosts missing a
-BIOS password, and rack, switch and power shelf health.
+BIOS password, and rack, switch, and power shelf health.
 
 **Network segments and VPC prefixes** - State distribution, above-SLA objects,
-transitions, time in state and handler errors for both object types.
+transitions, time in state, and handler errors for both object types.
 
 **InfiniBand** - Fabric count, UFM version, fabric errors, insecure configuration,
 UFM-visible ports and partitions, pkey mismatches, UFM write outcomes, monitor
@@ -548,7 +548,7 @@ latency and timeouts, applied changes, configuration apply delay, and switch
 certificate expiry.
 
 **State controller performance** - Processor and enqueuer iteration latency, task
-enqueue, dispatch, completion and requeue rates, per-state handler latency, and
+enqueue, dispatch, completion, and requeue rates, per-state handler latency, and
 database queries attributed to each controller.
 
 **API requests** - Request and error rate by method, availability with and without
@@ -578,13 +578,14 @@ rates, dropped requests, DNS negative cache, and DHCP certificate expiry.
 connected clients, and stream errors.
 
 **Logs and Kubernetes workloads** - Log event rate by level, the noisiest components at
-WARN and ERROR, and per-container CPU, memory, restarts and readiness. The Kubernetes
+WARN and ERROR, and per-container CPU, memory, restarts, and readiness. The Kubernetes
 panels need kube-state-metrics and cAdvisor.
 
 ### Fleet dashboard
 
-The fleet board (`nico-fleet.json`) compares sites on one Prometheus. Every panel groups
-by the `$site_label` variable.
+The fleet board (`nico-fleet.json`) compares sites on one Prometheus. Most panels group
+by the `$site_label` variable; fleet-wide totals, such as Distinct API versions and the
+Fleet BMC connection panels, aggregate across all sites.
 
 On a central Prometheus fed by remote-write or federation, set `$site_label` to
 `forge_site`: the NICo observability bundle sets that as each site's external label, and
@@ -609,7 +610,7 @@ per site, with the stuck objects of each type.
 hosts discounted, unhealthy hosts, failing probes, alert classifications, overrides,
 hosts missing a BIOS password, and unhealthy DPUs.
 
-**InfiniBand fabrics** - Fabrics, errors, insecure fabrics, UFM versions and pkey
+**InfiniBand fabrics** - Fabrics, errors, insecure fabrics, UFM versions, and pkey
 mismatches per site.
 
 **API service level** - Availability, request and error rate, mean and p95 latency,
@@ -617,9 +618,9 @@ controller iteration latency, Vault availability, warning and error log rate, an
 busiest pods.
 
 **Site explorer** - Hosts explored, managed hosts identified, failures, missing expected
-inventory, serial number mismatches and incomplete preingestions per site.
+inventory, serial number mismatches, and incomplete preingestions per site.
 
-**Serial console proxy** - Connected BMC share, connection counts and attached clients
+**Serial console proxy** - Connected BMC share, connection counts, and attached clients
 per site.
 
 ### Object lifecycle dashboard
@@ -654,8 +655,12 @@ control plane health and performance metrics:
 **Request summary** - API status, request rate, p95 latency, gRPC error rate. Top-level
 indicators for SLO monitoring.
 
-**Requests by method and status** - Heatmap of request latency by gRPC method. Identifies
-which endpoints are slow or failing.
+**Requests by method and status** - Stacked time series of requests per second, grouped
+by gRPC method and status code. Shows traffic volume and error responses by method.
+
+**Request latency** - The summary p95 and the p50/p95/p99 latency time series aggregate
+requests across all methods matching the selected job filter; they do not show
+per-method latency.
 
 **Database** - Queries per second, time per request, connection pool utilization. Database
 contention is a common cause of API slowdowns.
@@ -666,7 +671,7 @@ Catches secret management issues before they cause auth failures.
 ### BMC performance dashboard
 
 The BMC performance dashboard (`nico-bmc-performance.json`) covers the Redfish calls the
-hardware-health service makes, broken down by machine, BMC address, request path and BMC
+hardware-health service makes, broken down by machine, BMC address, request path, and BMC
 model: availability, error counts and latency. Use it when hardware operations are slow
 or failing and you need to know whether the BMCs or NICo are responsible.
 

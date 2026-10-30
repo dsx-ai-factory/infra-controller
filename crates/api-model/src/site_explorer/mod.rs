@@ -359,18 +359,6 @@ impl EndpointExplorationReport {
             .find(|e| e.mac_address == Some(mac))
             .and_then(|e| e.id.as_deref().none_if_empty())
     }
-
-    /// Yields a [`MachineBootInterface`] for every host ethernet interface that
-    /// reports both a MAC and a non-empty Redfish interface id -- for any NIC
-    /// type (integrated NICs, SuperNICs, DPUs in NIC mode, DPU host-PFs).
-    /// Interfaces missing either half are skipped (via
-    /// [`MachineBootInterface::from_parts`]).
-    pub fn complete_boot_interfaces(&self) -> impl Iterator<Item = MachineBootInterface> + '_ {
-        self.systems
-            .iter()
-            .flat_map(|s| s.ethernet_interfaces.iter())
-            .filter_map(|e| MachineBootInterface::from_parts(e.mac_address, e.id.clone()))
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,7 +375,7 @@ pub struct ExploredEndpoint {
     pub preingestion_state: PreingestionState,
     /// Indicates that preingestion is waiting for site explorer to refresh the state
     pub waiting_for_explorer_refresh: bool,
-    /// Whether the endpoint will be explored in the next site-explorer run
+    /// Whether exploration is queued. Pending requests remain queued while suppressed.
     pub exploration_requested: bool,
     /// Last BMC Reset issued through redfish
     pub last_redfish_bmc_reset: Option<chrono::DateTime<chrono::Utc>>,
@@ -416,7 +404,51 @@ impl Display for ExploredEndpoint {
     }
 }
 
+/// How many failed probes keep an expected, never-explored endpoint in the
+/// refresh-wait tier. Only failures advance the report version of a row that
+/// no exploration has typed, so the version counts them.
+const NEVER_EXPLORED_QUICK_RETRIES: u64 = 3;
+
 impl ExploredEndpoint {
+    /// The budget tier this endpoint competes in. `expected` says whether its
+    /// BMC MAC belongs to an expected machine, switch or power shelf. An
+    /// expected endpoint that no exploration has typed yet (a failed probe
+    /// stores its error on a report without an endpoint type) is a refresh
+    /// wait for its first [`NEVER_EXPLORED_QUICK_RETRIES`] failures whatever
+    /// its preingestion state, so a declared BMC whose first probe failed is
+    /// retried ahead of the routine refresh. After that it is routine, so
+    /// declared hardware that is not powered on yet does not hold refresh-wait
+    /// slots. An undeclared one is routine from the start: an underlay address
+    /// that never answers Redfish would otherwise hold a slot for good.
+    /// A BMC whose explorations timed out fewer than
+    /// `timeouts_before_prevent_allocations` times in a row is a refresh wait,
+    /// so it is re-explored ahead of the routine refresh to confirm or clear
+    /// the timeout; once its timeouts prevent allocations it is routine again.
+    pub fn exploration_tier(
+        &self,
+        expected: bool,
+        timeouts_before_prevent_allocations: u32,
+    ) -> ExplorationTier {
+        if self.exploration_requested {
+            ExplorationTier::Priority
+        } else if (expected
+            && self.report.endpoint_type == EndpointType::Unknown
+            && self.report_version.version_nr() <= NEVER_EXPLORED_QUICK_RETRIES)
+            || (self.waiting_for_explorer_refresh
+                && self.preingestion_state.parks_for_explorer_refresh())
+            || (self.report.endpoint_type == EndpointType::Bmc
+                && matches!(
+                    self.report.last_exploration_error,
+                    Some(EndpointExplorationError::ConnectionTimeout { consecutive_count, .. })
+                        if consecutive_count < timeouts_before_prevent_allocations
+                ))
+        {
+            ExplorationTier::RefreshWait
+        } else {
+            ExplorationTier::Routine
+        }
+    }
+
     /// Returns the fully-populated boot interface (MAC + Redfish interface id)
     /// for this endpoint, or `None` if either part is missing.
     ///
@@ -708,6 +740,21 @@ impl PreingestionState {
     }
 }
 
+/// The tier of the site explorer's `explorations_per_run` budget an endpoint
+/// competes in. Requests sit outside the budget; the other two tiers share it
+/// with the interfaces that have no endpoint yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplorationTier {
+    /// An operator requested the exploration.
+    Priority,
+    /// The endpoint waits on its next report: it is an expected BMC whose
+    /// first few probes failed, or preingestion parked it until the explorer
+    /// refreshes it.
+    RefreshWait,
+    /// The periodic refresh of a complete report.
+    Routine,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BfbPlatformPowercyclePhase {
@@ -934,8 +981,6 @@ impl ExploredManagedHost {
 pub struct ExploredManagedSwitch {
     /// The Switch's BMC IP
     pub bmc_ip: IpAddr,
-    // Host mac address
-    pub nv_os_mac_addresses: Vec<MacAddress>,
     /// Exploration report for this switch endpoint
     pub report: EndpointExplorationReport,
 }
@@ -1507,7 +1552,12 @@ pub enum EndpointExplorationError {
     /// reachable, but the  port is not listening, see ConnectionRefused.
     #[error("site-explorer timed out communicating with the endpoint: {details:?}")]
     #[serde(rename_all = "PascalCase")]
-    ConnectionTimeout { details: String },
+    ConnectionTimeout {
+        details: String,
+        /// Explorations in a row that timed out, including this one.
+        #[serde(default)]
+        consecutive_count: u32,
+    },
     /// The connection to the configured endpoint was refused. This indicates
     /// that site-explorer probably has connectivity to the target IP (unless
     /// a network device in the path is sending an RST), and is able to positively
@@ -2007,6 +2057,25 @@ pub struct Inventory {
     pub description: Option<String>,
     pub version: Option<String>,
     pub release_date: Option<String>,
+    /// The drive this entry reports, set only on entries that exploration
+    /// created from a Redfish Storage drive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<DriveIdentity>,
+}
+
+/// The drive behind a firmware inventory entry created from Redfish Storage.
+/// Host firmware configuration selects drive components by `model`.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct DriveIdentity {
+    /// The drive's Redfish `Model`, trimmed. Its form depends on the BMC: some
+    /// report the part number alone (`KCD8DPUG15T3` on Lenovo XCC), some add
+    /// the vendor (`SAMSUNG MZTL63T8HFLT-00AW7` on GB200), and Dell reports
+    /// its own name (`Dell Ent NVMe CM6 RI 1.92TB`).
+    pub model: String,
+    /// The drive's Redfish `MediaType` (`SSD`, `HDD` or `SMR`), for reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
 }
 
 /// The result of one Redfish machine-setup check.
@@ -2884,6 +2953,28 @@ mod tests {
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
 
+    /// Stored reports written before inventory entries carried drive data
+    /// still load, and the drive data round-trips.
+    #[test]
+    fn inventory_drive_identity_is_optional_in_stored_reports() {
+        let legacy: Inventory =
+            serde_json::from_str(r#"{"Id": "BMC-Primary", "Version": "1.0"}"#).unwrap();
+        assert_eq!(legacy.drive, None);
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("Drive"));
+
+        let drive = Inventory {
+            id: "Drive_KCD8DPUG15T3_drive_bay_0".into(),
+            version: Some("1XET7106".into()),
+            drive: Some(DriveIdentity {
+                model: "KCD8DPUG15T3".into(),
+                media_type: Some("SSD".into()),
+            }),
+            ..Default::default()
+        };
+        let stored = serde_json::to_string(&drive).unwrap();
+        assert_eq!(serde_json::from_str::<Inventory>(&stored).unwrap(), drive);
+    }
+
     fn processor_position_report() -> EndpointExplorationReport {
         EndpointExplorationReport {
             systems: vec![ComputerSystem {
@@ -3128,10 +3219,6 @@ mod tests {
         assert_eq!(multiple.model(), single.model());
         assert_eq!(multiple.primary_system().unwrap().id, "System_0");
         assert_eq!(multiple.all_mac_addresses(), single.all_mac_addresses());
-        assert_eq!(
-            multiple.complete_boot_interfaces().collect::<Vec<_>>(),
-            single.complete_boot_interfaces().collect::<Vec<_>>()
-        );
         let encoded = serde_json::to_string(&multiple).unwrap();
         assert_eq!(
             serde_json::from_str::<EndpointExplorationReport>(&encoded).unwrap(),
@@ -3332,6 +3419,7 @@ mod tests {
                 description: None,
                 version: version.map(|v| v.to_string()),
                 release_date: None,
+                drive: None,
             })
             .collect();
 
@@ -3358,6 +3446,194 @@ mod tests {
             boot_interface_id: None,
             pause_ingestion_and_poweron: false,
         }
+    }
+
+    /// `exploration_tier` by request flag, report, state, wait flag, report
+    /// version and whether an expected machine, switch or power shelf declares
+    /// the BMC.
+    #[test]
+    fn exploration_tier_cases() {
+        let parked = || PreingestionState::InitialBMCReset {
+            phase: InitialBmcResetPhase::WaitForExplorerRefresh,
+        };
+        // input: (endpoint type, preingestion state, waiting for refresh, requested, expected, report version)
+        check_values(
+            [
+                Check {
+                    scenario: "a request is served first, even when parked",
+                    input: (EndpointType::Bmc, parked(), true, true, false, 1),
+                    expect: ExplorationTier::Priority,
+                },
+                Check {
+                    scenario: "a request on a never-explored endpoint",
+                    input: (
+                        EndpointType::Unknown,
+                        PreingestionState::Initial,
+                        false,
+                        true,
+                        true,
+                        1,
+                    ),
+                    expect: ExplorationTier::Priority,
+                },
+                Check {
+                    scenario: "an expected endpoint never explored, after a failed retry set the wait flag",
+                    input: (
+                        EndpointType::Unknown,
+                        PreingestionState::Initial,
+                        true,
+                        false,
+                        true,
+                        2,
+                    ),
+                    expect: ExplorationTier::RefreshWait,
+                },
+                Check {
+                    scenario: "an expected endpoint never explored on its last quick retry",
+                    input: (
+                        EndpointType::Unknown,
+                        PreingestionState::Initial,
+                        true,
+                        false,
+                        true,
+                        3,
+                    ),
+                    expect: ExplorationTier::RefreshWait,
+                },
+                Check {
+                    scenario: "an expected endpoint never explored past its quick retries, such as hardware not powered on yet",
+                    input: (
+                        EndpointType::Unknown,
+                        PreingestionState::Initial,
+                        true,
+                        false,
+                        true,
+                        4,
+                    ),
+                    expect: ExplorationTier::Routine,
+                },
+                Check {
+                    scenario: "an expected endpoint never explored under manual ingestion, which completes preingestion at insert",
+                    input: (
+                        EndpointType::Unknown,
+                        PreingestionState::Complete,
+                        false,
+                        false,
+                        true,
+                        1,
+                    ),
+                    expect: ExplorationTier::RefreshWait,
+                },
+                Check {
+                    scenario: "an undeclared endpoint never explored stays routine",
+                    input: (
+                        EndpointType::Unknown,
+                        PreingestionState::Initial,
+                        true,
+                        false,
+                        false,
+                        1,
+                    ),
+                    expect: ExplorationTier::Routine,
+                },
+                Check {
+                    scenario: "parked by preingestion",
+                    input: (EndpointType::Bmc, parked(), true, false, false, 1),
+                    expect: ExplorationTier::RefreshWait,
+                },
+                Check {
+                    scenario: "the wait flag outside a parking state",
+                    input: (
+                        EndpointType::Bmc,
+                        PreingestionState::Initial,
+                        true,
+                        false,
+                        false,
+                        1,
+                    ),
+                    expect: ExplorationTier::Routine,
+                },
+                Check {
+                    scenario: "a parking state without the wait flag",
+                    input: (
+                        EndpointType::Bmc,
+                        PreingestionState::RecheckVersions,
+                        false,
+                        false,
+                        false,
+                        1,
+                    ),
+                    expect: ExplorationTier::Routine,
+                },
+                Check {
+                    scenario: "a complete report on an expected endpoint",
+                    input: (
+                        EndpointType::Bmc,
+                        PreingestionState::Complete,
+                        false,
+                        false,
+                        true,
+                        1,
+                    ),
+                    expect: ExplorationTier::Routine,
+                },
+            ],
+            |(endpoint_type, state, waiting, requested, expected, version)| {
+                let mut endpoint = create_test_endpoint(Vec::new());
+                endpoint.report.endpoint_type = endpoint_type;
+                endpoint.preingestion_state = state;
+                endpoint.waiting_for_explorer_refresh = waiting;
+                endpoint.exploration_requested = requested;
+                endpoint.report_version = ConfigVersion::new(version);
+                endpoint.exploration_tier(expected, 1)
+            },
+        );
+    }
+
+    /// A BMC that timed out is a refresh wait until its timeouts reach the
+    /// threshold that prevents allocations.
+    #[test]
+    fn exploration_tier_timeout_cases() {
+        // input: (endpoint type, consecutive timeouts, threshold)
+        check_values(
+            [
+                Check {
+                    scenario: "a first timeout is retried on the next run",
+                    input: (EndpointType::Bmc, 1, 3),
+                    expect: ExplorationTier::RefreshWait,
+                },
+                Check {
+                    scenario: "a timeout one short of the threshold",
+                    input: (EndpointType::Bmc, 2, 3),
+                    expect: ExplorationTier::RefreshWait,
+                },
+                Check {
+                    scenario: "timeouts that prevent allocations go back to routine",
+                    input: (EndpointType::Bmc, 3, 3),
+                    expect: ExplorationTier::Routine,
+                },
+                Check {
+                    scenario: "a threshold of one keeps timeouts routine",
+                    input: (EndpointType::Bmc, 1, 1),
+                    expect: ExplorationTier::Routine,
+                },
+                Check {
+                    scenario: "an endpoint never explored as a BMC stays routine",
+                    input: (EndpointType::Unknown, 1, 3),
+                    expect: ExplorationTier::Routine,
+                },
+            ],
+            |(endpoint_type, consecutive_count, threshold)| {
+                let mut endpoint = create_test_endpoint(Vec::new());
+                endpoint.report.endpoint_type = endpoint_type;
+                endpoint.report.last_exploration_error =
+                    Some(EndpointExplorationError::ConnectionTimeout {
+                        details: "timeout".to_string(),
+                        consecutive_count,
+                    });
+                endpoint.exploration_tier(false, threshold)
+            },
+        );
     }
 
     #[test]
@@ -3695,6 +3971,7 @@ mod tests {
                     scenario: "connection timeout",
                     input: EndpointExplorationError::ConnectionTimeout {
                         details: "timeout".to_string(),
+                        consecutive_count: 1,
                     },
                     expect: expected_error_behavior(
                         ErrorCode::nico(SiteExplorer, 100),
@@ -4271,6 +4548,7 @@ mod tests {
             description: Some("Host image".to_string()),
             version: uefi_version.clone(),
             release_date: None,
+            drive: None,
         };
         let report = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
@@ -4858,69 +5136,6 @@ mod tests {
             "empty id treated as absent (don't clobber stored boot interface)" {
                 (single_iface_report(Some(String::new())), mac) => Fails,
             }
-        );
-    }
-
-    #[test]
-    fn complete_boot_interfaces_yields_every_nic_regardless_of_type() {
-        let dpu_mac = MacAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]);
-        let integrated_mac = MacAddress::new([0xD4, 0x04, 0xE6, 0x84, 0x13, 0x98]);
-        let id_less_mac = MacAddress::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        let empty_id_mac = MacAddress::new([0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
-        let report = EndpointExplorationReport {
-            systems: vec![ComputerSystem {
-                ethernet_interfaces: vec![
-                    // A DPU host-PF -- the only kind the DPU-only capture reached...
-                    EthernetInterface {
-                        id: Some("NIC.Slot.7-1-1".to_string()),
-                        mac_address: Some(dpu_mac),
-                        ..Default::default()
-                    },
-                    // ...and a non-DPU integrated NIC, which is now yielded too.
-                    EthernetInterface {
-                        id: Some("NIC.Embedded.1-1-1".to_string()),
-                        mac_address: Some(integrated_mac),
-                        ..Default::default()
-                    },
-                    // No id -> can't form a pair, skipped.
-                    EthernetInterface {
-                        id: None,
-                        mac_address: Some(id_less_mac),
-                        ..Default::default()
-                    },
-                    // No MAC -> nothing to key on, skipped.
-                    EthernetInterface {
-                        id: Some("NIC.Embedded.2-1-1".to_string()),
-                        mac_address: None,
-                        ..Default::default()
-                    },
-                    // Empty id -> not a usable id, skipped (don't clobber last-known-good).
-                    EthernetInterface {
-                        id: Some(String::new()),
-                        mac_address: Some(empty_id_mac),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let boot_interfaces: Vec<MachineBootInterface> =
-            report.complete_boot_interfaces().collect();
-        assert_eq!(
-            boot_interfaces,
-            vec![
-                MachineBootInterface {
-                    mac_address: dpu_mac,
-                    interface_id: "NIC.Slot.7-1-1".to_string(),
-                },
-                MachineBootInterface {
-                    mac_address: integrated_mac,
-                    interface_id: "NIC.Embedded.1-1-1".to_string(),
-                },
-            ],
-            "complete_boot_interfaces should yield a MachineBootInterface for every NIC with both a MAC and a non-empty id -- DPU or not -- and skip the rest",
         );
     }
 

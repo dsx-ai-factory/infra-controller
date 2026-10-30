@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::error::Error;
+
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::{TestEnv, TestManagedHost, create_test_env};
@@ -36,6 +38,10 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
 
     let mut txn = env.pool.begin().await.unwrap();
     let host_interface = mh.host().first_interface(&mut txn).await;
+    let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.host().id])
+        .await
+        .unwrap();
+    let client_ip = interfaces[&mh.host().id][0].addresses[0].to_string();
     txn.rollback().await.unwrap();
     let host_arch = rpc::forge::MachineArchitecture::X86;
 
@@ -49,9 +55,58 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
             .run_provisioning_instructions_on_every_boot
     );
 
+    let mut txn = env.pool.begin().await.unwrap();
+    assert!(tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
+    txn.rollback().await.unwrap();
+
+    // Generating the script clears `use_custom_pxe_on_boot` before the
+    // URL lookup. A failed lookup must leave that request pending.
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    let status = env
+        .api
+        .get_pxe_instructions(tonic::Request::new(rpc::forge::PxeInstructionRequest {
+            arch: host_arch as i32,
+            client_ip: Some(client_ip),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a failed URL lookup must reject the one-time script");
+    assert_eq!(status.code(), tonic::Code::Internal);
+    let error = status
+        .source()
+        .and_then(|source| source.downcast_ref::<crate::errors::CarbideErrorWithLocation>())
+        .expect("PXE failure should preserve its source");
+    let crate::CarbideError::DBError(annotated) = &error.error else {
+        panic!("expected DBError, got {error:?}");
+    };
+    assert!(
+        matches!(&annotated.source, sqlx::Error::ColumnDecode { index, .. }
+            if index == "\"allocation_strategy\""),
+        "{error:?}"
+    );
+
+    let mut txn = env.pool.begin().await.unwrap();
+    assert!(tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
+    txn.rollback().await.unwrap();
+
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'reserved' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
     // The one-time custom script is marked for retries within this iPXE session.
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
+
+    let mut txn = env.pool.begin().await.unwrap();
+    assert!(!tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
+    txn.rollback().await.unwrap();
 
     // Second boot should return "exit"
     let pxe = host_interface.get_pxe_instructions(host_arch).await;

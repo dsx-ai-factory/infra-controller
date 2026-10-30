@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -616,6 +617,50 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
 }
 
 #[crate::sqlx_test]
+async fn test_static_assignment_initialization_preserves_lookup_failure(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(db_pool).await;
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await?;
+
+    let snapshot_query = "SELECT jsonb_build_object(
+        'segments', (SELECT jsonb_agg(ns ORDER BY id) FROM network_segments ns),
+        'prefixes', (SELECT jsonb_agg(np ORDER BY id) FROM network_prefixes np))";
+    let original: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(&env.pool)
+        .await?;
+
+    let mut txn = db::Transaction::begin(&env.pool).await?;
+    let error = db_init::ensure_static_assignments_segment(&env.api, &mut txn, None)
+        .await
+        .expect_err("a failed anchor lookup must stop initialization");
+    let crate::CarbideError::DBError(annotated) = &error else {
+        panic!("expected DBError, got {error:?}");
+    };
+    let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+        panic!("expected ColumnDecode, got {error:?}");
+    };
+    assert_eq!(index, "\"allocation_strategy\"");
+    assert!(source.to_string().contains("unsupported"), "{source:?}");
+
+    // The decode failure must leave this transaction usable and unchanged.
+    let pending: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(txn.as_pgconn())
+        .await?;
+    assert_eq!(pending, original);
+    txn.commit().await?;
+
+    let persisted: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(persisted, original);
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_initial_network_restart_does_not_restore_deleted_static_assignment_zones(
     db_pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -742,6 +787,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
 enum InitialVpcAllocationFailure {
     Exhausted,
     RequestedUnavailable,
+    MissingPool,
 }
 
 impl InitialVpcAllocationFailure {
@@ -749,12 +795,13 @@ impl InitialVpcAllocationFailure {
         match self {
             Self::Exhausted => "initial-vpc-empty",
             Self::RequestedUnavailable => "initial-vpc-requested",
+            Self::MissingPool => "initial-vpc-unconfigured",
         }
     }
 
     fn requested_vni(self) -> Option<i32> {
         match self {
-            Self::Exhausted => None,
+            Self::Exhausted | Self::MissingPool => None,
             Self::RequestedUnavailable => Some(42),
         }
     }
@@ -773,6 +820,13 @@ impl InitialVpcAllocationFailure {
                 ("failure", "requested_value_unavailable"),
                 ("failure_policy", "required"),
                 ("allocation_mode", "requested"),
+                ("value_type", "integer"),
+            ],
+            Self::MissingPool => [
+                ("operation", "allocate"),
+                ("failure", "configuration"),
+                ("failure_policy", "required"),
+                ("allocation_mode", "automatic"),
                 ("value_type", "integer"),
             ],
         }
@@ -796,7 +850,6 @@ struct InitialVpcAllocationFailureRecord {
     owner_id_is_vpc: bool,
     pool: Option<String>,
     error: Option<String>,
-    counter_delta: f64,
 }
 
 #[crate::sqlx_test]
@@ -828,15 +881,16 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     owner_id_is_vpc: true,
                     pool: Some("initial-vpc-empty".to_string()),
                     error: None,
-                    counter_delta: 1.0,
                 }),
             },
             Case {
                 scenario: "requested VNI unavailable",
                 input: InitialVpcAllocationFailure::RequestedUnavailable,
                 expect: Yields(InitialVpcAllocationFailureRecord {
-                    error_kind: "requested_value_unavailable",
-                    error_message: "resource pool database error: `42` not an available value for resource-pool `initial-vpc-requested`".to_string(),
+                    error_kind: "failed_precondition",
+                    error_message:
+                        "`42` not an available value for resource-pool `initial-vpc-requested`"
+                            .to_string(),
                     metadata_name: "resource_pool_allocation_failed".to_string(),
                     event_name: Some("resource_pool_allocation_failed".to_string()),
                     metric_name: Some(LIFECYCLE_FAILURES_METRIC.to_string()),
@@ -853,7 +907,32 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         "`42` not an available value for resource-pool `initial-vpc-requested`"
                             .to_string(),
                     ),
-                    counter_delta: 1.0,
+                }),
+            },
+            Case {
+                scenario: "absent pool configuration",
+                input: InitialVpcAllocationFailure::MissingPool,
+                expect: Yields(InitialVpcAllocationFailureRecord {
+                    error_kind: "failed_precondition",
+                    error_message:
+                        "resource-pool `initial-vpc-unconfigured` has no automatic allocation range"
+                            .to_string(),
+                    metadata_name: "resource_pool_allocation_failed".to_string(),
+                    event_name: Some("resource_pool_allocation_failed".to_string()),
+                    metric_name: Some(LIFECYCLE_FAILURES_METRIC.to_string()),
+                    level: tracing::Level::ERROR,
+                    message: "Error allocating from resource pool".to_string(),
+                    operation: Some("allocate".to_string()),
+                    failure: Some("configuration".to_string()),
+                    failure_policy: Some("required".to_string()),
+                    allocation_mode: Some("automatic".to_string()),
+                    value_type: Some("integer".to_string()),
+                    owner_id_is_vpc: true,
+                    pool: Some("initial-vpc-unconfigured".to_string()),
+                    error: Some(
+                        "resource-pool `initial-vpc-unconfigured` has no automatic allocation range"
+                            .to_string(),
+                    ),
                 }),
             },
         ],
@@ -862,13 +941,25 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
             async move {
                 let source_pool =
                     ResourcePool::<i32>::new(failure.pool_name().to_string(), ValueType::Integer);
-                if matches!(failure, InitialVpcAllocationFailure::RequestedUnavailable) {
-                    let mut txn = db_pool.begin().await.expect("begin seed transaction");
-                    db::resource_pool::populate(&source_pool, &mut txn, vec![43], false)
+                let mut txn = db_pool.begin().await.expect("begin seed transaction");
+                let auto_assign = matches!(failure, InitialVpcAllocationFailure::Exhausted);
+                if !matches!(failure, InitialVpcAllocationFailure::MissingPool) {
+                    db::resource_pool::populate(&source_pool, &mut txn, vec![43], auto_assign)
                         .await
-                        .expect("seed a different requestable VNI");
-                    txn.commit().await.expect("commit seed transaction");
+                        .expect("seed an allocation range");
                 }
+                if auto_assign {
+                    db::resource_pool::allocate(
+                        &source_pool,
+                        &mut txn,
+                        model::resource_pool::OwnerType::Vpc,
+                        &VpcId::new().to_string(),
+                        None,
+                    )
+                    .await
+                    .expect("exhaust the configured automatic range");
+                }
+                txn.commit().await.expect("commit seed transaction");
 
                 let vpcs = HashMap::from([(
                     format!("{}-vpc", failure.pool_name()),
@@ -884,22 +975,28 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 let registry = ResourcePoolRegistry::resolve(
                     PoolDefinitionSource::SeedConfiguration,
                     &mut txn,
-                    &HashMap::from([(
-                        failure.pool_name().to_string(),
-                        ResourcePoolSelection {
-                            pool_name: failure.pool_name().to_string(),
-                            value_domain: ResourcePoolValueDomain::Integer,
-                            backend_name: None,
-                            backend_kind: ResourcePoolBackendKind::Integrated,
-                            authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
-                            remote_pool: failure.pool_name().to_string(),
-                        },
-                    )]),
+                    &if matches!(failure, InitialVpcAllocationFailure::MissingPool) {
+                        HashMap::new()
+                    } else {
+                        HashMap::from([(
+                            failure.pool_name().to_string(),
+                            ResourcePoolSelection {
+                                pool_name: failure.pool_name().to_string(),
+                                value_domain: ResourcePoolValueDomain::Integer,
+                                backend_name: None,
+                                backend_kind: ResourcePoolBackendKind::Integrated,
+                                authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
+                                remote_pool: failure.pool_name().to_string(),
+                            },
+                        )])
+                    },
                 )
                 .await
                 .expect("resolve configured VPC pool");
-                // Keep the empty pool bound so exhaustion comes from the allocator.
-                assert!(registry.get(failure.pool_name()).is_some());
+                assert_eq!(
+                    registry.get(failure.pool_name()).is_some(),
+                    !matches!(failure, InitialVpcAllocationFailure::MissingPool)
+                );
                 txn.commit().await.expect("commit pool binding");
                 let metrics = MetricsCapture::start();
                 let (result, logs) = capture_logs_async(crate::db_init::create_initial_vpcs(
@@ -916,21 +1013,24 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                             ResourcePoolError::Empty,
                         ),
                     ) => "resource_pool_empty",
-                    crate::CarbideError::ResourcePoolDatabaseError(
-                        db::resource_pool::ResourcePoolDatabaseError::Database(error),
-                    ) if matches!(error.as_ref(), db::DatabaseError::FailedPrecondition(_)) => {
-                        "requested_value_unavailable"
-                    }
+                    crate::CarbideError::FailedPrecondition(_) => "failed_precondition",
                     error => panic!("unexpected initial VPC allocation error: {error:?}"),
                 };
                 let event_logs = logs
                     .iter()
-                    .filter(|log| {
-                        log.field("metric_name") == Some(LIFECYCLE_FAILURES_METRIC)
-                    })
+                    .filter(|log| log.field("metric_name") == Some(LIFECYCLE_FAILURES_METRIC))
                     .collect::<Vec<_>>();
                 assert_eq!(event_logs.len(), 1);
                 let log = event_logs[0];
+
+                // Tests without a `MetricsCapture` can increment this shared
+                // counter. The log capture above checks this request's event.
+                let observed =
+                    metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels());
+                assert!(
+                    observed >= 1.0,
+                    "expected at least one {failure:?} allocation failure, observed {observed}"
+                );
 
                 Ok::<_, ()>(InitialVpcAllocationFailureRecord {
                     error_kind,
@@ -950,10 +1050,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         .is_some_and(|owner_id| VpcId::from_str(owner_id).is_ok()),
                     pool: log.field("pool").map(str::to_string),
                     error: log.field("error").map(str::to_string),
-                    counter_delta: metrics.counter_delta(
-                        LIFECYCLE_FAILURES_METRIC,
-                        &failure.metric_labels(),
-                    ),
                 })
             }
         },
@@ -1150,10 +1246,10 @@ async fn test_network_segment_metrics(
     test_type: MetricsTestType,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut overrides = TestEnvOverrides::no_network_segments();
-    // This tests relies that drain period is not ended between two
-    // consequential run_single_iteration
-    overrides.network_segments_drain_period = Some(chrono::Duration::seconds(10));
-    let env = create_test_env_with_overrides(pool.clone(), overrides).await;
+    // Keep the segment in DrainAllocatedIPs for the metrics snapshot, including
+    // when parallel tests delay controller iterations.
+    overrides.network_segments_drain_period = Some(chrono::Duration::hours(1));
+    let env = create_test_env_with_overrides(pool.clone(), overrides.clone()).await;
 
     let segment =
         create_network_segment_with_api(&env, true, true, None, test_type.segment_type() as i32, 1)
@@ -1230,8 +1326,7 @@ async fn test_network_segment_metrics(
 
     drop(env);
 
-    let env =
-        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments()).await;
+    let env = create_test_env_with_overrides(pool.clone(), overrides).await;
 
     // Delete the segment, releasing the VNI back to the pool
     env.api
@@ -1724,12 +1819,33 @@ async fn test_update_svi_ip_admin_segment(
     Ok(())
 }
 
+/// Later instances skip persisted IPv4 and IPv6 SVIs outside the reserved range.
 #[crate::sqlx_test]
 async fn test_update_svi_ip_post_instance_allocation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mut site_prefixes = TEST_SITE_PREFIXES.to_vec();
+    site_prefixes.push("2001:db8::/32".parse()?);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(site_prefixes),
+            ..Default::default()
+        }
+        .with_fnn_config(None),
+    )
+    .await;
+    let segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: "test vpc 1".to_string(),
+                    ..Default::default()
+                })
+                .slaac_enabled(false)
+                .rpc(),
+        )
+        .await;
 
     let query = "UPDATE network_prefixes SET num_reserved = 2 WHERE id=$1";
 
@@ -1741,8 +1857,8 @@ async fn test_update_svi_ip_post_instance_allocation(
     )
     .await?;
 
-    // Let's make num_reserved 2 so that 3rd IP is assigned to instance.
-    // This will force carbide to pick next free IP as SVI IP.
+    // Leave 192.0.4.2 available for the first instance, so SVI allocation
+    // must use 192.0.4.3.
     sqlx::query(query)
         .bind(segments[0].prefixes[0].id)
         .execute(&mut *txn)
@@ -1766,13 +1882,18 @@ async fn test_update_svi_ip_post_instance_allocation(
     );
     txn.commit().await.unwrap();
 
-    mh.instance_builer(&env)
+    let first_instance = mh
+        .instance_builer(&env)
         .single_interface_network_config(segment_id)
         .build()
         .await;
 
-    // At this moment, the third IP is taken from the tenant subnet for the instance.
+    // The first instance has committed 192.0.4.2 before SVI allocation.
     let mut txn = env.pool.begin().await?;
+    let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].instance_id, first_instance.id);
+    assert_eq!(addresses[0].address, "192.0.4.2".parse::<IpAddr>().unwrap());
     let mut segment = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
@@ -1785,6 +1906,24 @@ async fn test_update_svi_ip_post_instance_allocation(
         if_version_match: None,
         network_virtualization_type: carbide_network::virtualization::VpcVirtualizationType::Fnn,
     };
+    // The ETV fixture has no routing profile. Seed the FNN profile and IPv6
+    // prefix in the conversion transaction so the committed VPC supports both.
+    sqlx::query("UPDATE vpcs SET routing_profile_type = 'INTERNAL' WHERE id = $1")
+        .bind(update_request.id)
+        .execute(txn.as_mut())
+        .await?;
+    db::network_prefix::create_for(
+        txn.as_mut(),
+        &segment_id,
+        &[NewNetworkPrefix {
+            prefix: "2001:db8::/64".parse()?,
+            gateway: None,
+            dhcpv6_link_address: None,
+            num_reserved: 2,
+        }],
+        None,
+    )
+    .await?;
     db::vpc::update_virtualization(&update_request, &mut txn).await?;
     txn.commit().await?;
 
@@ -1798,11 +1937,63 @@ async fn test_update_svi_ip_post_instance_allocation(
     let segment = segment.remove(0);
     txn.rollback().await?;
 
-    // Now the 4th IP is next available IP, so it should be assigned as SVI IP.
+    // IPv4 skips the existing instance; IPv6 has no instance allocation yet.
     assert_eq!(
-        segment.prefixes[0].svi_ip.unwrap().to_string(),
-        "192.0.4.3".to_string()
+        segment
+            .prefixes
+            .iter()
+            .map(|prefix| prefix.svi_ip)
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            Some("192.0.4.3".parse::<IpAddr>()?),
+            Some("2001:db8::2".parse::<IpAddr>()?),
+        ])
     );
+
+    // Neither 192.0.4.3 nor 2001:db8::2 has a row in `instance_addresses`.
+    // The next instance must skip both SVIs through the overlay resolver.
+    let second_host = common::api_fixtures::create_managed_host(&env).await;
+    let second_instance = second_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    let mut txn = env.pool.begin().await?;
+    let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
+    assert_eq!(
+        addresses
+            .iter()
+            .map(|address| (address.instance_id, address.address))
+            .collect::<Vec<_>>(),
+        vec![
+            (first_instance.id, "192.0.4.2".parse::<IpAddr>().unwrap()),
+            (second_instance.id, "192.0.4.4".parse::<IpAddr>().unwrap()),
+            (second_instance.id, "2001:db8::3".parse::<IpAddr>().unwrap()),
+        ]
+    );
+    assert_eq!(
+        addresses[2].prefix,
+        "2001:db8::3/128".parse::<ipnetwork::IpNetwork>()?
+    );
+
+    let mut segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig {
+            include_num_free_ips: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let segment = segments.remove(0);
+    let ipv4_prefix = segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv4())
+        .unwrap();
+    // Of 256 addresses, .0, .1, .2, .3, .4, and .255 are unavailable.
+    assert_eq!(ipv4_prefix.num_free_ips, Some(250));
 
     Ok(())
 }

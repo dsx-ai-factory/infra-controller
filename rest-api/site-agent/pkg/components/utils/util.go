@@ -93,13 +93,29 @@ func RetryWithExponentialBackoff(client *http.Client, req *http.Request,
 		if resp.StatusCode != http.StatusOK {
 			badStatus := fmt.Errorf("bad status code: %v", resp.StatusCode)
 			log.Error().Msg(badStatus.Error())
+			_ = resp.Body.Close()
 			if !httpIsRetryable(resp) {
 				return nil, badStatus
 			}
+			if i == maxAttempts {
+				break
+			}
 			req.Body = io.NopCloser(bytes.NewReader(reqBody))
 			sleepTime := float64(delayMs) * math.Pow(backoff, float64(i+1))
-			log.Info().Msgf("sleeping for %v", sleepTime)
-			time.Sleep(time.Duration(sleepTime) * time.Millisecond)
+			retryDelay := time.Duration(sleepTime) * time.Millisecond
+			log.Info().Msgf("sleeping for %v", retryDelay)
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-timer.C:
+			case <-req.Context().Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return nil, req.Context().Err()
+			}
 		} else {
 			return resp, nil
 		}

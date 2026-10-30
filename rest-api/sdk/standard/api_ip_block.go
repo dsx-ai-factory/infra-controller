@@ -195,7 +195,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
 
-Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
+Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -614,7 +614,7 @@ func (r ApiGetAllIpblockRequest) Execute() ([]IpBlock, *http.Response, error) {
 /*
 GetAllIpblock Retrieve all IP Blocks
 
-Retrieve the IP Blocks visible to the requesting organization. Private IP Block records linked to a `TenantManaged` SitePrefix are not exposed through this API.
+Retrieve the IP Blocks visible to the requesting organization. Tenant-created IP Blocks (`managed: false`) are not exposed through this API. Blocks allocated to Tenants by the Infrastructure Provider remain managed and visible within the requesting organization's scope.
 
 User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix. `infrastructureProviderId` or `tenantId` query parameter may be required for older API versions.
 
@@ -795,7 +795,7 @@ func (r ApiGetIpblockRequest) Execute() (*IpBlock, *http.Response, error) {
 /*
 GetIpblock Retrieve IP Block
 
-Retrieve an IP Block by ID. Records outside the requesting organization's scope, including private IP Block records linked to a `TenantManaged` SitePrefix, return the same 404 response as an unknown ID.
+Retrieve an IP Block by ID. Records outside the requesting organization's scope, including Tenant-created IP Blocks (`managed: false`), return the same 404 response as an unknown ID.
 
 User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix.
 
@@ -950,7 +950,7 @@ Org must have an Infrastructure Provider. Specified IP Block must belong to the 
 
 Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
 
-Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404.
+Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

@@ -116,12 +116,12 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 			return err
 		}
 	}
-	positionalArgs, err = resolveGeneratedPathParameters(s, info, positionalArgs)
+	positionalArgs, bodyContext, err := resolveGeneratedPathParameters(s, info, positionalArgs)
 	if err != nil {
 		return err
 	}
 
-	flagArgs, err = addGeneratedBodyForm(s, info, flagArgs)
+	flagArgs, err = addGeneratedBodyForm(s, info, flagArgs, bodyContext)
 	if err != nil {
 		return err
 	}
@@ -207,8 +207,13 @@ func generatedFlagName(token string) (string, bool) {
 	return name, false
 }
 
-func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo, args []string) ([]string, error) {
+func resolveGeneratedPathParameters(
+	s *Session,
+	info appcli.GeneratedCommandInfo,
+	args []string,
+) ([]string, map[string]string, error) {
 	resolved := append([]string(nil), args...)
+	bodyContext := make(map[string]string)
 	resolvedValues := map[string]string{
 		"siteId": strings.TrimSpace(s.Scope.SiteID),
 		"vpcId":  strings.TrimSpace(s.Scope.VpcID),
@@ -238,12 +243,18 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 			value,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if supported {
 			value = item.ID
+			if info.Name == "expected-machine update" && strings.TrimSpace(s.Scope.SiteID) == "" {
+				// `ExpectedMachineUpdateRequest` has no `siteId`. An unscoped
+				// session still needs the selected machine's Site for the SKU
+				// query, which requires it; explicit Site scope already supplies it.
+				bodyContext["siteId"] = item.Extra["siteId"]
+			}
 		} else if value == "" && descriptor.FreeFormReason == "" && s.Resolver != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"%s has no interactive selector for path parameter %s",
 				info.Name,
 				parameter,
@@ -254,7 +265,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 				true,
 			)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
@@ -265,7 +276,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 		}
 		resolvedValues[parameter] = value
 	}
-	return resolved, nil
+	return resolved, bodyContext, nil
 }
 
 func addRequiredGeneratedQueryFlags(s *Session, info appcli.GeneratedCommandInfo, args []string) ([]string, error) {

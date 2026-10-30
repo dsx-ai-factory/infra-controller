@@ -10,12 +10,13 @@ use model::nic_firmware::NicFirmwareProfileId;
 #[command(
     long_about = "\
 Read one NIC firmware profile definition and its edit version from Core. An \
-unknown ID fails. No hardware selection or firmware update is performed.
+unknown ID fails with the CLI error \"NIC firmware profile <ID> not found\". \
+No hardware selection or firmware update is performed.
 
 Use --format ascii-table (default), csv, json, or yaml and --output PATH before \
-the firmware subcommand. JSON/YAML returns a one-element array containing id, \
-config, and version. Extract [0].config from JSON output as JSON for create/update \
-input; YAML output is not accepted as input. Table/CSV shows one row per entry. \
+the firmware subcommand. JSON and YAML output is a one-element array containing id, \
+config, and version. Extract [0].config from JSON output as JSON for create or update \
+input; YAML output is not accepted as input. Table and CSV output has one row per entry. \
 Keep the observed version for a later update or delete.
 
 Output defaults to stdout. --output requires a path that does not exist; the \

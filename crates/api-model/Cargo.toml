@@ -81,7 +81,6 @@ tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
 uuid = { features = ["v4", "serde"], workspace = true }
 version-compare = { workspace = true }
-tokio = { workspace = true }
 #these are alphabetized
 
 [features]

@@ -22,8 +22,10 @@ use std::time::{Duration, Instant};
 use ::rpc::forge as rpc;
 use carbide_authn::SpiffeContext;
 use carbide_authn::middleware::{CertDescriptionMiddleware, ConnectionAttributes};
-use hyper::server::conn::{http1, http2};
+use hyper::server::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
+use hyper_util::server::graceful::GracefulConnection;
 use hyper_util::service::TowerToHyperService;
 use model::ConfigValidationError;
 use opentelemetry::metrics::Meter;
@@ -511,7 +513,7 @@ pub(crate) async fn start(
         None
     } else {
         Some(AsyncRequireAuthorizationLayer::new(
-            auth::middleware::InternalRBACHandler::new(),
+            auth::middleware::InternalRBACHandler::new(auth_config.as_ref()),
         ))
     };
 
@@ -687,6 +689,9 @@ pub(crate) async fn start(
                 let tls_acceptor = tls_acceptor.clone();
                 let http = http.clone();
                 let app = app.clone();
+                // Give the handler a child token of the global one, in case we want to cancel it
+                // independently.
+                let handler_cancel_token = cancel_token.child_token();
 
                 tokio::task::Builder::new()
                     .name("http conn handler")
@@ -718,19 +723,14 @@ pub(crate) async fn start(
                                         .layer(conn_attrs_extension_layer)
                                         .service(app);
 
-                                    if let Err(error) = http
-                                        .serve_connection(
+                                    serve_with_graceful_shutdown(
+                                        http.serve_connection(
                                             conn,
                                             TowerToHyperService::new(app_with_ext),
-                                        )
-                                        .await
-                                    {
-                                        tracing::debug!(
-                                            %error,
-                                            error_debug = ?error,
-                                            "error servicing tls http request",
-                                        );
-                                    }
+                                        ),
+                                        handler_cancel_token,
+                                    )
+                                    .await;
                                 }
                                 Err(error) => {
                                     error.record(addr);
@@ -752,26 +752,29 @@ pub(crate) async fn start(
                                 .layer(conn_attrs_extension_layer)
                                 .service(app);
 
-                            let result = if serve_plaintext_via_http1 {
+                            if serve_plaintext_via_http1 {
                                 // Serve the connection as HTTP/1.1 and allow upgrading to HTTP/2
-                                http1::Builder::new()
-                                    .serve_connection(conn, TowerToHyperService::new(app_with_ext))
-                                    .with_upgrades()
-                                    .await
+                                serve_with_graceful_shutdown(
+                                    auto::Builder::new(TokioExecutor::new())
+                                        .serve_connection_with_upgrades(
+                                            conn,
+                                            TowerToHyperService::new(app_with_ext),
+                                        ),
+                                    handler_cancel_token,
+                                )
+                                .await;
                             } else {
                                 // Serve the connection as HTTP/2, which will fail if the initial
                                 // request is HTTP/1.1 (which is the default behavior for web browsers,
                                 // curl, etc.)
-                                http.serve_connection(conn, TowerToHyperService::new(app_with_ext))
-                                    .await
-                            };
-
-                            if let Err(error) = result {
-                                tracing::debug!(
-                                    error = %error,
-                                    error_debug = ?error,
-                                    "error servicing plain http connection",
-                                );
+                                serve_with_graceful_shutdown(
+                                    http.serve_connection(
+                                        conn,
+                                        TowerToHyperService::new(app_with_ext),
+                                    ),
+                                    handler_cancel_token,
+                                )
+                                .await;
                             }
                         }
                     })
@@ -783,6 +786,37 @@ pub(crate) async fn start(
         })?;
 
     Ok(listen_address)
+}
+
+/// Helper to serve and await an HTTP connection, while gracefully shutting it down if the given
+/// [`CancellationToken`] is cancelled. For HTTP2 connections, this sends an HTTP/2
+/// [GOAWAY frame][0] on the connection so that no new streams can be opened. For HTTP1 connections
+/// it will disable keepalive on the connection, which should cause it to disconnect after the
+/// next response.
+///
+/// [0]: https://httpwg.org/specs/rfc7540.html#GOAWAY
+async fn serve_with_graceful_shutdown<C>(connection: C, cancel_token: CancellationToken)
+where
+    C: GracefulConnection,
+    C::Error: std::fmt::Display + std::fmt::Debug,
+{
+    tokio::pin!(connection);
+
+    let result = tokio::select! {
+        result = &mut connection => result,
+        () = cancel_token.cancelled() => {
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    };
+
+    if let Err(error) = result {
+        tracing::debug!(
+            error = %error,
+            error_debug = ?error,
+            "error servicing connection",
+        );
+    }
 }
 
 /// Handle the root URL. Health check services often expect a 200 here.

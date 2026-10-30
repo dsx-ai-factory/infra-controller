@@ -262,7 +262,7 @@ Useful metrics for fleet-level monitoring include:
 | `carbide_reboot_attempts_in_booting_with_discovery_image` | Detect hosts that require repeated discovery-image reboots. |
 | `carbide_measured_boot_machines_per_machine_state_total` | Review measured boot machine state coverage. |
 | `carbide_pending_host_firmware_update_count` | Count hosts that need host firmware updates. |
-| `carbide_pending_dpu_nic_firmware_update_count` | Count DPUs that need NIC firmware updates. |
+| `carbide_pending_dpu_nic_firmware_update_count` | Count classic and DPF drift candidates under the filters in [DPU Firmware Updates](firmware-updates/dpu-firmware.md#monitor-an-update). |
 | `carbide_active_host_firmware_update_count` | Count hosts actively updating firmware. |
 | `carbide_running_dpu_updates_count` | Count DPUs actively updating firmware. |
 
@@ -328,7 +328,7 @@ storage cleanup:
 1. Wait for the Redfish job to complete.
 1. Run Scout host cleanup.
 1. Recreate the BOSS virtual disk as `VD_0`.
-1. Re-enable host lockdown.
+1. Re-enable host lockdown, unless the host lifecycle profile sets `disable_lockdown`.
 1. Continue to post-cleanup validation.
 
 If the Redfish job fails, NICo retries the job path and, if required, power-cycles the host as part of the recovery loop.

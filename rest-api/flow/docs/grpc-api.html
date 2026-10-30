@@ -567,6 +567,14 @@
                 </li>
 
                 <li>
+                  <a href="#v1.GetTrayPowerDetailsRequest"><span class="badge">M</span>GetTrayPowerDetailsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetTrayPowerDetailsResponse"><span class="badge">M</span>GetTrayPowerDetailsResponse</a>
+                </li>
+
+                <li>
                   <a href="#v1.HealthProbeAlert"><span class="badge">M</span>HealthProbeAlert</a>
                 </li>
 
@@ -835,7 +843,19 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PowerActionDetails"><span class="badge">M</span>PowerActionDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerActualDetails"><span class="badge">M</span>PowerActualDetails</a>
+                </li>
+
+                <li>
                   <a href="#v1.PowerControlTaskOperation"><span class="badge">M</span>PowerControlTaskOperation</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerDesiredDetails"><span class="badge">M</span>PowerDesiredDetails</a>
                 </li>
 
                 <li>
@@ -847,7 +867,27 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PowerOperations"><span class="badge">M</span>PowerOperations</a>
+                </li>
+
+                <li>
                   <a href="#v1.PowerResetRackRequest"><span class="badge">M</span>PowerResetRackRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskDetails"><span class="badge">M</span>PowerTaskDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskDetailsList"><span class="badge">M</span>PowerTaskDetailsList</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskExternalTargets"><span class="badge">M</span>PowerTaskExternalTargets</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskWaitingContext"><span class="badge">M</span>PowerTaskWaitingContext</a>
                 </li>
 
                 <li>
@@ -931,6 +971,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.TaskBrief"><span class="badge">M</span>TaskBrief</a>
+                </li>
+
+                <li>
                   <a href="#v1.TaskOperation"><span class="badge">M</span>TaskOperation</a>
                 </li>
 
@@ -944,6 +988,10 @@
 
                 <li>
                   <a href="#v1.TaskStats"><span class="badge">M</span>TaskStats</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TrayPowerDetails"><span class="badge">M</span>TrayPowerDetails</a>
                 </li>
 
                 <li>
@@ -1088,6 +1136,14 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PowerDetailsReadError"><span class="badge">E</span>PowerDetailsReadError</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskRelevance"><span class="badge">E</span>PowerTaskRelevance</a>
+                </li>
+
+                <li>
                   <a href="#v1.RackFilterField"><span class="badge">E</span>RackFilterField</a>
                 </li>
 
@@ -1101,6 +1157,10 @@
 
                 <li>
                   <a href="#v1.TaskExecutorType"><span class="badge">E</span>TaskExecutorType</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TaskKind"><span class="badge">E</span>TaskKind</a>
                 </li>
 
                 <li>
@@ -4351,6 +4411,54 @@ and returns OperationRun.stats. </p></td>
 
 
 
+        <h3 id="v1.GetTrayPowerDetailsRequest">GetTrayPowerDetailsRequest</h3>
+        <p>Uses the same external component ID or BMC/PMC MAC selector as tray inventory.</p><p>Empty identifiers return InvalidArgument, missing identifiers NotFound, and</p><p>ambiguous identifiers FailedPrecondition. Only compute, NVLink switch, and</p><p>power shelf components are supported; other types return InvalidArgument.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetTrayPowerDetailsResponse">GetTrayPowerDetailsResponse</h3>
+        <p>Contains independently available power facts for the resolved inventory member.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>details</td>
+                  <td><a href="#v1.TrayPowerDetails">TrayPowerDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.HealthProbeAlert">HealthProbeAlert</h3>
         <p></p>
 
@@ -6849,6 +6957,68 @@ selected cohort is deterministic and auditable. </p></td>
 
 
 
+        <h3 id="v1.PowerActionDetails">PowerActionDetails</h3>
+        <p>A present Core value with no actions and no nested error means no tracked</p><p>maintenance was found. A nested error still makes that Core value unavailable.</p><p>Unsupported means the Core server did not provide action details; it must not</p><p>be interpreted as a successful empty action list.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentPowerActionDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerActualDetails">PowerActualDetails</h3>
+        <p>A Core observation, including its per-device failure, or a Flow read failure.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentPowerObservation</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.PowerControlTaskOperation">PowerControlTaskOperation</h3>
         <p></p>
 
@@ -6871,6 +7041,37 @@ selected cohort is deterministic and auditable. </p></td>
                   <td><a href="#bool">bool</a></td>
                   <td></td>
                   <td><p>Bypasses the component readiness gate when the task executes. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerDesiredDetails">PowerDesiredDetails</h3>
+        <p>Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentPowerPolicy</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -7001,6 +7202,37 @@ the bypass is recorded in the server log. </p></td>
 
 
 
+        <h3 id="v1.PowerOperations">PowerOperations</h3>
+        <p>Core maintenance and Flow tasks are separate records without a correlation ID.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>actions</td>
+                  <td><a href="#v1.PowerActionDetails">PowerActionDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.PowerTaskDetailsList">PowerTaskDetailsList</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.PowerResetRackRequest">PowerResetRackRequest</h3>
         <p></p>
 
@@ -7056,6 +7288,223 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskDetails">PowerTaskDetails</h3>
+        <p>Informational task details with recorded identities, not inferred live targets.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operation</td>
+                  <td><a href="#v1.TaskOperation">TaskOperation</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>targets</td>
+                  <td><a href="#v1.ComponentsByType">ComponentsByType</a></td>
+                  <td></td>
+                  <td><p>Recorded Flow UUIDs grouped by type, including IDs no longer in inventory.
+Absent when no targets were recorded. </p></td>
+                </tr>
+
+                <tr>
+                  <td>status</td>
+                  <td><a href="#v1.TaskStatus">TaskStatus</a></td>
+                  <td></td>
+                  <td><p>Waiting, Pending, or Running. Running does not prove hardware dispatch. </p></td>
+                </tr>
+
+                <tr>
+                  <td>created_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>updated_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>started_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p>Present only if the task store recorded an execution start. </p></td>
+                </tr>
+
+                <tr>
+                  <td>relevance</td>
+                  <td><a href="#v1.PowerTaskRelevance">PowerTaskRelevance</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>waiting_context</td>
+                  <td><a href="#v1.PowerTaskWaitingContext">PowerTaskWaitingContext</a></td>
+                  <td></td>
+                  <td><p>Populated for Waiting tasks; absent for Pending/Running (not applicable).
+On a Waiting task, absence means the service did not provide context. </p></td>
+                </tr>
+
+                <tr>
+                  <td>external_targets</td>
+                  <td><a href="#v1.PowerTaskExternalTargets">PowerTaskExternalTargets</a></td>
+                  <td></td>
+                  <td><p>Inventory identifiers for REST consumers. Absent on older services/proxies;
+a present result has every member of targets or a categorized error.
+Failure here does not remove the task or change its recorded UUID targets. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskDetailsList">PowerTaskDetailsList</h3>
+        <p>Outstanding power tasks for the tray's current Flow rack, ordered by created_at,</p><p>then task ID, ascending. Missing rack assignment returns NotLinked. Tasks from</p><p>a former rack are excluded. Only recorded selections or power-shelf tasks</p><p>affecting this rack are included; tasks with no recorded targets are excluded.</p><p>More than 256 outstanding rack power tasks makes this entire section unavailable,</p><p>even if fewer target this tray. Error is absent on success, including empty;</p><p>entries is empty on failure. Entries contain only power tasks; other task kinds</p><p>can appear as brief waiting-context references. Execution reports are excluded.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>entries</td>
+                  <td><a href="#v1.PowerTaskDetails">PowerTaskDetails</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskExternalTargets">PowerTaskExternalTargets</h3>
+        <p>External identities read from retained inventory, including soft-deleted rows.</p><p>These are the identities available at read time, not a historical copy saved</p><p>with the task. A component may have moved racks since the task was recorded.</p><p>Error is absent on success, including an empty recorded selection. On failure,</p><p>rack_id and targets are empty; no partial selection or Flow UUID fallback is</p><p>returned. Lookup shares the power-details request's existing read deadline.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>External identifier of the task&#39;s recorded rack; nonempty on success. </p></td>
+                </tr>
+
+                <tr>
+                  <td>targets</td>
+                  <td><a href="#v1.ExternalRef">ExternalRef</a></td>
+                  <td>repeated</td>
+                  <td><p>Membership and order match the existing PowerTaskDetails.targets field,
+which is ordered by type and UUID, not by external ID. Each type is
+explicit and matches the selected type. </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p>NotLinked means a rack or component identity is missing, empty, or purged.
+InvalidResponse means a selected type is unknown or disagrees with the
+inventory type, a target UUID is malformed, or the retained rack reply has
+wrong identity or cardinality. DeadlineExceeded/ReadFailed mean lookup
+failed; Unsupported means the dependency does not implement the read.
+LimitExceeded means external identity lookup was skipped because the UUID
+text alone cannot fit, or the result was removed to fit the response limit. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskWaitingContext">PowerTaskWaitingContext</h3>
+        <p>Nearby work observed for a Waiting power task, not a saved reason for waiting.</p><p>Tasks can change between the power-task read and this metadata read. Both lists</p><p>are ordered by creation time, then ID, ascending. Error is absent on success,</p><p>including empty lists; lists are empty on failure. More than 256 nonterminal</p><p>tasks in the rack makes context unavailable without discarding power tasks.</p><p>If a tray response exceeds its byte limit, populated context lists are replaced</p><p>with LimitExceeded before the complete task section can be discarded.</p><p>A task can also wait for linked inventory; this context is not a readiness check.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>active_conflicts</td>
+                  <td><a href="#v1.TaskBrief">TaskBrief</a></td>
+                  <td>repeated</td>
+                  <td><p>Pending or Running tasks that match Flow&#39;s current conflict rules. </p></td>
+                </tr>
+
+                <tr>
+                  <td>earlier_waiting</td>
+                  <td><a href="#v1.TaskBrief">TaskBrief</a></td>
+                  <td>repeated</td>
+                  <td><p>Waiting tasks of any kind in the same rack with strictly earlier creation times.
+Equal timestamps are excluded. These references do not establish exact
+blockers, queue position, historical causes, or execution order. </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p>Absent on success. LimitExceeded means the metadata row limit was exceeded
+or context references were removed to fit the response byte limit.
+DeadlineExceeded or ReadFailed means the metadata could not be read. </p></td>
                 </tr>
 
             </tbody>
@@ -7837,6 +8286,44 @@ Defaults to &#34;UTC&#34;. Ignored for interval and one-time specs. </p></td>
 
 
 
+        <h3 id="v1.TaskBrief">TaskBrief</h3>
+        <p>A task reference without its operation payload, report, or description.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>The stored Flow task UUID, not a Core action or component identity. </p></td>
+                </tr>
+
+                <tr>
+                  <td>kind</td>
+                  <td><a href="#v1.TaskKind">TaskKind</a></td>
+                  <td></td>
+                  <td><p>Unspecified when the stored task type has no known API kind. </p></td>
+                </tr>
+
+                <tr>
+                  <td>status</td>
+                  <td><a href="#v1.TaskStatus">TaskStatus</a></td>
+                  <td></td>
+                  <td><p>Pending or Running in active_conflicts; Waiting in earlier_waiting. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.TaskOperation">TaskOperation</h3>
         <p>TaskOperation is the typed, target-independent operation definition used by</p><p>new APIs. Existing operation APIs retain their established request messages.</p>
 
@@ -8069,6 +8556,75 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
 
 
 
+        <h3 id="v1.TrayPowerDetails">TrayPowerDetails</h3>
+        <p>Power details remain readable by MAC before a managed Core ID exists.</p><p>Every section is populated with either its value or a categorized error.</p><p>Inventory and both child reads share at most 30 seconds from RPC entry, capped</p><p>at one second before a caller deadline. Completed sections survive another</p><p>section's failure. Core hardware, policy, and actions may describe different</p><p>instants from Flow tasks; Running tasks do not imply active Core actions.</p><p>The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).</p><p>If the response is oversized, populated waiting-context lists are replaced</p><p>with context-level LimitExceeded first, then successful external target results</p><p>are replaced with LimitExceeded. If it still exceeds the limit, the entire</p><p>task section is replaced with LimitExceeded. If the rest still exceeds the</p><p>limit, the RPC returns ResourceExhausted. No task targets are truncated.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>component_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>External inventory ID, matching Component.component_id.
+Absent until the inventory member has a managed Core identity. </p></td>
+                </tr>
+
+                <tr>
+                  <td>component_type</td>
+                  <td><a href="#v1.ComponentType">ComponentType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Absent when this member has no Flow rack assignment. </p></td>
+                </tr>
+
+                <tr>
+                  <td>actual</td>
+                  <td><a href="#v1.PowerActualDetails">PowerActualDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>desired</td>
+                  <td><a href="#v1.PowerDesiredDetails">PowerDesiredDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operations</td>
+                  <td><a href="#v1.PowerOperations">PowerOperations</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>The inventory rack identifier used by REST rack and tray resources.
+Includes retained soft-deleted racks. Absent when no rack identity can be
+read; older services or proxies also omit it. Never uses the Flow UUID. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.TriggerTaskScheduleRequest">TriggerTaskScheduleRequest</h3>
         <p>TriggerTaskScheduleRequest fires a TaskSchedule immediately, regardless of</p><p>next_run_at or enabled state. The overlap policy is not consulted — all</p><p>scopes are submitted unconditionally. Returns an error for a one-time</p><p>schedule that has already fired.</p>
 
@@ -8201,7 +8757,7 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
 
 
         <h3 id="v1.UpdateTaskScheduleRequest">UpdateTaskScheduleRequest</h3>
-        <p>UpdateTaskScheduleRequest updates the scheduling config of an existing</p><p>TaskSchedule. To modify which racks are targeted, use</p><p>AddTaskScheduleScope / RemoveTaskScheduleScope instead.</p><p>update_mask is required and controls which fields are written. Supported paths:</p><p>"schedule.name"           – display name</p><p>"schedule.overlap_policy" – overlap behaviour</p><p>"schedule.spec"           – full spec block (type + spec string + next_run_at recomputed)</p><p>"schedule.spec.timezone"  – timezone only (spec type/string unchanged)</p>
+        <p>UpdateTaskScheduleRequest updates the scheduling config of an existing</p><p>TaskSchedule. To modify which racks are targeted, use</p><p>AddTaskScheduleScope / RemoveTaskScheduleScope instead.</p><p>update_mask is required and controls which fields are written. Supported paths:</p><p>- `schedule.name` – display name</p><p>- `schedule.overlap_policy` – overlap behaviour</p><p>- `schedule.spec` – full spec block (type + spec string + next_run_at recomputed)</p><p>- `schedule.spec.timezone` – timezone only (spec type/string unchanged)</p>
 
 
           <table class="field-table">
@@ -9512,6 +10068,99 @@ graceful restart</p></td>
           </tbody>
         </table>
 
+        <h3 id="v1.PowerDetailsReadError">PowerDetailsReadError</h3>
+        <p>Flow lookup failures are distinct from errors returned inside Core values.</p><p>Dependency error strings and credentials are never included.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p>Not emitted as an error by this RPC.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_NOT_LINKED</td>
+                <td>1</td>
+                <td><p>The section lacks its required identity: a managed Core ID for Core
+sections, a Flow rack assignment for tasks, or a retained external
+component/rack identifier for an external target result.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_NOT_CONFIGURED</td>
+                <td>2</td>
+                <td><p>Flow has no NICo provider client.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_UNSUPPORTED</td>
+                <td>3</td>
+                <td><p>Core lacks the RPC or did not provide this section.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED</td>
+                <td>4</td>
+                <td><p>A child read exceeded its caller or provider deadline.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_READ_FAILED</td>
+                <td>5</td>
+                <td><p>The dependency returned an error other than unsupported/deadline.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_INVALID_RESPONSE</td>
+                <td>6</td>
+                <td><p>A dependency returned the wrong identity/cardinality, an absent required
+value, an inventory type that differs from the selected type, or task data
+that cannot be converted to the declared operation or UUID.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED</td>
+                <td>7</td>
+                <td><p>The rack power-task count, waiting-context task count, or encoded response
+exceeded its documented bound.</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.PowerTaskRelevance">PowerTaskRelevance</h3>
+        <p>Why this task is included for the requested tray.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>POWER_TASK_RELEVANCE_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_TASK_RELEVANCE_SELECTED</td>
+                <td>1</td>
+                <td><p>The task&#39;s recorded UUID/type selection explicitly includes this tray.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_TASK_RELEVANCE_RACK_AFFECTED</td>
+                <td>2</td>
+                <td><p>The task selects a power shelf on this rack; the tray is not a selected target.</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
         <h3 id="v1.RackFilterField">RackFilterField</h3>
         <p>RackFilterField represents the supported filter field types for rack queries</p>
         <table class="enum-table">
@@ -9635,6 +10284,53 @@ graceful restart</p></td>
                 <td>TASK_EXECUTOR_TYPE_TEMPORAL</td>
                 <td>1</td>
                 <td><p></p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.TaskKind">TaskKind</h3>
+        <p>Task kinds include rack lifecycle work not represented by OperationType.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>TASK_KIND_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p>The stored task type has no known API kind.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_POWER_CONTROL</td>
+                <td>1</td>
+                <td><p>Power control for selected rack components.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_FIRMWARE_CONTROL</td>
+                <td>2</td>
+                <td><p>Firmware control for selected rack components.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_BRING_UP</td>
+                <td>3</td>
+                <td><p>Rack bring-up work.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_DECOMMISSION</td>
+                <td>4</td>
+                <td><p>Rack decommissioning work.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_INJECT_EXPECTATION</td>
+                <td>5</td>
+                <td><p>Installing expected inventory for a rack.</p></td>
               </tr>
 
           </tbody>
@@ -10242,6 +10938,15 @@ When pagination is omitted, offset defaults to 0 and limit defaults to 100.</p><
                 <td><a href="#v1.CancelOperationRunRequest">CancelOperationRunRequest</a></td>
                 <td><a href="#v1.OperationRun">OperationRun</a></td>
                 <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>GetTrayPowerDetails</td>
+                <td><a href="#v1.GetTrayPowerDetailsRequest">GetTrayPowerDetailsRequest</a></td>
+                <td><a href="#v1.GetTrayPowerDetailsResponse">GetTrayPowerDetailsResponse</a></td>
+                <td><p>Reads live Core power details and outstanding Flow power tasks independently.
+This is not an atomic snapshot and does not change power or task state.
+Caller cancellation fails the RPC; child read failures remain section errors.</p></td>
               </tr>
 
           </tbody>

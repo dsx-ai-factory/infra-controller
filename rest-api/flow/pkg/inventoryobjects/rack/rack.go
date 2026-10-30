@@ -190,16 +190,14 @@ func (r *Rack) IsSealed() bool {
 func (r *Rack) String() string {
 	var builder strings.Builder
 
-	builder.WriteString(fmt.Sprintf(
-		"Name: %s, Manufacturer: %s, SN: %s, Location: %s",
+	fmt.Fprintf(&builder, "Name: %s, Manufacturer: %s, SN: %s, Location: %s",
 		r.Info.Name,
 		r.Info.Manufacturer,
 		r.Info.SerialNumber,
-		r.Loc.Encode(),
-	))
+		r.Loc.Encode())
 
 	for i, c := range r.Components {
-		builder.WriteString(fmt.Sprintf("\n[%2d] %v", i, &c))
+		fmt.Fprintf(&builder, "\n[%2d] %v", i, &c)
 	}
 
 	return builder.String()

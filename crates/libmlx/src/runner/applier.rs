@@ -68,12 +68,7 @@ impl MlxConfigApplier {
             )));
         }
 
-        let spec = CommandSpec::new("mlxconfig")
-            .arg("-d")
-            .arg(&self.device)
-            .arg("--yes")
-            .arg("apply")
-            .arg(config_file.to_string_lossy().to_string());
+        let spec = self.apply_command(config_file);
 
         let executor = CommandExecutor {
             options: &self.options,
@@ -90,6 +85,15 @@ impl MlxConfigApplier {
 
         executor.execute_with_retry(&spec)?;
         Ok(())
+    }
+
+    pub(crate) fn apply_command(&self, config_file: &Path) -> CommandSpec {
+        CommandSpec::new("mlxconfig")
+            .arg("-d")
+            .arg(&self.device)
+            .arg("--yes")
+            .arg("apply")
+            .arg(config_file.to_string_lossy())
     }
 
     // reset_config resets all mlxconfig configurations on the device

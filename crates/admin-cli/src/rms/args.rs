@@ -24,9 +24,6 @@ EXAMPLES:
 Get the full RMS inventory (RMS URL taken from --url or config):
     $ nico-admin-cli rms --url https://rms.example.com:8443 inventory
 
-Get a rack's power-on sequence (URL from config):
-    $ nico-admin-cli rms power-on-sequence rack-1
-
 Talk to RMS over mTLS with explicit certs:
     $ nico-admin-cli rms --url https://rms.example.com:8443 \
     --root-ca /etc/rms/ca.crt --client-cert /etc/rms/client.crt \
@@ -58,33 +55,10 @@ pub(crate) struct RmsAction {
 pub(super) enum Cmd {
     #[clap(about = "Get the full RMS inventory")]
     Inventory,
-    #[clap(about = "Get the power on sequence")]
-    PowerOnSequence(PowerOnSequence),
     #[clap(about = "Get the power state for a given node")]
     PowerState(PowerState),
     #[clap(about = "Get the firmware inventory for a given node")]
     FirmwareInventory(FirmwareInventory),
-}
-
-#[derive(Parser, Debug, Clone)]
-#[command(after_long_help = "\
-EXAMPLES:
-
-Get the power-on sequence for a rack:
-    $ nico-admin-cli rms power-on-sequence rack-1
-
-")]
-pub(super) struct PowerOnSequence {
-    #[clap(help = "Rack ID to get power sequence for")]
-    rack_id: String,
-}
-
-impl From<PowerOnSequence> for librms::protos::rack_manager::GetRackPowerOnSequenceRequest {
-    fn from(args: PowerOnSequence) -> Self {
-        Self {
-            rack_id: args.rack_id,
-        }
-    }
 }
 
 #[derive(Parser, Debug, Clone)]

@@ -104,6 +104,7 @@ cp /build-output/forge-scout-network.sh /opt/forge/
 
 # Ensure key commands are present
 for bin in /opt/forge/forge-scout \
+           /opt/forge/mlx-firmware-supervisor \
            /usr/bin/dcgmi \
            /usr/libexec/datacenter-gpu-manager-4/nvvs \
            /usr/libexec/datacenter-gpu-manager-4/plugins/cuda13/BwChecker_13
@@ -117,6 +118,7 @@ done
 
 # Ensure no missing libraries for key commands
 for bin in /opt/forge/forge-scout \
+           /opt/forge/mlx-firmware-supervisor \
            /usr/bin/dcgmi \
            /usr/libexec/datacenter-gpu-manager-4/nvvs \
            /usr/libexec/datacenter-gpu-manager-4/plugins/cuda13/BwChecker_13

@@ -817,9 +817,7 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 	ifcd := NewInterfaceDAO(dbSession)
 
 	instance1Subnets := []Interface{}
-	instance2Subnets := []Interface{}
 	instance1VpcPrefixes := []Interface{}
-	instance2VpcPrefixes := []Interface{}
 
 	for i := 0; i < totalCount/2; i++ {
 		instance1Subnet, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: instances[i].ID, SubnetID: &subnet1.ID, IsPhysical: true, Status: InterfaceStatusPending, CreatedBy: user.ID})
@@ -841,15 +839,12 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 
 		instance1VpcPrefixes = append(instance1VpcPrefixes, *instance1VpcPrefix)
 
-		instance2Subnet, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: instances[i].ID, SubnetID: &subnet2.ID, Status: InterfaceStatusPending, CreatedBy: user.ID})
+		_, err = ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: instances[i].ID, SubnetID: &subnet2.ID, Status: InterfaceStatusPending, CreatedBy: user.ID})
 		assert.NoError(t, err)
 
-		instance2Subnets = append(instance2Subnets, *instance2Subnet)
-
-		instance2VpcPrefix, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: instances[i].ID, VpcPrefixID: &vpcPrefix1.ID, Status: InterfaceStatusPending, CreatedBy: user.ID})
+		_, err = ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: instances[i].ID, VpcPrefixID: &vpcPrefix1.ID, Status: InterfaceStatusPending, CreatedBy: user.ID})
 		assert.NoError(t, err)
 
-		instance2VpcPrefixes = append(instance2VpcPrefixes, *instance2VpcPrefix)
 	}
 
 	// OTEL Spanner configuration

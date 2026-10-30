@@ -111,12 +111,10 @@ func TestGetAllInfiniBandInterface_Handle(t *testing.T) {
 		ibPartitions = append(ibPartitions, ibPartition)
 	}
 
-	ibifcs := []*cdbm.InfiniBandInterface{}
 	for i := 0; i < 25; i++ {
 		ibPartition := ibPartitions[i%3]
 		ibifc := testInstanceBuildIBInterface(t, dbSession, inst1, st1, ibPartition, i%4, true, nil, cutil.GetPtr(cdbm.InfiniBandInterfaceStatusProvisioning), false)
 		assert.NotNil(t, ibifc)
-		ibifcs = append(ibifcs, ibifc)
 	}
 
 	e := echo.New()
@@ -731,11 +729,9 @@ func TestGetAllInstanceInfiniBandInterfaceHandler_Handle(t *testing.T) {
 	inst1 := testInstanceBuildInstance(t, dbSession, "test-instance-2", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mc1.ID), &os1.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, inst1)
 
-	ifcs := []*cdbm.Interface{}
 	for i := 0; i < 25; i++ {
 		instsub1 := testInstanceBuildInstanceInterface(t, dbSession, inst1.ID, &subnets[i].ID, nil, nil, cdbm.InterfaceStatusProvisioning)
 		assert.NotNil(t, instsub1)
-		ifcs = append(ifcs, instsub1)
 	}
 
 	ibps := []*cdbm.InfiniBandPartition{}
@@ -745,11 +741,9 @@ func TestGetAllInstanceInfiniBandInterfaceHandler_Handle(t *testing.T) {
 		ibps = append(ibps, ibp1)
 	}
 
-	ibifs := []*cdbm.InfiniBandInterface{}
 	for i := 0; i < 25; i++ {
 		ibif1 := testInstanceBuildIBInterface(t, dbSession, inst1, st1, ibps[i], i%4, true, cutil.GetPtr(1), cutil.GetPtr(cdbm.InfiniBandInterfaceStatusProvisioning), false)
 		assert.NotNil(t, ibif1)
-		ibifs = append(ibifs, ibif1)
 	}
 
 	e := echo.New()

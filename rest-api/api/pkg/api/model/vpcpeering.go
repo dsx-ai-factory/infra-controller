@@ -175,13 +175,13 @@ func NewAPIVpcPeering(dbVpcPeering cdbm.VpcPeering, dbMappedPeeringTenants map[u
 	// Expand relations if available.
 	if dbVpcPeering.Vpc1 != nil {
 		apiVpcPeering.Vpc1 = NewAPIVpcPeeringVpcSummary(dbVpcPeering.Vpc1, nil)
-		peerTenant1, _ := dbMappedPeeringTenants[dbVpcPeering.Vpc1.TenantID]
+		peerTenant1 := dbMappedPeeringTenants[dbVpcPeering.Vpc1.TenantID]
 		apiVpcPeering.Vpc1 = NewAPIVpcPeeringVpcSummary(dbVpcPeering.Vpc1, peerTenant1)
 	}
 
 	if dbVpcPeering.Vpc2 != nil {
 		apiVpcPeering.Vpc2 = NewAPIVpcPeeringVpcSummary(dbVpcPeering.Vpc2, nil)
-		peerTenant2, _ := dbMappedPeeringTenants[dbVpcPeering.Vpc2.TenantID]
+		peerTenant2 := dbMappedPeeringTenants[dbVpcPeering.Vpc2.TenantID]
 		apiVpcPeering.Vpc2 = NewAPIVpcPeeringVpcSummary(dbVpcPeering.Vpc2, peerTenant2)
 	}
 

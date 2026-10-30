@@ -1245,7 +1245,7 @@ func OperationRunTargetTo(
 		PhaseIndex:       target.PhaseIndex,
 		Status:           OperationRunTargetStatusTo(target.Status),
 		Message:          target.Message,
-		ComponentsByType: componentsByTypeTo(target.ComponentsByType),
+		ComponentsByType: ComponentsByTypeTo(target.ComponentsByType),
 		CreatedAt:        timestamppb.New(target.CreatedAt),
 		UpdatedAt:        timestamppb.New(target.UpdatedAt),
 	}
@@ -1594,7 +1594,9 @@ func OperationRunTargetStatusFrom(
 	}
 }
 
-func componentsByTypeTo(
+// ComponentsByTypeTo preserves recorded target UUIDs in deterministic type and ID
+// order, without resolving them through current inventory.
+func ComponentsByTypeTo(
 	componentsByType operation.ComponentsByType,
 ) *pb.ComponentsByType {
 	if len(componentsByType) == 0 {

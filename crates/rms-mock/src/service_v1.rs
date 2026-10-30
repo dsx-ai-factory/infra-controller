@@ -228,14 +228,13 @@ rack_manager_impl! {
 
         /// Report the state of a job and, when asked, of its children.
         ///
-        /// The requested id is always echoed, even for a job unknown to this
-        /// process; a failed job carries its reason in `error_message`.
+        /// A missing job is NotFound. A failed job carries its reason in `error_message`.
         async fn get_job_status(
             &self,
             request: tonic::Request<rms::GetJobStatusRequest>,
         ) -> std::result::Result<tonic::Response<rms::GetJobStatusResponse>, tonic::Status> {
             let req = request.get_ref();
-            let status = self.observe_job(&requested_job(&req.job_id)?);
+            let status = self.observe_job(&requested_job(&req.job_id)?)?;
 
             Ok(tonic::Response::new(rms::GetJobStatusResponse {
                 job_states: job_states(&status, req.include_child_job_states),
@@ -376,7 +375,7 @@ rack_manager_impl! {
         /// Report progress of a certificate configuration job, parent or
         /// child.
         ///
-        /// A job id the mock has no record of is reported completed.
+        /// A missing job returns RETURN_CODE_FAILURE with its id and reason.
         async fn get_configure_switch_certificate_job_status(
             &self,
             request: tonic::Request<rms::GetConfigureSwitchCertificateJobStatusRequest>,
@@ -385,7 +384,18 @@ rack_manager_impl! {
             tonic::Status,
         > {
             let job_id = requested_job(&request.get_ref().job_id)?;
-            let status = self.observe_job(&job_id);
+            let status = match self.observe_job(&job_id) {
+                Ok(status) => status,
+                Err(error) if error.code() == tonic::Code::NotFound => {
+                    return Ok(tonic::Response::new(rms::GetConfigureSwitchCertificateJobStatusResponse {
+                        status: rms::ReturnCode::Failure as i32,
+                        job_id: job_id.into(),
+                        error_message: error.message().to_string(),
+                        ..Default::default()
+                    }));
+                }
+                Err(error) => return Err(error),
+            };
 
             Ok(tonic::Response::new(
                 rms::GetConfigureSwitchCertificateJobStatusResponse {
@@ -416,15 +426,17 @@ rack_manager_impl! {
     }
 
     unimplemented {
+        execute_cold_reboot(ExecuteColdRebootRequest) -> ExecuteColdRebootResponse,
+        batch_get_firmware_inventory(BatchGetFirmwareInventoryRequest) -> BatchGetFirmwareInventoryResponse,
+        compare_firmware_object(CompareFirmwareObjectRequest) -> CompareFirmwareObjectResponse,
+        inspect_scale_up_fabrics(InspectScaleUpFabricsRequest) -> InspectScaleUpFabricsResponse,
+        batch_collect_switch_spdm_attestation_evidence(BatchCollectSwitchSpdmAttestationEvidenceRequest) -> BatchCollectSwitchSpdmAttestationEvidenceResponse,
         set_power_state(SetPowerStateRequest) -> SetPowerStateResponse,
         get_power_state(GetPowerStateRequest) -> GetPowerStateResponse,
-        sequence_rack_power(SequenceRackPowerRequest) -> SequenceRackPowerResponse,
         list_node_inventory(ListNodeInventoryRequest) -> ListNodeInventoryResponse,
         create_nodes(CreateNodesRequest) -> CreateNodesResponse,
         update_node(UpdateNodeRequest) -> UpdateNodeResponse,
         delete_node(DeleteNodeRequest) -> DeleteNodeResponse,
-        get_rack_power_on_sequence(GetRackPowerOnSequenceRequest) -> GetRackPowerOnSequenceResponse,
-        set_rack_power_on_sequence(SetRackPowerOnSequenceRequest) -> SetRackPowerOnSequenceResponse,
         list_racks(ListRacksRequest) -> ListRacksResponse,
         get_node_device_info(GetNodeDeviceInfoRequest) -> GetNodeDeviceInfoResponse,
         list_node_device_info_by_node_type(ListNodeDeviceInfoByNodeTypeRequest) -> ListNodeDeviceInfoByNodeTypeResponse,

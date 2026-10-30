@@ -28,7 +28,7 @@ pub(in crate::tests) mod tests {
         MachineValidationContext, ManagedHostState, ValidationState,
     };
     use model::metadata::Metadata;
-    use model::sku::Sku;
+    use model::sku::{Sku, SkuComponentsReplacement};
     use model::test_support::ManagedHostConfig;
     use sqlx::PgConnection;
 
@@ -38,6 +38,7 @@ pub(in crate::tests) mod tests {
         create_managed_host_with_config, create_test_env, create_test_env_with_overrides,
         get_config,
     };
+    use crate::tests::common::postgres::wait_for_blocked_query;
 
     // ================================================================================
     // SKU Test Suite Structure
@@ -51,8 +52,8 @@ pub(in crate::tests) mod tests {
     //   B = auto_generate_missing_sku (F=manual, T=auto-generate)
     //
     // When allow_allocation_on_validation_failure=true, machines with assigned
-    // SKUs in failed states (SkuVerificationFailed or SkuMissing) can transition
-    // back to Ready/MachineValidation instead of staying blocked.
+    // SKUs can proceed to Ready/MachineValidation despite SKU mismatches or
+    // missing SKU records.
     //
     // ================================================================================
     //
@@ -91,7 +92,7 @@ pub(in crate::tests) mod tests {
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
     // │5.1 │ F │ * │ Re-verify mismatched SKU    │ → VerificationFailed       │ test_stays_in_failed_when_verification_fails             │
     // │5.2 │ F │ * │ Replace SKU, no re-verify   │ Stays Ready (no validation)│ test_continues_to_ready_when_verification_fails          │
-    // │5.3 │ T │ * │ SkuVerificationFailed state │ Escapes → Ready            │ test_allow_allocation_escapes_from_sku_failed            │
+    // │5.3 │ T │ * │ Assigned SKU mismatches     │ → MachineValidation        │ test_allow_allocation_proceeds_despite_sku_mismatch      │
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
     // │ 6. SKU Auto-Matching Scenarios                                                                                                   │
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
@@ -431,6 +432,71 @@ pub(in crate::tests) mod tests {
                 expected_sku.id
             )
         );
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_sku_create_distinguishes_large_persisted_memory(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use std::collections::BTreeMap;
+
+        use rpc::forge::forge_server::Forge;
+        use rpc::forge::{SkuComponentMemory, SkuComponents, SkuList, SkusByIdsRequest};
+
+        let env = create_test_env(pool).await;
+        let mut expected_memory_by_id = BTreeMap::new();
+
+        // Separate RPCs make the second create compare against a committed SKU.
+        // Both totals exceed `u32`: narrow arithmetic would panic, and wrapping
+        // or saturation would make them appear equal.
+        for (sku_id, count) in [("first-large-memory", 2), ("second-large-memory", 4)] {
+            let memory = vec![SkuComponentMemory {
+                memory_type: "DDR5".to_string(),
+                capacity_mb: 1_u32 << 31,
+                count,
+            }];
+            let sku = rpc::forge::Sku {
+                id: sku_id.to_string(),
+                schema_version: CURRENT_SKU_VERSION,
+                components: Some(SkuComponents {
+                    memory: memory.clone(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let created = env
+                .api
+                .create_sku(tonic::Request::new(SkuList { skus: vec![sku] }))
+                .await?
+                .into_inner();
+            assert_eq!(created.ids, vec![sku_id.to_string()]);
+            expected_memory_by_id.insert(sku_id.to_string(), memory);
+        }
+
+        // Reload both definitions to check that their large values survive storage.
+        let saved_skus = env
+            .api
+            .find_skus_by_ids(tonic::Request::new(SkusByIdsRequest {
+                ids: expected_memory_by_id.keys().cloned().collect(),
+            }))
+            .await?
+            .into_inner()
+            .skus;
+        assert_eq!(saved_skus.len(), expected_memory_by_id.len());
+        let saved_memory_by_id = saved_skus
+            .into_iter()
+            .map(|sku| {
+                (
+                    sku.id,
+                    sku.components
+                        .expect("saved SKU should have components")
+                        .memory,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(saved_memory_by_id, expected_memory_by_id);
+
         Ok(())
     }
 
@@ -909,6 +975,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    server_name: None,
                 },
             },
         )
@@ -1005,6 +1072,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    server_name: None,
                 },
             },
         )
@@ -1076,6 +1144,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    server_name: None,
                 },
             },
         )
@@ -1164,6 +1233,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    server_name: None,
                 },
             },
         )
@@ -1603,28 +1673,33 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
-    /// Test 5.3: SkuVerificationFailed → Escapes to MachineValidation with allow_allocation_on_validation_failure=true
+    /// Test 5.3: A host with mismatched SKU hardware proceeds to machine validation.
     /// Conditions:
-    /// - allow_allocation_on_validation_failure = true (allow machines to escape from failed states)
-    /// - auto_generate_missing_sku = false
-    /// - machine has assigned SKU but verification would fail (hardware mismatch)
-    /// Expected: Machine escapes any potential SkuVerificationFailed state and proceeds directly to Ready
-    /// Note: With allow_allocation_on_validation_failure=true, the machine never actually stays in
-    /// SkuVerificationFailed state—it escapes immediately, so we just verify it reaches Ready.
+    /// - `allow_allocation_on_validation_failure = true`
+    /// - `auto_generate_missing_sku = false`
+    /// - the assigned SKU's CPU count does not match the host
+    /// Expected: one `VerifyingSku` iteration persists `RebootHost` with the
+    /// discovery validation ID and a validation run with `Discovery` context.
     #[crate::sqlx_test]
-    async fn test_allow_allocation_escapes_from_sku_failed(
+    async fn test_allow_allocation_proceeds_despite_sku_mismatch(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(pool.clone(), true, None, false).await;
 
-        // Create a SKU that will mismatch with the actual hardware
         let mut txn = pool.begin().await?;
-        let mismatched_sku: Sku = serde_json::from_str(SKU_DATA)?;
+        let mut mismatched_sku: Sku = serde_json::from_str(SKU_DATA)?;
+        mismatched_sku.components.cpus[0].count += 1;
         db::sku::create(&mut txn, &mismatched_sku).await?;
         txn.commit().await?;
 
-        // Create machine with the mismatched SKU
-        let managed_host_config = ManagedHostConfig::default();
+        let verifying_sku = ManagedHostState::BomValidating {
+            bom_validating_state: BomValidating::VerifyingSku(BomValidatingContext {
+                machine_validation_context: Some(MachineValidationContext::Discovery),
+                ..BomValidatingContext::default()
+            }),
+        };
+        let managed_host_config =
+            ManagedHostConfig::default().with_expected_state(verifying_sku.clone());
         let mut txn = pool.begin().await?;
         db::expected_machine::create(
             &mut txn,
@@ -1647,6 +1722,7 @@ pub(in crate::tests) mod tests {
                     dpu_policy: Default::default(),
                     bmc_ip_allocation: Default::default(),
                     host_lifecycle_profile: Default::default(),
+                    server_name: None,
                 },
             },
         )
@@ -1656,12 +1732,48 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host_with_config(&env, managed_host_config).await;
         let machine_id = mh.host().id;
 
-        // With allow_allocation_on_validation_failure=true, the machine should reach Ready state
-        // even though the SKU doesn't match the hardware (it would have failed verification
-        // if allow_allocation_on_validation_failure was false)
         let mut txn = pool.begin().await?;
         let machine = get_machine_by_id(&mut txn, &machine_id).await?;
-        assert_eq!(machine.current_state(), &ManagedHostState::Ready);
+        assert_eq!(machine.current_state(), &verifying_sku);
+        assert_eq!(machine.config.hw_sku.as_ref(), Some(&mismatched_sku.id));
+        assert!(machine.discovery_machine_validation_id.is_none());
+
+        let assigned_sku = db::sku::find(&mut txn, std::slice::from_ref(&mismatched_sku.id))
+            .await?
+            .pop()
+            .expect("assigned SKU should exist");
+        let actual_sku = db::sku::generate_sku_from_machine_at_version(
+            txn.as_mut(),
+            &machine_id,
+            assigned_sku.schema_version,
+        )
+        .await?;
+        // Both matching SKUs and allowed mismatches reach `RebootHost`;
+        // prove the mismatch first.
+        assert_eq!(
+            model::sku::diff_skus(&actual_sku, &assigned_sku),
+            ["Number of CPUs (1) does not match expected (2)"]
+        );
+        txn.commit().await?;
+
+        env.run_machine_state_controller_iteration().await;
+
+        let mut txn = pool.begin().await?;
+        let machine = get_machine_by_id(&mut txn, &machine_id).await?;
+        let validation_id = machine
+            .discovery_machine_validation_id
+            .expect("discovery validation ID should be persisted");
+        assert_eq!(
+            machine.current_state(),
+            &ManagedHostState::Validation {
+                validation_state: ValidationState::MachineValidation {
+                    machine_validation: MachineValidatingState::RebootHost { validation_id },
+                },
+            }
+        );
+        let validation = db::machine_validation::find_by_id(txn.as_mut(), &validation_id).await?;
+        assert_eq!(validation.machine_id, machine.id);
+        assert_eq!(validation.context.as_deref(), Some("Discovery"));
         txn.commit().await?;
 
         Ok(())
@@ -2150,6 +2262,489 @@ pub(in crate::tests) mod tests {
 
         assert_eq!(actual_sku_json, returned_sku_json);
         assert_eq!(actual_sku_json, expected_sku_json);
+
+        let mut invalid_sku = expected_sku.clone();
+        invalid_sku.device_type = Some("x".repeat(257));
+        let error = db::sku::replace(&mut txn, &invalid_sku)
+            .await
+            .expect_err("overlong device type must fail the SKU update");
+        let DatabaseError::Sqlx(annotated) = &error else {
+            panic!("expected SQLx update error, got {error:?}");
+        };
+        let source = annotated
+            .source
+            .as_database_error()
+            .expect("SKU update should retain the PostgreSQL error");
+        assert_eq!(source.code().as_deref(), Some("22001"));
+        assert!(annotated.to_string().contains("replace sku: update"));
+
+        let saved_sku = db::sku::find(&mut txn, std::slice::from_ref(&expected_sku.id))
+            .await?
+            .remove(0);
+        assert_eq!(
+            serde_json::ser::to_string_pretty(&saved_sku)?,
+            returned_sku_json
+        );
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test(fixtures("create_sku"))]
+    async fn test_replace_sku_components_preserves_concurrent_metadata(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        let env = create_test_env(pool.clone()).await;
+        let sku_id = "sku1".to_string();
+        let mut sku = db::sku::find(
+            pool.acquire().await?.as_mut(),
+            std::slice::from_ref(&sku_id),
+        )
+        .await?
+        .pop()
+        .expect("fixture SKU should exist");
+        sku.components.chassis.model = "replacement chassis".to_string();
+        let request = rpc::forge::ReplaceSkuComponentsRequest {
+            sku_id: sku_id.clone(),
+            components: Some(sku.components.into()),
+            schema_version: CURRENT_SKU_VERSION,
+            description: None,
+            device_type: None,
+        };
+
+        let mut metadata_txn = pool.begin().await?;
+        db::sku::update_metadata(
+            &mut metadata_txn,
+            sku_id.clone(),
+            Some("concurrent description".to_string()),
+            Some("concurrent device type".to_string()),
+        )
+        .await?;
+        let metadata_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *metadata_txn)
+            .await?;
+
+        let mut replacement =
+            Box::pin(env.api.replace_sku_components(tonic::Request::new(request)));
+
+        // Hold the metadata update uncommitted until the RPC reaches its write
+        // lock. Reading metadata before that lock would overwrite this edit.
+        tokio::select! {
+            _ = wait_for_blocked_query(&pool, metadata_pid, "LOCK TABLE machine_skus") => {}
+            result = &mut replacement => panic!("replacement completed before metadata committed: {result:?}"),
+        }
+        metadata_txn.commit().await?;
+        let response = replacement.await?.into_inner();
+
+        let saved_sku = db::sku::find(pool.acquire().await?.as_mut(), &[sku_id])
+            .await?
+            .pop()
+            .expect("replaced SKU should exist");
+        assert_eq!(saved_sku.description, "concurrent description");
+        assert_eq!(
+            saved_sku.device_type.as_deref(),
+            Some("concurrent device type")
+        );
+        assert_eq!(saved_sku.components.chassis.model, "replacement chassis");
+        assert_eq!(saved_sku.schema_version, CURRENT_SKU_VERSION);
+        assert_eq!(
+            response.description.as_deref(),
+            Some(saved_sku.description.as_str())
+        );
+        assert_eq!(response.device_type, saved_sku.device_type);
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test(fixtures("create_sku"))]
+    async fn test_replace_sku_components_updates_supplied_metadata(pool: sqlx::PgPool) {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::{Case, check_cases_async};
+
+        #[derive(Debug)]
+        struct MetadataUpdate {
+            description: Option<&'static str>,
+            device_type: Option<&'static str>,
+        }
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "description leaves device type unchanged",
+                    input: MetadataUpdate {
+                        description: Some("new description"),
+                        device_type: None,
+                    },
+                    expect: Yields((
+                        "new description".to_string(),
+                        Some("device_type".to_string()),
+                    )),
+                },
+                Case {
+                    scenario: "device type leaves description unchanged",
+                    input: MetadataUpdate {
+                        description: None,
+                        device_type: Some("new device type"),
+                    },
+                    expect: Yields((
+                        "test description".to_string(),
+                        Some("new device type".to_string()),
+                    )),
+                },
+                Case {
+                    scenario: "explicit empty values are saved",
+                    input: MetadataUpdate {
+                        description: Some(""),
+                        device_type: Some(""),
+                    },
+                    expect: Yields((String::new(), Some(String::new()))),
+                },
+            ],
+            |metadata| {
+                let pool = &pool;
+                async move {
+                    let result = async {
+                        let mut txn = pool.begin().await?;
+                        let sku = db::sku::find(&mut txn, &["sku1"])
+                            .await?
+                            .pop()
+                            .expect("fixture SKU should exist");
+                        db::sku::replace_components(
+                            &mut txn,
+                            SkuComponentsReplacement {
+                                id: sku.id,
+                                components: sku.components,
+                                schema_version: CURRENT_SKU_VERSION,
+                                description: metadata.description.map(str::to_string),
+                                device_type: metadata.device_type.map(str::to_string),
+                            },
+                        )
+                        .await?;
+                        let saved_sku = db::sku::find(&mut txn, &["sku1"])
+                            .await?
+                            .pop()
+                            .expect("replaced SKU should exist");
+                        txn.rollback().await?;
+                        Ok::<_, eyre::Error>((saved_sku.description, saved_sku.device_type))
+                    }
+                    .await;
+                    result.map_err(|error| error.to_string())
+                }
+            },
+        )
+        .await;
+    }
+
+    #[crate::sqlx_test]
+    async fn test_replace_sku_components_rejects_invalid_requests(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        struct Case {
+            scenario: &'static str,
+            request: rpc::forge::ReplaceSkuComponentsRequest,
+            expected_code: tonic::Code,
+            expected_operator_code: &'static str,
+            message_fragment: &'static str,
+        }
+
+        let env = create_test_env(pool).await;
+        let sku: rpc::forge::Sku = serde_json::from_str(FULL_SKU_DATA)?;
+        let request = rpc::forge::ReplaceSkuComponentsRequest {
+            sku_id: "missing-sku".to_string(),
+            components: sku.components,
+            schema_version: CURRENT_SKU_VERSION,
+            description: None,
+            device_type: None,
+        };
+        // Place the raw Debug logger's byte cutoff inside a UTF-8 character.
+        // ASCII padding keeps this independent of the Debug field-name lengths.
+        let unsupported_schema = (0..3)
+            .map(|padding| rpc::forge::ReplaceSkuComponentsRequest {
+                sku_id: format!(
+                    "{}{}",
+                    "a".repeat(padding),
+                    "界".repeat(rpc::MAX_ERR_MSG_SIZE as usize)
+                ),
+                schema_version: CURRENT_SKU_VERSION - 1,
+                ..request.clone()
+            })
+            .find(|request| {
+                !format!("{request:?}").is_char_boundary(rpc::MAX_ERR_MSG_SIZE as usize)
+            })
+            .expect("padding should place the cutoff inside a three-byte character");
+        let mut unconstrained_storage = request.clone();
+        let storage = &mut unconstrained_storage
+            .components
+            .as_mut()
+            .expect("complete SKU should have components")
+            .storage[0];
+        storage.min_size_mb = None;
+        storage.max_size_mb = None;
+        storage.pci_patterns.clear();
+
+        for case in [
+            Case {
+                scenario: "missing SKU",
+                request,
+                expected_code: tonic::Code::NotFound,
+                expected_operator_code: "NICO-API-404",
+                message_fragment: "SKU not found: missing-sku",
+            },
+            Case {
+                scenario: "unsupported schema with Unicode request logging",
+                request: unsupported_schema,
+                expected_code: tonic::Code::InvalidArgument,
+                expected_operator_code: "NICO-API-400",
+                message_fragment: "SKU version is no longer supported",
+            },
+            Case {
+                scenario: "unconstrained v5 storage",
+                request: unconstrained_storage,
+                expected_code: tonic::Code::InvalidArgument,
+                expected_operator_code: "NICO-API-400",
+                message_fragment: "has no size bounds or PCI patterns",
+            },
+        ] {
+            let error = env
+                .api
+                .replace_sku_components(tonic::Request::new(case.request))
+                .await
+                .expect_err(case.scenario);
+            assert_eq!(error.code(), case.expected_code, "{}", case.scenario);
+            assert!(
+                error.message().contains(case.message_fragment),
+                "{}: {error}",
+                case.scenario
+            );
+            assert_eq!(
+                error
+                    .metadata()
+                    .get("nico-error-code")
+                    .expect(case.scenario),
+                case.expected_operator_code,
+                "{}",
+                case.scenario
+            );
+            assert!(
+                error
+                    .metadata()
+                    .get("nico-error-text")
+                    .expect(case.scenario)
+                    .to_str()?
+                    .contains(case.message_fragment),
+                "{}",
+                case.scenario
+            );
+        }
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_replace_sku_rejects_missing_target(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        let env = create_test_env(pool.clone()).await;
+        let sku_id = "missing-sku";
+        let sku: rpc::forge::Sku = serde_json::from_str(FULL_SKU_DATA)?;
+        let error = env
+            .api
+            .replace_sku(tonic::Request::new(rpc::forge::Sku {
+                id: sku_id.to_string(),
+                schema_version: CURRENT_SKU_VERSION,
+                ..sku
+            }))
+            .await
+            .expect_err("missing replacement target should be rejected");
+
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.message(), format!("SKU not found: {sku_id}"));
+        assert!(
+            db::sku::find(pool.acquire().await?.as_mut(), &[sku_id])
+                .await?
+                .is_empty(),
+            "replacement must not create the missing SKU"
+        );
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_replace_sku_returns_persisted_machine_associations(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        #[derive(Debug)]
+        enum Replacement {
+            Full,
+            Components,
+        }
+
+        let env = create_test_env(pool.clone()).await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+        let machine_id: MachineId = machine_id.into();
+
+        let (mut sku, mut original_verify_request_time) = {
+            let mut txn = pool.begin().await?;
+            let sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
+            db::sku::create(&mut txn, &sku).await?;
+            db::machine::assign_sku(&mut txn, &machine_id, &sku.id).await?;
+            let machine =
+                db::machine::find_one(txn.as_mut(), &machine_id, MachineSearchConfig::default())
+                    .await?
+                    .expect("assigned machine should exist");
+            let verify_request_time = machine
+                .status
+                .hw_sku
+                .and_then(|status| status.verify_request_time);
+            txn.commit().await?;
+            (sku, verify_request_time)
+        };
+        db::sku::update_metadata(
+            pool.acquire().await?.as_mut(),
+            sku.id.clone(),
+            Some("saved description".to_string()),
+            Some("saved device type".to_string()),
+        )
+        .await?;
+
+        for replacement in [Replacement::Full, Replacement::Components] {
+            // Both methods return the saved assignment and request SKU verification.
+            // Component replacement also removes a populated CPU collection.
+            match replacement {
+                Replacement::Full => sku.components.cpus[0].thread_count *= 2,
+                Replacement::Components => {
+                    assert!(
+                        !sku.components.cpus.is_empty(),
+                        "fixture should have CPUs to remove"
+                    );
+                    sku.components.cpus.clear();
+                }
+            }
+            let request = rpc::forge::Sku {
+                description: None,
+                device_type: None,
+                associated_machine_ids: Vec::new(),
+                ..sku.clone().into()
+            };
+            let expected_components = request.components.clone();
+            let response = match replacement {
+                Replacement::Full => env.api.replace_sku(tonic::Request::new(request)).await?,
+                Replacement::Components => {
+                    env.api
+                        .replace_sku_components(tonic::Request::new(
+                            rpc::forge::ReplaceSkuComponentsRequest {
+                                sku_id: request.id,
+                                components: request.components,
+                                schema_version: request.schema_version,
+                                description: None,
+                                device_type: None,
+                            },
+                        ))
+                        .await?
+                }
+            }
+            .into_inner();
+
+            assert_eq!(response.components, expected_components, "{replacement:?}");
+
+            let mut connection = pool.acquire().await?;
+            let saved_sku = db::sku::find(&mut connection, std::slice::from_ref(&sku.id))
+                .await?
+                .pop()
+                .expect("replaced SKU should exist");
+            // Full replacement clears omitted metadata. Component replacement
+            // must preserve those empty and NULL values on the next iteration.
+            assert_eq!(
+                (
+                    saved_sku.description.as_str(),
+                    saved_sku.device_type.as_deref()
+                ),
+                ("", None),
+                "{replacement:?}"
+            );
+            let expected_response = rpc::forge::Sku {
+                associated_machine_ids: vec![machine_id],
+                ..saved_sku.clone().into()
+            };
+            assert_eq!(response, expected_response, "{replacement:?}");
+
+            let saved_machine = db::machine::find_one(
+                connection.as_mut(),
+                &machine_id,
+                MachineSearchConfig::default(),
+            )
+            .await?
+            .expect("assigned machine should exist after replacement");
+            assert_eq!(
+                saved_machine.config.hw_sku.as_ref(),
+                Some(&sku.id),
+                "{replacement:?}"
+            );
+            let verify_request_time = saved_machine
+                .status
+                .hw_sku
+                .and_then(|status| status.verify_request_time)
+                .expect("replacement should request SKU verification");
+            assert_ne!(
+                Some(verify_request_time),
+                original_verify_request_time,
+                "{replacement:?}"
+            );
+            original_verify_request_time = Some(verify_request_time);
+            sku = saved_sku;
+        }
+
+        let mut other_sku = sku.clone();
+        other_sku.id = "other-sku".to_string();
+        other_sku.components.chassis.model = "other chassis".to_string();
+        let mut txn = pool.begin().await?;
+        db::sku::create(&mut txn, &other_sku).await?;
+        txn.commit().await?;
+
+        let error = env
+            .api
+            .replace_sku_components(tonic::Request::new(
+                rpc::forge::ReplaceSkuComponentsRequest {
+                    sku_id: sku.id.clone(),
+                    components: Some(other_sku.components.into()),
+                    schema_version: CURRENT_SKU_VERSION,
+                    description: Some("rejected description".to_string()),
+                    device_type: Some("rejected device type".to_string()),
+                },
+            ))
+            .await
+            .expect_err("replacement must reject another SKU's components");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("other-sku"), "{error}");
+
+        let mut connection = pool.acquire().await?;
+        let saved_sku = db::sku::find(&mut connection, std::slice::from_ref(&sku.id))
+            .await?
+            .pop()
+            .expect("rejected replacement should retain its SKU");
+        assert_eq!(rpc::forge::Sku::from(saved_sku), rpc::forge::Sku::from(sku));
+        let saved_machine = db::machine::find_one(
+            connection.as_mut(),
+            &machine_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("assigned machine should exist after rejected replacement");
+        assert_eq!(
+            saved_machine
+                .status
+                .hw_sku
+                .and_then(|status| status.verify_request_time),
+            original_verify_request_time,
+            "rejected components must not request verification"
+        );
 
         Ok(())
     }

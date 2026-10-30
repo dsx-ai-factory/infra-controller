@@ -24,7 +24,7 @@ use super::proto::{self, PathElem};
 use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
 
 type MetricKey = (String, String, String);
-type SourcePath = Vec<(String, BTreeMap<String, String>)>;
+pub(super) type SourcePath = Vec<(String, BTreeMap<String, String>)>;
 
 pub(super) type SharedMetricSources =
     Arc<Mutex<HashMap<MetricKey, (SourcePath, Option<MetricSample>)>>>;
@@ -53,6 +53,18 @@ impl MetricReconciler {
         }
     }
 
+    /// Visits retained metric sources while holding the source lock.
+    pub(super) fn for_each_source(&self, mut visit: impl FnMut(&SourcePath)) {
+        let sources = self
+            .sources
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        for (source, _) in sources.values() {
+            visit(source);
+        }
+    }
+
     /// Publishes retained readings with this collector's current endpoint metadata.
     pub(super) fn republish(&self) {
         let Some(sink) = &self.sink else {
@@ -64,11 +76,19 @@ impl MetricReconciler {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
 
-        for (_, sample) in sources.values() {
+        for (source, sample) in sources.values() {
             if let Some(sample) = sample {
-                sink.handle_event(
+                // Reapply the source policy when cached readings are republished.
+                let is_event_record = source
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .take(2)
+                    .eq(["system-events", "system-event"]);
+
+                sink.handle_classified_event(
                     &self.context,
                     &CollectorEvent::Metric(Box::new(sample.clone())),
+                    is_event_record,
                 );
             }
         }
@@ -241,6 +261,7 @@ impl MetricReconciler {
 /// Reads path presence without replaying values through metric or log sinks.
 /// Mapped leaves may omit `val` or leave its inner value unset.
 /// Populated values on mapped leaves must be scalar.
+/// List-key values, including empty strings, are compared literally.
 pub(super) struct MetricSnapshot {
     candidates: HashSet<SourcePath>,
     present: HashSet<SourcePath>,
@@ -285,10 +306,7 @@ impl MetricSnapshot {
             !path.element.is_empty()
                 || (!path.target.is_empty() && path.target != self.target)
                 || !snapshot_origin_matches(&self.origin, &path.origin)
-                || path
-                    .elem
-                    .iter()
-                    .any(|elem| elem.name.is_empty() || elem.key.values().any(String::is_empty))
+                || path.elem.iter().any(|elem| elem.name.is_empty())
         }) {
             return Err(tonic::Status::invalid_argument(
                 "unsupported metric snapshot path",

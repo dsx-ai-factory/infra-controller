@@ -21,19 +21,21 @@ original observed --if-version-match token and advances the edit version
 on success. For an unknown profile, Core returns server status
 NOT_FOUND; stale versions return server status FAILED_PRECONDITION.
 
-Core also rejects removal of hardware support required by existing
-selections with server status FAILED_PRECONDITION. Compatibility checks
-precede the stored-version check. The command preserves the server
-diagnostic and does not read a fresh version or retry the update. After
-a connection error, inspect the profile; the change may have committed.
-Keep the original token when repeating the same request.
+Core also rejects removal of hardware support required by existing site,
+machine, or card selections with server status FAILED_PRECONDITION.
+Tenant selections do not bind hardware and do not impose this
+compatibility check. Compatibility checks precede the stored-version
+check. The command preserves the server diagnostic and does not read a
+fresh version or retry the update. After a connection error, inspect the
+profile; the change may have committed. Keep the original token when
+repeating the same request.
 
 This changes the live definition used by existing selections, without
 fetching artifacts or starting firmware updates. Use --format
 ascii-table (default), csv, json, or yaml and --output PATH before the
-firmware subcommand. JSON/YAML returns a one-element array containing
-the stored id, config, and new version. Table/CSV shows one row per
-entry.
+firmware subcommand. JSON and YAML output is a one-element array
+containing the stored id, config, and new version. Table and CSV output
+has one row per entry.
 
 Output defaults to stdout. --output requires a path that does not exist;
 the file is created before the operation, even if the operation later
@@ -58,7 +60,7 @@ sha256; and approach set to the case-sensitive string "Scout". Part
 numbers, PSIDs, and firmware versions are literal, nonempty strings
 without surrounding whitespace or control characters. An older firmware
 version is a valid target. The optional device_config is omitted or null
-when absent, or has the same url/sha256 fields as image. Hardware
+when absent, or has the same url and sha256 fields as image. Hardware
 selection and resolution support at most 256 UTF-8 bytes per part number
 or PSID; catalog registration accepts longer strings.
 

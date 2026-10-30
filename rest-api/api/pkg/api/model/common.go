@@ -40,15 +40,3 @@ func (labels APILabels) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(map[string]string(labels))
 }
-
-// APIList is a response collection that serializes nil as an empty JSON array.
-// Response fields using this type must not use omitempty.
-type APIList[T any] []T
-
-// MarshalJSON encodes items as an array, including when the slice is nil.
-func (items APIList[T]) MarshalJSON() ([]byte, error) {
-	if items == nil {
-		return []byte("[]"), nil
-	}
-	return json.Marshal([]T(items))
-}

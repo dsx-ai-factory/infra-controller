@@ -22,9 +22,9 @@ use carbide_uuid::extension_service::ExtensionServiceId;
 use config_version::{ConfigVersion, ConfigVersionChange};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    ExtensionService, ExtensionServiceInterfaceMac, ExtensionServiceLifecycleState,
-    ExtensionServiceObservability, ExtensionServiceSnapshot, ExtensionServiceType,
-    ExtensionServiceVersionInfo, ServiceVpcInterfaceRequirement,
+    ExtensionService, ExtensionServiceDeploymentType, ExtensionServiceInterfaceMac,
+    ExtensionServiceLifecycleState, ExtensionServiceObservability, ExtensionServiceSnapshot,
+    ExtensionServiceType, ExtensionServiceVersionInfo, ServiceVpcInterfaceRequirement,
 };
 use model::tenant::TenantOrganizationId;
 use sqlx::PgConnection;
@@ -73,7 +73,7 @@ pub enum InsertExtensionServiceInterfaceMacError {
 
 /// Reads a service's stable interface MAC assignments in ordinal order.
 pub async fn find_interface_macs(
-    txn: impl DbReader<'_>,
+    txn: &mut PgConnection,
     service_id: ExtensionServiceId,
 ) -> DatabaseResult<Vec<ExtensionServiceInterfaceMac>> {
     let query = "SELECT service_id, interface_ordinal, mac_address
@@ -198,11 +198,12 @@ pub async fn delete_interface_macs(
 /// # Parameters
 /// * `txn`                    - A reference to an active DB transaction
 /// * `service_type`           - The type of the extension service
+/// * `deployment_type`        - Deployment at creation or through instance attachment; cannot be changed
 /// * `service_name`           - The name of the extension service
 /// * `description`            - The description of the extension service
 /// * `service_vpc_interfaces` - Service-facing interface requirements
 /// * `data`                   - Data of the initial version of the extension service
-/// * `dpf_service_id`         - DPU Service service_ID, only for dpf-helm-chart services
+/// * `dpf_service_id`         - DPUService service ID, only for DPF Helm services
 /// * `observability`          - Observability config for the extension service
 /// * `has_credential`         - Whether the initial extension service version has a credential
 ///   stored in the vault
@@ -212,6 +213,7 @@ pub async fn create(
     version: ConfigVersion,
     service_id: &ExtensionServiceId,
     service_type: &ExtensionServiceType,
+    deployment_type: ExtensionServiceDeploymentType,
     dpu_target: Option<model::extension_service::DpuTarget>,
     service_name: &str,
     tenant_organization_id: &TenantOrganizationId,
@@ -231,7 +233,7 @@ pub async fn create(
     // not be derived from the API-visible service version counter.
     let initial_controller_state_version = ConfigVersion::initial();
 
-    // Validate DPF Helm chart extension service service_id uniqueness
+    // Reserve the chart-provided DPF identity before inserting its owner.
     if matches!(service_type, ExtensionServiceType::DpfHelmChart)
         && let Some(dpf_service_id) = dpf_service_id
     {
@@ -240,17 +242,18 @@ pub async fn create(
 
     // First create the extension service record
     let service_query = "INSERT INTO extension_services
-            (id, type, name, description, tenant_organization_id, version_ctr,
+            (id, type, deployment_type, name, description, tenant_organization_id, version_ctr,
              controller_state, controller_state_version, dpu_target, service_vpc_interfaces)
-            VALUES ($1, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::integer,
-                    $7::jsonb, $8::varchar, $9, $10::jsonb)
-            RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr,
+            VALUES ($1, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::varchar,
+                    $7::integer, $8::jsonb, $9::varchar, $10, $11::jsonb)
+            RETURNING id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr,
                       controller_state, controller_state_version, controller_state_outcome,
                       service_vpc_interfaces, created, updated, deleted";
 
     let service = match sqlx::query_as::<_, ExtensionService>(service_query)
         .bind(service_id)
         .bind(service_type.to_string())
+        .bind(deployment_type)
         .bind(service_name)
         .bind(description.unwrap_or(""))
         .bind(tenant_organization_id.to_string())
@@ -378,7 +381,7 @@ pub async fn update(
         .push(" AND version_ctr = ")
         .push_bind(config_version_change.current.version_nr().cast_signed());
     builder.push(" AND deleted IS NULL");
-    builder.push(" RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted");
+    builder.push(" RETURNING id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted");
 
     let updated_service = match builder
         .build_query_as::<ExtensionService>()
@@ -465,7 +468,7 @@ pub async fn update_metadata(
     builder.push(" WHERE id = ");
     builder.push_bind(service_id);
     builder.push(" AND deleted IS NULL");
-    builder.push(" RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted");
+    builder.push(" RETURNING id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted");
 
     let updated_service = match builder
         .build_query_as::<ExtensionService>()
@@ -551,7 +554,7 @@ pub async fn update_dpf_helm_chart_in_place(
     builder.push(" AND controller_state = ");
     builder.push_bind(sqlx::types::Json(ExtensionServiceLifecycleState::Ready));
     builder.push(
-        " RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, \
+        " RETURNING id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr, \
           controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted",
     );
 
@@ -811,7 +814,7 @@ pub async fn find_by_ids(
     }
 
     let mut builder = sqlx::QueryBuilder::new(
-        "SELECT id, type, dpu_target, name, description, tenant_organization_id, version_ctr,
+        "SELECT id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr,
          controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted FROM
          extension_services WHERE id = ANY(",
     );
@@ -857,6 +860,7 @@ pub async fn find_snapshots_by_ids(
         s.id AS service_id,
         s.name AS service_name,
         s.type AS service_type,
+        s.deployment_type,
         s.dpu_target,
         s.version_ctr AS version_ctr,
         s.description AS description,
@@ -1353,6 +1357,100 @@ mod test_batched_lookups {
     const SQL_VIOLATION_INTERFACE_MAC_ORDINAL_NEGATIVE: &str =
         "extension_service_interface_macs_interface_ordinal_nonnegative";
 
+    /// Verifies existing registrations retain attachment-based placement while the
+    /// shipped migration permits selector-free baseline Helm services, so upgrades
+    /// preserve old intent and reject inconsistent placement at the database boundary.
+    #[crate::sqlx_test]
+    async fn deployment_type_migration_preserves_existing_placement(pool: sqlx::PgPool) {
+        // Seed both service types, including a deleted Helm registration that must retain policy.
+        let [(pod_id, _), (helm_id, _)] = seed_services(&pool, 2).await.try_into().unwrap();
+        let mut txn = pool.begin().await.expect("begin migration contract test");
+        sqlx::query(
+            "UPDATE extension_services SET type = 'dpf_helm_chart', dpu_target = 'primary',
+             deleted = NOW() WHERE id = $1",
+        )
+        .bind(helm_id)
+        .execute(txn.as_mut())
+        .await
+        .expect("seed historical Helm registration");
+
+        // Restore the predecessor schema so the migration exercises an upgrade with existing data.
+        sqlx::raw_sql(
+            "ALTER TABLE extension_services DROP COLUMN deployment_type;
+             ALTER TABLE extension_services ADD CONSTRAINT extension_services_dpu_target_check CHECK (
+                (type = 'dpf_helm_chart' AND dpu_target IS NOT NULL
+                    AND dpu_target IN ('primary', 'all_active', 'all'))
+                OR (type = 'kubernetes_pod' AND dpu_target IS NULL)
+             );",
+        )
+        .execute(txn.as_mut())
+        .await
+        .expect("restore predecessor placement schema");
+
+        // Apply the shipped SQL directly so this upgrade proof cannot drift from the migration.
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261007233104_extension_service_deployment_type.sql"
+        ))
+        .execute(txn.as_mut())
+        .await
+        .expect("apply shipped deployment-type migration");
+
+        // Decode migrated rows through the production reader, including soft-deleted services.
+        let services = find_by_ids(txn.as_mut(), &[pod_id, helm_id], true, false)
+            .await
+            .expect("read migrated registrations");
+        assert_eq!(services.len(), 2);
+        for service in services {
+            assert_eq!(
+                service.deployment_type,
+                ExtensionServiceDeploymentType::DemandDriven
+            );
+            assert_eq!(
+                service.dpu_target,
+                (service.id == helm_id).then_some(DpuTarget::Primary)
+            );
+        }
+
+        // Baseline must allow no target, but reject placement and unknown policy strings.
+        sqlx::query(
+            "UPDATE extension_services SET deployment_type = 'baseline', dpu_target = NULL WHERE id = $1",
+        )
+        .bind(helm_id)
+        .execute(txn.as_mut())
+        .await
+        .expect("baseline Helm registration is valid without a target");
+        let cases = [
+            // A host-scoped target would contradict baseline's independent placement.
+            ("baseline", Some("all")),
+            // A required target cannot be removed from an attachment-based Helm service.
+            ("demand_driven", None),
+            // Unknown policies must not bypass the combined placement constraint.
+            ("unknown", None),
+        ];
+        for (deployment_type, target) in cases {
+            let mut attempt = txn.begin().await.expect("begin invalid-policy savepoint");
+            let error = sqlx::query(
+                "UPDATE extension_services SET deployment_type = $1, dpu_target = $2 WHERE id = $3",
+            )
+            .bind(deployment_type)
+            .bind(target)
+            .bind(helm_id)
+            .execute(attempt.as_mut())
+            .await
+            .expect_err("inconsistent placement must be rejected");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
+                Some("extension_services_dpu_target_check"),
+            );
+            attempt.rollback().await.expect("rollback rejected policy");
+        }
+        txn.rollback()
+            .await
+            .expect("discard predecessor-schema test");
+    }
+
     /// Verifies the migration preserves predecessor registrations as unnetworked
     /// and the MAC registry contains and distinguishes identity conflicts, so
     /// later assignment can safely reuse or retry in the same transaction.
@@ -1572,6 +1670,7 @@ mod test_batched_lookups {
                 version,
                 &service_id,
                 &ExtensionServiceType::KubernetesPod,
+                ExtensionServiceDeploymentType::DemandDriven,
                 None,
                 &format!("svc-{i}"),
                 &tenant,
@@ -1611,6 +1710,7 @@ mod test_batched_lookups {
             version,
             &first_service_id,
             &ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
             Some(DpuTarget::AllActive),
             "first-service",
             &tenant,
@@ -1640,6 +1740,7 @@ mod test_batched_lookups {
                 version,
                 &second_service_id,
                 &ExtensionServiceType::DpfHelmChart,
+                ExtensionServiceDeploymentType::DemandDriven,
                 Some(DpuTarget::AllActive),
                 "second-service",
                 &tenant,
@@ -1887,6 +1988,7 @@ mod test_batched_lookups {
             ConfigVersion::initial(),
             &service_id,
             &ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
             Some(DpuTarget::AllActive),
             "dpf-service",
             &tenant,
@@ -2162,6 +2264,74 @@ mod test_batched_lookups {
     }
 
     #[crate::sqlx_test]
+    async fn snapshot_rejects_malformed_older_active_version(pool: sqlx::PgPool) {
+        let [(service_id, initial_version)] = seed_services(&pool, 1).await.try_into().unwrap();
+        let mut txn = pool.begin().await.expect("begin snapshot decode test");
+        let version_change = initial_version.incremental_change();
+        let (_, updated) = update(
+            &mut txn,
+            service_id,
+            None,
+            None,
+            &[],
+            "updated pod definition",
+            None,
+            false,
+            version_change,
+        )
+        .await
+        .expect("create valid latest version");
+
+        let [snapshot] = find_snapshots_by_ids(&mut txn, &[service_id])
+            .await
+            .expect("read complete active version inventory")
+            .try_into()
+            .expect("one service snapshot");
+        assert_eq!(
+            snapshot.active_versions,
+            vec![updated.version, initial_version]
+        );
+
+        // `ConfigVersion` cannot represent this malformed value. Keep the numeric
+        // prefix valid so the snapshot query's integer cast succeeds and the older
+        // row is aggregated.
+        sqlx::query(
+            "UPDATE extension_service_versions SET version = 'V1-Tbad'
+             WHERE service_id = $1 AND version = $2",
+        )
+        .bind(service_id)
+        .bind(initial_version)
+        .execute(&mut *txn)
+        .await
+        .expect("corrupt only the older version's timestamp");
+
+        let latest = find_version_info_of_known_service(&mut txn, service_id, None)
+            .await
+            .expect("the latest version still decodes");
+        assert_eq!(latest.version, updated.version);
+
+        let error = find_snapshots_by_ids(&mut txn, &[service_id])
+            .await
+            .expect_err("a malformed older version must fail the complete snapshot");
+        let DatabaseError::Sqlx(annotated) = &error else {
+            panic!("expected Sqlx, got {error:?}");
+        };
+        let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+            panic!("expected ColumnDecode, got {error:?}");
+        };
+        assert_eq!(index, "active_versions");
+        assert!(
+            matches!(
+                source.downcast_ref::<config_version::ConfigVersionParseError>(),
+                Some(config_version::ConfigVersionParseError::VersionFormat(version))
+                    if version == "V1-Tbad"
+            ),
+            "{source:?}"
+        );
+        txn.rollback().await.expect("rollback snapshot decode test");
+    }
+
+    #[crate::sqlx_test]
     async fn version_queries_decode_complete_records(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2205,6 +2375,7 @@ mod test_batched_lookups {
             expected_initial.version,
             &expected_initial.service_id,
             &ExtensionServiceType::KubernetesPod,
+            ExtensionServiceDeploymentType::DemandDriven,
             None,
             "pod-service",
             &tenant,
@@ -2252,6 +2423,7 @@ mod test_batched_lookups {
             expected_dpf.version,
             &expected_dpf.service_id,
             &ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
             Some(DpuTarget::AllActive),
             "helm-service",
             &tenant,

@@ -40,6 +40,7 @@ where
         emit_span_logs: true,
         write_end_time: false,
         event_fields: Vec::new(),
+        trace_context: None,
     }
 }
 
@@ -81,6 +82,8 @@ impl EventField {
 ///
 /// If the emission of Span logs should be prevented, a special attribute `logfmt.suppress`
 /// can be set to `true` in the span.
+///
+/// [`Self::with_trace_context`] enables OpenTelemetry trace ID correlation.
 pub struct LogFmtLayer<S> {
     _registry: std::marker::PhantomData<S>,
     make_writer: Arc<dyn Fn() -> Box<dyn Write> + Send + Sync>,
@@ -89,12 +92,25 @@ pub struct LogFmtLayer<S> {
     /// Span attributes surfaced on event and span lines, each with an optional
     /// fallback. See [`EventField`]. Set via `with_event_fields`.
     event_fields: Vec<EventField>,
+    trace_context: Option<trace_propagation::LogTraceContext>,
 }
 
 impl<S> LogFmtLayer<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
+    /// Include the enclosing span's real `trace_id`, retaining the local `span_id`.
+    ///
+    /// Omits the field when no valid context exists, including when no OTel layer
+    /// is installed. Install this layer before the OpenTelemetry layer so span
+    /// completions can read the context before it is removed. Disabled by default.
+    pub fn with_trace_context(self) -> Self {
+        Self {
+            trace_context: Some(trace_propagation::LogTraceContext::default()),
+            ..self
+        }
+    }
+
     /// Sets a custom writer for events
     pub fn with_writer(self, make_writer: Arc<dyn Fn() -> Box<dyn Write> + Send + Sync>) -> Self {
         Self {
@@ -238,6 +254,12 @@ impl<S> Layer<S> for LogFmtLayer<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
+    fn on_register_dispatch(&self, dispatch: &tracing::Dispatch) {
+        if let Some(trace_context) = &self.trace_context {
+            trace_context.register_dispatch(dispatch);
+        }
+    }
+
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         let mut data = LogFmtData::new();
         let mut visitor = SpanAttributeVisitor { data: &mut data };
@@ -332,13 +354,20 @@ where
     fn on_follows_from(&self, _id: &span::Id, _follows: &span::Id, _ctx: Context<S>) {}
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let current_span = ctx.lookup_current();
+        let current_span = ctx.event_span(event);
+        // Read the OTel context before borrowing extensions: obtaining the
+        // context may start a span and requires its extension lock.
+        let trace_id = current_span.as_ref().and_then(|span| {
+            let trace_context = self.trace_context.as_ref()?;
+            span.scope()
+                .find_map(|span| trace_context.trace_id(&span.id()))
+        });
 
         // Resolve the event fields and read `span_id` under a single extensions
         // borrow (no extra clone of the span's resolved map). Outside any span the
         // fields fall back to their defaults (or are omitted) and there is no
         // `span_id`.
-        let (event_fields, span_id) = match current_span.as_ref() {
+        let (mut event_fields, span_id) = match current_span.as_ref() {
             Some(span) => {
                 let ext = span.extensions();
                 let data = ext
@@ -350,6 +379,10 @@ where
             }
             None => (self.resolve_event_fields(None), None),
         };
+        if let Some(trace_id) = trace_id {
+            event_fields.retain(|(name, _)| name != "trace_id");
+            event_fields.push(("trace_id".to_string(), trace_id.to_string()));
+        }
 
         /// This formatting subfunction exists so that we can use the ? operator
         /// on write! results
@@ -384,6 +417,11 @@ where
             }
             visitor.fields.sort_by(RenderedField::emit_order);
             for field in &visitor.fields {
+                if field.key.as_str() == "trace_id"
+                    && event_fields.iter().any(|(name, _)| name == "trace_id")
+                {
+                    continue;
+                }
                 // Deliberately raw byte copies rather than the obvious
                 // `write!(out, "{key}={value} ")`: this loop is the hottest
                 // path in the layer, and routing each field through
@@ -443,8 +481,17 @@ where
             return;
         }
 
+        let trace_id = self.trace_context.as_ref().and_then(|trace_context| {
+            span.scope()
+                .find_map(|span| trace_context.trace_id(&span.id()))
+        });
+
         // Resolve from this span's own resolved values.
-        let event_fields = self.resolve_event_fields(Some(&data.resolved_event_fields));
+        let mut event_fields = self.resolve_event_fields(Some(&data.resolved_event_fields));
+        if let Some(trace_id) = trace_id {
+            event_fields.retain(|(name, _)| name != "trace_id");
+            event_fields.push(("trace_id".to_string(), trace_id.to_string()));
+        }
 
         data.attributes.insert(
             "timing_start_time".to_string(),
@@ -847,8 +894,13 @@ fn clear_format_buffer(buf: &mut Vec<u8>) {
 mod tests {
     use std::sync::Mutex;
 
+    use opentelemetry::trace::{
+        SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, TracerProvider,
+    };
+    use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
     use tracing::Level;
     use tracing::level_filters::LevelFilter;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::prelude::*;
 
@@ -880,6 +932,106 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn trace_id_correlates_events_and_span_completions() {
+        for (name, sampler, remote) in [
+            ("remote sampled", Sampler::AlwaysOn, true),
+            ("remote unsampled", Sampler::AlwaysOff, true),
+            ("local root", Sampler::AlwaysOn, false),
+        ] {
+            let provider = SdkTracerProvider::builder().with_sampler(sampler).build();
+            let writer = TestWriter::new();
+            let output = writer.clone();
+            let subscriber = tracing_subscriber::registry()
+                .with(
+                    layer()
+                        .with_trace_context()
+                        .with_writer(Arc::new(move || Box::new(output.clone()))),
+                )
+                .with(
+                    tracing_opentelemetry::layer()
+                        .with_tracer(provider.tracer("test"))
+                        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+                            meta.target() != "untraced"
+                        })),
+                );
+            tracing::subscriber::with_default(subscriber, || {
+                let request = tracing::info_span!("request", span_id = "local-request");
+                if remote {
+                    let parent = SpanContext::new(
+                        TraceId::from(42),
+                        SpanId::from(7),
+                        TraceFlags::SAMPLED,
+                        true,
+                        TraceState::default(),
+                    );
+                    request
+                        .set_parent(opentelemetry::Context::new().with_remote_span_context(parent))
+                        .unwrap();
+                }
+                let trace_id = request.context().span().span_context().trace_id();
+                assert_ne!(trace_id, TraceId::INVALID, "{name}");
+                if remote {
+                    assert_eq!(trace_id, TraceId::from(42), "{name}");
+                }
+                request.in_scope(|| {
+                    tracing::info!(trace_id = "not-the-context", "request event");
+                    let child = tracing::info_span!("child", span_id = "local-child");
+                    child.in_scope(|| tracing::info!("child event"));
+                    let filtered = tracing::info_span!(target: "untraced", "filtered");
+                    filtered.in_scope(|| tracing::info!("filtered child event"));
+                    // A span can close without ever being entered or logging an event.
+                    drop(tracing::info_span!("never entered"));
+                });
+                // An explicit parent wins even outside the request's entered scope.
+                tracing::info!(parent: &request, "explicit parent event");
+                request.in_scope(|| tracing::info!(parent: None, "detached event"));
+                drop(request);
+                tracing::info!("outside event");
+
+                let text = writer.text();
+                let expected = format!("trace_id={trace_id}");
+                for line in text.lines() {
+                    if line.contains("detached event") || line.contains("outside event") {
+                        assert!(!line.contains("trace_id="), "{name}: {line}");
+                    } else {
+                        assert!(line.contains(&expected), "{name}: {line}");
+                        assert_eq!(line.matches("trace_id=").count(), 1, "{name}: {line}");
+                    }
+                }
+                assert!(text.contains("span_id=local-request"));
+                assert!(text.contains("span_id=local-child"));
+                assert_eq!(
+                    text.lines()
+                        .filter(|line| line.starts_with("level=SPAN"))
+                        .count(),
+                    4
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn untraced_logs_keep_local_span_id_without_inventing_trace_id() {
+        let writer = TestWriter::new();
+        let output = writer.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            layer()
+                .with_trace_context()
+                .with_writer(Arc::new(move || Box::new(output.clone()))),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("request", span_id = "local");
+            span.in_scope(|| tracing::info!("event"));
+        });
+        let text = writer.text();
+        assert_eq!(text.lines().count(), 2);
+        for line in text.lines() {
+            assert!(line.contains("span_id=local"), "{line}");
+            assert!(!line.contains("trace_id="), "{line}");
         }
     }
 

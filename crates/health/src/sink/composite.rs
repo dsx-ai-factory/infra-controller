@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::{CollectorEvent, DataSink, EventContext};
+use super::{CollectorEvent, DataSink, EventContext, SharedMetric};
 use crate::HealthError;
 use crate::metrics::{ComponentKind, ComponentMetrics, MetricsManager};
 
@@ -91,6 +91,15 @@ impl DataSink for CompositeDataSink {
         context: &EventContext,
         event: &CollectorEvent,
     ) -> Result<(), HealthError> {
+        self.try_handle_classified_event(context, event, false)
+    }
+
+    fn try_handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        is_event_record: bool,
+    ) -> Result<(), HealthError> {
         let sample = match event {
             CollectorEvent::Metric(sample) if self.share_metrics => Some(sample.as_ref()),
             _ => None,
@@ -104,12 +113,14 @@ impl DataSink for CompositeDataSink {
             let result = if let Some(sample) = sample.filter(|_| sink.accepts_shared_metric()) {
                 // Charge the first copy to the first target's timed dispatch.
                 // Later targets retain the same immutable observation.
-                let shared_metric = shared_metric
-                    .get_or_insert_with(|| Arc::new((context.clone(), (*sample).clone())));
+                let shared_metric = shared_metric.get_or_insert_with(|| SharedMetric {
+                    payload: Arc::new((context.clone(), (*sample).clone())),
+                    key: Arc::new(super::otlp::metric_queue_key(context, sample)),
+                });
 
-                sink.try_handle_shared_metric(context, event, shared_metric)
+                sink.try_handle_shared_metric_with_identity(context, event, shared_metric)
             } else {
-                sink.try_handle_event(context, event)
+                sink.try_handle_classified_event(context, event, is_event_record)
             };
 
             self.record_sink_operation(sink.as_ref(), start.elapsed(), result.is_ok());

@@ -34,19 +34,44 @@ type recordingForgeClient struct {
 	switchDelay       time.Duration
 	shelfIDDelay      time.Duration
 	shelfDelay        time.Duration
+	rackIDDelay       time.Duration
 	rackDelay         time.Duration
 	versionRequests   []*corev1.VersionRequest
 	machineSearches   []*corev1.MachineSearchConfig
 	machineIDs        []string
 	switchIDs         []string
 	shelfIDs          []string
+	rackIDs           []string
+	rackHealth        map[string]*corev1.HealthReport
 	switchResponseIDs []string
 	machineBatches    [][]string
 	switchBatches     [][]string
 	shelfBatches      [][]string
 	rackBatches       [][]string
+	rackSearches      []*corev1.RackSearchFilter
 	failCall          int
 	omitID            string
+}
+
+func (c *recordingForgeClient) FindRackIds(
+	ctx context.Context,
+	request *corev1.RackSearchFilter,
+	_ ...grpc.CallOption,
+) (*corev1.RackIdList, error) {
+	c.mu.Lock()
+	c.rackSearches = append(c.rackSearches, request)
+	delay := c.rackIDDelay
+	ids := slices.Clone(c.rackIDs)
+	c.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	return &corev1.RackIdList{RackIds: stringsToRackIds(ids)}, nil
 }
 
 func (c *recordingForgeClient) Version(
@@ -254,6 +279,7 @@ func (c *recordingForgeClient) FindRacksByIds(
 	failed := c.failCall == len(c.rackBatches)
 	omitID := c.omitID
 	delay := c.rackDelay
+	health := c.rackHealth
 	c.mu.Unlock()
 	if delay > 0 {
 		select {
@@ -269,10 +295,14 @@ func (c *recordingForgeClient) FindRacksByIds(
 	racks := make([]*corev1.Rack, 0, len(batch))
 	for _, id := range batch {
 		if id != omitID {
+			rackHealth := health[id]
+			if rackHealth == nil {
+				rackHealth = &corev1.HealthReport{Source: "health-" + id}
+			}
 			racks = append(racks, &corev1.Rack{
 				Id:          &corev1.RackId{Id: id},
 				RackGroupId: &corev1.RackGroupId{Id: "group-" + id},
-				Status:      &corev1.RackStatus{Health: &corev1.HealthReport{Source: "health-" + id}},
+				Status:      &corev1.RackStatus{Health: rackHealth},
 			})
 		}
 	}
@@ -297,6 +327,107 @@ func stringsToPowerShelfIds(ids []string) []*corev1.PowerShelfId {
 		result = append(result, &corev1.PowerShelfId{Id: id})
 	}
 	return result
+}
+
+func stringsToRackIds(ids []string) []*corev1.RackId {
+	result := make([]*corev1.RackId, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, &corev1.RackId{Id: id})
+	}
+
+	return result
+}
+
+func TestGrpcClient_GetLeakingRackIds(t *testing.T) {
+	rackLeak := &corev1.HealthReport{Alerts: []*corev1.HealthProbeAlert{{
+		Classifications: []string{classificationRackLeak},
+	}}}
+	nonRackLeak := &corev1.HealthReport{Alerts: []*corev1.HealthProbeAlert{{
+		Classifications: []string{"TrayLeak", "PreventAllocations"},
+	}}}
+
+	tests := []struct {
+		name        string
+		fake        *recordingForgeClient
+		grpcTimeout time.Duration
+		want        []string
+		wantErr     string
+		wantBatches [][]string
+	}{
+		{
+			name: "selects RackLeak classification and honors batch limit",
+			fake: &recordingForgeClient{
+				runtimeConfig: &corev1.RuntimeConfig{MaxFindByIds: 2},
+				rackIDs:       []string{"rack-3", "rack-1", "rack-2"},
+				rackHealth: map[string]*corev1.HealthReport{
+					"rack-1": rackLeak,
+					"rack-2": nonRackLeak,
+					"rack-3": rackLeak,
+				},
+			},
+			want:        []string{"rack-1", "rack-3"},
+			wantBatches: [][]string{{"rack-3", "rack-1"}, {"rack-2"}},
+		},
+		{
+			name: "gives ID and detail RPCs independent timeouts",
+			fake: &recordingForgeClient{
+				rackIDs:     []string{"rack-1"},
+				rackIDDelay: 120 * time.Millisecond,
+				rackDelay:   120 * time.Millisecond,
+				rackHealth:  map[string]*corev1.HealthReport{"rack-1": rackLeak},
+			},
+			grpcTimeout: 200 * time.Millisecond,
+			want:        []string{"rack-1"},
+			wantBatches: [][]string{{"rack-1"}},
+		},
+		{
+			name: "empty ID snapshot avoids detail lookup",
+			fake: &recordingForgeClient{},
+			want: []string{},
+		},
+		{
+			name: "preserves leaking racks from incomplete detail snapshot",
+			fake: &recordingForgeClient{
+				rackIDs: []string{"rack-1", "rack-2"},
+				omitID:  "rack-2",
+				rackHealth: map[string]*corev1.HealthReport{
+					"rack-1": rackLeak,
+				},
+			},
+			want:        []string{"rack-1"},
+			wantBatches: [][]string{{"rack-1", "rack-2"}},
+		},
+		{
+			name: "returns detail RPC failure",
+			fake: &recordingForgeClient{
+				rackIDs:  []string{"rack-1"},
+				failCall: 1,
+			},
+			wantErr:     "injected rack lookup failure",
+			wantBatches: [][]string{{"rack-1"}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newRecordingGRPCClient(test.fake)
+			if test.grpcTimeout > 0 {
+				client.grpcTimeout = test.grpcTimeout
+			}
+
+			got, err := client.GetLeakingRackIds(context.Background())
+
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				require.Nil(t, got)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, test.want, got)
+			}
+			require.Len(t, test.fake.rackSearches, 1)
+			require.Equal(t, test.wantBatches, test.fake.rackBatches)
+		})
+	}
 }
 
 func TestGrpcClient_GetMachines(t *testing.T) {

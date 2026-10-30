@@ -161,6 +161,8 @@ async fn test_lookup_by_mac(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
             .expect("the power shelf we just created should be findable by its BMC MAC");
     assert_eq!(found.bmc_mac_address, shelves[0].bmc_mac_address);
     assert_eq!(found.serial_number, shelves[0].serial_number);
+    assert_eq!(found.bmc_ip_address, None);
+    assert_eq!(found.rack_id, None);
 
     // 0xff is past the six shelves the fixture creates.
     let unknown_mac = mac_address::MacAddress::new([0x44, 0x44, 0x22, 0x22, 0x00, 0xff]);
@@ -170,6 +172,55 @@ async fn test_lookup_by_mac(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
             .is_none()
     );
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn expected_power_shelf_lookup_rejects_non_host_prefix(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let shelf = create(
+        &mut txn,
+        ExpectedPowerShelf {
+            bmc_mac_address: expected_power_shelf_bmc_mac_address(0),
+            serial_number: "non-host-prefix".to_string(),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let id = shelf
+        .expected_power_shelf_id
+        .expect("created power shelf has an ID");
+
+    // PostgreSQL accepts this prefix, but SQLx decodes `IpAddr` only with
+    // a /32 (IPv4) or /128 (IPv6) prefix.
+    sqlx::query(
+        "UPDATE expected_power_shelves SET bmc_ip_address = '192.0.2.1/24'::inet
+         WHERE expected_power_shelf_id = $1",
+    )
+    .bind(id)
+    .execute(&mut *txn)
+    .await?;
+    let error = find_by_id(&mut txn, id)
+        .await
+        .map(|_| ())
+        .expect_err("a non-host prefix must fail decoding rather than become an absent address");
+    let DatabaseError::Sqlx(annotated) = &error else {
+        panic!("expected Sqlx, got {error:?}");
+    };
+    let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+        panic!("expected ColumnDecode, got {error:?}");
+    };
+    assert_eq!(index, "\"bmc_ip_address\"");
+    assert_eq!(source.to_string(), "lossy decode from inet/cidr");
+    assert!(
+        annotated
+            .query
+            .contains("FROM expected_power_shelves WHERE expected_power_shelf_id=$1"),
+        "{error:?}"
+    );
+    txn.rollback().await?;
     Ok(())
 }
 

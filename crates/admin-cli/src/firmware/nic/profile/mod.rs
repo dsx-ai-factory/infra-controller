@@ -25,9 +25,9 @@ version; each deletion also requires its observed version.
 
 Put --format ascii-table (default), csv, json, or yaml and --output PATH before \
 the firmware subcommand. Create, show, list, and update return an array of \
-complete profiles in JSON/YAML. Table/CSV output has one row per firmware entry, \
+complete profiles in JSON or YAML. Table and CSV output has one row per firmware entry, \
 including the profile edit version and target firmware version. Extract \
-[0].config from JSON output as JSON for create/update input; YAML output is not \
+[0].config from JSON output as JSON for create or update input; YAML output is not \
 accepted as input.
 
 Output defaults to stdout. --output requires a path that does not exist; the \

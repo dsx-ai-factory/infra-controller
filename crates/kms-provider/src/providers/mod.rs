@@ -16,5 +16,6 @@
  */
 
 pub mod integrated;
+pub mod kmip;
 pub mod multi;
 pub mod transit;

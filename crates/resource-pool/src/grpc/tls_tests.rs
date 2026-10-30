@@ -135,7 +135,6 @@ fn replace_file(path: &Path, contents: &str, modified: SystemTime) {
 fn description() -> DescribeRequest {
     let pool = pool();
     DescribeRequest {
-        site_id: pool.site_id,
         pool_alias: pool.logical_pool,
     }
 }

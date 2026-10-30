@@ -53,6 +53,58 @@ Tilt forwards these endpoints:
 | Grafana | `http://localhost:13000` |
 | Prometheus | `http://localhost:19090` |
 
+## NICo PostgreSQL dashboard
+
+With `--observability=true`, Tilt installs the shared
+[`nico-postgres-exporter` Helm chart](../../../helm/charts/nico-postgres-exporter/README.md)
+as a separate release in `nico-system`. It builds the exporter image through the
+shared Rust artifacts image and provisions **NICo / PostgreSQL** alongside
+**CloudNativePG** in Grafana's **PostgreSQL** folder.
+
+```bash
+tilt up -f dev/deployment/tilt/Tiltfile -- --observability=true
+```
+
+Open [Grafana at localhost:13000](http://localhost:13000) and choose
+**PostgreSQL → NICo / PostgreSQL**. The dashboard includes connection health and
+a cumulative **Slow queries** table. See the chart README for collection behavior,
+metric contracts, binary configuration, and installation with your own Grafana.
+
+Tilt passes `tilt.observability.postgresExporter` as chart values, supplying the
+image and `tilt.localConfig.database` host, port, and database name. Development
+values use `database.credentialsSecret: nico-pg-cluster-app` and
+`database.sslMode: disable`; the credentials Secret is in the release namespace.
+For verified TLS, configure `database.sslMode` and `database.sslRootCertSecret`
+under `tilt.observability.postgresExporter`. Tilt enables the ServiceMonitor and
+places the dashboard ConfigMap in `observability`, waiting for Prometheus,
+PostgreSQL, and local configuration before installation. Disabling observability
+excludes the exporter release and dashboard.
+
+With observability enabled, Tilt sets `pg_stat_statements.track: top` and
+`pg_stat_statements.track_utility: off`, excluding utility statements that could
+contain password literals from new query statistics. It also grants the application
+owner `pg_read_all_stats` membership. CloudNativePG manages the
+preload library and installs the extension in connectable databases when that
+parameter is present; changing the preload configuration can restart PostgreSQL.
+See [CloudNativePG's managed-extension contract](https://cloudnative-pg.io/docs/1.28/postgresql_conf/#enabling-pg_stat_statements).
+The shared chart itself does not configure extensions or database permissions.
+For external databases and existing statistics collected before disabling utility
+tracking, follow the [database setup instructions](../../../helm/charts/nico-postgres-exporter/README.md#database-collection-and-dashboard).
+
+The dashboard JSON now lives in the chart at
+[`dashboards/nico-postgres.json`](../../../helm/charts/nico-postgres-exporter/dashboards/nico-postgres.json).
+Tilt watches the chart directory; edits update the Helm-managed ConfigMap and
+Grafana's existing sidecar loads them. Allow one collection and scrape interval
+for fresh data. Chart-only installs can enable the optional umbrella dependency
+or install this chart as a separate release; both are disabled by default.
+
+If upgrading a Tilt environment from the direct Kubernetes exporter wiring,
+remove the old Tilt-owned `nico-postgres-exporter` Deployment, Service, and
+ServiceMonitor in `nico-system`, plus the old
+`grafana-dashboards-nico-postgres` ConfigMap in `observability`, then retry the
+exporter resource. Helm cannot adopt those existing objects. This is a one-time
+migration; do not remove resources already owned by the new Helm release.
+
 ## Pod logs
 
 Grafana Alloy collects stdout and stderr from every pod through the Kubernetes
@@ -109,6 +161,26 @@ The Prometheus chart also publishes its standard Kubernetes dashboards for the
 same sidecar to load. These cover cluster, namespace, workload, pod, node,
 kubelet, API server, and persistent-volume metrics.
 
+With the observability profile enabled, Tilt also enables PodMonitors for the
+CloudNativePG operator and PostgreSQL cluster. The operator chart provisions the
+**CloudNativePG** dashboard in Grafana's **PostgreSQL** folder, covering operator
+and database metrics. Tilt places its dashboard ConfigMap in the observability
+namespace and waits for Prometheus before installing the operator's PodMonitor.
+
+If Tilt is already running, it reloads changes to the Tiltfile and values file
+and updates the `cnpg-operator` and `nico-postgres` Helm releases automatically.
+Enable the profile with `tilt args -- --observability=true` if needed. To retry
+an update, use the resource's update button in Tilt or run:
+
+```bash
+tilt trigger cnpg-operator
+tilt trigger nico-postgres
+```
+
+Grafana's sidecar loads the dashboard automatically. Allow time for the Helm
+updates and a Prometheus scrape, then refresh Grafana; no manual dashboard
+import is required.
+
 All Tilt settings are in [`values.yaml`](values.yaml). NICo Core values are at
 the document root, while the `tilt` section contains the prerequisite and REST
 settings.
@@ -138,18 +210,38 @@ mock on port 443.
 
 ## Image builds
 
-Core uses the existing Dockerfiles under
-[`dev/deployment/devspace/`](../devspace); mat-k8s-controller uses its existing
-[`Dockerfile`](../../k8s/machine-a-tron-controller/Dockerfile). REST and MCP
-use the existing Dockerfiles under
-[`rest-api/docker/local/`](../../../rest-api/docker/local).
-The Tilt setup does not add or modify a Dockerfile.
+Tilt owns its service Dockerfiles and build-context ignore files in this directory.
+The shared compiler-container Dockerfile remains under `dev/docker`, where CI and
+other development workflows also use it. Their existing service Dockerfiles
+remain independent of Tilt.
+
+All Tilt runtime images derive from one digest-pinned Debian Bookworm slim base
+with CA certificates. Service images install their additional runtime packages;
+the compiler toolchains remain in build stages. DHCP uses the Kea version in
+`dev/docker/kea.version`, matching the compiler container.
+
+`Dockerfile.core` has separate targets for API, BMC proxy, DHCP,
+machine-a-tron, SSH console, and the MAT protocol gateway. Each target builds
+and packages its own binary (or DHCP hook library), sharing locked Cargo
+dependency and target caches. Tilt's Rust build stages use `line-tables-only`
+debug information for development and release profiles, retaining source-line
+backtraces without full debugger type and variable information. The API image
+contains a copy of nico-admin-cli for convenience.
+
+The MAT controller and its gateway also use separate images in Tilt. Other chart
+users keep the combined controller image unless they set
+`mat-k8s-controller.gateway.image.repository` or `.tag`; each empty field falls
+back to the corresponding controller image field, and both containers use the
+controller image pull policy. REST API images contain only the API service
+binary, without the debugging CLI.
 
 Each deployable image has its own Tilt resource and rebuild control. Images build
 once during startup, then wait for their resource's update button before
 rebuilding. REST build contexts are restricted to the source directories copied
 by that image's Dockerfile. Docker and Cargo or Go build caches are reused across
-rebuilds.
+rebuilds. Repeated changed-source builds still retain historical layers until
+Docker, Tilt, or the cluster removes them; this layout does not set storage
+retention policies.
 
 ## Optional profiles
 

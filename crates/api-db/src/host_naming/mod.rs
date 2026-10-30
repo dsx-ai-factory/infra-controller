@@ -171,6 +171,23 @@ pub async fn hostname_for(
     }
 }
 
+/// The hostname `hostname_for` would return for `ctx`, without the writes a
+/// strategy may make on the way to it. For deciding whether a stored name is
+/// current from a transaction that must not write or lock rows.
+pub(crate) async fn preview_hostname_for(
+    txn: &mut PgConnection,
+    ctx: &NamingContext<'_>,
+) -> DatabaseResult<String> {
+    match configured().strategy().preview(txn, ctx).await? {
+        Naming::Assign(hostname) => Ok(hostname),
+        Naming::Keep => ctx.current_hostname.map(str::to_string).ok_or_else(|| {
+            DatabaseError::internal(
+                "host naming strategy returned Keep with no stored hostname".to_string(),
+            )
+        }),
+    }
+}
+
 /// A pluggable hostname naming strategy. Selected by
 /// [`HostNamingStrategyKind`] and consulted at each naming-relevant event.
 #[async_trait::async_trait]
@@ -180,6 +197,15 @@ pub trait HostNamingStrategy: Send + Sync {
     /// the database (the others ignore it).
     async fn name(&self, txn: &mut PgConnection, ctx: &NamingContext<'_>)
     -> DatabaseResult<Naming>;
+
+    /// The decision `name` would make for `ctx`, reading only. A strategy
+    /// whose `name` writes rows on the way to its answer derives the same
+    /// names without them; the others delegate to `name`.
+    async fn preview(
+        &self,
+        txn: &mut PgConnection,
+        ctx: &NamingContext<'_>,
+    ) -> DatabaseResult<Naming>;
 }
 
 /// Config-selectable naming strategy. Deserializes from snake_case (e.g.
@@ -250,6 +276,14 @@ impl HostNamingStrategy for IpHostNamingStrategy {
     ) -> DatabaseResult<Naming> {
         Ok(Naming::Assign(ip_or_dormant(ctx)?))
     }
+
+    async fn preview(
+        &self,
+        txn: &mut PgConnection,
+        ctx: &NamingContext<'_>,
+    ) -> DatabaseResult<Naming> {
+        self.name(txn, ctx).await
+    }
 }
 
 /// Restores the "fun" naming scheme: a stable adjective-noun handle assigned
@@ -285,6 +319,14 @@ impl HostNamingStrategy for FunHostNamingStrategy {
             StableDecision::Generate => Ok(Naming::Assign(generate_unique_hostname(txn).await?)),
         }
     }
+
+    async fn preview(
+        &self,
+        txn: &mut PgConnection,
+        ctx: &NamingContext<'_>,
+    ) -> DatabaseResult<Naming> {
+        self.name(txn, ctx).await
+    }
 }
 
 /// Names a host after its hardware serial.
@@ -317,6 +359,24 @@ impl HostNamingStrategy for SerialNumberHostNamingStrategy {
                 Ok(Naming::Assign(hostname))
             }
             // No usable serial (yet): the temporary IP-based name.
+            None => Ok(Naming::Assign(ip_or_dormant(ctx)?)),
+        }
+    }
+
+    /// The names `name` derives, without the holder checks and the rename of
+    /// a demoted sibling that `claim_bare_serial_hostname` performs: those
+    /// run once `name` is called under the row locks.
+    async fn preview(
+        &self,
+        txn: &mut PgConnection,
+        ctx: &NamingContext<'_>,
+    ) -> DatabaseResult<Naming> {
+        match usable_serial(txn, ctx).await? {
+            Some(serial) if ctx.is_primary => Ok(Naming::Assign(serial_to_hostname(&serial)?)),
+            Some(serial) => Ok(Naming::Assign(serial_with_mac_hostname(
+                &serial,
+                ctx.mac_address,
+            )?)),
             None => Ok(Naming::Assign(ip_or_dormant(ctx)?)),
         }
     }
@@ -366,6 +426,14 @@ impl HostNamingStrategy for MacAddressHostNamingStrategy {
         // `(segment_id, mac_address)` constraint and DHCP itself, and
         // same-domain name conflicts through `fqdn_must_be_unique`.
         Ok(Naming::Assign(mac_hostname(ctx.mac_address)))
+    }
+
+    async fn preview(
+        &self,
+        txn: &mut PgConnection,
+        ctx: &NamingContext<'_>,
+    ) -> DatabaseResult<Naming> {
+        self.name(txn, ctx).await
     }
 }
 
@@ -1284,6 +1352,61 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(sibling, "sn-test-123-020000000099");
+    }
+
+    /// `preview` answers the bare serial for the primary where `name` would
+    /// also rename the demoted sibling, and leaves the transaction without a
+    /// write: Postgres assigns a transaction id on the first row write or row
+    /// lock, so a null `backend_xid` proves neither happened.
+    #[crate::sqlx_test]
+    async fn serial_preview_derives_the_bare_serial_without_writing(pool: sqlx::PgPool) {
+        let mut conn = pool.acquire().await.unwrap();
+        let machine_id = serial_collision_fixture(&mut conn).await;
+        sqlx::query(
+            "INSERT INTO machine_interfaces (segment_id, mac_address, primary_interface, hostname, machine_id, association_type)
+             VALUES ('00000000-0000-0000-0000-0000000000aa'::uuid, '02:00:00:00:00:99'::macaddr, false, 'sn-test-123', $1, 'Machine')",
+        )
+        .bind(machine_id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        drop(conn);
+
+        let addr: IpAddr = "10.1.2.3".parse().unwrap();
+        let addresses = [addr];
+        let ctx = NamingContext {
+            mac_address: mac(),
+            addresses: &addresses,
+            current_hostname: Some("10-1-2-3"),
+            machine_id: Some(machine_id),
+            is_primary: true,
+            interface_type: InterfaceType::Data,
+            interface_id: None,
+            domain_id: None,
+        };
+        let mut txn = pool.begin().await.unwrap();
+        assert_eq!(
+            SerialNumberHostNamingStrategy
+                .preview(&mut txn, &ctx)
+                .await
+                .unwrap(),
+            Naming::Assign("sn-test-123".to_string())
+        );
+        let wrote_nothing: bool = sqlx::query_scalar(
+            "SELECT backend_xid IS NULL FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+        )
+        .fetch_one(&mut *txn)
+        .await
+        .unwrap();
+        assert!(wrote_nothing, "preview must not write or lock a row");
+        let sibling: String = sqlx::query_scalar(
+            "SELECT hostname FROM machine_interfaces WHERE mac_address = '02:00:00:00:00:99'::macaddr",
+        )
+        .fetch_one(&mut *txn)
+        .await
+        .unwrap();
+        assert_eq!(sibling, "sn-test-123");
+        txn.rollback().await.unwrap();
     }
 
     #[crate::sqlx_test]

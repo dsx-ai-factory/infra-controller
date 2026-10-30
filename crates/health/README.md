@@ -9,6 +9,59 @@ enables tracing and Prometheus output, and disables NICo API discovery and all
 health-report sinks. No NICo API server, database, or Kubernetes cluster is
 needed for this workflow.
 
+## Static endpoint credentials
+
+Static endpoints require one shared JSON credentials file for both
+static endpoint lists. Inline `username` and `password` fields are rejected:
+
+```toml
+[endpoint_sources]
+static_credentials_file = "/run/secrets/bmc/credentials.json"
+
+[[endpoint_sources.static_bmc_endpoints]]
+ip = "192.0.2.1"
+mac = "aa:bb:cc:dd:ee:ff"
+credentials_profile = "bmc"
+
+[[endpoint_sources.static_switch_host_endpoints]]
+ip = "192.0.2.2"
+mac = "aa:bb:cc:dd:ee:01"
+credentials_profile = "switch"
+switch = { serial = "switch-01" }
+```
+
+See [credentials.example.json](example/credentials.example.json) for the schema.
+The optional `profiles` map contains named credential sets; `overrides` contains
+partial credentials keyed by MAC, ignoring letter case. Omitted and empty maps
+both contain no entries. `credentials_profile` selects a profile explicitly,
+requires a configured file, and rejects unknown names; there is no default.
+
+Fields resolve independently: **per-MAC override → selected profile**. Omitted
+or `null` fields inherit; empty strings are explicit values.
+Usernames are required; passwords are optional. Target MACs must be unique
+across both static lists.
+
+The file path is required when either static list is nonempty and has no
+default; relative paths use the working directory. One reader is shared across
+targets. Startup rejects missing or
+malformed files, unknown profiles, and missing usernames, logging the file path
+and, for lookup errors, the target MAC.
+
+File events trigger reloads; 60-second polling also detects atomic replacements
+and Kubernetes Secret updates. Replace complete files atomically. Missing files,
+unknown fields, invalid types or MACs, and malformed JSON retain the
+entire last valid snapshot. Parse errors report line/column when available and
+redact values.
+
+Consumers refresh from the cached snapshot after authentication fails. Redfish
+reads retry; mutating calls are not replayed. NVUE REST fetches again on the next
+collection pass. gNMI refreshes before reconnecting; established streams remain
+connected. Rotation can cause rejected requests or a failed REST collection pass.
+
+Profile/override changes need no restart. Removed overrides restore profile values;
+removing a selected profile or the last username causes lookup errors. Main
+configuration changes, including targets and profile selections, require restart.
+
 ## Prerequisites
 
 - Run every command from the repository root.
@@ -72,6 +125,24 @@ The expected results are:
 
 The tracing sink is also enabled, so the hardware-health terminal shows
 endpoint discovery, collector events, and any collection errors.
+
+## gNMI event metrics
+
+The Prometheus sink excludes individual gNMI event records from `/telemetry`
+because event IDs and creation times create distinct series for each occurrence.
+The exclusion covers the built-in
+`carbide_hardware_health_nvue_gnmi_events_on_change_row_severity` family and custom
+metric mappings under `/system-events/system-event`, regardless of subscription
+mode, metric name, unit, or metric prefix. Cached republication applies the same
+exclusion. Aggregate counts and hardware state metrics remain eligible.
+
+When `collectors.nvue.gnmi.system_events_enabled` is enabled (the default), the
+built-in collector exposes `carbide_hardware_health_nvue_gnmi_events_total` on
+`/metrics` for aggregate row counts by severity and logs individual event details.
+Custom subscriptions alone do not produce the built-in counter or detailed event
+logs. A configured OTLP sink receives built-in event metrics and custom metric
+projections. OTLP export, collector caching, and reconciliation behavior are
+unchanged.
 
 ## Inject an unhealthy sensor
 

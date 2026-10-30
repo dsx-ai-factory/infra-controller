@@ -18,8 +18,9 @@
 //! Releases the DPF maintenance hold for hosts whose DPUs are already running
 //! the software their DPUDeployment declares.
 //!
-//! A DPUService change (helm chart or image version) drives every affected DPU
-//! into the NodeEffect phase, where DPF waits for permission to disrupt it.
+//! A DPUDeployment-owned DPUService revision whose upgrade policy enables NodeEffect drives every
+//! affected DPU into that phase, where DPF waits for permission to disrupt it. Revisions configured
+//! with `applyNodeEffect=false` bypass this path.
 //! Granting that permission is only correct for a DPU that is otherwise up to
 //! date: one still awaiting reprovisioning is about to have its OS replaced, and
 //! the new services may not run on the OS currently installed.

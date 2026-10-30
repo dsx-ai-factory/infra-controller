@@ -530,11 +530,12 @@ depends on step 4 but can otherwise proceed independently.
   [Secrets Storage](../configuration/secrets-storage.md) and the
   [PostgreSQL secret-storage design](postgres-secrets/README.md).
 - The KMIP provider never retrieves or exports a KEK. Its mTLS identity is
-  scoped to Encrypt, Decrypt, Query, and attribute-read operations for the
-  configured key objects. A KMIP outage has the same synchronous read impact as
-  a Transit outage. The provider's versioned encoding preserves every response
-  field needed for authenticated decryption, and interoperability tests prove
-  that encoding and error behavior against every supported server product.
+  limited to `Encrypt`, `Decrypt`, and `Get Attributes` on the configured key
+  objects, plus `Query` and `Discover Versions`. A KMIP outage has the same
+  synchronous read impact as a Transit outage. The provider's versioned
+  encoding preserves every response field needed for authenticated decryption,
+  and interoperability tests prove that encoding and error behavior against
+  every supported server product.
 - On an existing reference site, direct cert-manager selection requires the
   same CA certificate and signing key as Vault PKI. A mismatch fails before
   selection and leaves Vault PKI active; custom CA migration is outside this
@@ -690,7 +691,7 @@ and [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-ro
 | Certificate-provider separation | Implemented; production providers remain Vault-backed | [#2880](https://github.com/dsx-ai-factory/infra-controller/issues/2880), [implementation](https://github.com/dsx-ai-factory/infra-controller/pull/2881) |
 | Selectable cert-manager certificate provider | Open; Vault PKI remains supported, and cert-manager with the same `site-root` CA and signing key is the independent option. A new Rust Kubernetes-resource abstraction uses in-memory keys and CSR-only `CertificateRequest` resources for dynamic node and UFM issuance; existing trust, leaves, keys, Secrets, and mounts remain unchanged. Issuance policy and API-side enforcement of individual node-signing credential disablement or revocation remain required. | [#5956](https://github.com/dsx-ai-factory/infra-controller/issues/5956) |
 | Provider-driven installation and bootstrap | Open for selecting the chart and runtime credential, KMS, and PKI providers; the DPF BMC version-0 bootstrap path already has no Vault dependency | [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958), [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147) |
-| Production KMIP KEK provider | Open; scoped KMIP client and per-product interoperability qualification selected | [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) |
+| Production KMIP KEK provider | Implemented; per-product interoperability qualification is open, and no product is qualified yet | [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253), [#7312](https://github.com/dsx-ai-factory/infra-controller/pull/7312), [#7779](https://github.com/dsx-ai-factory/infra-controller/pull/7779), [KMIP KEK Provider](../configuration/kmip-kek-provider.md) |
 | Machine-identity encryption convergence | Open after #3253; independent of the selected production KMS provider | [#3255](https://github.com/dsx-ai-factory/infra-controller/issues/3255) |
 | Shared UFM/NMX-C cache lifecycle | Open, non-blocking refactor that preserves #1837 behavior | [#5516](https://github.com/dsx-ai-factory/infra-controller/issues/5516) |
 | Overall high-level design | This document | [#3251](https://github.com/dsx-ai-factory/infra-controller/issues/3251) |

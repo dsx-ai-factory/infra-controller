@@ -185,38 +185,52 @@ the `nico-admin-cli resource-pool grow` command described below.
 
 ## Runtime operations
 
-### Listing pools
+### Listing Pools
 
-To inspect the current state of all resource pools:
+Run the following command to inspect resource pools:
 
 ```bash
 nico-admin-cli resource-pool list
 ```
 
-This queries the API server for the current state of all pools. The response includes the
-following fields for each pool.
+In v2.4, `nico-api` fails to start if a pool selects a gRPC backend. Integrated pools report known counts. The remote statuses below describe the inspection API for internal testing; [gRPC lifecycle integration](https://github.com/dsx-ai-factory/infra-controller/issues/7140) is tracked separately.
 
-| Field | Description |
+The [pool inspection API](https://github.com/dsx-ai-factory/infra-controller/issues/7138) lists pools that have local inventory or a saved record of which backend they use, ordered by NICo pool name. When connected to an older server without inspection support, the CLI falls back to local inventory only. That view labels pools `Integrated` and `Known`, omits saved backend names, and cannot show a pool with no inventory rows.
+
+The resource pool table contains the following columns:
+
+| Column | Description |
 |---|---|
-| Name | The pool name, matching the key in the configuration file |
-| Min | The lowest value currently in the pool (allocated or free) |
-| Max | The highest value currently in the pool (allocated or free) |
-| Size | Total number of values in the pool |
-| Used | Number of allocated values, followed by the percentage of total used |
+| Name | NICo's logical pool name |
+| Backend | Allocator type, `Integrated` or `gRPC`, followed by the backend name saved for the pool in parentheses when present |
+| Remote Pool | Name used to look up the pool at its backend; Integrated pools repeat `Name` |
+| Min | Lowest value in stored local inventory, allocated or free; blank when absent |
+| Max | Highest value in stored local inventory, allocated or free; blank when absent |
+| Size | Total allocated and free values when statistics are known; otherwise `Unknown` or `Unavailable` |
+| Used | Allocated values, with a rounded whole-number usage percentage when `Size` is greater than zero |
+| Status | `Known`, `Unknown`, or `Unavailable`, as described below |
 
-Sample output:
+Use `Status` to interpret the counts:
+
+- `Known`: NICo obtained valid counts. An empty pool has `Size` and `Used` equal to `0`. There is no percentage because total capacity is zero.
+- `Unknown`: The `Stats` request returned `Unimplemented`. The backend might not support statistics, or the endpoint might not serve the expected RPC. Both count cells display `Unknown`.
+- `Unavailable`: NICo could not read or validate the statistics, for example because no accepted pool definition exists or the provider cannot be reached. Both count cells display `Unavailable`.
+
+Unknown and unavailable counts have no percentage because total capacity is unknown. When a diagnostic is available, the command writes it to standard error as `<pool-name>: <message>`. A failed statistics observation for one pool does not prevent other rows from being displayed or make the command exit unsuccessfully. A failure of the listing request itself does make the command fail.
+
+`Min` and `Max` are blank for an empty Integrated pool or a remote pool. Remote allocation ranges do not describe observed inventory bounds. Remote counts apply to the pool definition the provider accepted. `Size` and `Used` include both automatic and manual allocation values: a pool can still have free manual values after its automatic values are used up.
+
+This excerpt from a captured test run shows a pool named `local` with 2 of its 10 values allocated:
 
 ```text
-+---------------------+---------+---------+------+----------+
-| Name                | Min     | Max     | Size | Used     |
-+---------------------+---------+---------+------+----------+
-| external-vpc-vni    | 3024500 | 3025499 | 1000 | 12 (1%)  |
-| vpc-vni             | 2024500 | 2025499 | 1000 | 47 (5%)  |
-+---------------------+---------+---------+------+----------+
++-------------+---------------+-------------+-----+-----+-------------+-------------+-------------+
+| Name        | Backend       | Remote Pool | Min | Max | Size        | Used        | Status      |
++=============+===============+=============+=====+=====+=============+=============+=============+
+| local       | Integrated    | local       | 1   | 10  | 10          | 2 (20%)     | Known       |
++-------------+---------------+-------------+-----+-----+-------------+-------------+-------------+
 ```
 
-Monitor the `Used` column. When it approaches 100%, VPC creation for that pool will begin
-failing. Plan pool-grow operations before the pool is exhausted rather than after.
+Monitor `Used` when `Status` is `Known`, and grow the required allocation range before it is exhausted. VPC creation fails when the selected pool has no eligible free value. If no pools are returned, the command prints `No resource pools defined` and exits unsuccessfully.
 
 ### Growing a pool
 
@@ -314,10 +328,10 @@ reference.
 
 ### VPC creation fails with a resource-exhausted error
 
-The pool that would have served the allocation is empty. The VNI pool selected depends on the
+The selected pool has no eligible automatic VNI available. The VNI pool selected depends on the
 routing profile of the VPC being created.
 
-1. Run `nico-admin-cli resource-pool list` and identify which pool is at or near 100% used.
+1. Run `nico-admin-cli resource-pool list` and check `Status`. For `Known` counts, `Used` equal to `Size` confirms there are no free values, including when both are zero. A lower `Used` count does not rule out automatic allocation exhaustion: the remaining values may be manual-only. Check that the range being grown allows automatic allocation (`auto_assign = true`, the default).
 2. Coordinate a new range with the network team.
 3. Run `nico-admin-cli resource-pool grow -f <file>` with the new range.
 4. Retry the VPC creation.

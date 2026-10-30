@@ -45,6 +45,16 @@ restAddress: null
 # Unset by default.
 compatibilityRestAddress: null
 
+# Optional IPv6 metadata address alongside the existing IPv4 interface address.
+# Accepts only fd00:76b9::254/127. Include that endpoint in nico-dpu-agent's
+# fmds.networkingAddresses and set restAddress to "[::]:80" for both families.
+# A listener bound to fd00:76b9::254 serves only IPv6; retain a separate IPv4
+# listener if needed. The rendered flag overrides FMDS_INTERFACE_CIDR_V6;
+# null omits the flag and leaves the binary's environment fallback in effect.
+# The chart requires an IPv6 listener when this value is set; FMDS validates
+# its exact address at startup, including when the CIDR comes from the environment.
+interfaceCidrV6: null
+
 # Prometheus /metrics listen port (must match nico-otelcol scrape target).
 metricsPort: 8888
 image:

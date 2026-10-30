@@ -409,6 +409,7 @@ impl NvSwitchManager for NsmSwitchBackend {
             "switch certificate job status is not supported by NSM backend, passthrough"
         );
         Ok(ConfigureSwitchCertificateJobStatus {
+            failure: None,
             state: ConfigureSwitchCertificateState::Completed,
             error: None,
         })

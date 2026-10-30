@@ -5,6 +5,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <table>
 <tr><td>Name</td><td>Type</td><td>Description</td></tr>
 <tr><td>carbide_active_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system currently working on updating their firmware.</td></tr>
+<tr><td>carbide_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_api_admission_admitted_total</td><td>counter</td><td>Number of API requests admitted for execution</td></tr>
 <tr><td>carbide_api_admission_handler_execution_duration_seconds</td><td>histogram</td><td>Duration of admitted API request handler execution</td></tr>
 <tr><td>carbide_api_admission_pending_requests</td><td>gauge</td><td>Number of API requests currently waiting for an execution slot</td></tr>
@@ -15,6 +16,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_api_db_queries_total</td><td>counter</td><td>Number of database queries that occurred inside a span</td></tr>
 <tr><td>carbide_api_db_span_query_time_milliseconds</td><td>histogram</td><td>Total time the request spent inside a span on database transactions</td></tr>
 <tr><td>carbide_api_grpc_server_duration_milliseconds</td><td>histogram</td><td>Processing time for a request on the carbide API server</td></tr>
+<tr><td>carbide_api_host_admin_address_reconcile_failures_total</td><td>counter</td><td>Number of host admin address reconciliations that failed after a discovery committed</td></tr>
 <tr><td>carbide_api_ready</td><td>gauge</td><td>Whether the NICo API is running</td></tr>
 <tr><td>carbide_api_secrets_request_duration_milliseconds</td><td>histogram</td><td>Duration of Postgres secrets operations, in milliseconds.</td></tr>
 <tr><td>carbide_api_secrets_requests_failed_total</td><td>counter</td><td>Number of failed Postgres secrets operations.</td></tr>
@@ -49,11 +51,15 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_bmc_proxy_breaker_opened_total</td><td>counter</td><td>Number of times a request class&#39;s circuit breaker at a BMC opened: the BMC failed too many of the class&#39;s recent exchanges, by request class</td></tr>
 <tr><td>carbide_bmc_proxy_redirects_total</td><td>counter</td><td>Number of BMC redirect responses observed by configured mode, response status, target classification, and proxy disposition</td></tr>
 <tr><td>carbide_bmc_proxy_slo_missed_total</td><td>counter</td><td>Number of windows of requests in which a class with a latency target missed it at a BMC, each cutting the slots classes without a target may hold there, by request class</td></tr>
+<tr><td>carbide_bmc_proxy_switch_probe_denied_total</td><td>counter</td><td>Number of times nico-api denied the proxy&#39;s FindSwitchIds probe for the switch at a proxied address, after which the proxy resolves every address as a BMC&#39;s until it probes again</td></tr>
+<tr><td>carbide_bmc_proxy_switch_tls_certificate_out_of_validity_total</td><td>counter</td><td>Number of times a load or check of the tls.switch files found a certificate in them expired or not yet valid, by the file holding it</td></tr>
+<tr><td>carbide_bmc_proxy_switch_tls_reload_failures_total</td><td>counter</td><td>Number of failed reloads of the tls.switch client identity and CA bundle the proxy uses for switches&#39; NVOS interfaces; the previously loaded ones stay in use</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_attempted_total</td><td>counter</td><td>Number of inbound TLS connection attempts</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_fail_total</td><td>counter</td><td>Number of failed inbound connections, by failure reason</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_success_total</td><td>counter</td><td>Number of successful TLS connections</td></tr>
 <tr><td>carbide_bmc_proxy_tls_reload_failures_total</td><td>counter</td><td>Number of failed inbound TLS identity and trust-root reloads</td></tr>
 <tr><td>carbide_bmc_proxy_upstream_auth_retries_total</td><td>counter</td><td>Number of forwarded requests replayed once with freshly resolved BMC credentials after the BMC rejected the proxy&#39;s cached credential, by HTTP method</td></tr>
+<tr><td>carbide_bmc_proxy_upstream_certificate_rejected_total</td><td>counter</td><td>Number of attempts the proxy did not send because the target&#39;s certificate failed verification against tls.switch</td></tr>
 <tr><td>carbide_bmc_proxy_upstream_request_duration_milliseconds</td><td>histogram</td><td>Duration of requests the proxy forwarded to BMCs, by HTTP method and upstream status class; the _count series, split by status, gives the request and outcome rates.</td></tr>
 <tr><td>carbide_bmc_session_cleanup_failures_total</td><td>counter</td><td>Number of BMC session cleanup failures, by operation.</td></tr>
 <tr><td>carbide_bmc_session_lockout_breaker_transitions_total</td><td>counter</td><td>Number of BMC session lockout-avoidance breaker transitions.</td></tr>
@@ -68,6 +74,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_database_transaction_rollback_failures_total</td><td>counter</td><td>Number of database transaction rollback failures, by trigger.</td></tr>
 <tr><td>carbide_db_pool_idle_conns</td><td>gauge</td><td>Number of idle connections in the carbide database pool</td></tr>
 <tr><td>carbide_db_pool_total_conns</td><td>gauge</td><td>Number of (active + idle) connections in the carbide database pool</td></tr>
+<tr><td>carbide_dhcp_certificate_expiration_time</td><td>gauge</td><td>The certificate expiration time (epoch seconds)</td></tr>
+<tr><td>carbide_dhcp_certificate_expiration_time_seconds</td><td>gauge</td><td>The certificate expiration time (epoch seconds)</td></tr>
 <tr><td>carbide_dhcp_dropped_requests_total</td><td>counter</td><td>Number of DHCPv4 packets dropped without a reply, by drop reason.</td></tr>
 <tr><td>carbide_dhcp_replies_sent_total</td><td>counter</td><td>Number of DHCPv4 replies sent, by reply message type.</td></tr>
 <tr><td>carbide_dhcp_requests_total</td><td>counter</td><td>Number of DHCPv4 packets received and decoded, by DHCP message type.</td></tr>
@@ -88,6 +96,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_dpu_agent_service_restart_attempts_total</td><td>counter</td><td>Number of DPU-agent service restart attempts, by service and result.</td></tr>
 <tr><td>carbide_dpu_agent_version_count</td><td>gauge</td><td>Number of DPU agents which have reported a certain version.</td></tr>
 <tr><td>carbide_dpu_bmc_service_credential_rotation_results_total</td><td>counter</td><td>Number of persisted DPU BMC service credential rotation results, by result</td></tr>
+<tr><td>carbide_dpu_client_certificate_expiration_time</td><td>gauge</td><td>The expiration time (epoch seconds) for the client certificate associated with a given DPU.</td></tr>
+<tr><td>carbide_dpu_client_certificate_expiration_time_seconds</td><td>gauge</td><td>The expiration time (epoch seconds) for the client certificate associated with a given DPU.</td></tr>
 <tr><td>carbide_dpu_firmware_version_count</td><td>gauge</td><td>Number of DPUs which have reported a certain firmware version.</td></tr>
 <tr><td>carbide_dpu_remediation_executor_failures_total</td><td>counter</td><td>Number of DPU remediation executor failures, by failure stage.</td></tr>
 <tr><td>carbide_dpu_uefi_password_setup_skips_total</td><td>counter</td><td>Number of DPU UEFI password setup operations skipped, by reason.</td></tr>
@@ -111,6 +121,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_endpoint_explorations_count</td><td>gauge</td><td>Number of attempted endpoint explorations</td></tr>
 <tr><td>carbide_exhausted_reprovision_retry_count</td><td>gauge</td><td>Number of host machines in the system whose host firmware upgrade retry budget is exhausted.</td></tr>
 <tr><td>carbide_extension_service_credential_cleanup_failures_total</td><td>counter</td><td>Number of extension-service credential cleanup failures, by operation.</td></tr>
+<tr><td>carbide_extension_services_count</td><td>gauge</td><td>Number of carbide_extension_services in the system</td></tr>
 <tr><td>carbide_extension_services_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_extension_services in the system</td></tr>
 <tr><td>carbide_extension_services_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_extension_services</td></tr>
 <tr><td>carbide_extension_services_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_extension_services</td></tr>
@@ -127,16 +138,133 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_gpus_total_count</td><td>gauge</td><td>Number of GPUs in the NICo deployment</td></tr>
 <tr><td>carbide_gpus_usable_count</td><td>gauge</td><td>Number of remaining GPUs in the NICo deployment available for immediate instance creation</td></tr>
 <tr><td>carbide_hardware_health_component_inventory_info</td><td>gauge</td><td>Authoritative NICo component inventory for the current rack-ingestion session</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_correctable_io_read_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_correctable_io_read_errors_count_total</td><td>counter</td><td>Number of correctable read errors over the lifetime of the drive, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_correctable_io_write_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_correctable_io_write_errors_count_total</td><td>counter</td><td>Number of correctable write errors over the lifetime of the drive, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_correctable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_correctable_ecc_errors_count_total</td><td>counter</td><td>Number of correctable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_indeterminate_correctable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_indeterminate_correctable_errors_count_total</td><td>counter</td><td>Number of indeterminate correctable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_indeterminate_uncorrectable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_indeterminate_uncorrectable_errors_count_total</td><td>counter</td><td>Number of indeterminate uncorrectable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_uncorrectable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_uncorrectable_ecc_errors_count_total</td><td>counter</td><td>Number of uncorrectable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_energy_kilowatt_hours</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_energy_kilowatt_hours_total</td><td>counter</td><td>Number of kilowatt-hours consumed by the power supply since the last sensor reset, by powersupply_id, chassis_id, and optional model</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_correctable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_correctable_ecc_errors_count_total</td><td>counter</td><td>Number of correctable ECC errors over the lifetime of the memory, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_correctable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_correctable_errors_count_total</td><td>counter</td><td>Number of indeterminate correctable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_uncorrectable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_uncorrectable_errors_count_total</td><td>counter</td><td>Number of indeterminate uncorrectable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_uncorrectable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_uncorrectable_ecc_errors_count_total</td><td>counter</td><td>Number of uncorrectable ECC errors over the lifetime of the memory, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_accumulated_gpu_context_utilization_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_accumulated_gpu_context_utilization_seconds_total</td><td>counter</td><td>Number of seconds of GPU context utilization accumulated with the driver loaded, by processor_id and system_id; resets on SBR, fundamental reset, or ClearAccumulatedUtilizationCounters and wraps after approximately 49 days of activity</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_accumulated_sm_utilization_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_accumulated_sm_utilization_seconds_total</td><td>counter</td><td>Number of seconds of SM utilization accumulated with the driver loaded, by processor_id and system_id; resets on SBR, fundamental reset, or ClearAccumulatedUtilizationCounters and wraps after approximately 49 days of activity</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_correctable_row_remapping_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_correctable_row_remapping_count_total</td><td>counter</td><td>Number of memory row remappings due to correctable errors reported by the NVIDIA device, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_global_software_violation_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_global_software_violation_throttle_seconds_total</td><td>counter</td><td>Number of seconds the NVIDIA processor has throttled due to global software violation since reset, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_hardware_violation_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_hardware_violation_throttle_seconds_total</td><td>counter</td><td>Number of seconds the NVIDIA processor has throttled due to hardware violation since reset, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_pcie_rx_bytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_pcie_rx_bytes_total</td><td>counter</td><td>Number of bytes received by the NVIDIA processor PCIe receiver, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_pcie_tx_bytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_pcie_tx_bytes_total</td><td>counter</td><td>Number of bytes sent by the NVIDIA processor PCIe transmitter, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_power_brake_assertion_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_power_brake_assertion_seconds_total</td><td>counter</td><td>Number of seconds the NVIDIA processor power brake has been asserted since reset, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_uncorrectable_row_remapping_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_uncorrectable_row_remapping_count_total</td><td>counter</td><td>Number of memory row remappings due to uncorrectable errors reported by the NVIDIA device, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_bad_dllp_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_bad_dllp_count_total</td><td>counter</td><td>Number of bad PCIe data link layer packets issued on the PCIe link by the receiver</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_bad_tlp_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_bad_tlp_count_total</td><td>counter</td><td>Number of bad PCIe transaction layer packets issued on the PCIe link by the receiver</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_correctable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_correctable_errors_count_total</td><td>counter</td><td>Number of PCIe correctable errors reported by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_fatal_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_fatal_errors_count_total</td><td>counter</td><td>Number of PCIe fatal errors reported by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_flow_control_timeout_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_flow_control_timeout_count_total</td><td>counter</td><td>Number of PCIe flow control credit timeouts reported by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_l0_to_recovery_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_l0_to_recovery_count_total</td><td>counter</td><td>Number of PCIe link transitions from L0 to recovery for the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_nak_received_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_nak_received_count_total</td><td>counter</td><td>Number of PCIe negative acknowledgements received by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_nak_sent_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_nak_sent_count_total</td><td>counter</td><td>Number of PCIe negative acknowledgements sent by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_non_fatal_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_non_fatal_errors_count_total</td><td>counter</td><td>Number of PCIe non-fatal errors reported by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_replay_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_replay_count_total</td><td>counter</td><td>Number of PCIe replays issued by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_replay_rollover_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_replay_rollover_count_total</td><td>counter</td><td>Number of PCIe replay rollovers issued by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count_total</td><td>counter</td><td>Number of unsupported PCIe requests received by the device</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds_total</td><td>counter</td><td>Number of seconds the processor has throttled due to a power limit since reset</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_on_hours_hours</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_on_hours_hours_total</td><td>counter</td><td>Number of power-on hours over the lifetime of the drive, by drive_id, storage_id, system_id, and optional model</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_read_io_kibibytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_read_io_kibibytes_total</td><td>counter</td><td>Number of kibibytes read from the drive since the last reset or wrap, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds_total</td><td>counter</td><td>Number of seconds the processor has throttled due to a thermal limit since reset</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_uncorrectable_io_read_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_uncorrectable_io_read_errors_count_total</td><td>counter</td><td>Number of uncorrectable read errors over the lifetime of the drive, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_uncorrectable_io_write_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_uncorrectable_io_write_errors_count_total</td><td>counter</td><td>Number of uncorrectable write errors over the lifetime of the drive, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_write_io_kibibytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_write_io_kibibytes_total</td><td>counter</td><td>Number of kibibytes written to the drive since the last reset or wrap, by drive_id, storage_id, and system_id</td></tr>
 <tr><td>carbide_hardware_health_inventory_last_success_time_seconds</td><td>gauge</td><td>Unix timestamp of the last successful NICo inventory reconciliation</td></tr>
 <tr><td>carbide_hardware_health_inventory_refresh_failures_total</td><td>counter</td><td>Number of authoritative hardware inventory refreshes that failed.</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_errors_count_total</td><td>counter</td><td>Number of inbound packets with errors reported by the interface</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_octets_bytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_octets_bytes_total</td><td>counter</td><td>Number of octets received by the interface</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_packets_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_packets_count_total</td><td>counter</td><td>Number of packets received by the interface</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_link_downed_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_link_downed_count_total</td><td>counter</td><td>Number of link down events reported by the InfiniBand port</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_link_error_recovery_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_link_error_recovery_count_total</td><td>counter</td><td>Number of link error recovery events reported by the InfiniBand port</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_local_link_integrity_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_local_link_integrity_errors_count_total</td><td>counter</td><td>Number of local link integrity errors reported by the InfiniBand port</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_discards_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_discards_count_total</td><td>counter</td><td>Number of outbound packets discarded by the interface without detected errors</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_errors_count_total</td><td>counter</td><td>Number of outbound packets with errors reported by the interface</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_octets_bytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_octets_bytes_total</td><td>counter</td><td>Number of octets transmitted by the interface</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_packets_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_packets_count_total</td><td>counter</td><td>Number of packets transmitted by the interface</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_port_buffer_overrun_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_port_buffer_overrun_errors_count_total</td><td>counter</td><td>Number of excessive buffer overrun errors reported by the InfiniBand port</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_port_xmit_wait_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_port_xmit_wait_count_total</td><td>counter</td><td>Number of ticks during which the InfiniBand port had data to transmit but sent none for the entire tick</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_qp1_dropped_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_qp1_dropped_count_total</td><td>counter</td><td>Number of QP1 packets dropped by the InfiniBand port</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_constraint_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_constraint_errors_count_total</td><td>counter</td><td>Number of receive constraint errors reported by the InfiniBand port</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_remote_physical_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_remote_physical_errors_count_total</td><td>counter</td><td>Number of receive remote physical errors reported by the InfiniBand port</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_switch_relay_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_switch_relay_errors_count_total</td><td>counter</td><td>Number of receive switch relay errors reported by the InfiniBand port</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_vl15_dropped_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_vl15_dropped_count_total</td><td>counter</td><td>Number of VL15 packets dropped by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_rack_nvlink_domain_info</td><td>gauge</td><td>Authoritative NICo rack-to-NVLink-domain assignments for current rack-ingestion sessions</td></tr>
 <tr><td>carbide_hardware_health_rack_session_start_time_seconds</td><td>gauge</td><td>NICo rack creation time in Unix seconds, labeled by its ingestion session</td></tr>
+<tr><td>carbide_health_bmc_connection_circuit_closed_total</td><td>counter</td><td>Number of times a BMC connection circuit closed because the BMC answered again.</td></tr>
+<tr><td>carbide_health_bmc_connection_circuit_opened_total</td><td>counter</td><td>Number of times a BMC connection circuit opened after a connect-level failure.</td></tr>
+<tr><td>carbide_health_otlp_egress_records_total</td><td>counter</td><td>Number of OTLP log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections, by target and signal.</td></tr>
 <tr><td>carbide_health_otlp_export_failures_total</td><td>counter</td><td>Number of OTLP export batches dropped after a send failure, by signal and gRPC status code.</td></tr>
+<tr><td>carbide_health_otlp_ingress_records_total</td><td>counter</td><td>Number of log records or metric samples accepted into OTLP queues, including replacements and insertions that evict an older entry, by target and signal.</td></tr>
 <tr><td>carbide_health_otlp_queue_depth</td><td>gauge</td><td>Number of entries waiting in an OTLP queue, by target and signal.</td></tr>
 <tr><td>carbide_health_otlp_queue_dropped_total</td><td>counter</td><td>Number of OTLP queue entries dropped because a per-target queue reached capacity, by target and signal.</td></tr>
 <tr><td>carbide_health_redfish_sse_event_record_resolution_failures_total</td><td>counter</td><td>Number of Redfish SSE event records dropped after a referenced record could not be resolved, by failure reason.</td></tr>
 <tr><td>carbide_health_report_submissions_total</td><td>counter</td><td>Number of health report submissions to the NICo API, by report target and outcome.</td></tr>
 <tr><td>carbide_host_reprovision_retries_total</td><td>counter</td><td>Number of times a failed host firmware upgrade was retried during host reprovisioning</td></tr>
+<tr><td>carbide_hosts_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_hosts_by_sku_count</td><td>gauge</td><td>Number of hosts by SKU and device type (&#39;unknown&#39; for hosts without SKU)</td></tr>
 <tr><td>carbide_hosts_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
 <tr><td>carbide_hosts_health_status_count</td><td>gauge</td><td>Number of managed hosts in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
@@ -145,6 +273,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hosts_unhealthy_by_probe_id_count</td><td>gauge</td><td>Number of objects which reported a certain Health Probe Alert</td></tr>
 <tr><td>carbide_hosts_usable_count</td><td>gauge</td><td>Number of remaining hosts in the NICo deployment available for immediate instance creation</td></tr>
 <tr><td>carbide_hosts_with_bios_password_set</td><td>gauge</td><td>Number of hosts in the system that have their BIOS password set.</td></tr>
+<tr><td>carbide_hosts_with_scout_heartbeat_timeout</td><td>gauge</td><td>Scout heartbeat timeout status for hosts</td></tr>
 <tr><td>carbide_ib_monitor_fabrics_count</td><td>gauge</td><td>Number of monitored InfiniBand fabrics</td></tr>
 <tr><td>carbide_ib_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one IB fabric monitor iteration</td></tr>
 <tr><td>carbide_ib_monitor_machine_ib_status_updates_count</td><td>gauge</td><td>Number of Machines whose InfiniBand status observation was updated</td></tr>
@@ -154,6 +283,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_ib_monitor_partial_failures_total</td><td>counter</td><td>Number of IB fabric monitor partial failures, by failure stage.</td></tr>
 <tr><td>carbide_ib_monitor_ufm_changes_applied_total</td><td>counter</td><td>Number of changes performed at UFM</td></tr>
 <tr><td>carbide_ib_partition_pkey_missing_total</td><td>counter</td><td>Number of IB partitions missing a pkey, by controller state</td></tr>
+<tr><td>carbide_ib_partitions_count</td><td>gauge</td><td>Number of carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ib_partitions_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ib_partitions_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_ib_partitions</td></tr>
 <tr><td>carbide_ib_partitions_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_ib_partitions</td></tr>
@@ -178,6 +308,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_machine_validation_result_persistence_attempts_total</td><td>counter</td><td>Number of machine validation result persistence attempts, by outcome.</td></tr>
 <tr><td>carbide_machine_validation_stale_runs_count</td><td>gauge</td><td>Number of active machine validation runs considered stale</td></tr>
 <tr><td>carbide_machine_validation_tests</td><td>gauge</td><td>The details of machine validation tests</td></tr>
+<tr><td>carbide_machines_count</td><td>gauge</td><td>Number of carbide_machines in the system</td></tr>
 <tr><td>carbide_machines_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_machines in the system</td></tr>
 <tr><td>carbide_machines_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_machines in a certain state</td></tr>
 <tr><td>carbide_machines_in_maintenance_count</td><td>gauge</td><td>Number of machines in the system in maintenance</td></tr>
@@ -194,13 +325,24 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_machines_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_machines have exited a certain state</td></tr>
 <tr><td>carbide_machines_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_machines have spent in a certain state</td></tr>
 <tr><td>carbide_machines_total</td><td>gauge</td><td>Number of carbide_machines in the system</td></tr>
-<tr><td>carbide_machines_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_machines in a given state</td></tr>
+<tr><td>carbide_machines_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_machines whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_managed_loop_iterations_total</td><td>counter</td><td>Number of managed loop iterations, by manager and outcome; the measured boot metrics collector&#39;s iterations are counted by its latency histogram instead</td></tr>
+<tr><td>carbide_measured_boot_bundles_count</td><td>gauge</td><td>Number of measured boot bundles.</td></tr>
+<tr><td>carbide_measured_boot_bundles_per_pcr_value_count</td><td>gauge</td><td>Number of measured boot bundles containing a given PCR value at a given PCR index.</td></tr>
 <tr><td>carbide_measured_boot_bundles_total</td><td>gauge</td><td>Number of measured boot bundles.</td></tr>
 <tr><td>carbide_measured_boot_collector_iteration_latency_milliseconds</td><td>histogram</td><td>Number of milliseconds a full measured boot metrics collector iteration took, by outcome</td></tr>
+<tr><td>carbide_measured_boot_machines_count</td><td>gauge</td><td>Number of discovered candidate machines, including machines without measurements.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_bundle_count</td><td>gauge</td><td>Number of machines per measured boot bundle.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_bundle_state_count</td><td>gauge</td><td>Number of machines per measured boot bundle state.</td></tr>
 <tr><td>carbide_measured_boot_machines_per_bundle_state_total</td><td>gauge</td><td>Number of machines per measured boot bundle state.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_bundle_total</td><td>gauge</td><td>Number of machines per measured boot bundle.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_machine_state_count</td><td>gauge</td><td>Number of machines per measured boot machine state.</td></tr>
 <tr><td>carbide_measured_boot_machines_per_machine_state_total</td><td>gauge</td><td>Number of machines per measured boot machine state.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_pcr_value_total</td><td>gauge</td><td>Number of machines with a given PCR value at a given PCR index.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_profile_count</td><td>gauge</td><td>Number of machines per measured boot system profile.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_profile_total</td><td>gauge</td><td>Number of machines per measured boot system profile.</td></tr>
 <tr><td>carbide_measured_boot_machines_total</td><td>gauge</td><td>Number of machines reporting measurements.</td></tr>
+<tr><td>carbide_measured_boot_profiles_count</td><td>gauge</td><td>Number of measured boot profiles.</td></tr>
 <tr><td>carbide_measured_boot_profiles_total</td><td>gauge</td><td>Number of measured boot profiles.</td></tr>
 <tr><td>carbide_measured_boot_verification_failures_total</td><td>counter</td><td>Number of measured boot verification failures, across quote verification and attestation handling, by cause</td></tr>
 <tr><td>carbide_metrics_scrape_failures_total</td><td>counter</td><td>Number of /metrics scrape failures, by outcome.</td></tr>
@@ -219,6 +361,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_mqtt_queue_pending_messages</td><td>gauge</td><td>Number of received MQTT messages currently waiting in the client&#39;s processing queue</td></tr>
 <tr><td>carbide_mqtt_reconnects_total</td><td>counter</td><td>Number of times an MQTT client re-established its broker connection after the initial connect</td></tr>
 <tr><td>carbide_mqtt_unmatched_topics_total</td><td>counter</td><td>Number of received MQTT messages whose topic matched no registered handler pattern</td></tr>
+<tr><td>carbide_network_segments_count</td><td>gauge</td><td>Number of carbide_network_segments in the system</td></tr>
 <tr><td>carbide_network_segments_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_network_segments in the system</td></tr>
 <tr><td>carbide_network_segments_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_network_segments in a certain state</td></tr>
 <tr><td>carbide_network_segments_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_network_segments</td></tr>
@@ -233,15 +376,20 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_network_segments_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_network_segments have exited a certain state</td></tr>
 <tr><td>carbide_network_segments_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_network_segments have spent in a certain state</td></tr>
 <tr><td>carbide_network_segments_total</td><td>gauge</td><td>Number of carbide_network_segments in the system</td></tr>
-<tr><td>carbide_network_segments_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_network_segments in a given state</td></tr>
+<tr><td>carbide_network_segments_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_network_segments whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
+<tr><td>carbide_nvlink_partition_monitor_groups_total</td><td>counter</td><td>Number of machine groups (chassis or rack) the partition monitor finished, by outcome</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>Time consumed for one monitor iteration</td></tr>
+<tr><td>carbide_nvlink_partition_monitor_iteration_overruns_total</td><td>counter</td><td>Number of partition monitor iterations that ran longer than monitor_run_interval</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_machine_status_updates_count</td><td>gauge</td><td>Number of machines whose NVLink status observation was updated</td></tr>
+<tr><td>carbide_nvlink_partition_monitor_nmx_c_unreachable_chassis_count</td><td>gauge</td><td>Number of machine groups (chassis or rack) where NMX-C was unreachable during partition monitor iteration</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_nmxc_changes_applied_total</td><td>counter</td><td>Number of changes requested to NMX-C</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_nmxc_op_latency_milliseconds</td><td>histogram</td><td>Time consumed for one NMX-C operation</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_num_logical_partitions</td><td>gauge</td><td>Number of monitored logical partitions</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_num_physical_partitions</td><td>gauge</td><td>Number of monitored physical partitions</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_nvlink_info_mismatches</td><td>gauge</td><td>Number of NVLink GPU partition ID mismatches between DB and NMX-C</td></tr>
+<tr><td>carbide_nvlink_partition_monitor_stage_latency_milliseconds</td><td>histogram</td><td>Time consumed by one stage of a partition monitor iteration, by stage</td></tr>
 <tr><td>carbide_nvlink_partition_monitor_stale_partitions_deleted</td><td>gauge</td><td>Number of stale partitions deleted from DB (not found in NMX-C)</td></tr>
+<tr><td>carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total</td><td>counter</td><td>Number of NvlinkUnhealthy health-report writes that failed and were deferred to the next pass</td></tr>
 <tr><td>carbide_nvlink_switch_cert_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>Time consumed for one NMX-C switch certificate monitor iteration</td></tr>
 <tr><td>carbide_object_info</td><td>gauge</td><td>Stable identifying traits for a state-controller object. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_object_manual_intervention_required</td><td>gauge</td><td>Indicates that an object currently requires manual operator intervention. Exposed only on the opt-in per-object endpoint.</td></tr>
@@ -249,6 +397,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_object_state_sla_seconds</td><td>gauge</td><td>Resolved SLA in seconds for an objects current state. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_pending_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update</td></tr>
 <tr><td>carbide_pending_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system that need a firmware update.</td></tr>
+<tr><td>carbide_power_shelves_count</td><td>gauge</td><td>Number of carbide_power_shelves in the system</td></tr>
 <tr><td>carbide_power_shelves_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_power_shelves in the system</td></tr>
 <tr><td>carbide_power_shelves_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_power_shelves in a certain state</td></tr>
 <tr><td>carbide_power_shelves_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
@@ -265,8 +414,9 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_power_shelves_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_power_shelves have exited a certain state</td></tr>
 <tr><td>carbide_power_shelves_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_power_shelves have spent in a certain state</td></tr>
 <tr><td>carbide_power_shelves_total</td><td>gauge</td><td>Number of carbide_power_shelves in the system</td></tr>
-<tr><td>carbide_power_shelves_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_power_shelves in a given state</td></tr>
+<tr><td>carbide_power_shelves_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_power_shelves whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_preingestion_bfb_copy_duration_seconds</td><td>histogram</td><td>Duration of preingestion BFB copies to a DPU rshim, by outcome; the _count series, split by outcome, is the copy and failure rate.</td></tr>
+<tr><td>carbide_preingestion_count</td><td>gauge</td><td>Number of known machines currently being evaluated prior to ingestion</td></tr>
 <tr><td>carbide_preingestion_firmware_upgrade_tasks_total</td><td>counter</td><td>Number of preingestion firmware upgrade Redfish tasks reaching a terminal state, by firmware component, final task state, and outcome.</td></tr>
 <tr><td>carbide_preingestion_firmware_upload_total</td><td>counter</td><td>Number of preingestion firmware uploads to a BMC, by upload method and outcome.</td></tr>
 <tr><td>carbide_preingestion_power_control_total</td><td>counter</td><td>Number of preingestion Redfish power operations (host power control, BMC and chassis resets), by operation and outcome.</td></tr>
@@ -275,6 +425,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_preingestion_waiting_installation</td><td>gauge</td><td>Number of machines which have had firmware uploaded to them and are currently in the process of installing that firmware</td></tr>
 <tr><td>carbide_pxe_boot_outcomes_total</td><td>counter</td><td>Number of PXE boot-path outcomes served, by endpoint and reason.</td></tr>
 <tr><td>carbide_rack_maintenance_access_token_cleanup_failures_total</td><td>counter</td><td>Number of rack maintenance access token cleanup failures</td></tr>
+<tr><td>carbide_racks_count</td><td>gauge</td><td>Number of carbide_racks in the system</td></tr>
 <tr><td>carbide_racks_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_racks in the system</td></tr>
 <tr><td>carbide_racks_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_racks in a certain state</td></tr>
 <tr><td>carbide_racks_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
@@ -288,12 +439,17 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_racks_per_state</td><td>gauge</td><td>Number of carbide_racks in the system with a given state</td></tr>
 <tr><td>carbide_racks_per_state_above_sla</td><td>gauge</td><td>Number of carbide_racks currently in a state longer than the SLA allows</td></tr>
 <tr><td>carbide_racks_total</td><td>gauge</td><td>Number of carbide_racks in the system</td></tr>
-<tr><td>carbide_racks_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_racks in a given state</td></tr>
+<tr><td>carbide_racks_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_racks whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_reboot_attempts_in_booting_with_discovery_image</td><td>histogram</td><td>Reboot attempts per machine in BootingWithDiscoveryImage, recorded when a machine is rebooted again after no response from the host.</td></tr>
 <tr><td>carbide_redfish_action_result_persistence_failures_total</td><td>counter</td><td>Number of detached Redfish action results that failed to persist</td></tr>
 <tr><td>carbide_reserved_ips_count</td><td>gauge</td><td>Number of reserved IPs per network segment</td></tr>
+<tr><td>carbide_resource_pool_cleanup_pending</td><td>gauge</td><td>Number of remote allocations awaiting confirmed cancellation or release</td></tr>
 <tr><td>carbide_resource_pool_lifecycle_failures_total</td><td>counter</td><td>Number of resource pool lifecycle failures, by operation, failure, failure policy, allocation mode, and value type.</td></tr>
 <tr><td>carbide_resourcepool_free_count</td><td>gauge</td><td>Number of values in the resource pool currently available for allocation</td></tr>
+<tr><td>carbide_resourcepool_stats_available</td><td>gauge</td><td>Whether the last resource pool statistics poll returned known counts, regardless of age</td></tr>
+<tr><td>carbide_resourcepool_stats_fresh</td><td>gauge</td><td>Whether the last successful resource pool statistics poll is less than 120 seconds old; zero before any success. Used/free count series are absent before success, after a failed poll, or when this gauge is zero</td></tr>
+<tr><td>carbide_resourcepool_stats_last_success_timestamp_seconds</td><td>gauge</td><td>Unix timestamp of the last successful resource pool statistics poll, retained after failure and absent before any success</td></tr>
+<tr><td>carbide_resourcepool_stats_poll_failures_total</td><td>counter</td><td>Number of failed resource pool observations: one per unavailable or unsupported pool, or per failed database snapshot. Labels: backend (integrated for the local snapshot, grpc for a remote pool), failure (database or timeout for snapshots, unknown for unsupported statistics, unavailable for other pool failures)</td></tr>
 <tr><td>carbide_resourcepool_used_count</td><td>gauge</td><td>Number of currently allocated values in the resource pool</td></tr>
 <tr><td>carbide_rms_switch_certificate_unrecognized_job_states_total</td><td>counter</td><td>Number of unrecognized RMS switch certificate job states.</td></tr>
 <tr><td>carbide_running_dpu_updates_count</td><td>gauge</td><td>Number of machines in the system that are currently running a DPU/NIC firmware update</td></tr>
@@ -314,18 +470,30 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_site_explorer_boot_interface_selections_total</td><td>counter</td><td>Number of successful Site Explorer boot interface selections for hosts with more than one explored DPU and effective DPU policy Manage, by selection mechanism.</td></tr>
 <tr><td>carbide_site_explorer_create_machines</td><td>gauge</td><td>Whether site-explorer machine creation is enabled (1) or disabled (0)</td></tr>
 <tr><td>carbide_site_explorer_create_machines_latency_milliseconds</td><td>histogram</td><td>The time it took to perform create_machines inside site-explorer</td></tr>
-<tr><td>carbide_site_explorer_created_machines_count</td><td>gauge</td><td>Number of machine pairs created by Site Explorer after identification</td></tr>
-<tr><td>carbide_site_explorer_created_power_shelves_count</td><td>gauge</td><td>Number of power shelves created by Site Explorer after identification</td></tr>
+<tr><td>carbide_site_explorer_created_machines_count</td><td>gauge</td><td>Number of machine pairs created by Site Explorer after identification in the last SiteExplorer run</td></tr>
+<tr><td>carbide_site_explorer_created_power_shelves_count</td><td>gauge</td><td>Number of power shelves created by Site Explorer after identification in the last SiteExplorer run</td></tr>
+<tr><td>carbide_site_explorer_dpf_explorations_deferred_total</td><td>counter</td><td>Number of periodic endpoint candidates skipped, re-exploration requests rejected, or refresh requests deferred during DPF provisioning, by request type.</td></tr>
 <tr><td>carbide_site_explorer_dpu_migration_signals_count</td><td>gauge</td><td>Number of DPU NIC-mode migration signals by signal type -- mode-mismatch found, set_nic_mode issued, reset requested, and zero-DPU registered for a host whose DPU policy is nic.</td></tr>
 <tr><td>carbide_site_explorer_enabled</td><td>gauge</td><td>Whether site-explorer is enabled (1) or paused (0)</td></tr>
+<tr><td>carbide_site_explorer_host_admin_address_reconcile_failures_total</td><td>counter</td><td>Number of host admin address reconciliations that failed after Site Explorer committed or revisited a managed host</td></tr>
 <tr><td>carbide_site_explorer_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one site explorer iteration</td></tr>
 <tr><td>carbide_site_explorer_last_run_status</td><td>gauge</td><td>The status of the latest Site Explorer run</td></tr>
 <tr><td>carbide_site_explorer_machine_slot_tray_enrichment_failures_total</td><td>counter</td><td>Number of Site Explorer machine slot and tray enrichment failures, by failure stage.</td></tr>
+<tr><td>carbide_site_explorer_managed_host_creation_latency_milliseconds</td><td>histogram</td><td>Time one Site Explorer managed host creation attempt took, from admission to the end of the after-commit repair, by outcome; the _count series, split by outcome, is the per-host creation and failure rate.</td></tr>
+<tr><td>carbide_site_explorer_managed_host_creation_stage_latency_milliseconds</td><td>histogram</td><td>Time one stage of a Site Explorer managed host creation attempt took, by stage: the admission permit wait, the creation transaction, and the after-commit admin address repair.</td></tr>
 <tr><td>carbide_site_explorer_phase_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one site explorer iteration phase</td></tr>
+<tr><td>carbide_site_explorer_rack_host_fill_count</td><td>gauge</td><td>Racks with expected hosts before the last create_machines phase, by kind: expected, all_hosts_ingested (every expected host has a machine), and completable_this_run (every expected host still without a machine was identified for creation in that run)</td></tr>
 <tr><td>carbide_site_explorer_update_explored_endpoints_count</td><td>gauge</td><td>Counts from the last update_explored_endpoints phase by kind</td></tr>
 <tr><td>carbide_site_prefix_admission_total</td><td>counter</td><td>Number of completed tenant SitePrefix admission attempts, by result.</td></tr>
 <tr><td>carbide_site_prefix_retirements_total</td><td>counter</td><td>Number of tenant SitePrefix retirements, by previous lifecycle state.</td></tr>
+<tr><td>carbide_spdm_attestation_count</td><td>gauge</td><td>Number of carbide_spdm_attestation in the system</td></tr>
+<tr><td>carbide_spdm_attestation_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_spdm_attestation in the system</td></tr>
+<tr><td>carbide_spdm_attestation_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_spdm_attestation</td></tr>
+<tr><td>carbide_spdm_attestation_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_spdm_attestation</td></tr>
+<tr><td>carbide_spdm_attestation_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_spdm_attestation</td></tr>
+<tr><td>carbide_spdm_attestation_total</td><td>gauge</td><td>Number of carbide_spdm_attestation in the system</td></tr>
 <tr><td>carbide_spdm_evidence_collection_unexpected_task_states_total</td><td>counter</td><td>Number of unexpected SPDM evidence collection task states, by task state and next action.</td></tr>
+<tr><td>carbide_ssh_console_bmc_recovery_attempts_total</td><td>counter</td><td>Number of BMC connection recovery iterations started during this service lifetime, excluding each client&#39;s initial connection</td></tr>
 <tr><td>carbide_ssh_console_stream_lines_dropped_total</td><td>counter</td><td>Number of console lines omitted from client-specific streams, by reason</td></tr>
 <tr><td>carbide_state_handler_wakeup_failures_total</td><td>counter</td><td>Number of times a machine&#39;s state handler could not be woken after an observed or desired state change</td></tr>
 <tr><td>carbide_static_address_assignments_total</td><td>counter</td><td>Number of static address assignment attempts, by outcome.</td></tr>
@@ -333,6 +501,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_static_address_removals_total</td><td>counter</td><td>Number of static address removal attempts, by outcome.</td></tr>
 <tr><td>carbide_static_credential_watcher_failures_total</td><td>counter</td><td>Number of static credential watcher failures, by operation.</td></tr>
 <tr><td>carbide_switch_slot_tray_enrichment_failures_total</td><td>counter</td><td>Number of switch slot and tray enrichment failures, by failure stage.</td></tr>
+<tr><td>carbide_switches_count</td><td>gauge</td><td>Number of carbide_switches in the system</td></tr>
 <tr><td>carbide_switches_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_switches in the system</td></tr>
 <tr><td>carbide_switches_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_switches in a certain state</td></tr>
 <tr><td>carbide_switches_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
@@ -349,9 +518,12 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_switches_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_switches have exited a certain state</td></tr>
 <tr><td>carbide_switches_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_switches have spent in a certain state</td></tr>
 <tr><td>carbide_switches_total</td><td>gauge</td><td>Number of carbide_switches in the system</td></tr>
-<tr><td>carbide_switches_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_switches in a given state</td></tr>
+<tr><td>carbide_switches_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_switches whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
+<tr><td>carbide_tokio_runtime_workers</td><td>gauge</td><td>Number of worker threads in the Tokio runtime</td></tr>
+<tr><td>carbide_tokio_worker_busy_seconds_total</td><td>counter</td><td>Number of seconds each Tokio runtime worker thread has spent running tasks</td></tr>
 <tr><td>carbide_total_ips_count</td><td>gauge</td><td>Number of IPs per network segment</td></tr>
 <tr><td>carbide_unavailable_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update but are unavailable for update</td></tr>
+<tr><td>carbide_vpc_prefixes_count</td><td>gauge</td><td>Number of carbide_vpc_prefixes in the system</td></tr>
 <tr><td>carbide_vpc_prefixes_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_vpc_prefixes in the system</td></tr>
 <tr><td>carbide_vpc_prefixes_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_vpc_prefixes in a certain state</td></tr>
 <tr><td>carbide_vpc_prefixes_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_vpc_prefixes</td></tr>
@@ -366,7 +538,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_vpc_prefixes_state_exited_total</td><td>counter</td><td>Number of times objects of type carbide_vpc_prefixes have exited a certain state</td></tr>
 <tr><td>carbide_vpc_prefixes_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_vpc_prefixes have spent in a certain state</td></tr>
 <tr><td>carbide_vpc_prefixes_total</td><td>gauge</td><td>Number of carbide_vpc_prefixes in the system</td></tr>
-<tr><td>carbide_vpc_prefixes_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_vpc_prefixes in a given state</td></tr>
+<tr><td>carbide_vpc_prefixes_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_vpc_prefixes whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_work_lock_failures_total</td><td>counter</td><td>Number of work-lock lifecycle failures, by operation and failure kind.</td></tr>
 <tr><td>site_explorer_create_power_shelves_latency_seconds</td><td>histogram</td><td>Duration of power shelf creation</td></tr>
 <tr><td>site_explorer_create_switches_latency_seconds</td><td>histogram</td><td>Duration of switch creation</td></tr>

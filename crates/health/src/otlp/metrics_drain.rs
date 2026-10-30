@@ -23,7 +23,7 @@ use super::collector_metrics::ExportMetricsServiceRequest;
 use super::collector_metrics::metrics_service_client::MetricsServiceClient;
 use super::convert::build_queued_metrics_export_request;
 use super::metrics::metric;
-use super::{OtlpExport, OtlpSignal, run_drain};
+use super::{OtlpExport, OtlpExportResponse, OtlpSignal, run_drain};
 use crate::config::OtlpTargetConfig;
 use crate::sink::otlp::{OtlpMetricsQueue, QueuedMetric};
 
@@ -97,8 +97,15 @@ impl OtlpExport for MetricsExport {
         prost::Message::encoded_len(request)
     }
 
-    async fn send(&mut self, request: Self::Request) -> Result<(), tonic::Status> {
-        self.client.export(request).await.map(drop)
+    async fn send(&mut self, request: Self::Request) -> Result<OtlpExportResponse, tonic::Status> {
+        let response = self.client.export(request).await?.into_inner();
+
+        Ok(response
+            .partial_success
+            .map_or_else(OtlpExportResponse::default, |partial| OtlpExportResponse {
+                rejected_records: partial.rejected_data_points,
+                error_message: partial.error_message,
+            }))
     }
 }
 
@@ -106,7 +113,7 @@ impl OtlpExport for MetricsExport {
 mod tests {
     use super::*;
     use crate::otlp::metrics::{
-        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
+        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, metric,
     };
 
     #[test]
@@ -114,22 +121,33 @@ mod tests {
         let request = ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics {
                 scope_metrics: vec![ScopeMetrics {
-                    metrics: vec![Metric {
-                        data: Some(metric::Data::Gauge(Gauge {
-                            data_points: vec![
-                                NumberDataPoint::default(),
-                                NumberDataPoint::default(),
-                                NumberDataPoint::default(),
-                            ],
-                        })),
-                        ..Default::default()
-                    }],
+                    metrics: vec![
+                        Metric {
+                            data: Some(metric::Data::Gauge(Gauge {
+                                data_points: vec![
+                                    NumberDataPoint::default(),
+                                    NumberDataPoint::default(),
+                                ],
+                            })),
+                            ..Default::default()
+                        },
+                        Metric {
+                            data: Some(metric::Data::Sum(Sum {
+                                data_points: vec![
+                                    NumberDataPoint::default(),
+                                    NumberDataPoint::default(),
+                                ],
+                                ..Default::default()
+                            })),
+                            ..Default::default()
+                        },
+                    ],
                     ..Default::default()
                 }],
                 ..Default::default()
             }],
         };
 
-        assert_eq!(MetricsExport::record_count(&request), 3);
+        assert_eq!(MetricsExport::record_count(&request), 4);
     }
 }
