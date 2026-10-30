@@ -3405,7 +3405,8 @@ mod tests {
     /// Each response closes its connection so the client opens a fresh one per
     /// request, making the count an exact measure of how many times the caller
     /// hit the wire. Follows the local-server pattern used by the NVUE REST
-    /// collector tests.
+    /// collector tests. A connection that closes before sending any request
+    /// bytes is ignored without advancing the scripted response.
     fn spawn_scripted_http_server(
         responses: Vec<(u16, &'static str)>,
     ) -> (Url, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
@@ -3419,14 +3420,63 @@ mod tests {
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = requests.clone();
         let handle = std::thread::spawn(move || {
-            for (status, body) in responses {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
+            const HEADER_LIMIT: usize = 16 * 1024;
+            const HEADER_TIMEOUT: Duration = Duration::from_secs(1);
+
+            for (response_index, (status, body)) in responses.into_iter().enumerate() {
+                let mut stream = 'accept: loop {
+                    let (mut stream, _) = listener
+                        .accept()
+                        .expect("scripted HTTP server accepts request connection");
+                    let deadline = Instant::now() + HEADER_TIMEOUT;
+                    let mut headers = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+
+                    loop {
+                        let remaining_time = deadline.saturating_duration_since(Instant::now());
+                        assert!(
+                            !remaining_time.is_zero(),
+                            "scripted request {response_index} headers timed out"
+                        );
+                        stream
+                            .set_read_timeout(Some(remaining_time))
+                            .expect("set scripted request header timeout");
+
+                        assert!(
+                            headers.len() < HEADER_LIMIT,
+                            "scripted request {response_index} headers exceed {HEADER_LIMIT} bytes"
+                        );
+                        let remaining_space = HEADER_LIMIT - headers.len();
+                        let read_len = remaining_space.min(buffer.len());
+                        match stream.read(&mut buffer[..read_len]) {
+                            Ok(0) if headers.is_empty() => continue 'accept,
+                            Ok(0) => panic!(
+                                "scripted request {response_index} connection closed before headers completed"
+                            ),
+                            Ok(read) => {
+                                headers.extend_from_slice(&buffer[..read]);
+                                if headers.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    break 'accept stream;
+                                }
+                            }
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                                ) =>
+                            {
+                                panic!(
+                                    "scripted request {response_index} headers timed out after {HEADER_TIMEOUT:?}"
+                                )
+                            }
+                            Err(error) => {
+                                panic!(
+                                    "scripted request {response_index} header read failed: {error}"
+                                )
+                            }
+                        }
+                    }
                 };
-                let mut buffer = [0_u8; 4096];
-                if stream.read(&mut buffer).is_err() {
-                    return;
-                }
                 counter.fetch_add(1, AtomicOrdering::SeqCst);
 
                 let reason = match status {
@@ -3441,7 +3491,11 @@ mod tests {
                     "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len(),
                 );
-                let _ = stream.write_all(response.as_bytes());
+                stream
+                    .write_all(response.as_bytes())
+                    .unwrap_or_else(|error| {
+                        panic!("scripted response {response_index} write failed: {error}")
+                    });
             }
         });
 
