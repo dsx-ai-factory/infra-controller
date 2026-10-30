@@ -385,6 +385,30 @@ pub trait K8sConfigRepository: Send + Sync {
     ) -> Result<(), DpfError>;
 }
 
+/// Immutable per-device BMC credential Secrets.
+#[async_trait]
+pub trait BmcCredentialRepository: Send + Sync {
+    async fn get_bmc_credential_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<k8s_openapi::api::core::v1::Secret>, DpfError>;
+
+    /// Create only; an existing Secret must never be overwritten.
+    async fn create_bmc_credential_secret(
+        &self,
+        secret: &k8s_openapi::api::core::v1::Secret,
+    ) -> Result<(), DpfError>;
+
+    /// Delete exactly the observed Secret, respecting its finalizers.
+    async fn delete_bmc_credential_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError>;
+}
+
 /// Repository for DPFOperatorConfig resources.
 #[async_trait]
 pub trait DpfOperatorConfigRepository: Send + Sync {
