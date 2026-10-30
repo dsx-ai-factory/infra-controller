@@ -34,7 +34,6 @@ use carbide_dpf::{
 use crate::cfg::file::{
     DpfBootstrapCaObjectKind, DpfDpuAgentBootstrapCa, DpfExtraService,
     DpfResolvedMandatoryServicesConfig, DpfServiceConfig, EwEthersConfig, NodeAuthConfig,
-    PartialMultiplane,
 };
 
 /// Default DOCA helm registry (DPUServiceTemplate source.repoURL).
@@ -894,20 +893,16 @@ pub(crate) fn mandatory_services(
     let mut dhcp = dhcp_server_service(&resolved.base.dhcp_server, interfaces);
     service_vpc_slots.append_dhcp_interfaces(&mut dhcp);
 
-    // If Xplane service is enabled, then set the xplaneMaintenance from the
-    // site config's partial-multiplane setting. Apply this
-    // after extra_helm_values so the mounts stay consistent with that setting.
-    // Mounted directories contain the Xplane core socket and provisioned
-    // netdev-to-logical-name mapping.
+    // If xplane service is configured then set the xplaneMaintenance so that the dpu
+    // agent can mount socket and other paths associated with xplane.
+    // Apply this after extra_helm_values so an override cannot remove those mounts.
     let mut agent = dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca);
     if resolved.extra.contains_key(&DpfExtraService::DocaXplane) {
-        let enabled = ewethers_config
-            .is_none_or(|config| config.partial_multiplane == PartialMultiplane::Enabled);
         agent
             .helm_values
             .as_mut()
             .expect("DPU agent has generated Helm values")["xplaneMaintenance"] =
-            serde_json::json!({ "enabled": enabled });
+            serde_json::json!({ "enabled": true });
     }
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
@@ -1477,6 +1472,45 @@ mod tests {
         );
         assert_eq!(values["image"]["repository"], config.docker_repo_url);
         assert_eq!(values["image"]["tag"], "configured-tag");
+    }
+
+    #[test]
+    fn xplane_agent_mounts_remain_enabled_when_partial_multiplane_initialization_is_disabled() {
+        let mut resolved = DpfResolvedMandatoryServicesConfig {
+            base: serde_json::from_value(serde_json::json!({}))
+                .expect("mandatory services build from their serde defaults"),
+            extra: BTreeMap::from([(DpfExtraService::DocaXplane, default_doca_xplane_service())]),
+        };
+        // Runtime maintenance requires these mounts even if an overlay disables them.
+        resolved.base.dpu_agent.extra_helm_values =
+            serde_json::json!({ "xplaneMaintenance": { "enabled": false } })
+                .as_object()
+                .cloned();
+        let ewethers_config = EwEthersConfig {
+            enabled: true,
+            astra_enabled: true,
+            partial_multiplane: crate::cfg::file::PartialMultiplane::Disabled,
+            ..Default::default()
+        };
+        let service = mandatory_services(
+            &resolved,
+            &DpfDpuAgentBootstrapCa::default(),
+            &[],
+            ServiceVpcSlots::default(),
+            &NodeAuthConfig::default(),
+            Some(&ewethers_config),
+        )
+        .into_iter()
+        .find(|service| service.name == DPU_AGENT_SERVICE_NAME)
+        .expect("mandatory DPU agent service");
+        let template = build_service_template(&service, TEST_NS, "bf4astra");
+        let values = template
+            .spec
+            .helm_chart
+            .values
+            .expect("helmChart values must be set");
+
+        assert_eq!(values["xplaneMaintenance"]["enabled"], true);
     }
 
     // ---- weave services ----
