@@ -27,7 +27,7 @@ use super::cleanup::{
     stop_ineligible_nmxc_collectors, stop_removed_bmc_collectors, stop_stale_endpoint_connections,
     stop_stale_machine_collectors, stop_stale_power_shelf_collectors, stop_stale_switch_collectors,
 };
-use super::context::{CollectorKind, DiscoveryLoopContext};
+use super::context::DiscoveryLoopContext;
 use super::identity::ensure_primary_system_uuid;
 use super::reachability::reconcile_reachability_collectors;
 use super::spawn::{spawn_collectors_for_endpoint, switch_supports_nmxc_subscription};
@@ -221,7 +221,7 @@ pub async fn run_discovery_iteration(
     Ok(DiscoveryIterationStats {
         discovered_endpoints: endpoints.len(),
         sharded_endpoints: sharded_endpoints.len(),
-        active_monitors: ctx.collectors.len(CollectorKind::Sensor),
+        active_monitors: ctx.collectors.active_endpoint_count(),
     })
 }
 
@@ -235,6 +235,7 @@ mod tests {
     use carbide_uuid::rack::RackId;
     use mac_address::MacAddress;
 
+    use super::super::context::CollectorKind;
     use super::*;
     use crate::config::{Config, Configurable, NmxtCollectorConfig, ReachabilityCollectorConfig};
     use crate::endpoint::test_support::endpoint_with_creds;
@@ -505,6 +506,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_counts_mixed_endpoints_with_sensors_enabled_or_disabled() {
+        for (sensor_config, expected_sensors) in [
+            (Configurable::Enabled(Default::default()), 1),
+            (Configurable::Disabled, 0),
+        ] {
+            let source = Arc::new(StaticEndpointSource::new(vec![
+                endpoint(MacAddress::new([2, 0, 0, 0, 0, 1]), false, None)
+                    .as_ref()
+                    .clone(),
+                endpoint(MacAddress::new([2, 0, 0, 0, 0, 2]), true, None)
+                    .as_ref()
+                    .clone(),
+            ]));
+
+            let mut config = Config::default();
+            config.endpoint_sources.carbide_api = Configurable::Disabled;
+            config.collectors.sensors = sensor_config;
+            config.collectors.manager = Configurable::Disabled;
+            config.collectors.leak_detector = Configurable::Disabled;
+            config.collectors.metrics = Configurable::Enabled(Default::default());
+            config.collectors.nvue = Configurable::Enabled(Default::default());
+
+            let metrics_manager = Arc::new(MetricsManager::new("active_endpoint_count").unwrap());
+
+            let mut ctx =
+                DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics_manager, Arc::new(config))
+                    .unwrap();
+
+            let stats = run_discovery_iteration(
+                source,
+                &ShardManager {
+                    shard: 0,
+                    shards_count: 1,
+                },
+                &mut ctx,
+                None,
+                "test",
+            )
+            .await
+            .unwrap();
+
+            let sensors = ctx.collectors.len(CollectorKind::Sensor);
+            let nvue_rest = ctx.collectors.len(CollectorKind::NvueRest);
+
+            stop_removed_bmc_collectors(&mut ctx, &HashSet::new()).await;
+
+            assert_eq!(sensors, expected_sensors);
+            assert_eq!(nvue_rest, 1);
+            assert_eq!(stats.active_monitors, 2);
+        }
+    }
+
+    #[tokio::test]
     async fn reachability_does_not_change_duplicate_endpoint_spawning() {
         let mac = MacAddress::from_str("00:00:00:00:00:21").unwrap();
         let first = switch_endpoint(mac, false, false);
@@ -553,6 +607,7 @@ mod tests {
 
         assert_eq!(stats.discovered_endpoints, 2);
         assert_eq!(stats.sharded_endpoints, 2);
+        assert_eq!(stats.active_monitors, 1);
         assert!(ctx.collectors.contains(CollectorKind::Nmxt, &first.key()));
 
         let collector = ctx
