@@ -4604,6 +4604,8 @@ enum MachineType {
   POWER_SHELF = 3;
 }
 
+// BMC connection details and observed versions. Machine.bmc_info is deprecated
+// in favor of BmcEndpoint and BmcStatus.
 message BmcInfo {
   optional string ip = 1;
   optional string mac = 2;
@@ -4611,6 +4613,26 @@ message BmcInfo {
   optional string firmware_version = 4;
   optional uint32 port = 5;
   optional common.MachineInterfaceId machine_interface_id = 6;
+}
+
+// Connection details for a BMC. Unknown values are omitted.
+message BmcEndpoint {
+  // IPv4 or IPv6 address of the BMC.
+  optional string ip = 1;
+  // MAC address of the BMC network interface.
+  optional string mac = 2;
+  // TCP port for the BMC HTTPS endpoint; clients use 443 when omitted.
+  optional uint32 port = 3;
+  // Identifier of the BMC's machine interface, when it has been resolved.
+  optional common.MachineInterfaceId machine_interface_id = 4;
+}
+
+// Observed BMC versions. Unknown values are omitted.
+message BmcStatus {
+  // BMC version reported during discovery.
+  optional string version = 2;
+  // BMC firmware version, which can change after a firmware update.
+  optional string firmware_version = 3;
 }
 
 message SwitchNvosInfo {
@@ -4680,6 +4702,8 @@ message MachineStatus {
   // LLDP neighbors last reported by this machine (scout on a host, the DPU agent on a DPU),
   // one entry per link.
   repeated InterfaceLldp lldp_neighbors = 25;
+  // Observed BMC versions, populated even when individual versions are unknown.
+  BmcStatus bmc_status = 26;
 }
 
 message Machine {
@@ -4737,8 +4761,9 @@ message Machine {
   // Machine type (DPU or HOST). Set at ingestion time; not operator-mutable.
   MachineType machine_type = 11;
 
-  // BMC connection details. Discovered at ingestion time; not operator-mutable.
-  BmcInfo bmc_info = 12;
+  // Deprecated: use bmc for connection details and status.bmc_status for versions.
+  // Populated alongside those fields for clients using the legacy representation.
+  BmcInfo bmc_info = 12 [deprecated = true];
 
   reserved 14; // Was: google.protobuf.Timestamp last_reboot_time = 14;
   reserved 15; // Was NetworkHealth network_health = 15;
@@ -4790,6 +4815,8 @@ message Machine {
 
   MachineConfig config = 50;
   MachineStatus status = 51;
+  // BMC connection details, populated even when individual values are unknown.
+  BmcEndpoint bmc = 52;
 }
 
 message DpfMachineState {

@@ -51,6 +51,7 @@ mod admission_retry;
 mod async_write;
 mod attestation;
 mod backend;
+mod bmc;
 mod bmc_machine;
 mod bmc_role;
 mod boot_interface;

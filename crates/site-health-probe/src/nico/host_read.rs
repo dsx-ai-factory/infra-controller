@@ -78,7 +78,16 @@ pub(crate) fn full_host_detail(machine: forge::Machine) -> Result<HostDetail, Ca
         .discovery_info
         .and_then(|info| info.dmi_data)
         .unwrap_or_default();
-    let bmc = machine.bmc_info.unwrap_or_default();
+    let bmc_ip = match machine.bmc {
+        Some(bmc) => bmc.ip,
+        #[allow(deprecated)] // The probe can connect to older Core versions.
+        None => machine.bmc_info.as_ref().and_then(|bmc| bmc.ip.clone()),
+    };
+    let bmc_version = match status.bmc_status {
+        Some(bmc) => bmc.firmware_version,
+        #[allow(deprecated)] // The probe can connect to older Core versions.
+        None => machine.bmc_info.and_then(|bmc| bmc.firmware_version),
+    };
     Ok(HostDetail {
         id,
         state: machine.state,
@@ -89,7 +98,7 @@ pub(crate) fn full_host_detail(machine: forge::Machine) -> Result<HostDetail, Ca
         vendor: non_empty(dmi.sys_vendor),
         model: non_empty(dmi.product_name),
         instance_type: config.instance_type_id.filter(|id| !id.is_empty()),
-        bmc_ip: bmc.ip.filter(|ip| !ip.is_empty()),
+        bmc_ip: bmc_ip.filter(|ip| !ip.is_empty()),
         rack_id: machine.rack_id.map(|rack| rack.to_string()),
         nvlink_domain: status
             .nvlink_info
@@ -102,7 +111,7 @@ pub(crate) fn full_host_detail(machine: forge::Machine) -> Result<HostDetail, Ca
             .collect(),
         update_complete: status.update_complete,
         firmware_autoupdate: config.firmware_autoupdate,
-        bmc_version: bmc.firmware_version.filter(|v| !v.is_empty()),
+        bmc_version: bmc_version.filter(|v| !v.is_empty()),
         uefi_version: non_empty(dmi.bios_version),
         version_source: VersionSource::MachineRecord,
         report_at: None,
@@ -118,6 +127,7 @@ fn non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::{Check, check_values};
     use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
@@ -140,9 +150,8 @@ mod tests {
                 outcome_msg: Some("all good".to_string()),
                 ..Default::default()
             }),
-            bmc_info: Some(forge::BmcInfo {
+            bmc: Some(forge::BmcEndpoint {
                 ip: Some("10.0.0.5".to_string()),
-                firmware_version: Some("25.06-2".to_string()),
                 ..Default::default()
             }),
             config: Some(forge::MachineConfig {
@@ -151,6 +160,10 @@ mod tests {
                 ..Default::default()
             }),
             status: Some(forge::MachineStatus {
+                bmc_status: Some(forge::BmcStatus {
+                    firmware_version: Some("25.06-2".to_string()),
+                    ..Default::default()
+                }),
                 discovery_info: Some(rpc::machine_discovery::DiscoveryInfo {
                     dmi_data: Some(rpc::machine_discovery::DmiData {
                         sys_vendor: "NVIDIA".to_string(),
@@ -196,5 +209,95 @@ mod tests {
         })
         .expect_err("a row without an ID");
         assert!(matches!(err, CallError::Decode(_)));
+    }
+
+    #[test]
+    #[allow(deprecated)] // Exercise responses from Core before the BMC split.
+    fn full_host_read_bmc_message_precedence() {
+        let endpoint = forge::BmcEndpoint {
+            ip: Some("192.0.2.10".to_string()),
+            ..Default::default()
+        };
+        let status = forge::BmcStatus {
+            firmware_version: Some("new-version".to_string()),
+            ..Default::default()
+        };
+        let legacy = forge::BmcInfo {
+            ip: Some("192.0.2.20".to_string()),
+            firmware_version: Some("old-version".to_string()),
+            ..Default::default()
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "split messages override legacy values",
+                    input: (
+                        Some(endpoint.clone()),
+                        Some(status.clone()),
+                        Some(legacy.clone()),
+                    ),
+                    expect: (
+                        Some("192.0.2.10".to_string()),
+                        Some("new-version".to_string()),
+                    ),
+                },
+                Check {
+                    scenario: "missing split status falls back independently",
+                    input: (Some(endpoint), None, Some(legacy.clone())),
+                    expect: (
+                        Some("192.0.2.10".to_string()),
+                        Some("old-version".to_string()),
+                    ),
+                },
+                Check {
+                    scenario: "missing split endpoint falls back independently",
+                    input: (None, Some(status), Some(legacy.clone())),
+                    expect: (
+                        Some("192.0.2.20".to_string()),
+                        Some("new-version".to_string()),
+                    ),
+                },
+                Check {
+                    scenario: "present empty split messages are authoritative",
+                    input: (
+                        Some(forge::BmcEndpoint::default()),
+                        Some(forge::BmcStatus::default()),
+                        Some(legacy.clone()),
+                    ),
+                    expect: (None, None),
+                },
+                Check {
+                    scenario: "legacy-only Core response",
+                    input: (None, None, Some(legacy)),
+                    expect: (
+                        Some("192.0.2.20".to_string()),
+                        Some("old-version".to_string()),
+                    ),
+                },
+                Check {
+                    scenario: "all BMC information is absent",
+                    input: (None, None, None),
+                    expect: (None, None),
+                },
+            ],
+            |(bmc, bmc_status, bmc_info)| {
+                let detail = full_host_detail(forge::Machine {
+                    id: Some(MachineId::new(
+                        MachineIdSource::ProductBoardChassisSerial,
+                        [1; 32],
+                        MachineType::Host,
+                    )),
+                    bmc,
+                    bmc_info,
+                    status: Some(forge::MachineStatus {
+                        bmc_status,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .expect("maps");
+                (detail.bmc_ip, detail.bmc_version)
+            },
+        );
     }
 }

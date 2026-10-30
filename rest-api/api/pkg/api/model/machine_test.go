@@ -461,8 +461,8 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 
 	if apimi.Metadata != nil {
 		if apimi.Metadata.BMCInfo != nil {
-			assert.Equal(t, *apimi.Metadata.BMCInfo.IP, *machineInfo1.Machine.BmcInfo.Ip)
-			assert.Equal(t, *apimi.Metadata.BMCInfo.Mac, *machineInfo1.Machine.BmcInfo.Mac)
+			assert.Equal(t, *apimi.Metadata.BMCInfo.IP, *machineInfo1.Machine.BmcInfo.Ip)   //nolint:staticcheck // Verify the legacy Core response fixture.
+			assert.Equal(t, *apimi.Metadata.BMCInfo.Mac, *machineInfo1.Machine.BmcInfo.Mac) //nolint:staticcheck // Verify the legacy Core response fixture.
 		}
 
 		if apimi.Metadata.DMIData != nil {
@@ -583,33 +583,34 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 }
 
 func TestAPIMachineMetadata_FromProto(t *testing.T) {
-	metadata := APIMachineMetadata{
-		DMIData:              &APIDMIData{},
-		BMCInfo:              &APIBMCInfo{},
-		GPUs:                 []APIMachineGPUInfo{{}},
-		NetworkInterfaces:    []APIMachineNetworkInterface{{}},
-		InfiniBandInterfaces: []APIMachineInfiniBandInterface{{}},
-		LifecycleState:       &APIMachineLifecycleState{},
-		LldpNeighbors:        []APIMachineLldpNeighbor{{}},
-	}
+	t.Run("missing machine clears metadata", func(t *testing.T) {
+		metadata := APIMachineMetadata{
+			DMIData:              &APIDMIData{},
+			BMCInfo:              &APIBMCInfo{},
+			GPUs:                 []APIMachineGPUInfo{{}},
+			NetworkInterfaces:    []APIMachineNetworkInterface{{}},
+			InfiniBandInterfaces: []APIMachineInfiniBandInterface{{}},
+			LifecycleState:       &APIMachineLifecycleState{},
+			LldpNeighbors:        []APIMachineLldpNeighbor{{}},
+		}
 
-	metadata.FromProto(nil)
+		metadata.FromProto(nil)
 
-	assert.Nil(t, metadata.DMIData)
-	assert.Nil(t, metadata.BMCInfo)
-	assert.NotNil(t, metadata.GPUs)
-	assert.Empty(t, metadata.GPUs)
-	assert.NotNil(t, metadata.NetworkInterfaces)
-	assert.Empty(t, metadata.NetworkInterfaces)
-	assert.NotNil(t, metadata.InfiniBandInterfaces)
-	assert.Empty(t, metadata.InfiniBandInterfaces)
-	assert.Nil(t, metadata.LifecycleState)
-	assert.NotNil(t, metadata.LldpNeighbors)
-	assert.Empty(t, metadata.LldpNeighbors)
+		assert.Nil(t, metadata.DMIData)
+		assert.Nil(t, metadata.BMCInfo)
+		assert.NotNil(t, metadata.GPUs)
+		assert.Empty(t, metadata.GPUs)
+		assert.NotNil(t, metadata.NetworkInterfaces)
+		assert.Empty(t, metadata.NetworkInterfaces)
+		assert.NotNil(t, metadata.InfiniBandInterfaces)
+		assert.Empty(t, metadata.InfiniBandInterfaces)
+		assert.Nil(t, metadata.LifecycleState)
+		assert.NotNil(t, metadata.LldpNeighbors)
+		assert.Empty(t, metadata.LldpNeighbors)
 
-	payload, err := json.Marshal(metadata)
-	require.NoError(t, err)
-	assert.JSONEq(t, `{
+		payload, err := json.Marshal(metadata)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{
 		"dmiData": null,
 		"bmcInfo": null,
 		"gpus": [],
@@ -618,6 +619,48 @@ func TestAPIMachineMetadata_FromProto(t *testing.T) {
 		"lifecycleState": null,
 		"lldpNeighbors": []
 	}`, string(payload))
+	})
+	t.Run("BMC split fields", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			legacy *corev1.BmcInfo
+		}{
+			{
+				name: "split fields without legacy data",
+			},
+			{
+				name: "split fields override legacy data",
+				legacy: &corev1.BmcInfo{
+					Ip:              cutil.GetPtr("192.0.2.20"),
+					Mac:             cutil.GetPtr("02:00:00:00:00:20"),
+					Version:         cutil.GetPtr("legacy-version"),
+					FirmwareVersion: cutil.GetPtr("legacy-firmware"),
+				},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				machine := &corev1.Machine{
+					Bmc: &corev1.BmcEndpoint{
+						Ip:  cutil.GetPtr("192.0.2.10"),
+						Mac: cutil.GetPtr("02:00:00:00:00:10"),
+					},
+					Status: &corev1.MachineStatus{
+						BmcStatus: &corev1.BmcStatus{
+							Version:         cutil.GetPtr("new-version"),
+							FirmwareVersion: cutil.GetPtr("new-firmware"),
+						},
+					},
+					BmcInfo: tc.legacy, //nolint:staticcheck // Verify split fields win over the older representation.
+				}
+				metadata := APIMachineMetadata{}
+				metadata.FromProto(machine)
+				payload, err := json.Marshal(metadata.BMCInfo)
+				require.NoError(t, err)
+				assert.JSONEq(t, `{"ip":"192.0.2.10","mac":"02:00:00:00:00:10","version":"new-version","firmwareRevision":"new-firmware"}`, string(payload))
+			})
+		}
+	})
 }
 
 // TestMachine_NewAPIMachineLldpNeighborsJSON proves the wire contract of

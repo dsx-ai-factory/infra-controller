@@ -191,7 +191,7 @@ mod tests {
             Some(Ok(())),
         );
 
-        let bmc = machine.bmc_info.unwrap_or_default();
+        let bmc = machine.bmc.unwrap_or_default();
         let expected = rpc::forge::HostState {
             id: machine.id,
             state: machine.state,

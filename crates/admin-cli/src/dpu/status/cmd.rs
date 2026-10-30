@@ -144,7 +144,9 @@ fn get_dpu_version_status(build_info: &BuildInfo, machine: &Machine) -> String {
 
     /* TODO add bmc version check when available
     let expected_bmc_versions: HashMap<String, String> = HashMap::default();
-    let bmc_version = machine.bmc_info.as_ref().map(|bi| bi.firmware_version.clone().unwrap_or_default());
+    let bmc_version = machine.status.as_ref()
+        .and_then(|status| status.bmc_status.as_ref())
+        .and_then(|bmc_status| bmc_status.firmware_version.clone());
 
     if let Some(bmc_version) = bmc_version {
         if let Some(expected_bmc_version) = expected_bmc_versions.get(&product_name) {

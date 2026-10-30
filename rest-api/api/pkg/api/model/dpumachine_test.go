@@ -272,6 +272,115 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 			test.check(t, dpuMachine.DpuNetworkConfig)
 		})
 	}
+
+	t.Run("BMC field compatibility", func(t *testing.T) {
+		endpoint := &corev1.BmcEndpoint{
+			Ip:  cutil.GetPtr("192.0.2.10"),
+			Mac: cutil.GetPtr("02:00:00:00:00:10"),
+		}
+		status := &corev1.MachineStatus{
+			BmcStatus: &corev1.BmcStatus{
+				Version:         cutil.GetPtr("new-version"),
+				FirmwareVersion: cutil.GetPtr("new-firmware"),
+			},
+		}
+		legacy := &corev1.BmcInfo{
+			Ip:              cutil.GetPtr("192.0.2.20"),
+			Mac:             cutil.GetPtr("02:00:00:00:00:20"),
+			Version:         cutil.GetPtr("legacy-version"),
+			FirmwareVersion: cutil.GetPtr("legacy-firmware"),
+		}
+		wantNew := &APIBMCInfo{
+			IP:               cutil.GetPtr("192.0.2.10"),
+			Mac:              cutil.GetPtr("02:00:00:00:00:10"),
+			Version:          cutil.GetPtr("new-version"),
+			FirmwareRevision: cutil.GetPtr("new-firmware"),
+		}
+		wantLegacy := &APIBMCInfo{
+			IP:               cutil.GetPtr("192.0.2.20"),
+			Mac:              cutil.GetPtr("02:00:00:00:00:20"),
+			Version:          cutil.GetPtr("legacy-version"),
+			FirmwareRevision: cutil.GetPtr("legacy-firmware"),
+		}
+		cases := []struct {
+			name     string
+			endpoint *corev1.BmcEndpoint
+			status   *corev1.MachineStatus
+			legacy   *corev1.BmcInfo
+			want     *APIBMCInfo
+		}{
+			{
+				name:     "split fields without legacy data",
+				endpoint: endpoint,
+				status:   status,
+				want:     wantNew,
+			},
+			{
+				name:     "split fields take precedence over legacy data",
+				endpoint: endpoint,
+				status:   status,
+				legacy:   legacy,
+				want:     wantNew,
+			},
+			{
+				name:   "older Core without structured status",
+				legacy: legacy,
+				want:   wantLegacy,
+			},
+			{
+				name:     "split endpoint with legacy status",
+				endpoint: endpoint,
+				legacy:   legacy,
+				want: &APIBMCInfo{
+					IP:               cutil.GetPtr("192.0.2.10"),
+					Mac:              cutil.GetPtr("02:00:00:00:00:10"),
+					Version:          cutil.GetPtr("legacy-version"),
+					FirmwareRevision: cutil.GetPtr("legacy-firmware"),
+				},
+			},
+			{
+				name:   "split status with legacy endpoint",
+				status: status,
+				legacy: legacy,
+				want: &APIBMCInfo{
+					IP:               cutil.GetPtr("192.0.2.20"),
+					Mac:              cutil.GetPtr("02:00:00:00:00:20"),
+					Version:          cutil.GetPtr("new-version"),
+					FirmwareRevision: cutil.GetPtr("new-firmware"),
+				},
+			},
+			{
+				name:     "empty split messages do not revive legacy values",
+				endpoint: &corev1.BmcEndpoint{},
+				status: &corev1.MachineStatus{
+					BmcStatus: &corev1.BmcStatus{},
+				},
+				legacy: legacy,
+				want:   &APIBMCInfo{},
+			},
+			{
+				name: "missing BMC data clears a reused receiver",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				input := &corev1.DpuMachine{
+					Machine: &corev1.Machine{
+						Bmc:     tc.endpoint,
+						Status:  tc.status,
+						BmcInfo: tc.legacy, //nolint:staticcheck // Exercise compatibility with Core responses before the BMC split.
+					},
+				}
+				dpu := APIDpuMachine{
+					BMCInfo: &APIBMCInfo{
+						IP: cutil.GetPtr("192.0.2.99"),
+					},
+				}
+				dpu.FromProto(input, protoContext)
+				assert.Equal(t, tc.want, dpu.BMCInfo)
+			})
+		}
+	})
 }
 
 func TestAPIDpuMachineFromProtoClearsMissingHealth(t *testing.T) {

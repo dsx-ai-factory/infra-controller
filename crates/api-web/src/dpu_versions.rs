@@ -87,8 +87,8 @@ impl From<forgerpc::Machine> for Row {
                 .and_then(|di| di.dpu_info.as_ref())
                 .map(|dpu| dpu.firmware_version.clone())
                 .unwrap_or_default(),
-            bmc_version: machine
-                .bmc_info
+            bmc_version: status
+                .bmc_status
                 .as_ref()
                 .and_then(|bmc| bmc.firmware_version.clone())
                 .unwrap_or_default(),

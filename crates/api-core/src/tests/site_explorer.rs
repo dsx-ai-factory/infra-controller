@@ -681,7 +681,7 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
         common::api_fixtures::create_managed_host(&env).await.into();
 
     let dpu_machine = env.find_machine(&dpu_machine_id).await.remove(0);
-    let bmc_ip: IpAddr = dpu_machine.bmc_info.as_ref().unwrap().ip().parse().unwrap();
+    let bmc_ip: IpAddr = dpu_machine.bmc.as_ref().unwrap().ip().parse().unwrap();
 
     // Get the existing explored endpoint (created by create_managed_host) and update it with position info
     let mut txn = env.pool.begin().await?;
