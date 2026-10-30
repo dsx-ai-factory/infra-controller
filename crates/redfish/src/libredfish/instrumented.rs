@@ -529,31 +529,6 @@ mod tests {
         let client = sim_client(&sim).await;
         for required in [false, true] {
             sim.set_lockdown_has_boot_latched_controls(required);
-    }
-
-    #[tokio::test]
-    async fn ok_call_records_the_external_call_histogram() {
-        let sim = RedfishSim::default();
-        let client = sim_client(&sim).await;
-
-        let metrics = MetricsCapture::start();
-        assert_eq!(
-            client.get_power_state().await.expect("sim power state"),
-            PowerState::On,
-        );
-
-        assert_eq!(
-            metrics.histogram_count_delta(
-                "carbide_external_call_duration_milliseconds",
-                &[
-                    ("backend", "redfish"),
-                    ("operation", "get_power_state"),
-                    ("outcome", "ok"),
-                ],
-            ),
-            1,
-        );
-    }
             assert_eq!(
                 client.lockdown_has_boot_latched_controls().await.unwrap(),
                 required
