@@ -25,8 +25,12 @@
 //!
 //! Reports carry no units -- `MetricReport` only pairs a `MetricId`
 //! with a stringly-typed `MetricValue`. The unit lives on the matching
-//! `MetricDefinition`, so definitions are read once and cached by id
-//! for the lifetime of the collector.
+//! `MetricDefinition`, so definitions are read once and cached for the
+//! lifetime of the collector, indexed by the definition's `Id` and by each
+//! URI in its `MetricProperties`, with `{Name}` wildcards expanded from
+//! the definition's `Wildcards`. A value that carries a `MetricId` takes
+//! its unit from that definition only; a value without one is matched
+//! through its `MetricProperty`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -96,6 +100,102 @@ fn push_separator(out: &mut String) {
     }
 }
 
+/// Extract the property identifier leaf from a Redfish `MetricProperty` URI.
+///
+/// When a URI fragment exists (e.g. `#/0/PowerConsumedWatts` or
+/// `#/Sensors/GPU_0_Temp_0`), the target property is named in the fragment.
+/// When no fragment exists, the last path segment of the resource path is used.
+fn leaf_from_property(property: &str) -> &str {
+    match property.split_once('#') {
+        Some((path, fragment)) => {
+            let frag = fragment.trim_end_matches('/');
+            if frag.is_empty() {
+                path.trim_end_matches('/')
+            } else {
+                frag
+            }
+        }
+        None => property.trim_end_matches('/'),
+    }
+    .rsplit('/')
+    .next()
+    .filter(|s| !s.is_empty())
+    .unwrap_or("unknown")
+}
+
+/// Expand the `{Name}` wildcards in a `MetricDefinition` property URI.
+///
+/// Each wildcard is replaced by every one of its listed values, so a URI
+/// with several wildcards expands to their cross product. A `*` value
+/// stands for "all possible values" and cannot be enumerated, so it stays
+/// in the URI as a literal `*` that [`glob_matches`] treats as a pattern. A
+/// URI that still contains a placeholder afterwards matches no concrete
+/// `MetricProperty` and is dropped.
+fn expand_wildcards(template: &str, wildcards: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut expanded = vec![template.to_string()];
+    for (name, values) in wildcards {
+        let placeholder = format!("{{{name}}}");
+        if !template.contains(&placeholder) {
+            continue;
+        }
+        expanded = expanded
+            .iter()
+            .flat_map(|uri| values.iter().map(|value| uri.replace(&placeholder, value)))
+            .collect();
+    }
+    expanded.retain(|uri| !uri.contains('{'));
+    expanded
+}
+
+/// Whether `text` matches `pattern`, where each `*` stands for one or more
+/// characters that do not cross a `/`, i.e. at most one URI path segment
+/// (or the part of it a wildcard fills).
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let Some((head, rest)) = pattern.split_once('*') else {
+        return pattern == text;
+    };
+    let Some(after_head) = text.strip_prefix(head) else {
+        return false;
+    };
+    let longest = after_head.find('/').unwrap_or(after_head.len());
+    (1..=longest)
+        .filter(|&len| after_head.is_char_boundary(len))
+        .any(|len| glob_matches(rest, &after_head[len..]))
+}
+
+/// Units declared by the service's metric definitions.
+#[derive(Debug, Default)]
+struct UnitIndex {
+    /// Definition `Id` (what a value's `MetricId` names) -> sanitized unit.
+    by_id: HashMap<String, String>,
+    /// Concrete `MetricProperties` URI -> sanitized unit.
+    by_property: HashMap<String, String>,
+    /// `MetricProperties` URIs with a `*` ("all values") wildcard, tried in
+    /// definition order when no concrete URI matches.
+    property_patterns: Vec<(String, String)>,
+}
+
+impl UnitIndex {
+    /// The unit for a value. A `MetricId` names the definition that
+    /// describes the reading -- which may be a calculation over the
+    /// property in another unit -- so the property is consulted only
+    /// when the value carries no `MetricId`.
+    fn unit(&self, metric_id: Option<&str>, property: Option<&str>) -> Option<&str> {
+        match metric_id {
+            Some(metric_id) => self.by_id.get(metric_id),
+            None => property.and_then(|property| {
+                self.by_property.get(property).or_else(|| {
+                    self.property_patterns
+                        .iter()
+                        .find(|(pattern, _)| glob_matches(pattern, property))
+                        .map(|(_, unit)| unit)
+                })
+            }),
+        }
+        .map(String::as_str)
+    }
+}
+
 pub struct TelemetryCollectorConfig {
     pub data_sink: Option<Arc<dyn DataSink>>,
 }
@@ -105,9 +205,8 @@ pub struct TelemetryCollector<B: Bmc> {
     endpoint: Arc<BmcEndpoint>,
     event_context: EventContext,
     data_sink: Option<Arc<dyn DataSink>>,
-    /// `MetricId` -> sanitized unit, read once from the service's
-    /// metric definitions.
-    units: Option<HashMap<String, String>>,
+    /// Units read once from the service's metric definitions.
+    units: Option<UnitIndex>,
 }
 
 impl<B: Bmc + 'static> PeriodicCollector<B> for TelemetryCollector<B> {
@@ -203,8 +302,9 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         }
     }
 
-    /// Build the `MetricId` -> unit map from the service's metric
-    /// definitions.
+    /// Build the unit index from the service's metric definitions, keyed
+    /// by each definition's `Id` and by every URI in its
+    /// `MetricProperties` after wildcard expansion.
     ///
     /// A BMC that publishes no definitions is not an error; every
     /// reading then falls back to [`UNKNOWN_UNIT`]. Returning an empty
@@ -216,7 +316,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
     async fn load_units(
         &self,
         telemetry_service: &nv_redfish::telemetry_service::TelemetryService<B>,
-    ) -> Option<HashMap<String, String>> {
+    ) -> Option<UnitIndex> {
         let definitions = match telemetry_service.metric_definitions().await {
             Ok(Some(definitions)) => definitions,
             Ok(None) => Vec::new(),
@@ -232,16 +332,36 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             }
         };
 
-        Some(
-            definitions
-                .into_iter()
-                .filter_map(|definition| {
-                    let raw = definition.raw();
-                    let units = raw.units.clone().flatten()?;
-                    Some((raw.id.clone(), sanitize_unit(&units)))
+        let mut index = UnitIndex::default();
+        for definition in definitions {
+            let raw = definition.raw();
+            let Some(unit) = raw.units.clone().flatten() else {
+                continue;
+            };
+            let unit = sanitize_unit(&unit);
+            let wildcards: Vec<(String, Vec<String>)> = raw
+                .wildcards
+                .iter()
+                .flatten()
+                .filter_map(|wildcard| {
+                    Some((
+                        wildcard.name.clone().flatten()?,
+                        wildcard.values.clone().flatten().unwrap_or_default(),
+                    ))
                 })
-                .collect(),
-        )
+                .collect();
+            for template in raw.metric_properties.iter().flatten().flatten() {
+                for property in expand_wildcards(template, &wildcards) {
+                    if property.contains('*') {
+                        index.property_patterns.push((property, unit.clone()));
+                    } else {
+                        index.by_property.insert(property, unit.clone());
+                    }
+                }
+            }
+            index.by_id.insert(raw.id.clone(), unit);
+        }
+        Some(index)
     }
 
     /// Emit one sample per numeric reading in `report`, returning how
@@ -266,9 +386,29 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         let units = self.units.as_ref();
         let mut count = 0;
         for value in raw.metric_values.iter().flatten() {
-            let Some(metric_id) = value.metric_id.clone().flatten() else {
+            let metric_id = value.metric_id.clone().flatten();
+            let property = value.metric_property.clone().flatten();
+            let is_stale = value
+                .oem
+                .as_ref()
+                .and_then(|oem| {
+                    oem.additional_properties
+                        .pointer("/Nvidia/MetricValueStale")
+                        .and_then(serde_json::Value::as_bool)
+                })
+                .unwrap_or(false);
+            if is_stale {
+                tracing::debug!(
+                    report_id,
+                    metric_id = metric_id.as_deref().unwrap_or(""),
+                    property = property.as_deref().unwrap_or(""),
+                    bmc_address = ?self.endpoint.addr,
+                    rack_id = self.event_context.rack_id().map(tracing::field::display),
+                    "Skipping metric value marked stale by the NVIDIA OEM extension"
+                );
                 continue;
-            };
+            }
+
             let Some(reading) = value.metric_value.as_ref().and_then(Option::as_ref) else {
                 continue;
             };
@@ -284,7 +424,8 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             if !reading.is_finite() {
                 tracing::debug!(
                     report_id,
-                    metric_id,
+                    metric_id = metric_id.as_deref().unwrap_or(""),
+                    property = property.as_deref().unwrap_or(""),
                     reading,
                     bmc_address = ?self.endpoint.addr,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
@@ -294,8 +435,8 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             }
 
             let unit = units
-                .and_then(|units| units.get(&metric_id))
-                .map_or(UNKNOWN_UNIT, String::as_str);
+                .and_then(|units| units.unit(metric_id.as_deref(), property.as_deref()))
+                .unwrap_or(UNKNOWN_UNIT);
 
             let mut labels: Vec<MetricLabel> =
                 vec![(Cow::Borrowed("report_id"), report_id.clone())];
@@ -306,14 +447,29 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             // what the key is built from: sinks index gauges by key, and
             // keying on the id alone would drop every reading but the
             // last. This also matches the entity collectors, whose keys
-            // are `{resource odata id}/{metric}`.
-            let property = value.metric_property.clone().flatten();
-            let key = match &property {
-                Some(property) => format!("{property}/{metric_id}"),
-                None => format!("{}/{metric_id}", report.raw().odata_id),
+            // are `{resource odata id}/{metric}`. A value without a
+            // `MetricId` is keyed by its `MetricProperty` alone and its
+            // `metric_type` comes from the URI's leaf. For JSON-pointer
+            // style properties such as `.../Sensors/X#/Reading` that leaf
+            // is `Reading`; series stay distinct through the key and the
+            // `metric_property` label.
+            let (key, metric_type) = match (property.as_deref(), metric_id.as_deref()) {
+                (Some(property), Some(metric_id)) => (
+                    format!("{property}/{metric_id}"),
+                    metric_type_from_id(metric_id),
+                ),
+                (Some(property), None) => (
+                    property.to_string(),
+                    metric_type_from_id(leaf_from_property(property)),
+                ),
+                (None, Some(metric_id)) => (
+                    format!("{}/{metric_id}", report.raw().odata_id),
+                    metric_type_from_id(metric_id),
+                ),
+                (None, None) => continue,
             };
-            if let Some(property) = property {
-                labels.push((Cow::Borrowed("metric_property"), property));
+            if let Some(ref property) = property {
+                labels.push((Cow::Borrowed("metric_property"), property.clone()));
             }
 
             self.emit_event(CollectorEvent::Metric(
@@ -321,7 +477,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
                     semantics: crate::sink::MetricSemantics::Gauge,
                     key,
                     name: METRIC_NAME.to_string(),
-                    metric_type: metric_type_from_id(&metric_id),
+                    metric_type,
                     unit: unit.to_string(),
                     value: reading,
                     labels,
@@ -397,6 +553,147 @@ mod tests {
                 },
             ],
             metric_type_from_id,
+        );
+    }
+
+    #[test]
+    fn leaf_from_property_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "fragment with numeric index",
+                    input: "/redfish/v1/Chassis/Tray_1/Power#/0/PowerConsumedWatts",
+                    expect: "PowerConsumedWatts",
+                },
+                Check {
+                    scenario: "resource path without fragment",
+                    input: "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0",
+                    expect: "GPU_0_Temp_0",
+                },
+                Check {
+                    scenario: "fragment with trailing slash",
+                    input: "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_0_Temp_0/",
+                    expect: "GPU_0_Temp_0",
+                },
+                Check {
+                    scenario: "empty fragment falls back to resource path",
+                    input: "/redfish/v1/Chassis/Tray_1/Power#",
+                    expect: "Power",
+                },
+                Check {
+                    scenario: "empty fragment with slash falls back to resource path",
+                    input: "/redfish/v1/Chassis/Tray_1/Power#/",
+                    expect: "Power",
+                },
+                Check {
+                    scenario: "empty input yields unknown",
+                    input: "",
+                    expect: "unknown",
+                },
+            ],
+            leaf_from_property,
+        );
+    }
+
+    #[test]
+    fn expand_wildcards_cases() {
+        const GPU_TEMP: &str = "/redfish/v1/Chassis/{ChassisId}/Sensors/GPU_{GpuId}_Temp";
+        let wildcard = |name: &str, values: &[&str]| {
+            (
+                name.to_string(),
+                values.iter().map(|value| (*value).to_string()).collect(),
+            )
+        };
+        let uris =
+            |uris: &[&str]| -> Vec<String> { uris.iter().map(|uri| (*uri).to_string()).collect() };
+        check_values(
+            [
+                Check {
+                    scenario: "URI without placeholders is kept as is",
+                    input: ("/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp", vec![]),
+                    expect: uris(&["/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp"]),
+                },
+                Check {
+                    scenario: "several wildcards expand to their cross product",
+                    input: (
+                        GPU_TEMP,
+                        vec![
+                            wildcard("ChassisId", &["CH0", "CH1"]),
+                            wildcard("GpuId", &["0", "1"]),
+                            wildcard("Unused", &["x"]),
+                        ],
+                    ),
+                    expect: uris(&[
+                        "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp",
+                        "/redfish/v1/Chassis/CH0/Sensors/GPU_1_Temp",
+                        "/redfish/v1/Chassis/CH1/Sensors/GPU_0_Temp",
+                        "/redfish/v1/Chassis/CH1/Sensors/GPU_1_Temp",
+                    ]),
+                },
+                Check {
+                    scenario: "the all-values marker is kept as a pattern",
+                    input: (
+                        GPU_TEMP,
+                        vec![
+                            wildcard("ChassisId", &["CH0"]),
+                            wildcard("GpuId", &["*", "2"]),
+                        ],
+                    ),
+                    expect: uris(&[
+                        "/redfish/v1/Chassis/CH0/Sensors/GPU_*_Temp",
+                        "/redfish/v1/Chassis/CH0/Sensors/GPU_2_Temp",
+                    ]),
+                },
+                Check {
+                    scenario: "a placeholder without a wildcard entry is dropped",
+                    input: (GPU_TEMP, vec![wildcard("GpuId", &["0"])]),
+                    expect: uris(&[]),
+                },
+            ],
+            |(template, wildcards)| expand_wildcards(template, &wildcards),
+        );
+    }
+
+    #[test]
+    fn glob_matches_cases() {
+        const PATTERN: &str = "/redfish/v1/Chassis/CH0/Sensors/GPU_*_Power";
+        check_values(
+            [
+                Check {
+                    scenario: "a pattern without a star needs an exact match",
+                    input: ("/redfish/v1/A", "/redfish/v1/A"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "the star fills part of a path segment",
+                    input: (PATTERN, "/redfish/v1/Chassis/CH0/Sensors/GPU_7_Power"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "the star needs at least one character",
+                    input: (PATTERN, "/redfish/v1/Chassis/CH0/Sensors/GPU__Power"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "the star does not cross a path separator",
+                    input: (PATTERN, "/redfish/v1/Chassis/CH0/Sensors/GPU_7/8_Power"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "text after the pattern is not matched",
+                    input: (PATTERN, "/redfish/v1/Chassis/CH0/Sensors/GPU_7_Power_0"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "several stars each fill their own segment",
+                    input: (
+                        "/redfish/v1/Chassis/*/Sensors/*",
+                        "/redfish/v1/Chassis/CH0/Sensors/Temp",
+                    ),
+                    expect: true,
+                },
+            ],
+            |(pattern, text)| glob_matches(pattern, text),
         );
     }
 
@@ -506,7 +803,7 @@ mod tests {
                            stale, non-numeric and non-finite values are dropped",
                 input: fixture.bmc(),
                 expect: Yields(ObservedIteration {
-                    entity_count: Some(3),
+                    entity_count: Some(6),
                     fetch_failures: 0,
                     metrics: {
                         const REPORT: &str =
@@ -521,6 +818,40 @@ mod tests {
                                 &[
                                     ("report_id", "PlatformEnvironmentMetrics"),
                                     ("metric_property", &format!("{SENSORS}/GPU0_Temp")),
+                                ],
+                            ),
+                            metric(
+                                &format!("{SENSORS}/GPU_0_Temp_0"),
+                                "gpu_0_temp_0",
+                                "celsius",
+                                48.0,
+                                &[
+                                    ("report_id", "PlatformEnvironmentMetrics"),
+                                    ("metric_property", &format!("{SENSORS}/GPU_0_Temp_0")),
+                                ],
+                            ),
+                            // Unit resolved through the wildcard-expanded
+                            // MetricProperties of the GPU_Power definition.
+                            metric(
+                                &format!("{SENSORS}/GPU_1_Power_0"),
+                                "gpu_1_power_0",
+                                "watts",
+                                600.0,
+                                &[
+                                    ("report_id", "PlatformEnvironmentMetrics"),
+                                    ("metric_property", &format!("{SENSORS}/GPU_1_Power_0")),
+                                ],
+                            ),
+                            // A MetricId without a unit-bearing definition
+                            // does not borrow the property's unit.
+                            metric(
+                                &format!("{SENSORS}/GPU_1_Power_0/GPU1_PowerAvg"),
+                                "gpu1_power_avg",
+                                "unknown",
+                                590.0,
+                                &[
+                                    ("report_id", "PlatformEnvironmentMetrics"),
+                                    ("metric_property", &format!("{SENSORS}/GPU_1_Power_0")),
                                 ],
                             ),
                             metric(
@@ -601,6 +932,9 @@ mod tests {
                     unit_pairs(&[
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "unknown"),
+                        ("gpu1_power_avg", "unknown"),
+                        ("gpu_0_temp_0", "unknown"),
+                        ("gpu_1_power_0", "unknown"),
                         ("total_gpu_power_watts", "unknown"),
                     ]),
                 ),
@@ -609,6 +943,9 @@ mod tests {
                     unit_pairs(&[
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "celsius"),
+                        ("gpu1_power_avg", "unknown"),
+                        ("gpu_0_temp_0", "celsius"),
+                        ("gpu_1_power_0", "watts"),
                         ("total_gpu_power_watts", "watts"),
                     ]),
                 ),
