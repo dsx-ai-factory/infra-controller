@@ -15,7 +15,7 @@ The chart is designed for production environments where NICo manages the full li
 | 1  | **nico-api** | Core API server (gRPC + REST). Manages machines, provisioning, networking, and firmware. Requires PostgreSQL and Vault. |
 | 2  | **nico-bmc-proxy** | Authenticating proxy for connecting to BMCs over HTTPS (Redfish). Required for DPS-based power provisioning. |
 | 3  | **nico-dhcp** | Kea DHCP server for bare-metal PXE boot and IP assignment. |
-| 4  | **nico-dns** | Authoritative DNS server (StatefulSet) for managed machines and VPCs. |
+| 4  | **nico-dns** | Authoritative DNS for managed machine and instance inventory records. Runs as a StatefulSet. VPC-domain registration does not enable DNS publication. |
 | 5  | **nico-dsx-exchange-consumer** | Consumes DSX exchange messages for machine telemetry and state updates. Optional; enabled by default - disable when the site has no MQTT broker. |
 | 6  | **nico-flow** | Task, policy, and automation service. Not rendered by the umbrella chart; `setup.sh` phase 7h installs it as a separate release from `helm/nico-flow` whenever NICo REST is installed (no skip flag of its own; skipped only with all of REST by `--skip-rest`). |
 | 7  | **nico-hardware-health** | Collects and reports hardware health metrics from managed machines. |
