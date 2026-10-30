@@ -2860,7 +2860,7 @@ where
 ///
 /// The caller supplies `new_version` for every machine and its history entry.
 /// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
-/// version changed, or a maintenance request was cancelled/replaced; no state or
+/// version changed, or a rack Reset request was cancelled/replaced; no state or
 /// history changes remain. Successful writes return
 /// `Applied(())` and remain in the caller's transaction. Database failures remain
 /// errors.
@@ -2885,9 +2885,12 @@ pub async fn try_update_controller_state(
     )
     .await?;
 
-    // A cancelled request must not be claimed from a stale controller snapshot.
+    // A cancelled rack Reset must not be claimed from a stale controller snapshot.
     let maintenance_request = match new_state {
-        ManagedHostState::Maintenance { request, .. } => request.as_ref(),
+        ManagedHostState::Maintenance {
+            operation: MachineMaintenanceOperation::Reset,
+            request: Some(request),
+        } if request.initiator.starts_with("rack-") => Some(request),
         _ => None,
     };
     let query = r#"
