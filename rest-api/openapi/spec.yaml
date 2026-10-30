@@ -8535,6 +8535,8 @@ paths:
                       interfaces:
                         - id: 64d2028c-ae87-4069-a624-66089d957ef9
                           instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                          instanceTenantId: null
+                          vpcTenantId: null
                           subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                           isPhysical: true
                           device: null
@@ -8646,6 +8648,8 @@ paths:
                       interfaces:
                         - id: 07cd865e-5512-4fe9-8063-8f4c8f442b1a
                           instanceId: 37804b21-0a00-4668-81cb-af9e1b07ad3e
+                          instanceTenantId: null
+                          vpcTenantId: null
                           vpcPrefixId: 915443b6-d164-48d4-89dd-041968e1f9d7
                           isPhysical: true
                           virtualFunctionId: null
@@ -8732,6 +8736,8 @@ paths:
                       interfaces:
                         - id: fa84f327-cad4-458b-94b7-c320cdf48d4d
                           instanceId: bba44e11-facc-4d7f-a2b5-ffdca3935b8b
+                          instanceTenantId: null
+                          vpcTenantId: null
                           vpcPrefixId: 915443b6-d164-48d4-89dd-041968e1f9d7
                           isPhysical: true
                           device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
@@ -8745,6 +8751,8 @@ paths:
                           updated: '2019-08-24T14:15:22Z'
                         - id: fa84f327-cad4-458b-94b7-c320cdf48d4d
                           instanceId: bba44e11-facc-4d7f-a2b5-ffdca3935b8b
+                          instanceTenantId: null
+                          vpcTenantId: null
                           vpcPrefixId: 56944877-3bc0-48c9-8290-21f9e0e31eca
                           isPhysical: true
                           device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
@@ -8954,6 +8962,8 @@ paths:
                     interfaces:
                       - id: 64d2028c-ae87-4069-a624-66089d957ef9
                         instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                        instanceTenantId: null
+                        vpcTenantId: null
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         isPhysical: true
                         virtualFunctionId: null
@@ -9024,6 +9034,8 @@ paths:
                     interfaces:
                       - id: 64d2028c-ae87-4069-a624-66089d957ef9
                         instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                        instanceTenantId: null
+                        vpcTenantId: null
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         isPhysical: true
                         virtualFunctionId: null
@@ -9456,6 +9468,8 @@ paths:
                     interfaces:
                       - id: 64d2028c-ae87-4069-a624-66089d957ef9
                         instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                        instanceTenantId: null
+                        vpcTenantId: null
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         isPhysical: true
                         virtualFunctionId: null
@@ -9637,6 +9651,8 @@ paths:
                     interfaces:
                       - id: 64d2028c-ae87-4069-a624-66089d957ef9
                         instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                        instanceTenantId: null
+                        vpcTenantId: null
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         isPhysical: true
                         virtualFunctionId: null
@@ -9908,6 +9924,8 @@ paths:
                   value:
                     - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                       instanceId: 64d2028c-ae87-4069-a624-66089d957ef9
+                      instanceTenantId: null
+                      vpcTenantId: null
                       subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                       isPhysical: true
                       virtualFunctionId: null
@@ -9919,6 +9937,8 @@ paths:
                       updated: '2019-08-24T14:15:22Z'
                     - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                       instanceId: d57b373a-5a59-4fa4-b080-50e9a1095aeb
+                      instanceTenantId: null
+                      vpcTenantId: null
                       vpcPrefixId: 26be5f71-3d51-487b-a940-6513c7725cfd
                       isPhysical: true
                       virtualFunctionId: null
@@ -24975,6 +24995,8 @@ components:
           interfaces:
             - id: 64d2028c-ae87-4069-a624-66089d957ef9
               instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+              instanceTenantId: null
+              vpcTenantId: null
               subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
               isPhysical: true
               virtualFunctionId: null
@@ -25073,6 +25095,8 @@ components:
           interfaces:
             - id: 64d2028c-ae87-4069-a624-66089d957ef9
               instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+              instanceTenantId: null
+              vpcTenantId: null
               vpcPrefixId: 000bc42b-f946-472e-83d4-ddf7e365e148
               isPhysical: true
               virtualFunctionId: null
