@@ -38,7 +38,8 @@ use crate::metadata::Metadata;
 use crate::os::{InlineIpxe, OperatingSystem, OperatingSystemVariant};
 use crate::tenant::TenantOrganizationId;
 
-/// Validates stored attachment identities and service-interface references.
+/// Validates stored attachment identities and the service-interface and
+/// VPC-local interface records that reference them.
 fn validate_extension_service_identities(
     config: &InstanceExtensionServicesConfig,
     network_config: &InstanceNetworkConfig,
@@ -77,6 +78,28 @@ fn validate_extension_service_identities(
         service_interface
             .validate()
             .map_err(|error| invalid_extension_service_identity(error.to_string()))?;
+    }
+
+    let mut vpc_local_interface_ids = HashSet::new();
+    let mut vpc_local_interface_keys = HashSet::new();
+    for vpc_local_interface in &network_config.vpc_local_interfaces {
+        // The identity rules of a service interface, with the VPC in the key:
+        // one attachment serves each of a DPU's VPCs through its own record.
+        if vpc_local_interface.attachment_id.is_nil()
+            || !attachment_ids.contains(&vpc_local_interface.attachment_id)
+            || vpc_local_interface.internal_uuid.is_nil()
+            || !vpc_local_interface_ids.insert(vpc_local_interface.internal_uuid)
+            || !vpc_local_interface_keys.insert((
+                vpc_local_interface.attachment_id,
+                vpc_local_interface.interface_ordinal,
+                vpc_local_interface.dpu_id,
+                vpc_local_interface.vpc_id,
+            ))
+        {
+            return Err(invalid_extension_service_identity(
+                "VPC-local interface record contains a nil, duplicate, or dangling identity",
+            ));
+        }
     }
 
     Ok(())
@@ -461,7 +484,9 @@ mod tests {
 
     use super::*;
     use crate::instance::config::extension_services::InstanceExtensionServiceConfig;
-    use crate::instance::config::network::InstanceServiceInterfaceConfig;
+    use crate::instance::config::network::{
+        InstanceServiceInterfaceConfig, InstanceVpcLocalInterfaceConfig,
+    };
     use crate::instance::config::spx::{InstanceSpxAttachment, SpxAttachmentType};
     use crate::instance::nic_firmware::NicFirmwareAllocationTarget;
     use crate::nic_firmware::{
@@ -488,6 +513,20 @@ mod tests {
             network_prefix_id: carbide_uuid::network::NetworkPrefixId::new(),
             link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
             mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: Uuid::new_v4(),
+        }
+    }
+
+    fn vpc_local_interface(attachment_id: Uuid) -> InstanceVpcLocalInterfaceConfig {
+        InstanceVpcLocalInterfaceConfig {
+            attachment_id,
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: carbide_uuid::vpc::VpcId::new(),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
             internal_uuid: Uuid::new_v4(),
         }
     }
@@ -672,22 +711,26 @@ mod tests {
         );
     }
 
-    /// Verifies snapshots written before service interfaces existed remain
-    /// readable, because an omitted field means no stored service-interface records.
+    /// Verifies snapshots written before service interfaces or VPC-local
+    /// interfaces existed remain readable, because an omitted field means no
+    /// stored records of that kind.
     #[test]
     fn missing_service_interfaces_defaults_to_empty() {
-        // Remove the additive field to model JSON stored by an older binary.
+        // Remove the additive fields to model JSON stored by an older binary.
         let mut persisted = serde_json::to_value(minimal_pg_json()).expect("serialize snapshot");
-        persisted["network_config"]
-            .as_object_mut()
-            .expect("network config is an object")
-            .remove("service_interfaces")
-            .expect("current network config includes service interfaces");
+        for field in ["service_interfaces", "vpc_local_interfaces"] {
+            persisted["network_config"]
+                .as_object_mut()
+                .expect("network config is an object")
+                .remove(field)
+                .unwrap_or_else(|| panic!("current network config includes {field}"));
+        }
 
         // Decode through the production snapshot shape and preserve its legacy meaning.
         let decoded = serde_json::from_value::<InstanceSnapshotPgJson>(persisted)
             .expect("deserialize predecessor snapshot");
         assert!(decoded.network_config.service_interfaces.is_empty());
+        assert!(decoded.network_config.vpc_local_interfaces.is_empty());
     }
 
     /// Verifies an attachment written before IDs existed remains readable and
@@ -761,6 +804,60 @@ mod tests {
                 (vec![None], Some(attachment_id)) => Fails,
                 // A service-interface attachment ID must match an attachment in this instance.
                 (vec![Some(attachment_id)], Some(Uuid::new_v4())) => Fails,
+            }
+        );
+    }
+
+    /// Verifies a VPC-local interface record is held to the identity rules of
+    /// a service interface, keyed by VPC as well: a stored non-nil attachment,
+    /// a stable identity, and one record per attachment, position, DPU and VPC.
+    #[test]
+    fn vpc_local_interface_identity_is_validated() {
+        let attachment_id = Uuid::new_v4();
+        let attachments = |ids: Vec<Option<Uuid>>| InstanceExtensionServicesConfig {
+            service_configs: ids
+                .into_iter()
+                .map(|id| InstanceExtensionServiceConfig {
+                    id,
+                    dpu_target: None,
+                    service_id: carbide_uuid::extension_service::ExtensionServiceId::new(),
+                    version: ConfigVersion::initial(),
+                    removed: None,
+                })
+                .collect(),
+        };
+        // Each helper call draws a fresh VPC and identity for the same attachment.
+        let matching = vpc_local_interface(attachment_id);
+        let mut nil_identity = vpc_local_interface(attachment_id);
+        nil_identity.internal_uuid = Uuid::nil();
+        let mut reused_identity = vpc_local_interface(attachment_id);
+        reused_identity.interface_ordinal = 1;
+        reused_identity.internal_uuid = matching.internal_uuid;
+        let other_vpc = vpc_local_interface(attachment_id);
+        let mut same_position = vpc_local_interface(attachment_id);
+        same_position.vpc_id = matching.vpc_id;
+
+        scenarios!(
+            run = |(ids, records): (Vec<Option<Uuid>>, Vec<InstanceVpcLocalInterfaceConfig>)| {
+                let network = InstanceNetworkConfig {
+                    vpc_local_interfaces: records,
+                    ..Default::default()
+                };
+                validate_extension_service_identities(&attachments(ids), &network).map_err(drop)
+            };
+            "VPC-local interface references" {
+                (vec![Some(attachment_id)], vec![matching.clone()]) => Yields(()),
+                // A record cannot refer to an ID-less legacy attachment or to a foreign one.
+                (vec![None], vec![matching.clone()]) => Fails,
+                (vec![Some(Uuid::new_v4())], vec![matching.clone()]) => Fails,
+                // A nil internal identity cannot correlate the record across reconciliation.
+                (vec![Some(attachment_id)], vec![nil_identity]) => Fails,
+                // Distinct positions still need distinct stable identities.
+                (vec![Some(attachment_id)], vec![matching.clone(), reused_identity]) => Fails,
+                // One attachment serves a DPU's VPCs through one record each.
+                (vec![Some(attachment_id)], vec![matching.clone(), other_vpc]) => Yields(()),
+                // One attachment cannot own two records for the same VPC, position and DPU.
+                (vec![Some(attachment_id)], vec![matching, same_position]) => Fails,
             }
         );
     }

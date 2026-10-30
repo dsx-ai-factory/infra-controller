@@ -37,7 +37,9 @@ use mac_address::MacAddress;
 use model::instance::config::extension_services::{
     InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
 };
-use model::instance::config::network::InstanceServiceInterfaceConfig;
+use model::instance::config::network::{
+    InstanceServiceInterfaceConfig, InstanceVpcLocalInterfaceConfig,
+};
 use model::machine::{InstanceState, ManagedHostState, NetworkConfigUpdateState};
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
@@ -2678,10 +2680,13 @@ async fn test_pending_host_network_update_finishes_after_instance_release(pool: 
 ///
 /// The legacy pending-request fixture creates this situation:
 ///
-/// 1. The live instance has two service endpoints, belonging to active and terminating attachments.
-/// 2. The pending host edit contains a different endpoint whose attachment ID is absent from the live attachments.
+/// 1. The live instance has two service endpoints, belonging to active and terminating
+///    attachments, and a VPC-local interface record of the active attachment.
+/// 2. The pending host edit contains a different endpoint and record whose attachment IDs are
+///    absent from the live attachments.
 /// 3. The full controller promotes the host edit.
-/// 4. The test asserts that the two live endpoints survive unchanged and the obsolete endpoint is excluded.
+/// 4. The test asserts that the live endpoints and record survive unchanged and the obsolete
+///    ones are excluded.
 #[crate::sqlx_test]
 async fn test_pending_host_network_promotion_preserves_live_service_interfaces(pool: sqlx::PgPool) {
     // Both rows stage a public host edit; each exercises a different stale snapshot boundary.
@@ -2844,6 +2849,17 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             .collect::<Vec<_>>();
         let mut live_network = staged.config.network.clone();
         live_network.service_interfaces = live_interfaces.clone();
+        // The active attachment's VPC-local record is server-owned state of the same kind.
+        let live_vpc_local_interfaces = vec![InstanceVpcLocalInterfaceConfig {
+            attachment_id: live_interfaces[0].attachment_id,
+            interface_ordinal: 0,
+            dpu_id: managed_host.dpu_ids[0],
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 3]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        }];
+        live_network.vpc_local_interfaces = live_vpc_local_interfaces.clone();
         let mut txn = env.db_txn().await;
         assert_eq!(
             db::instance::update_extension_services_config(
@@ -2876,6 +2892,10 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             obsolete.vpc_id = VpcId::new();
             let mut pending = pending.clone();
             pending.new_config.service_interfaces = vec![obsolete];
+            let mut obsolete_vpc_local = live_vpc_local_interfaces[0].clone();
+            obsolete_vpc_local.attachment_id = uuid::Uuid::new_v4();
+            obsolete_vpc_local.internal_uuid = uuid::Uuid::new_v4();
+            pending.new_config.vpc_local_interfaces = vec![obsolete_vpc_local];
             sqlx::query("UPDATE instances SET update_network_config_request = $1 WHERE id = $2")
                 .bind(sqlx::types::Json(pending))
                 .bind(instance.id)
@@ -2973,6 +2993,10 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             .expect("promoted instance exists");
         assert_eq!(
             persisted.config.network.service_interfaces, live_interfaces,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted.config.network.vpc_local_interfaces, live_vpc_local_interfaces,
             "{scenario}"
         );
         assert_eq!(

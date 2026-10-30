@@ -51,6 +51,8 @@ use crate::{
 };
 
 pub mod nic_firmware;
+#[cfg(test)]
+mod test_vpc_local_interfaces;
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;
@@ -614,6 +616,38 @@ pub async fn find_service_vpc_memberships(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// The VPCs a DPU serves through VPC-local interfaces: the records on the live
+/// instances of the DPU's host whose attachment is present and not terminating.
+/// This is the set of private zones the DPU's agent may fetch, so a record
+/// whose attachment is gone grants nothing.
+pub async fn find_vpc_local_vpc_ids_for_dpu(
+    txn: impl DbReader<'_>,
+    dpu_id: DpuMachineId,
+) -> Result<Vec<VpcId>, DatabaseError> {
+    let query = "SELECT DISTINCT (vpc_local_interface->>'vpc_id')::uuid AS vpc_id
+        FROM machine_interfaces mi
+        JOIN instances i ON i.machine_id = mi.machine_id AND i.deleted IS NULL
+        CROSS JOIN LATERAL jsonb_array_elements(
+            COALESCE(i.network_config->'vpc_local_interfaces', '[]'::jsonb)
+        ) AS vpc_local_interfaces(vpc_local_interface)
+        WHERE mi.attached_dpu_machine_id = $1
+          AND vpc_local_interface->>'dpu_id' = $1
+          AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(
+                  COALESCE(i.extension_services_config->'service_configs', '[]'::jsonb)
+              ) AS attachments(attachment)
+              WHERE attachment->>'id' = vpc_local_interface->>'attachment_id'
+                AND attachment->>'removed' IS NULL
+          )
+        ORDER BY vpc_id";
+    sqlx::query_scalar(query)
+        .bind(dpu_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Returns the highest service-VPC slot referenced by any attachment for a service so registration
 /// reconciliation keeps slot-specific DPUServiceInterface and DPUServiceChain resources in use.
 pub async fn highest_retained_service_vpc_slot(
@@ -1063,6 +1097,14 @@ pub async fn trigger_update_network_config_request(
     // Pending host snapshots must never restore or release service-owned resources.
     network_config_request.old_config.service_interfaces.clear();
     network_config_request.new_config.service_interfaces.clear();
+    network_config_request
+        .old_config
+        .vpc_local_interfaces
+        .clear();
+    network_config_request
+        .new_config
+        .vpc_local_interfaces
+        .clear();
     let query = r#"UPDATE instances SET update_network_config_request=$1::json
                         WHERE id = $2::uuid
                           AND update_network_config_request IS NULL
@@ -2723,6 +2765,7 @@ mod tests {
             ],
             auto_config: None,
             service_interfaces: Vec::new(),
+            vpc_local_interfaces: vec![],
         };
         let compatibility_cases = [
             // Legacy auto=false carries the same explicit-networking intent as auto_config=None.
