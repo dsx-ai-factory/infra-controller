@@ -11586,6 +11586,7 @@ impl HostUpgradeState {
                     fw_info.vendor,
                     &fw_info.model,
                     firmware_type,
+                    to_install.scout.as_ref(),
                 )
                 .map_err(|error| {
                     StateHandlerError::GenericError(eyre!(
