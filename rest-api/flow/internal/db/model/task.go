@@ -13,6 +13,7 @@ import (
 	"github.com/uptrace/bun"
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 )
 
@@ -282,17 +283,38 @@ func taskListOptionsToFilterable(
 		Connector: dbquery.ConnectorAND,
 	}
 
-	// ComponentID needs a jsonpath expression on attributes, which the
-	// generic Filter type does not express, so combine it with the rest
-	// via a small composite Filterable.
-	if options.ComponentID != uuid.Nil {
-		return taskFilterables{
-			group,
-			taskComponentIDFilter{componentID: options.ComponentID},
-		}
+	if options.ComponentID == uuid.Nil && options.EventFilter == nil {
+		return group
 	}
+	combined := taskFilterables{group}
+	if options.ComponentID != uuid.Nil {
+		combined = append(combined, taskComponentIDFilter{componentID: options.ComponentID})
+	}
+	if options.EventFilter != nil {
+		combined = append(combined, taskEventFilter{filter: *options.EventFilter})
+	}
+	return combined
+}
 
-	return group
+// taskEventFilter uses recorded event provenance, not current policy bindings or
+// Task.applied_rule_id (which identifies the operation rule).
+type taskEventFilter struct{ filter taskcommon.EventTaskFilter }
+
+func (f taskEventFilter) ApplyTo(q *bun.SelectQuery) *bun.SelectQuery {
+	q = q.Where("t.trigger_type = ?", operation.TriggerTypeEventRuleExecution)
+	if f.filter.EventType == "" && f.filter.PolicyID == uuid.Nil {
+		return q
+	}
+	provenance := q.DB().NewSelect().TableExpr("event_action_executions AS x").
+		ColumnExpr("1").Join("JOIN events AS e ON e.id = x.event_id").
+		Where("x.id = t.trigger_id")
+	if f.filter.EventType != "" {
+		provenance = provenance.Where("e.event_type = ?", f.filter.EventType)
+	}
+	if f.filter.PolicyID != uuid.Nil {
+		provenance = provenance.Where("e.applied_rule_id = ?", f.filter.PolicyID)
+	}
+	return q.Where("EXISTS (?)", provenance)
 }
 
 // taskFilterables is an AND-combination of several Filterables. Each entry

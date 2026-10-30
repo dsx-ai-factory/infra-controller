@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tClient "go.temporal.io/sdk/client"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -353,6 +354,9 @@ func NewGetAllTaskHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetAllTask
 // @Param includeReport query boolean false "Include the per-task execution report in each response (default false)"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
+// @Param eventType query string false "Captured event type; implies event-triggered Tasks"
+// @Param eventPolicyId query string false "Captured Event policy UUID; implies event-triggered Tasks"
+// @Param eventTriggeredOnly query boolean false "Restrict to event-triggered Tasks"
 // @Success 200 {array} model.APITask
 // @Router /v2/org/{org}/nico/task [get]
 func (h GetAllTaskHandler) Handle(c echo.Context) error {
@@ -382,7 +386,8 @@ func (h GetAllTaskHandler) Handle(c echo.Context) error {
 	}
 
 	var apiRequest model.APIGetTasksRequest
-	if err := common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pagination.PageRequest{}); err != nil {
+	err = common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pagination.PageRequest{})
+	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
 	if err := c.Bind(&apiRequest); err != nil {
@@ -440,17 +445,7 @@ func (h GetAllTaskHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowRequest := &flowv1.ListTasksRequest{
-		ActiveOnly: apiRequest.ActiveOnly,
-		WithReport: apiRequest.IncludeReport,
-	}
-	if pageRequest.Offset != nil && pageRequest.Limit != nil {
-		flowRequest.Pagination = &flowv1.Pagination{
-			Offset: int32(*pageRequest.Offset),
-			Limit:  int32(*pageRequest.Limit),
-		}
-	}
-
+	flowRequest := apiRequest.ToProto(&pageRequest)
 	workflowID := fmt.Sprintf("task-get-all-%s", common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 	var flowResponse flowv1.ListTasksResponse
 	proxyErr := common.ProxyFlowGRPC(
@@ -461,6 +456,9 @@ func (h GetAllTaskHandler) Handle(c echo.Context) error {
 	)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
+	}
+	if !taskListFiltersApplied(flowRequest, &flowResponse) {
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Site Agent and Flow must support the requested Task filters", nil)
 	}
 
 	taskOpts := apiRequest.TaskOptions()
@@ -514,6 +512,9 @@ func NewGetRackTasksHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 // @Param includeReport query boolean false "Include the per-task execution report in each response (default false)"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
+// @Param eventType query string false "Captured event type; implies event-triggered Tasks"
+// @Param eventPolicyId query string false "Captured Event policy UUID; implies event-triggered Tasks"
+// @Param eventTriggeredOnly query boolean false "Restrict to event-triggered Tasks"
 // @Success 200 {array} model.APITask
 // @Router /v2/org/{org}/nico/rack/{id}/task [get]
 func (h GetRackTasksHandler) Handle(c echo.Context) error {
@@ -526,13 +527,16 @@ func (h GetRackTasksHandler) Handle(c echo.Context) error {
 	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackID))
 
 	var apiRequest model.APIGetTasksRequest
-	if err := common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pagination.PageRequest{}); err != nil {
+	err := common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pagination.PageRequest{})
+	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
-	if err := c.Bind(&apiRequest); err != nil {
+	err = c.Bind(&apiRequest)
+	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
 	}
-	if err := apiRequest.Validate(); err != nil {
+	err = apiRequest.Validate()
+	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
 
@@ -588,11 +592,13 @@ func (h GetRackTasksHandler) Handle(c echo.Context) error {
 	}
 
 	pageRequest := pagination.PageRequest{}
-	if err := c.Bind(&pageRequest); err != nil {
+	err = c.Bind(&pageRequest)
+	if err != nil {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
-	if err := pageRequest.Validate(nil); err != nil {
+	err = pageRequest.Validate(nil)
+	if err != nil {
 		logger.Warn().Err(err).Msg("error validating pagination request data")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate pagination request data", err)
 	}
@@ -603,18 +609,8 @@ func (h GetRackTasksHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowRequest := &flowv1.ListTasksRequest{
-		RackId:     &flowv1.UUID{Id: rackID},
-		ActiveOnly: apiRequest.ActiveOnly,
-		WithReport: apiRequest.IncludeReport,
-	}
-	if pageRequest.Offset != nil && pageRequest.Limit != nil {
-		flowRequest.Pagination = &flowv1.Pagination{
-			Offset: int32(*pageRequest.Offset),
-			Limit:  int32(*pageRequest.Limit),
-		}
-	}
-
+	flowRequest := apiRequest.ToProto(&pageRequest)
+	flowRequest.RackId = &flowv1.UUID{Id: rackID}
 	workflowID := fmt.Sprintf("tasks-rack-get-%s-%s", rackID, common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 	var flowResponse flowv1.ListTasksResponse
 	proxyErr := common.ProxyFlowGRPC(
@@ -625,6 +621,10 @@ func (h GetRackTasksHandler) Handle(c echo.Context) error {
 	)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
+	}
+
+	if !taskListFiltersApplied(flowRequest, &flowResponse) {
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Site Agent and Flow must support the requested Task filters", nil)
 	}
 
 	taskOpts := apiRequest.TaskOptions()
@@ -678,6 +678,9 @@ func NewGetTrayTasksHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 // @Param includeReport query boolean false "Include the per-task execution report in each response (default false)"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
+// @Param eventType query string false "Captured event type; implies event-triggered Tasks"
+// @Param eventPolicyId query string false "Captured Event policy UUID; implies event-triggered Tasks"
+// @Param eventTriggeredOnly query boolean false "Restrict to event-triggered Tasks"
 // @Success 200 {array} model.APITask
 // @Router /v2/org/{org}/nico/tray/{id}/task [get]
 func (h GetTrayTasksHandler) Handle(c echo.Context) error {
@@ -690,13 +693,16 @@ func (h GetTrayTasksHandler) Handle(c echo.Context) error {
 	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayID))
 
 	var apiRequest model.APIGetTasksRequest
-	if err := common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pagination.PageRequest{}); err != nil {
+	err := common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pagination.PageRequest{})
+	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
-	if err := c.Bind(&apiRequest); err != nil {
+	err = c.Bind(&apiRequest)
+	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
 	}
-	if err := apiRequest.Validate(); err != nil {
+	err = apiRequest.Validate()
+	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
 
@@ -752,11 +758,13 @@ func (h GetTrayTasksHandler) Handle(c echo.Context) error {
 	}
 
 	pageRequest := pagination.PageRequest{}
-	if err := c.Bind(&pageRequest); err != nil {
+	err = c.Bind(&pageRequest)
+	if err != nil {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
-	if err := pageRequest.Validate(nil); err != nil {
+	err = pageRequest.Validate(nil)
+	if err != nil {
 		logger.Warn().Err(err).Msg("error validating pagination request data")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate pagination request data", err)
 	}
@@ -767,18 +775,8 @@ func (h GetTrayTasksHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	flowRequest := &flowv1.ListTasksRequest{
-		ComponentId: &flowv1.UUID{Id: trayID},
-		ActiveOnly:  apiRequest.ActiveOnly,
-		WithReport:  apiRequest.IncludeReport,
-	}
-	if pageRequest.Offset != nil && pageRequest.Limit != nil {
-		flowRequest.Pagination = &flowv1.Pagination{
-			Offset: int32(*pageRequest.Offset),
-			Limit:  int32(*pageRequest.Limit),
-		}
-	}
-
+	flowRequest := apiRequest.ToProto(&pageRequest)
+	flowRequest.ComponentId = &flowv1.UUID{Id: trayID}
 	workflowID := fmt.Sprintf("tasks-tray-get-%s-%s", trayID, common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 	var flowResponse flowv1.ListTasksResponse
 	proxyErr := common.ProxyFlowGRPC(
@@ -789,6 +787,10 @@ func (h GetTrayTasksHandler) Handle(c echo.Context) error {
 	)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
+	}
+
+	if !taskListFiltersApplied(flowRequest, &flowResponse) {
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Site Agent and Flow must support the requested Task filters", nil)
 	}
 
 	taskOpts := apiRequest.TaskOptions()
@@ -808,4 +810,17 @@ func (h GetTrayTasksHandler) Handle(c echo.Context) error {
 
 	logger.Info().Int("Count", len(apiTasks)).Int("Total", total).Msg("finishing API handler")
 	return c.JSON(http.StatusOK, apiTasks)
+}
+
+// taskListFiltersApplied rejects an event-filtered response if a Site Agent or
+// Flow discarded any requested selector. Ordinary lists retain compatibility
+// with services that do not return the acknowledgement.
+func taskListFiltersApplied(request *flowv1.ListTasksRequest, response *flowv1.ListTasksResponse) bool {
+	if request.EventFilter == nil {
+		return true
+	}
+	applied := response.GetAppliedFilters()
+	return applied != nil && proto.Equal(applied.GetRackId(), request.RackId) &&
+		proto.Equal(applied.GetComponentId(), request.ComponentId) &&
+		proto.Equal(applied.GetEventFilter(), request.EventFilter)
 }

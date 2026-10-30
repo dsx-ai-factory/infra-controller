@@ -25,7 +25,7 @@ func TestActionsValidate(t *testing.T) {
 		},
 	}
 	strategies := []TargetStrategy{
-		TargetStrategyComponent,
+		TargetStrategySource,
 		TargetStrategyRack,
 		TargetStrategyAffectedComponents,
 	}
@@ -144,14 +144,14 @@ func TestActionRejectsInvalidDomainValues(t *testing.T) {
 			Name: "task",
 			Spec: &SubmitTask{
 				Operation:        &operations.PowerControlTaskInfo{},
-				TargetStrategy:   TargetStrategyComponent,
+				TargetStrategy:   TargetStrategySource,
 				ConflictStrategy: ConflictStrategyQueue,
 			},
 		},
 		"missing operation": {
 			Name: "task",
 			Spec: &SubmitTask{
-				TargetStrategy:   TargetStrategyComponent,
+				TargetStrategy:   TargetStrategySource,
 				ConflictStrategy: ConflictStrategyQueue,
 			},
 		},
@@ -159,7 +159,7 @@ func TestActionRejectsInvalidDomainValues(t *testing.T) {
 			Name: "task",
 			Spec: &SubmitTask{
 				Operation:        (*operations.PowerControlTaskInfo)(nil),
-				TargetStrategy:   TargetStrategyComponent,
+				TargetStrategy:   TargetStrategySource,
 				ConflictStrategy: ConflictStrategyQueue,
 			},
 		},
@@ -278,7 +278,7 @@ func TestTargetStrategy_RequiresResolution(t *testing.T) {
 		want     bool
 	}{
 		"none":                {strategy: TargetStrategyNone},
-		"component":           {strategy: TargetStrategyComponent, want: true},
+		"source":              {strategy: TargetStrategySource, want: true},
 		"rack":                {strategy: TargetStrategyRack, want: true},
 		"affected components": {strategy: TargetStrategyAffectedComponents, want: true},
 	}

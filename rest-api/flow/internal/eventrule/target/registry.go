@@ -22,12 +22,12 @@ type Registry struct {
 	eventSpecific map[resolverKey]Resolver
 }
 
-// New constructs a registry containing the generic component, rack, and
+// New constructs a registry containing generic source, rack, and
 // affected-components strategies.
 func New() *Registry {
 	return &Registry{
 		generic: map[eventrule.TargetStrategy]Resolver{
-			eventrule.TargetStrategyComponent:          componentResolver{},
+			eventrule.TargetStrategySource:             sourceResolver{},
 			eventrule.TargetStrategyRack:               rackResolver{},
 			eventrule.TargetStrategyAffectedComponents: affectedComponentsResolver{},
 		},

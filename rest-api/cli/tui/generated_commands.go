@@ -493,7 +493,7 @@ func generatedCommandRequiresSiteScope(
 ) bool {
 	resource, _, _ := strings.Cut(info.Name, " ")
 	switch resource {
-	case "domain", "rack", "rule", "task-run", "tray":
+	case "domain", "event", "rack", "rule", "task-run", "tray":
 		// Guided forms and scalar body flags need a persisted scope so their
 		// resource selectors use the correct Site. Opaque JSON already
 		// carries its own siteId and remains an explicit escape hatch unless

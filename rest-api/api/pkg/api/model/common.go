@@ -3,7 +3,12 @@
 
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
 
 const (
 	// DeletionRequestAcceptedMessage is returned when an asynchronous delete has
@@ -39,4 +44,19 @@ func (labels APILabels) MarshalJSON() ([]byte, error) {
 		return []byte("{}"), nil
 	}
 	return json.Marshal(map[string]string(labels))
+}
+
+func timePtrToProto(t *time.Time) *timestamppb.Timestamp {
+	if t == nil {
+		return nil
+	}
+	return timestamppb.New(*t)
+}
+
+func timePtrFromProto(t *timestamppb.Timestamp) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := t.AsTime().UTC()
+	return &v
 }

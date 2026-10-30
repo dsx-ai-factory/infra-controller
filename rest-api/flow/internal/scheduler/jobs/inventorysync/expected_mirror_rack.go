@@ -315,6 +315,10 @@ func mirrorExpectedRacks(
 			if rowsAffected != 1 {
 				return fmt.Errorf("soft-delete rack %q affected %d rows, expected 1", p.toDelete[i].Name, rowsAffected)
 			}
+			err = model.DeleteEventRuleBindingsForRack(ctx, tx, p.toDelete[i].ID)
+			if err != nil {
+				return err
+			}
 			softDeleted += int(rowsAffected)
 		}
 		return nil

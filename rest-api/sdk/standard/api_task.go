@@ -213,14 +213,17 @@ func (a *TaskAPIService) CancelTaskExecute(r ApiCancelTaskRequest) (*Task, *http
 }
 
 type ApiGetAllTasksRequest struct {
-	ctx           context.Context
-	ApiService    *TaskAPIService
-	siteId        *string
-	org           string
-	activeOnly    *bool
-	includeReport *bool
-	pageNumber    *int32
-	pageSize      *int32
+	ctx                context.Context
+	ApiService         *TaskAPIService
+	siteId             *string
+	org                string
+	activeOnly         *bool
+	includeReport      *bool
+	eventType          *EventType
+	eventPolicyId      *string
+	eventTriggeredOnly *bool
+	pageNumber         *int32
+	pageSize           *int32
 }
 
 // ID of the Site whose Tasks are returned.
@@ -238,6 +241,24 @@ func (r ApiGetAllTasksRequest) ActiveOnly(activeOnly bool) ApiGetAllTasksRequest
 // Include the per-task execution report on each returned Task.
 func (r ApiGetAllTasksRequest) IncludeReport(includeReport bool) ApiGetAllTasksRequest {
 	r.includeReport = &includeReport
+	return r
+}
+
+// Captured event type. Implies event-triggered Tasks and combines with every other filter using AND.
+func (r ApiGetAllTasksRequest) EventType(eventType EventType) ApiGetAllTasksRequest {
+	r.eventType = &eventType
+	return r
+}
+
+// Nonzero captured Event policy UUID, independent of current bindings, enabled state, or policy existence. Does not refer to a Task operation rule. A valid, nonzero UUID with no matching Tasks returns an empty list. Implies event-triggered Tasks.
+func (r ApiGetAllTasksRequest) EventPolicyId(eventPolicyId string) ApiGetAllTasksRequest {
+	r.eventPolicyId = &eventPolicyId
+	return r
+}
+
+// Defaults to false. Restrict to event-triggered Tasks from any policy or type. False or omission includes all Tasks unless eventType or eventPolicyId is supplied.
+func (r ApiGetAllTasksRequest) EventTriggeredOnly(eventTriggeredOnly bool) ApiGetAllTasksRequest {
+	r.eventTriggeredOnly = &eventTriggeredOnly
 	return r
 }
 
@@ -265,6 +286,14 @@ List all Tasks created in the specified Site, across every Rack and Tray.
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix, and the Site must belong to that Provider and have NICo Flow enabled.
 
 Setting `activeOnly=true` restricts the result to tasks in a non-terminal REST state (`Pending` or `Running`). Results are ordered by creation time descending, then Task UUID descending, before pagination. The `X-Pagination` response header reports the total count over the post-filter set.
+
+Optional `eventType` and `eventPolicyId` filters select event-triggered Tasks using the triggering event's captured type and policy UUID. `eventPolicyId` is distinct from the Task operation rule returned as `ruleId`. Membership remains valid after policy replacement, disabling, or deletion. A valid, nonzero policy UUID with no matching Tasks returns `[]`.
+
+Set `eventTriggeredOnly=true` to list Tasks from all event types and policies. `eventType` or `eventPolicyId` also implies event-triggered Tasks, even when `eventTriggeredOnly=false` or omitted. Without event selectors, ordinary and event-triggered Tasks are included. All filters combine with AND before pagination.
+
+Use `/rack/{id}/task` or `/tray/{id}/task` with the same event selectors to restrict results to a target Rack or Tray. Target IDs are path parameters on those endpoints; `/task` does not accept `rackId` or `trayId` query parameters. Task targets can differ from the source of the triggering event.
+
+Filtering by event provenance requires a Site Agent and Flow that acknowledge the requested event and target selectors. A service version that ignores a selector returns HTTP 412 instead of an unfiltered Task list.
 
 By default the `report` field is omitted from each Task in the response. Set `includeReport=true` to include it; this is opt-in because report bodies can be several KB.
 
@@ -320,6 +349,15 @@ func (a *TaskAPIService) GetAllTasksExecute(r ApiGetAllTasksRequest) ([]Task, *h
 		var defaultValue bool = false
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeReport", defaultValue, "form", "")
 		r.includeReport = &defaultValue
+	}
+	if r.eventType != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "eventType", r.eventType, "form", "")
+	}
+	if r.eventPolicyId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "eventPolicyId", r.eventPolicyId, "form", "")
+	}
+	if r.eventTriggeredOnly != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "eventTriggeredOnly", r.eventTriggeredOnly, "form", "")
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -408,6 +446,28 @@ func (a *TaskAPIService) GetAllTasksExecute(r ApiGetAllTasksRequest) ([]Task, *h
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

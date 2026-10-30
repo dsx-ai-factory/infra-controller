@@ -1260,23 +1260,29 @@ func (s *PostgresStore) PatchComponent(ctx context.Context, patch ComponentPatch
 	return s.runInTx(ctx, operation)
 }
 
-// DeleteRack soft-deletes a rack and all its components in a single transaction.
+// DeleteRack soft-deletes a rack and its components and removes its event-rule
+// bindings in a single transaction.
 func (s *PostgresStore) DeleteRack(ctx context.Context, id uuid.UUID) error {
 	operation := func(ctx context.Context, tx bun.Tx) error {
 		rackDAO := &model.Rack{ID: id}
-		if _, err := rackDAO.Get(ctx, tx, false); err != nil {
+		_, err := rackDAO.Get(ctx, tx, false)
+		if err != nil {
 			return s.checkDBGetError(err, fmt.Sprintf("rack %s", id))
 		}
 
 		// Soft-delete all components belonging to this rack.
-		_, err := tx.NewDelete().Model((*model.Component)(nil)).
+		_, err = tx.NewDelete().Model((*model.Component)(nil)).
 			Where("rack_id = ?", id).
 			Exec(ctx)
 		if err != nil {
 			return err
 		}
 
-		return rackDAO.Delete(ctx, tx)
+		err = rackDAO.Delete(ctx, tx)
+		if err != nil {
+			return err
+		}
+		return model.DeleteEventRuleBindingsForRack(ctx, tx, id)
 	}
 	return s.runInTx(ctx, operation)
 }
@@ -1285,7 +1291,9 @@ func (s *PostgresStore) DeleteRack(ctx context.Context, id uuid.UUID) error {
 func (s *PostgresStore) PurgeRack(ctx context.Context, id uuid.UUID) error {
 	operation := func(ctx context.Context, tx bun.Tx) error {
 		rackDAO := &model.Rack{ID: id}
-		r, err := rackDAO.GetIncludingDeleted(ctx, tx)
+		var r model.Rack
+		err := tx.NewSelect().Model(&r).Where("r.id = ?", id).
+			WhereAllWithDeleted().For("UPDATE").Scan(ctx)
 		if err != nil {
 			return s.checkDBGetError(err, fmt.Sprintf("rack %s", id))
 		}
@@ -1303,6 +1311,10 @@ func (s *PostgresStore) PurgeRack(ctx context.Context, id uuid.UUID) error {
 			return err
 		}
 
+		err = model.DeleteEventRuleBindingsForRack(ctx, tx, id)
+		if err != nil {
+			return err
+		}
 		return rackDAO.ForceDelete(ctx, tx)
 	}
 	return s.runInTx(ctx, operation)

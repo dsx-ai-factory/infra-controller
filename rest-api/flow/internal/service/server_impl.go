@@ -17,12 +17,14 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
 	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
 	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
@@ -1176,14 +1178,39 @@ func (rs *FlowServerImpl) ListTasks(
 		ActiveOnly:  req.GetActiveOnly(),
 	}
 
+	filter := req.GetEventFilter()
+	if filter != nil {
+		options.EventFilter = &taskcommon.EventTaskFilter{}
+		if filter.EventType != nil {
+			manager, err := rs.requireEventRuleManager()
+			if err != nil {
+				return nil, err
+			}
+			err = manager.ValidateEventType(eventrule.Type(filter.GetEventType()))
+			if filter.GetEventType() == "" || err != nil {
+				return nil, status.Error(codes.InvalidArgument, "event_type must be a supported, nonempty event type")
+			}
+			options.EventFilter.EventType = filter.GetEventType()
+		}
+		if filter.PolicyId != nil {
+			id, err := requiredEventRuleUUID(filter.PolicyId, "event_filter.policy_id")
+			if err != nil {
+				return nil, status.Error(codes.InvalidArgument, err.Error())
+			}
+			options.EventFilter.PolicyID = id
+		}
+	}
+
 	pagination := protobuf.PaginationFrom(req.GetPagination())
-	if err := pagination.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid pagination information: %w", err)
+	err := pagination.Validate()
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid pagination information: %v", err)
 	}
 
 	tasks, total, err := rs.taskStore.ListTasks(ctx, options, pagination)
 	if err != nil {
-		return nil, err
+		log.Error().Err(err).Msg("failed to list Tasks")
+		return nil, status.Error(codes.Internal, "Failed to list Tasks")
 	}
 
 	results := make([]*pb.Task, 0, len(tasks))
@@ -1194,7 +1221,13 @@ func (rs *FlowServerImpl) ListTasks(
 		stripTaskReports(results)
 	}
 
-	return &pb.ListTasksResponse{Tasks: results, Total: total}, nil
+	return &pb.ListTasksResponse{
+		Tasks: results,
+		Total: total,
+		AppliedFilters: &pb.TaskListAppliedFilters{
+			RackId: req.GetRackId(), ComponentId: req.GetComponentId(), EventFilter: req.GetEventFilter(),
+		},
+	}, nil
 }
 
 // stripTaskReports clears the report field on each task in place. Used by

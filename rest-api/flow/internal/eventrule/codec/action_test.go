@@ -24,13 +24,14 @@ func TestActionRoundTrip(t *testing.T) {
 			Spec: &eventrule.SubmitTask{
 				Operation: &operations.FirmwareControlTaskInfo{
 					Operation:              operations.FirmwareOperationUpgrade,
+					RuleID:                 "550e8400-e29b-41d4-a716-446655440000",
 					TargetVersion:          "1.2.3",
 					StartTime:              123,
 					EndTime:                456,
 					SubTargets:             []string{"bmc", "bios"},
 					OverrideReadinessCheck: true,
 				},
-				TargetStrategy:   eventrule.TargetStrategyComponent,
+				TargetStrategy:   eventrule.TargetStrategySource,
 				ConflictStrategy: eventrule.ConflictStrategyQueue,
 				Description:      "power off",
 			},

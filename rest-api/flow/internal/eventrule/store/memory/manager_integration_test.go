@@ -32,8 +32,9 @@ func TestManagerIntegration(t *testing.T) {
 			Runtime:    eventscheduler.DefaultRuntimeConfig(),
 			Policy:     eventscheduler.DefaultPolicyConfig(),
 		},
-		Inventory:   integrationInventory{},
-		TaskManager: integrationTaskManager{},
+		Inventory:      integrationInventory{},
+		TaskManager:    integrationTaskManager{},
+		HandlingReader: integrationHandlingReader{},
 	})
 	require.NoError(t, err)
 
@@ -45,7 +46,8 @@ func TestManagerIntegration(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ruleManager.Bind(ctx, site.ID, eventrule.Scope{Type: eventrule.ScopeTypeSite})
 	require.NoError(t, err)
-	require.NoError(t, ruleManager.SetEnabled(ctx, site.ID, true))
+	_, err = ruleManager.SetEnabled(ctx, site.ID, true)
+	require.NoError(t, err)
 
 	loadedSite, err := ruleManager.GetByID(ctx, site.ID)
 	require.NoError(t, err)
@@ -59,9 +61,11 @@ func TestManagerIntegration(t *testing.T) {
 		ID:   rackID,
 	})
 	require.NoError(t, err)
-	require.NoError(t, ruleManager.SetEnabled(ctx, rack.ID, true))
+	_, err = ruleManager.SetEnabled(ctx, rack.ID, true)
+	require.NoError(t, err)
 
-	require.NoError(t, ruleManager.SetEnabled(ctx, rack.ID, false))
+	_, err = ruleManager.SetEnabled(ctx, rack.ID, false)
+	require.NoError(t, err)
 
 	loadedRack, err := ruleManager.GetByID(ctx, rack.ID)
 	require.NoError(t, err)
@@ -83,6 +87,8 @@ func (integrationInventory) GetComponentByID(
 }
 
 type integrationTaskManager struct{}
+
+type integrationHandlingReader struct{}
 
 func (integrationTaskManager) SubmitTask(
 	context.Context,
@@ -114,4 +120,8 @@ func integrationCreate(eventType eventrule.Type, name string) eventrule.RuleCrea
 			{Name: "noop", Spec: &eventrule.Noop{}},
 		}},
 	}
+}
+
+func (integrationHandlingReader) ListEventHandlings(context.Context, eventrule.HandlingQuery) ([]eventrule.Handling, int, error) {
+	return nil, 0, nil
 }

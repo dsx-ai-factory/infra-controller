@@ -201,6 +201,7 @@ const maxEventSummaryRunes = 1024
 // Event is one deduplicated, enriched, rule-matched observation. It owns the
 // immutable information shared by all action executions.
 type Event struct {
+	RackID          uuid.UUID
 	ID              uuid.UUID
 	Key             EventKey
 	Type            Type
@@ -208,6 +209,9 @@ type Event struct {
 	AppliedRuleID   uuid.UUID
 	EffectivePolicy Policy
 	Summary         string
+	// FirstObservedAt is the source timestamp captured from the first accepted
+	// observation. Zero means the source timestamp is unavailable.
+	FirstObservedAt time.Time
 	Observations    int
 	CreatedAt       time.Time
 	LastObservedAt  time.Time
@@ -222,8 +226,8 @@ func (e Event) Clone() Event {
 }
 
 // ValidateDefinition checks the immutable content supplied when creating an
-// event. Persistence-owned identity, timestamps, and observation counts are
-// intentionally excluded.
+// event. Store-owned identity, creation and last-observed timestamps, and
+// observation counts are intentionally excluded. The source timestamp is optional.
 func (e Event) ValidateDefinition() error {
 	if err := e.Key.Validate(); err != nil {
 		return err

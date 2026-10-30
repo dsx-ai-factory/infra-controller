@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
 	eventscheduler "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/scheduler"
@@ -29,6 +30,7 @@ func TestManager_PostgresRuleHierarchy(t *testing.T) {
 	ctx := context.Background()
 	session := storetest.NewPostgresTestSession(t)
 	rackID := uuid.New()
+	require.NoError(t, (&dbmodel.Rack{ID: rackID, Name: "binding rack"}).Create(ctx, session.DB))
 	inventory := newPostgresIntegrationInventory(rackID)
 	config := testManagerConfig()
 	store := eventstore.New(session)
@@ -59,7 +61,8 @@ func TestManager_PostgresRuleHierarchy(t *testing.T) {
 	require.NoError(t, err)
 	_, err = manager.Bind(ctx, site.ID, eventrule.Scope{Type: eventrule.ScopeTypeSite})
 	require.NoError(t, err)
-	require.NoError(t, manager.SetEnabled(ctx, site.ID, true))
+	_, err = manager.SetEnabled(ctx, site.ID, true)
+	require.NoError(t, err)
 
 	envelope.Key.SourceKey = "site"
 	require.NoError(t, manager.Process(ctx, envelope))
@@ -74,7 +77,8 @@ func TestManager_PostgresRuleHierarchy(t *testing.T) {
 		ID:   rackID,
 	})
 	require.NoError(t, err)
-	require.NoError(t, manager.SetEnabled(ctx, rackRule.ID, true))
+	_, err = manager.SetEnabled(ctx, rackRule.ID, true)
+	require.NoError(t, err)
 
 	envelope.Key.SourceKey = "rack"
 	require.NoError(t, manager.Process(ctx, envelope))

@@ -34,9 +34,6 @@ type APIPowerActionStatus string
 // APIPowerActionOperation names the saved Core maintenance operation.
 type APIPowerActionOperation string
 
-// APIPowerTaskOperation names the power operation requested through Flow.
-type APIPowerTaskOperation string
-
 // APIPowerTaskRelevance explains a member's relationship to a task; root rack tasks use `Unknown`.
 type APIPowerTaskRelevance string
 
@@ -101,17 +98,6 @@ var powerActionOperationNames = map[corev1.ComponentPowerActionOperation]APIPowe
 var powerTaskRelevanceNames = map[flowv1.PowerTaskRelevance]APIPowerTaskRelevance{
 	flowv1.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED:      "Selected",
 	flowv1.PowerTaskRelevance_POWER_TASK_RELEVANCE_RACK_AFFECTED: "RackAffected",
-}
-
-var powerTaskOperationNames = map[flowv1.PowerControlOperation]APIPowerTaskOperation{
-	flowv1.PowerControlOperation_POWER_CONTROL_OPERATION_POWER_ON:        "PowerOn",
-	flowv1.PowerControlOperation_POWER_CONTROL_OPERATION_FORCE_POWER_ON:  "ForcePowerOn",
-	flowv1.PowerControlOperation_POWER_CONTROL_OPERATION_POWER_OFF:       "PowerOff",
-	flowv1.PowerControlOperation_POWER_CONTROL_OPERATION_FORCE_POWER_OFF: "ForcePowerOff",
-	flowv1.PowerControlOperation_POWER_CONTROL_OPERATION_RESTART:         "Restart",
-	flowv1.PowerControlOperation_POWER_CONTROL_OPERATION_FORCE_RESTART:   "ForceRestart",
-	flowv1.PowerControlOperation_POWER_CONTROL_OPERATION_WARM_RESET:      "WarmReset",
-	flowv1.PowerControlOperation_POWER_CONTROL_OPERATION_COLD_RESET:      "ColdReset",
 }
 
 var taskTypeNames = map[flowv1.TaskKind]APITaskType{
@@ -543,11 +529,6 @@ func (s *APIPowerActionStatus) FromProto(status corev1.ComponentPowerActionStatu
 // FromProto retains known maintenance operations and marks newer values Unknown.
 func (o *APIPowerActionOperation) FromProto(operation corev1.ComponentPowerActionOperation) {
 	*o = enumOr(powerActionOperationNames, operation, "Unknown")
-}
-
-// FromProto retains known task operations and marks newer values Unknown.
-func (o *APIPowerTaskOperation) FromProto(operation flowv1.PowerControlOperation) {
-	*o = enumOr(powerTaskOperationNames, operation, "Unknown")
 }
 
 // FromProto retains the selection relationship and marks newer values Unknown.

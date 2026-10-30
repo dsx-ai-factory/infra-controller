@@ -88,10 +88,7 @@ service Flow {
 
     // Event rules
 
-    // Creates a persisted event rule in the disabled state. The returned rule
-    // always has enabled set to false and does not participate in effective-rule
-    // selection. Callers may create its bindings while it is disabled, but must
-    // call EnableEventRule before it can override a site or built-in rule.
+    // Creates a policy atomically with its initial enabled state; omission defaults to disabled.
     rpc CreateEventRule(CreateEventRuleRequest) returns (EventRule);
     rpc GetEventRule(GetEventRuleRequest) returns (EventRule);
     rpc GetEffectiveEventRule(GetEffectiveEventRuleRequest) returns (EventRule);
@@ -99,15 +96,31 @@ service Flow {
     // group ordered by ascending rule ID. Filters are applied before pagination.
     // When pagination is omitted, offset defaults to 0 and limit defaults to 100.
     rpc ListEventRules(ListEventRulesRequest) returns (ListEventRulesResponse);
-    rpc UpdateEventRule(UpdateEventRuleRequest) returns (EventRule);
-    rpc EnableEventRule(EnableEventRuleRequest) returns (EventRule);
-    rpc DisableEventRule(DisableEventRuleRequest) returns (EventRule);
+    // Sets the enabled state without changing the immutable rule definition.
+    // Repeating the current state preserves updated_at. Returns the updated rule.
+    rpc SetEventRuleEnabled(SetEventRuleEnabledRequest) returns (EventRule);
+    // Deprecated v1 alias for SetEventRuleEnabled with enabled=true.
+    // Retained throughout v1; removal is reserved for a future v2 API.
+    rpc EnableEventRule(EnableEventRuleRequest) returns (EventRule) {
+        option deprecated = true;
+    }
+    // Deprecated v1 alias for SetEventRuleEnabled with enabled=false.
+    // Retained throughout v1; removal is reserved for a future v2 API.
+    rpc DisableEventRule(DisableEventRuleRequest) returns (EventRule) {
+        option deprecated = true;
+    }
     rpc DeleteEventRule(DeleteEventRuleRequest) returns (google.protobuf.Empty);
 
     // Event-rule bindings
     rpc CreateEventRuleBinding(CreateEventRuleBindingRequest) returns (EventRuleBinding);
     rpc GetEventRuleBinding(GetEventRuleBindingRequest) returns (EventRuleBinding);
     rpc DeleteEventRuleBinding(DeleteEventRuleBindingRequest) returns (google.protobuf.Empty);
+
+    // Explicit bindings only; replacement is atomic and preserves policy definitions.
+    rpc PutEventRuleBinding(PutEventRuleBindingRequest) returns (PutEventRuleBindingResponse);
+    rpc ListEventRuleBindings(ListEventRuleBindingsRequest) returns (ListEventRuleBindingsResponse);
+    // Operational reads over captured event context. Filters apply before pagination.
+    rpc ListEventHandlings(ListEventHandlingsRequest) returns (ListEventHandlingsResponse);
 
     // Rack-rule associations
     rpc AssociateRuleWithRack(AssociateRuleWithRackRequest) returns (google.protobuf.Empty);
@@ -916,7 +929,10 @@ message DecommissionRackRequest {
 // set filter. Unset optional fields are not applied; with no filter set
 // every Task is returned subject to pagination.
 message ListTasksRequest {
-    optional UUID rack_id = 1;                  // Restrict by rack identifier.
+    // External inventory ID of the Task target Rack, including UUID-shaped
+    // external IDs. The Rack must remain resolvable in live inventory.
+    // This selects the Task target, independently of the event source Rack.
+    optional UUID rack_id = 1;
     bool active_only = 2;                       // Restrict to non-terminal Tasks (Waiting, Pending, Running).
     // Results are ordered by creation time descending, then UUID descending.
     optional Pagination pagination = 3;
@@ -932,11 +948,34 @@ message ListTasksRequest {
     // GetTasksByIDs and CancelTask always return the report and do not
     // accept this flag.
     bool with_report = 5;
+    // Omission includes ordinary and event-triggered Tasks. An empty filter
+    // restricts results to event-triggered Tasks; populated fields combine with AND.
+    EventTaskFilter event_filter = 6;
+}
+
+// EventTaskFilter selects immutable event provenance, independently of current
+// policy existence, enabled state, or bindings. It does not select operation rules.
+message EventTaskFilter {
+    // Registered event type. When present, must be nonempty and supported.
+    optional string event_type = 1;
+    // Nonzero event-policy UUID captured on the event. Unknown UUIDs match nothing.
+    UUID policy_id = 2;
+}
+
+// TaskListAppliedFilters acknowledges selectors supported and applied by Flow.
+// Proxy clients can reject a response from an older Agent or Flow that ignored
+// selectors. Identifiers retain the request representation, before normalization.
+message TaskListAppliedFilters {
+    UUID rack_id = 1;
+    EventTaskFilter event_filter = 2;
+    UUID component_id = 3;
 }
 
 message ListTasksResponse {
     repeated Task tasks = 1;
     int32 total = 2;
+    // Present after all requested Rack, component, and event selectors have been applied.
+    TaskListAppliedFilters applied_filters = 3;
 }
 
 message GetTasksByIDsRequest {
@@ -980,6 +1019,10 @@ message TaskOperation {
         PowerControlTaskOperation power_control = 1;
         FirmwareControlTaskOperation firmware_control = 2;
     }
+    // Optional Operation Rule override. Omission uses normal rule resolution.
+    // A supplied ID must be a valid non-zero UUID. The rule is checked when
+    // Tasks are submitted; an unavailable explicit rule never falls back.
+    UUID rule_id = 3;
 }
 
 enum PowerControlOperation {
@@ -1099,9 +1142,17 @@ enum EventRuleSeverity {
 }
 
 enum EventRuleTargetStrategy {
+    option allow_alias = true;
     EVENT_RULE_TARGET_STRATEGY_UNSPECIFIED = 0;
-    EVENT_RULE_TARGET_STRATEGY_COMPONENT = 1;
+    // Legacy name for SOURCE. Kept first so existing ProtoJSON enum names remain
+    // readable by older clients; new clients should use SOURCE.
+    EVENT_RULE_TARGET_STRATEGY_COMPONENT = 1 [deprecated = true];
+    // The resource that produced the event: one component for a component event,
+    // or the event rack (expanded to its components) for a rack event.
+    EVENT_RULE_TARGET_STRATEGY_SOURCE = 1;
+    // All components in the event rack or the event component's owning rack.
     EVENT_RULE_TARGET_STRATEGY_RACK = 2;
+    // Event-type-specific impact selection.
     EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS = 3;
 }
 
@@ -1178,6 +1229,8 @@ message CreateEventRuleRequest {
     // "hardware.leak.detected".
     string event_type = 3;
     repeated EventRuleAction actions = 4;
+    // Optional initial state, persisted atomically. Omission preserves disabled creation.
+    optional bool enabled = 5;
 }
 
 message GetEventRuleRequest {
@@ -1203,6 +1256,8 @@ message ListEventRulesRequest {
     // non-negative and limit must be greater than zero. Results are ordered by
     // UUID ascending.
     optional Pagination pagination = 3;
+    // Explicit binding presence, independent of enabled state. Built-ins are unbound.
+    optional bool bound = 4;
 }
 
 message ListEventRulesResponse {
@@ -1211,39 +1266,48 @@ message ListEventRulesResponse {
     int64 total = 2;
 }
 
-message EventRuleMetadataUpdate {
-    string name = 1;
-    string description = 2;
-}
-
-message EventRuleActionsUpdate {
-    repeated EventRuleAction actions = 1;
-}
-
-message UpdateEventRuleRequest {
+// SetEventRuleEnabledRequest changes only participation in rule selection.
+// Rule definitions are immutable; create a new rule and replace its bindings
+// to change metadata, event type, or actions. Built-in rules are read-only.
+message SetEventRuleEnabledRequest {
     UUID rule_id = 1;
-    oneof update {
-        EventRuleMetadataUpdate metadata = 2;
-        EventRuleActionsUpdate actions = 3;
-    }
+    // Required explicit desired state. Omission returns InvalidArgument.
+    // Disabling preserves bindings, captured events, and existing Tasks.
+    optional bool enabled = 2;
 }
 
+// EnableEventRuleRequest preserves the legacy v1 enable request.
+// Use SetEventRuleEnabledRequest with enabled=true for new integrations.
 message EnableEventRuleRequest {
     UUID rule_id = 1;
 }
 
+// DisableEventRuleRequest preserves the legacy v1 disable request.
+// Use SetEventRuleEnabledRequest with enabled=false for new integrations.
 message DisableEventRuleRequest {
     UUID rule_id = 1;
 }
 
+// DeleteEventRuleRequest identifies an unbound persisted rule to delete.
+// Deletion atomically rejects any remaining bindings, including bindings to
+// disabled rules, with AlreadyExists. Remove or replace those bindings first.
 message DeleteEventRuleRequest {
     UUID rule_id = 1;
 }
 
+// EventRuleScope identifies a Site or Rack scope.
+// Site scopes omit both identifiers; Rack scopes specify exactly one of id or rack_external_id.
+// Flow resolves external IDs before invoking the event-rule manager.
+// Responses use the canonical Rack UUID in id and omit rack_external_id.
 message EventRuleScope {
+    // Required. SITE or RACK.
     EventRuleScopeType type = 1;
-    // Required for rack scope and omitted for site scope.
+    // Canonical Flow Rack UUID. Mutually exclusive with rack_external_id.
+    // Omitted for Site scope.
     UUID id = 2;
+    // External inventory Rack ID. When provided, must be nonempty and the scope
+    // must be RACK. UUID-shaped values remain external IDs.
+    optional string rack_external_id = 3;
 }
 
 message EventRuleBinding {
@@ -1251,11 +1315,13 @@ message EventRuleBinding {
     UUID rule_id = 2;
     string event_type = 3;
     EventRuleScope scope = 4;
+    // Public Rack ID when inventory is available; otherwise use scope.id.
+    optional string rack_external_id = 5;
 }
 
 message CreateEventRuleBindingRequest {
     UUID rule_id = 1;
-    // Required. A rack scope ID must identify an existing inventory rack.
+    // Required. A Rack scope must resolve to an existing inventory Rack.
     EventRuleScope scope = 2;
 }
 
@@ -1263,6 +1329,7 @@ message GetEventRuleBindingRequest {
     // Required. Must be registered by Flow. Supported value:
     // "hardware.leak.detected".
     string event_type = 1;
+    // Required. Identifies the Site or Rack scope of the binding.
     EventRuleScope scope = 2;
 }
 
@@ -1270,8 +1337,14 @@ message DeleteEventRuleBindingRequest {
     // Required. Identifies the event-family resolution slot to clear. Must be
     // registered by Flow. Supported value: "hardware.leak.detected".
     string event_type = 1;
-    // Required. Must exactly match the site or rack scope of the binding.
+    // Required. Must exactly match the Site or Rack scope of the binding.
     EventRuleScope scope = 2;
+    // Optional. When provided, must be a valid non-zero policy UUID. Delete only
+    // if the slot still references that policy; otherwise return AlreadyExists.
+    // When omitted, delete the current binding without a policy precondition,
+    // preserving the v1 event_type-and-scope request contract.
+    // An absent binding returns NotFound in either mode.
+    UUID expected_rule_id = 3;
 }
 
 // Rack-rule associations API messages
@@ -2719,4 +2792,143 @@ message RackComponentFirmwareOperations {
 message FirmwareTaskReferenceList {
     repeated UUID ids = 1;
     optional FirmwareDetailsReadError error = 2;
+}
+
+// EventResourceType identifies the inventory resource that emitted an event.
+enum EventResourceType {
+    EVENT_RESOURCE_TYPE_UNSPECIFIED = 0;
+    EVENT_RESOURCE_TYPE_COMPONENT = 1;
+    EVENT_RESOURCE_TYPE_RACK = 2;
+}
+
+// EventHandlingTask summarizes a Task created by one event-rule action.
+message EventHandlingTask {
+    // Stable Flow Task UUID.
+    UUID id = 1;
+    // Current Task lifecycle status.
+    TaskStatus status = 2;
+    // Time Flow created the Task.
+    google.protobuf.Timestamp created_at = 3;
+}
+
+message EventHandling {
+    // Stable UUID for the source event that caused this handling decision.
+    UUID id = 1;
+    // Registered event type handled by the rule.
+    string event_type = 2;
+    // Current public identifier of the resource whose event was handled.
+    string resource_id = 3;
+    // Kind of inventory resource identified by resource_id.
+    EventResourceType resource_type = 4;
+    // Tasks created by event-rule actions, ordered by creation time then UUID
+    // ascending. Empty when handling created no Tasks.
+    repeated EventHandlingTask tasks = 5;
+    // Time Flow first applied an event rule for this source event.
+    google.protobuf.Timestamp handled_at = 6;
+    // Summary captured when Flow first handled the source event.
+    string event_summary = 7;
+    // Required. Immutable effective policy captured for this event, including
+    // only actions whose conditions matched. Never resolved from the current rule.
+    EventRulePolicy applied_policy = 8;
+    // Source observation timestamp captured when the event was first accepted.
+    // Absent for older records or sources without an observation timestamp.
+    // Duplicate observations do not change this time. This is not the actual
+    // beginning of the underlying condition and can differ from handled_at.
+    google.protobuf.Timestamp event_first_observed_at = 9;
+    // Authoritative aggregate of the captured actions, executions, and Tasks.
+    // Failed > Retrying > Starting > Unspecified > Running > Skipped > Completed
+    // > NoAction. Missing execution/task information is Unspecified.
+    EventHandlingStatus handling_status = 10;
+    // Bounded diagnostic for the aggregate result; unspecified when unnecessary.
+    EventHandlingReason reason = 11;
+    // Curated handling summary. Never contains raw backend error messages.
+    string message = 12;
+    // Original event-policy UUID; independent of Task operation-rule UUIDs.
+    UUID applied_rule_id = 13;
+}
+
+message ListEventHandlingsResponse {
+    // Handling records in descending handled_at and event UUID order.
+    repeated EventHandling handlings = 1;
+    // Number of matching records before pagination, including when the page is empty.
+    int32 total_count = 2;
+}
+
+// EventRulePolicy contains the actions selected when an event was handled.
+message EventRulePolicy {
+    // Historical action snapshot, independent of subsequent rule edits or deletion.
+    // Empty when none of the selected rule's actions applied to the event.
+    repeated EventRuleAction actions = 1;
+}
+
+// EventHandlingStatus reports progress across all applicable actions and Tasks.
+// Completed includes Task completion, not only successful dispatch. NoAction
+// means no actions applied or all applicable actions completed as no-ops.
+enum EventHandlingStatus {
+    EVENT_HANDLING_STATUS_UNSPECIFIED = 0;
+    EVENT_HANDLING_STATUS_NO_ACTION = 1;
+    EVENT_HANDLING_STATUS_STARTING = 2;
+    EVENT_HANDLING_STATUS_RETRYING = 3;
+    EVENT_HANDLING_STATUS_RUNNING = 4;
+    EVENT_HANDLING_STATUS_COMPLETED = 5;
+    EVENT_HANDLING_STATUS_SKIPPED = 6;
+    EVENT_HANDLING_STATUS_FAILED = 7;
+}
+
+// EventHandlingReason explains the aggregate handling result.
+enum EventHandlingReason {
+    EVENT_HANDLING_REASON_UNSPECIFIED = 0;
+    EVENT_HANDLING_REASON_NO_TARGETS = 1;
+    EVENT_HANDLING_REASON_ATTEMPT_FAILED = 2;
+    EVENT_HANDLING_REASON_ATTEMPT_INTERRUPTED = 3;
+    EVENT_HANDLING_REASON_RETRY_SCHEDULED = 4;
+    EVENT_HANDLING_REASON_ACTION_FAILED = 5;
+    EVENT_HANDLING_REASON_TASK_FAILED = 6;
+    EVENT_HANDLING_REASON_INCOMPLETE_STATE = 7;
+}
+
+// PutEventRuleBindingRequest selects an existing policy without changing its definition.
+message PutEventRuleBindingRequest {
+    string event_type = 1;
+    UUID rule_id = 2;
+    EventRuleScope scope = 3;
+}
+// PutEventRuleBindingResponse distinguishes initial assignment from replacement.
+message PutEventRuleBindingResponse {
+    EventRuleBinding binding = 1;
+    bool created = 2;
+}
+// ListEventRuleBindingsRequest filters combine with AND before pagination.
+// Omitted filters include all explicit assignments, including disabled policies.
+message ListEventRuleBindingsRequest {
+    UUID rule_id = 1;
+    Pagination pagination = 2;
+    optional string event_type = 3;
+    EventRuleScopeType scope_type = 4;
+    // External inventory Rack ID. UUID-shaped values remain external IDs.
+    // Cannot be combined with Site scope.
+    optional string rack_id = 5;
+}
+message ListEventRuleBindingsResponse {
+    repeated EventRuleBinding bindings = 1;
+    int64 total = 2;
+}
+// EventHandlingFilter fields combine with AND. Omitted fields impose no constraint.
+message EventHandlingFilter {
+    optional string event_type = 1;
+    UUID policy_id = 2;
+    // External inventory Rack ID; matches captured source Rack context.
+    // UUID-shaped values remain external IDs.
+    optional string rack_id = 3;
+    EventResourceType resource_type = 4;
+    // Exact source identifier, supplied together with resource_type. COMPONENT
+    // accepts an external component ID or BMC MAC that resolves uniquely across
+    // all component types in inventory; ambiguity returns FailedPrecondition.
+    // rack_id filters captured event rows only and does not narrow this lookup.
+    // RACK accepts an external Rack ID, including UUID-shaped external IDs.
+    optional string resource_id = 5;
+}
+message ListEventHandlingsRequest {
+    EventHandlingFilter filter = 1;
+    Pagination pagination = 2;
 }

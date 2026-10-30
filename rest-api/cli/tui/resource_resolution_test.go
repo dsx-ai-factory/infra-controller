@@ -497,3 +497,65 @@ func testResolveGeneratedPathParameters_ExplicitDiscoveryValues(t *testing.T) {
 		})
 	}
 }
+
+func TestSession_fetchEventPolicies(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		site      string
+		fail      bool
+		wantError string
+	}{
+		{name: "all pages and policy states", site: "site-one"},
+		{name: "missing Site", wantError: "select a site before resolving an event policy"},
+		{name: "list failure", site: "site-one", fail: true, wantError: "policy list unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := make(chan string, 3)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.URL.RawQuery
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/v2/org/acme/nico/event/policy", r.URL.Path)
+				assert.Equal(t, test.site, r.URL.Query().Get("siteId"))
+				assert.Equal(t, "100", r.URL.Query().Get("pageSize"))
+				assert.False(t, r.URL.Query().Has("enabled"))
+				assert.False(t, r.URL.Query().Has("bound"))
+				w.Header().Set("Content-Type", "application/json")
+				if test.fail {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = io.WriteString(w, `{"message":"policy list unavailable"}`)
+					return
+				}
+				if r.URL.Query().Get("pageNumber") == "1" {
+					items := make([]map[string]any, 100)
+					for i := range items {
+						items[i] = map[string]any{"id": fmt.Sprintf("00000000-0000-4000-8000-%012d", i), "name": fmt.Sprintf("Policy %d", i), "enabled": true, "readOnly": i == 0, "eventType": "hardware.leak.detected"}
+					}
+					assert.NoError(t, json.NewEncoder(w).Encode(items))
+					return
+				}
+				assert.Equal(t, "2", r.URL.Query().Get("pageNumber"))
+				_, _ = io.WriteString(w, `[{"id":"00000000-0000-4000-8000-000000000100","name":"","enabled":false,"readOnly":false,"eventType":"hardware.leak.detected"}]`)
+			}))
+			defer server.Close()
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope.SiteID = test.site
+			items, err := session.Resolver.Fetch(t.Context(), "event-policy")
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				if test.site == "" {
+					assert.Empty(t, requests)
+				}
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, items, 101)
+			assert.Len(t, requests, 2)
+			assert.Equal(t, "Policy 0", items[0].Name)
+			assert.Equal(t, "00000000-0000-4000-8000-000000000000; Enabled, Read-only", items[0].Status)
+			assert.Equal(t, "00000000-0000-4000-8000-000000000100", items[100].Name)
+			assert.Equal(t, items[100].ID+"; Disabled", items[100].Status)
+			assert.Equal(t, test.site, items[100].Extra["siteId"])
+			assert.Equal(t, "hardware.leak.detected", items[100].Extra["eventType"])
+		})
+	}
+}

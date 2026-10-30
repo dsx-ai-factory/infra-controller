@@ -353,6 +353,7 @@ func testAtomicEventLifecycle(t *testing.T, factory ExecutionFactory) {
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	store := factory(&now)
 	definition := newEventDefinition()
+	definition.FirstObservedAt = now.Add(-time.Minute)
 	plan := newEventPlan()
 
 	missing, err := store.ObserveEvent(ctx, definition.Key)
@@ -364,9 +365,12 @@ func testAtomicEventLifecycle(t *testing.T, factory ExecutionFactory) {
 	require.NotNil(t, created)
 	require.Equal(t, 1, created.Observations)
 	require.Equal(t, now, created.CreatedAt)
+	require.Equal(t, definition.FirstObservedAt, created.FirstObservedAt)
 
 	now = now.Add(time.Second)
-	duplicate, err := store.CommitEventPlan(ctx, definition, plan)
+	duplicateDefinition := definition.Clone()
+	duplicateDefinition.FirstObservedAt = now
+	duplicate, err := store.CommitEventPlan(ctx, duplicateDefinition, plan)
 	require.NoError(t, err)
 	require.Nil(t, duplicate)
 
@@ -375,6 +379,7 @@ func testAtomicEventLifecycle(t *testing.T, factory ExecutionFactory) {
 	require.Equal(t, created.ID, observed.ID)
 	require.Equal(t, 3, observed.Observations)
 	require.Equal(t, now, observed.LastObservedAt)
+	require.Equal(t, definition.FirstObservedAt, observed.FirstObservedAt)
 
 	empty := newEventDefinition()
 	empty.EffectivePolicy = eventrule.Policy{}

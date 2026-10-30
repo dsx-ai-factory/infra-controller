@@ -22,13 +22,14 @@ import (
 // Manager is the event-rule subsystem facade. It owns rule management and the
 // internally assembled event-processing runtime.
 type Manager struct {
-	builtIns  *builtInRegistry
-	store     eventrule.Store
-	targets   *target.Registry
-	executors *eventexecutor.Registry
-	processor *eventprocessor.Processor
-	scheduler *eventscheduler.Scheduler
-	inventory *inventoryresolver.Resolver
+	builtIns       *builtInRegistry
+	store          eventrule.Store
+	targets        *target.Registry
+	executors      *eventexecutor.Registry
+	processor      *eventprocessor.Processor
+	scheduler      *eventscheduler.Scheduler
+	inventory      *inventoryresolver.Resolver
+	handlingReader HandlingReader
 }
 
 // New constructs a fully assembled event-rule manager.
@@ -77,13 +78,14 @@ func New(config Config) (*Manager, error) {
 	}
 
 	return &Manager{
-		builtIns:  builtIns,
-		store:     config.Store,
-		targets:   targets,
-		executors: executors,
-		processor: processor,
-		scheduler: executionScheduler,
-		inventory: inventoryresolver.New(config.Inventory),
+		builtIns:       builtIns,
+		store:          config.Store,
+		targets:        targets,
+		executors:      executors,
+		processor:      processor,
+		scheduler:      executionScheduler,
+		inventory:      inventoryresolver.New(config.Inventory),
+		handlingReader: config.HandlingReader,
 	}, nil
 }
 
@@ -304,9 +306,7 @@ func (m *Manager) List(
 	}, nil
 }
 
-// Create constructs and stores a disabled persisted rule. New rules remain
-// disabled so callers can finish configuring and binding them before an
-// explicit SetEnabled call makes them effective.
+// Create validates and atomically stores a policy with its requested initial state.
 func (m *Manager) Create(
 	ctx context.Context,
 	input eventrule.RuleCreate,
@@ -317,6 +317,7 @@ func (m *Manager) Create(
 
 	rule := eventrule.Rule{
 		ID:          uuid.New(),
+		Enabled:     input.Enabled,
 		Origin:      eventrule.RuleOriginPersisted,
 		Name:        input.Metadata.Name,
 		Description: input.Metadata.Description,
@@ -335,64 +336,16 @@ func (m *Manager) Create(
 	return m.store.Create(ctx, &rule)
 }
 
-// UpdateMetadata updates a persisted rule's descriptive fields.
-func (m *Manager) UpdateMetadata(
-	ctx context.Context,
-	id uuid.UUID,
-	metadata eventrule.RuleMetadata,
-) error {
-	if err := validateRuleID(id); err != nil {
-		return invalidRuleInput(err)
-	}
-
-	if err := metadata.Validate(); err != nil {
-		return invalidRuleInput(err)
-	}
-
-	if err := m.rejectBuiltInID(ctx, id); err != nil {
-		return err
-	}
-
-	return m.store.UpdateMetadata(ctx, id, metadata)
-}
-
-// ReplaceActions replaces all actions belonging to a persisted rule.
-func (m *Manager) ReplaceActions(
-	ctx context.Context,
-	id uuid.UUID,
-	actions []eventrule.Action,
-) error {
-	if err := validateRuleID(id); err != nil {
-		return invalidRuleInput(err)
-	}
-
-	if err := m.rejectBuiltInID(ctx, id); err != nil {
-		return err
-	}
-
-	rule, err := m.store.GetByID(ctx, id)
-	if err != nil {
-		return err
-	}
-
-	candidate := rule.Clone()
-	candidate.Actions = eventrule.CloneActions(actions)
-
-	if err := m.validateRuntimeRule(&candidate); err != nil {
-		return invalidRuleInput(err)
-	}
-
-	return m.store.ReplaceActions(ctx, id, candidate.Actions)
-}
-
-// Delete delegates deletion to the persisted store, which atomically deletes
-// the rule and all of its bindings in one transaction.
+// Delete removes an unbound persisted rule. The store atomically rejects
+// deletion while any binding references the rule.
 func (m *Manager) Delete(ctx context.Context, id uuid.UUID) error {
-	if err := validateRuleID(id); err != nil {
+	err := validateRuleID(id)
+	if err != nil {
 		return invalidRuleInput(err)
 	}
 
-	if err := m.rejectBuiltInID(ctx, id); err != nil {
+	err = m.rejectBuiltInID(ctx, id)
+	if err != nil {
 		return err
 	}
 
@@ -401,29 +354,30 @@ func (m *Manager) Delete(ctx context.Context, id uuid.UUID) error {
 
 // SetEnabled changes whether a persisted rule is enabled.
 //
-// Flow mutations use last-write-wins semantics until a service-wide
-// etag/revision contract is introduced. Enabling validates the rule snapshot
-// loaded here, while the store atomically applies the desired state to the
-// latest row. Concurrent rule-definition mutations made through Manager are
-// independently runtime-validated, but the enabled definition is not
-// guaranteed to be the same snapshot validated by this call.
-func (m *Manager) SetEnabled(ctx context.Context, id uuid.UUID, enabled bool) error {
-	if err := validateRuleID(id); err != nil {
-		return invalidRuleInput(err)
+// Enabled-state changes use last-write-wins semantics. Enabling validates the
+// immutable rule definition before the store atomically applies the desired
+// state and returns its policy snapshot. Repeating the current state preserves
+// UpdatedAt and returns the existing policy.
+func (m *Manager) SetEnabled(ctx context.Context, id uuid.UUID, enabled bool) (*eventrule.Rule, error) {
+	err := validateRuleID(id)
+	if err != nil {
+		return nil, invalidRuleInput(err)
 	}
 
-	if err := m.rejectBuiltInID(ctx, id); err != nil {
-		return err
+	err = m.rejectBuiltInID(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 
 	if enabled {
 		rule, err := m.store.GetByID(ctx, id)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		if err := m.validateRuntimeRule(rule); err != nil {
-			return invalidRuleInput(err)
+		err = m.validateRuntimeRule(rule)
+		if err != nil {
+			return nil, invalidRuleInput(err)
 		}
 	}
 
@@ -497,11 +451,13 @@ func (m *Manager) validateBindingScope(ctx context.Context, scope eventrule.Scop
 	return nil
 }
 
-// Unbind removes the persisted rule binding occupying an event type and scope.
+// Unbind removes the scope assignment. A non-zero expectedRuleID requires that
+// the assignment still reference that policy; uuid.Nil imposes no precondition.
 func (m *Manager) Unbind(
 	ctx context.Context,
 	eventType eventrule.Type,
 	scope eventrule.Scope,
+	expectedRuleID uuid.UUID,
 ) error {
 	if err := m.validateSupportedEventType(eventType); err != nil {
 		return invalidRuleInput(err)
@@ -510,7 +466,7 @@ func (m *Manager) Unbind(
 		return invalidRuleInput(err)
 	}
 
-	return m.store.Unbind(ctx, eventType, scope)
+	return m.store.Unbind(ctx, eventType, scope, expectedRuleID)
 }
 
 // GetBindingForScope returns the persisted binding occupying an event type and
@@ -584,4 +540,67 @@ func validateRuleID(id uuid.UUID) error {
 
 func invalidRuleInput(err error) error {
 	return fmt.Errorf("%w: %w", eventrule.ErrInvalidRuleInput, err)
+}
+
+// PutBinding assigns a reusable policy without modifying its definition or state.
+func (m *Manager) PutBinding(ctx context.Context, eventType eventrule.Type, id uuid.UUID, scope eventrule.Scope) (*eventrule.BindingPutResult, error) {
+	err := m.validateSupportedEventType(eventType)
+	if err != nil {
+		return nil, invalidRuleInput(err)
+	}
+	err = scope.Validate()
+	if err != nil {
+		return nil, invalidRuleInput(err)
+	}
+	err = m.rejectBuiltInID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := m.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rule.EventType != eventType {
+		return nil, invalidRuleInput(fmt.Errorf("policy event type does not match binding"))
+	}
+	err = m.validateBindingScope(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	return m.store.PutBinding(ctx, eventrule.Binding{ID: uuid.New(), RuleID: id, EventType: eventType, Scope: scope})
+}
+
+// ListBindings returns explicit policy references, including disabled assignments.
+func (m *Manager) ListBindings(ctx context.Context, query eventrule.BindingListRequest) ([]eventrule.Binding, int, error) {
+	err := query.Validate()
+	if err != nil {
+		return nil, 0, invalidRuleInput(err)
+	}
+	if query.EventType != "" {
+		err = m.validateSupportedEventType(query.EventType)
+		if err != nil {
+			return nil, 0, invalidRuleInput(err)
+		}
+	}
+	return m.store.ListBindings(ctx, query)
+}
+
+// ValidateEventType checks a registered type at query boundaries.
+func (m *Manager) ValidateEventType(eventType eventrule.Type) error {
+	err := m.validateSupportedEventType(eventType)
+	if err != nil {
+		return invalidRuleInput(err)
+	}
+	return nil
+}
+
+// ListEventHandlings reports operational state using captured associations.
+func (m *Manager) ListEventHandlings(ctx context.Context, query eventrule.HandlingQuery) ([]eventrule.Handling, int, error) {
+	if query.EventType != "" {
+		err := m.ValidateEventType(query.EventType)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	return m.handlingReader.ListEventHandlings(ctx, query)
 }

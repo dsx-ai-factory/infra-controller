@@ -149,6 +149,7 @@ func (m *mockScheduleStore) UpdateScopeComponentFilter(_ context.Context, _ uuid
 // mockTaskStore implements taskstore.Store. Only GetTask is functional; all
 // other methods panic to catch unexpected calls.
 type mockTaskStore struct {
+	taskstore.Store
 	getTaskFn func(ctx context.Context, id uuid.UUID) (*taskdef.Task, error)
 }
 

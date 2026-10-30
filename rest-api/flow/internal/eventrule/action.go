@@ -194,7 +194,7 @@ type TargetStrategy string
 
 const (
 	TargetStrategyNone               TargetStrategy = "none"
-	TargetStrategyComponent          TargetStrategy = "component"
+	TargetStrategySource             TargetStrategy = "source"
 	TargetStrategyRack               TargetStrategy = "rack"
 	TargetStrategyAffectedComponents TargetStrategy = "affected_components"
 )
@@ -203,7 +203,7 @@ const (
 func (s TargetStrategy) Validate() error {
 	switch s {
 	case TargetStrategyNone,
-		TargetStrategyComponent,
+		TargetStrategySource,
 		TargetStrategyRack,
 		TargetStrategyAffectedComponents:
 		return nil
