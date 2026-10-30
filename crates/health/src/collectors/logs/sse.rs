@@ -123,7 +123,7 @@ struct SseSubscriptionClosed {
     log = warn,
     metric = counter,
     message = "BMC SSE subscription cap reached; stale SSE EventDestinations may need DELETE (or set [collectors.logs.sse] reap_on_cap)",
-    describe = "Number of times a BMC refused or immediately dropped an SSE open while it held SSE subscriptions."
+    describe = "Number of SSE subscription cap warnings, at most one per BMC per 30 minutes."
 )]
 struct SseCapacityExhausted {
     #[context]
