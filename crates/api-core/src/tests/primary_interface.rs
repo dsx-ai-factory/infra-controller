@@ -18,6 +18,7 @@
 use std::str::FromStr;
 
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{
     HostMachineId, MachineIdSubtypeTrait, MachineInterfaceId, StableHostMachineId,
 };
@@ -26,8 +27,11 @@ use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
+use model::instance::NewInstance;
+use model::instance::config::InstanceConfig;
 use model::machine::{InstanceState, ManagedHostState};
 use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterfaceTarget};
+use model::metadata::Metadata;
 use model::network_segment::NetworkSegmentType;
 use model::test_support::ManagedHostConfig;
 use rpc::forge;
@@ -41,6 +45,7 @@ use crate::tests::common::api_fixtures::network_segment::{
     FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY, create_admin_network_segment,
     create_host_inband_network_segment, create_underlay_network_segment,
 };
+use crate::tests::common::postgres::wait_for_blocked_query;
 
 #[derive(Debug, PartialEq, sqlx::FromRow)]
 struct InterfaceIdentityState {
@@ -121,6 +126,29 @@ fn stable_host_id(host_id: HostMachineId) -> StableHostMachineId {
     host_id
         .try_into()
         .expect("site-explorer fixture should produce a stable host ID")
+}
+
+/// Returns a non-primary DPU-backed host interface so concurrency tests perform a real promotion.
+async fn non_primary_dpu_interface_id(
+    pool: &sqlx::PgPool,
+    host_id: StableHostMachineId,
+) -> MachineInterfaceId {
+    let mut txn = pool.begin().await.expect("test transaction should start");
+    let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
+        .await
+        .expect("host interfaces should load")
+        .remove(&host_id)
+        .expect("host should have interface rows");
+    txn.rollback()
+        .await
+        .expect("read-only test transaction should roll back");
+    interfaces
+        .into_iter()
+        .find(|interface| {
+            !interface.primary_interface && interface.attached_dpu_machine_id.is_some()
+        })
+        .expect("host should have a non-primary DPU-backed interface")
+        .id
 }
 
 async fn load_set_primary_persistence_state(
@@ -877,6 +905,144 @@ async fn test_set_primary_interface_promotes_a_non_primary_interface(
             .all_hosts()
             .is_empty(),
         "the deprecated reboot alias should not restart from the request path",
+    );
+
+    Ok(())
+}
+
+/// Verifies SetPrimary waits on an assigned Instance before locking Machine so service-VPC
+/// activation, which uses the same Instance-before-Machine order, can complete without deadlocking
+/// and the assigned Instance's
+/// `network_config_version` still increments.
+#[crate::sqlx_test]
+async fn test_set_primary_interface_locks_instance_before_machine(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create an assigned multi-DPU host and select a different interface for promotion.
+    let env = api_fixtures::create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    let host_id = host.id;
+    let instance = host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let promote_id = non_primary_dpu_interface_id(&env.pool, host_id).await;
+    let before = db::instance::find_by_id(&env.pool, instance.id)
+        .await?
+        .expect("assigned Instance should exist");
+
+    // Hold Instance, then start SetPrimary and prove it waits before acquiring Machine.
+    let mut instance_writer = env.pool.begin().await?;
+    db::instance::find_live_by_machine_id_for_update(instance_writer.as_mut(), &host_id)
+        .await?
+        .expect("assigned Instance should lock");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(instance_writer.as_mut())
+        .await?;
+    let update_api = env.api.clone();
+    let update_task = tokio::spawn(async move {
+        update_api
+            .set_primary_interface(tonic::Request::new(forge::SetPrimaryInterfaceRequest {
+                host_machine_id: Some(host_id),
+                interface_id: Some(promote_id),
+                force_reconcile: false,
+                ..Default::default()
+            }))
+            .await
+    });
+    wait_for_blocked_query(&env.pool, writer_pid, "FOR UPDATE OF i").await;
+
+    // Locking Machine while Instance remains held confirms SetPrimary is still waiting for Instance.
+    db::machine_desired_boot_interface::lock(instance_writer.as_mut(), &host_id).await?;
+    instance_writer.commit().await?;
+    update_task
+        .await
+        .expect("SetPrimary task should not panic")?;
+
+    // A fresh read proves the waiting update completed and incremented `network_config_version`.
+    let after = db::instance::find_by_id(&env.pool, instance.id)
+        .await?
+        .expect("assigned Instance should remain");
+    assert_eq!(
+        after.network_config_version.version_nr(),
+        before.network_config_version.version_nr() + 1,
+    );
+
+    Ok(())
+}
+
+/// Verifies SetPrimary restarts when allocation creates an Instance while it waits for Machine so
+/// the new Instance receives the primary-change `network_config_version` increment.
+#[crate::sqlx_test]
+async fn test_set_primary_interface_restarts_after_concurrent_instance_allocation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create an unassigned Ready host and retain its Machine lock as allocation would.
+    let env = api_fixtures::create_test_env(pool).await;
+    let host =
+        api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
+            .await?;
+    let host_id = stable_host_id(host.host_snapshot.id);
+    let promote_id = non_primary_dpu_interface_id(&env.pool, host_id).await;
+    let mut allocation = env.pool.begin().await?;
+    db::machine_desired_boot_interface::lock(allocation.as_mut(), &host_id).await?;
+    let allocation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(allocation.as_mut())
+        .await?;
+
+    // Start SetPrimary after its first Instance lookup can see no assignment.
+    let update_api = env.api.clone();
+    let update_task = tokio::spawn(async move {
+        update_api
+            .set_primary_interface(tonic::Request::new(forge::SetPrimaryInterfaceRequest {
+                host_machine_id: Some(host_id),
+                interface_id: Some(promote_id),
+                force_reconcile: false,
+                ..Default::default()
+            }))
+            .await
+    });
+    wait_for_blocked_query(&env.pool, allocation_pid, "FROM machines machine").await;
+
+    // Commit an Instance inside the Machine-locking transaction to force SetPrimary's restart path.
+    let instance_id = InstanceId::new();
+    let config = InstanceConfig::try_from(forge::InstanceConfig {
+        tenant: Some(api_fixtures::instance::default_tenant_config()),
+        os: Some(api_fixtures::instance::default_os_config()),
+        ..Default::default()
+    })?;
+    let version = ConfigVersion::initial();
+    db::instance::batch_persist(
+        vec![NewInstance {
+            instance_id,
+            machine_id: host_id.into(),
+            instance_type_id: None,
+            config: &config,
+            metadata: Metadata::default(),
+            config_version: version,
+            network_config_version: version,
+            ib_config_version: version,
+            extension_services_config_version: version,
+            nvlink_config_version: version,
+            spx_config_version: version,
+        }],
+        allocation.as_mut(),
+    )
+    .await?;
+    allocation.commit().await?;
+    update_task
+        .await
+        .expect("SetPrimary task should not panic")?;
+
+    // The `network_config_version` increment confirms the restarted update included the new Instance.
+    let persisted = db::instance::find_by_id(&env.pool, instance_id)
+        .await?
+        .expect("concurrently allocated Instance should remain");
+    assert_eq!(
+        persisted.network_config_version.version_nr(),
+        version.version_nr() + 1,
     );
 
     Ok(())

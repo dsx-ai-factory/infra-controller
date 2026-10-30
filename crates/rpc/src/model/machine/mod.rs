@@ -40,6 +40,7 @@ use crate::model::RpcTryFrom;
 use crate::model::instance::snapshot::instance_snapshot_derive_status;
 
 pub mod capabilities;
+pub mod host_state;
 pub mod infiniband;
 pub mod machine_id;
 pub mod machine_search_config;

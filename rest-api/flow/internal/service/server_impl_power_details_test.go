@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -26,6 +27,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	dbtestutil "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/testutil"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/migrations"
+	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
+	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
+	inventorystore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/store"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
@@ -37,6 +44,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
@@ -96,9 +104,16 @@ func (s *powerDetailsTaskStore) ListTaskContextForRack(ctx context.Context, rack
 // fails inventory lookup. The embedded manager retains real selector behavior.
 type powerDetailsInventory struct {
 	*mockManager
-	calls      int
-	deadline   time.Time
-	beforeRead func(context.Context) error
+	calls            int
+	deadline         time.Time
+	beforeRead       func(context.Context) error
+	identityCalls    int
+	identityIDs      []uuid.UUID
+	identityDeadline time.Time
+	identityRead     func(context.Context) ([]component.Identity, error)
+	rackRead         func(context.Context) ([]*rack.Rack, error)
+	rackCalls        int
+	rackDeadline     time.Time
 }
 
 // GetComponentsByExternalIDs applies the test's delay or failure before resolution.
@@ -112,6 +127,36 @@ func (m *powerDetailsInventory) GetComponentsByExternalIDs(ctx context.Context, 
 		}
 	}
 	return m.mockManager.GetComponentsByExternalIDs(ctx, ids)
+}
+
+// GetComponentIdentitiesByIDsIncludingDeleted records the separate task-target
+// lookup so selector resolution cannot conceal an accidental per-target query.
+func (m *powerDetailsInventory) GetComponentIdentitiesByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID) ([]component.Identity, error) {
+	m.identityCalls++
+	m.identityIDs = append([]uuid.UUID(nil), ids...)
+	m.identityDeadline, _ = ctx.Deadline()
+	if m.identityRead != nil {
+		return m.identityRead(ctx)
+	}
+	var identities []component.Identity
+	for _, id := range ids {
+		tray := m.components[id]
+		if tray != nil {
+			identities = append(identities, component.Identity{ID: id, Type: tray.Type, ExternalID: tray.ComponentID})
+		}
+	}
+	return identities, nil
+}
+
+// GetRacksByIDsIncludingDeleted exposes the fallback boundary separately from
+// selector lookup so a delayed rack read cannot be mistaken for initial lookup.
+func (m *powerDetailsInventory) GetRacksByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error) {
+	m.rackCalls++
+	m.rackDeadline, _ = ctx.Deadline()
+	if m.rackRead != nil {
+		return m.rackRead(ctx)
+	}
+	return m.mockManager.GetRacksByIDsIncludingDeleted(ctx, ids, withComponents)
 }
 
 // powerDetailsFixture keeps Flow identity separate from the managed Core ID so
@@ -131,10 +176,11 @@ type powerDetailsFixture struct {
 // action/task read. Scenarios alter only the boundary they intend to exercise.
 func newPowerDetailsFixture() *powerDetailsFixture {
 	tray := &component.Component{
-		Type:        devicetypes.ComponentTypeCompute,
-		Info:        deviceinfo.DeviceInfo{ID: uuid.New()},
-		ComponentID: "managed-compute-id",
-		RackID:      uuid.New(),
+		Type:           devicetypes.ComponentTypeCompute,
+		Info:           deviceinfo.DeviceInfo{ID: uuid.New()},
+		ComponentID:    "managed-compute-id",
+		RackID:         uuid.New(),
+		RackExternalID: "inventory-rack-id",
 	}
 	observedSource := corev1.ComponentPowerSource_COMPONENT_POWER_SOURCE_REDFISH
 	policySource := corev1.ComponentPowerSource_COMPONENT_POWER_SOURCE_CORE_POWER_POLICY
@@ -215,7 +261,9 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 						Operation: &pb.TaskOperation{Operation: &pb.TaskOperation_PowerControl{PowerControl: &pb.PowerControlTaskOperation{Operation: pb.PowerControlOperation_POWER_CONTROL_OPERATION_FORCE_POWER_OFF}}},
 						Targets:   &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, ComponentIds: []*pb.UUID{{Id: f.tray.Info.ID.String()}}}}},
 						Status:    pb.TaskStatus_TASK_STATUS_RUNNING, CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(updated), StartedAt: timestamppb.New(started),
-						Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED},
+						Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
+						ExternalTargets: &pb.PowerTaskExternalTargets{RackId: f.tray.RackExternalID,
+							Targets: []*pb.ExternalRef{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, Id: f.tray.ComponentID}}}},
 					{Id: &pb.UUID{Id: "00000000-0000-0000-0000-000000000002"}, RackId: &pb.UUID{Id: f.tray.RackID.String()},
 						Operation: &pb.TaskOperation{Operation: &pb.TaskOperation_PowerControl{PowerControl: &pb.PowerControlTaskOperation{Operation: pb.PowerControlOperation_POWER_CONTROL_OPERATION_POWER_ON}}},
 						Targets:   &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{Type: pb.ComponentType_COMPONENT_TYPE_POWERSHELF, ComponentIds: []*pb.UUID{{Id: shelfID.String()}}}}},
@@ -223,18 +271,22 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 						Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_RACK_AFFECTED, WaitingContext: &pb.PowerTaskWaitingContext{
 							ActiveConflicts: []*pb.TaskBrief{{Id: &pb.UUID{Id: (uuid.UUID{15: 3}).String()}, Kind: pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL, Status: pb.TaskStatus_TASK_STATUS_RUNNING}},
 							EarlierWaiting:  []*pb.TaskBrief{{Id: &pb.UUID{Id: (uuid.UUID{15: 4}).String()}, Kind: pb.TaskKind_TASK_KIND_BRING_UP, Status: pb.TaskStatus_TASK_STATUS_WAITING}},
-						}},
+						}, ExternalTargets: &pb.PowerTaskExternalTargets{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED.Enum()}},
 				}}
 				return t.Context(), f.tray.ComponentID
 			},
 			check: func(t *testing.T, f *powerDetailsFixture, response *pb.GetTrayPowerDetailsResponse, err error) {
 				require.NoError(t, err)
 				details := response.GetDetails()
-				require.Equal(t, f.tray.Info.ID.String(), details.GetFlowComponentId().GetId())
-				require.Equal(t, f.tray.ComponentID, details.GetCoreComponentId())
+				require.Equal(t, f.tray.ComponentID, details.GetComponentId())
 				require.Len(t, f.core.request.GetMachineIds().GetMachineIds(), 1)
 				require.Equal(t, f.tray.ComponentID, f.core.request.GetMachineIds().GetMachineIds()[0].GetId())
 				require.Equal(t, f.tray.RackID.String(), details.GetRackId().GetId())
+				require.Equal(t, f.tray.RackExternalID, details.GetRackExternalId())
+				require.Equal(t, 1, f.inventory.identityCalls)
+				require.ElementsMatch(t, []uuid.UUID{f.tray.Info.ID, uuid.MustParse("00000000-0000-0000-0000-000000000099")}, f.inventory.identityIDs,
+					"unrelated rack tasks must not add identity lookups")
+				require.Equal(t, f.store.deadline, f.inventory.identityDeadline)
 				require.Equal(t, f.tray.RackID, f.store.rackID)
 				require.Equal(t, 1, f.store.contextCalls)
 				require.Equal(t, f.tray.RackID, f.store.contextRackID)
@@ -243,6 +295,116 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 				require.True(t, proto.Equal(f.entry.Desired, details.GetDesired().GetValue()))
 				require.NotNil(t, details.GetOperations().GetActions().GetValue())
 				require.True(t, proto.Equal(f.wantTasks, details.GetOperations().GetTasks()), "complete task metadata and recorded targets must survive")
+			},
+		},
+		{
+			// Normal component lookup omits a deleted Rack relation even though
+			// the retained rack row still has the inventory ID needed by REST.
+			name: "retained deleted rack supplies inventory identity", transport: true,
+			configure: func(t *testing.T, f *powerDetailsFixture) (context.Context, string) {
+				if os.Getenv("DB_PORT") == "" {
+					t.Skip("Skipping PostgreSQL power details test: no DB environment specified")
+				}
+				config, err := cdb.ConfigFromEnv()
+				require.NoError(t, err)
+				pool, err := dbtestutil.CreateTestDB(t.Context(), t, config)
+				require.NoError(t, err)
+				t.Cleanup(pool.Close)
+				require.NoError(t, migrations.MigrateWithDB(t.Context(), pool.DB, migrations.MigrateOptions{}))
+
+				rackRow := dbmodel.Rack{ID: f.tray.RackID, Name: "retained-rack", ExternalID: &f.tray.RackExternalID}
+				require.NoError(t, rackRow.Create(t.Context(), pool.DB))
+				trayRow := dbmodel.Component{ID: f.tray.Info.ID, Name: "active-tray", Type: "Compute", RackID: rackRow.ID, ComponentID: &f.tray.ComponentID}
+				require.NoError(t, trayRow.Create(t.Context(), pool.DB))
+				_, err = pool.DB.NewDelete().Model(&rackRow).WherePK().Exec(t.Context())
+				require.NoError(t, err)
+				retained, err := rackRow.GetIncludingDeleted(t.Context(), pool.DB)
+				require.NoError(t, err)
+				require.NotNil(t, retained.DeletedAt, "fixture must exercise a persisted soft deletion")
+
+				f.server.inventoryManager = inventorymanager.New(inventorystore.NewPostgres(pool))
+				resolved, err := f.server.resolveComponentIdentifier(t.Context(), f.tray.ComponentID)
+				require.NoError(t, err)
+				require.Empty(t, resolved.RackExternalID, "active-only selector must omit the deleted rack relation")
+				f.store.read = func(context.Context) ([]taskdef.PowerTaskDetails, error) {
+					return []taskdef.PowerTaskDetails{{ID: uuid.UUID{15: 1}, RackID: f.tray.RackID,
+						Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
+						Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {f.tray.Info.ID}}},
+						Status:     taskcommon.TaskStatusPending}}, nil
+				}
+				return t.Context(), f.tray.ComponentID
+			},
+			check: func(t *testing.T, f *powerDetailsFixture, response *pb.GetTrayPowerDetailsResponse, err error) {
+				require.NoError(t, err)
+				require.Equal(t, f.tray.RackExternalID, response.Details.GetRackExternalId())
+				require.Len(t, response.Details.Operations.Tasks.Entries, 1)
+				entry := response.Details.Operations.Tasks.Entries[0]
+				want := &pb.PowerTaskExternalTargets{RackId: f.tray.RackExternalID,
+					Targets: []*pb.ExternalRef{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, Id: f.tray.ComponentID}}}
+				require.True(t, proto.Equal(want, entry.ExternalTargets))
+				require.Equal(t, f.tray.Info.ID.String(), entry.Targets.Groups[0].ComponentIds[0].Id)
+			},
+		},
+		{
+			// A rack assignment without an inventory ID cannot use its Flow UUID
+			// as a substitute, but that must not erase known tasks or Core facts.
+			name: "assigned rack without inventory identity preserves tasks",
+			configure: func(t *testing.T, f *powerDetailsFixture) (context.Context, string) {
+				f.tray.RackExternalID = ""
+				f.inventory.racks[f.tray.RackID] = &rack.Rack{Info: deviceinfo.DeviceInfo{ID: f.tray.RackID}}
+				f.store.read = func(context.Context) ([]taskdef.PowerTaskDetails, error) {
+					return []taskdef.PowerTaskDetails{{ID: uuid.UUID{15: 1}, RackID: f.tray.RackID,
+						Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
+						Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {f.tray.Info.ID}}},
+						Status:     taskcommon.TaskStatusPending}}, nil
+				}
+				return t.Context(), f.tray.ComponentID
+			},
+			check: func(t *testing.T, f *powerDetailsFixture, response *pb.GetTrayPowerDetailsResponse, err error) {
+				require.NoError(t, err)
+				require.Nil(t, response.Details.RackExternalId)
+				require.Nil(t, response.Details.Operations.Tasks.Error)
+				require.Len(t, response.Details.Operations.Tasks.Entries, 1)
+				require.Equal(t, pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED, response.Details.Operations.Tasks.Entries[0].ExternalTargets.GetError())
+				require.Equal(t, 1, f.inventory.rackCalls)
+				require.Zero(t, f.inventory.identityCalls)
+				require.True(t, proto.Equal(f.entry.Actual, response.Details.Actual.GetValue()))
+			},
+		},
+		{
+			// Rack recovery is optional metadata. Its deadline cannot discard the
+			// task already read or prevent Core from completing independently.
+			name: "rack identity deadline preserves tasks and Core",
+			configure: func(t *testing.T, f *powerDetailsFixture) (context.Context, string) {
+				f.tray.RackExternalID = ""
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				t.Cleanup(cancel)
+				f.wantDeadline = time.Now().Add(9 * time.Second)
+				f.store.read = func(context.Context) ([]taskdef.PowerTaskDetails, error) {
+					return []taskdef.PowerTaskDetails{{ID: uuid.UUID{15: 1}, RackID: f.tray.RackID,
+						Operation:  operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
+						Attributes: taskcommon.TaskAttributes{ComponentsByType: operation.ComponentsByType{devicetypes.ComponentTypeCompute: {f.tray.Info.ID}}},
+						Status:     taskcommon.TaskStatusPending}}, nil
+				}
+				f.inventory.rackRead = func(ctx context.Context) ([]*rack.Rack, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return ctx, f.tray.ComponentID
+			},
+			check: func(t *testing.T, f *powerDetailsFixture, response *pb.GetTrayPowerDetailsResponse, err error) {
+				require.NoError(t, err)
+				require.Nil(t, response.Details.RackExternalId)
+				require.Nil(t, response.Details.Operations.Tasks.Error)
+				require.Len(t, response.Details.Operations.Tasks.Entries, 1)
+				entry := response.Details.Operations.Tasks.Entries[0]
+				require.Equal(t, f.tray.Info.ID.String(), entry.Targets.Groups[0].ComponentIds[0].Id)
+				require.Equal(t, pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED, entry.ExternalTargets.GetError())
+				require.Equal(t, f.wantDeadline, f.inventory.rackDeadline)
+				require.Zero(t, f.inventory.identityCalls)
+				require.True(t, proto.Equal(f.entry.Actual, response.Details.Actual.GetValue()))
+				require.True(t, proto.Equal(f.entry.Desired, response.Details.Desired.GetValue()))
+				require.True(t, proto.Equal(f.entry.Actions, response.Details.Operations.Actions.GetValue()))
 			},
 		},
 		{
@@ -271,6 +433,7 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 				require.Len(t, f.core.request.GetPowerShelfIds().GetIds(), 1)
 				require.Equal(t, f.tray.ComponentID, f.core.request.GetPowerShelfIds().Ids[0].GetId())
 				require.Nil(t, response.Details.RackId)
+				require.Nil(t, response.Details.RackExternalId)
 				require.Zero(t, f.store.calls, "unassigned tray must not query an invented rack")
 				require.Empty(t, response.Details.Operations.Tasks.Entries)
 				require.Equal(t, pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED, response.Details.Operations.Tasks.GetError())
@@ -285,7 +448,7 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 			},
 			check: func(t *testing.T, f *powerDetailsFixture, response *pb.GetTrayPowerDetailsResponse, err error) {
 				require.NoError(t, err)
-				require.Nil(t, response.Details.CoreComponentId)
+				require.Nil(t, response.Details.ComponentId)
 				require.Nil(t, f.core.request)
 				require.Equal(t, pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED, response.Details.Actual.GetError())
 				require.Equal(t, pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED, response.Details.Desired.GetError())
@@ -314,6 +477,8 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 					Targets:   &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, ComponentIds: []*pb.UUID{{Id: f.tray.Info.ID.String()}}}}},
 					Status:    pb.TaskStatus_TASK_STATUS_PENDING, CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(created),
 					Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
+					ExternalTargets: &pb.PowerTaskExternalTargets{RackId: f.tray.RackExternalID,
+						Targets: []*pb.ExternalRef{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, Id: f.tray.ComponentID}}},
 				}}}
 				return t.Context(), f.tray.ComponentID
 			},
@@ -540,8 +705,9 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 					Operation: &pb.TaskOperation{Operation: &pb.TaskOperation_PowerControl{PowerControl: &pb.PowerControlTaskOperation{Operation: pb.PowerControlOperation_POWER_CONTROL_OPERATION_POWER_ON}}},
 					Targets:   &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, ComponentIds: []*pb.UUID{{Id: f.tray.Info.ID.String()}}}}},
 					Status:    pb.TaskStatus_TASK_STATUS_WAITING, CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(created),
-					Relevance:      pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
-					WaitingContext: &pb.PowerTaskWaitingContext{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED.Enum()},
+					Relevance:       pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
+					WaitingContext:  &pb.PowerTaskWaitingContext{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED.Enum()},
+					ExternalTargets: &pb.PowerTaskExternalTargets{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED.Enum()},
 				}}}
 				return ctx, f.tray.ComponentID
 			},
@@ -551,6 +717,8 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 				require.Equal(t, 1, f.store.contextCalls)
 				require.Equal(t, f.tray.RackID, f.store.contextRackID)
 				require.Equal(t, f.wantDeadline, f.store.contextDeadline)
+				require.Equal(t, 1, f.inventory.identityCalls)
+				require.Equal(t, f.wantDeadline, f.inventory.identityDeadline)
 				require.True(t, proto.Equal(f.wantTasks, response.Details.Operations.Tasks), "context failure must retain complete primary tasks")
 				require.True(t, proto.Equal(f.entry.Actual, response.Details.Actual.GetValue()))
 				require.True(t, proto.Equal(f.entry.Desired, response.Details.Desired.GetValue()))
@@ -894,24 +1062,30 @@ func powerDetailsRPCClient(t *testing.T, implementation *FlowServerImpl) pb.Flow
 // The proxy's HTML escaping must count toward the same byte limit.
 func TestBoundPowerDetailsResponse(t *testing.T) {
 	tests := []struct {
-		name              string
-		targetCount       int
-		initiator         string
-		wantTasksError    bool
-		wantContextErrors bool
+		name               string
+		targetCount        int
+		initiator          string
+		wantTasksError     bool
+		wantContextErrors  bool
+		wantExternalErrors bool
 	}{
 		// Context must remain intact when the full response already fits.
 		{name: "ordinary response", targetCount: 1},
 		// Repeated references can overflow while all primary power tasks still fit.
 		{name: "waiting context exceeds proxy allowance", targetCount: 1, wantContextErrors: true},
-		// Removing context is insufficient: '<' expands sixfold in the wrapper.
+		// External identifiers can overflow independently of the recorded UUIDs.
+		{name: "external identifiers exceed proxy allowance", targetCount: 1, wantExternalErrors: true},
+		// Removing context and external IDs is insufficient: '<' expands
+		// sixfold in the wrapper, so the whole task section must be unavailable.
 		{name: "HTML expansion exceeds proxy allowance", targetCount: 10000, initiator: strings.Repeat("<", 270000), wantTasksError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			targets := make([]*pb.UUID, test.targetCount)
+			externalTargets := make([]*pb.ExternalRef, test.targetCount)
 			for index := range targets {
 				targets[index] = &pb.UUID{Id: fmt.Sprintf("00000000-0000-0000-0000-%012x", index)}
+				externalTargets[index] = &pb.ExternalRef{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, Id: fmt.Sprintf("compute-%d", index)}
 			}
 			created := timestamppb.New(time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC))
 			active := &pb.TaskBrief{Id: &pb.UUID{Id: "00000000-0000-0000-0000-000000000001"},
@@ -922,7 +1096,8 @@ func TestBoundPowerDetailsResponse(t *testing.T) {
 				Operation: &pb.TaskOperation{Operation: &pb.TaskOperation_PowerControl{PowerControl: &pb.PowerControlTaskOperation{Operation: pb.PowerControlOperation_POWER_CONTROL_OPERATION_POWER_ON}}},
 				Targets:   &pb.ComponentsByType{Groups: []*pb.ComponentsForType{{Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE, ComponentIds: targets}}},
 				Status:    pb.TaskStatus_TASK_STATUS_WAITING, CreatedAt: created, UpdatedAt: created,
-				Relevance: pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
+				Relevance:       pb.PowerTaskRelevance_POWER_TASK_RELEVANCE_SELECTED,
+				ExternalTargets: &pb.PowerTaskExternalTargets{RackId: "inventory-rack", Targets: externalTargets},
 				WaitingContext: &pb.PowerTaskWaitingContext{
 					ActiveConflicts: []*pb.TaskBrief{active},
 					EarlierWaiting: []*pb.TaskBrief{{Id: &pb.UUID{Id: "00000000-0000-0000-0000-000000000099"},
@@ -971,6 +1146,18 @@ func TestBoundPowerDetailsResponse(t *testing.T) {
 				entries[3].WaitingContext = &pb.PowerTaskWaitingContext{ActiveConflicts: []*pb.TaskBrief{active}}
 				response.Details.Operations.Tasks.Entries = entries
 			}
+			if test.wantExternalErrors {
+				// Keep unsupported and failed identity reads distinct when one
+				// successful result must be dropped to preserve the original task.
+				older := proto.Clone(baseTask).(*pb.PowerTaskDetails)
+				older.Id = &pb.UUID{Id: (uuid.UUID{15: 3}).String()}
+				older.ExternalTargets, older.WaitingContext = nil, nil
+				failed := proto.Clone(older).(*pb.PowerTaskDetails)
+				failed.Id = &pb.UUID{Id: (uuid.UUID{15: 4}).String()}
+				failed.ExternalTargets = &pb.PowerTaskExternalTargets{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_READ_FAILED.Enum()}
+				baseTask.ExternalTargets.Targets[0].Id = strings.Repeat("<", 340000)
+				response.Details.Operations.Tasks.Entries = []*pb.PowerTaskDetails{baseTask, older, failed}
+			}
 
 			// Compare the complete response so task order, identities, targets,
 			// operation metadata, and every Core section must survive unchanged.
@@ -983,6 +1170,10 @@ func TestBoundPowerDetailsResponse(t *testing.T) {
 			if test.wantTasksError {
 				want.Details.Operations.Tasks = &pb.PowerTaskDetailsList{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED.Enum()}
 			}
+			if test.wantExternalErrors {
+				want.Details.Operations.Tasks.Entries[0].WaitingContext = &pb.PowerTaskWaitingContext{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED.Enum()}
+				want.Details.Operations.Tasks.Entries[0].ExternalTargets = &pb.PowerTaskExternalTargets{Error: pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED.Enum()}
+			}
 			message, err := protojson.Marshal(response)
 			require.NoError(t, err)
 			if test.wantTasksError {
@@ -990,7 +1181,7 @@ func TestBoundPowerDetailsResponse(t *testing.T) {
 			}
 			encoded, err := json.Marshal(grpcproxy.Response{ResponseJSON: message})
 			require.NoError(t, err)
-			if test.wantContextErrors || test.wantTasksError {
+			if test.wantContextErrors || test.wantTasksError || test.wantExternalErrors {
 				require.Greater(t, len(encoded), powerDetailsResponseBytes, "fixture must exercise overflow")
 			} else {
 				require.LessOrEqual(t, len(encoded), powerDetailsResponseBytes)

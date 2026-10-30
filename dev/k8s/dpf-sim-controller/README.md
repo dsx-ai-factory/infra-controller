@@ -29,9 +29,11 @@ it watches the `DPUDevice`/`DPUNode` CRs NICo creates and drives a matching
 `DPU` CR through the authentic phase sequence, honoring the node-effect hold
 and the reboot round-trip that NICo's state machine depends on.
 
-It is a **simulator**, not the operator: no BFB is flashed, no ARM OS boots,
-no DPU cluster is joined. Only the CR status transitions NICo observes are
-reproduced, on a configurable per-phase timer.
+It is a **simulator**, not the operator: no ARM OS boots and no DPU cluster is
+joined. By default only the CR status transitions NICo observes are reproduced,
+on a configurable per-phase timer. Optionally the simulator also installs the
+managed BFB through the DPU BMC, refer to
+[Installing the managed BFB](#installing-the-managed-bfb-optional).
 
 ## Why Go + reuse from doca-platform
 
@@ -211,11 +213,91 @@ kubectl annotate dpunode node-02-00-00-00-00-01 -n dpf-operator-system \
 > name within milliseconds, so `kubectl delete dpu`, which waits for the name
 > to disappear, hangs indefinitely.
 >
-> **Building on Apple Silicon:** the multi-stage `golang:1.25` build segfaults
+> **Building on Apple Silicon:** the multi-stage `golang:1.27.3` build segfaults
 > under QEMU. `make docker-build` sets `--platform linux/amd64`, which works on
 > native amd64 (CI); on an Apple-Silicon laptop, cross-compile first
 > (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/dpf-sim-controller ./cmd`)
 > and build a copy-only image, or build on an amd64 host.
+
+## Installing the managed BFB (optional)
+
+Real DPF writes the managed BFB to the DPU in OS Installing by POSTing
+`UpdateService.SimpleUpdate` (target `DPU_OS`) to the DPU BMC's Redfish and
+waiting for the task it returns. By default the simulator only dwells in that
+phase. A DPU whose OS was reset, for example to the pre-ingestion image by a
+decommission, therefore never gets the managed image back on a rebuild.
+
+`--redfish-os-install` (`make deploy REDFISH_OS_INSTALL=true`) makes the
+simulator do what the operator does:
+
+1. Save a durable submission marker on the DPU with a resource-version check.
+   Then POST `SimpleUpdate` to the DPUDevice's BMC address (`status` if set, else
+   `spec`, port default 443). Use HTTPS, omit port 443 and bracket IPv6 addresses,
+   for example `https://[2001:db8::5]`. Other ports stay in the URL, for example
+   `https://[2001:db8::5]:8443`. Set `ImageURI` to the `spec.url` of the BFB CR
+   the DPU references.
+2. Prefer the Task resource identified in the response body over a monitor
+   Location. Poll until `Completed`, then move to Rebooting. The DPU stays in
+   OS Installing meanwhile, and `--os-install-dwell` does not apply.
+   A monitor-only response is polled with 202 meaning running and 204 meaning
+   completed. A monitor 200 with a `TaskState` uses that task state,
+   progress and messages, because `Location` can point to a Task resource.
+   An empty or non-string `TaskState` is a polling error that retries until
+   the install timeout. Without `TaskState`, monitor 200 means completed and
+   its action body is ignored.
+   A Task resource's 200 must contain `TaskState`, otherwise
+   polling retries until the install timeout. Resource 202/204 handling stays
+   running/completed, respectively.
+   The `sim.dpu.nvidia.com/bfb-install-task` annotation stores path and kind
+   together, for example `{"path":"/monitor/7","kind":"monitor"}`, so a restart
+   resumes with the same interpretation. After ignoring leading whitespace,
+   values starting with `{` are JSON references and their paths must start
+   with `/`. Other values are legacy bare paths interpreted as resources.
+   Missing kind also means resource. Invalid JSON references fail `TaskLost`
+   without resubmitting. Older controller versions cannot resume the new JSON
+   format, so do not downgrade during an install. An old monitor saved as a
+   bare path remains interpreted as a resource.
+3. A `SimpleUpdate` response other than 202, a task in `Exception`, and
+   `--os-install-timeout` (default 45m, the operator's default) move the DPU to
+   `Error` with an `OSInstalled=False` condition. A task GET returning 404 with
+   a Redfish JSON error body moves the DPU to `Error` immediately with reason
+   `TaskLost`, retaining the task annotation for diagnosis without resubmitting
+   the install. Before submitting, a missing Secret or BFB CR is retried.
+   Once a POST may have been sent, a missing task path or transport error is
+   `TaskLost`. A marker without a cached task path triggers an uncached DPU read
+   to recover a successfully saved task. If no path was saved, the DPU fails
+   without another POST, including after a restart between the marker and POST.
+   Plain routing or proxy 404s and unreachable BMCs while polling a known task
+   are retried every `--os-install-poll-interval` until `--os-install-timeout`.
+   **Known limit:** a monitor that finishes with another 4xx or 5xx also retries
+   until that timeout. Only the Redfish error 404 above fails immediately.
+4. A DPU created from a `blueFieldSoftware` source has no BFB and is not
+   installed.
+
+**It is off by default** because it needs a network path from the simulator pod
+to the DPU BMCs. Existing users, whose DPUDevices carry BMC addresses the pod
+cannot reach, would otherwise stall in OS Installing until the timeout.
+
+Credentials and TLS follow the operator. The simulator logs in with basic auth
+as `--bmc-username` (default `root`) and the `password` key of the
+`--bmc-secret-name` Secret (default `bmc-shared-password`) in the DPF
+namespace, which NICo writes (`crates/dpf/src/sdk.rs`). It reads that one
+Secret directly, not through the cache, and the Role grants `get` on that name
+only, so a custom `--bmc-secret-name` needs the name in
+`config/rbac/role.yaml` as well. TLS verification is skipped, as in the
+operator's basic-auth client: DPU BMCs and machine-a-tron's mock BMCs serve
+self-signed certificates. The operator's mTLS client is not reproduced.
+
+**Network path on a machine-a-tron cluster.** machine-a-tron's controller
+publishes every mock BMC as a Service whose `externalIPs` is the BMC address
+and whose port 443 forwards to the bmc-mock listener
+(`dev/k8s/machine-a-tron-controller`, refer to its README). kube-proxy programs
+that on every node for pod traffic too, so the simulator pod reaches
+`DPUDevice.spec.bmcIp:443` the same way NICo does, with no extra Service,
+route or `hostNetwork`. The BMC network must stay outside the ServiceCIDR, the
+pod CIDR and the node network, as the machine-a-tron chart already requires.
+The mock BMC must accept the shared password and implement SimpleUpdate with a
+task, which is what makes the DPU report the managed image.
 
 ## Status
 

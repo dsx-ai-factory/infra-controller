@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr};
 
 use ::rpc::forge as rpc;
 use carbide_instrument::emit;
@@ -32,7 +31,7 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_request_data_redacted};
 use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
-    validate_bmc_mac,
+    validate_bmc_mac, validate_single_interface_address,
 };
 use crate::handlers::machine_interface_address::update_preallocated_expected_machine_interface;
 use crate::handlers::static_address_metrics::{
@@ -185,40 +184,15 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
     Ok(())
 }
 
-const NOT_A_SINGLE_INTERFACE_ADDRESS: &str =
-    "must not be an unspecified, multicast or IPv4 limited-broadcast address";
-
-/// Rejects fixed addresses that cannot identify a single interface. Without
-/// this check, such an address is reserved on `static-assignments` and blocks
-/// every other declaration that uses it.
 fn validate_fixed_addresses(data: &ExpectedMachineData) -> Result<(), CarbideError> {
-    if let Some(address) = data.bmc_ip_address
-        && !identifies_single_interface(address)
-    {
-        return Err(CarbideError::InvalidArgument(format!(
-            "bmc_ip_address {address} {NOT_A_SINGLE_INTERFACE_ADDRESS}"
-        )));
-    }
+    validate_single_interface_address("bmc_ip_address", data.bmc_ip_address)?;
     for interface in &data.interfaces {
-        if let Some(address) = interface.fixed_ip
-            && !identifies_single_interface(address)
-        {
-            return Err(CarbideError::InvalidArgument(format!(
-                "interfaces entry {}: fixed_ip {address} {NOT_A_SINGLE_INTERFACE_ADDRESS}",
-                interface.identity(),
-            )));
-        }
+        validate_single_interface_address(
+            format_args!("interfaces entry {}: fixed_ip", interface.identity()),
+            interface.fixed_ip,
+        )?;
     }
     Ok(())
-}
-
-/// Matches the REST API's `ValidateExpectedBmcIPAddress`, including its
-/// treatment of IPv4-mapped IPv6 addresses.
-fn identifies_single_interface(address: IpAddr) -> bool {
-    let address = address.to_canonical();
-    !(address.is_unspecified()
-        || address.is_multicast()
-        || address == IpAddr::V4(Ipv4Addr::BROADCAST))
 }
 
 /// Create missing expected_machines that aren't already in the database,
@@ -1482,6 +1456,8 @@ pub(super) async fn query(
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::{Case, Check, check_cases, check_values};
 

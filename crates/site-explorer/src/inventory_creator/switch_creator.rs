@@ -97,6 +97,11 @@ impl SwitchCreator {
 
         let mut skipped_existing_switches = 0usize;
         for explored_managed_switch in explored_managed_switches {
+            // The cap counts every pass of the run, so a later pass starts
+            // from where the earlier ones left the count.
+            if metrics.created_switches_count as u64 >= self.config.switches_created_per_run {
+                break;
+            }
             let expected_switch = match expected_explored_endpoint_index
                 .matched_expected_switch(&explored_managed_switch.bmc_ip)
             {
@@ -132,10 +137,6 @@ impl SwitchCreator {
                     );
 
                     metrics.created_switches_count += 1;
-                    if metrics.created_switches_count as u64 == self.config.switches_created_per_run
-                    {
-                        break;
-                    }
                 }
                 Ok(false) => {}
                 Err(error) => {

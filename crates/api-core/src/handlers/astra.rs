@@ -80,8 +80,7 @@ pub(super) async fn get_astra_config(
         .iter()
         .find(|dpu| dpu.id == dpu_machine_id)
         .is_some_and(super::spx_multiplane::is_bf4_dpu);
-    let multiplane_interfaces = if is_bf4_dpu && api.runtime_config.is_partial_multiplane_enabled()
-    {
+    let multiplane_interfaces = if is_bf4_dpu {
         let configuration = match super::spx_multiplane::load_configuration(
             &mut txn,
             snapshot.host_snapshot.id,
@@ -300,7 +299,6 @@ pub(super) async fn process_astra_config_status(
     let is_maintenance_status_processed = astra_config_status
         .is_maintenance_status_present
         .unwrap_or(true)
-        && api.runtime_config.is_partial_multiplane_enabled()
         && snapshot
             .dpu_snapshots
             .iter()

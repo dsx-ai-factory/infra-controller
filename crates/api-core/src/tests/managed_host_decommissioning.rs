@@ -25,11 +25,12 @@ use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use db::ConditionalWrite;
+use libredfish::{PowerState, RedfishError, SystemPowerControl};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, NewDpaInterface};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
-    CleanupState, DecommissioningState, DeconfiguringHostState, ManagedHostState,
-    SpdmMeasuringState,
+    CleanupState, DecommissioningState, DeconfiguringHostState, MachineLastRebootRequestedMode,
+    ManagedHostState, SpdmMeasuringState,
 };
 use state_controller::db_write_batch::DbWriteBatch;
 use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHandlerError};
@@ -617,4 +618,86 @@ async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
     let host = managed_host.host().db_machine(&mut txn).await;
     assert!(host.decommission_requested);
     txn.commit().await.unwrap();
+}
+
+// A BMC without an AC power cycle action leaves the host off and continues;
+// any other power cycle error keeps the host in PowerCyclingHost.
+#[crate::sqlx_test]
+async fn power_cycling_host_continues_when_ac_powercycle_is_not_supported(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let managed_host = create_managed_host(&env).await;
+    let host_id: HostMachineId = managed_host.id.into();
+    env.redfish_sim.set_ac_powercycle_supported(true);
+
+    for (name, error, expected_state, expected_mode) in [
+        (
+            "not supported",
+            RedfishError::NotSupported("no AC power cycle action".to_string()),
+            DecommissioningState::PoweringOnHost,
+            Some(MachineLastRebootRequestedMode::PowerOff),
+        ),
+        (
+            "other error",
+            RedfishError::GenericError {
+                error: "BMC request failed".to_string(),
+            },
+            DecommissioningState::PowerCyclingHost,
+            None,
+        ),
+    ] {
+        let mut txn = env.db_txn().await;
+        db::machine::update_state(
+            &mut txn,
+            &host_id,
+            &ManagedHostState::Decommissioning {
+                decommissioning_state: DecommissioningState::PowerCyclingHost,
+            },
+        )
+        .await
+        .unwrap();
+        let bmc_ip = managed_host
+            .host()
+            .db_machine(&mut txn)
+            .await
+            .status
+            .bmc_info
+            .ip
+            .unwrap()
+            .to_string();
+        txn.commit().await.unwrap();
+
+        env.redfish_sim.set_power_state(&bmc_ip, PowerState::On);
+        env.redfish_sim
+            .fail_next_power_action_with(SystemPowerControl::ACPowercycle, error);
+        let redfish_timepoint = env.redfish_sim.timepoint();
+        env.run_machine_state_controller_iteration().await;
+
+        assert_eq!(
+            env.redfish_sim
+                .actions_since(&redfish_timepoint)
+                .all_hosts(),
+            vec![
+                RedfishSimAction::Power(SystemPowerControl::ForceOff),
+                RedfishSimAction::PowerFailed(SystemPowerControl::ACPowercycle),
+            ],
+            "{name}",
+        );
+        let mut txn = env.db_txn().await;
+        let host = managed_host.host().db_machine(&mut txn).await;
+        assert_eq!(
+            host.current_state(),
+            &ManagedHostState::Decommissioning {
+                decommissioning_state: expected_state,
+            },
+            "{name}",
+        );
+        if let Some(expected_mode) = expected_mode {
+            assert_eq!(
+                host.status.last_reboot_requested.as_ref().unwrap().mode,
+                expected_mode,
+                "{name}",
+            );
+        }
+        txn.commit().await.unwrap();
+    }
 }

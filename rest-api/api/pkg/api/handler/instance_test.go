@@ -5276,6 +5276,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	ifcDAO := cdbm.NewInterfaceDAO(dbSession)
+	deletingEthIfcForEmptyNVLinkUpdate := testInstanceBuildInstanceInterface(
+		t, dbSession, instNoIB.ID, nil, &vpcPrefixSite2.ID, nil, cdbm.InterfaceStatusDeleting,
+	)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -5285,15 +5288,16 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	}
 
 	type args struct {
-		reqData                  *model.APIInstanceUpdateRequest
-		reqOrg                   string
-		reqUser                  *cdbm.User
-		reqInstance              string
-		cleanInstanceToStatus    string
-		respNoOfInterfaces       *int
-		respNoOfNVLinkInterfaces *int
-		ethInterfacesToDelete    []cdbm.Interface
-		ibInterfaceToDelete      []cdbm.InfiniBandInterface
+		reqData                          *model.APIInstanceUpdateRequest
+		reqOrg                           string
+		reqUser                          *cdbm.User
+		reqInstance                      string
+		cleanInstanceToStatus            string
+		respNoOfInterfaces               *int
+		respNoOfNVLinkInterfaces         *int
+		expectedRespNVLinkInterfaceCount *int
+		ethInterfacesToDelete            []cdbm.Interface
+		ibInterfaceToDelete              []cdbm.InfiniBandInterface
 		// Expect these InfiniBand interface rows to stay Ready with no Pending rows created on the Instance
 		// when the request matches on (partition ID, device, device instance) — READY no-op IB update path.
 		expectInfiniBandInterfacesRemainReady []uuid.UUID
@@ -8108,6 +8112,43 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "test Instance update without interfaces skips unrelated Deleting Ethernet interface",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript:       os2.IpxeScript,
+					NVLinkInterfaces: []model.APINVLinkInterfaceCreateOrUpdateRequest{},
+				},
+				reqInstance:                      instNoIB.ID.String(),
+				cleanInstanceToStatus:            instNoIB.Status,
+				reqOrg:                           tnOrg1,
+				reqUser:                          tnu1,
+				respCode:                         http.StatusOK,
+				expectedRespNVLinkInterfaceCount: cutil.GetPtr(0),
+				beforeHandle: func(t *testing.T) {
+					originalClient := scp.IDClientMap[st2.ID.String()]
+					scp.IDClientMap[st2.ID.String()] = tsc
+					t.Cleanup(func() {
+						scp.IDClientMap[st2.ID.String()] = originalClient
+					})
+				},
+				afterHandle: func(t *testing.T) {
+					deletingInterface, err := ifcDAO.GetByID(ctx, nil, deletingEthIfcForEmptyNVLinkUpdate.ID, nil)
+					require.NoError(t, err)
+					require.NotNil(t, deletingInterface)
+					assert.Equal(t, cdbm.InterfaceStatusDeleting, deletingInterface.Status)
+				},
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -8208,6 +8249,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			serr := json.Unmarshal(rec.Body.Bytes(), rst)
 			if serr != nil {
 				t.Fatal(serr)
+			}
+
+			if tt.args.expectedRespNVLinkInterfaceCount != nil {
+				require.Len(t, rst.NVLinkInterfaces, *tt.args.expectedRespNVLinkInterfaceCount)
 			}
 
 			if tt.args.afterHandle != nil {

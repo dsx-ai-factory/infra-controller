@@ -24,8 +24,8 @@ use futures::{StreamExt, stream};
 
 use super::DiscoveryIterationStats;
 use super::cleanup::{
-    stop_ineligible_nmxc_collectors, stop_removed_bmc_collectors, stop_stale_machine_collectors,
-    stop_stale_power_shelf_collectors, stop_stale_switch_collectors,
+    stop_ineligible_nmxc_collectors, stop_removed_bmc_collectors, stop_stale_endpoint_connections,
+    stop_stale_machine_collectors, stop_stale_power_shelf_collectors, stop_stale_switch_collectors,
 };
 use super::context::{CollectorKind, DiscoveryLoopContext};
 use super::identity::ensure_primary_system_uuid;
@@ -155,6 +155,7 @@ pub async fn run_discovery_iteration(
     stop_stale_machine_collectors(ctx, &sharded_endpoints).await;
     stop_stale_switch_collectors(ctx, &sharded_endpoints).await;
     stop_stale_power_shelf_collectors(ctx, &sharded_endpoints).await;
+    stop_stale_endpoint_connections(ctx, &sharded_endpoints).await;
 
     let active_endpoints = active_keys(&sharded_endpoints);
     stop_removed_bmc_collectors(ctx, &active_endpoints).await;
@@ -730,5 +731,191 @@ mod tests {
         reconcile_reachability_collectors(&mut ctx, &[], Some(sink), "test")
             .await
             .expect("reachability cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn cluster_inventory_credential_rotation_recovers_running_collectors() {
+        use std::collections::BTreeMap;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+
+        use axum::extract::{Request, State};
+        use axum::middleware::{Next, from_fn_with_state};
+        use axum::response::Response;
+        use bmc_mock::test_support::{liteon_powershelf_router_with_auth, serve_https};
+        use bmc_mock::{DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME};
+
+        use crate::config::{ClusterEndpointSourceConfig, SensorCollectorConfig};
+        use crate::endpoint::ClusterEndpointSource;
+        use crate::endpoint::test_support::reqwest;
+
+        type Responses = Arc<StdMutex<Vec<(String, u16)>>>;
+
+        // Record the status of every request the BMC answers, outside its
+        // authentication layer.
+        async fn record(
+            State(responses): State<Responses>,
+            request: Request,
+            next: Next,
+        ) -> Response {
+            let path = request.uri().path().to_string();
+            let response = next.run(request).await;
+            responses
+                .lock()
+                .unwrap()
+                .push((path, response.status().as_u16()));
+            response
+        }
+
+        // Reads every collector iteration and refresh counter, by label set.
+        fn collector_counters(metrics: &MetricsManager) -> BTreeMap<String, u64> {
+            let mut counters = BTreeMap::new();
+            for family in metrics.global_registry().gather() {
+                let name = family.name();
+                let iterations = name.ends_with("_collector_iteration_seconds");
+                if !iterations && !name.ends_with("_collector_refresh_total") {
+                    continue;
+                }
+                for metric in family.get_metric() {
+                    let labels = metric
+                        .get_label()
+                        .iter()
+                        .map(|label| format!("{}={}", label.name(), label.value()))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let value = if iterations {
+                        metric.get_histogram().get_sample_count()
+                    } else {
+                        metric.get_counter().value() as u64
+                    };
+                    counters.insert(format!("{name}{{{labels}}}"), value);
+                }
+            }
+            counters
+        }
+
+        let authenticated = |path: &str| !matches!(path, "/redfish/v1" | "/redfish/v1/");
+        let wait_until = |what: &'static str, done: Box<dyn Fn() -> bool + Send>| async move {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while !done() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+        };
+
+        let responses: Responses = Arc::default();
+        let (router, bmc) = liteon_powershelf_router_with_auth();
+        let router = router.layer(from_fn_with_state(responses.clone(), record));
+        let (_server, base_url) = serve_https("health-cluster-rotation", router);
+
+        let inventory = tempfile::NamedTempFile::new().expect("create inventory file");
+        let write_inventory = |password: &str| {
+            std::fs::write(
+                inventory.path(),
+                serde_json::json!({
+                    "default_credentials": {"username": DUMMY_FACTORY_USERNAME, "password": password},
+                    "nodes": [{"hostname": "shelf-a", "bmc_ip": "10.2.3.4", "rack": "rack-a"}],
+                })
+                .to_string(),
+            )
+            .expect("write inventory file");
+        };
+        write_inventory(DUMMY_FACTORY_PASSWORD);
+
+        let source: Arc<dyn EndpointSource> = Arc::new(ClusterEndpointSource::from_config(
+            ClusterEndpointSourceConfig {
+                inventory_path: inventory.path().to_path_buf(),
+                ..Default::default()
+            },
+            &reqwest(),
+            Some(&base_url),
+            10,
+            None,
+        ));
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        config.collectors.discovery.refresh_interval = Duration::from_millis(100);
+        config.collectors.sensors = Configurable::Enabled(SensorCollectorConfig {
+            sensor_fetch_interval: Duration::from_millis(100),
+            ..Default::default()
+        });
+        let metrics = Arc::new(MetricsManager::new("cluster_rotation_iteration").unwrap());
+        let mut ctx =
+            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics.clone(), Arc::new(config))
+                .expect("discovery context should start");
+        let shard_manager = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("initial discovery should complete");
+        let started = {
+            let metrics = metrics.clone();
+            Box::new(move || {
+                let counters = collector_counters(&metrics);
+                !counters.is_empty() && counters.values().any(|count| *count >= 5)
+            })
+        };
+        wait_until("collectors to iterate", started).await;
+        assert!(
+            responses
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(path, status)| authenticated(path) && *status < 300),
+            "collectors authenticate with the inventory credentials"
+        );
+
+        // The inventory changes first, and then the BMC: the collectors keep
+        // working on the credentials they hold until the BMC refuses them.
+        write_inventory("rotated-secret");
+        run_discovery_iteration(source, &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("rotated discovery should complete");
+        let before = collector_counters(&metrics);
+        let rotated_from = responses.lock().unwrap().len();
+        bmc.account_service_state
+            .change_factory_default_password("rotated-secret");
+
+        let recovered = {
+            let responses = responses.clone();
+            Box::new(move || {
+                let responses = responses.lock().unwrap();
+                let after = &responses[rotated_from..];
+                after
+                    .iter()
+                    .position(|(_, status)| *status == 401)
+                    .is_some_and(|refused| {
+                        after[refused + 1..]
+                            .iter()
+                            .any(|(path, status)| authenticated(path) && *status < 300)
+                    })
+            })
+        };
+        wait_until(
+            "a refused request followed by an authenticated one",
+            recovered,
+        )
+        .await;
+
+        // The same collectors kept running: every series is still there and
+        // has not restarted from zero.
+        let after = collector_counters(&metrics);
+        assert_eq!(
+            before.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>(),
+            "collector metric series must not change"
+        );
+        for (series, count) in &before {
+            assert!(
+                after[series] >= *count,
+                "{series} went from {count} to {}; the collector restarted",
+                after[series]
+            );
+        }
     }
 }

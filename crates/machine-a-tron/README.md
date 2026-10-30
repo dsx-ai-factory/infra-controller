@@ -14,6 +14,30 @@ tenant observations from the read-only MAT control route
 `GET /machines/tenant-networks` to exercise the real NICo DHCPv4/DHCPv6 server and
 temporary Linux endpoints. No file export or additional MAT setting is needed.
 
+## BMC DHCP renewal
+
+Host and DPU BMCs renew their leases periodically. Set the top-level
+`bmc_dhcp_renewal_interval` in the MAT TOML configuration to a positive duration
+string, such as `"900s"` (the default) or `"1s"` for a local test. The interval
+takes effect after a restart. The first renewal is spread uniformly from zero
+up to the configured interval. Later intervals include up to 10% jitter in either
+direction.
+Set `"0s"` to disable periodic renewal. Initial DHCP and factory-reset DHCP recovery
+remain enabled.
+Like scout and network polling intervals, it is independent of
+`acceleration_factor`. Switch and shelf BMCs retain their existing DHCP behavior.
+
+An unchanged lease keeps its route. A new address removes the previous route
+before mounting the new one. A failed renewal retains the current address and
+retries with the existing 4–64 second DHCP backoff and +/-1 second jitter. Factory
+reset still drops its lease before recovery DHCP, then resumes periodic renewal
+when enabled. Each renewal attempt has a ten-second deadline. A pending renewal
+caps the actor's next sleep at 100ms, allowing power and factory-reset commands
+between polls. The runtime drives each attempt independently, so an unpolled
+result cannot block the shared API connection lock. Pausing defers result
+publication while the attempt still observes its deadline. Reset or actor shutdown
+aborts the pending attempt, so an old response cannot restore a pre-reset lease.
+
 ## Usage
 
 ```text

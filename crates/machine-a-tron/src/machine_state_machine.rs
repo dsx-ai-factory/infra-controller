@@ -23,7 +23,8 @@ use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{
-    ActionError, BmcEvent, BmcState, Callbacks, HostnameQuerying, MachineInfo, ResourceResetType,
+    ActionError, BmcEvent, BmcState, Callbacks, DeviceEffect, DpuOsImage, HostnameQuerying,
+    MachineInfo, ResourceResetType,
 };
 use carbide_network::virtualization::build_dual_stack_list;
 use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
@@ -36,7 +37,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::api_client::{ClientApiError, DpuNetworkStatusArgs, MockDiscoveryData};
-use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcDhcpRecovery, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{MachineATronContext, MachineConfig};
 use crate::dhcp_wrapper::{
     DhcpRelayError, DhcpRelayResult, DhcpRequestInfo, DhcpRequester, DhcpResponseInfo,
@@ -86,6 +87,7 @@ fn abandon_machine_actions_on_power_change(
         | FsmAction::AgentControlRequest(_)
         | FsmAction::DpuAgentNetworkObservation
         | FsmAction::ConsoleOutputStart
+        | FsmAction::AdoptBmcDpuOs
         | FsmAction::BmcEvent(BmcEvent::PowerOn | BmcEvent::BootCompleted) => false,
     });
 }
@@ -136,10 +138,14 @@ pub(super) struct MachineStateMachine {
     pub(super) live_state: Arc<RwLock<LiveState>>,
     pub(super) mat_host_id: Uuid,
     pub(super) installed_os: OsImage,
+    /// The BMC's DPU OS generation that `installed_os` reflects. A different
+    /// value on the BMC means a BFB install landed there.
+    dpu_os_generation: u64,
 
     fsm: MachineFsm,
     bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
     bmc_state: Option<BmcState<LiveStateCallbacks>>,
+    bmc_recovery: BmcDhcpRecovery,
     bmc_injection: Arc<InjectionStore>,
     power_cycle_deadline: Option<Instant>,
     machine_on_deadline: Option<Instant>,
@@ -171,6 +177,8 @@ pub(super) struct MachineStateMachine {
 pub(super) struct LiveStateCallbacks {
     state: Arc<RwLock<LiveState>>,
     command_channel: mpsc::UnboundedSender<BmcCommand>,
+    #[cfg(test)]
+    reset_admission: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl LiveStateCallbacks {
@@ -181,6 +189,8 @@ impl LiveStateCallbacks {
         Self {
             state,
             command_channel,
+            #[cfg(test)]
+            reset_admission: None,
         }
     }
 
@@ -191,7 +201,7 @@ impl LiveStateCallbacks {
                 request: reset_type,
                 reply: None,
             })
-            .map_err(|err| ActionError::Internal(err.into()))
+            .map_err(|err| ActionError::Internal(eyre::eyre!(err.to_string())))
     }
 }
 
@@ -200,7 +210,33 @@ impl Callbacks for LiveStateCallbacks {
         &self,
         reset_type: ResourceResetType,
     ) -> Result<(), ActionError> {
-        self.set_power_state(reset_type)
+        self.set_power_state(reset_type)?;
+        #[cfg(test)]
+        if let Some(gate) = &self.reset_admission {
+            let _permit = gate
+                .acquire()
+                .await
+                .map_err(|_| ActionError::Internal(eyre::eyre!("test restart admission closed")))?;
+        }
+        Ok(())
+    }
+
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        let (reply, response) = oneshot::channel();
+        let wait = matches!(&effect, DeviceEffect::ResetBmcToDefaults(_));
+        self.command_channel
+            .send(BmcCommand::DeviceEffect {
+                effect,
+                reply: wait.then_some(reply),
+            })
+            .map_err(|err| ActionError::Internal(eyre::eyre!(err.to_string())))?;
+        if wait {
+            response
+                .await
+                .map_err(|err| ActionError::Internal(eyre::eyre!(err.to_string())))?
+        } else {
+            Ok(())
+        }
     }
 
     fn state_refresh_indication(&self) {
@@ -231,6 +267,8 @@ impl HostnameQuerying for LiveStateHostnameQuery {
 pub(super) struct LiveState {
     pub(super) is_up: bool,
     pub(super) power_state: PowerState, // Latest power observation from the machine FSM.
+    /// Applied AC power drops in this actor's lifetime, independent of ordinary ForceOff.
+    pub(super) aux_power_cycle_generation: u64,
     pub(super) observed_machine_id: Option<MachineId>,
     pub(super) tenant_network_config: Option<TenantNetworkConfig>,
     pub(super) machine_ip: Option<Ipv4Addr>,
@@ -254,6 +292,9 @@ pub(super) struct LiveState {
     pub(super) active_host_firmware: Option<bmc_mock::HostFirmwareVersions>,
     /// Live snapshot access with startup fallback for a BMC not yet constructed.
     pub(super) bmc_persistence: crate::bmc_mock_wrapper::BmcPersistence,
+    /// For a DPU machine, read-only access to its BMC's disk image and install
+    /// generation. Weak, so it does not keep the BMC or its callbacks alive.
+    pub(super) dpu_os_status_source: Option<bmc_mock::DpuOsStatusSource>,
 }
 
 impl Drop for MachineStateMachine {
@@ -270,6 +311,7 @@ impl Default for LiveState {
         LiveState {
             is_up: matches!(power_state, PowerState::On),
             power_state: PowerState::On,
+            aux_power_cycle_generation: 0,
             observed_machine_id: None,
             tenant_network_config: None,
             machine_ip: None,
@@ -286,11 +328,18 @@ impl Default for LiveState {
             dpu_flipped_to_nic_mode: false,
             active_host_firmware: None,
             bmc_persistence: Default::default(),
+            dpu_os_status_source: None,
         }
     }
 }
 
 impl LiveState {
+    /// The DPU's disk image and install generation as its BMC reports them, or
+    /// `None` for a host or before the BMC starts.
+    pub(super) fn dpu_os_status(&self) -> Option<bmc_mock::DpuOsStatus> {
+        self.dpu_os_status_source.as_ref()?.status()
+    }
+
     fn for_machine(
         machine_info: &MachineInfo,
         power_state: PowerState,
@@ -389,11 +438,21 @@ impl MachineStateMachine {
         };
         let (fsm, actions) = MachineFsm::init(true, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
-        let installed_os = initial_installed_os(
-            matches!(machine_info, MachineInfo::Dpu(_)),
-            config.dpf_enabled,
-            initial_os_image,
-        );
+        // The BMC commits its disk and task together. The MAT observation may
+        // have been sampled just before that commit, so a saved BMC disk wins,
+        // including an explicitly empty disk on a DPF-enabled DPU.
+        let saved_disk = bmc_persistence
+            .persisted()
+            .and_then(|saved| saved.dpu_os_status());
+        let installed_os = saved_disk
+            .map(|status| OsImage::from_dpu_disk_image(status.image))
+            .unwrap_or_else(|| {
+                initial_installed_os(
+                    matches!(machine_info, MachineInfo::Dpu(_)),
+                    config.dpf_enabled,
+                    initial_os_image,
+                )
+            });
         let mut live_state =
             LiveState::for_machine(&machine_info, PowerState::On, tpm_ek_certificate);
         live_state.bmc_persistence = bmc_persistence;
@@ -402,6 +461,9 @@ impl MachineStateMachine {
             actions: actions.into_iter().collect(),
             bmc_mock: None,
             bmc_state: None,
+            bmc_recovery: BmcDhcpRecovery::with_renewal(
+                app_context.app_config.bmc_dhcp_renewal_interval,
+            ),
             bmc_injection: Arc::new(InjectionStore::new()),
             power_cycle_deadline: None,
             machine_on_deadline: None,
@@ -415,6 +477,7 @@ impl MachineStateMachine {
             dhcp_retry_deadline: None,
             machine_discovery_result: None,
             installed_os,
+            dpu_os_generation: 0,
             live_state: Arc::new(RwLock::new(live_state)),
             machine_info,
             bmc_command_channel,
@@ -455,6 +518,9 @@ impl MachineStateMachine {
             bmc_dhcp_info: None,
             bmc_mock: None,
             bmc_state: None,
+            bmc_recovery: BmcDhcpRecovery::with_renewal(
+                app_context.app_config.bmc_dhcp_renewal_interval,
+            ),
             bmc_injection: Arc::new(InjectionStore::new()),
             machine_dhcp_info: None,
             machine_interface_id: None,
@@ -467,6 +533,7 @@ impl MachineStateMachine {
             first_run_delay: Some(first_run_offset(config.run_interval_idle)),
             power_cycle_deadline: None,
             installed_os,
+            dpu_os_generation: 0,
             machine_info,
             bmc_command_channel,
             config,
@@ -479,7 +546,30 @@ impl MachineStateMachine {
         }
     }
 
+    pub(super) async fn reset_bmc(
+        &mut self,
+        update: bmc_mock::BmcResetUpdate,
+    ) -> Result<(), ActionError> {
+        self.bmc_recovery.reset(update).await
+    }
+
     pub(super) async fn advance(&mut self) -> Duration {
+        if let Some(info) = self
+            .bmc_recovery
+            .advance(
+                &self.app_context.bmc_registry,
+                &self.app_context.dhcp_client,
+                DhcpRequestInfo {
+                    mac_address: self.machine_info.bmc_mac_address(),
+                    relay_address: self.config.bmc_dhcp_relay_address,
+                    vendor_class: vendor_class(&self.machine_info, DhcpRequester::Bmc),
+                },
+            )
+            .await
+        {
+            self.bmc_dhcp_info = Some(info);
+            self.update_live_state();
+        }
         if let Some(delay) = self.first_run_delay.take() {
             return delay;
         }
@@ -542,7 +632,7 @@ impl MachineStateMachine {
                 .unwrap_or(self.config.run_interval_idle)
             }
         };
-        jitter_interval(sleep_duration)
+        jitter_interval(sleep_duration).min(self.bmc_recovery.next_attempt_in())
     }
 
     async fn process_actions(&mut self) -> Option<Duration> {
@@ -552,7 +642,7 @@ impl MachineStateMachine {
                 FsmAction::SetupBmc => match self.setup_bmc().await {
                     Ok((bmc_mock, bmc_state)) => {
                         self.bmc_mock = bmc_mock;
-                        self.bmc_state = Some(bmc_state);
+                        self.attach_bmc_state(bmc_state);
                         self.actions.pop_front();
                     }
                     Err(_) => return Some(self.config.run_interval_working),
@@ -669,7 +759,7 @@ impl MachineStateMachine {
                         if matches!(self.machine_info, MachineInfo::Dpu(_))
                             && matches!(os_image, OsImage::DpuAgent)
                         {
-                            self.installed_os = OsImage::DpuAgent;
+                            self.set_installed_os(OsImage::DpuAgent);
                         }
                         self.actions.pop_front();
                         self.fsm_event(Event::PxeComplete(os_image))
@@ -680,7 +770,14 @@ impl MachineStateMachine {
                     if let Some(bmc_state) = &self.bmc_state {
                         bmc_state.on_event(event)
                     }
+                    let dpu_power_on = matches!(event, BmcEvent::PowerOn)
+                        && matches!(self.machine_info, MachineInfo::Dpu(_));
                     self.actions.pop_front();
+                    if dpu_power_on {
+                        // The BMC may defer committing a PowerOn until its reset
+                        // callback accepts. Keep OS boot actions behind adoption.
+                        self.actions.push_front(FsmAction::AdoptBmcDpuOs);
+                    }
                     // A BlueField that just applied a staged NIC-mode flip on this
                     // power-on is now a plain NIC, not a managed DPU. Converge to the
                     // dormant BMC-only track: drop the queued boot actions and stop,
@@ -708,6 +805,15 @@ impl MachineStateMachine {
                         self.fsm_event(Event::DpuFlippedToNicMode);
                     }
                 }
+                FsmAction::AdoptBmcDpuOs => {
+                    if self.bmc_state.as_ref().is_some_and(|state| {
+                        state.update_service_state.dpu_restart_admission_pending()
+                    }) {
+                        return Some(self.config.run_interval_working);
+                    }
+                    self.adopt_bmc_dpu_os_install();
+                    self.actions.pop_front();
+                }
                 FsmAction::InitialDiscoveryRequest(os_image) => {
                     match self.initial_discovery_request(*os_image).await {
                         Ok(None) => {
@@ -716,7 +822,7 @@ impl MachineStateMachine {
                             self.fsm_event(Event::MachineNotFound)
                         }
                         Ok(Some(machine_discovery_result)) => {
-                            self.installed_os = *os_image;
+                            self.set_installed_os(*os_image);
                             self.machine_discovery_result = Some(machine_discovery_result);
                             self.actions.pop_front();
                             self.fsm_event(Event::InitialDiscoveryCompleted)
@@ -785,6 +891,49 @@ impl MachineStateMachine {
         None
     }
 
+    /// Use a newly started BMC. A DPU's BMC learns the installed image and
+    /// exposes its disk status through the live state.
+    fn attach_bmc_state(&mut self, bmc_state: BmcState<LiveStateCallbacks>) {
+        if matches!(self.machine_info, MachineInfo::Dpu(_)) {
+            self.live_state.write().unwrap().dpu_os_status_source =
+                Some(bmc_state.update_service_state.dpu_os_status_source());
+        }
+        self.bmc_state = Some(bmc_state);
+        self.set_installed_os(self.installed_os);
+    }
+
+    /// Record the OS installed on this machine. A DPU's BMC tracks the same
+    /// disk, so the image is written there too.
+    fn set_installed_os(&mut self, os_image: OsImage) {
+        self.installed_os = os_image;
+        if matches!(self.machine_info, MachineInfo::Dpu(_))
+            && let Some(status) = self.bmc_state.as_ref().and_then(|bmc_state| {
+                bmc_state
+                    .update_service_state
+                    .record_dpu_os_image(os_image.dpu_disk_image())
+            })
+        {
+            self.dpu_os_generation = status.generation;
+        }
+    }
+
+    /// Take a BFB install that the DPU's BMC applied on this power-on, so the
+    /// next boot runs the new image.
+    fn adopt_bmc_dpu_os_install(&mut self) {
+        let Some(status) = self
+            .bmc_state
+            .as_ref()
+            .and_then(|bmc_state| bmc_state.update_service_state.dpu_os_status())
+        else {
+            return;
+        };
+        if status.generation != self.dpu_os_generation {
+            tracing::info!(image = ?status.image, generation = status.generation, "DPU booting a newly installed BFB");
+            self.installed_os = OsImage::from_dpu_disk_image(status.image);
+            self.dpu_os_generation = status.generation;
+        }
+    }
+
     fn fsm_event(&mut self, event: Event) {
         if matches!(
             event,
@@ -812,7 +961,7 @@ impl MachineStateMachine {
     }
 
     async fn setup_bmc(
-        &self,
+        &mut self,
     ) -> Result<
         (
             Option<Arc<BmcMockWrapperHandle>>,
@@ -1372,6 +1521,12 @@ impl MachineStateMachine {
         Ok(())
     }
 
+    pub(super) fn apply_aux_power_cycle(&mut self) -> Result<(), ActionError> {
+        self.set_system_power(ResourceResetType::ForceOff)?;
+        self.live_state.write().unwrap().aux_power_cycle_generation += 1;
+        Ok(())
+    }
+
     pub(super) fn set_system_power(
         &mut self,
         request: ResourceResetType,
@@ -1420,7 +1575,7 @@ impl MachineStateMachine {
     }
 
     async fn run_bmc_mock(
-        &self,
+        &mut self,
         ip_address: Ipv4Addr,
     ) -> Result<
         (
@@ -1466,11 +1621,13 @@ impl MachineStateMachine {
         }
 
         let maybe_bmc_mock_handle = {
-            self.app_context
-                .bmc_registry
-                .write()
-                .await
-                .insert(ip_address.to_string(), bmc_mock.router().clone());
+            self.bmc_recovery
+                .mount(
+                    &self.app_context.bmc_registry,
+                    ip_address,
+                    bmc_mock.router().clone(),
+                )
+                .await;
             bmc_mock.start().await?.map(Arc::new)
         };
         if let Some(ssh_host_key) = maybe_bmc_mock_handle
@@ -1522,6 +1679,29 @@ pub enum OsImage {
     DpuAgent,
     /// This is the scout image and can be run on hosts via PXE but should not be installed
     Scout,
+    /// The vanilla pre-ingestion BFB that decommissioning installs on a DPU. It boots but runs
+    /// no NICo agent.
+    PreIngestionBfb,
+}
+
+impl OsImage {
+    /// The BlueField disk image this installed OS corresponds to.
+    fn dpu_disk_image(self) -> Option<DpuOsImage> {
+        match self {
+            OsImage::DpuAgent => Some(DpuOsImage::Managed),
+            OsImage::PreIngestionBfb => Some(DpuOsImage::PreIngestion),
+            OsImage::None | OsImage::Scout => None,
+        }
+    }
+
+    /// The installed OS a BlueField disk image boots into.
+    fn from_dpu_disk_image(image: Option<DpuOsImage>) -> Self {
+        match image {
+            Some(DpuOsImage::Managed) => OsImage::DpuAgent,
+            Some(DpuOsImage::PreIngestion) => OsImage::PreIngestionBfb,
+            None => OsImage::None,
+        }
+    }
 }
 
 impl Display for OsImage {
@@ -1530,6 +1710,7 @@ impl Display for OsImage {
             OsImage::DpuAgent => f.write_str("Dpu Agent"),
             OsImage::Scout => f.write_str("Scout"),
             OsImage::None => f.write_str("No OS"),
+            OsImage::PreIngestionBfb => f.write_str("Pre-ingestion BFB"),
         }
     }
 }
@@ -1655,6 +1836,37 @@ mod tests {
         assert!(live_state.read().unwrap().tenant_network_config.is_none());
     }
 
+    /// The BMC mock only queues a device effect. Unlike a Redfish `ForceOff`, it is
+    /// not rejected for an already-off machine, since the AC cycle drops power that a
+    /// controller's earlier `ForceOff` has already removed.
+    #[tokio::test]
+    async fn device_effect_is_queued_whatever_the_power_state() {
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let live_state = Arc::new(RwLock::new(LiveState::default()));
+        live_state.write().unwrap().power_state = PowerState::Off;
+        let callbacks = LiveStateCallbacks::new(live_state, command_tx);
+
+        assert!(
+            callbacks
+                .computer_system_reset(ResourceResetType::ForceOff)
+                .await
+                .is_err()
+        );
+        callbacks
+            .device_effect(DeviceEffect::AuxPowerCycle)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(BmcCommand::DeviceEffect {
+                effect: DeviceEffect::AuxPowerCycle,
+                reply: None
+            })
+        ));
+        assert!(command_rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn first_advance_returns_the_start_offset_without_running_actions() {
         let app_context = MachineATronContext::for_test();
@@ -1684,6 +1896,339 @@ mod tests {
         assert!(offset < config.run_interval_idle);
         assert!(state_machine.first_run_delay.is_none());
         assert_eq!(state_machine.actions.len(), queued_actions);
+    }
+
+    fn dpu_with_bmc(
+        gate: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> (
+        axum::Router,
+        BmcState<LiveStateCallbacks>,
+        MachineStateMachine,
+        mpsc::UnboundedReceiver<BmcCommand>,
+    ) {
+        let app_context = MachineATronContext::for_test();
+        let config = app_context.app_config.machines["config"].clone();
+        let mac = MacAddress::new([2, 0, 0, 0, 0, 0]);
+        let mut mac_pool = MacAddressPool::new_pool(MacAddressPoolConfig::new(mac, 24).unwrap());
+        let dpu_info = MachineInfo::Dpu(bmc_mock::DpuMachineInfo::new(
+            config.hw_type,
+            &mut mac_pool,
+            bmc_mock::DpuSettings::default(),
+        ));
+        let (bmc_command_tx, bmc_command_rx) = mpsc::unbounded_channel();
+        let mut state_machine = MachineStateMachine::new(
+            dpu_info.clone(),
+            config,
+            app_context,
+            bmc_command_tx.clone(),
+            None,
+            None,
+            Uuid::new_v4(),
+        );
+        // The BMC can only restart a running DPU.
+        state_machine.live_state.write().unwrap().power_state = PowerState::On;
+        let mut callbacks =
+            LiveStateCallbacks::new(state_machine.live_state.clone(), bmc_command_tx);
+        callbacks.reset_admission = gate;
+        let (router, bmc_state) = bmc_mock::machine_router(
+            &dpu_info,
+            Arc::new(callbacks),
+            "test-dpu".into(),
+            false,
+            bmc_mock::MachineRouterOptions {
+                firmware_upgrade_duration: Some(Duration::ZERO),
+                ..Default::default()
+            },
+        );
+        state_machine.attach_bmc_state(bmc_state.clone());
+        state_machine
+            .live_state
+            .write()
+            .unwrap()
+            .bmc_persistence
+            .attach(&bmc_state);
+        state_machine.set_installed_os(OsImage::DpuAgent);
+
+        (router, bmc_state, state_machine, bmc_command_rx)
+    }
+
+    /// A BFB install accepted by the DPU's BMC restarts the DPU, and on that
+    /// power-on the DPU takes the installed image as its OS. A later netboot of
+    /// the agent image restores the managed image on the BMC.
+    #[tokio::test]
+    async fn dpu_boots_the_bfb_its_bmc_installed() {
+        use axum::http::{Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (router, bmc_state, mut state_machine, mut bmc_command_rx) = dpu_with_bmc(None);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate")
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "ImageURI": "carbide-pxe.forge//public/blobs/internal/aarch64/preingestion.bfb",
+                            "Targets": ["redfish/v1/UpdateService/FirmwareInventory/DPU_OS"],
+                            "TransferProtocol": "HTTP",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let task_id = response.headers()["Location"]
+            .to_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        assert_eq!(
+            state_machine
+                .live_state
+                .read()
+                .unwrap()
+                .bmc_persistence
+                .effect_snapshot()
+                .unwrap()
+                .tasks[task_id],
+            bmc_mock::BmcTaskState::Running
+        );
+        let restart = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match bmc_command_rx.recv().await.unwrap() {
+                    BmcCommand::SetSystemPower { request, .. } => return request,
+                    BmcCommand::StateRefreshIndication => {}
+                    BmcCommand::DeviceEffect { .. } => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(restart, ResourceResetType::ForceRestart);
+        assert_eq!(state_machine.installed_os, OsImage::DpuAgent);
+
+        state_machine.actions = VecDeque::from([FsmAction::BmcEvent(BmcEvent::PowerOn)]);
+        assert!(state_machine.process_actions().await.is_none());
+        assert_eq!(state_machine.installed_os, OsImage::PreIngestionBfb);
+        assert_eq!(
+            state_machine
+                .live_state
+                .read()
+                .unwrap()
+                .bmc_persistence
+                .effect_snapshot()
+                .unwrap()
+                .tasks[task_id],
+            bmc_mock::BmcTaskState::Completed
+        );
+        assert_eq!(
+            state_machine.live_state.read().unwrap().installed_os,
+            OsImage::PreIngestionBfb
+        );
+        assert_eq!(
+            state_machine.live_state.read().unwrap().dpu_os_status(),
+            Some(bmc_mock::DpuOsStatus {
+                image: Some(bmc_mock::DpuOsImage::PreIngestion),
+                generation: 2
+            })
+        );
+
+        // Rebuild: the agent netboot writes the managed image back, and a later
+        // power-on keeps it.
+        state_machine.set_installed_os(OsImage::DpuAgent);
+        assert_eq!(
+            bmc_state
+                .update_service_state
+                .dpu_os_status()
+                .unwrap()
+                .image,
+            Some(bmc_mock::DpuOsImage::Managed)
+        );
+        state_machine.actions = VecDeque::from([FsmAction::BmcEvent(BmcEvent::PowerOn)]);
+        assert!(state_machine.process_actions().await.is_none());
+        assert_eq!(state_machine.installed_os, OsImage::DpuAgent);
+    }
+
+    #[tokio::test]
+    async fn dpu_boot_waits_for_restart_admission_then_adopts_the_committed_disk() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        for rejected in [false, true] {
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let (router, state, mut machine, mut commands) = dpu_with_bmc(Some(gate.clone()));
+            let response = router
+                .oneshot(
+                    Request::post("/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            serde_json::json!({
+                                "ImageURI": "http://bmc/preingestion.bfb",
+                                "Targets": ["redfish/v1/UpdateService/FirmwareInventory/DPU_OS"],
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let task = response.headers()["Location"]
+                .to_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if matches!(
+                        commands.recv().await.unwrap(),
+                        BmcCommand::SetSystemPower { .. }
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert!(state.update_service_state.dpu_restart_admission_pending());
+            machine.actions = VecDeque::from([
+                FsmAction::BmcEvent(BmcEvent::PowerOn),
+                FsmAction::SetTimer(Timer::OsReady),
+            ]);
+            assert!(
+                machine.process_actions().await.is_some(),
+                "boot must wait for admission"
+            );
+            assert!(
+                machine.os_ready_deadline.is_none(),
+                "OS boot advanced while callback was pending"
+            );
+            assert_eq!(machine.installed_os, OsImage::DpuAgent);
+            if rejected {
+                gate.close();
+            } else {
+                gate.add_permits(1);
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while state.update_service_state.dpu_restart_admission_pending() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(machine.process_actions().await.is_none());
+            assert!(machine.os_ready_deadline.is_some());
+            let expected = if rejected {
+                OsImage::DpuAgent
+            } else {
+                OsImage::PreIngestionBfb
+            };
+            assert_eq!(machine.installed_os, expected);
+            let boot = resolve_pxe_boot(
+                PxeResponse {
+                    boot_target: PxeBootTarget::Exit,
+                    machine_interface_id: Some(
+                        "0fd6e9a3-06fc-4a22-ad29-aca299677b00".parse().unwrap(),
+                    ),
+                },
+                machine.installed_os,
+            )
+            .unwrap()
+            .0;
+            assert_eq!(boot, expected, "disk boot chose a stale image");
+            assert_eq!(
+                state.snapshot_source().effect_snapshot().unwrap().tasks[task],
+                if rejected {
+                    bmc_mock::BmcTaskState::Exception
+                } else {
+                    bmc_mock::BmcTaskState::Completed
+                }
+            );
+            assert_eq!(
+                machine.dpu_os_generation,
+                state
+                    .update_service_state
+                    .dpu_os_status()
+                    .unwrap()
+                    .generation
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_dpu_disk_wins_over_a_stale_mat_os_observation() {
+        for image in [None, Some(DpuOsImage::PreIngestion)] {
+            let context = MachineATronContext::for_test();
+            let mut config = (*context.app_config.machines["config"]).clone();
+            config.dpf_enabled = true;
+            let range = MacAddressPoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 24).unwrap();
+            let mut pool = MacAddressPool::new_pool(range);
+            let info = bmc_mock::DpuMachineInfo::new(config.hw_type, &mut pool, Default::default());
+            let (_, old_bmc) = bmc_mock::machine_router(
+                &MachineInfo::Dpu(info.clone()),
+                Arc::new(LiveStateCallbacks::new(
+                    Arc::new(RwLock::new(LiveState::default())),
+                    mpsc::unbounded_channel().0,
+                )),
+                "dpu-snapshot".into(),
+                false,
+                Default::default(),
+            );
+            let disk = old_bmc
+                .update_service_state
+                .record_dpu_os_image(image)
+                .unwrap();
+            let saved = crate::PersistedDpuMachine {
+                mat_id: Uuid::new_v4(),
+                hw_type: info.hw_type,
+                bmc_mac_address: info.bmc_mac_address,
+                host_mac_address: info.host_mac_address,
+                oob_mac_address: info.oob_mac_address,
+                serial: info.serial.clone(),
+                installed_os: OsImage::DpuAgent,
+                dpu_index: 0,
+                bmc_state: Some(old_bmc.persisted()),
+                settings: info.settings.clone(),
+            };
+            let (sender, _receiver) = mpsc::unbounded_channel();
+            let mut machine = MachineStateMachine::from_persisted(
+                PersistedMachine::Dpu(saved),
+                MachineInfo::Dpu(info.clone()),
+                Arc::new(config),
+                context,
+                sender.clone(),
+                None,
+                Uuid::new_v4(),
+            );
+            assert_eq!(machine.installed_os, OsImage::from_dpu_disk_image(image));
+            let (_, fresh) = bmc_mock::machine_router(
+                &MachineInfo::Dpu(info),
+                Arc::new(LiveStateCallbacks::new(machine.live_state.clone(), sender)),
+                "restored".into(),
+                false,
+                Default::default(),
+            );
+            machine
+                .live_state
+                .read()
+                .unwrap()
+                .bmc_persistence
+                .restore(&fresh)
+                .unwrap();
+            machine.attach_bmc_state(fresh.clone());
+            machine.update_live_state();
+            assert_eq!(fresh.update_service_state.dpu_os_status(), Some(disk));
+            assert_eq!(
+                machine.live_state.read().unwrap().installed_os,
+                OsImage::from_dpu_disk_image(image)
+            );
+        }
     }
 
     #[test]
@@ -1857,6 +2402,7 @@ mod tests {
                             FsmAction::DpuAgentNetworkObservation,
                             FsmAction::BmcEvent(BmcEvent::PowerOn),
                             FsmAction::BmcEvent(BmcEvent::BootCompleted),
+                            FsmAction::AdoptBmcDpuOs,
                             FsmAction::ConsoleOutputStop,
                             FsmAction::CleanupOnPowerOff,
                         ]),

@@ -284,26 +284,23 @@ thread_local! {
     pub static QUERY_DATA: RefCell<SqlxQueryDataAggregation> = RefCell::new(SqlxQueryDataAggregation::default());
 }
 
+/// Returns the current span's aggregate query data and records its declared SQL fields.
+/// Query data is collected by [`create_sqlx_query_tracing_layer`].
 pub fn fetch_and_update_current_span_attributes() -> SqlxQueryDataAggregation {
     let span = tracing::Span::current();
     // The magic event will make an attached `SqlxQueryTracingLayer` update `QUERY_DATA` for us
     tracing::event!(target: "sqlx::extract_query_data", tracing::Level::INFO, {});
     // We now grab the data and patch our span attributes
     let query_data = QUERY_DATA.with(|data| data.take());
-    span.record("sql_queries", query_data.num_queries);
-    span.record("sql_total_rows_affected", query_data.total_rows_affected);
-    span.record("sql_total_rows_returned", query_data.total_rows_returned);
-    span.record(
-        "sql_max_query_duration_us",
-        query_data.max_query_duration.as_micros(),
-    );
-    span.record(
-        "sql_max_query_duration_summary",
-        &query_data.max_query_duration_summary,
-    );
-    span.record(
-        "sql_total_query_duration_us",
-        query_data.total_query_duration.as_micros(),
+    // Batch the SQL fields to avoid repeated span updates.
+    tracing::record_all!(
+        span,
+        sql_queries = query_data.num_queries,
+        sql_total_rows_affected = query_data.total_rows_affected,
+        sql_total_rows_returned = query_data.total_rows_returned,
+        sql_max_query_duration_us = query_data.max_query_duration.as_micros(),
+        sql_max_query_duration_summary = &query_data.max_query_duration_summary,
+        sql_total_query_duration_us = query_data.total_query_duration.as_micros(),
     );
     query_data
 }
@@ -397,6 +394,50 @@ mod tests {
         }
     }
 
+    // Capture visitor types as well as values; formatted output cannot distinguish them.
+    #[derive(Debug, PartialEq)]
+    enum RecordedValue {
+        U64(u64),
+        U128(u128),
+        Str(String),
+        Debug(String),
+    }
+
+    #[derive(Debug, Default, PartialEq)]
+    struct RecordedFields(Vec<(&'static str, RecordedValue)>);
+
+    impl field::Visit for RecordedFields {
+        fn record_u64(&mut self, field: &field::Field, value: u64) {
+            self.0.push((field.name(), RecordedValue::U64(value)));
+        }
+
+        fn record_u128(&mut self, field: &field::Field, value: u128) {
+            self.0.push((field.name(), RecordedValue::U128(value)));
+        }
+
+        fn record_str(&mut self, field: &field::Field, value: &str) {
+            self.0
+                .push((field.name(), RecordedValue::Str(value.to_owned())));
+        }
+
+        fn record_debug(&mut self, field: &field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .push((field.name(), RecordedValue::Debug(format!("{value:?}"))));
+        }
+    }
+
+    struct RecordLayer {
+        records: Arc<Mutex<Vec<RecordedFields>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for RecordLayer {
+        fn on_record(&self, _id: &Id, values: &span::Record<'_>, _ctx: Context<'_, S>) {
+            let mut fields = RecordedFields::default();
+            values.record(&mut fields);
+            self.records.lock().unwrap().push(fields);
+        }
+    }
+
     #[test]
     fn test_sqlx_subscriber() {
         use std::time::Duration;
@@ -406,6 +447,7 @@ mod tests {
         let writer = Arc::new(MutexWriter {
             writer: Mutex::new(Vec::new()),
         });
+        let records = Arc::new(Mutex::new(Vec::new()));
 
         let fmt_layer = tracing_subscriber::fmt::layer()
             .without_time()
@@ -415,6 +457,9 @@ mod tests {
 
         let _subscriber = tracing_subscriber::registry()
             .with(create_sqlx_query_tracing_layer())
+            .with(RecordLayer {
+                records: records.clone(),
+            })
             .with(fmt_layer.with_filter(block_sqlx_filter()))
             .with(LevelFilter::from_level(Level::INFO))
             .set_default();
@@ -424,12 +469,14 @@ mod tests {
                 parent: None,
                 tracing::Level::WARN,
                 "sqlx_test_span",
-                sql_queries = 0,
-                sql_total_rows_affected = 0,
-                sql_total_rows_returned = 0,
-                sql_max_query_duration_us = 0,
-                sql_max_query_duration_summary = tracing::field::Empty,
+                // SQL fields resolve by name even after unrelated, reordered declarations.
+                unrelated_field = tracing::field::Empty,
                 sql_total_query_duration_us = 0,
+                sql_max_query_duration_summary = tracing::field::Empty,
+                sql_total_rows_affected = 0,
+                sql_queries = 0,
+                sql_max_query_duration_us = 0,
+                sql_total_rows_returned = 0,
             );
 
             let _entered = span.enter();
@@ -438,7 +485,36 @@ mod tests {
             tracing::event!(target: "sqlx::query", Level::INFO, summary = "Summary3", db.statement = "Statement3", rows_affected = 8u64, rows_returned = 6u64, elapsed = ?Duration::from_millis(311));
             tracing::event!(target: "sqlx::query", Level::INFO, summary = "Summary4", db.statement = "Statement4", rows_affected = 16u64, rows_returned = 9u64, elapsed = ?Duration::from_secs(411));
 
-            fetch_and_update_current_span_attributes();
+            let query_data = fetch_and_update_current_span_attributes();
+            assert_eq!(query_data.num_queries, 4);
+            assert_eq!(query_data.total_rows_affected, 30);
+            assert_eq!(query_data.total_rows_returned, 19);
+            assert_eq!(query_data.max_query_duration, Duration::from_secs(411));
+            assert_eq!(query_data.max_query_duration_summary, "Statement4");
+            assert_eq!(
+                query_data.total_query_duration,
+                Duration::from_nanos(411_311_211_111)
+            );
+            assert_eq!(
+                std::mem::take(&mut *records.lock().unwrap()),
+                vec![RecordedFields(vec![
+                    ("sql_queries", RecordedValue::U64(4)),
+                    ("sql_total_rows_affected", RecordedValue::U64(30)),
+                    ("sql_total_rows_returned", RecordedValue::U64(19)),
+                    (
+                        "sql_max_query_duration_us",
+                        RecordedValue::U128(411_000_000)
+                    ),
+                    (
+                        "sql_max_query_duration_summary",
+                        RecordedValue::Str("Statement4".to_owned()),
+                    ),
+                    (
+                        "sql_total_query_duration_us",
+                        RecordedValue::U128(411_311_211)
+                    ),
+                ])]
+            );
 
             // The default formatter will only log attributs on events. Therefore we produce one
             // Note that it will also log the initial values of attributes, e.g. sql_queries = 0
@@ -461,6 +537,62 @@ mod tests {
             assert!(log_lines[0].contains("sql_total_query_duration_us=411311211"));
             // We use the first 150 chars of the statement as the summary for more detail
             assert!(log_lines[0].contains("sql_max_query_duration_summary=\"Statement4\""));
+        }
+
+        // A fresh span must not inherit the previous span's query data.
+        {
+            let span = tracing::span!(
+                parent: None,
+                Level::WARN,
+                "sqlx_empty_span",
+                sql_queries = 0,
+                sql_total_rows_affected = 0,
+                sql_total_rows_returned = 0,
+                sql_max_query_duration_us = 0,
+                sql_max_query_duration_summary = tracing::field::Empty,
+                sql_total_query_duration_us = 0,
+            );
+            let _entered = span.enter();
+            let query_data = fetch_and_update_current_span_attributes();
+            assert_eq!(query_data.num_queries, 0);
+            assert_eq!(query_data.total_rows_affected, 0);
+            assert_eq!(query_data.total_rows_returned, 0);
+            assert_eq!(query_data.max_query_duration, Duration::ZERO);
+            assert_eq!(query_data.max_query_duration_summary, "");
+            assert_eq!(query_data.total_query_duration, Duration::ZERO);
+            assert_eq!(
+                std::mem::take(&mut *records.lock().unwrap()),
+                vec![RecordedFields(vec![
+                    ("sql_queries", RecordedValue::U64(0)),
+                    ("sql_total_rows_affected", RecordedValue::U64(0)),
+                    ("sql_total_rows_returned", RecordedValue::U64(0)),
+                    ("sql_max_query_duration_us", RecordedValue::U128(0)),
+                    (
+                        "sql_max_query_duration_summary",
+                        RecordedValue::Str(String::new()),
+                    ),
+                    ("sql_total_query_duration_us", RecordedValue::U128(0)),
+                ])]
+            );
+        }
+
+        // Query aggregation also works when the span has no SQL fields to record.
+        {
+            let span = tracing::span!(parent: None, Level::WARN, "sqlx_span_without_fields");
+            let _entered = span.enter();
+            tracing::event!(target: "sqlx::query", Level::INFO, summary = "Summary5", db.statement = "Statement5", rows_affected = 2u64, rows_returned = 1u64, elapsed = ?Duration::from_nanos(41));
+
+            let query_data = fetch_and_update_current_span_attributes();
+            assert_eq!(query_data.num_queries, 1);
+            assert_eq!(query_data.total_rows_affected, 2);
+            assert_eq!(query_data.total_rows_returned, 1);
+            assert_eq!(query_data.max_query_duration, Duration::from_nanos(41));
+            assert_eq!(query_data.max_query_duration_summary, "Statement5");
+            assert_eq!(query_data.total_query_duration, Duration::from_nanos(41));
+            assert_eq!(
+                std::mem::take(&mut *records.lock().unwrap()),
+                vec![RecordedFields(Vec::new())]
+            );
         }
     }
 }

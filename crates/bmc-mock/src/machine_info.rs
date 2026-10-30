@@ -354,6 +354,7 @@ impl DpuMachineInfo {
             DpuType::Bluefield3 => self.bluefield3().update_service_config(),
             DpuType::Bluefield4 => self.bluefield4().update_service_config(),
         };
+        config.dpu_os = true;
         self.append_configured_firmware_inventory(&mut config);
         config
     }
@@ -615,8 +616,12 @@ impl HostMachineInfo {
             }
             HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().system_config(),
             HardwareType::DeltaPowerShelf => self.delta_power_shelf().system_config(),
-            HardwareType::NvidiaSwitchNd5200Ld => self.nvidia_switch_nd5200_ld().system_config(),
-            HardwareType::NvidiaSwitchN5700Ld => self.nvidia_switch_n5700_ld().system_config(),
+            HardwareType::NvidiaSwitchNd5200Ld => {
+                self.nvidia_switch_nd5200_ld().system_config(callbacks)
+            }
+            HardwareType::NvidiaSwitchN5700Ld => {
+                self.nvidia_switch_n5700_ld().system_config(callbacks)
+            }
             HardwareType::NvidiaDgxH100 => self.nvidia_dgx_h100().system_config(callbacks),
             HardwareType::HpeProliantDl380aGen11 => {
                 self.hpe_proliant_dl380a_gen11().system_config(callbacks)

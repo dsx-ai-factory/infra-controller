@@ -21,6 +21,8 @@
 use lazy_static::lazy_static;
 
 static MANAGED_HOSTS_TEMPLATE: &str = include_str!("sql/managed_hosts.sql.template");
+static MANAGED_HOSTS_COMPACT_TEMPLATE: &str =
+    include_str!("sql/managed_hosts_compact.sql.template");
 static MACHINE_SNAPSHOTS_TEMPLATE: &str = include_str!("sql/machine_snapshots.sql.template");
 static MANAGED_HOST_HISTORY_JOIN_SNIPPET: &str =
     include_str!("sql/managed_host_history_join.snippet");
@@ -43,6 +45,8 @@ fn replace_sql<F: Fn(&str) -> Option<&str>>(input: &str, f: F) -> String {
 }
 
 lazy_static! {
+    pub static ref MANAGED_HOSTS_COMPACT: String =
+        replace_sql(MANAGED_HOSTS_COMPACT_TEMPLATE, |line| Some(line));
     pub static ref MANAGED_HOSTS_WITH_HISTORY: String =
         replace_sql(MANAGED_HOSTS_TEMPLATE, |line| {
             match line {
@@ -74,4 +78,39 @@ lazy_static! {
                 default => Some(default),
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    /// The compact query keeps the allocation and health inputs and leaves out
+    /// the heavy parts of the full query.
+    #[test]
+    fn compact_template_shape() {
+        value_scenarios!(
+            run = |fragment: &str| (
+                MANAGED_HOSTS_COMPACT.contains(fragment),
+                MANAGED_HOSTS_NO_HISTORY.contains(fragment)
+            );
+            "kept" {
+                "OFFSET 0" => (true, true),
+                "LEFT JOIN machine_boot_interfaces boot_interface" => (true, true),
+                "INNER JOIN network_segments ns" => (true, true),
+                "AND bmc_i.interface_type = 'Bmc'" => (true, true),
+                "FROM racks rack" => (true, true),
+                "mi_parent.attached_dpu_machine_id" => (true, true),
+            }
+            "left out" {
+                "machine_nic_firmware_overrides" => (false, true),
+                "power_options" => (false, true),
+                "machine_skus" => (false, true),
+                "dhcp_entries" => (false, true),
+                "'topology', mt2.topology" => (false, true),
+                "SELECT json_agg(a2.address)" => (false, true),
+            }
+        );
+    }
 }

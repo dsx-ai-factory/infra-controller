@@ -14,18 +14,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::iter::Peekable;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use carbide_instrument::emit;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId,
 };
+use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
 use db::machine::MachineNetworkConfigNotCurrent;
 use db::{ConditionalWrite, Transaction};
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::bmc_info::BmcInfo;
@@ -58,7 +63,10 @@ use crate::IdentifiedManagedHost;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::managed_host::ManagedHost;
-use crate::metrics::SiteExplorationMetrics;
+use crate::metrics::{
+    ManagedHostCreationFinished, ManagedHostCreationStage, ManagedHostCreationStageFinished,
+    SiteExplorationMetrics,
+};
 
 mod host_identification;
 pub(crate) use host_identification::ConfiguredIngestionCandidate;
@@ -69,6 +77,9 @@ const DESIRED_BOOT_INTERFACE_RECONCILE_PAGE_SIZE: i64 = 100;
 pub struct MachineCreator {
     database_connection: PgPool,
     config: Config,
+    /// In-flight creations per `create_machines` call: the configured value,
+    /// clamped below the admin-lock admission permits.
+    creation_concurrency: usize,
     common_pools: Arc<CommonPools>,
     rack_profiles: Arc<RackProfileConfig>,
     machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
@@ -85,9 +96,14 @@ impl MachineCreator {
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
         dpf_enabled_at_site: bool,
     ) -> Self {
+        let creation_concurrency = creation_concurrency(
+            config.machine_creation_concurrency,
+            db::machine_interface::admin_lock_admission_permits(),
+        );
         Self {
             database_connection,
             config,
+            creation_concurrency,
             common_pools,
             rack_profiles,
             machine_info_provider,
@@ -95,56 +111,52 @@ impl MachineCreator {
         }
     }
 
-    /// Creates a new ManagedHost (Host `Machine` and DPU `Machine` pair)
-    /// for each ManagedHost that was identified and that doesn't have a corresponding `Machine` yet.
+    /// Starts creating a new ManagedHost (Host `Machine` and DPU `Machine`
+    /// pair) for each ManagedHost that was identified and that doesn't have a
+    /// corresponding `Machine` yet. `CreationRun::create_hosts` drives it.
     ///
     /// A host whose BMC and DPU BMCs are all in `ingested_bmc_ips` only enters the
     /// per-host transaction when one of its endpoints is in `explored_this_run`, so
     /// the steady-state repair in `create_managed_host` follows the exploration
-    /// rotation. A host with any BMC still missing a machine always enters it.
-    pub(crate) async fn create_machines(
-        &self,
-        metrics: &mut SiteExplorationMetrics,
-        explored_managed_hosts: &mut [IdentifiedManagedHost],
-        expected_explored_endpoint_index: &ExploredEndpointIndex,
+    /// rotation. Such a repair takes a concurrency slot and no slot of
+    /// `machines_created_per_run`. A host with any BMC still missing a machine
+    /// always enters the transaction and counts toward the cap.
+    pub(super) fn creation_run<'a>(
+        &'a self,
+        explored_managed_hosts: &'a mut [IdentifiedManagedHost],
+        expected_explored_endpoint_index: &'a ExploredEndpointIndex,
         ingested_bmc_ips: &HashSet<IpAddr>,
         explored_this_run: &HashSet<IpAddr>,
-    ) -> SiteExplorerResult<()> {
+    ) -> CreationRun<'a> {
         let mut skipped_existing_hosts = 0usize;
-        for identified in explored_managed_hosts {
-            let host = &identified.explored_host;
-            if !needs_managed_host_transaction(host, ingested_bmc_ips, explored_this_run) {
+        let mut pending = Vec::new();
+        let mut repairs = Vec::new();
+        let mut racks_to_ensure = BTreeSet::new();
+        for identified in explored_managed_hosts.iter_mut() {
+            if !needs_managed_host_transaction(
+                &identified.explored_host,
+                ingested_bmc_ips,
+                explored_this_run,
+            ) {
                 skipped_existing_hosts += 1;
                 continue;
             }
-            let expected_machine =
-                expected_explored_endpoint_index.matched_expected_machine(&host.host_bmc_ip);
-
-            match self
-                .create_managed_host_with_selection(
-                    host,
-                    &mut identified.report,
-                    expected_machine,
-                    identified.primary_interface_selection,
-                    &self.database_connection,
-                )
-                .await
+            if host_bmc_ips(&identified.explored_host)
+                .all(|bmc_ip| ingested_bmc_ips.contains(bmc_ip))
             {
-                Ok(true) => {
-                    metrics.created_machines += 1;
-                    if metrics.created_machines as u64 == self.config.machines_created_per_run {
-                        break;
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => tracing::error!(
-                    %error,
-                    host = ?host,
-                    "Failed to create managed host"
-                ),
+                repairs.push(identified);
+                continue;
             }
+            let host_bmc_ip = &identified.explored_host.host_bmc_ip;
+            if !ingested_bmc_ips.contains(host_bmc_ip)
+                && let Some(rack_id) = expected_explored_endpoint_index
+                    .matched_expected_machine(host_bmc_ip)
+                    .and_then(|expected| expected.data.rack_id.as_ref())
+            {
+                racks_to_ensure.insert(rack_id.clone());
+            }
+            pending.push(identified);
         }
-
         if skipped_existing_hosts > 0 {
             tracing::info!(
                 skipped_existing_hosts,
@@ -152,7 +164,71 @@ impl MachineCreator {
             );
         }
 
-        Ok(())
+        CreationRun {
+            creator: self,
+            expected_explored_endpoint_index,
+            pending: pending.into_iter().peekable(),
+            repairs: repairs.into_iter().peekable(),
+            budget: CreationBudget::new(
+                self.config.machines_created_per_run,
+                self.creation_concurrency,
+            ),
+            racks_to_ensure: racks_to_ensure.into_iter().collect(),
+            pass_interval: self.config.switch_and_power_shelf_pass_interval,
+            last_pass: Instant::now(),
+        }
+    }
+
+    /// One creation attempt on `identified`, with the Event for its outcome.
+    async fn create_identified_host(
+        &self,
+        identified: &mut IdentifiedManagedHost,
+        expected_machine: Option<&ExpectedMachine>,
+    ) -> CreationAttempt {
+        let IdentifiedManagedHost {
+            explored_host,
+            report,
+            primary_interface_selection,
+        } = identified;
+        let start = Instant::now();
+        let result = self
+            .create_managed_host_with_selection(
+                explored_host,
+                report,
+                expected_machine,
+                *primary_interface_selection,
+                &self.database_connection,
+            )
+            .await;
+        CreationAttempt {
+            created: matches!(result, Ok(ManagedHostCreation::Created { .. })),
+            event: creation_finished_event(explored_host, result, start.elapsed()),
+        }
+    }
+
+    /// Creates the rack rows of `rack_ids` in one short transaction before
+    /// the first host is dispatched, so concurrent hosts of a new rack find
+    /// the row instead of racing to insert it. It runs while nothing is in
+    /// flight and takes no segment lock. A failure is logged and not retried
+    /// in this run; `ensure_rack_exists` in the host transaction remains the
+    /// fallback.
+    async fn ensure_racks_before_dispatch(&self, rack_ids: &[RackId]) {
+        let result = async {
+            let mut txn = Transaction::begin(&self.database_connection).await?;
+            for rack_id in rack_ids {
+                crate::ensure_rack_exists(&mut txn, rack_id).await?;
+            }
+            txn.commit().await?;
+            SiteExplorerResult::Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(
+                rack_count = rack_ids.len(),
+                %error,
+                "Could not ensure the racks before dispatching their hosts; the host transactions retry"
+            );
+        }
     }
 
     /// Best-effort reconciles every host whose desired boot interface is still
@@ -291,8 +367,10 @@ impl MachineCreator {
         expected_machine: Option<&ExpectedMachine>,
         pool: &PgPool,
     ) -> SiteExplorerResult<bool> {
-        self.create_managed_host_with_selection(explored_host, report, expected_machine, None, pool)
-            .await
+        let creation = self
+            .create_managed_host_with_selection(explored_host, report, expected_machine, None, pool)
+            .await?;
+        Ok(matches!(creation, ManagedHostCreation::Created { .. }))
     }
 
     /// Creates a managed host with its transient report selection available for
@@ -300,6 +378,10 @@ impl MachineCreator {
     ///
     /// The source is recorded only when its selected MAC becomes the durable
     /// target; target resolution may legitimately choose another interface.
+    ///
+    /// Records one stage observation for the admission wait, one for the
+    /// creation transaction on every exit including errors, and one for the
+    /// after-commit repair when a host machine was committed.
     async fn create_managed_host_with_selection(
         &self,
         explored_host: &ExploredManagedHost,
@@ -307,22 +389,70 @@ impl MachineCreator {
         expected_machine: Option<&ExpectedMachine>,
         primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
         pool: &PgPool,
-    ) -> SiteExplorerResult<bool> {
+    ) -> SiteExplorerResult<ManagedHostCreation> {
         let Some(expected_machine) = expected_machine else {
             tracing::warn!(
                 host_bmc_ip_address = %explored_host.host_bmc_ip,
-                    "Refusing to create managed host, expected machines entry not found"
+                "Refusing to create managed host, expected machines entry not found"
             );
-            return Ok(false);
+            return Ok(ManagedHostCreation::SkippedUnexpected);
         };
-        let machine_data = Some(&expected_machine.data);
-        let mut managed_host = ManagedHost::init(explored_host);
 
         // Admission permit BEFORE the transaction: waiters on the admin-segment
         // advisory locks (the allocation locks taken below for a new host, and
         // the reconcile transaction that follows the commit) must queue in
         // memory, not on open pool connections.
+        let admission_start = Instant::now();
         let _admin_admission = db::machine_interface::admin_lock_admission().await;
+        record_creation_stage(
+            ManagedHostCreationStage::AdmissionWait,
+            admission_start.elapsed(),
+        );
+
+        let transaction_start = Instant::now();
+        let creation = self
+            .create_managed_host_in_transaction(
+                pool,
+                explored_host,
+                report,
+                expected_machine,
+                primary_interface_selection,
+            )
+            .await;
+        record_creation_stage(
+            ManagedHostCreationStage::Transaction,
+            transaction_start.elapsed(),
+        );
+        let creation = creation?;
+
+        if let Some(host_machine_id) = creation.committed_host_machine_id() {
+            // Normalize host admin address ownership now that every DPU-backed
+            // host interface is attached and the primary flags are committed.
+            let repair_start = Instant::now();
+            reconcile_host_admin_addresses_after_commit(pool, &host_machine_id).await;
+            record_creation_stage(
+                ManagedHostCreationStage::AfterCommitRepair,
+                repair_start.elapsed(),
+            );
+        }
+
+        Ok(creation)
+    }
+
+    /// The creation transaction: one transaction from begin to commit, with
+    /// the DPU-backed branch holding the admin segment locks in allocation
+    /// mode. Returns after the commit; the caller runs the admin address
+    /// repair.
+    async fn create_managed_host_in_transaction(
+        &self,
+        pool: &PgPool,
+        explored_host: &ExploredManagedHost,
+        report: &mut EndpointExplorationReport,
+        expected_machine: &ExpectedMachine,
+        primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
+    ) -> SiteExplorerResult<ManagedHostCreation> {
+        let machine_data = Some(&expected_machine.data);
+        let mut managed_host = ManagedHost::init(explored_host);
         let mut txn = Transaction::begin(pool).await?;
 
         // Zero-dpu case: If the explored host had no DPUs, we can create the machine now
@@ -343,7 +473,9 @@ impl MachineCreator {
                 // desired boot target. Keep those restart-safe writes even
                 // though there is no new machine to count this iteration.
                 txn.commit().await?;
-                return Ok(false);
+                return Ok(ManagedHostCreation::Repaired {
+                    host_machine_id: None,
+                });
             }
             tracing::info!("Created managed_host with zero DPUs");
         }
@@ -379,8 +511,9 @@ impl MachineCreator {
             reconcile_desired_boot_interface(&mut txn, &host_machine_id, None, None).await?;
 
             txn.commit().await?;
-            reconcile_host_admin_addresses_after_commit(pool, &host_machine_id).await;
-            return Ok(false);
+            return Ok(ManagedHostCreation::Repaired {
+                host_machine_id: Some(host_machine_id),
+            });
         }
 
         // Advisory-lock the admin segments, in the allocators' mode, before the
@@ -498,18 +631,7 @@ impl MachineCreator {
 
         txn.commit().await?;
 
-        // Normalize host admin address ownership now that every DPU-backed
-        // host interface is attached and the primary flags are committed.
-        reconcile_host_admin_addresses_after_commit(pool, &host_machine_id).await;
-
-        tracing::info!(
-            host_bmc_ip_address = %explored_host.host_bmc_ip,
-            %host_machine_id,
-            dpu_count = managed_host.explored_host.dpus.len(),
-            "Created managed host from explored endpoint"
-        );
-
-        Ok(true)
+        Ok(ManagedHostCreation::Created { host_machine_id })
     }
 
     async fn dpf_based_dpu_provisioning_possible(
@@ -1439,6 +1561,241 @@ impl MachineCreator {
     }
 }
 
+/// One finished `create_identified_host` call.
+struct CreationAttempt {
+    created: bool,
+    event: ManagedHostCreationFinished,
+}
+
+/// The hosts of one run that still need a creation attempt, with the run's
+/// creation budget. Built by `MachineCreator::creation_run`.
+pub(super) struct CreationRun<'a> {
+    creator: &'a MachineCreator,
+    expected_explored_endpoint_index: &'a ExploredEndpointIndex,
+    /// Hosts with a BMC still without a machine, in creation order. Each
+    /// attempt counts toward the cap.
+    pending: Peekable<std::vec::IntoIter<&'a mut IdentifiedManagedHost>>,
+    /// Ingested hosts explored this run, revisited for the steady-state
+    /// repair after the pending hosts. An attempt takes a concurrency slot
+    /// and no cap slot.
+    repairs: Peekable<std::vec::IntoIter<&'a mut IdentifiedManagedHost>>,
+    budget: CreationBudget,
+    /// Distinct racks of the pending hosts still without a machine, in id
+    /// order. The first `create_hosts` call takes and creates them.
+    racks_to_ensure: Vec<RackId>,
+    pass_interval: Duration,
+    last_pass: Instant,
+}
+
+/// Why `CreationRun::create_hosts` returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CreationProgress {
+    /// Every pending host within the cap and every repair has had its attempt.
+    Done,
+    /// `switch_and_power_shelf_pass_interval` has elapsed and hosts remain to
+    /// dispatch: pending hosts within the cap, or repairs. Nothing is in
+    /// flight, so the caller can run the switch and power shelf pass and call
+    /// `create_hosts` again.
+    PassDue,
+}
+
+impl<'a> CreationRun<'a> {
+    /// Creates the pending hosts in order, up to `machine_creation_concurrency`
+    /// at once, each in its own transaction under its own admission permit,
+    /// and awaits every in-flight creation before returning.
+    /// `machines_created_per_run` is applied at dispatch and counts in-flight
+    /// creations. The repairs follow the pending hosts and take a concurrency
+    /// slot only, so an exhausted cap does not defer them. The first call
+    /// creates the racks the pending hosts need before it dispatches anything,
+    /// unless the cap lets it dispatch no pending host. Once
+    /// `switch_and_power_shelf_pass_interval` has elapsed since the run
+    /// started or since the last pass, dispatching stops, the in-flight
+    /// creations drain, and this returns `PassDue` while hosts remain to
+    /// dispatch. A zero interval never pauses.
+    pub(super) async fn create_hosts(
+        &mut self,
+        metrics: &mut SiteExplorationMetrics,
+    ) -> CreationProgress {
+        let creator = self.creator;
+        let expected_explored_endpoint_index = self.expected_explored_endpoint_index;
+        let racks_to_ensure = std::mem::take(&mut self.racks_to_ensure);
+        if !racks_to_ensure.is_empty() && !self.budget.exhausted() {
+            creator.ensure_racks_before_dispatch(&racks_to_ensure).await;
+        }
+        let creation_attempt = move |identified: &'a mut IdentifiedManagedHost| {
+            let expected_machine = expected_explored_endpoint_index
+                .matched_expected_machine(&identified.explored_host.host_bmc_ip);
+            creator.create_identified_host(identified, expected_machine)
+        };
+        let mut in_flight = FuturesUnordered::new();
+        let mut pass_due = false;
+        loop {
+            while !pass_due && self.budget.can_dispatch() {
+                let Some(identified) = self.pending.next() else {
+                    break;
+                };
+                self.budget.dispatched();
+                in_flight.push(creation_attempt(identified));
+            }
+            while !pass_due && self.budget.can_dispatch_repair() {
+                let Some(identified) = self.repairs.next() else {
+                    break;
+                };
+                self.budget.dispatched();
+                in_flight.push(creation_attempt(identified));
+            }
+            let Some(attempt) = in_flight.next().await else {
+                break;
+            };
+            self.budget.finished(attempt.created);
+            if attempt.created {
+                metrics.created_machines += 1;
+            }
+            emit(attempt.event);
+            if !self.pass_interval.is_zero() && self.last_pass.elapsed() >= self.pass_interval {
+                pass_due = true;
+            }
+        }
+
+        let hosts_remain = (self.pending.peek().is_some() && !self.budget.exhausted())
+            || self.repairs.peek().is_some();
+        if pass_due && hosts_remain {
+            self.last_pass = Instant::now();
+            CreationProgress::PassDue
+        } else {
+            CreationProgress::Done
+        }
+    }
+}
+
+/// The per-run creation cap applied at dispatch. In-flight creations count
+/// against the cap, so `created` never exceeds it, and a finished attempt
+/// that created nothing frees its slot and keeps the cap. A repair takes a
+/// concurrency slot and no cap slot.
+#[derive(Debug)]
+struct CreationBudget {
+    cap: u64,
+    concurrency: usize,
+    in_flight: usize,
+    created: u64,
+}
+
+impl CreationBudget {
+    fn new(cap: u64, concurrency: usize) -> Self {
+        Self {
+            cap,
+            concurrency,
+            in_flight: 0,
+            created: 0,
+        }
+    }
+
+    /// Whether another creation may start now.
+    fn can_dispatch(&self) -> bool {
+        self.can_dispatch_repair() && !self.exhausted()
+    }
+
+    /// Whether another repair may start now. It needs a concurrency slot only.
+    fn can_dispatch_repair(&self) -> bool {
+        self.in_flight < self.concurrency
+    }
+
+    /// Whether the cap leaves nothing more to dispatch, counting in-flight
+    /// creations.
+    fn exhausted(&self) -> bool {
+        self.created + (self.in_flight as u64) >= self.cap
+    }
+
+    fn dispatched(&mut self) {
+        self.in_flight += 1;
+    }
+
+    fn finished(&mut self, created: bool) {
+        self.in_flight -= 1;
+        if created {
+            self.created += 1;
+        }
+    }
+}
+
+/// The in-flight creation bound: the configured value, at least 1 and at
+/// most one below the admission permit count, so the other gated flows keep
+/// a permit while creation runs. With a single permit one creation still
+/// runs and holds it.
+fn creation_concurrency(configured: u64, admission_permits: usize) -> usize {
+    let ceiling = admission_permits.saturating_sub(1).max(1);
+    let configured = usize::try_from(configured).unwrap_or(usize::MAX).max(1);
+    if configured > ceiling {
+        tracing::warn!(
+            configured,
+            ceiling,
+            admission_permits,
+            "machine_creation_concurrency exceeds the admin-lock admission permits minus one; using the ceiling"
+        );
+    }
+    configured.min(ceiling)
+}
+
+/// What one `create_managed_host_with_selection` call did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedHostCreation {
+    /// A host machine and its DPU machines were created.
+    Created { host_machine_id: HostMachineId },
+    /// Every DPU already had a machine, or a predicted zero-DPU host gained no
+    /// machine: the host's rows were refreshed in place. The admin address
+    /// repair after the commit runs when the host machine is known.
+    Repaired {
+        host_machine_id: Option<HostMachineId>,
+    },
+    /// No `expected_machines` record matched the host.
+    SkippedUnexpected,
+}
+
+impl ManagedHostCreation {
+    /// The host machine whose admin addresses the after-commit repair
+    /// reconciles, if the transaction committed one.
+    fn committed_host_machine_id(&self) -> Option<HostMachineId> {
+        match self {
+            Self::Created { host_machine_id } => Some(*host_machine_id),
+            Self::Repaired { host_machine_id } => *host_machine_id,
+            Self::SkippedUnexpected => None,
+        }
+    }
+}
+
+/// The Event for one finished creation attempt on `host`.
+fn creation_finished_event(
+    host: &ExploredManagedHost,
+    result: SiteExplorerResult<ManagedHostCreation>,
+    latency: Duration,
+) -> ManagedHostCreationFinished {
+    match result {
+        Ok(ManagedHostCreation::Created { host_machine_id }) => {
+            ManagedHostCreationFinished::Created {
+                latency,
+                host_bmc_ip_address: host.host_bmc_ip,
+                host_machine_id,
+                dpu_count: host.dpus.len(),
+            }
+        }
+        Ok(ManagedHostCreation::Repaired { .. }) => {
+            ManagedHostCreationFinished::Repaired { latency }
+        }
+        Ok(ManagedHostCreation::SkippedUnexpected) => {
+            ManagedHostCreationFinished::SkippedUnexpected { latency }
+        }
+        Err(error) => ManagedHostCreationFinished::Failed {
+            latency,
+            host_bmc_ip_address: host.host_bmc_ip,
+            error: error.to_string(),
+        },
+    }
+}
+
+fn record_creation_stage(stage: ManagedHostCreationStage, latency: Duration) {
+    emit(ManagedHostCreationStageFinished { stage, latency });
+}
+
 /// Reconciles host admin addresses in a transaction of its own, after the
 /// managed-host transaction has committed or when an exploration revisits an
 /// ingested host.
@@ -1836,6 +2193,171 @@ mod tests {
     use model::site_explorer::{Chassis, ComputerSystem, EthernetInterface, NetworkAdapter};
 
     use super::*;
+
+    struct BudgetCase {
+        cap: u64,
+        concurrency: usize,
+        /// Outcomes of the attempts finished after the first dispatch round.
+        finished: Vec<bool>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct BudgetState {
+        dispatched: usize,
+        created: u64,
+        can_dispatch: bool,
+        can_dispatch_repair: bool,
+        exhausted: bool,
+    }
+
+    #[test]
+    fn creation_budget_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "the cap counts in-flight creations",
+                    input: BudgetCase {
+                        cap: 2,
+                        concurrency: 3,
+                        finished: vec![],
+                    },
+                    expect: BudgetState {
+                        dispatched: 2,
+                        created: 0,
+                        can_dispatch: false,
+                        can_dispatch_repair: true,
+                        exhausted: true,
+                    },
+                },
+                Check {
+                    scenario: "an attempt that created nothing frees its slot and keeps the cap",
+                    input: BudgetCase {
+                        cap: 2,
+                        concurrency: 3,
+                        finished: vec![false],
+                    },
+                    expect: BudgetState {
+                        dispatched: 2,
+                        created: 0,
+                        can_dispatch: true,
+                        can_dispatch_repair: true,
+                        exhausted: false,
+                    },
+                },
+                Check {
+                    scenario: "creations spend the cap",
+                    input: BudgetCase {
+                        cap: 2,
+                        concurrency: 3,
+                        finished: vec![true, true],
+                    },
+                    expect: BudgetState {
+                        dispatched: 2,
+                        created: 2,
+                        can_dispatch: false,
+                        can_dispatch_repair: true,
+                        exhausted: true,
+                    },
+                },
+                Check {
+                    scenario: "concurrency 1 dispatches one host at a time",
+                    input: BudgetCase {
+                        cap: 4,
+                        concurrency: 1,
+                        finished: vec![true],
+                    },
+                    expect: BudgetState {
+                        dispatched: 1,
+                        created: 1,
+                        can_dispatch: true,
+                        can_dispatch_repair: true,
+                        exhausted: false,
+                    },
+                },
+                Check {
+                    scenario: "a repair takes a concurrency slot",
+                    input: BudgetCase {
+                        cap: 4,
+                        concurrency: 1,
+                        finished: vec![],
+                    },
+                    expect: BudgetState {
+                        dispatched: 1,
+                        created: 0,
+                        can_dispatch: false,
+                        can_dispatch_repair: false,
+                        exhausted: false,
+                    },
+                },
+                Check {
+                    scenario: "a zero cap dispatches no creation and still admits a repair",
+                    input: BudgetCase {
+                        cap: 0,
+                        concurrency: 3,
+                        finished: vec![],
+                    },
+                    expect: BudgetState {
+                        dispatched: 0,
+                        created: 0,
+                        can_dispatch: false,
+                        can_dispatch_repair: true,
+                        exhausted: true,
+                    },
+                },
+            ],
+            |BudgetCase {
+                 cap,
+                 concurrency,
+                 finished,
+             }| {
+                let mut budget = CreationBudget::new(cap, concurrency);
+                let mut dispatched = 0;
+                while budget.can_dispatch() {
+                    budget.dispatched();
+                    dispatched += 1;
+                }
+                for created in finished {
+                    budget.finished(created);
+                }
+                BudgetState {
+                    dispatched,
+                    created: budget.created,
+                    can_dispatch: budget.can_dispatch(),
+                    can_dispatch_repair: budget.can_dispatch_repair(),
+                    exhausted: budget.exhausted(),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn creation_concurrency_stays_below_the_admission_permits() {
+        check_values(
+            [
+                Check {
+                    scenario: "a value below the ceiling is used as configured",
+                    input: (4, 16),
+                    expect: 4,
+                },
+                Check {
+                    scenario: "a value at the permit count is clamped to one below it",
+                    input: (16, 16),
+                    expect: 15,
+                },
+                Check {
+                    scenario: "zero creates hosts one at a time",
+                    input: (0, 16),
+                    expect: 1,
+                },
+                Check {
+                    scenario: "a single permit still allows one creation",
+                    input: (4, 1),
+                    expect: 1,
+                },
+            ],
+            |(configured, admission_permits)| creation_concurrency(configured, admission_permits),
+        );
+    }
 
     /// A host with one DPU, keyed on BMC IPs only.
     fn one_dpu_host(host_bmc_ip: IpAddr, dpu_bmc_ip: IpAddr) -> ExploredManagedHost {

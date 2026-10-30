@@ -635,6 +635,17 @@ impl TestEnv {
             .await;
     }
 
+    /// Processes each host once without requeuing transitions, so tests can
+    /// inspect intermediate states even when multiple hosts share the environment.
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_no_requeue(&self) {
+        self.machine_state_controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
+            .boxed()
+            .await;
+    }
+
     /// Reports membership in the latest database object-ID list so integration
     /// tests can verify which identity the machine controller read after discovery.
     pub(in crate::tests) async fn machine_object_ids_from_database_contains(
@@ -1872,8 +1883,13 @@ async fn create_test_env_with_overrides_inner(
             run_interval: Duration::seconds(0).to_std().unwrap(),
             concurrent_explorations: 100,
             explorations_per_run: 100,
+            exploration_timeouts_before_prevent_allocations: 1,
             create_machines: Arc::new(true.into()),
             machines_created_per_run: 1,
+            machine_creation_concurrency: SiteExplorerConfig::default_machine_creation_concurrency(
+            ),
+            switch_and_power_shelf_pass_interval:
+                SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: Arc::new(Default::default()),
@@ -1889,6 +1905,7 @@ async fn create_test_env_with_overrides_inner(
             deprecated_force_dpu_nic_mode: None,
             // Tests use MockEndpointExplorer. So this doesn't affect anything.
             explore_mode: SiteExplorerExploreMode::NvRedfish,
+            explore_drive_firmware: false,
         },
         test_meter.meter(),
         api.endpoint_exploration_service.clone(),

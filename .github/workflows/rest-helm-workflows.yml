@@ -85,8 +85,6 @@ jobs:
 
       - name: Install yq for umbrella packaging
         if: matrix.chart == 'helm/rest/nico-rest' && inputs.ngc_path != ''
-        # Keep install-yq-action at v1.1.1 to match the pinned helm-package-push action:
-        # https://github.com/dsx-ai-factory/dsx-github-actions/blob/7de619729962a6bd5e8355b6fb3582a22517d7e5/.github/actions/helm-package-push/action.yml#L64
         uses: dcarbone/install-yq-action@64b1b9eb28920bb1a4c13c05321df284f9a8f940 # v1.1.1
         with:
           version: v4.35.1
@@ -110,8 +108,10 @@ jobs:
           echo "chart_path=${prepared_chart_dir}" >> "${GITHUB_OUTPUT}"
 
       - name: Package and push Helm chart to NGC
+        id: publish_helm
+        continue-on-error: true
         if: ${{ inputs.ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
         with:
           chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
           chart-version: ${{ inputs.chart_version }}
@@ -119,4 +119,16 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_STG_TOKEN }}
           ngc-path: ${{ inputs.ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+
+      - name: Retry package and push Helm chart to NGC
+        if: ${{ steps.publish_helm.outcome == 'failure' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
+          chart-version: ${{ inputs.chart_version }}
+          app-version: ${{ inputs.app_version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_STG_TOKEN }}
+          ngc-path: ${{ inputs.ngc_path }}
+          ngc-duplicate: verify

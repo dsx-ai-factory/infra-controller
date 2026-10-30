@@ -92,7 +92,7 @@ use crate::types::{
 pub(crate) const MAX_HBN_SERVICE_INTERFACES: usize = 32;
 
 /// MTU shared by fixed service-VPC listeners and their service-pod attachment networks.
-pub const SERVICE_VPC_MTU: i64 = 9000;
+pub const SERVICE_VPC_MTU: i64 = 9_000;
 
 /// A validated collection of NICo-managed service-VPC slots.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -530,7 +530,7 @@ mod tests {
             }),
             // A different listener MTU would disagree with the qualified service-pod attachment.
             ("wrong MTU", |service| {
-                service.service_nads[0].mtu = Some(1500)
+                service.service_nads[0].mtu = Some(SERVICE_VPC_MTU + 1)
             }),
         ];
 
@@ -567,18 +567,18 @@ mod tests {
         let slots = ServiceVpcSlots::new(1).expect("valid slot count");
         let mut hbn_interfaces = Vec::new();
         slots.append_hbn_interfaces(&mut hbn_interfaces);
-        let cases: &[(&str, InventoryMutation, &str)] = &[
+        let cases: Vec<(&str, InventoryMutation, String)> = vec![
             // Complete HBN inventory cannot compensate for the absent DHCP service.
             (
                 "missing DHCP service",
                 |services| services.retain(|service| service.name != DHCP_SERVER_SERVICE_NAME),
-                "service-VPC slots require a DHCP service definition",
+                "service-VPC slots require a DHCP service definition".to_string(),
             ),
             // Two DHCP definitions cannot safely own the same generated listener resources.
             (
                 "duplicate DHCP service",
                 |services| services.push(services[1].clone()),
-                "service-VPC slots require exactly one DHCP service definition",
+                "service-VPC slots require exactly one DHCP service definition".to_string(),
             ),
             // A different service must not reuse the namespace-wide slot NAD name.
             (
@@ -589,7 +589,9 @@ mod tests {
                         ..ServiceDefinition::new("other", "repo", "chart", "1")
                     })
                 },
-                "service-VPC slot d_iface_svc_0 requires exactly one DHCP interface and an IPAM-disabled SF NAD on its bridge with MTU 9000",
+                format!(
+                    "service-VPC slot d_iface_svc_0 requires exactly one DHCP interface and an IPAM-disabled SF NAD on its bridge with MTU {SERVICE_VPC_MTU}"
+                ),
             ),
         ];
 
@@ -604,7 +606,7 @@ mod tests {
 
             // Assert the intended rejection and that validation has no topology side effects.
             assert!(
-                matches!(error, DpfError::ConfigError(ref message) if message == *expected),
+                matches!(error, DpfError::ConfigError(ref message) if message == &expected),
                 "{description}: {error}"
             );
             assert!(interfaces.is_empty(), "{description}");

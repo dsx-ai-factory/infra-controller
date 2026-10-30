@@ -23,6 +23,7 @@
 
 use std::net::IpAddr;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use ipnetwork::IpNetwork;
@@ -152,21 +153,24 @@ pub async fn find_allocation_occupancy(
     vpc_prefix_id: VpcPrefixId,
     vpc_prefix: IpNetwork,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = r#"
-        SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address,
-               np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip
-        FROM network_prefixes np
+    let query = format!(
+        r#"
+        SELECT {}
+        FROM {}
         JOIN network_vpc_prefixes vp ON vp.id = $2
         WHERE np.prefix && $1::cidr
           AND (np.overlap_vpc_id IS NULL OR vp.overlap_vpc_id IS NULL
                OR np.overlap_vpc_id = vp.overlap_vpc_id)
-    "#;
-    sqlx::query_as(query)
+    "#,
+        NetworkPrefix::db_aliased_columns(),
+        NetworkPrefix::db_aliased_table(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vpc_prefix)
         .bind(vpc_prefix_id)
         .fetch_all(txn)
         .await
-        .map_err(|error| DatabaseError::query(query, error))
+        .map_err(|error| DatabaseError::query(&query, error))
 }
 
 // Search for specific prefix
@@ -239,17 +243,19 @@ pub async fn find_by_vpc(
     txn: &mut PgConnection,
     vpc_id: VpcId,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address, \
-            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip \
-            FROM network_prefixes np \
+    let query = format!(
+        "SELECT {} FROM {} \
             INNER JOIN network_segments ns ON np.segment_id = ns.id \
-            WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = $1 ORDER BY ns.created";
+            WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = $1 ORDER BY ns.created",
+        NetworkPrefix::db_aliased_columns(),
+        NetworkPrefix::db_aliased_table(),
+    );
 
-    let prefixes = sqlx::query_as(query)
+    let prefixes = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vpc_id)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
     Ok(prefixes)
 }
 
@@ -259,17 +265,19 @@ pub async fn find_by_vpcs(
     txn: &mut PgConnection,
     vpc_ids: &Vec<VpcId>,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address,
-            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip
-            FROM network_prefixes np
+    let query = format!(
+        "SELECT {} FROM {}
             INNER JOIN network_segments ns ON np.segment_id = ns.id
-            WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = ANY($1) ORDER BY ns.created";
+            WHERE np.vpc_prefix_id IS NULL AND ns.vpc_id = ANY($1) ORDER BY ns.created",
+        NetworkPrefix::db_aliased_columns(),
+        NetworkPrefix::db_aliased_table(),
+    );
 
-    let prefixes = sqlx::query_as(query)
+    let prefixes = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vpc_ids)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(prefixes)
 }
@@ -348,20 +356,23 @@ pub async fn set_vpc_prefix(
     vpc_prefix_id: &VpcPrefixId,
     prefix: &IpNetwork,
 ) -> Result<(), DatabaseError> {
-    let query = r#"
-        UPDATE network_prefixes AS np
+    let query = format!(
+        r#"
+        UPDATE {}
         SET vpc_prefix_id = $1, vpc_prefix = $2
         WHERE np.id = $3
-        RETURNING np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address,
-            np.num_reserved, np.vpc_prefix_id, np.vpc_prefix, np.svi_ip
-    "#;
-    let network_prefix = sqlx::query_as::<_, NetworkPrefix>(query)
+        RETURNING {}
+    "#,
+        NetworkPrefix::db_aliased_table(),
+        NetworkPrefix::db_aliased_columns(),
+    );
+    let network_prefix = sqlx::query_as::<_, NetworkPrefix>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vpc_prefix_id)
         .bind(prefix)
         .bind(value.id)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     value.vpc_prefix_id = network_prefix.vpc_prefix_id;
     value.vpc_prefix = network_prefix.vpc_prefix;

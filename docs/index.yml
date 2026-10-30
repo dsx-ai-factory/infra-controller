@@ -48,6 +48,8 @@ navigation:
               path: getting-started/prerequisites/software.md
             - page: BMC and Out-of-Band Setup
               path: getting-started/prerequisites/bmc-oob-setup.md
+        - page: Sizing and Scale Guidance
+          path: getting-started/sizing-and-scale.md
         - page: Building NICo Containers
           path: manuals/building_nico_containers.md
           slug: building-nico-containers
@@ -155,6 +157,8 @@ navigation:
               path: manuals/networking/infiniband_partitioning.md
         - page: Tenant Management
           path: configuration/tenant_management.md
+        - page: SSH Console Setup and Access
+          path: configuration/ssh-console.md
         - page: Tenant Management with Keycloak
           path: configuration/tenant-management-keycloak.md
         - page: Image-Based Operating Systems

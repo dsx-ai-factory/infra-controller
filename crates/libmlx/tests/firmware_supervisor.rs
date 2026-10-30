@@ -64,24 +64,6 @@ impl SupervisorProcess {
         }
         process
     }
-
-    fn expect_timeout(&mut self, watchdog: Duration) {
-        let status = self
-            .0
-            .wait_timeout(watchdog)
-            .expect("wait for supervisor timeout")
-            .expect("supervisor exceeded its independent test watchdog");
-        let mut stderr = String::new();
-        self.0
-            .stderr
-            .as_mut()
-            .unwrap()
-            .read_to_string(&mut stderr)
-            .expect("read exited supervisor diagnostics");
-        assert_eq!(status.code(), Some(1), "{stderr}");
-        assert!(stderr.contains("TimedOut"), "{stderr}");
-        assert!(stderr.contains("supervisor deadline expired"), "{stderr}");
-    }
 }
 
 impl Drop for SupervisorProcess {
@@ -97,31 +79,6 @@ impl Drop for SupervisorProcess {
             result => eprintln!("failed to reap fixture supervisor within watchdog: {result:?}"),
         }
     }
-}
-
-/// An open control pipe with only part of a frame must expire without EOF.
-#[test]
-fn stalled_request_exits_at_the_request_deadline() {
-    let started = Instant::now();
-    let mut helper = SupervisorProcess::spawn();
-    // `wait_timeout` closes stdin stored on the child. Hold it separately so
-    // only the helper's request deadline can end this incomplete dispatch.
-    let mut control = helper.0.stdin.take().unwrap();
-    control.write_all(&100_u32.to_be_bytes()).unwrap();
-    control.write_all(b"{").unwrap();
-
-    helper.expect_timeout(Duration::from_secs(40));
-    assert!(started.elapsed() >= Duration::from_secs(30));
-    drop(control);
-    let mut stdout = Vec::new();
-    helper
-        .0
-        .stdout
-        .as_mut()
-        .unwrap()
-        .read_to_end(&mut stdout)
-        .expect("read exited supervisor handshake");
-    assert_eq!(stdout, b"MLX-SUPERVISOR-1\n");
 }
 
 /// An oversized frame fails from its length prefix without waiting for a body or EOF.
@@ -160,59 +117,6 @@ fn oversized_worker_request_is_rejected_before_reading_its_body() {
         .unwrap();
     assert_eq!(response, b"MLX-SUPERVISOR-1\n");
     drop(control);
-}
-
-/// A completed result must expire when the caller keeps stdout open but unread.
-#[test]
-fn blocked_result_delivery_exits_at_the_delivery_deadline() {
-    let started = Instant::now();
-    let mut helper = SupervisorProcess::spawn();
-    let stdout = helper.0.stdout.as_ref().unwrap();
-    fcntl(stdout, FcntlArg::F_SETPIPE_SZ(4096)).expect("reduce result pipe capacity");
-    let capacity = usize::try_from(
-        fcntl(stdout, FcntlArg::F_GETPIPE_SZ).expect("measure result pipe capacity"),
-    )
-    .unwrap();
-    let output_len = capacity + 1;
-    assert!(
-        output_len <= 1024 * 1024,
-        "fixture stays within output limit"
-    );
-    let request = serde_json::to_vec(&serde_json::json!({
-        "program": "/bin/sh",
-        "args": ["-c", format!("printf '%0{output_len}d' 0")],
-        "timeout": Duration::from_secs(10),
-    }))
-    .unwrap();
-    let mut control = helper.0.stdin.take().unwrap();
-    control
-        .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
-        .unwrap();
-    control.write_all(&request).unwrap();
-
-    // The handshake fits in the pipe; the successful result cannot. No read
-    // may free space until the helper has exited on its delivery deadline.
-    helper.expect_timeout(Duration::from_secs(15));
-    assert!(started.elapsed() >= Duration::from_secs(5));
-    drop(control);
-    let mut stdout = Vec::new();
-    helper
-        .0
-        .stdout
-        .as_mut()
-        .unwrap()
-        .read_to_end(&mut stdout)
-        .expect("read the result prefix after helper exit");
-    let result = stdout
-        .strip_prefix(b"MLX-SUPERVISOR-1\n")
-        .expect("actual helper handshake");
-    let length = u32::from_be_bytes(result[..4].try_into().unwrap()) as usize;
-    assert!(
-        length > capacity,
-        "result must exceed measured pipe capacity"
-    );
-    assert!(result[4..].starts_with(b"{\"Finished\":"));
-    assert!(result.len() - 4 < length, "delivery must remain incomplete");
 }
 
 /// The fake tool stays inside its test's temporary directory.

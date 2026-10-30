@@ -28,7 +28,7 @@ use carbide_uuid::machine::{
 use carbide_uuid::rack::RackId;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use model::machine::{LoadSnapshotOptions, ManagedHostStateSnapshot};
+use model::machine::{HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot};
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
@@ -238,22 +238,68 @@ where
     Ok(result)
 }
 
+/// Loads compact snapshots of `host_ids` for the allocation and health rules,
+/// see `sql/managed_hosts_compact.sql.template` for what is left out. Instance
+/// data is included. Missing hosts are omitted.
+pub async fn load_compact_by_host_ids(
+    txn: &mut PgConnection,
+    host_ids: &[HostMachineId],
+    host_health_config: HostHealthConfig,
+) -> Result<HashMap<HostMachineId, ManagedHostStateSnapshot>, DatabaseError> {
+    lazy_static! {
+        static ref QUERY: String = format!(
+            r#"
+        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
+        FROM ({}) m
+        LEFT JOIN instances i ON i.machine_id = m.id
+        "#,
+            queries::MANAGED_HOSTS_COMPACT.as_str(),
+        );
+    }
+
+    // The singleton form is much faster, as in load_by_machine_ids.
+    let mut query = sqlx::QueryBuilder::new(QUERY.as_str());
+    if let [host_id] = host_ids {
+        query.push(" WHERE m.id = ").push_bind(host_id);
+    } else {
+        query
+            .push(" WHERE m.id = ANY(")
+            .push_bind(host_ids)
+            .push(")");
+    }
+
+    Ok(query
+        .build_query_as()
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("managed_host::load_compact_by_host_ids", e))?
+        .into_iter()
+        .map(|mut snapshot: ManagedHostStateSnapshot| {
+            snapshot.derive_aggregate_health(host_health_config);
+            (snapshot.host_snapshot.id, snapshot)
+        })
+        .collect())
+}
+
 /// Loads a ManagedHost snapshots from the database based on a list of Instance IDs
 pub async fn load_by_instance_ids(
     txn: &mut PgConnection,
     instance_ids: &[InstanceId],
     load_snapshot_options: LoadSnapshotOptions,
 ) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
+    // Keep `ARRAY`: PostgreSQL resolves the requested instances to host IDs once,
+    // then filters the machine scan before building snapshots. An outer instance
+    // join can build snapshots for unrelated machines before filtering them out.
     let query = format!(
         r#"SELECT m.* FROM ({}) m
-        INNER JOIN instances i ON i.machine_id = m.id
-        WHERE i.id = ANY(
+        WHERE m.id = ANY(ARRAY(
+            SELECT i.machine_id FROM instances i WHERE i.id = ANY(
     "#,
         managed_host_snapshots_query(&load_snapshot_options)
     );
     let result: Vec<ManagedHostStateSnapshot> = sqlx::QueryBuilder::new(query)
         .push_bind(instance_ids)
-        .push(")")
+        .push(")))")
         .build_query_as()
         .fetch_all(txn)
         .await

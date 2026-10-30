@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
@@ -586,6 +586,37 @@ pub async fn find_by_ip(
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
+/// The interfaces holding any of `ips`, keyed by the requested address. An
+/// address belongs to at most one interface, so a requested address maps to
+/// one snapshot or is absent.
+pub async fn find_by_ips(
+    txn: impl DbReader<'_>,
+    ips: &[IpAddr],
+) -> Result<HashMap<IpAddr, MachineInterfaceSnapshot>, DatabaseError> {
+    static QUERY: &str = concat!(
+        machine_interface_snapshot_query!(),
+        r#" INNER JOIN machine_interface_addresses mia on mia.interface_id=mi.id
+        WHERE mia.address = ANY($1::inet[])"#,
+    );
+    let snapshots: Vec<MachineInterfaceSnapshot> = sqlx::query_as(QUERY)
+        .bind(ips)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))?;
+    let requested: HashSet<IpAddr> = ips.iter().copied().collect();
+    let mut by_ip = HashMap::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        for address in snapshot
+            .addresses
+            .iter()
+            .filter(|address| requested.contains(address))
+        {
+            by_ip.insert(*address, snapshot.clone());
+        }
+    }
+    Ok(by_ip)
 }
 
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<MachineInterfaceSnapshot>> {
@@ -2477,8 +2508,72 @@ pub async fn lock_all_admin_segments_for_allocation(txn: &mut PgConnection) -> D
     load_and_lock_all_admin_segments(txn).await.map(|_| ())
 }
 
-static ADMIN_LOCK_ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::OnceLock::new();
+/// The admission gate: its permit count and the semaphore that hands the
+/// permits out.
+struct AdminLockAdmission {
+    permits: usize,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+static ADMIN_LOCK_ADMISSION: std::sync::OnceLock<AdminLockAdmission> = std::sync::OnceLock::new();
+
+/// Accepted range of the admission permit count. 0 would deadlock every
+/// gated flow, and a value at or above the pool size defeats the gate's
+/// purpose (the waiters it is meant to keep off connections would all be
+/// admitted). The site configuration is validated against it at startup.
+pub const ADMIN_LOCK_ADMISSION_PERMIT_RANGE: std::ops::RangeInclusive<usize> = 1..=256;
+const DEFAULT_ADMIN_LOCK_ADMISSION_PERMITS: usize = 16;
+
+/// The permit count: the configured value, else the `ADMIN_LOCK_ADMISSION`
+/// environment variable clamped to the accepted range, else the default.
+fn admin_lock_admission_permit_count(
+    configured: Option<usize>,
+    environment: Option<&str>,
+) -> usize {
+    configured
+        .or_else(|| environment?.parse().ok())
+        .map(|permits| {
+            permits.clamp(
+                *ADMIN_LOCK_ADMISSION_PERMIT_RANGE.start(),
+                *ADMIN_LOCK_ADMISSION_PERMIT_RANGE.end(),
+            )
+        })
+        .unwrap_or(DEFAULT_ADMIN_LOCK_ADMISSION_PERMITS)
+}
+
+fn new_admin_lock_admission(configured: Option<usize>) -> AdminLockAdmission {
+    let environment = std::env::var("ADMIN_LOCK_ADMISSION").ok();
+    let permits = admin_lock_admission_permit_count(configured, environment.as_deref());
+    AdminLockAdmission {
+        permits,
+        semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(permits)),
+    }
+}
+
+fn admin_lock_admission_gate() -> &'static AdminLockAdmission {
+    ADMIN_LOCK_ADMISSION.get_or_init(|| new_admin_lock_admission(None))
+}
+
+/// Sets the admission permit count from the parsed site configuration.
+/// Called once during server startup, before any gated flow runs; the first
+/// value wins, and a later differing value is logged and ignored.
+pub fn configure_admin_lock_admission(permits: Option<usize>) {
+    let gate = new_admin_lock_admission(permits);
+    let requested = gate.permits;
+    if ADMIN_LOCK_ADMISSION.set(gate).is_err() && admin_lock_admission_permits() != requested {
+        tracing::warn!(
+            requested_permit_count = requested,
+            active_permit_count = admin_lock_admission_permits(),
+            "admin-lock admission permits are already set; keeping the active count"
+        );
+    }
+}
+
+/// The permit count of the admission gate, so a caller that holds one permit
+/// per in-flight operation can bound its own concurrency below it.
+pub fn admin_lock_admission_permits() -> usize {
+    admin_lock_admission_gate().permits
+}
 
 /// Admission gate for the flows that may wait on the admin-segment advisory
 /// locks. Without it, every waiter parks *inside* an open transaction and
@@ -2486,22 +2581,12 @@ static ADMIN_LOCK_ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Sem
 /// queue exhausts Postgres `max_connections`. Acquire this permit BEFORE
 /// opening the transaction and hold it until commit/rollback, so excess
 /// waiters queue in memory instead of on connections. Permits:
+/// `admin_lock_admission_permits` in the site configuration, else the
 /// `ADMIN_LOCK_ADMISSION` env var, default 16.
 pub async fn admin_lock_admission() -> tokio::sync::OwnedSemaphorePermit {
-    let sem = ADMIN_LOCK_ADMISSION.get_or_init(|| {
-        // Clamp to a sane range: 0 would deadlock every gated flow, and a
-        // value at or above the pool size defeats the gate's purpose (the
-        // waiters it is meant to keep off connections would all be admitted).
-        const DEFAULT_PERMITS: usize = 16;
-        const MAX_PERMITS: usize = 256;
-        let permits = std::env::var("ADMIN_LOCK_ADMISSION")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .map(|n| n.clamp(1, MAX_PERMITS))
-            .unwrap_or(DEFAULT_PERMITS);
-        std::sync::Arc::new(tokio::sync::Semaphore::new(permits))
-    });
-    sem.clone()
+    admin_lock_admission_gate()
+        .semaphore
+        .clone()
         .acquire_owned()
         .await
         .expect("admin-lock admission semaphore is never closed")

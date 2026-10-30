@@ -257,9 +257,9 @@ async fn run_integration() -> eyre::Result<()> {
         "the second server must reuse the first server's pool bindings"
     );
 
-    // Add an unregistered provider pool below startup validation so the running
-    // sampler exercises its unavailable path. The release gate still rejects
-    // remote selections in operator configuration.
+    // Startup rejects remote bindings, so add this fixture after both servers
+    // start. Its missing accepted definition makes the direct poll below emit
+    // the unavailable counter for the catalogue.
     let mut txn = test_env.db_pool.begin().await?;
     db::resource_pool::binding::bind_or_verify(
         &mut txn,
@@ -497,43 +497,20 @@ async fn run_integration() -> eyre::Result<()> {
     exercise_admin_address_reconcile_failures(&test_env).await?;
     exercise_nvlink_partition_monitor(&test_env, server_handle_2.ready.meter.clone()).await?;
 
-    // The binding was added after startup, so allow a full sixty-second poll
-    // interval. Require all series in one scrape before checking missing counts.
-    let expected_pool_metrics = [
+    carbide_api_core::test_support::poll_resource_pool_stats(test_env.db_pool.clone()).await?;
+    // The live exporters supply local gauges; the direct poll emits the failure
+    // counter without updating their samples. `test_service_health_metrics`
+    // checks unavailable gauge rendering, while `resource_pool_inspection`
+    // exercises the sampler's failure and recovery paths.
+    for line in [
         r#"carbide_resourcepool_used_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_free_count{pool="vpc-vni"}"#,
         r#"carbide_resourcepool_stats_available{pool="vpc-vni"} 1"#,
         r#"carbide_resourcepool_stats_fresh{pool="vpc-vni"} 1"#,
         r#"carbide_resourcepool_stats_last_success_timestamp_seconds{pool="vpc-vni"}"#,
-        r#"carbide_resourcepool_stats_available{pool="metrics-unregistered-pool"} 0"#,
-        r#"carbide_resourcepool_stats_fresh{pool="metrics-unregistered-pool"} 0"#,
         r#"carbide_resourcepool_stats_poll_failures_total{backend="grpc",failure="unavailable"}"#,
-    ];
-    let pool_metrics = tokio::time::timeout(Duration::from_secs(90), async {
-        loop {
-            for endpoint in &test_env.carbide_metrics_addrs {
-                let scrape = metrics::metrics(endpoint)?;
-                if expected_pool_metrics
-                    .iter()
-                    .all(|expected| scrape.contains(expected))
-                {
-                    return Ok::<_, eyre::Report>(scrape);
-                }
-            }
-            sleep(Duration::from_millis(300)).await;
-        }
-    })
-    .await
-    .wrap_err("resource pool metrics did not appear after a complete poll interval")??;
-    for metric in [
-        "carbide_resourcepool_used_count",
-        "carbide_resourcepool_free_count",
-        "carbide_resourcepool_stats_last_success_timestamp_seconds",
     ] {
-        assert!(
-            !pool_metrics.contains(&format!(r#"{metric}{{pool="metrics-unregistered-pool"}}"#)),
-            "a failed observation must not create counts or a success timestamp",
-        );
+        metrics::wait_for_metric_line(&test_env.carbide_metrics_addrs, line).await?;
     }
 
     let metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
@@ -599,27 +576,15 @@ async fn run_integration() -> eyre::Result<()> {
         "# TYPE carbide_vpc_prefixes_with_state_handling_errors_per_state gauge\n",
     )
     .await?;
-    // Exercise the library sampler on the server's meter without activating a
-    // remote backend. Stop its task before catalogue collection and generation,
-    // which can return early or panic on I/O errors.
-    let mut cleanup_metric_tasks = tokio::task::JoinSet::new();
-    let cleanup_metric_cancel = cancel_token.child_token();
-    carbide_resource_pool::remote::start_cleanup_metrics(
-        test_env.db_pool.clone(),
-        server_handle_2.ready.meter.clone(),
-        &mut cleanup_metric_tasks,
-        cleanup_metric_cancel.clone(),
-    )?;
-    let cleanup_metric_result = metrics::wait_for_metric_line(
-        &test_env.carbide_metrics_addrs,
-        r#"carbide_resource_pool_cleanup_pending{fresh="true"} 0"#,
-    )
-    .await;
-    cleanup_metric_cancel.cancel();
-    while let Some(result) = cleanup_metric_tasks.join_next().await {
-        result?;
+    // Every authoritative API instance starts this sampler, even with Integrated pools.
+    // Require a fresh sample from each before collecting the catalogue.
+    for endpoint in &test_env.carbide_metrics_addrs {
+        metrics::wait_for_metric_line(
+            std::slice::from_ref(endpoint),
+            r#"carbide_resource_pool_cleanup_pending{fresh="true"} 0"#,
+        )
+        .await?;
     }
-    cleanup_metric_result?;
     let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     metric_infos.push(collect_ssh_console_metric_info().await?);
     metric_infos.extend(collect_dhcp_metric_infos().await?);
@@ -2312,6 +2277,7 @@ where
         )]),
         carbide_api_url: format!("https://{}:{}", api_addr.ip(), api_addr.port()),
         dhcp: DhcpType::Api {},
+        bmc_dhcp_renewal_interval: Duration::from_secs(900),
         log_file: None,
         log_format: LogFormat::Compact,
         bmc_mock_port: 0, // unused, we're using dynamic ports on localhost

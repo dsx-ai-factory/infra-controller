@@ -204,8 +204,10 @@ pub async fn lock(
         .map(|decoded| decoded.desired))
 }
 
-/// Returns one keyset page of hosts whose desired target is unset or still
-/// lacks a Redfish id.
+/// Returns one keyset page of hosts whose desired target is unset, or is
+/// MAC-only while an owned or predicted interface carries a Redfish id for
+/// that MAC. A MAC-only host with no such source cannot change until one
+/// appears, so it is left out; the caller still decides the transition.
 pub async fn find_incomplete_machine_ids(
     db: impl DbReader<'_>,
     after_id: Option<&HostMachineId>,
@@ -221,6 +223,23 @@ pub async fn find_incomplete_machine_ids(
                 OR starts_with(machine.id, $2)
             )
           AND boot_interface.desired_interface_id IS NULL
+          AND (
+                boot_interface.machine_id IS NULL
+                OR EXISTS (
+                    SELECT 1
+                    FROM machine_interfaces mi
+                    WHERE mi.machine_id = machine.id
+                      AND mi.mac_address = boot_interface.desired_mac_address
+                      AND mi.boot_interface_id IS NOT NULL
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM predicted_machine_interfaces pmi
+                    WHERE pmi.machine_id = machine.id
+                      AND pmi.mac_address = boot_interface.desired_mac_address
+                      AND pmi.boot_interface_id IS NOT NULL
+                )
+            )
           AND ($3::text IS NULL OR machine.id::text > $3)
         ORDER BY machine.id
         LIMIT $4
@@ -1062,8 +1081,15 @@ mod tests {
     use BootInterfaceSelectionAuthority::Existing;
     use BootInterfaceSelectionSource::{Operator, RedfishUefiPci};
     use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use model::address_selection_strategy::AddressSelectionStrategy;
     use model::machine::machine_search_config::MachineSearchConfig;
     use model::machine::{InstanceState, MachineState, ManagedHostState};
+    use model::machine_interface_address::MachineInterfaceAssociation;
+    use model::network_prefix::NewNetworkPrefix;
+    use model::network_segment::{
+        NetworkSegmentControllerState, NetworkSegmentType, NewNetworkSegment,
+    };
+    use model::predicted_machine_interface::NewPredictedMachineInterface;
     use sqlx::PgPool;
     use sqlx::types::Json;
 
@@ -2270,11 +2296,25 @@ mod tests {
             seed_machine(txn.as_mut(), machine_id).await?;
         }
 
+        let mac_only_mac = MacAddress::new([2, 0, 0, 0, 1, 1]);
         set(
             txn.as_mut(),
             &mac_only_host,
-            &MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 1, 1])),
+            &MachineBootInterfaceTarget::MacOnly(mac_only_mac),
             Operator,
+        )
+        .await?;
+        // A MAC-only target is incomplete only while an interface id can be
+        // found for its MAC; the prediction supplies one.
+        crate::predicted_machine_interface::create(
+            NewPredictedMachineInterface {
+                machine_id: &mac_only_host,
+                mac_address: mac_only_mac,
+                expected_network_segment_type: NetworkSegmentType::Admin,
+                boot_interface_id: Some("NIC.Slot.1-1-1".to_string()),
+                primary_interface: false,
+            },
+            txn.as_mut(),
         )
         .await?;
         set(
@@ -2301,6 +2341,133 @@ mod tests {
         }
 
         let mut expected = vec![unset_host, mac_only_host, unset_prediction];
+        expected.sort();
+        assert_eq!(found, expected);
+
+        Ok(())
+    }
+
+    /// A MAC-only host is paged only while an interface or prediction carries
+    /// a Redfish id for its MAC; without one, nothing the pass could write
+    /// exists, so the host is left out. Unset hosts are always paged.
+    #[crate::sqlx_test]
+    async fn incomplete_targets_skip_mac_only_hosts_without_an_interface_id_source(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let unset_host = host_machine_id(40);
+        let unresolvable_host = host_machine_id(41);
+        let resolvable_host = host_machine_id(42);
+        let complete_host = host_machine_id(43);
+        let owned_host = host_machine_id(44);
+        for machine_id in [
+            &unset_host,
+            &unresolvable_host,
+            &resolvable_host,
+            &complete_host,
+            &owned_host,
+        ] {
+            seed_machine(txn.as_mut(), machine_id).await?;
+        }
+
+        let unresolvable_mac = MacAddress::new([2, 0, 0, 0, 4, 1]);
+        let resolvable_mac = MacAddress::new([2, 0, 0, 0, 4, 2]);
+        let owned_mac = MacAddress::new([2, 0, 0, 0, 4, 4]);
+        set(
+            txn.as_mut(),
+            &unresolvable_host,
+            &MachineBootInterfaceTarget::MacOnly(unresolvable_mac),
+            Operator,
+        )
+        .await?;
+        set(
+            txn.as_mut(),
+            &resolvable_host,
+            &MachineBootInterfaceTarget::MacOnly(resolvable_mac),
+            Operator,
+        )
+        .await?;
+        set(
+            txn.as_mut(),
+            &owned_host,
+            &MachineBootInterfaceTarget::MacOnly(owned_mac),
+            Operator,
+        )
+        .await?;
+        set(
+            txn.as_mut(),
+            &complete_host,
+            &MachineBootInterfaceTarget::Pair(MachineBootInterface {
+                mac_address: MacAddress::new([2, 0, 0, 0, 4, 3]),
+                interface_id: "NIC.Slot.4-1-1".to_string(),
+            }),
+            Operator,
+        )
+        .await?;
+        // A prediction with an id for another MAC is no source for the
+        // unresolvable host; one for the desired MAC makes the other resolvable.
+        for (machine_id, mac_address) in [
+            (&unresolvable_host, MacAddress::new([2, 0, 0, 0, 4, 9])),
+            (&resolvable_host, resolvable_mac),
+        ] {
+            crate::predicted_machine_interface::create(
+                NewPredictedMachineInterface {
+                    machine_id,
+                    mac_address,
+                    expected_network_segment_type: NetworkSegmentType::Admin,
+                    boot_interface_id: Some("NIC.Slot.4-2-1".to_string()),
+                    primary_interface: false,
+                },
+                txn.as_mut(),
+            )
+            .await?;
+        }
+        // An owned interface with an id for the desired MAC is the other source.
+        let segment = crate::network_segment::persist(
+            NewNetworkSegment {
+                id: uuid::Uuid::new_v4().into(),
+                name: "boot-interface-paging".to_string(),
+                subdomain_id: None,
+                vpc_id: None,
+                mtu: 1500,
+                prefixes: vec![NewNetworkPrefix {
+                    prefix: "192.0.2.0/29".parse()?,
+                    gateway: None,
+                    dhcpv6_link_address: None,
+                    num_reserved: 0,
+                }],
+                vlan_id: None,
+                vni: None,
+                segment_type: NetworkSegmentType::Admin,
+                can_stretch: None,
+                allocation_strategy: Default::default(),
+                infer_slaac_eui64_addresses: false,
+            },
+            txn.as_mut(),
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        let owned_interface = crate::machine_interface::create(
+            txn.as_mut(),
+            std::slice::from_ref(&segment),
+            &owned_mac,
+            false,
+            AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        crate::machine_interface::associate_interface_with_machine(
+            &owned_interface.id,
+            MachineInterfaceAssociation::Machine(MachineId::from(&owned_host)),
+            txn.as_mut(),
+        )
+        .await?;
+        crate::machine_interface::set_boot_interface_id(owned_mac, "NIC.Slot.4-3-1", txn.as_mut())
+            .await?;
+        txn.commit().await?;
+
+        let found = find_incomplete_machine_ids(&pool, None, 10).await?;
+        let mut expected = vec![unset_host, resolvable_host, owned_host];
         expected.sort();
         assert_eq!(found, expected);
 

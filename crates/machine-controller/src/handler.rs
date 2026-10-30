@@ -1645,6 +1645,7 @@ impl MachineStateHandler {
                         deconfiguring_state,
                         mh_snapshot,
                         ctx,
+                        &self.host_handler.host_handler_params.reachability_params,
                     )
                     .await
                 }
@@ -8815,24 +8816,60 @@ impl StateHandler for HostMachineStateHandler {
                                 // `Nic`/`Ignore` hosts. Disable still needs the
                                 // shared status poll to reach platform
                                 // configuration. Preserve the established
-                                // Enable path, which does not require a
-                                // separately readable lockdown status.
+                                // Enable path for controls that apply immediately.
+                                // Boot-latched controls need a host boot after the
+                                // policy's restart request, not configured readback.
                                 if lockdown_info.mode == LockdownMode::Enable {
-                                    return complete_host_init_lockdown(
-                                        ctx,
-                                        mh_snapshot,
-                                        ManagedHostState::BomValidating {
-                                            bom_validating_state: BomValidating::MatchingSku(
-                                                BomValidatingContext {
-                                                    machine_validation_context: Some(
-                                                        MachineValidationContext::Discovery,
-                                                    ),
-                                                    ..BomValidatingContext::default()
-                                                },
-                                            ),
-                                        },
-                                    )
-                                    .await;
+                                    let host = &mh_snapshot.host_snapshot;
+                                    let redfish_client = ctx
+                                        .services
+                                        .create_redfish_client_from_machine(host)
+                                        .await?;
+                                    let has_boot_latched_controls = redfish_client
+                                        .lockdown_has_boot_latched_controls()
+                                        .await
+                                        .map_err(|e| {
+                                            redfish_error("lockdown_has_boot_latched_controls", e)
+                                        })?;
+                                    if has_boot_latched_controls
+                                        && !host.status.last_reboot_requested.as_ref().is_some_and(
+                                            |request| {
+                                                host.status
+                                                    .last_reboot_time
+                                                    .is_some_and(|boot| boot > request.time)
+                                            },
+                                        )
+                                    {
+                                        let status = trigger_reboot_if_needed(
+                                            host,
+                                            mh_snapshot,
+                                            None,
+                                            &self.host_handler_params.reachability_params,
+                                            ctx,
+                                        )
+                                        .await?;
+                                        return Ok(StateHandlerOutcome::wait(format!(
+                                            "Waiting for host boot to apply lockdown: {}",
+                                            status.status
+                                        )));
+                                    }
+                                    if !has_boot_latched_controls {
+                                        return complete_host_init_lockdown(
+                                            ctx,
+                                            mh_snapshot,
+                                            ManagedHostState::BomValidating {
+                                                bom_validating_state: BomValidating::MatchingSku(
+                                                    BomValidatingContext {
+                                                        machine_validation_context: Some(
+                                                            MachineValidationContext::Discovery,
+                                                        ),
+                                                        ..BomValidatingContext::default()
+                                                    },
+                                                ),
+                                            },
+                                        )
+                                        .await;
+                                    }
                                 }
                                 return Ok(StateHandlerOutcome::transition(
                                     ManagedHostState::HostInit {
@@ -10742,30 +10779,18 @@ async fn release_vpc_dpu_loopback_for_memberships(
         return Ok(());
     }
 
-    let retained_memberships = db::instance::find_service_vpc_memberships(&mut *txn, instance_id)
-        .await?
-        .into_iter()
-        .chain(retained_host_memberships.iter().copied())
-        .collect::<HashSet<_>>();
-
-    let mut releasable_by_dpu = HashMap::<DpuMachineId, Vec<VpcId>>::new();
-    for &(dpu_id, vpc_id) in candidate_memberships {
-        // Host and service use retain only their exact DPU/VPC loopback.
-        if !retained_memberships.contains(&(dpu_id, vpc_id)) {
-            releasable_by_dpu.entry(dpu_id).or_default().push(vpc_id);
-        }
-    }
-
-    for (dpu_id, vpc_ids) in releasable_by_dpu {
-        db::vpc_dpu_loopback::delete_and_deallocate_for_vpcs(common_pools, &dpu_id, &vpc_ids, txn)
-            .await
-            .map_err(|e| StateHandlerError::ResourceCleanupError {
-                resource: "VpcLoopbackIp",
-                error: e.to_string(),
-            })?;
-    }
-
-    Ok(())
+    db::vpc_dpu_loopback::release_unretained_instance_loopbacks(
+        common_pools,
+        txn,
+        instance_id,
+        candidate_memberships,
+        retained_host_memberships,
+    )
+    .await
+    .map_err(|e| StateHandlerError::ResourceCleanupError {
+        resource: "VpcLoopbackIp",
+        error: e.to_string(),
+    })
 }
 
 /// Maps each VPC interface to its exact host DPU when possible and to every current host DPU when
@@ -11440,7 +11465,7 @@ impl HostUpgradeState {
                         && matches!(next_state, ManagedHostState::HostInit {
                             machine_state: MachineState::WaitingForLockdown {
                                 lockdown_info: LockdownInfo {
-                                    state: LockdownState::PollingLockdownStatus,
+                                    state: LockdownState::SetLockdown | LockdownState::PollingLockdownStatus,
                                     mode: Enable,
                                 },
                             },
@@ -11696,6 +11721,26 @@ impl HostUpgradeState {
         };
 
         if lockdown_disabled && !state.host_snapshot.host_profile.disable_lockdown {
+            // Readback is only configured state for boot-latched controls.
+            // Persist the existing apply/reboot flow before writing policy so
+            // a retry cannot skip the reboot after observing the new value.
+            if matches!(scenario, HostFirmwareScenario::Ready)
+                && redfish_client
+                    .lockdown_has_boot_latched_controls()
+                    .await
+                    .map_err(|e| redfish_error("lockdown_has_boot_latched_controls", e))?
+            {
+                return Ok(StateHandlerOutcome::transition(
+                    ManagedHostState::HostInit {
+                        machine_state: MachineState::WaitingForLockdown {
+                            lockdown_info: LockdownInfo {
+                                state: LockdownState::SetLockdown,
+                                mode: Enable,
+                            },
+                        },
+                    },
+                ));
+            }
             tracing::debug!("host firmware update: Reenabling lockdown");
             if let Err(e) = redfish_client
                 .lockdown(libredfish::EnabledDisabled::Enabled)
@@ -13951,12 +13996,7 @@ async fn do_ipmi_restart(
         trigger_location = %trigger_location,
         "IPMI Host Power Control"
     );
-    ctx.pending_db_writes
-        .push(MachineWriteOp::UpdateRebootRequestedTime {
-            machine_id: machine.id.into(),
-            mode: machine_last_reboot_requested_mode(action),
-            time: Utc::now(),
-        });
+    let requested_at = Utc::now();
 
     let bmc_mac = machine
         .status
@@ -13991,7 +14031,15 @@ async fn do_ipmi_restart(
         .await
         .map_err(|e| {
             StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
-        })
+        })?;
+    ctx.pending_db_writes
+        .push(MachineWriteOp::UpdateRebootRequestedTime {
+            machine_id: machine.id.into(),
+            mode: machine_last_reboot_requested_mode(action),
+            time: requested_at,
+        });
+
+    Ok(())
 }
 
 async fn resolve_ipmi_address(
@@ -14420,6 +14468,9 @@ async fn handle_instance_host_platform_config(
                 )
                 .await
                 {
+                    // When the BMC has no AC power cycle, `host_power_control` leaves
+                    // the host off and returns `Ok`, so the power-on happens on the next
+                    // retry after `power_down_wait`.
                     Ok(()) => {
                         return Ok(StateHandlerOutcome::transition(
                             ManagedHostState::Assigned {
@@ -14432,10 +14483,6 @@ async fn handle_instance_host_platform_config(
                                 },
                             },
                         ));
-                    }
-                    Err(RedfishError::NotSupported(_)) => {
-                        // if not supported, just power on
-                        tracing::info!("AC Powercycle not supported, skipping to power on");
                     }
                     Err(e) => {
                         // TODO: Dell's return a generic error if in lockdown which needs to be changed in Redfish SDK
@@ -16087,12 +16134,14 @@ mod tests {
                             description: None,
                             version: Some(target_version.to_string()),
                             release_date: None,
+                            drive: None,
                         },
                         Inventory {
                             id: "CX7_1".to_string(),
                             description: None,
                             version: Some(old_version.to_string()),
                             release_date: None,
+                            drive: None,
                         },
                     ],
                 }],

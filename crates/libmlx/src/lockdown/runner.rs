@@ -17,8 +17,11 @@
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use crate::lockdown::error::{MlxError, MlxResult};
+use crate::lockdown::lockdown::LockStatus;
+use crate::runner::FirmwareToolExecutor;
 use crate::runner::command_builder::CommandSpec;
 
 // FlintRunner is a wrapper for executing flint commands.
@@ -164,7 +167,28 @@ impl FlintRunner {
         }
 
         let output = Self::execute(Command::new(&self.flint_path).args(args), "query")?;
+        // The synchronous public API returns lowercase status strings.
+        Self::classify_query_output(device_id, output).map(|status| status.to_string())
+    }
 
+    pub(super) async fn query_device_bounded(
+        &self,
+        device_id: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<LockStatus> {
+        let command = CommandSpec::new(&self.flint_path).args(["-d", device_id, "q"]);
+        if self.dry_run {
+            return Err(MlxError::DryRun(command.to_string()));
+        }
+        let output = executor
+            .execute(&command, timeout)
+            .await
+            .map_err(|error| MlxError::CommandAttempt(error.into()))?;
+        Self::classify_query_output(device_id, output)
+    }
+
+    fn classify_query_output(device_id: &str, output: Output) -> MlxResult<LockStatus> {
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -172,7 +196,7 @@ impl FlintRunner {
             // Check specific error conditions first.
             if stderr.contains("HW access is disabled") || stdout.contains("HW access is disabled")
             {
-                return Ok("locked".to_string());
+                return Ok(LockStatus::Locked);
             } else if stderr.contains("Cannot open") || stdout.contains("Cannot open") {
                 return Err(MlxError::DeviceNotFound(device_id.to_string()));
             } else if stderr.contains("Permission denied") || stdout.contains("Permission denied") {
@@ -183,7 +207,7 @@ impl FlintRunner {
             return Err(MlxError::CommandFailed(error_msg));
         }
 
-        Ok("unlocked".to_string())
+        Ok(LockStatus::Unlocked)
     }
 
     /// Enable hardware access with a key of 1–16 bare ASCII hexadecimal digits.
@@ -208,6 +232,28 @@ impl FlintRunner {
     /// Failed completion collection returns [`MlxError::ProcessUnsettled`].
     pub fn disable_hw_access(&self, device_id: &str, key: &str) -> MlxResult<()> {
         self.run_key_command(KeyOperation::Disable, device_id, key)
+    }
+
+    pub(super) async fn enable_hw_access_bounded(
+        &self,
+        device_id: &str,
+        key: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<()> {
+        self.run_key_command_bounded(KeyOperation::Enable, device_id, key, executor, timeout)
+            .await
+    }
+
+    pub(super) async fn disable_hw_access_bounded(
+        &self,
+        device_id: &str,
+        key: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<()> {
+        self.run_key_command_bounded(KeyOperation::Disable, device_id, key, executor, timeout)
+            .await
     }
 
     /// Set a hardware access key of 1–16 bare ASCII hexadecimal digits.
@@ -258,6 +304,22 @@ impl FlintRunner {
         }
 
         Ok(command.arg(key))
+    }
+
+    async fn run_key_command_bounded(
+        &self,
+        operation: KeyOperation,
+        device_id: &str,
+        key: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<()> {
+        let command = self.prepare_key_command(operation, device_id, key)?;
+        let output = executor
+            .execute(&command, timeout)
+            .await
+            .map_err(|error| MlxError::CommandAttempt(error.into()))?;
+        operation.classify_output(output)
     }
 
     // burn burns a firmware image onto the device. This runs:
@@ -405,6 +467,7 @@ mod coverage_tests {
     fn err_kind(e: &MlxError) -> &'static str {
         match e {
             MlxError::ProcessUnsettled { .. } => "ProcessUnsettled",
+            MlxError::CommandAttempt(_) => "CommandAttempt",
             MlxError::CommandFailed(_) => "CommandFailed",
             MlxError::DeviceNotFound(_) => "DeviceNotFound",
             MlxError::InvalidDeviceId(_) => "InvalidDeviceId",

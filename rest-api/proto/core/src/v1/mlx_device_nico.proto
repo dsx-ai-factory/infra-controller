@@ -227,6 +227,20 @@ message MlxDeviceReport {
   common.MachineId machine_id = 5;
 }
 
+// MlxDeviceSelector selects a device independently of its current PCI address.
+// Exactly one identity is required; omission and malformed values are rejected.
+// Matching uses the reported base MAC or literal, case-sensitive base GUID.
+message MlxDeviceSelector {
+  oneof identity {
+    // Nonzero unicast MAC, as 12 hexadecimal digits or six two-digit octets
+    // consistently separated by ':' or '-'. Output uses uppercase ':' notation.
+    string base_mac = 1;
+    // Opaque GUID with 1-256 UTF-8 bytes, without surrounding whitespace or
+    // control characters. '--' and 'N/A' are invalid absence placeholders.
+    string base_guid = 2;
+  }
+}
+
 // MlxDeviceInfo represents detailed information about a Mellanox network device.
 message MlxDeviceInfo {
   // pci_name is the PCI address or MST device path for the device.
@@ -638,6 +652,15 @@ message MlxDeviceUpdateFirmwareError {
   MlxDeviceUpdateFirmwareErrorCode code = 1;
   // Nonempty nonsecret explanation, at most 2048 UTF-8 bytes.
   string diagnostic = 2;
+}
+
+// A definite missing receipt in one live supervisor instance. This does not prove
+// absence in a prior instance or authorize retry after journal loss.
+message FirmwareOperationMissingReceipt {
+  // Opaque ID containing 1-256 printable nonspace ASCII bytes, generated anew
+  // at every supervisor startup. The caller retains it before initial submission
+  // and never refreshes it while resolving an uncertain operation.
+  string supervisor_instance_id = 1;
 }
 
 // Result for exactly one delivered MlxDeviceUpdateFirmware workflow. Core must

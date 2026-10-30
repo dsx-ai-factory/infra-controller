@@ -25,6 +25,7 @@ mod gb200_host_interface;
 mod host_init_measurements;
 mod host_uefi_rotation;
 mod host_uefi_setup;
+mod lenovo_lockdown;
 mod maintenance;
 mod power_management;
 mod rack_firmware_upgrade;

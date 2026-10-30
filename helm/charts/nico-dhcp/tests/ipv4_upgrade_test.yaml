@@ -25,7 +25,7 @@ tests:
               containers:
                 - name: nico-dhcp
                   image: example.invalid/core:pinned
-                  command: [sh, -c, 'mkdir -vp /var/run/kea /var/lib/kea && /sbin/kea-dhcp4 -c /tmp/kea_config.json']
+                  command: [sh, -c, 'mkdir -vp /var/run/kea /var/lib/kea && exec /sbin/kea-dhcp4 -c /tmp/kea_config.json']
                   env:
                     - {name: FORGE_CLIENT_CERT_PATH, value: /var/run/secrets/spiffe.io/tls.crt}
                     - {name: FORGE_CLIENT_KEY_PATH, value: /var/run/secrets/spiffe.io/tls.key}

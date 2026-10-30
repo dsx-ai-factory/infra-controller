@@ -405,6 +405,7 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Reject endpoints with embedded secrets before tracing the configuration.
     config.validate_resource_pool_backends()?;
     config.api_admission_control.validate()?;
+    config.validate_admin_lock_admission_permits()?;
     config
         .firmware_global
         .downloads
@@ -435,6 +436,10 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Publish the deployment-wide host naming policy so the DB layer can read it
     // wherever an interface is [re]named (same way we do it w/ `init_tools` above).
     db::host_naming::configure(config.host_naming_strategy);
+
+    // Publish the admin-lock admission permit count the same way; the DB
+    // layer gates the admin-segment lock waiters on it.
+    db::machine_interface::configure_admin_lock_admission(config.admin_lock_admission_permits);
 
     if let Some(manager_config) = &config.component_manager {
         component_manager::rms::validate_rms_backend_rack_profiles(

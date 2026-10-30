@@ -49,6 +49,7 @@ pub(super) mod finder;
 pub(super) mod firmware;
 pub(super) mod health;
 pub(super) mod host_reprovisioning;
+pub(super) mod host_state;
 pub(super) mod ib_fabric;
 pub(super) mod ib_partition;
 pub(super) mod instance;

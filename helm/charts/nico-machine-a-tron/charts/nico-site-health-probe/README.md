@@ -64,7 +64,8 @@ which this standalone binary is not part of.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `carbide_site_health_probe_request_duration_milliseconds` | histogram | `api`, `probe`, `operation` | Duration of synthetic probe requests against NICo APIs, by API surface, probe, and operation. SDK default buckets (0 ms – 10 s). |
-| `carbide_site_health_probe_requests_total` | counter | `api`, `probe`, `outcome` | Probe runs by outcome (`success`, `failure`, `timeout`). Timeout is separate from failure: a slow-but-alive API and a down API are different incidents. |
+| `carbide_site_health_probe_requests_total` | counter | `api`, `probe`, `outcome` | Probe runs by outcome (`success`, `failure`, `timeout`). Timeout is separate from failure: a slow-but-alive API and a down API are different incidents. A call cut at the call timeout, or answered `DEADLINE_EXCEEDED`, counts as `timeout` too. |
+| `carbide_site_health_probe_calls_total` | counter | `api`, `call`, `result` | Calls to each API (`nico-api`, `nico-rest-api`, `metrics-store`) by call and result: `ok`, `timeout` (cut at the call timeout, or answered `DEADLINE_EXCEEDED`), `pushback` (429, 503, `RESOURCE_EXHAUSTED`, `UNAVAILABLE`), `error` (any other failure) and `cancelled`. `cancelled` is a started call whose future was dropped before it returned, by the probe's own timeout or by shutdown. The server may still have finished it. A call still waiting for its turn at the API's gate is not counted. |
 | `carbide_site_health_probe_up` | gauge | `api`, `probe` | 1 if the probe's most recent run succeeded, 0 on failure, timeout, or panic — the gauge operators alert on. |
 | `carbide_site_health_probe_last_run_timestamp_seconds` | gauge | `api`, `probe` | Unix time of the most recent completed run; a stale value means the probe is wedged or stopped. |
 

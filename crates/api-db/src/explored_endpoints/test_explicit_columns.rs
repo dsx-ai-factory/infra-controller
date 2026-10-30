@@ -129,6 +129,7 @@ async fn exercise_endpoint_queries(
     let mut failed_report = report.clone();
     failed_report.last_exploration_error = Some(EndpointExplorationError::ConnectionTimeout {
         details: "projection timeout".to_string(),
+        consecutive_count: 1,
     });
     assert_eq!(
         try_update(

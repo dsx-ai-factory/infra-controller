@@ -12,7 +12,7 @@ NVIDIA Infra Controller (NICo) allows you to do the following with NVLink:
 NICo extends the concept of an *NVLink Partition* with the *NVLink Logical Partition*, which allows users to manage NVLink Partitions without having to learn the datacenter topology.
 
 <Note title="Compatibility note">
-NVLink Partitioning is only supported for GB200 compute nodes.
+NVLink Partitioning is supported for GB200, GB300, and Vera Rubin (VR) compute nodes.
 </Note>
 
 ## Operations: Who Does What
@@ -157,7 +157,9 @@ whether it applied changes, checked in this order:
 With the default interval, a 61 s pass that applied changes idles 15 s
 rather than one second. The partition owners accept a couple of minutes of
 staleness, so a site whose passes overrun at `60s` can set `120s`. On 556
-simulated racks a pass took 27 to 33 s. Chassis and racks are reconciled in
+simulated racks with `partition_monitor_max_concurrent_groups = 64`, a pass
+took 27 to 33 s before unchanged groups were skipped, and with skipping the
+mean pass on the same fleet was about 10 s. Chassis and racks are reconciled in
 parallel, at most `nvlink_config.partition_monitor_max_concurrent_groups`
 (default `16`, documented range 1 to 256) at a time.
 
@@ -365,18 +367,21 @@ below should be repeatable as a checklist.
 1. **Per-machine GPU placement.**
 
    ```bash
-   nicocli machine nvlink-info --machine-id <machine-id>
+   nico-admin-cli --format json machine show <machine-id>
    ```
 
-   Returns the machine's NVLink GPU status observations, including the
-   Domain each GPU is currently assigned to. Use this to confirm that
-   two instances expected to share an NVLink Logical Partition have
+   The `status.nvlink.gpu_status` list holds the machine's NVLink GPU status
+   observations: the `domain_id` of each GPU and the `partition_id` and
+   `logical_partition_id` it is currently assigned to. Use this to confirm
+   that two instances expected to share an NVLink Logical Partition have
    actually landed in the same NVLink Domain — instances in different
    Domains cannot share GPU memory regardless of having the same
-   Logical Partition ID.
+   Logical Partition ID. To see the machine's stored Domain and GPU mapping,
+   run `nico-admin-cli machine nvlink-info show <machine-id>`.
 1. **Cleanup after release.** After releasing an instance, the same
-   `machine nvlink-info` output should show an empty Domain assignment
-   on the affected GPUs within one or two reconcile intervals. Failure
+   `status.nvlink.gpu_status` output should show no `partition_id` or
+   `logical_partition_id` on the affected GPUs within one or two reconcile
+   intervals. Failure
    to clear indicates the monitor could not remove the GPU from its NMX-C
    partition; investigate the corresponding connect-error and op-latency
    metrics.
