@@ -4040,6 +4040,23 @@ impl Forge for Api {
         crate::handlers::component_manager::component_power_control(self, request).await
     }
 
+    async fn component_reset_switch_sdn_factory_default(
+        &self,
+        request: Request<rpc::ComponentResetSwitchSdnFactoryDefaultRequest>,
+    ) -> Result<Response<rpc::ComponentResetSwitchSdnFactoryDefaultResponse>, Status> {
+        crate::handlers::component_manager::component_reset_switch_sdn_factory_default(
+            self, request,
+        )
+        .await
+    }
+
+    async fn get_switch_sdn_factory_reset_status(
+        &self,
+        request: Request<rpc::GetSwitchSdnFactoryResetStatusRequest>,
+    ) -> Result<Response<rpc::GetSwitchSdnFactoryResetStatusResponse>, Status> {
+        crate::handlers::component_manager::get_switch_sdn_factory_reset_status(self, request).await
+    }
+
     async fn component_configure_switch_certificate(
         &self,
         request: Request<rpc::ComponentConfigureSwitchCertificateRequest>,

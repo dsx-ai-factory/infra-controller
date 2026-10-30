@@ -3463,6 +3463,89 @@ async fn dispatch_compute_tray_power_control(
     Ok((results, ips))
 }
 
+pub(crate) async fn component_reset_switch_sdn_factory_default(
+    api: &Api,
+    request: Request<rpc::ComponentResetSwitchSdnFactoryDefaultRequest>,
+) -> Result<Response<rpc::ComponentResetSwitchSdnFactoryDefaultResponse>, Status> {
+    log_request_data(&request);
+    let req = request.into_inner();
+    let ids = req
+        .switch_ids
+        .ok_or_else(|| CarbideError::InvalidArgument("switch_ids is required".into()))?
+        .ids;
+    if ids.is_empty() || ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+        return Err(CarbideError::InvalidArgument(
+            "switch_ids must be non-empty and distinct".into(),
+        )
+        .into());
+    }
+    if req
+        .domain_name
+        .as_ref()
+        .is_some_and(|domain| domain.trim().is_empty())
+    {
+        return Err(CarbideError::InvalidArgument(
+            "domain_name must be non-empty when supplied".into(),
+        )
+        .into());
+    }
+    let cm = require_component_manager(api)?;
+    let endpoints = resolve_switch_endpoints(api, &ids).await?;
+    if !endpoints.unresolved.is_empty() {
+        return Err(component_manager_error_to_status(
+            ComponentManagerError::RejectedBeforeDispatch(format!(
+                "no SDN resets submitted; unresolved switches: {}",
+                endpoints
+                    .unresolved
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        ));
+    }
+    let submission = cm
+        .nv_switch
+        .batch_reset_switch_sdn_factory_default(
+            &endpoints.resolved.endpoints,
+            req.domain_name.as_deref(),
+        )
+        .await
+        .map_err(component_manager_error_to_status)?;
+    Ok(Response::new(
+        rpc::ComponentResetSwitchSdnFactoryDefaultResponse {
+            job_id: submission.job_id,
+            submission_errors: submission.errors,
+        },
+    ))
+}
+
+pub(crate) async fn get_switch_sdn_factory_reset_status(
+    api: &Api,
+    request: Request<rpc::GetSwitchSdnFactoryResetStatusRequest>,
+) -> Result<Response<rpc::GetSwitchSdnFactoryResetStatusResponse>, Status> {
+    log_request_data(&request);
+    let job_id = request.into_inner().job_id;
+    if job_id.trim().is_empty() {
+        return Err(CarbideError::InvalidArgument("job_id must be non-empty".into()).into());
+    }
+    let status = require_component_manager(api)?
+        .nv_switch
+        .get_switch_sdn_factory_reset_job_status(&job_id)
+        .await
+        .map_err(component_manager_error_to_status)?;
+    use component_manager::nv_switch_manager::SwitchFactoryResetState;
+    let state = match status.state {
+        SwitchFactoryResetState::Pending => rpc::SwitchSdnFactoryResetState::Pending,
+        SwitchFactoryResetState::Completed => rpc::SwitchSdnFactoryResetState::Completed,
+        SwitchFactoryResetState::Failed => rpc::SwitchSdnFactoryResetState::Failed,
+    };
+    Ok(Response::new(rpc::GetSwitchSdnFactoryResetStatusResponse {
+        state: state as i32,
+        error: status.error,
+    }))
+}
+
 pub(crate) async fn component_configure_switch_certificate(
     api: &Api,
     request: Request<rpc::ComponentConfigureSwitchCertificateRequest>,

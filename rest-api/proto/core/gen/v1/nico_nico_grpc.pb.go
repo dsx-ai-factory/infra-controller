@@ -556,6 +556,8 @@ const (
 	Forge_ReleaseDPUServiceSyncHold_FullMethodName                          = "/forge.Forge/ReleaseDPUServiceSyncHold"
 	Forge_ComponentPowerControl_FullMethodName                              = "/forge.Forge/ComponentPowerControl"
 	Forge_GetComponentPowerDetails_FullMethodName                           = "/forge.Forge/GetComponentPowerDetails"
+	Forge_ComponentResetSwitchSdnFactoryDefault_FullMethodName              = "/forge.Forge/ComponentResetSwitchSdnFactoryDefault"
+	Forge_GetSwitchSdnFactoryResetStatus_FullMethodName                     = "/forge.Forge/GetSwitchSdnFactoryResetStatus"
 	Forge_ComponentConfigureSwitchCertificate_FullMethodName                = "/forge.Forge/ComponentConfigureSwitchCertificate"
 	Forge_GetComponentInventory_FullMethodName                              = "/forge.Forge/GetComponentInventory"
 	Forge_UpdateComponentFirmware_FullMethodName                            = "/forge.Forge/UpdateComponentFirmware"
@@ -1643,6 +1645,15 @@ type ForgeClient interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error)
+	// Reset SDN configuration directly through the component backend. This disrupts
+	// fabric traffic and does not queue state-controller maintenance or restore SDN.
+	// Requires an RMS backend implementing BatchResetSwitchSdnFactoryDefault.
+	// Returns after submission; poll GetSwitchSdnFactoryResetStatus for completion.
+	// An unavailable response may follow dispatch: do not automatically resubmit.
+	ComponentResetSwitchSdnFactoryDefault(ctx context.Context, in *ComponentResetSwitchSdnFactoryDefaultRequest, opts ...grpc.CallOption) (*ComponentResetSwitchSdnFactoryDefaultResponse, error)
+	// Observe the parent and every child job; unknown/lost jobs return Unavailable,
+	// never Completed. RMS job state is in memory and may be lost on restart.
+	GetSwitchSdnFactoryResetStatus(ctx context.Context, in *GetSwitchSdnFactoryResetStatusRequest, opts ...grpc.CallOption) (*GetSwitchSdnFactoryResetStatusResponse, error)
 	ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(ctx context.Context, in *GetComponentInventoryRequest, opts ...grpc.CallOption) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(ctx context.Context, in *UpdateComponentFirmwareRequest, opts ...grpc.CallOption) (*UpdateComponentFirmwareResponse, error)
@@ -7021,6 +7032,26 @@ func (c *forgeClient) GetComponentPowerDetails(ctx context.Context, in *GetCompo
 	return out, nil
 }
 
+func (c *forgeClient) ComponentResetSwitchSdnFactoryDefault(ctx context.Context, in *ComponentResetSwitchSdnFactoryDefaultRequest, opts ...grpc.CallOption) (*ComponentResetSwitchSdnFactoryDefaultResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ComponentResetSwitchSdnFactoryDefaultResponse)
+	err := c.cc.Invoke(ctx, Forge_ComponentResetSwitchSdnFactoryDefault_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetSwitchSdnFactoryResetStatus(ctx context.Context, in *GetSwitchSdnFactoryResetStatusRequest, opts ...grpc.CallOption) (*GetSwitchSdnFactoryResetStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSwitchSdnFactoryResetStatusResponse)
+	err := c.cc.Invoke(ctx, Forge_GetSwitchSdnFactoryResetStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ComponentConfigureSwitchCertificateResponse)
@@ -8232,6 +8263,15 @@ type ForgeServer interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error)
+	// Reset SDN configuration directly through the component backend. This disrupts
+	// fabric traffic and does not queue state-controller maintenance or restore SDN.
+	// Requires an RMS backend implementing BatchResetSwitchSdnFactoryDefault.
+	// Returns after submission; poll GetSwitchSdnFactoryResetStatus for completion.
+	// An unavailable response may follow dispatch: do not automatically resubmit.
+	ComponentResetSwitchSdnFactoryDefault(context.Context, *ComponentResetSwitchSdnFactoryDefaultRequest) (*ComponentResetSwitchSdnFactoryDefaultResponse, error)
+	// Observe the parent and every child job; unknown/lost jobs return Unavailable,
+	// never Completed. RMS job state is in memory and may be lost on restart.
+	GetSwitchSdnFactoryResetStatus(context.Context, *GetSwitchSdnFactoryResetStatusRequest) (*GetSwitchSdnFactoryResetStatusResponse, error)
 	ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(context.Context, *GetComponentInventoryRequest) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(context.Context, *UpdateComponentFirmwareRequest) (*UpdateComponentFirmwareResponse, error)
@@ -9858,6 +9898,12 @@ func (UnimplementedForgeServer) ComponentPowerControl(context.Context, *Componen
 }
 func (UnimplementedForgeServer) GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetComponentPowerDetails not implemented")
+}
+func (UnimplementedForgeServer) ComponentResetSwitchSdnFactoryDefault(context.Context, *ComponentResetSwitchSdnFactoryDefaultRequest) (*ComponentResetSwitchSdnFactoryDefaultResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ComponentResetSwitchSdnFactoryDefault not implemented")
+}
+func (UnimplementedForgeServer) GetSwitchSdnFactoryResetStatus(context.Context, *GetSwitchSdnFactoryResetStatusRequest) (*GetSwitchSdnFactoryResetStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSwitchSdnFactoryResetStatus not implemented")
 }
 func (UnimplementedForgeServer) ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ComponentConfigureSwitchCertificate not implemented")
@@ -19497,6 +19543,42 @@ func _Forge_GetComponentPowerDetails_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ComponentResetSwitchSdnFactoryDefault_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ComponentResetSwitchSdnFactoryDefaultRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ComponentResetSwitchSdnFactoryDefault(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ComponentResetSwitchSdnFactoryDefault_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ComponentResetSwitchSdnFactoryDefault(ctx, req.(*ComponentResetSwitchSdnFactoryDefaultRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetSwitchSdnFactoryResetStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSwitchSdnFactoryResetStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetSwitchSdnFactoryResetStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetSwitchSdnFactoryResetStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetSwitchSdnFactoryResetStatus(ctx, req.(*GetSwitchSdnFactoryResetStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_ComponentConfigureSwitchCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ComponentConfigureSwitchCertificateRequest)
 	if err := dec(in); err != nil {
@@ -21879,6 +21961,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetComponentPowerDetails",
 			Handler:    _Forge_GetComponentPowerDetails_Handler,
+		},
+		{
+			MethodName: "ComponentResetSwitchSdnFactoryDefault",
+			Handler:    _Forge_ComponentResetSwitchSdnFactoryDefault_Handler,
+		},
+		{
+			MethodName: "GetSwitchSdnFactoryResetStatus",
+			Handler:    _Forge_GetSwitchSdnFactoryResetStatus_Handler,
 		},
 		{
 			MethodName: "ComponentConfigureSwitchCertificate",

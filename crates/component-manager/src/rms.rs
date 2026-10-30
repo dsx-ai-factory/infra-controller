@@ -71,7 +71,7 @@ use crate::nv_switch_manager::{
     ScaleUpFabricStatus, ScaleUpFabricSwitchStatus, SwitchCertificateEndpoint,
     SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
     SwitchFirmwareUpdateStatus, SwitchMtlsDisableJobStatus, SwitchMtlsDisableState,
-    SwitchPasswordRotationState, SwitchSlotAndTrayResult,
+    SwitchPasswordRotationState, SwitchSdnFactoryResetSubmission, SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     Backend as PowerShelfBackend, PowerShelfComponentResult, PowerShelfEndpoint,
@@ -4090,6 +4090,57 @@ impl NvSwitchManager for RmsBackend {
     }
 
     #[instrument(skip(self, endpoints, tls_server_domain), fields(backend = "rms"))]
+    async fn batch_reset_switch_sdn_factory_default(
+        &self,
+        endpoints: &[SwitchEndpoint],
+        tls_server_domain: Option<&str>,
+    ) -> Result<SwitchSdnFactoryResetSubmission, ComponentManagerError> {
+        if endpoints.is_empty() {
+            return Err(ComponentManagerError::InvalidArgument(
+                "switch SDN factory reset requires at least one endpoint".to_string(),
+            ));
+        }
+
+        let macs: Vec<MacAddress> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
+        let identities = resolve_switch_identities(&self.db, &macs).await?;
+        let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
+        let mut nodes = Vec::with_capacity(endpoints.len());
+
+        for endpoint in endpoints {
+            let resolved = self
+                .resolve_switch_or_power_shelf_node(
+                    &identities,
+                    endpoint.bmc_mac,
+                    SwitchOrPowerShelfRole::Switch,
+                )
+                .map_err(ComponentManagerError::Internal)?;
+
+            nodes.push(build_switch_node_info(
+                endpoint,
+                &resolved,
+                hostnames.get(&endpoint.nvos_mac).cloned(),
+            ));
+        }
+
+        rms_batch_reset_switch_sdn_factory_default(self.client.as_ref(), nodes, tls_server_domain)
+            .await
+    }
+
+    #[instrument(skip(self), fields(backend = "rms", job_id))]
+    async fn get_switch_sdn_factory_reset_job_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
+        let jobs =
+            rms_get_switch_job_tree(self.client.as_ref(), SDN_RESET_JOB_LABELS, job_id).await?;
+        let (state, error) = summarize_rms_switch_job_tree(SDN_RESET_JOB_LABELS, job_id, &jobs)?;
+        Ok(SwitchFactoryResetJobStatus {
+            state: state.into(),
+            error,
+        })
+    }
+
+    #[instrument(skip(self, endpoints, tls_server_domain), fields(backend = "rms"))]
     async fn batch_reset_switch_factory_default(
         &self,
         endpoints: &[SwitchEndpoint],
@@ -4423,6 +4474,71 @@ fn map_rms_password_rotation_state(job: &rms::JobStatus) -> SwitchPasswordRotati
     }
 }
 
+/// Submits an SDN reset batch and requires an observable parent job handle.
+async fn rms_batch_reset_switch_sdn_factory_default(
+    client: &dyn RmsApi,
+    nodes: Vec<rms::NodeInfo>,
+    tls_server_domain: Option<&str>,
+) -> Result<SwitchSdnFactoryResetSubmission, ComponentManagerError> {
+    let request = rms::BatchResetSwitchSdnFactoryDefaultRequest {
+        nodes: Some(rms::NodeSet { nodes }),
+        domain: tls_server_domain.map(str::to_owned),
+    };
+
+    let response = red::instrumented(
+        "rms",
+        "batch_reset_switch_sdn_factory_default",
+        client.batch_reset_switch_sdn_factory_default(request),
+    )
+    .await
+    .map_err(|error| match error {
+        // The contract guarantees that an unimplemented RPC accepted no reset work.
+        // Other status or transport failures can arrive after dispatch, so they must
+        // not invite an automatic retry of this destructive operation.
+        RackManagerError::ApiInvocationError(status)
+            if status.code() == tonic::Code::Unimplemented =>
+        {
+            ComponentManagerError::Unsupported(
+                "RMS does not support switch SDN factory reset".to_string(),
+            )
+        }
+        _ => ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch SDN factory-reset submission returned no durable job ID".to_string(),
+        ),
+    })?;
+
+    let batch = response.response.ok_or_else(|| {
+        ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch SDN factory-reset submission returned no operation response or job ID"
+                .to_string(),
+        )
+    })?;
+
+    if !batch.job_id.trim().is_empty() {
+        let mut errors: Vec<String> = batch
+            .node_results
+            .iter()
+            .filter(|result| result.status != rms::ReturnCode::Success as i32)
+            .map(|result| format!("{}: {}", result.node_id, result.error_message))
+            .collect();
+        if batch.status != rms::ReturnCode::Success as i32 && errors.is_empty() {
+            errors.push(format!(
+                "RMS rejected part of the SDN reset batch: {}",
+                batch.message
+            ));
+        }
+        return Ok(SwitchSdnFactoryResetSubmission {
+            job_id: batch.job_id,
+            errors,
+        });
+    }
+
+    Err(ComponentManagerError::OperationOutcomeUnknown(format!(
+        "RMS switch SDN factory-reset submission returned no job ID (status {}); the operation outcome is unknown",
+        batch.status
+    )))
+}
+
 /// Submits a factory-reset batch and requires RMS to return a job ID.
 ///
 /// `tls_server_domain` overrides the RMS switch domain. If omitted, RMS uses its
@@ -4488,6 +4604,11 @@ struct RmsSwitchJobLabels {
     /// Noun for the outcome that cannot be established, such as `reset`.
     outcome: &'static str,
 }
+
+const SDN_RESET_JOB_LABELS: RmsSwitchJobLabels = RmsSwitchJobLabels {
+    operation: "switch SDN factory-reset",
+    outcome: "reset",
+};
 
 const FACTORY_RESET_JOB_LABELS: RmsSwitchJobLabels = RmsSwitchJobLabels {
     operation: "switch factory-reset",
@@ -9803,6 +9924,136 @@ mod tests {
             ComponentManagerError::OperationOutcomeUnknown(message)
                 if message.contains("disable outcome is unknown")
         ));
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_sdn_reset_maps_targets_preserves_rejections_and_polls_children(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        mock.enqueue_batch_reset_switch_sdn_factory_default(Ok(
+            rms::BatchResetSwitchSdnFactoryDefaultResponse {
+                response: Some(rms::NodeBatchResponse {
+                    job_id: "sdn-parent".into(),
+                    status: rms::ReturnCode::Failure as i32,
+                    node_results: vec![rms::NodeOperationResult {
+                        node_id: "rejected-node".into(),
+                        status: rms::ReturnCode::Failure as i32,
+                        error_message: "unsupported target".into(),
+                    }],
+                    ..Default::default()
+                }),
+            },
+        ))
+        .await;
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+        let submission = NvSwitchManager::batch_reset_switch_sdn_factory_default(
+            &backend,
+            &[endpoint],
+            Some("nvl-domain"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(submission.job_id, "sdn-parent");
+        assert_eq!(submission.errors, ["rejected-node: unsupported target"]);
+        let calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].domain.as_deref(), Some("nvl-domain"));
+        let nodes = &calls[0].nodes.as_ref().unwrap().nodes;
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, sw1.to_string());
+        assert!(nodes[0].host_endpoint.is_some());
+        assert!(
+            mock.batch_reset_switch_factory_default_calls()
+                .await
+                .is_empty()
+        );
+
+        mock.enqueue_get_job_status(Ok(rms::GetJobStatusResponse {
+            job_states: vec![rms::JobStatus {
+                job_id: "sdn-parent".into(),
+                child_job_ids: vec!["not-yet-visible".into()],
+                execution_state: rms::JobExecutionState::Completed as i32,
+                ..Default::default()
+            }],
+        }))
+        .await;
+        let status =
+            NvSwitchManager::get_switch_sdn_factory_reset_job_status(&backend, "sdn-parent")
+                .await
+                .unwrap();
+        assert_eq!(status.state, SwitchFactoryResetState::Pending);
+        assert!(mock.get_job_status_calls().await[0].include_child_job_states);
+        let error = NvSwitchManager::batch_reset_switch_sdn_factory_default(&backend, &[], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ComponentManagerError::InvalidArgument(_)));
+        assert_eq!(
+            mock.batch_reset_switch_sdn_factory_default_calls()
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sw_sdn_reset_submission_requires_observable_job() {
+        let cases = [
+            (
+                "missing response",
+                Ok(rms::BatchResetSwitchSdnFactoryDefaultResponse::default()),
+                false,
+            ),
+            (
+                "empty handle",
+                Ok(rms::BatchResetSwitchSdnFactoryDefaultResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        job_id: " ".into(),
+                        ..Default::default()
+                    }),
+                }),
+                false,
+            ),
+            (
+                "ambiguous transport",
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unavailable("lost reply"),
+                )),
+                false,
+            ),
+            (
+                "unsupported RPC",
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unimplemented("old RMS"),
+                )),
+                true,
+            ),
+        ];
+        for (label, response, unsupported) in cases {
+            let mock = MockRmsApi::new();
+            mock.enqueue_batch_reset_switch_sdn_factory_default(response)
+                .await;
+            let error = rms_batch_reset_switch_sdn_factory_default(
+                &mock,
+                vec![rms::NodeInfo::default()],
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                if unsupported {
+                    matches!(error, ComponentManagerError::Unsupported(_))
+                } else {
+                    matches!(error, ComponentManagerError::OperationOutcomeUnknown(_))
+                },
+                "{label}: {error}"
+            );
+            assert_eq!(
+                mock.batch_reset_switch_sdn_factory_default_calls()
+                    .await
+                    .len(),
+                1,
+                "{label}"
+            );
+        }
     }
 
     #[carbide_macros::sqlx_test]
