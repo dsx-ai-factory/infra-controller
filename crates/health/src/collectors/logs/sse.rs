@@ -110,7 +110,7 @@ struct SseSubscriptionClosed {
     #[context]
     odata_id: String,
     #[context]
-    endpoint: String,
+    endpoint_address: String,
     #[context]
     error: String,
 }
@@ -127,7 +127,7 @@ struct SseSubscriptionClosed {
 )]
 struct SseCapacityExhausted {
     #[context]
-    endpoint: String,
+    endpoint_address: String,
     #[context]
     sse_destinations: String,
     #[context]
@@ -152,7 +152,7 @@ struct SseSubscriptionReaped {
     #[context]
     odata_id: String,
     #[context]
-    endpoint: String,
+    endpoint_address: String,
     #[context]
     error: String,
 }
@@ -255,13 +255,13 @@ impl<B: Bmc + 'static> SseLogCollector<B> {
             return;
         }
 
-        let endpoint = format!("{:?}", self.endpoint.addr);
+        let endpoint_address = format!("{:?}", self.endpoint.addr);
 
         if warn {
             self.last_cap_warning = Some(Instant::now());
 
             carbide_instrument::emit(SseCapacityExhausted {
-                endpoint: endpoint.clone(),
+                endpoint_address: endpoint_address.clone(),
                 sse_destination_count: ids.len(),
                 sse_destinations: ids.join(","),
                 tracked_destination: self.undeleted_destination.clone().unwrap_or_default(),
@@ -287,7 +287,7 @@ impl<B: Bmc + 'static> SseLogCollector<B> {
             carbide_instrument::emit(SseSubscriptionReaped {
                 outcome,
                 odata_id,
-                endpoint: endpoint.clone(),
+                endpoint_address: endpoint_address.clone(),
                 error,
             });
         }
@@ -351,7 +351,7 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
         // A bmcweb open at the cap also succeeds, so only an identified destination
         // shows the cap has cleared.
         if self.destination.is_some() && self.last_cap_warning.take().is_some() {
-            tracing::info!(endpoint = ?self.endpoint.addr, "BMC SSE subscription cap cleared");
+            tracing::info!(endpoint_address = ?self.endpoint.addr, "BMC SSE subscription cap cleared");
         }
 
         let event_stream = map_event_stream(
@@ -367,13 +367,13 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
 
     /// Deletes the destination the stream created; some BMCs keep it after the stream closes.
     async fn disconnect(&mut self, reason: CloseReason) {
-        let endpoint = format!("{:?}", self.endpoint.addr);
+        let endpoint_address = format!("{:?}", self.endpoint.addr);
 
         let Some(destination) = self.destination.take() else {
             carbide_instrument::emit(SseSubscriptionClosed {
                 outcome: SseCloseOutcome::SocketOnly,
                 odata_id: String::new(),
-                endpoint,
+                endpoint_address,
                 error: String::new(),
             });
 
@@ -403,7 +403,7 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
         carbide_instrument::emit(SseSubscriptionClosed {
             outcome,
             odata_id,
-            endpoint,
+            endpoint_address,
             error,
         });
     }

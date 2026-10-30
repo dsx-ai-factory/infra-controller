@@ -64,7 +64,7 @@ pub(crate) use reachability::{
 };
 pub(crate) use runtime::CANCELLED_CONNECT_GRACE;
 pub use runtime::{
-    BackoffConfig, Collector, CollectorStartContext, EventStream, ExponentialBackoff,
+    BackoffConfig, CloseReason, Collector, CollectorStartContext, EventStream, ExponentialBackoff,
     IterationResult, PeriodicCollector, StreamMetrics, StreamingCollector,
     StreamingCollectorStartContext, StreamingConnectResult,
 };

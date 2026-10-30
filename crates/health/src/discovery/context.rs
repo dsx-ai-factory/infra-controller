@@ -594,12 +594,13 @@ impl DiscoveryLoopContext {
 
         let mut closed = 0;
 
-        let _ = tokio::time::timeout(timeout, async {
+        tokio::time::timeout(timeout, async {
             while stopping.join_next().await.is_some() {
                 closed += 1;
             }
         })
-        .await;
+        .await
+        .ok();
 
         DiscoveryShutdown {
             closed,

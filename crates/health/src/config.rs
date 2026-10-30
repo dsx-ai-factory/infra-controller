@@ -114,7 +114,8 @@ pub struct Config {
     pub endpoint_discovery_interval: Duration,
 
     /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
-    /// still running when it passes are abandoned.
+    /// still running when it passes are abandoned. Defaults to 20 seconds and
+    /// must be greater than zero.
     #[serde(with = "humantime_serde")]
     pub shutdown_timeout: Duration,
 
@@ -1544,13 +1545,15 @@ pub struct SseLogConfig {
     /// Deadline for deleting the BMC subscription a closed stream opened, and for
     /// each cap diagnosis: listing the BMC's subscriptions plus any `reap_on_cap`
     /// sweep. In `sse` and `auto` log modes, validation requires it plus 5 s for a
-    /// cancelled connect to finish to be less than `shutdown_timeout`.
+    /// cancelled connect to finish to be less than `shutdown_timeout`. Defaults
+    /// to 5 seconds and must be greater than zero.
     #[serde(with = "humantime_serde")]
     pub close_timeout: Duration,
 
     /// Delete every SSE destination on a BMC at its cap. Enable only where
     /// hw-health is the BMC's sole SSE consumer. Not yet effective on BMCs that
-    /// drop a capped SSE open without an HTTP response (LiteOn).
+    /// drop a capped SSE open without an HTTP response (LiteOn). Disabled by
+    /// default.
     ///
     /// Each BMC is swept at most once per 30 minutes, and recovery does not
     /// reset that interval. The DELETEs run one at a time within `close_timeout`,
