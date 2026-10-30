@@ -1,7 +1,8 @@
 name: Download REST Go modules
 description: >-
   Restores the REST module downloads cached for the current `rest-api/go.sum`,
-  runs `go mod download` with retries, and saves the downloads on a cache miss.
+  runs `go mod download` with retries, and saves the downloads on a cache miss
+  on main.
 
 # Only the downloaded zips are cached, not the extracted modules, and Go reads
 # them back through a `file://` GOPROXY entry. Keep the cache path, key, and
@@ -33,12 +34,15 @@ runs:
         # downloads, not only on a missing module.
         GOPROXY="file://${cache_dir}|$(go env GOPROXY)" ./scripts/go-mod-download.sh
 
+    # Only main saves. Other refs can read main's entry but not each other's,
+    # so a branch-scoped copy would only take Actions cache space.
+    #
     # Every caller runs the full `go mod download` above first, so whichever
     # job saves the entry saves the complete module set. The directory is
     # emptied first because a fallback restore holds an earlier `go.sum`'s
     # versions, and carrying them forward would grow the entry on every change.
     - name: Collect Go module downloads
-      if: steps.restore.outputs.cache-hit != 'true'
+      if: github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true'
       shell: bash
       working-directory: rest-api
       run: |
@@ -49,7 +53,7 @@ runs:
         cp -R "$(go env GOMODCACHE)/cache/download/." "${cache_dir}/"
 
     - name: Save Go module downloads
-      if: steps.restore.outputs.cache-hit != 'true'
+      if: github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
         path: ~/.cache/rest-go-mod-download
