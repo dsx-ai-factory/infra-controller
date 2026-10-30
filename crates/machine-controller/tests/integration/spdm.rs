@@ -276,6 +276,127 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
     Ok(())
 }
 
+/// A failed polling-state write rolls back its job, and the next iteration schedules one job.
+#[sqlx_test]
+async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::Result<()> {
+    let (mut env, mh) = setup_spdm_host(pool.clone(), true).await;
+    let machine_id: MachineId = mh.host.id.into();
+    let selected_devices = ["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1"];
+    let trigger_state = ManagedHostState::HostInit {
+        machine_state: MachineState::SpdmMeasuring {
+            spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
+        },
+    };
+
+    // Start with a discovered selection and no jobs from fixture setup.
+    let mut txn = env.test_harness.db_txn().await;
+    sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
+        .bind(machine_id)
+        .execute(&mut *txn)
+        .await?;
+    sqlx::query("DELETE FROM attestation_profiles")
+        .execute(&mut *txn)
+        .await?;
+    db::attestation_profile::create(
+        &mut txn,
+        MOCK_HOST_HARDWARE_CLASS,
+        &AttestationPolicyDocument::new(AttesterSelection {
+            mode: AttesterSelectionMode::Allowlist,
+            component_ids: selected_devices
+                .iter()
+                .map(|id| ComponentIdMatch::Exact((*id).to_string()))
+                .collect(),
+        }),
+        "test",
+    )
+    .await?;
+    db::machine::update_state(&mut txn, &mh.host.id, &trigger_state).await?;
+    txn.commit().await?;
+
+    // Fail after scheduling, when the processor saves PollResult. Sequences survive
+    // rollback, so this proves the iteration reached the injected failure.
+    sqlx::raw_sql(
+        "CREATE SEQUENCE spdm_poll_state_writes;
+         CREATE FUNCTION reject_spdm_poll_state() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             PERFORM nextval('spdm_poll_state_writes');
+             RAISE EXCEPTION 'forced SPDM polling state persistence failure';
+         END $$;
+         CREATE TRIGGER reject_spdm_poll_state
+             BEFORE UPDATE OF controller_state ON machines
+             FOR EACH ROW
+             WHEN (NEW.controller_state #> '{machine_state,spdm_measuring_state,pollresult}' IS NOT NULL)
+             EXECUTE FUNCTION reject_spdm_poll_state();",
+    )
+    .execute(&pool)
+    .await?;
+
+    env.run_single_iteration().await;
+    let attempted_writes: i64 =
+        sqlx::query_scalar("SELECT COALESCE(pg_sequence_last_value('spdm_poll_state_writes'), 0)")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        attempted_writes, 1,
+        "the polling-state write must be attempted"
+    );
+
+    // Reload both sides of the transaction: neither the transition nor job rows survive.
+    let mut txn = env.test_harness.db_txn().await;
+    let machine = mh.host.db_machine(&mut txn).await;
+    assert_eq!(machine.current_state(), &trigger_state);
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COUNT(DISTINCT job_id)
+         FROM spdm_machine_devices_attestation WHERE machine_id = $1",
+    )
+    .bind(machine_id)
+    .fetch_one(&mut *txn)
+    .await?;
+    assert_eq!(
+        counts,
+        (0, 0),
+        "a failed transition must not leave an orphan job"
+    );
+    txn.commit().await?;
+
+    // Remove the transient failure and let the same trigger state retry normally.
+    sqlx::query("DROP TRIGGER reject_spdm_poll_state ON machines")
+        .execute(&pool)
+        .await?;
+    env.run_single_iteration().await;
+    let mut txn = env.test_harness.db_txn().await;
+    let machine = mh.host.db_machine(&mut txn).await;
+    let ManagedHostState::HostInit {
+        machine_state:
+            MachineState::SpdmMeasuring {
+                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
+            },
+    } = machine.current_state()
+    else {
+        panic!(
+            "expected a persisted polling state, got {:?}",
+            machine.current_state()
+        );
+    };
+    let rows: Vec<(uuid::Uuid, String, bool)> = sqlx::query_as(
+        "SELECT job_id, device_id, triggered_by_mh_controller
+         FROM spdm_machine_devices_attestation WHERE machine_id = $1 ORDER BY device_id",
+    )
+    .bind(machine_id)
+    .fetch_all(&mut *txn)
+    .await?;
+    assert_eq!(
+        rows,
+        selected_devices
+            .into_iter()
+            .map(|id| (*job_id, id.to_string(), true))
+            .collect::<Vec<_>>(),
+        "the retry must persist exactly one controller job for the selected devices",
+    );
+    txn.commit().await?;
+    Ok(())
+}
+
 /// Membership changes cancel the old job before returning to the trigger state.
 #[sqlx_test]
 async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::Result<()> {

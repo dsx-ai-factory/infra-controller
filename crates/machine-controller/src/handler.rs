@@ -2459,23 +2459,20 @@ impl MachineStateHandler {
                         }
                         match spdm_measuring_state {
                             SpdmMeasuringState::TriggerMeasurements => {
-                                match handle_spdm_trigger_state(
+                                handle_spdm_trigger_state(
                                     ctx.services,
                                     mh_snapshot,
                                     host_machine_id,
-                                )
-                                .await?
-                                {
-                                    Some(job_id) => Ok(StateHandlerOutcome::transition(
-                                        ManagedHostState::PostAssignedMeasuring {
-                                            attestation_mode: AttestationMode::SpdmAttestation {
-                                                spdm_measuring_state:
-                                                    SpdmMeasuringState::PollResult(job_id),
-                                            },
+                                    |job_id| ManagedHostState::PostAssignedMeasuring {
+                                        attestation_mode: AttestationMode::SpdmAttestation {
+                                            spdm_measuring_state: SpdmMeasuringState::PollResult(
+                                                job_id,
+                                            ),
                                         },
-                                    )),
-                                    None => Ok(StateHandlerOutcome::transition(next_skip_state)),
-                                }
+                                    },
+                                    next_skip_state,
+                                )
+                                .await
                             }
                             SpdmMeasuringState::PollResult(job_id) => {
                                 handle_spdm_poll_state(
@@ -2509,16 +2506,16 @@ impl MachineStateHandler {
                 }
                 match spdm_measuring_state {
                     SpdmMeasuringState::TriggerMeasurements => {
-                        match handle_spdm_trigger_state(ctx.services, mh_snapshot, host_machine_id)
-                            .await?
-                        {
-                            Some(job_id) => Ok(StateHandlerOutcome::transition(
-                                ManagedHostState::PreAssignedMeasuring {
-                                    spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
-                                },
-                            )),
-                            None => Ok(StateHandlerOutcome::transition(next_skip_state)),
-                        }
+                        handle_spdm_trigger_state(
+                            ctx.services,
+                            mh_snapshot,
+                            host_machine_id,
+                            |job_id| ManagedHostState::PreAssignedMeasuring {
+                                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
+                            },
+                            next_skip_state,
+                        )
+                        .await
                     }
                     SpdmMeasuringState::PollResult(job_id) => {
                         handle_spdm_poll_state(
@@ -8670,24 +8667,22 @@ impl StateHandler for HostMachineStateHandler {
                         return Ok(StateHandlerOutcome::transition(next_skip_state));
                     }
                     match spdm_measuring_state {
-                        SpdmMeasuringState::TriggerMeasurements => match handle_spdm_trigger_state(
-                            ctx.services,
-                            mh_snapshot,
-                            host_machine_id,
-                        )
-                        .await?
-                        {
-                            Some(job_id) => Ok(StateHandlerOutcome::transition(
-                                ManagedHostState::HostInit {
+                        SpdmMeasuringState::TriggerMeasurements => {
+                            handle_spdm_trigger_state(
+                                ctx.services,
+                                mh_snapshot,
+                                host_machine_id,
+                                |job_id| ManagedHostState::HostInit {
                                     machine_state: MachineState::SpdmMeasuring {
                                         spdm_measuring_state: SpdmMeasuringState::PollResult(
                                             job_id,
                                         ),
                                     },
                                 },
-                            )),
-                            None => Ok(StateHandlerOutcome::transition(next_skip_state)),
-                        },
+                                next_skip_state,
+                            )
+                            .await
+                        }
                         SpdmMeasuringState::PollResult(job_id) => {
                             handle_spdm_poll_state(
                                 ctx.services,

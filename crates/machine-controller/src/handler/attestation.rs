@@ -33,7 +33,7 @@ use model::machine::{
     CleanupContext, CleanupState, FailureCause, FailureDetails, FailureSource, MachineState,
     ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, PgTransaction};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -120,6 +120,20 @@ pub struct SchedulingResult {
     pub devices_scheduled: u64,
 }
 
+impl SchedulingResult {
+    fn emit_scheduling_event(&self, machine_id: MachineId) {
+        // Count scheduling attempts for both API and managed-host triggers.
+        carbide_instrument::emit(AttestationScheduled {
+            outcome: self.outcome,
+            machine_id,
+            profile_source: ProfileSource::of(self),
+            hardware_class: self.hardware_class.clone(),
+            profile_version: self.profile_version.clone(),
+            devices_scheduled: self.devices_scheduled,
+        });
+    }
+}
+
 /// Selected BMC components and the policy decision, before any work is scheduled.
 pub struct MachineAttesterSelection {
     /// The policy decision, before any attestation work is scheduled.
@@ -192,7 +206,7 @@ pub async fn trigger_attestation(
     redfish_timeout_duration: std::time::Duration,
     triggered_by_mh_controller: bool,
 ) -> Result<SchedulingResult, StateHandlerError> {
-    let result = schedule(
+    let (result, txn) = schedule(
         db_pool,
         connect,
         bmc_info,
@@ -202,14 +216,11 @@ pub async fn trigger_attestation(
     )
     .await?;
 
-    carbide_instrument::emit(AttestationScheduled {
-        outcome: result.outcome,
-        machine_id: *machine_id,
-        profile_source: ProfileSource::of(&result),
-        hardware_class: result.hardware_class.clone(),
-        profile_version: result.profile_version.clone(),
-        devices_scheduled: result.devices_scheduled,
-    });
+    // API triggers have no machine transition to persist with the new job.
+    if let Some(txn) = txn {
+        txn.commit().await?;
+    }
+    result.emit_scheduling_event(*machine_id);
 
     Ok(result)
 }
@@ -221,7 +232,8 @@ async fn schedule(
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
     triggered_by_mh_controller: bool,
-) -> Result<SchedulingResult, StateHandlerError> {
+) -> Result<(SchedulingResult, Option<PgTransaction<'static>>), StateHandlerError> {
+    // Complete profile resolution and BMC discovery before opening a write transaction.
     let selection = select_machine_attesters(
         db_pool,
         connect,
@@ -242,7 +254,7 @@ async fn schedule(
 
     // Policy-only and empty-inventory outcomes create no job.
     if selection.attesters.is_empty() {
-        return Ok(result);
+        return Ok((result, None));
     }
 
     // Each scheduling attempt creates a separate job. Existing jobs retain
@@ -269,14 +281,16 @@ async fn schedule(
     )
     .await?;
 
-    txn.commit().await?;
-
-    Ok(SchedulingResult {
-        started_at: Some(time_now),
-        job_id: Some(job_id),
-        devices_scheduled: records_inserted,
-        ..result
-    })
+    // The caller commits the job with the state that records its ID when applicable.
+    Ok((
+        SchedulingResult {
+            started_at: Some(time_now),
+            job_id: Some(job_id),
+            devices_scheduled: records_inserted,
+            ..result
+        },
+        Some(txn),
+    ))
 }
 
 /// The lowest SPDM version this build attests, below which the responder is
@@ -451,9 +465,11 @@ pub(crate) async fn handle_spdm_trigger_state(
     services: &MachineStateHandlerServices,
     mh_snapshot: &mut ManagedHostStateSnapshot,
     host_machine_id: &MachineId,
-) -> Result<Option<uuid::Uuid>, StateHandlerError> {
+    next_poll_state: impl FnOnce(uuid::Uuid) -> ManagedHostState,
+    next_skip_state: ManagedHostState,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     // Create the BMC client only when the resolved profile requires collection.
-    let result = trigger_attestation(
+    let (result, txn) = schedule(
         &services.db_pool,
         async || {
             services
@@ -466,10 +482,15 @@ pub(crate) async fn handle_spdm_trigger_state(
         true, // This job is part of the managed-host lifecycle.
     )
     .await?;
+    result.emit_scheduling_event(*host_machine_id);
 
-    // The caller polls the newly created job. Outcomes that schedule nothing
-    // have no job ID and let the machine advance without polling.
-    Ok(result.job_id)
+    // Persist the job and its polling state together; a rejected transition rolls back both.
+    // Empty selections have no transaction and advance without polling.
+    let next_state = match result.job_id {
+        Some(job_id) => next_poll_state(job_id),
+        None => next_skip_state,
+    };
+    Ok(StateHandlerOutcome::transition(next_state).with_txn_opt(txn))
 }
 
 pub(crate) async fn handle_spdm_poll_state(
