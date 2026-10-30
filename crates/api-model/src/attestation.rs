@@ -98,7 +98,7 @@ pub mod spdm {
         pub evidence: Option<Evidence>,
         /// Whether this job owns the device's shared evidence collection endpoint.
         /// Ownership lasts until evidence is saved, the BMC task is known to have stopped,
-        /// or the two-minute best-effort cancellation timeout expires.
+        /// or the configured best-effort cancellation timeout expires.
         pub evidence_collection_locked: bool,
         // job id
         pub job_id: uuid::Uuid,
@@ -129,9 +129,13 @@ pub mod spdm {
         PollEvidenceCollection {
             task_id: String,
             retry_count: i32,
-            /// Whether cancellation was accepted or is unsupported. Older states retry it.
-            #[serde(default)]
-            cancellation_attempted: bool,
+        },
+        /// Reconcile a BMC task after a cancellation attempt or a missing-task response.
+        WaitForTaskCancellation {
+            /// BMC task whose evidence collection claim remains held during cleanup.
+            task_id: String,
+            /// Number of collection retries already performed, excluding cancellation polling.
+            retry_count: i32,
         },
         NrasVerification,
         ApplyAppraisalPolicy,
@@ -1074,7 +1078,6 @@ mod test {
                 r#"{"PollEvidenceCollection":{"task_id":"t1","retry_count":2}}"# => Yields(SpdmAttestationState::PollEvidenceCollection {
                     task_id: "t1".to_string(),
                     retry_count: 2,
-                    cancellation_attempted: false,
                 }),
             }
         );
@@ -1276,7 +1279,6 @@ mod test {
                 details_with_state(SpdmAttestationState::PollEvidenceCollection {
                     task_id: "t1".to_string(),
                     retry_count: 2,
-                    cancellation_attempted: false,
                 }) => None,
             }
 

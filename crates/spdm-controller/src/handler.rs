@@ -35,6 +35,10 @@ use state_controller::state_handler::{
 
 use crate::context::SpdmStateHandlerContextObjects;
 
+// Unexpected nonterminal tasks get two minutes from entering PollEvidenceCollection.
+// Cancellation cleanup then has its own configurable grace period.
+const EVIDENCE_COLLECTION_POLL_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
+
 #[derive(Debug, Clone)]
 pub struct SpdmAttestationStateHandler {
     verifier: Arc<dyn Verifier>,
@@ -43,7 +47,7 @@ pub struct SpdmAttestationStateHandler {
 }
 
 impl SpdmAttestationStateHandler {
-    /// Creates a handler with a timeout measured from each job's persisted cancellation time.
+    /// Creates a handler with a cleanup timeout measured from persisted cancellation times.
     pub fn new(
         verifier: Arc<dyn Verifier>,
         nras_config: nras::Config,
@@ -71,7 +75,6 @@ impl SpdmAttestationStateHandler {
                 let SpdmAttestationState::PollEvidenceCollection {
                     task_id,
                     retry_count,
-                    cancellation_attempted,
                 } = state
                 else {
                     // An ambiguous collection POST can hold the lock without a task ID.
@@ -80,44 +83,32 @@ impl SpdmAttestationStateHandler {
                             .to_string(),
                     ));
                 };
+                // The waiting state records that cancellation was already requested;
+                // a transient request failure remains here for the next iteration.
                 let client = redfish_client(&snapshot.bmc_info, ctx).await?;
-                let stopped = match client.get_task(task_id).await {
-                    Ok(task) => evidence_collection_task_stopped(task.task_state.as_ref()),
-                    // Redfish may remove the task when cancellation finishes.
-                    Err(libredfish::RedfishError::HTTPErrorCode { status_code, .. })
-                        if *cancellation_attempted && matches!(status_code.as_u16(), 404 | 410) =>
-                    {
-                        true
-                    }
-                    Err(error) => return Err(redfish_error("get_task_state", error)),
-                };
-                if !stopped {
-                    if *cancellation_attempted {
-                        return Ok(StateHandlerOutcome::wait(
-                            "Waiting for BMC evidence collection to stop after cancellation"
-                                .to_string(),
-                        ));
-                    }
-                    let stopped = match client.cancel_task(task_id).await {
-                        Ok(stopped) => stopped,
-                        Err(libredfish::RedfishError::NotSupported(_)) => {
-                            tracing::warn!(%object_id, %task_id, "BMC task cancellation is unsupported; waiting for collection to stop");
-                            false
-                        }
-                        Err(error) => return Err(redfish_error("cancel_task", error)),
-                    };
-                    if !stopped {
-                        // Persist the accepted/unsupported result so normal polling does
-                        // not repeatedly send DELETE. Transient errors remain retryable.
-                        return Ok(StateHandlerOutcome::transition(
-                            SpdmAttestationState::PollEvidenceCollection {
-                                task_id: task_id.clone(),
-                                retry_count: *retry_count,
-                                cancellation_attempted: true,
-                            },
-                        ));
-                    }
+                let task = client
+                    .get_task(task_id)
+                    .await
+                    .map_err(|error| redfish_error("get_task_state", error))?;
+                if evidence_collection_task_stopped(task.task_state.as_ref()) {
+                    return self.complete_cancellation(object_id, state, ctx).await;
                 }
+                // if cancelling is immediate, then move into Cancelled state,
+                // otherwise move into WaitForTaskCancellation and poll there
+                match client.cancel_task(task_id).await {
+                    Ok(true) => return self.complete_cancellation(object_id, state, ctx).await,
+                    Ok(false) => {}
+                    Err(libredfish::RedfishError::NotSupported(_)) => {
+                        tracing::warn!(%object_id, %task_id, "BMC task cancellation is unsupported; waiting for collection to stop");
+                    }
+                    Err(error) => return Err(redfish_error("cancel_task", error)),
+                }
+                return Ok(StateHandlerOutcome::transition(
+                    SpdmAttestationState::WaitForTaskCancellation {
+                        task_id: task_id.clone(),
+                        retry_count: *retry_count,
+                    },
+                ));
             } else {
                 // This is an explicit best-effort cutoff, not proof that the task stopped.
                 tracing::warn!(%object_id, "SPDM cancellation timed out; releasing the evidence collection lock without BMC confirmation");
@@ -192,7 +183,12 @@ impl StateHandler for SpdmAttestationStateHandler {
         // record metrics irrespective of the state of the machine
         self.record_metrics(snapshot, ctx);
 
-        if snapshot.cancelled_at.is_some() {
+        if snapshot.cancelled_at.is_some()
+            && !matches!(
+                original_controller_state,
+                SpdmAttestationState::WaitForTaskCancellation { .. }
+            )
+        {
             return self
                 .handle_cancellation(object_id, snapshot, original_controller_state, ctx)
                 .await;
@@ -345,7 +341,6 @@ impl StateHandler for SpdmAttestationStateHandler {
                         SpdmAttestationState::PollEvidenceCollection {
                             task_id: task.id,
                             retry_count: *retry_count,
-                            cancellation_attempted: false,
                         },
                     )),
                     Err(error) => {
@@ -380,10 +375,23 @@ impl StateHandler for SpdmAttestationStateHandler {
                     ));
                 }
                 let redfish_client = redfish_client(&snapshot.bmc_info, ctx).await?;
-                let task = redfish_client
-                    .get_task(task_id)
-                    .await
-                    .map_err(|e| redfish_error("get_task_state", e))?;
+                let task = match redfish_client.get_task(task_id).await {
+                    Ok(task) => task,
+                    Err(libredfish::RedfishError::HTTPErrorCode { status_code, .. })
+                        if matches!(status_code.as_u16(), 404 | 410) =>
+                    {
+                        // Cancellation may finish before its state transition is persisted.
+                        // Reconcile the missing task through the bounded cleanup state.
+                        tracing::warn!(%object_id, %task_id, status_code = status_code.as_u16(), "BMC evidence collection task disappeared; entering cancellation cleanup");
+                        return Ok(StateHandlerOutcome::transition(
+                            SpdmAttestationState::WaitForTaskCancellation {
+                                task_id: task_id.clone(),
+                                retry_count: *retry_count,
+                            },
+                        ));
+                    }
+                    Err(error) => return Err(redfish_error("get_task_state", error)),
+                };
                 let task_stopped = evidence_collection_task_stopped(task.task_state.as_ref());
 
                 match classify_evidence_collection_task_state(task.task_state.as_ref()) {
@@ -432,9 +440,15 @@ impl StateHandler for SpdmAttestationStateHandler {
                         )))
                     }
                     EvidenceCollectionTaskStateClass::Unexpected(task_state) => {
-                        let err = task.messages.iter().map(|t| t.message.as_str()).join("\n");
-                        let next_action = if task_stopped {
-                            EvidenceCollectionNextAction::for_retry(*retry_count)
+                        // Only confirmed termination permits another collection. Request
+                        // cancellation here before entering the separate polling state.
+                        let time_in_state = snapshot.state_version.since_state_change();
+                        let next_action = if task_stopped && *retry_count > 4 {
+                            EvidenceCollectionNextAction::Fail
+                        } else if task_stopped {
+                            EvidenceCollectionNextAction::Retry
+                        } else if time_in_state >= EVIDENCE_COLLECTION_POLL_TIMEOUT {
+                            EvidenceCollectionNextAction::Cancel
                         } else {
                             EvidenceCollectionNextAction::Wait
                         };
@@ -446,7 +460,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                             device_id: device_id.clone(),
                             task_id: task_id.clone(),
                             retry_count: *retry_count,
-                            error: err,
+                            error: task.messages.iter().map(|t| t.message.as_str()).join("\n"),
                         });
 
                         if next_action == EvidenceCollectionNextAction::Wait {
@@ -455,13 +469,40 @@ impl StateHandler for SpdmAttestationStateHandler {
                                     .to_string(),
                             ));
                         }
+                        if next_action == EvidenceCollectionNextAction::Cancel {
+                            // has the task cancellation happen immediately?
+                            let is_stopped = match redfish_client.cancel_task(task_id).await {
+                                Ok(stopped) => stopped,
+                                Err(libredfish::RedfishError::NotSupported(_)) => {
+                                    tracing::warn!(%object_id, %task_id, "BMC task cancellation is unsupported; waiting for collection to stop");
+                                    false
+                                }
+                                Err(error) => {
+                                    // The task may still be running despite this error. Preserve the
+                                    // cleanup grace and claim instead of failing and releasing it early.
+                                    tracing::warn!(%object_id, %task_id, error = %error, "BMC task cancellation failed; waiting for collection to stop");
+                                    false
+                                }
+                            };
+                            // task cancellation did not happen immediately, so need to wait and poll
+                            if !is_stopped {
+                                return Ok(StateHandlerOutcome::transition(
+                                    SpdmAttestationState::WaitForTaskCancellation {
+                                        task_id: task_id.clone(),
+                                        retry_count: *retry_count,
+                                    },
+                                ));
+                            }
+                        }
 
+                        // at this stage we either retry or fail, so release the lock in either case
                         let mut txn = ctx.services.db_pool.begin().await?;
                         db::attestation::spdm::release_evidence_collection_lock(
                             &mut txn, object_id,
                         )
                         .await?;
-                        if next_action == EvidenceCollectionNextAction::Fail {
+                        // A synchronous cancellation also needs to honor the retry budget.
+                        if *retry_count > 4 {
                             Ok(
                                 StateHandlerOutcome::transition(SpdmAttestationState::Failed(
                                     "Too many retries triggering evidence collection".to_string(),
@@ -480,6 +521,75 @@ impl StateHandler for SpdmAttestationStateHandler {
                         }
                     }
                 }
+            }
+            SpdmAttestationState::WaitForTaskCancellation {
+                task_id,
+                retry_count,
+            } => {
+                if !snapshot.evidence_collection_locked {
+                    return Err(StateHandlerError::InvalidState(
+                        "Cannot poll task cancellation without owning the device's evidence collection claim"
+                            .to_string(),
+                    ));
+                }
+                // get the lowest of: user cancellation vs automatic cancellation (i.e. triggered above)
+                let cancellation_started_at = snapshot.state_version.timestamp();
+                let started_at = snapshot
+                    .cancelled_at
+                    .map_or(cancellation_started_at, |time| {
+                        time.min(cancellation_started_at)
+                    });
+                let timed_out = chrono::Utc::now() - started_at >= self.cancellation_timeout;
+                // Check the deadline before Redfish so transport failures cannot keep
+                // either a cancelled or a failed job's claim locked indefinitely.
+                if timed_out {
+                    tracing::warn!(%object_id, %task_id, "SPDM task cancellation timed out; releasing the evidence collection lock without BMC confirmation");
+                } else {
+                    let client = redfish_client(&snapshot.bmc_info, ctx).await?;
+                    let is_stopped =
+                        match client.get_task(task_id).await {
+                            Ok(task) => evidence_collection_task_stopped(task.task_state.as_ref()),
+                            // Redfish may remove the task when cancellation finishes.
+                            Err(libredfish::RedfishError::HTTPErrorCode {
+                                status_code, ..
+                            }) if matches!(status_code.as_u16(), 404 | 410) => true,
+                            Err(error) => return Err(redfish_error("get_task_state", error)),
+                        };
+                    if !is_stopped {
+                        return Ok(StateHandlerOutcome::wait(
+                            "Waiting for BMC evidence collection to stop after cancellation"
+                                .to_string(),
+                        ));
+                    }
+                }
+
+                // this was a user requested cancellation, so move to the Cancelled state
+                if snapshot.cancelled_at.is_some() {
+                    return self
+                        .complete_cancellation(object_id, original_controller_state, ctx)
+                        .await;
+                }
+                // Automatic recovery must fail rather than waive attestation if cleanup
+                // expires. Only a confirmed stop and remaining retries permit a new task.
+                let next_state = if timed_out {
+                    SpdmAttestationState::Failed(
+                        "Timed out waiting for BMC evidence collection to stop".to_string(),
+                    )
+                } else if *retry_count > 4 {
+                    SpdmAttestationState::Failed(
+                        "Too many retries triggering evidence collection".to_string(),
+                    )
+                } else {
+                    SpdmAttestationState::TriggerEvidenceCollection {
+                        retry_count: retry_count + 1,
+                        redfish_retry_count: 0,
+                        last_redfish_failure_tstamp: None,
+                    }
+                };
+                let mut txn = ctx.services.db_pool.begin().await?;
+                db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id)
+                    .await?;
+                Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
             }
             SpdmAttestationState::NrasVerification => {
                 let client = self.verifier.client(self.nras_config.clone());
@@ -606,18 +716,9 @@ fn classify_evidence_collection_task_state(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 enum EvidenceCollectionNextAction {
     Wait,
+    Cancel,
     Retry,
     Fail,
-}
-
-impl EvidenceCollectionNextAction {
-    fn for_retry(retry_count: i32) -> Self {
-        if retry_count > 4 {
-            Self::Fail
-        } else {
-            Self::Retry
-        }
-    }
 }
 
 #[derive(Event)]
@@ -798,6 +899,7 @@ mod tests {
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
 
+    use super::EvidenceCollectionNextAction::{Cancel, Fail, Retry, Wait};
     use super::*;
 
     const METRIC_NAME: &str = "carbide_spdm_evidence_collection_unexpected_task_states_total";
@@ -806,6 +908,7 @@ mod tests {
     struct TaskStateCase {
         task_state: Option<TaskState>,
         retry_count: i32,
+        next_action: EvidenceCollectionNextAction,
     }
 
     #[derive(Debug, PartialEq)]
@@ -835,7 +938,7 @@ mod tests {
             EvidenceCollectionTaskStateClass::Completed
             | EvidenceCollectionTaskStateClass::InProgress => None,
         };
-        let next_action = EvidenceCollectionNextAction::for_retry(input.retry_count);
+        let next_action = input.next_action;
         let metrics = MetricsCapture::start();
         let logs = capture_logs(|| {
             if let Some(task_state) = task_state {
@@ -935,26 +1038,28 @@ mod tests {
         value_scenarios!(
             run = observe_task_state;
             "normal states do not emit" {
-                TaskStateCase { task_state: Some(TaskState::New), retry_count: 0 } => no_event(),
-                TaskStateCase { task_state: Some(TaskState::Starting), retry_count: 0 } => no_event(),
-                TaskStateCase { task_state: Some(TaskState::Running), retry_count: 0 } => no_event(),
-                TaskStateCase { task_state: Some(TaskState::Completed), retry_count: 0 } => no_event(),
+                TaskStateCase { task_state: Some(TaskState::New), retry_count: 0, next_action: Wait } => no_event(),
+                TaskStateCase { task_state: Some(TaskState::Starting), retry_count: 0, next_action: Wait } => no_event(),
+                TaskStateCase { task_state: Some(TaskState::Running), retry_count: 0, next_action: Wait } => no_event(),
+                TaskStateCase { task_state: Some(TaskState::Completed), retry_count: 0, next_action: Wait } => no_event(),
             }
-            "unexpected states retry" {
-                TaskStateCase { task_state: Some(TaskState::Suspended), retry_count: 4 } => emitted("suspended", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Interrupted), retry_count: 4 } => emitted("interrupted", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Pending), retry_count: 4 } => emitted("pending", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Stopping), retry_count: 4 } => emitted("stopping", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Killed), retry_count: 4 } => emitted("killed", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Exception), retry_count: 4 } => emitted("exception", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Service), retry_count: 4 } => emitted("service", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Cancelling), retry_count: 4 } => emitted("cancelling", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Cancelled), retry_count: 4 } => emitted("cancelled", "retry", 4),
-                TaskStateCase { task_state: None, retry_count: 4 } => emitted("missing", "retry", 4),
+            "unexpected states retry only after stopping" {
+                TaskStateCase { task_state: Some(TaskState::Suspended), retry_count: 4, next_action: Wait } => emitted("suspended", "wait", 4),
+                TaskStateCase { task_state: Some(TaskState::Interrupted), retry_count: 4, next_action: Wait } => emitted("interrupted", "wait", 4),
+                TaskStateCase { task_state: Some(TaskState::Pending), retry_count: 4, next_action: Wait } => emitted("pending", "wait", 4),
+                TaskStateCase { task_state: Some(TaskState::Stopping), retry_count: 4, next_action: Wait } => emitted("stopping", "wait", 4),
+                TaskStateCase { task_state: Some(TaskState::Killed), retry_count: 4, next_action: Retry } => emitted("killed", "retry", 4),
+                TaskStateCase { task_state: Some(TaskState::Exception), retry_count: 4, next_action: Retry } => emitted("exception", "retry", 4),
+                TaskStateCase { task_state: Some(TaskState::Service), retry_count: 4, next_action: Wait } => emitted("service", "wait", 4),
+                TaskStateCase { task_state: Some(TaskState::Cancelling), retry_count: 4, next_action: Wait } => emitted("cancelling", "wait", 4),
+                TaskStateCase { task_state: Some(TaskState::Cancelled), retry_count: 4, next_action: Retry } => emitted("cancelled", "retry", 4),
+                TaskStateCase { task_state: None, retry_count: 4, next_action: Wait } => emitted("missing", "wait", 4),
             }
-            "retry budget is exhausted" {
-                TaskStateCase { task_state: Some(TaskState::Interrupted), retry_count: 5 } => emitted("interrupted", "fail", 5),
-                TaskStateCase { task_state: None, retry_count: 5 } => emitted("missing", "fail", 5),
+            "failure is observable" {
+                TaskStateCase { task_state: Some(TaskState::Exception), retry_count: 5, next_action: Fail } => emitted("exception", "fail", 5),
+            }
+            "cancellation is observable" {
+                TaskStateCase { task_state: Some(TaskState::Cancelling), retry_count: 0, next_action: Cancel } => emitted("cancelling", "cancel", 0),
             }
         );
     }

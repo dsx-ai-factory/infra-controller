@@ -719,10 +719,6 @@ pub(in crate::tests) mod tests {
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
-        // set up redfish to fail evidence collection with a terminal exception
-        env.redfish_sim
-            .set_get_task_trigger_evidence_returns_exception(true);
-
         let response = env
             .api
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
@@ -740,14 +736,72 @@ pub(in crate::tests) mod tests {
 
         let mut txn = env.pool.begin().await.unwrap();
 
-        // let's loop until we are triggering evidence and verify that
-        for _ in 0..8 {
+        // Reach polling, then model a BMC that removed tasks after cancellation
+        // completed without the controller's waiting-state transition being saved.
+        for _ in 0..3 {
             env.run_spdm_controller_iteration_no_requeue().await;
         }
 
         let object_ids = db::attestation::spdm::find_machine_ids_for_attestation(&mut txn)
             .await
             .expect("Failed getting object ids for attestation");
+
+        for (object_id, status_code) in object_ids.iter().zip(
+            [http::StatusCode::NOT_FOUND, http::StatusCode::GONE]
+                .into_iter()
+                .cycle(),
+        ) {
+            let SpdmObjectId(_, device_id, job_id) = object_id;
+            let (state, _) = get_state_from_db(&mut txn, &machine_id, device_id, job_id).await?;
+            let SpdmAttestationState::PollEvidenceCollection { task_id, .. } = state else {
+                panic!("expected PollEvidenceCollection, got: {state:?}");
+            };
+            env.redfish_sim.set_task_http_error(&task_id, status_code);
+        }
+        env.run_spdm_controller_iteration_no_requeue().await;
+        for SpdmObjectId(_, device_id, job_id) in &object_ids {
+            let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                device_id,
+                job_id,
+            )
+            .await?;
+            assert!(matches!(
+                snapshot.state,
+                SpdmAttestationState::WaitForTaskCancellation { retry_count: 0, .. }
+            ));
+            assert!(snapshot.evidence_collection_locked);
+        }
+
+        // Missing tasks count as stopped during cleanup, consuming one retry
+        // and releasing the claim before another collection can begin.
+        env.run_spdm_controller_iteration_no_requeue().await;
+        for SpdmObjectId(_, device_id, job_id) in &object_ids {
+            let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                device_id,
+                job_id,
+            )
+            .await?;
+            assert_eq!(
+                snapshot.state,
+                SpdmAttestationState::TriggerEvidenceCollection {
+                    retry_count: 1,
+                    redfish_retry_count: 0,
+                    last_redfish_failure_tstamp: None,
+                }
+            );
+            assert!(!snapshot.evidence_collection_locked);
+        }
+
+        // Continue retrying terminal exceptions within the same collection budget.
+        env.redfish_sim
+            .set_get_task_trigger_evidence_returns_exception(true);
+        for _ in 0..4 {
+            env.run_spdm_controller_iteration_no_requeue().await;
+        }
 
         for object_id in &*object_ids {
             let SpdmObjectId(_, device_id, job_id) = object_id;
@@ -966,6 +1020,230 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn test_unexpected_evidence_collection_waits_for_cancellation(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
+
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = env
+            .redfish_sim
+            .create_client("cancellation-fixture", None, RedfishAuth::Anonymous, None)
+            .await?;
+
+        for (scenario, finish_collection, user_cancelled, cancel_error) in [
+            ("confirmed stop permits retry", true, false, None),
+            (
+                "cancellation request failure still observes the cleanup deadline",
+                false,
+                false,
+                Some(libredfish::RedfishError::GenericError {
+                    error: "temporary cancellation failure".to_string(),
+                }),
+            ),
+            (
+                "user cancellation wins without extending cleanup",
+                false,
+                true,
+                None,
+            ),
+        ] {
+            env.redfish_sim.set_evidence_collection_running(false);
+            let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+            env.redfish_sim.set_evidence_collection_running(true);
+            let job_id = uuid::Uuid::try_from(
+                env.api
+                    .trigger_machine_attestation(Request::new(
+                        SpdmMachineAttestationTriggerRequest {
+                            machine_id: Some(machine_id.into()),
+                            redfish_timeout_secs: u32::MAX,
+                        },
+                    ))
+                    .await?
+                    .into_inner()
+                    .job_id
+                    .unwrap(),
+            )?;
+            for _ in 0..3 {
+                env.run_spdm_controller_iteration_no_requeue().await;
+            }
+            let mut txn = env.db_txn().await;
+            let devices =
+                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+            // Model a BMC stuck in Cancelling, an unexpected but nonterminal state.
+            for device in &devices {
+                let SpdmAttestationState::PollEvidenceCollection { task_id, .. } = &device.state
+                else {
+                    panic!(
+                        "{scenario}: expected evidence collection, got {:?}",
+                        device.state
+                    );
+                };
+                assert!(!client.cancel_task(task_id).await?);
+            }
+            let initial_cancellations = env.redfish_sim.task_cancellation_requests().len();
+            let initial_collections = env.redfish_sim.evidence_collection_requests().len();
+            env.run_spdm_controller_iteration_no_requeue().await;
+            for device in &devices {
+                let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut txn,
+                    &machine_id,
+                    &device.device_id,
+                    &job_id,
+                )
+                .await?;
+                assert!(
+                    matches!(
+                        snapshot.state,
+                        SpdmAttestationState::PollEvidenceCollection { retry_count: 0, .. }
+                    ),
+                    "{scenario}"
+                );
+                assert!(
+                    matches!(snapshot.state_outcome, Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+                    if reason == "Waiting for BMC evidence collection to stop before retrying"),
+                    "{scenario}"
+                );
+            }
+
+            // Age the persisted polling state instead of sleeping through the grace period.
+            let old_time = Utc::now() - chrono::Duration::minutes(2);
+            let old_version: ConfigVersion =
+                format!("V1-T{}", old_time.timestamp_micros()).parse()?;
+            sqlx::query(
+                "UPDATE spdm_machine_devices_attestation SET state_version = $2 WHERE job_id = $1",
+            )
+            .bind(job_id)
+            .bind(old_version)
+            .execute(&env.pool)
+            .await?;
+            if let Some(error) = cancel_error {
+                env.redfish_sim.set_next_task_cancel_error(error);
+            }
+            env.run_spdm_controller_iteration_no_requeue().await;
+            for device in &devices {
+                let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut txn,
+                    &machine_id,
+                    &device.device_id,
+                    &job_id,
+                )
+                .await?;
+                assert!(
+                    matches!(
+                        snapshot.state,
+                        SpdmAttestationState::WaitForTaskCancellation { retry_count: 0, .. }
+                    ),
+                    "{scenario}"
+                );
+                assert!(snapshot.evidence_collection_locked, "{scenario}");
+            }
+            assert_eq!(
+                env.redfish_sim.task_cancellation_requests().len(),
+                initial_cancellations + devices.len(),
+                "unexpected polling requests cancellation before entering the waiting state"
+            );
+            let cleanup_version: ConfigVersion = sqlx::query_scalar("SELECT state_version FROM spdm_machine_devices_attestation WHERE job_id = $1 AND device_id = $2")
+                .bind(job_id).bind(&devices[0].device_id).fetch_one(&env.pool).await?;
+            // The waiting state only polls; it must not send another DELETE.
+            for _ in 0..2 {
+                env.run_spdm_controller_iteration_no_requeue().await;
+            }
+            assert_eq!(
+                env.redfish_sim.task_cancellation_requests().len(),
+                initial_cancellations + devices.len(),
+                "{scenario}"
+            );
+            let waiting = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &devices[0].device_id,
+                &job_id,
+            )
+            .await?;
+            assert_eq!(cleanup_version, waiting.state_version, "{scenario}");
+            assert!(
+                matches!(waiting.state_outcome, Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+                    if reason == "Waiting for BMC evidence collection to stop after cancellation"),
+                "{scenario}"
+            );
+            assert_eq!(
+                env.redfish_sim.evidence_collection_requests().len(),
+                initial_collections,
+                "a pending cancellation must not start another collection"
+            );
+
+            if finish_collection {
+                env.redfish_sim.set_evidence_collection_running(false);
+            } else {
+                sqlx::query("UPDATE spdm_machine_devices_attestation SET state_version = $2 WHERE job_id = $1")
+                    .bind(job_id).bind(old_version).execute(&env.pool).await?;
+            }
+            if user_cancelled {
+                env.api
+                    .cancel_attestation(Request::new(job_id.into()))
+                    .await?;
+            }
+            env.run_spdm_controller_iteration_no_requeue().await;
+            for device in &devices {
+                let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut txn,
+                    &machine_id,
+                    &device.device_id,
+                    &job_id,
+                )
+                .await?;
+                let expected = if user_cancelled {
+                    SpdmAttestationState::Cancelled
+                } else if finish_collection {
+                    SpdmAttestationState::TriggerEvidenceCollection {
+                        retry_count: 1,
+                        redfish_retry_count: 0,
+                        last_redfish_failure_tstamp: None,
+                    }
+                } else {
+                    SpdmAttestationState::Failed(
+                        "Timed out waiting for BMC evidence collection to stop".to_string(),
+                    )
+                };
+                assert_eq!(snapshot.state, expected, "{scenario}");
+                assert!(!snapshot.evidence_collection_locked, "{scenario}");
+                assert_eq!(
+                    snapshot.completed_at.is_some(),
+                    user_cancelled,
+                    "{scenario}"
+                );
+                assert!(
+                    snapshot.evidence.is_none(),
+                    "cleanup must not read evidence"
+                );
+            }
+            if !finish_collection && !user_cancelled {
+                // The Failed handler records completion on the following iteration.
+                env.run_spdm_controller_iteration_no_requeue().await;
+                for device in &devices {
+                    let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                        &mut txn,
+                        &machine_id,
+                        &device.device_id,
+                        &job_id,
+                    )
+                    .await?;
+                    assert!(snapshot.completed_at.is_some(), "{scenario}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn test_cancelled_by_user_goes_into_cancelled(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
@@ -1066,7 +1344,8 @@ pub(in crate::tests) mod tests {
             let expected_task_ids = devices
                 .iter()
                 .filter_map(|device| {
-                    if let SpdmAttestationState::PollEvidenceCollection { task_id, .. } =
+                    if let SpdmAttestationState::WaitForTaskCancellation { task_id, .. }
+                    | SpdmAttestationState::PollEvidenceCollection { task_id, .. } =
                         &device.state
                     {
                         Some(task_id.clone())
@@ -1147,10 +1426,7 @@ pub(in crate::tests) mod tests {
                     assert!(
                         matches!(
                             snapshot.state,
-                            SpdmAttestationState::PollEvidenceCollection {
-                                cancellation_attempted: true,
-                                ..
-                            }
+                            SpdmAttestationState::WaitForTaskCancellation { .. }
                         ),
                         "{}",
                         case.scenario

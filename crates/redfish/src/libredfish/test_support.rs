@@ -61,6 +61,7 @@ struct RedfishSimState {
     task_cancellation_requests: Vec<String>,
     cancelling_evidence_tasks: HashSet<String>,
     next_task_cancel_error: Option<RedfishError>,
+    task_http_errors: HashMap<String, http::StatusCode>,
     machine_setup_bios_job_id: Option<String>,
     is_bios_setup: Option<bool>,
     default_lockdown: Option<EnabledDisabled>,
@@ -389,6 +390,15 @@ impl RedfishSim {
     /// Fail the next task cancellation so callers can exercise unsupported or retry paths.
     pub fn set_next_task_cancel_error(&self, error: RedfishError) {
         self.state.lock().unwrap().next_task_cancel_error = Some(error);
+    }
+
+    /// Return the specified HTTP error on every lookup of this task.
+    pub fn set_task_http_error(&self, task_id: &str, status_code: http::StatusCode) {
+        self.state
+            .lock()
+            .unwrap()
+            .task_http_errors
+            .insert(task_id.to_string(), status_code);
     }
 
     pub fn set_machine_setup_bios_job_id(&self, job_id: Option<String>) {
@@ -1335,6 +1345,14 @@ impl Redfish for RedfishSimClient {
         id: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::task::Task, RedfishError>> {
         Box::pin(async move {
+            if let Some(status_code) = self.state.lock().unwrap().task_http_errors.get(id).copied()
+            {
+                return Err(sim_http_error(
+                    status_code,
+                    &format!("TaskService/Tasks/{id}"),
+                    "simulated task lookup failure",
+                ));
+            }
             if self
                 .state
                 .lock()

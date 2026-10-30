@@ -125,6 +125,7 @@ impl StateControllerIO for SpdmStateControllerIO {
                 ("triggerevidencecollection", "")
             }
             SpdmAttestationState::PollEvidenceCollection { .. } => ("pollevidencecolletion", ""),
+            SpdmAttestationState::WaitForTaskCancellation { .. } => ("waitfortaskcancellation", ""),
             SpdmAttestationState::NrasVerification => ("nrasverification", ""),
             SpdmAttestationState::ApplyAppraisalPolicy => ("applyappraisalpolicy", ""),
             SpdmAttestationState::Failed(_) => ("failed", ""),

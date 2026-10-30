@@ -3848,9 +3848,11 @@ pub struct SpdmStateControllerConfig {
     /// Common state controller configs
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
-    /// Maximum wait from the persisted cancellation time before releasing an
+    /// Maximum wait from the persisted start of cancellation cleanup before releasing an
     /// evidence collection lock without BMC confirmation. Accepts positive
     /// durations up to five minutes (e.g. "30s", "5m"); defaults to "2m".
+    /// Covers user cancellation and automatic recovery. User requests use their
+    /// cancellation timestamp and cannot extend cleanup already in progress.
     /// Requires an API restart; controller retries do not reset the deadline.
     #[serde(
         deserialize_with = "SpdmStateControllerConfig::deserialize_cancellation_timeout",
