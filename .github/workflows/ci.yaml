@@ -868,6 +868,7 @@ jobs:
       # of what filled up the Actions quota and evicted the sccache
       # entries.
       cache: false
+      sccache_scope: release-container-x86_64
       build_args: ${{ needs.prepare.outputs.release_build_args }}
       image_name: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       image_tag: ${{ needs.prepare.outputs.version }}
@@ -904,6 +905,7 @@ jobs:
       # is the worst of the four: 8m21s of cache export on a main run for two
       # cached layers.
       cache: false
+      sccache_scope: release-container-aarch64
       build_args: ${{ needs.prepare.outputs.release_build_args_aarch64 }}
       image_name: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide-aarch64
       image_tag: ${{ needs.prepare.outputs.version }}
@@ -1229,6 +1231,7 @@ jobs:
       # Off for the same reason as the release containers above: 2m00s of cache
       # export on a main run for a single cached layer.
       cache: false
+      sccache_scope: forge-cli-x86_64
       image_name: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -1253,6 +1256,7 @@ jobs:
       # Off for the same reason as the release containers above: 3m27s of cache
       # export on a main run for two cached layers.
       cache: false
+      sccache_scope: forge-cli-aarch64
       image_name: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.major_minor_version }}-latest
