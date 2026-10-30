@@ -221,7 +221,13 @@ impl Kea {
     fn run_once(&mut self) -> Result<Option<ExitStatus>, eyre::Report> {
         drop(self.dhcp_in_port_reservation.take());
 
-        let mut process = Command::new("/usr/sbin/kea-dhcp4")
+        let mut command = Command::new("/usr/sbin/kea-dhcp4");
+        // IPv4 must remain usable when both IPv6 native contracts are absent.
+        #[cfg(target_os = "linux")]
+        command
+            .env("LD_PRELOAD", env!("KEA_TEST_LEASE_IO_LIBRARY"))
+            .env("NICO_TEST_REJECT_KEA_CAPABILITY", "*");
+        let mut process = command
             .env("KEA_PIDFILE_DIR", self.temp_base_directory.path())
             .env("KEA_LOCKFILE_DIR", self.temp_base_directory.path())
             .arg("-c")
