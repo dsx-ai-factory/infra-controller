@@ -202,7 +202,7 @@ workspace = false
 script = '''
 set -e
 if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
-docker build --build-arg KEA_VERSION=${KEA_VERSION} -f ${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64 -t carbide-build-x86_64 ${REPO_ROOT}/dev/docker
+docker build --build-arg KEA_VERSION=${KEA_VERSION} -f ${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64 -t carbide-build-x86_64 ${REPO_ROOT}
 echo "Image carbide-build-x86_64 built. Run: cargo make cargo-docker -- build -p nico-admin-cli --release"
 '''
 
@@ -448,7 +448,7 @@ args = [
   "${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64",
   ".",
 ]
-cwd = "${REPO_ROOT}/dev/docker"
+cwd = "${REPO_ROOT}"
 
 [tasks.build-arm-build-container]
 condition_script = '''
@@ -469,10 +469,10 @@ args = [
   "-t",
   "${BUILD_CONTAINER_AARCH64_URL}",
   "-f",
-  "${REPO_ROOT}/dev/docker/Dockerfile.build-container-arm",
+  "${REPO_ROOT}/dev/docker/Dockerfile.build-container-aarch64",
   ".",
 ]
-cwd = "${REPO_ROOT}/dev/docker"
+cwd = "${REPO_ROOT}"
 
 [tasks.runtime-container]
 category = "Docker Compose"
