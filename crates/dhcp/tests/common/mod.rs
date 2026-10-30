@@ -22,6 +22,9 @@ mod dhcpv6_factory;
 mod kea;
 #[allow(dead_code)]
 mod kea_v6;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod lease_io_fault;
 
 use std::io::{Read, Write};
 use std::net::{Ipv6Addr, SocketAddr, TcpStream, UdpSocket};

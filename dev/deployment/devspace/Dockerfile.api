@@ -34,6 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   tpm2-tools \
   && rm -rf /var/lib/apt/lists/*
 
+COPY --from=artifacts /artifacts/kea-common.deb /tmp/kea-common.deb
+RUN dpkg -i /tmp/kea-common.deb && rm /tmp/kea-common.deb
+
 RUN mkdir -p /opt/carbide /opt/carbide/firmware /mnt/persistence /var/run/kea
 
 COPY --from=artifacts /artifacts/carbide-api /opt/carbide/carbide-api

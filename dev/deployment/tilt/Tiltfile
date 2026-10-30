@@ -849,11 +849,18 @@ docker_build(
 )
 docker_build(
     'build-container-localdev',
-    os.path.join(repo_root, 'dev/docker'),
+    repo_root,
     dockerfile=os.path.join(
         repo_root,
         'dev/docker/Dockerfile.build-container-x86_64',
     ),
+    only=[
+        'dev/docker/Dockerfile.build-container-x86_64',
+        'dev/docker/kea.version',
+        'dev/docker/build-kea.sh',
+        'dev/docker/kea-reuse-null.patch',
+        'dev/docker/kea-lease6-replacement.patch',
+    ],
     build_args={'KEA_VERSION': kea_version},
 )
 # A target packages only the service being refreshed. Cargo caches are shared.

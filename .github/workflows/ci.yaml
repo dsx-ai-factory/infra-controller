@@ -213,15 +213,27 @@ jobs:
           filters: |
             build_container:
               - 'dev/docker/Dockerfile.build-container-x86_64'
+              - 'dev/docker/build-kea.sh'
+              - 'dev/docker/kea-reuse-null.patch'
+              - 'dev/docker/kea-lease6-replacement.patch'
               - 'dev/docker/kea.version'
             runtime_container:
               - 'dev/docker/Dockerfile.runtime-container-x86_64'
+              - 'dev/docker/build-kea.sh'
+              - 'dev/docker/kea-reuse-null.patch'
+              - 'dev/docker/kea-lease6-replacement.patch'
               - 'dev/docker/kea.version'
             runtime_container_aarch64:
               - 'dev/docker/Dockerfile.runtime-container-aarch64'
+              - 'dev/docker/build-kea.sh'
+              - 'dev/docker/kea-reuse-null.patch'
+              - 'dev/docker/kea-lease6-replacement.patch'
               - 'dev/docker/kea.version'
             build_container_aarch64:
               - 'dev/docker/Dockerfile.build-container-aarch64'
+              - 'dev/docker/build-kea.sh'
+              - 'dev/docker/kea-reuse-null.patch'
+              - 'dev/docker/kea-lease6-replacement.patch'
               - 'dev/docker/kea.version'
             build_artifacts_x86_64:
               - 'dev/docker/Dockerfile.build-artifacts-container-x86_64'
