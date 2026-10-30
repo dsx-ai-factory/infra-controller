@@ -27,6 +27,11 @@ namespaceOverride: ""
 
 replicas: 1
 
+## Must exceed hardware-health's `shutdown_timeout` (default 20s) so the pod
+## exits on its own; 30s leaves 10s of headroom. Rendering fails when it does not
+## exceed CARBIDE_HEALTH__SHUTDOWN_TIMEOUT (whole seconds only) or the 20s default.
+terminationGracePeriodSeconds: 30
+
 ## Container resource requests and limits. Empty by default.
 resources: {}
 

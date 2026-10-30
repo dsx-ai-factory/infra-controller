@@ -36,9 +36,9 @@ use crate::mac_address_pool::{
 use crate::machine_info::DpuSettings;
 use crate::redfish::computer_system::SystemState;
 use crate::{
-    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo, HardwareType,
-    HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY,
-    ResourceResetType,
+    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo,
+    EventServiceConfig, EventServiceOverride, HardwareType, HostMachineInfo, ListenerOrAddress,
+    MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY, ResourceResetType,
 };
 
 pub mod axum_http_client;
@@ -598,6 +598,22 @@ pub async fn dell_poweredge_r750_bmc() -> TestBmcHandle {
         MachineRouterOptions::default(),
     ))
     .await
+}
+
+/// A Dell R750 router whose EventService uses `limits`, and its state.
+pub fn dell_poweredge_r750_router_with_event_limits(
+    limits: EventServiceConfig,
+) -> (Router, BmcState<TestCallbacks>) {
+    create_test_bmc(
+        &host_info(HardwareType::DellPowerEdgeR750),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions {
+            event_service: EventServiceOverride::Limits(limits),
+            ..Default::default()
+        },
+    )
 }
 
 const TEST_DELL_STORAGE: &str = "/redfish/v1/Systems/System.Embedded.1/Storage";

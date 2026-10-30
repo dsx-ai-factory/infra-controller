@@ -456,6 +456,8 @@ fn spawn_generic_redfish_collectors(
                             include_diagnostics: ctx.logs_include_diagnostics,
                             request_concurrency: ctx.bmc_request_concurrency,
                             gpu_inventory: sse_gpu_inventory,
+                            close_timeout: sse_cfg.close_timeout,
+                            reap_on_cap: sse_cfg.reap_on_cap,
                         },
                         data_sink,
                         StreamingCollectorStartContext {
@@ -539,6 +541,8 @@ fn spawn_generic_redfish_collectors(
                             include_diagnostics: ctx.logs_include_diagnostics,
                             request_concurrency: ctx.bmc_request_concurrency,
                             gpu_inventory: sse_gpu_inventory,
+                            close_timeout: sse_cfg.close_timeout,
+                            reap_on_cap: sse_cfg.reap_on_cap,
                         },
                         tracked_data_sink,
                         StreamingCollectorStartContext {
