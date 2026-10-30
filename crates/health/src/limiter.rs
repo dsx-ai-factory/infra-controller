@@ -68,7 +68,8 @@ impl BucketLimiter {
     ///
     /// # Arguments
     ///
-    /// * `capacity` - Burst size: max tokens accumulated (e.g., 32)
+    /// * `capacity` - Burst size: max tokens accumulated (e.g., 32). Values
+    ///   above `u64::MAX / TOKEN_SCALE` tokens are capped at that limit.
     /// * `replenish_interval` - How often to add tokens (milliseconds)
     /// * `max_jitter` - Maximum random delay to spread requests
     pub fn new(capacity: usize, replenish_interval: Duration, max_jitter: Duration) -> Self {
