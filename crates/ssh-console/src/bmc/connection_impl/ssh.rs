@@ -29,7 +29,7 @@ use ringbuf::LocalRb;
 use ringbuf::storage::Array;
 use ringbuf::traits::RingBuffer;
 use russh::client::{AuthResult, GexParams, KeyboardInteractiveAuthResponse};
-use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg, MethodKind};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -616,7 +616,7 @@ impl russh::client::Handler for Handler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        _server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         // TODO: known_hosts support?
         Ok(true)
