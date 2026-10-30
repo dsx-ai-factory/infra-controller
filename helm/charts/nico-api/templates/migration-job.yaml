@@ -1,7 +1,12 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "nico-api.name" . }}-migrate
+  # The release revision is part of the name because a Job's pod template is
+  # immutable: a fixed name cannot be re-applied on upgrade. Helm removes the
+  # previous revision's Job, which is what a hook delete policy used to do.
+  # Under Argo CD the revision is always 1, and the hook annotations below
+  # handle replacement there instead.
+  name: {{ include "nico-api.name" . }}-migrate-{{ .Release.Revision }}
   namespace: {{ include "nico-api.namespace" . }}
   labels:
     {{- include "nico-api.labels" . | nindent 4 }}
@@ -10,13 +15,14 @@ metadata:
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/sync-wave: "-5"
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation
-    helm.sh/hook-weight: "-5"
 spec:
+  # The datastore may not be serving yet when this is applied. restartPolicy
+  # OnFailure plus a backoff limit is the wait: the Job retries until the
+  # migration connects, rather than assuming an ordering Helm does not give.
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
   template:
     metadata:
-      name: {{ include "nico-api.name" . }}-migrate
+      name: {{ include "nico-api.name" . }}-migrate-{{ .Release.Revision }}
       labels:
         {{- include "nico-api.labels" . | nindent 8 }}
         app: {{ include "nico-api.name" . }}-migrate

@@ -1396,27 +1396,43 @@ and upgrade — knowing they exist helps when debugging stuck rollouts:
 | `gen-site-ca` | helm-prereqs pre-install | Before `nico-prereqs` install | Generates the self-signed site-root certificate that bootstraps Vault TLS. |
 | `vault-pki-config` | helm-prereqs post-install | After Vault is unsealed | Configures the Vault PKI secrets engine, creates the `nico-issuer` role, sets up the AppRole auth used by `nico-api`. |
 | `ssh-host-key` | helm-prereqs pre-install | Before `nico-ssh-console-rs` install | Generates an Ed25519 SSH host key and writes it to the `ssh-host-key` Secret. |
-| `nico-api-migrate` | NICo Core pre-upgrade | Before every `nico-api` upgrade | Runs `nico-api migrate` against the Postgres datastore. Failures abort the upgrade. |
+| `nico-api-migrate-<revision>` | NICo Core install and upgrade | Alongside every `nico-api` install and upgrade | Runs `nico-api migrate` against the Postgres datastore. Not a Helm hook: it is an ordinary Job that retries until the datastore accepts connections. |
 | `nico-rest cert-manager` ClusterIssuer apply | Phase 7b | Before nico-rest pods come up | Installs the `nico-rest-ca-issuer` ClusterIssuer for REST-side TLS. |
 
-If `helm upgrade` hangs, check Job logs first — these run as
-pre-/post-install hooks and a failure here blocks the chart from
-finishing. The migration Job in particular surfaces image-pull failures
-quickly because it runs before anything else.
+If `helm upgrade` hangs, check Job logs first — the helm-prereqs Jobs above
+run as pre-/post-install hooks and a failure there blocks the chart from
+finishing. The NICo Core migration Job is not a hook, so it does not block the
+release. `helm --wait` alone does **not** wait for an ordinary Job --
+`--wait-for-jobs` is needed as well, and `setup.sh` passes both. Without it an
+upgrade reports success while the schema is still being applied.
 
 ### Schema migrations
 
-`nico-api migrate` runs as a `nico-api-migrate` Job before every `helm
-upgrade`. It applies any pending schema migrations to the Postgres
-datastore. Migration files are versioned in
+`nico-api migrate` runs as a `nico-api-migrate-<revision>` Job on every `helm
+install` and `helm upgrade`. It applies any pending schema migrations to the
+Postgres datastore. Migration files are versioned in
 `crates/api-core/migrations/`. The Job:
 
 - Is idempotent — re-running with no pending migrations exits cleanly.
-- Blocks the upgrade until completion. If it fails, **the upgrade is rolled back automatically**.
-- Uses the same image as `nico-api`, so image registry / pull secret problems surface here first.
+- Is an ordinary manifest, not a Helm hook. Helm applies hooks before every
+  manifest in the same release, including the datastore, so a hook could not
+  reach a Postgres the same release installs.
+- Retries until the datastore accepts connections. `restartPolicy: OnFailure`
+  restarts the container in place, with the backoff Kubernetes applies, so a
+  datastore that is slow to start delays the Job rather than failing it.
+  `migrationJob.backoffLimit` bounds whole-Pod failures, which this path does
+  not produce; raise it only if the Pod itself is being replaced.
+- Carries the release revision in its name, because a Job's pod template is
+  immutable and a fixed name cannot be re-applied on upgrade. Helm removes the
+  previous revision's Job.
+- Uses the same image as `nico-api`, so image registry and pull-secret problems
+  surface here first.
 
-Always read `nico-api-migrate-<hash>` Job logs when an upgrade fails
-during the pre-upgrade hook phase.
+Under Argo CD the Job keeps its `Sync` hook annotations and sync wave, so it
+is still ordered ahead of the application there.
+
+Always read `nico-api-migrate-<revision>-<hash>` Job logs when an install or
+upgrade fails to settle.
 
 ### Service accounts and RBAC
 

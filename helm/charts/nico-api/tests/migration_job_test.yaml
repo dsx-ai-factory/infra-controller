@@ -1,9 +1,14 @@
-suite: database migration hook ordering
+suite: database migration job and ConfigMap ordering
 templates:
   - configmap.yaml
   - migration-job.yaml
 tests:
-  - it: should create database ConfigMap as a pre-install hook with lower weight than migration job
+  # The database ConfigMap and the migration Job are ordinary manifests, not
+  # Helm hooks. Helm applies hooks before every manifest in the same release,
+  # including the Namespace and the datastore, so a hook here cannot see what
+  # it needs. Argo CD sync waves still order them, because Argo CD applies
+  # waves within the sync rather than ahead of it.
+  - it: should create the database ConfigMap as an ordinary manifest
     template: configmap.yaml
     set:
       databaseConfig:
@@ -17,28 +22,68 @@ tests:
       - equal:
           path: metadata.name
           value: nico-system-nico-database-config
-      - equal:
+      - notExists:
           path: metadata.annotations["helm.sh/hook"]
-          value: pre-install,pre-upgrade
-      - equal:
+      - notExists:
           path: metadata.annotations["helm.sh/hook-weight"]
-          value: "-10"
-      - equal:
+      - notExists:
           path: metadata.annotations["helm.sh/hook-delete-policy"]
-          value: before-hook-creation
-      - equal:
+      - notExists:
           path: metadata.annotations["helm.sh/resource-policy"]
-          value: keep
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "-10"
 
-  - it: migration job hook weight should be higher than database ConfigMap
+  - it: should create the migration job as an ordinary manifest
+    template: migration-job.yaml
+    asserts:
+      - notExists:
+          path: metadata.annotations["helm.sh/hook"]
+      - notExists:
+          path: metadata.annotations["helm.sh/hook-weight"]
+      - notExists:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "-5"
+
+  # A Job's pod template is immutable, so a fixed name cannot be re-applied on
+  # upgrade. The revision suffix gives each upgrade its own Job and lets Helm
+  # remove the previous one.
+  - it: should name the migration job after the release revision
+    template: migration-job.yaml
+    asserts:
+      - matchRegex:
+          path: metadata.name
+          pattern: ^nico-api-migrate-[0-9]+$
+      - matchRegex:
+          path: spec.template.metadata.name
+          pattern: ^nico-api-migrate-[0-9]+$
+      - equal:
+          path: metadata.labels["app"]
+          value: nico-api-migrate
+
+  # The Job is applied alongside the datastore rather than before it, so the
+  # retry is what waits for the datastore to accept connections.
+  - it: should retry the migration job until the datastore accepts connections
     template: migration-job.yaml
     asserts:
       - equal:
-          path: metadata.annotations["helm.sh/hook"]
-          value: pre-install,pre-upgrade
+          path: spec.template.spec.restartPolicy
+          value: OnFailure
       - equal:
-          path: metadata.annotations["helm.sh/hook-weight"]
-          value: "-5"
+          path: spec.backoffLimit
+          value: 12
+
+  - it: should honour an overridden backoff limit
+    template: migration-job.yaml
+    set:
+      migrationJob:
+        backoffLimit: 30
+    asserts:
+      - equal:
+          path: spec.backoffLimit
+          value: 30
 
   - it: should not create database ConfigMap when databaseConfig is empty
     template: configmap.yaml

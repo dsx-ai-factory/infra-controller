@@ -418,6 +418,44 @@ waiting for the DPUs, and restoring a database backup does not undo their networ
 changes. For the network-version and migration details, refer to the
 [configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#vpc-peering-deletion).
 
+### 2.4 → 2.5: nico-api migration Job and database ConfigMap are no longer Helm hooks
+
+**Impact:** `setup.sh` handles this automatically. A manual `helm upgrade` of the `nico` chart fails without the step below.
+
+**Root cause:** Through NICo 2.4 the `nico-api` schema migration Job and the database-config ConfigMap were `pre-install,pre-upgrade` Helm hooks. Helm does not record hook resources in the release, so it never stamped the ConfigMap with `app.kubernetes.io/managed-by: Helm` or the `meta.helm.sh/release-name` annotations. From 2.5 both are ordinary manifests, and Helm refuses to adopt an existing object that carries no ownership metadata:
+
+```text
+ConfigMap "nico-system-nico-database-config" in namespace "nico-system" exists and cannot
+be imported into the current release: invalid ownership metadata
+```
+
+**How setup.sh handles this:** Before the Core chart upgrade it gives the existing ConfigMap to the release, removes the dead hook annotations, and deletes the orphaned `nico-api-migrate` Job. It is idempotent: a ConfigMap that is already owned, or absent on a first install, is left alone.
+
+**If you are upgrading manually**, adopt the ConfigMap first. Substitute your release name and namespace:
+
+```bash
+NS=nico-system
+kubectl annotate configmap "${NS}-nico-database-config" -n "${NS}" \
+    meta.helm.sh/release-name=nico \
+    meta.helm.sh/release-namespace="${NS}" \
+    helm.sh/hook- helm.sh/hook-weight- helm.sh/hook-delete-policy- helm.sh/resource-policy- \
+    --overwrite
+kubectl label configmap "${NS}-nico-database-config" -n "${NS}" \
+    app.kubernetes.io/managed-by=Helm --overwrite
+```
+
+Pass `--wait-for-jobs` alongside `--wait` on the upgrade itself. The schema migration is an ordinary Job from 2.5, and `--wait` alone does not wait for ordinary Jobs, so the upgrade would otherwise report success while the schema is still being applied.
+
+`helm upgrade --take-ownership` adopts the ConfigMap instead, on Helm 3.17 and later. It leaves the dead hook annotations in place, which are inert but misleading when reading the object later.
+
+The migration Job needs no adoption: it is renamed to `nico-api-migrate-<revision>`, so the old hook-created Job does not collide. Delete it once, since Helm never owned it and will not remove it:
+
+```bash
+kubectl delete job nico-api-migrate -n "${NS}" --ignore-not-found
+```
+
+Sites that deploy through Argo CD are unaffected. The Argo CD hook annotations and sync waves are unchanged, and Argo CD applies waves within the sync rather than ahead of it.
+
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
 <Warning>

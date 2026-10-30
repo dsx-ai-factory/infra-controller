@@ -1807,13 +1807,69 @@ else
         _CORE_VALUES_ARG="${_DPF_VALUES}"
     fi
 
+    # The database-config ConfigMap used to be a pre-install hook, so helm never
+    # stamped it with ownership metadata. It is an ordinary manifest from NICo
+    # 2.5, and helm refuses to adopt an existing object that has no ownership
+    # metadata:
+    #
+    #   ConfigMap "<ns>-nico-database-config" ... cannot be imported into the
+    #   current release: invalid ownership metadata
+    #
+    # Give it to the release before the upgrade, and drop the dead hook
+    # annotations while we are here. Idempotent: a ConfigMap that is already
+    # owned, or absent on a first install, is left alone.
+    _DB_CM="${NICO_NS:-nico-system}-nico-database-config"
+    _DB_CM_NS="${NICO_NS:-nico-system}"
+    # Helm needs BOTH the release annotations and the managed-by label. Check
+    # both before skipping: with only the annotation checked, a run where the
+    # annotate succeeded and the label did not would skip adoption forever and
+    # leave every later upgrade failing on the missing label.
+    _cm_owned() {
+        local ann lbl
+        ann="$(kubectl get configmap "${_DB_CM}" -n "${_DB_CM_NS}" \
+            -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || true)"
+        lbl="$(kubectl get configmap "${_DB_CM}" -n "${_DB_CM_NS}" \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)"
+        [[ -n "${ann}" && "${lbl}" == "Helm" ]]
+    }
+    if kubectl get configmap "${_DB_CM}" -n "${_DB_CM_NS}" &>/dev/null && ! _cm_owned; then
+        echo "Adopting ${_DB_CM} into the nico release (was a pre-install hook)..."
+        # Not suppressed: a half-adopted ConfigMap fails the upgrade a few
+        # lines later with "invalid ownership metadata", which is a worse
+        # place to find out.
+        kubectl annotate configmap "${_DB_CM}" -n "${_DB_CM_NS}" \
+            meta.helm.sh/release-name=nico \
+            meta.helm.sh/release-namespace="${_DB_CM_NS}" \
+            helm.sh/hook- helm.sh/hook-weight- helm.sh/hook-delete-policy- \
+            helm.sh/resource-policy- \
+            --overwrite
+        kubectl label configmap "${_DB_CM}" -n "${_DB_CM_NS}" \
+            app.kubernetes.io/managed-by=Helm --overwrite
+        if ! _cm_owned; then
+            echo "Error: could not give ${_DB_CM} to the nico release." >&2
+            echo "  Helm refuses an object without both meta.helm.sh/release-name and" >&2
+            echo "  app.kubernetes.io/managed-by=Helm. See docs/manuals/upgrade.md" >&2
+            echo "  '2.4 → 2.5' for the manual commands." >&2
+            exit 1
+        fi
+    fi
+
+    # The migration Job carries the release revision from NICo 2.5, so the
+    # hook-created nico-api-migrate Job is orphaned rather than replaced.
+    kubectl delete job nico-api-migrate -n "${NICO_NS:-nico-system}" \
+        --ignore-not-found 2>/dev/null || true
+
     NICO_CORE_CMD=(
         helm upgrade --install nico ./helm
         --namespace nico-system
         -f "${_CORE_VALUES_ARG}"
         --set-string "global.image.repository=${NICO_IMAGE_REGISTRY}/nvmetal-carbide"
         --set-string "global.image.tag=${NICO_CORE_IMAGE_TAG}"
-        --timeout 600s --wait
+        # --wait-for-jobs as well as --wait: the schema migration is an
+        # ordinary Job now, not a hook, and --wait alone does not wait for
+        # ordinary Jobs. Without it the upgrade reports success while the
+        # schema is still being applied.
+        --timeout 600s --wait --wait-for-jobs
     )
     if "${INSTALL_DPF}"; then
         # Create the nico-api-dpf Role/RoleBinding in dpf-operator-system so
