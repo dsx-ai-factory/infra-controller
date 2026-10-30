@@ -495,6 +495,13 @@ mod tests {
             .unwrap();
         let text = std::str::from_utf8(&body).unwrap();
         assert!(text.starts_with("#cloud-config-archive\n"));
+        let json: serde_json::Value =
+            serde_json::from_str(text.strip_prefix("#cloud-config-archive\n").unwrap()).unwrap();
+        assert_eq!(
+            json[0]["filename"].as_str(),
+            Some("on"),
+            "quote metadata strings for cloud-init's YAML 1.1 parser"
+        );
         let actual: serde_yaml::Value = serde_yaml::from_str(text).unwrap();
         let mut expected: serde_yaml::Value = serde_yaml::from_str(input).unwrap();
         expected[1]["content"] = "users: [default]\n".into();
