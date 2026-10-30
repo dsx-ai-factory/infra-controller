@@ -20,7 +20,7 @@
 //! Requires: `vault` binary in PATH, `DATABASE_URL` env var set.
 
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bmc_vendor::DpuModel;
 use carbide_secrets::credentials::{
@@ -208,7 +208,11 @@ async fn vault_to_postgres_import() -> eyre::Result<()> {
     // rather than string-concatenating onto DATABASE_URL -- concatenation
     // breaks if the URL carries its own database path or query parameters.
     let admin_opts = PgConnectOptions::from_str(&db_url)?;
-    let test_db_name = format!("secrets_import_test_{}", std::process::id());
+    let test_db_name = format!(
+        "secrets_import_test_{}_{:x}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    );
     let admin_pool = PgPool::connect_with(admin_opts.clone()).await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE DATABASE {test_db_name}"
@@ -217,10 +221,7 @@ async fn vault_to_postgres_import() -> eyre::Result<()> {
     .await?;
     let test_opts = admin_opts.database(&test_db_name);
 
-    // Everything from connecting onward runs in a fallible block whose
-    // result is captured, so the database is dropped whether the import
-    // succeeds, an assertion fails, or migrations error -- no leaked
-    // temporary databases.
+    // Capture failures so the default mode also cleans up failed imports.
     let result = async {
         let test_pool = PgPool::connect_with(test_opts).await?;
         db::migrations::migrate(&test_pool).await?;
@@ -230,9 +231,12 @@ async fn vault_to_postgres_import() -> eyre::Result<()> {
     }
     .await;
 
-    sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {test_db_name}")))
-        .execute(&admin_pool)
-        .await?;
+    if !std::env::var("NICO_TEST_SKIP_DB_CLEANUP").is_ok_and(|value| value == "1") {
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {test_db_name}")))
+            .execute(&admin_pool)
+            .await?;
+    }
+    admin_pool.close().await;
 
     result
 }

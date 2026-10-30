@@ -24,12 +24,17 @@
 //! is an error. Without the variable, each process prepares its own template as
 //! before. `cargo make test-release-container-services` prepares a shared template
 //! once before running the suite; direct `cargo test` retains the default mode.
+//!
+//! `NICO_TEST_SKIP_DB_CLEANUP=1` skips dropping each test database before and
+//! after the test. Database names include a process/run prefix so separate test
+//! executables and repeated runs can leave their databases on the same server.
+//! Use this with disposable PostgreSQL instances; pool connections still close.
 
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sqlx::pool::PoolOptions;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
@@ -39,6 +44,14 @@ use tokio::sync::OnceCell;
 
 static POOL: OnceCell<PgPool> = OnceCell::const_new();
 static DB_NUMBER: AtomicUsize = AtomicUsize::new(0);
+static SKIP_DB_CLEANUP: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("NICO_TEST_SKIP_DB_CLEANUP").is_ok_and(|value| value == "1"));
+static DB_RUN_ID: LazyLock<u128> = LazyLock::new(|| {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("test database run must start after the Unix epoch")
+        .as_nanos()
+});
 static TEMPLATE_DB: &str = "sqlx_test_template_db";
 static PREPARED_TEMPLATE_DB: LazyLock<Option<String>> =
     LazyLock::new(|| match std::env::var("NICO_TEST_TEMPLATE_DB") {
@@ -159,7 +172,8 @@ where
         setup_test_db(&test_context.connect_opts, &args).await;
 
         let res = test_fn(test_context.pool_opts, test_context.connect_opts).await;
-        if res.is_success()
+        if !*SKIP_DB_CLEANUP
+            && res.is_success()
             && let Err(e) = cleanup_test(&test_context.db_name).await
         {
             eprintln!(
@@ -272,17 +286,27 @@ pub async fn prepare_template_database(
 async fn test_context(args: &TestArgs) -> Result<TestContext<Postgres>, sqlx::Error> {
     let pool = POOL.get_or_init(init_pool).await;
 
-    let new_db_name = format!(
-        "db{}_{}",
-        DB_NUMBER.fetch_add(1, Ordering::SeqCst),
-        args.test_path.replace(":", "_"),
-    );
+    let db_number = DB_NUMBER.fetch_add(1, Ordering::SeqCst);
+    let test_path = args.test_path.replace(":", "_");
+    let new_db_name = if *SKIP_DB_CLEANUP {
+        // Keep the unique prefix before the test path, which PostgreSQL may
+        // truncate to its identifier length limit.
+        format!(
+            "db{}_{:x}_{db_number}_{test_path}",
+            std::process::id(),
+            *DB_RUN_ID
+        )
+    } else {
+        format!("db{db_number}_{test_path}")
+    };
 
-    let drop_test_query = drop_database_query(&new_db_name);
-    pool.acquire()
-        .await?
-        .execute(sqlx::AssertSqlSafe(drop_test_query))
-        .await?;
+    if !*SKIP_DB_CLEANUP {
+        let drop_test_query = drop_database_query(&new_db_name);
+        pool.acquire()
+            .await?
+            .execute(sqlx::AssertSqlSafe(drop_test_query))
+            .await?;
+    }
 
     let template_db = PREPARED_TEMPLATE_DB.as_deref().unwrap_or(TEMPLATE_DB);
     let create_test_query = create_database_from_template_query(&new_db_name, template_db);

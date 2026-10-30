@@ -1154,7 +1154,10 @@ jobs:
           set -euo pipefail
           mkdir -p "${{ github.workspace }}/.sccache"
           docker pull "${BUILD_CONTAINER}"
+          # Retained test databases grow PostgreSQL statistics in shared memory
+          # beyond Docker's default 64 MiB /dev/shm limit.
           docker run --rm \
+            --shm-size=1g \
             -v "${{ github.workspace }}:/carbide" \
             -v "${{ github.workspace }}/.sccache:/sccache" \
             -w /carbide \
@@ -1176,21 +1179,26 @@ jobs:
               # owned by root and the post-job archive step cannot read it back.
               # Hand the directory to the runner user on the way out, including
               # when the tests fail.
-              trap "chown -R ${HOST_OWNER} /sccache 2>/dev/null || true" EXIT
+              trap "
+                echo Starting sccache ownership cleanup
+                chown -R ${HOST_OWNER} /sccache 2>/dev/null || true
+                echo Finished sccache ownership cleanup
+              " EXIT
               git config --global --add safe.directory /carbide
-              # max_connections is startup-only; the default of 100 is too low
-              # when Cargo runs several SQLx-backed test binaries concurrently.
-              printf "max_connections = 1000\n" | tee -a /etc/postgresql/*/main/postgresql.conf
+              # This cluster is discarded with the test container. Apply its
+              # durability, WAL and connection settings before PostgreSQL starts.
+              tee -a /etc/postgresql/*/main/postgresql.conf < .github/ci/postgresql.conf
               /etc/init.d/postgresql start
               sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
               createdb root
               # Test IPv6 with a separate login without changing the SQLx build database.
               sudo -u postgres psql -c "CREATE ROLE nico_ipv6_test LOGIN PASSWORD \$\$nico_ipv6_test\$\$;"
               export NICO_TEST_POSTGRES_URL="postgresql://nico_ipv6_test:nico_ipv6_test@[::1]:5432/postgres?sslmode=disable"
-              cargo make test-release-container-services
+              NICO_TEST_SKIP_DB_CLEANUP=1 cargo make test-release-container-services
               sccache --show-stats || true
               echo "sccache directory holds $(du -sh /sccache | cut -f1)"
             '
+          echo "Service test container exited and was removed"
 
       # Worth saving even when the tests failed: the entry holds the dependency
       # compilation, which is no less valid after a red run and is most of the

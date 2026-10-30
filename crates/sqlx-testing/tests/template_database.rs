@@ -20,11 +20,15 @@ use std::process::{Command, Output};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::testing::TestArgs;
 
-fn probe(template: Option<&str>) -> Output {
+fn probe(template: Option<&str>, skip_cleanup: bool) -> Output {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.args(["--exact", "template_probe", "--ignored", "--nocapture"]);
     command.env_remove("NICO_TEST_TEMPLATE_DB");
     command.env_remove("NICO_TEST_EXPECT_PREPARED");
+    command.env_remove("NICO_TEST_SKIP_DB_CLEANUP");
+    if skip_cleanup {
+        command.env("NICO_TEST_SKIP_DB_CLEANUP", "1");
+    }
     if let Some(template) = template {
         command.env("NICO_TEST_TEMPLATE_DB", template);
         command.env("NICO_TEST_EXPECT_PREPARED", "true");
@@ -32,7 +36,7 @@ fn probe(template: Option<&str>) -> Output {
     command.output().unwrap()
 }
 
-fn assert_success(output: Output) {
+fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
         "stdout: {}\nstderr: {}",
@@ -59,7 +63,7 @@ fn template_database_modes() {
     });
 
     assert_success(
-        Command::new(env!("CARGO_BIN_EXE_prepare-test-template"))
+        &Command::new(env!("CARGO_BIN_EXE_prepare-test-template"))
             .env("NICO_TEST_TEMPLATE_DB", &template)
             .output()
             .unwrap(),
@@ -81,9 +85,46 @@ fn template_database_modes() {
     });
 
     // Separate processes must reuse the same template without replacing it.
-    assert_success(probe(Some(&template)));
-    assert_success(probe(Some(&template)));
-    assert_success(probe(None));
+    // Retained databases must neither collide nor contaminate another clone.
+    let mut retained_databases = Vec::new();
+    for (template_name, skip_cleanup) in [
+        (Some(template.as_str()), false),
+        (Some(template.as_str()), false),
+        (None, false),
+        (Some(template.as_str()), true),
+        (Some(template.as_str()), true),
+    ] {
+        let output = probe(template_name, skip_cleanup);
+        assert_success(&output);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let databases = stdout
+            .lines()
+            .filter_map(|line| line.split_once("PROBE_DATABASE=").map(|(_, name)| name))
+            .collect::<Vec<_>>();
+        assert_eq!(databases.len(), 2, "each probe must run both tests");
+        for name in databases {
+            let exists: bool = runtime
+                .block_on(
+                    sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
+                    )
+                    .bind(name)
+                    .fetch_one(&root_pool),
+                )
+                .unwrap();
+            assert_eq!(exists, skip_cleanup, "test database {name}");
+            if skip_cleanup {
+                retained_databases.push(name.to_string());
+            }
+        }
+    }
+    retained_databases.sort();
+    retained_databases.dedup();
+    assert_eq!(
+        retained_databases.len(),
+        4,
+        "each process must use new names"
+    );
 
     for (name, message) in [
         (
@@ -92,7 +133,7 @@ fn template_database_modes() {
         ),
         (String::new(), "NICO_TEST_TEMPLATE_DB must not be empty"),
     ] {
-        let output = probe(Some(&name));
+        let output = probe(Some(&name), false);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains(message));
         let exists: bool = runtime
@@ -131,7 +172,7 @@ fn template_database_modes() {
                 .unwrap();
             assert!(!output.status.success());
             assert!(String::from_utf8_lossy(&output.stderr).contains("must not exceed"));
-            let output = probe(Some(&name));
+            let output = probe(Some(&name), false);
             assert!(!output.status.success());
             assert!(String::from_utf8_lossy(&output.stderr).contains("must not exceed"));
             let retained_oid: i64 =
@@ -175,11 +216,13 @@ fn template_database_modes() {
         assert!(!exists, "failed migrations must remove the template");
         failing_pool.close().await;
 
-        let query = format!("DROP DATABASE \"{}\"", template.replace('"', "\"\""));
-        sqlx::raw_sql(sqlx::AssertSqlSafe(query))
-            .execute(&root_pool)
-            .await
-            .unwrap();
+        for name in retained_databases.iter().chain(std::iter::once(&template)) {
+            let query = format!("DROP DATABASE \"{}\"", name.replace('"', "\"\""));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(query))
+                .execute(&root_pool)
+                .await
+                .unwrap();
+        }
         root_pool.close().await;
     });
 }
@@ -196,6 +239,11 @@ fn template_probe() {
                 fixtures: &[],
             },
             |pool| async move {
+                let database_name: String = sqlx::query_scalar("SELECT current_database()")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                println!("PROBE_DATABASE={database_name}");
                 let migrations: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
                     .fetch_one(&pool)
                     .await

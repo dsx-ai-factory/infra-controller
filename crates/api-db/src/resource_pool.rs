@@ -1724,12 +1724,14 @@ mod tests {
 
         assert_eq!(all_values.lock().await.len(), 5_000);
 
-        // WITH (FORCE) terminates any lingering backends before dropping,
-        // avoiding the flaky "database is being accessed by other users" error.
-        let drop_stmt = format!("DROP DATABASE \"{db_name}\" WITH (FORCE)");
-        sqlx::query(sqlx::AssertSqlSafe(drop_stmt))
-            .execute(&admin)
-            .await?;
+        if !std::env::var("NICO_TEST_SKIP_DB_CLEANUP").is_ok_and(|value| value == "1") {
+            // WITH (FORCE) terminates any lingering backends before dropping,
+            // avoiding the flaky "database is being accessed by other users" error.
+            let drop_stmt = format!("DROP DATABASE \"{db_name}\" WITH (FORCE)");
+            sqlx::query(sqlx::AssertSqlSafe(drop_stmt))
+                .execute(&admin)
+                .await?;
+        }
         admin.close().await;
         Ok(())
     }
