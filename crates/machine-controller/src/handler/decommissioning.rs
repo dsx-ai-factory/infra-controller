@@ -25,8 +25,8 @@ use libredfish::{EnabledDisabled, JobState, PowerState, RedfishError, SystemPowe
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
 use model::machine::{
-    DecommissioningState, DeconfiguringDpuState, DeconfiguringHostState, Machine, ManagedHostState,
-    ManagedHostStateSnapshot,
+    DecommissioningState, DeconfiguringDpuState, DeconfiguringHostState, Machine,
+    MachineLastRebootRequestedMode, ManagedHostState, ManagedHostStateSnapshot,
 };
 use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
@@ -37,6 +37,9 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
+use crate::handler::{
+    ReachabilityParams, handler_host_power_control, trigger_reboot_if_needed, wait,
+};
 use crate::redfish::{did_dpu_finish_booting, host_power_control};
 
 fn deconfiguring_dpus_after_host_reset(state: &ManagedHostStateSnapshot) -> ManagedHostState {
@@ -113,6 +116,7 @@ pub(super) async fn handle_deconfiguring_host(
     deconfiguring_state: &DeconfiguringHostState,
     state: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    reachability_params: &ReachabilityParams,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let machine = &state.host_snapshot;
     match deconfiguring_state {
@@ -121,7 +125,22 @@ pub(super) async fn handle_deconfiguring_host(
                 .services
                 .create_redfish_client_from_machine(machine)
                 .await?;
-            match redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await {
+            let has_boot_latched_controls = redfish_client
+                .lockdown_has_boot_latched_controls()
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "failed to discover boot-latched lockdown controls: {error}"
+                    ))
+                })?;
+            // Release boot-latched runtime protection when handing the server
+            // back, rather than only opening its BMC configuration interface.
+            let unlock = if has_boot_latched_controls {
+                redfish_client.lockdown(EnabledDisabled::Disabled).await
+            } else {
+                redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await
+            };
+            match unlock {
                 Ok(()) | Err(RedfishError::NotSupported(_)) => {}
                 Err(error) => {
                     return Err(StateHandlerError::GenericError(eyre::eyre!(
@@ -130,7 +149,7 @@ pub(super) async fn handle_deconfiguring_host(
                 }
             }
 
-            let next = if machine.bmc_vendor().is_supermicro() {
+            let next = if has_boot_latched_controls || machine.bmc_vendor().is_supermicro() {
                 DeconfiguringHostState::RebootAfterLockdown
             } else {
                 DeconfiguringHostState::ClearSuperNicLockdown
@@ -148,6 +167,58 @@ pub(super) async fn handle_deconfiguring_host(
                 .services
                 .create_redfish_client_from_machine(machine)
                 .await?;
+            let has_boot_latched_controls = redfish_client
+                .lockdown_has_boot_latched_controls()
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "failed to discover boot-latched lockdown controls: {error}"
+                    ))
+                })?;
+            if has_boot_latched_controls {
+                if let Some(reboot) = &machine.status.last_reboot_requested
+                    && reboot.time >= machine.state.version.timestamp()
+                {
+                    if matches!(
+                        reboot.mode,
+                        MachineLastRebootRequestedMode::Reboot
+                            | MachineLastRebootRequestedMode::PowerOn
+                    ) && machine
+                        .status
+                        .last_reboot_time
+                        .is_some_and(|boot| boot > reboot.time)
+                    {
+                        if wait(&reboot.time, reachability_params.uefi_boot_wait) {
+                            return Ok(StateHandlerOutcome::wait(
+                                "Waiting for host boot interval to release runtime EFI protection"
+                                    .to_string(),
+                            ));
+                        }
+                        return Ok(StateHandlerOutcome::transition(
+                            ManagedHostState::Decommissioning {
+                                decommissioning_state: DecommissioningState::DeconfiguringHost {
+                                    deconfiguring_state:
+                                        DeconfiguringHostState::ClearSuperNicLockdown,
+                                },
+                            },
+                        ));
+                    }
+                    let status =
+                        trigger_reboot_if_needed(machine, state, None, reachability_params, ctx)
+                            .await?;
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "Waiting for host boot to release runtime EFI protection: {}",
+                        status.status
+                    )));
+                }
+                // The managed-host wrapper powers on an off host and preserves
+                // vendor-specific restart selection. Only an observed boot can
+                // complete this boundary.
+                handler_host_power_control(state, ctx, SystemPowerControl::ForceRestart).await?;
+                return Ok(StateHandlerOutcome::wait(
+                    "Host boot requested to release runtime EFI protection".to_string(),
+                ));
+            }
             host_power_control(
                 redfish_client.as_ref(),
                 machine,
