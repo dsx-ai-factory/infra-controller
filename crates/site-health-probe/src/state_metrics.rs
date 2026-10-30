@@ -321,6 +321,7 @@ impl StateCollector {
 
     /// How many label sets the retirement rule tracks.
     #[cfg(test)]
+    #[expect(dead_code, reason = "the memory soak tests use it")]
     pub(crate) fn tracked_label_sets(&self) -> usize {
         self.seen.lock().unwrap().len()
     }
