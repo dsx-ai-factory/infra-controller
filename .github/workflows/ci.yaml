@@ -2309,6 +2309,9 @@ jobs:
       - name: Test REST postgres StatefulSet recreation
         run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
 
+      - name: Test site-agent Core connection verification
+        run: bash helm-prereqs/tests/setup-site-agent-connection_test.sh
+
       - name: Test Temporal/Keycloak HA Postgres resolution
         run: bash helm-prereqs/tests/preflight-ha-postgres-resolution_test.sh
 
