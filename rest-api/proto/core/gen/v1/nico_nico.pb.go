@@ -16325,6 +16325,8 @@ type ExpectedPowerShelf struct {
 	BmcPassword       string                 `protobuf:"bytes,3,opt,name=bmc_password,json=bmcPassword,proto3" json:"bmc_password,omitempty"`
 	ShelfSerialNumber string                 `protobuf:"bytes,4,opt,name=shelf_serial_number,json=shelfSerialNumber,proto3" json:"shelf_serial_number,omitempty"`
 	// BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+	// Unspecified, multicast, and IPv4 limited-broadcast addresses, including
+	// their IPv4-mapped IPv6 forms, also fail INVALID_ARGUMENT.
 	// Empty or omitted means no inventory address on add, full update, or
 	// replace-all. Masked updates apply this field only when selected.
 	// Clearing the inventory address does not remove existing interface addresses.
@@ -18046,6 +18048,8 @@ type ExpectedSwitch struct {
 	// Unique identifier for the expected switch. When omitted, server generates one.
 	ExpectedSwitchId *UUID `protobuf:"bytes,9,opt,name=expected_switch_id,json=expectedSwitchId,proto3,oneof" json:"expected_switch_id,omitempty"`
 	// BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+	// Unspecified, multicast, and IPv4 limited-broadcast addresses, including
+	// their IPv4-mapped IPv6 forms, also fail INVALID_ARGUMENT.
 	// Empty or omitted means no inventory address on add, full update, or
 	// replace-all. Masked updates apply this field only when selected.
 	// Clearing the inventory address does not remove existing interface addresses.
@@ -18054,7 +18058,9 @@ type ExpectedSwitch struct {
 	// factory-default credentials in Vault as-is.
 	BmcRetainCredentials *bool `protobuf:"varint,12,opt,name=bmc_retain_credentials,json=bmcRetainCredentials,proto3,oneof" json:"bmc_retain_credentials,omitempty"`
 	// Static IP reservation for the single wired NVOS port. Only meaningful
-	// when `nvos_interfaces` has exactly one entry.
+	// when `nvos_interfaces` has exactly one entry. Unspecified, multicast, and
+	// IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+	// fail INVALID_ARGUMENT.
 	NvosIpAddress *string `protobuf:"bytes,13,opt,name=nvos_ip_address,json=nvosIpAddress,proto3,oneof" json:"nvos_ip_address,omitempty"`
 	// The switch's NVOS ethernet ports. Create and replace-all entries require
 	// at least one port. Exactly one entry must be flagged
@@ -40530,7 +40536,10 @@ type ExpectedHostNic struct {
 	MacAddress *string                `protobuf:"bytes,1,opt,name=mac_address,json=macAddress,proto3,oneof" json:"mac_address,omitempty"`
 	// Legacy free-form segment hint (bf3, onboard, oob, ...). Kept for backward
 	// compatibility; declare `network_segment_type` instead, which wins.
-	NicType      *string `protobuf:"bytes,2,opt,name=nic_type,json=nicType,proto3,oneof" json:"nic_type,omitempty"`
+	NicType *string `protobuf:"bytes,2,opt,name=nic_type,json=nicType,proto3,oneof" json:"nic_type,omitempty"`
+	// Address that NICo reserves for this interface. Unspecified, multicast, and
+	// IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+	// fail INVALID_ARGUMENT.
 	FixedIp      *string `protobuf:"bytes,3,opt,name=fixed_ip,json=fixedIp,proto3,oneof" json:"fixed_ip,omitempty"`
 	FixedMask    *string `protobuf:"bytes,4,opt,name=fixed_mask,json=fixedMask,proto3,oneof" json:"fixed_mask,omitempty"`
 	FixedGateway *string `protobuf:"bytes,5,opt,name=fixed_gateway,json=fixedGateway,proto3,oneof" json:"fixed_gateway,omitempty"`
@@ -40761,7 +40770,9 @@ type ExpectedMachine struct {
 	// switches and power shelves; external IPs use the static-assignments
 	// segment. Single and batch update omission preserves the effective Host BMC
 	// setting; an explicit empty string clears it. Replace-all keeps its earlier
-	// replacement semantics for legacy-only rows.
+	// replacement semantics for legacy-only rows. Unspecified, multicast, and
+	// IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+	// fail INVALID_ARGUMENT.
 	BmcIpAddress *string `protobuf:"bytes,14,opt,name=bmc_ip_address,json=bmcIpAddress,proto3,oneof" json:"bmc_ip_address,omitempty"`
 	// When true, site-explorer skips BMC password rotation and stores the
 	// factory-default credentials in Vault as-is.
