@@ -227,10 +227,7 @@ fn validate_control_plane_designation(machine: &ExpectedMachine) -> Result<(), C
     // declaration so the designation covers every management address. A machine
     // that attaches no DPU has nothing to declare.
     if machine.data.dpu_policy != HostDpuPolicy::Ignore {
-        for required in [
-            ExpectedInterfaceRole::DpuBmc,
-            ExpectedInterfaceRole::DpuOs,
-        ] {
+        for required in [ExpectedInterfaceRole::DpuBmc, ExpectedInterfaceRole::DpuOs] {
             if !machine
                 .data
                 .interfaces
