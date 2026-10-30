@@ -30163,7 +30163,7 @@ components:
           type:
             - boolean
             - 'null'
-          description: When true, the machine is designated as a control-plane machine. After completion of https://github.com/dsx-ai-factory/infra-controller/issues/7568, its management addresses stay usable while the control plane is down. A designated machine requires a fixed or retained IP allocation on every host BMC, DPU BMC, and DPU OS interface. When omitted, the existing value is preserved.
+          description: When true, the machine is designated as a control-plane machine. After completion of https://github.com/dsx-ai-factory/infra-controller/issues/7568, its management addresses stay usable while the control plane is down. A designated machine must declare a dpu_bmc and a dpu_os interface, and requires a fixed or retained IP allocation on the host BMC and on both DPU interfaces. A machine whose dpuPolicy attaches no DPU declares neither. When omitted, the existing value is preserved.
     ExpectedMachineInterface:
       title: ExpectedMachineInterface
       type: object

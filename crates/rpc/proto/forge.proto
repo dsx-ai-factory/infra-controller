@@ -7787,10 +7787,11 @@ message HostLifecycleProfile {
   optional bool disable_lockdown = 1;
   // If true, designate the machine as a control-plane machine. After completion
   // of https://github.com/dsx-ai-factory/infra-controller/issues/7568, its
-  // management addresses stay usable while the control plane is down. Every
-  // host BMC, DPU BMC, and DPU OS interface must then use a fixed or retained
-  // IP allocation. If unset or false, the machine has no control-plane
-  // designation.
+  // management addresses stay usable while the control plane is down. The
+  // machine must declare a DPU BMC and a DPU OS interface, and the host BMC
+  // and both DPU interfaces must then use a fixed or retained IP allocation.
+  // A machine whose dpu_policy attaches no DPU declares neither. If unset or
+  // false, the machine has no control-plane designation.
   optional bool control_plane = 2;
 }
 

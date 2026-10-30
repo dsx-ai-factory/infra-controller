@@ -191,9 +191,11 @@ pub(crate) struct HostLifecycleProfile {
     #[serde(default)]
     pub(crate) disable_lockdown: Option<bool>,
     /// If true, designate the machine as a control-plane machine. The API
-    /// records the designation and requires a fixed or retained IP allocation
-    /// on every host BMC, DPU BMC, and DPU OS interface. If unset or false,
-    /// the machine has no control-plane designation.
+    /// records the designation, requires a declared DPU BMC and DPU OS
+    /// interface, and requires a fixed or retained IP allocation on the host
+    /// BMC and both DPU interfaces. A machine whose dpu_policy attaches no DPU
+    /// declares neither. If unset or false, the machine has no control-plane
+    /// designation.
     #[serde(default)]
     pub(crate) control_plane: Option<bool>,
 }

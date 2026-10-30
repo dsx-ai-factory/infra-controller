@@ -55,5 +55,5 @@ Set the designation with the new `host_lifecycle_profile.control_plane` field:
 The field is optional and defaults to unset, so existing machines and manifests do not change. Omitting it in a patch preserves the stored value.
 
 <Note title="Address policy requirement">
-A designated machine must use a `fixed` or `retained` IP allocation on every `host_bmc`, `dpu_bmc`, and `dpu_os` interface. NICo rejects the designation when one of these interfaces resolves to `dynamic`, because a DHCP address is not available during the outage that the designation exists for. Host data interfaces are not restricted.
+A designated machine must declare a `dpu_bmc` and a `dpu_os` interface, and must use a `fixed` or `retained` IP allocation on the host BMC and on both DPU interfaces. NICo rejects the designation when one of those interfaces is missing or resolves to `dynamic`, because a DHCP address is not available during the outage that the designation exists for. A machine whose `dpu_policy` attaches no DPU declares neither. Host data interfaces are not restricted.
 </Note>

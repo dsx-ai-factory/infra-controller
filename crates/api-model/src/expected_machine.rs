@@ -1052,9 +1052,11 @@ pub struct HostLifecycleProfile {
     /// <https://github.com/dsx-ai-factory/infra-controller/issues/7568>, NICo
     /// keeps its management addresses usable while the control plane is down,
     /// so the machine and its DPU can complete a full power-on cycle without
-    /// NICo. Every host BMC, DPU BMC, and DPU OS interface must resolve to a
-    /// `Fixed` or `Retained` allocation; see
-    /// [`ExpectedInterface::resolved_ip_allocation`]. If unset or false, the
+    /// NICo. The machine must declare a `DpuBmc` and a `DpuOs` interface, and
+    /// the host BMC and both DPU interfaces must resolve to a `Fixed` or
+    /// `Retained` allocation; see
+    /// [`ExpectedInterface::resolved_ip_allocation`]. A machine whose
+    /// `dpu_policy` attaches no DPU declares neither. If unset or false, the
     /// machine has no control-plane designation.
     #[serde(default)]
     pub control_plane: Option<bool>,
