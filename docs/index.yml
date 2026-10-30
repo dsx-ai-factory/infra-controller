@@ -417,6 +417,12 @@ navigation:
                   href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile.md
                 - link: Show Routing Profiles
                   href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile-show.md
+            - section: Switch SDN Reset CLI Reference
+              contents:
+                - link: Reset SDN Configuration
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-reset-switch-sdn-factory-default.md
+                - link: Check Reset Status
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-switch-sdn-factory-reset-status.md
             - section: NIC Firmware CLI Reference
               contents:
                 - link: NIC Firmware Overview

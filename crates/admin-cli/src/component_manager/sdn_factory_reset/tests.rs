@@ -42,7 +42,7 @@ use crate::rpc::ApiClient;
 
 #[tokio::test]
 async fn public_sdn_reset_commands_preserve_job_ids_failures_and_status() {
-    let switch_id = "12345678-1234-5678-90ab-cdef01234567";
+    let switch_id = "sw100nsner0op5osl6n85t7772j010jmhafm934n7oej4mlome3okrn9b60";
     let cases = [
         (
             "submit",

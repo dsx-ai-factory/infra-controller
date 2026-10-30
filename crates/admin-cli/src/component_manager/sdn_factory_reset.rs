@@ -17,27 +17,24 @@
 
 use ::rpc::admin_cli::OutputFormat;
 use clap::Parser;
-use tokio::io::AsyncWriteExt;
 
 use super::common::SwitchIdArgs;
+use crate::async_writeln;
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
 #[derive(Parser, Debug)]
-#[command(after_long_help = "\
+#[command(
+    long_about = "Reset SDN configuration for explicitly named switches through RMS. Dispatch bypasses state-controller maintenance and disrupts fabric traffic; it does not restore SDN configuration. Returns a parent job ID without waiting for completion. Partial submission prints the job ID and submission errors, then exits unsuccessfully. Do not automatically resubmit after an RPC error because the reset may have started. Requires RMS support for BatchResetSwitchSdnFactoryDefault.",
+    after_long_help = "\
 EXAMPLES:
 
 Submit a disruptive SDN reset and retain the returned job ID:
-    $ nico-admin-cli component-manager reset-switch-sdn-factory-default --switch-id 12345678-1234-5678-90ab-cdef01234567
+    $ nico-admin-cli component-manager reset-switch-sdn-factory-default --switch-id sw100nsner0op5osl6n85t7772j010jmhafm934n7oej4mlome3okrn9b60
 
-This dispatches directly through the configured backend, bypassing state-controller maintenance.
-It does not restore SDN configuration. RMS must support the SDN reset RPC.
-Acceptance does not mean completion; query get-switch-sdn-factory-reset-status.
-Partial submission prints the job ID and submission errors, then exits unsuccessfully.
-Do not automatically resubmit after an RPC error: the reset may have started.
-
-")]
+"
+)]
 pub(crate) struct ResetArgs {
     #[clap(flatten)]
     ids: SwitchIdArgs,
@@ -49,18 +46,16 @@ pub(crate) struct ResetArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(after_long_help = "\
+#[command(
+    long_about = "Observe a switch SDN reset's parent and child jobs. Pending means a parent or child is not complete. Completed requires all submitted children and does not override submission errors returned when requesting the reset. Failed prints diagnostics and exits unsuccessfully. RMS restart can lose job state; an unavailable observation does not establish whether the reset ran.",
+    after_long_help = "\
 EXAMPLES:
 
 Observe a submitted SDN reset:
     $ nico-admin-cli component-manager get-switch-sdn-factory-reset-status --job-id JOB_ID
 
-Pending means a parent or child is not complete. Completed requires all submitted children;
-it does not override submission errors returned when the reset was requested.
-Failed prints diagnostics and exits unsuccessfully. RMS restart can lose job state;
-an unavailable observation does not establish whether the reset ran.
-
-")]
+"
+)]
 pub(crate) struct StatusArgs {
     #[clap(
         long,
@@ -82,15 +77,19 @@ impl Run for ResetArgs {
             )
             .await?;
         if ctx.config.format == OutputFormat::Json {
-            ctx.output_file.write_all(format!("{}\n", serde_json::to_string_pretty(&serde_json::json!({ "job_id": response.job_id, "submission_errors": response.submission_errors }))?).as_bytes()).await?;
+            let output = serde_json::json!({
+                "job_id": response.job_id,
+                "submission_errors": response.submission_errors,
+            });
+            async_writeln!(
+                ctx.output_file,
+                "{}",
+                serde_json::to_string_pretty(&output)?
+            )?;
         } else {
-            ctx.output_file
-                .write_all(format!("Job ID: {}\n", response.job_id).as_bytes())
-                .await?;
+            async_writeln!(ctx.output_file, "Job ID: {}", response.job_id)?;
             for error in &response.submission_errors {
-                ctx.output_file
-                    .write_all(format!("Submission error: {error}\n").as_bytes())
-                    .await?;
+                async_writeln!(ctx.output_file, "Submission error: {error}")?;
             }
         }
         if !response.submission_errors.is_empty() {
@@ -117,15 +116,17 @@ impl Run for StatusArgs {
         let state = rpc::forge::SwitchSdnFactoryResetState::try_from(response.state)
             .map_err(|_| CarbideCliError::GenericError("unknown SDN reset state".into()))?;
         if ctx.config.format == OutputFormat::Json {
-            ctx.output_file.write_all(format!("{}\n", serde_json::to_string_pretty(&serde_json::json!({ "state": state.as_str_name(), "error": response.error }))?).as_bytes()).await?;
+            let output =
+                serde_json::json!({ "state": state.as_str_name(), "error": response.error });
+            async_writeln!(
+                ctx.output_file,
+                "{}",
+                serde_json::to_string_pretty(&output)?
+            )?;
         } else {
-            ctx.output_file
-                .write_all(format!("State: {}\n", state.as_str_name()).as_bytes())
-                .await?;
+            async_writeln!(ctx.output_file, "State: {}", state.as_str_name())?;
             if let Some(error) = &response.error {
-                ctx.output_file
-                    .write_all(format!("Error: {error}\n").as_bytes())
-                    .await?;
+                async_writeln!(ctx.output_file, "Error: {error}")?;
             }
         }
         match state {
