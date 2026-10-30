@@ -1,10 +1,4 @@
-{{- $shutdownTimeout := "20s" }}
-{{- if and (kindIs "map" .Values.env) (hasKey .Values.env "CARBIDE_HEALTH__SHUTDOWN_TIMEOUT") }}
-{{- $shutdownTimeout = toString (index .Values.env "CARBIDE_HEALTH__SHUTDOWN_TIMEOUT") }}
-{{- end }}
-{{- if and (regexMatch "^[0-9]+s$" $shutdownTimeout) (le (int .Values.terminationGracePeriodSeconds) (int (trimSuffix "s" $shutdownTimeout))) }}
-{{- fail (printf "terminationGracePeriodSeconds (%v) must exceed hardware-health's shutdown_timeout (%s)" .Values.terminationGracePeriodSeconds $shutdownTimeout) }}
-{{- end }}
+{{- include "nico-hardware-health.validateTerminationGracePeriod" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
