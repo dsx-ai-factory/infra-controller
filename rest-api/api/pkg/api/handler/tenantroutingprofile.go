@@ -4,8 +4,10 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -52,6 +54,8 @@ func (h UpdateTenantRoutingProfileHandler) Handle(c echo.Context) error {
 	if span != nil {
 		defer span.End()
 	}
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
 	if dbUser == nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
@@ -153,6 +157,30 @@ func (h UpdateTenantRoutingProfileHandler) Handle(c echo.Context) error {
 	}
 	if current.Tenant.GetOrganizationId() != tenant.Org || current.Tenant.GetMetadata() == nil || current.Tenant.GetVersion() == "" {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Site returned incomplete or mismatched Tenant data", nil)
+	}
+
+	if provider == nil {
+		defaultName := current.Tenant.GetRoutingProfileType()
+		if defaultName == "" {
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Tenant has no default routing profile on Site", nil)
+		}
+		requestedName := model.NormalizeAPIVpcRoutingProfileForSite(req.DefaultRoutingProfile)
+		names := slices.Compact([]string{defaultName, requestedName})
+		profiles, profileErr := findNamedRoutingProfiles(ctx, stc, names)
+		if profileErr != nil {
+			return cutil.NewAPIErrorResponse(c, profileErr.Code, profileErr.Message, nil)
+		}
+		defaultProfile := profiles[defaultName]
+		if defaultProfile == nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Tenant default routing profile was not found on Site", nil)
+		}
+		requestedProfile := profiles[requestedName]
+		if requestedProfile == nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Requested routing profile was not found on Site", nil)
+		}
+		if requestedProfile.Config.GetAccessTier() < defaultProfile.Config.GetAccessTier() {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Cannot update to a routing profile with an access tier lower than the Tenant's current default routing profile", nil)
+		}
 	}
 
 	updated := &corev1.UpdateTenantResponse{}

@@ -36,10 +36,82 @@ func TestUpdateTenantRoutingProfileHandler_Handle(t *testing.T) {
 	cases := []struct {
 		name          string
 		currentTenant bool
+		rejectProfile bool
 		prepare       func(*testing.T, *tenantRoutingProfileFixture)
 		status        int
 		calls         int
 	}{
+		{
+			name:          "tenant cannot lower its default access tier",
+			currentTenant: true,
+			rejectProfile: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.definitions.Profiles[1].Config.AccessTier = cutil.GetPtr(uint32(1))
+			},
+			status: http.StatusForbidden,
+			calls:  2,
+		},
+		{
+			name:          "tenant may raise its default access tier",
+			currentTenant: true,
+			rejectProfile: false,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.definitions.Profiles[1].Config.AccessTier = cutil.GetPtr(uint32(3))
+			},
+			status: http.StatusOK,
+			calls:  2,
+		},
+		{
+			name:          "unset destination access tier counts as zero",
+			currentTenant: true,
+			rejectProfile: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.definitions.Profiles[1].Config.AccessTier = nil
+			},
+			status: http.StatusForbidden,
+			calls:  2,
+		},
+		{
+			name:          "unset default access tier counts as zero",
+			currentTenant: true,
+			rejectProfile: false,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.definitions.Profiles[0].Config.AccessTier = nil
+				f.definitions.Profiles[1].Config.AccessTier = nil
+			},
+			status: http.StatusOK,
+			calls:  2,
+		},
+		{
+			name:          "missing current default fails closed",
+			currentTenant: true,
+			rejectProfile: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.definitions.Profiles = f.definitions.Profiles[1:]
+			},
+			status: http.StatusInternalServerError,
+			calls:  2,
+		},
+		{
+			name:          "missing requested profile is invalid",
+			currentTenant: true,
+			rejectProfile: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.definitions.Profiles = f.definitions.Profiles[:1]
+			},
+			status: http.StatusBadRequest,
+			calls:  2,
+		},
+		{
+			name:          "definition lookup error prevents mutation",
+			currentTenant: true,
+			rejectProfile: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.definitionsErr = temporal.NewNonRetryableApplicationError("Core unavailable", swe.ErrTypeNICoUnavailable, nil)
+			},
+			status: http.StatusServiceUnavailable,
+			calls:  2,
+		},
 		{
 			name:          "privileged tenant updates its own default",
 			currentTenant: true,
@@ -336,7 +408,14 @@ func TestUpdateTenantRoutingProfileHandler_Handle(t *testing.T) {
 			if tc.calls > 0 {
 				f.expectProxy(t, corev1.Forge_FindTenant_FullMethodName, f.current, f.readErr)
 			}
-			if tc.calls > 1 {
+			expectedCalls := tc.calls
+			if tc.currentTenant && tc.calls > 1 {
+				f.expectProxy(t, corev1.Forge_FindRoutingProfilesByNames_FullMethodName, f.definitions, f.definitionsErr)
+				if !tc.rejectProfile {
+					expectedCalls++
+				}
+			}
+			if tc.calls > 1 && !tc.rejectProfile {
 				f.expectProxy(t, corev1.Forge_UpdateTenant_FullMethodName, f.updated, f.updateErr)
 			}
 			e := echo.New()
@@ -358,20 +437,25 @@ func TestUpdateTenantRoutingProfileHandler_Handle(t *testing.T) {
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
 			assert.Equal(t, tc.status, rec.Code, rec.Body.String())
-			require.Len(t, f.calls, tc.calls)
+			require.Len(t, f.calls, expectedCalls)
 			f.client.AssertExpectations(t)
 			if tc.calls > 0 {
 				var read corev1.FindTenantRequest
 				require.NoError(t, protojson.Unmarshal(f.calls[0].RequestJSON, &read))
 				assert.Equal(t, f.tenant.Org, read.TenantOrganizationId)
 			}
-			if tc.calls > 1 {
+			if tc.currentTenant && tc.calls > 1 {
+				var lookup corev1.RoutingProfilesByNamesRequest
+				require.NoError(t, protojson.Unmarshal(f.calls[1].RequestJSON, &lookup))
+				assert.Equal(t, []string{"EXTERNAL", "INTERNAL"}, lookup.Names)
+			}
+			if tc.calls > 1 && !tc.rejectProfile {
 				var update corev1.UpdateTenantRequest
-				require.NoError(t, protojson.Unmarshal(f.calls[1].RequestJSON, &update))
+				require.NoError(t, protojson.Unmarshal(f.calls[len(f.calls)-1].RequestJSON, &update))
 				assert.Equal(t, f.tenant.Org, update.OrganizationId)
 				assert.Equal(t, f.current.Tenant.Version, update.GetIfVersionMatch())
 				assert.True(t, proto.Equal(f.current.Tenant.Metadata, update.Metadata))
-				assert.Empty(t, f.calls[1].EncryptedSecrets)
+				assert.Empty(t, f.calls[len(f.calls)-1].EncryptedSecrets)
 			}
 			if tc.status == http.StatusOK {
 				assert.JSONEq(t, fmt.Sprintf(`{"siteId":%q,"defaultRoutingProfile":%q}`, f.siteID, f.profile), rec.Body.String())
@@ -381,23 +465,25 @@ func TestUpdateTenantRoutingProfileHandler_Handle(t *testing.T) {
 }
 
 type tenantRoutingProfileFixture struct {
-	db        *cdb.Session
-	org       string
-	user      *cdbm.User
-	site      *cdbm.Site
-	account   *cdbm.TenantAccount
-	tenant    *cdbm.Tenant
-	tenantID  string
-	siteID    string
-	profile   string
-	body      string
-	current   *corev1.FindTenantResponse
-	updated   *corev1.UpdateTenantResponse
-	readErr   error
-	updateErr error
-	client    *tmocks.Client
-	scp       *sc.ClientPool
-	calls     []grpcproxy.Request
+	db             *cdb.Session
+	org            string
+	user           *cdbm.User
+	site           *cdbm.Site
+	account        *cdbm.TenantAccount
+	tenant         *cdbm.Tenant
+	tenantID       string
+	siteID         string
+	profile        string
+	body           string
+	current        *corev1.FindTenantResponse
+	updated        *corev1.UpdateTenantResponse
+	readErr        error
+	updateErr      error
+	definitions    *corev1.NamedRoutingProfileList
+	definitionsErr error
+	client         *tmocks.Client
+	scp            *sc.ClientPool
+	calls          []grpcproxy.Request
 }
 
 func newTenantRoutingProfileFixture(t *testing.T) *tenantRoutingProfileFixture {
@@ -448,6 +534,18 @@ func newTenantRoutingProfileFixture(t *testing.T) *tenantRoutingProfileFixture {
 		},
 		updated: &corev1.UpdateTenantResponse{
 			Tenant: updated,
+		},
+		definitions: &corev1.NamedRoutingProfileList{
+			Profiles: []*corev1.NamedRoutingProfile{
+				{
+					Name:   "EXTERNAL",
+					Config: &corev1.NamedRoutingProfileConfig{AccessTier: cutil.GetPtr(uint32(2))},
+				},
+				{
+					Name:   "INTERNAL",
+					Config: &corev1.NamedRoutingProfileConfig{AccessTier: cutil.GetPtr(uint32(2))},
+				},
+			},
 		},
 		client: client,
 		scp:    scp,
