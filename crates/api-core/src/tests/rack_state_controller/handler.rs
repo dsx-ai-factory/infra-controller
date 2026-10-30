@@ -1781,19 +1781,17 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
     let machine_ids = [host_a.host_snapshot.id, host_b.host_snapshot.id];
 
-    // NMX-C has finished. A busy host keeps the rack in the existing certificate
-    // wait state; the next successful poll retries the atomic restart handoff.
-    for _ in 0..3 {
-        env.rms_sim
-            .queue_get_configure_switch_certificate_job_status_response(Ok(
-                rms::GetConfigureSwitchCertificateJobStatusResponse {
-                    status: rms::ReturnCode::Success as i32,
-                    state: "completed".to_string(),
-                    ..Default::default()
-                },
-            ))
-            .await;
-    }
+    // Resume a certificate job persisted by the predecessor. Its success must
+    // be saved before attempting restart admission, even when a host is busy.
+    env.rms_sim
+        .queue_get_configure_switch_certificate_job_status_response(Ok(
+            rms::GetConfigureSwitchCertificateJobStatusResponse {
+                status: rms::ReturnCode::Success as i32,
+                state: "completed".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await;
 
     // A previously booted, Ready host must report a new boot for this batch.
     env.api
@@ -1846,10 +1844,65 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         rack.controller_state.value,
         RackState::Maintenance {
             maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster: ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { ref job_id },
+                configure_nmx_cluster: ConfigureNmxClusterState::Completed,
             },
         }
-        if job_id == "completed-primary-certificate-job"
+    ));
+    let configured_state = rack.controller_state.clone();
+    let mut responses = Vec::new();
+    for id in [Some(rack_id.to_string()), None] {
+        responses.push(
+            env.api
+                .get_rack(Request::new(rpc::forge::GetRackRequest { id }))
+                .await?
+                .into_inner()
+                .rack,
+        );
+    }
+    responses.push(
+        env.api
+            .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
+                rack_ids: vec![rack_id.clone()],
+            }))
+            .await?
+            .into_inner()
+            .racks,
+    );
+    for response in responses {
+        let public_rack = response
+            .into_iter()
+            .find(|rack| rack.id.as_ref() == Some(&rack_id))
+            .unwrap();
+        assert_eq!(
+            public_rack.rack_state,
+            "Maintenance(ConfigureNmxCluster(Completed))"
+        );
+        assert_eq!(
+            serde_json::from_str::<RackState>(
+                &public_rack.status.unwrap().lifecycle.unwrap().state
+            )?,
+            configured_state.value
+        );
+    }
+    // RMS evicts terminal jobs. Its real missing-certificate-job response is
+    // transport success with a Failure body, which would turn another poll into Error.
+    env.rms_sim
+        .queue_get_configure_switch_certificate_job_status_response(Ok(
+            rms::GetConfigureSwitchCertificateJobStatusResponse {
+                status: rms::ReturnCode::Failure as i32,
+                message: "job not found".into(),
+                ..Default::default()
+            },
+        ))
+        .await;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, configured_state.value);
+    assert_eq!(rack.controller_state.version, configured_state.version);
+    assert!(matches!(
+        rack.controller_state_outcome,
+        Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason.contains("unavailable machines") && reason.contains(&machine_ids[0].to_string())
     ));
     let machine_a = db::machine::find_one(
         &pool,
@@ -1899,14 +1952,12 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         .await?;
     env.run_rack_controller_iteration().await;
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, configured_state.value);
+    assert_eq!(rack.controller_state.version, configured_state.version);
     assert!(matches!(
-        rack.controller_state.value,
-        RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster:
-                    ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { .. },
-            }
-        }
+        rack.controller_state_outcome,
+        Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason.contains("no longer eligible") && reason.contains(&allocated_id.to_string())
     ));
     for machine_id in machine_ids {
         let machine = db::machine::find_one(&pool, &machine_id, Default::default())
@@ -1930,6 +1981,14 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
             },
         }
     ));
+    assert_eq!(
+        env.rms_sim
+            .submitted_get_configure_switch_certificate_job_status_requests()
+            .await
+            .len(),
+        1,
+        "restart admission must not query the completed RMS job"
+    );
 
     let restart_state = rack.controller_state.clone();
     if let RackState::Maintenance {
@@ -5534,7 +5593,6 @@ async fn run_configure_nmx_cluster_v2_workflow(
     env.run_rack_controller_iteration().await;
 
     let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
-
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -5568,7 +5626,21 @@ async fn run_configure_nmx_cluster_v2_workflow(
     }
 
     let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
-
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::Completed,
+            },
+        }
+    ));
+    let job_poll_count = env.rms_sim.submitted_get_job_status_requests().await.len();
+    // An expired V2 job would be resubmitted if restart admission polled it again.
+    env.rms_sim
+        .queue_get_job_status_response(Ok(rms::GetJobStatusResponse::default()))
+        .await;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
@@ -5578,6 +5650,11 @@ async fn run_configure_nmx_cluster_v2_workflow(
             },
         }
     ));
+    assert_eq!(
+        env.rms_sim.submitted_get_job_status_requests().await.len(),
+        job_poll_count,
+        "persisted configuration success must not re-query or resubmit the V2 job"
+    );
 
     env.run_rack_controller_iteration().await;
     let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;

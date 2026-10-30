@@ -3379,9 +3379,9 @@ pub async fn try_set_machine_maintenance_requested(
         .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(lock_query, error))?;
-    if !state.is_some_and(|state| state.accepts_maintenance_request()) {
+    let Some(state) = state.filter(|state| state.accepts_maintenance_request()) else {
         return Ok(false);
-    }
+    };
     // A separate statement observes an allocation committed while the lock was awaited.
     let request = model::machine::MachineMaintenanceRequest {
         requested_at: Utc::now(),
@@ -3392,13 +3392,23 @@ pub async fn try_set_machine_maintenance_requested(
         WHERE id = $2 AND machine_maintenance_requested IS NULL
           AND NOT EXISTS (SELECT 1 FROM instances WHERE machine_id = $2)
         RETURNING id"#;
-    sqlx::query_as::<_, MachineId>(query)
-        .bind(sqlx::types::Json(request))
+    let claimed = sqlx::query_as::<_, MachineId>(query)
+        .bind(sqlx::types::Json(&request))
         .bind(machine_id)
         .fetch_optional(txn)
         .await
-        .map(|row| row.is_some())
-        .map_err(|error| DatabaseError::new("try_set_machine_maintenance_requested", error))
+        .map_err(|error| DatabaseError::new("try_set_machine_maintenance_requested", error))?
+        .is_some();
+    if claimed {
+        tracing::info!(
+            machine_id = %machine_id.as_machine_id(),
+            initiator,
+            operation = ?request.operation,
+            previous_state = ?state.0,
+            "Queueing machine maintenance request"
+        );
+    }
+    Ok(claimed)
 }
 
 /// Cancels only an unstarted Reset owned by the given rack initiator.

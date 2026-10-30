@@ -572,7 +572,8 @@ impl Display for RackMaintenanceState {
 /// RMS ScaleUpFabricManager workflow. `WaitForSwitchCertificateJob`,
 /// `WaitForScaleUpFabricManagerJob`, and the optional telemetry-only
 /// `WaitForPrimarySwitchCertificateJob` persist each asynchronous phase across
-/// controller restarts.
+/// controller restarts. `Completed` records successful configuration before
+/// compute-host restart admission, which no longer depends on RMS job history.
 ///
 /// `ConfigureCertificates`, `DisableScaleUpFabricState`,
 /// `ConfigureScaleUpFabricManager`, and `WaitForFabricStatus` name sub-states of
@@ -599,6 +600,10 @@ pub enum ConfigureNmxClusterState {
         /// Parent RMS job identifier returned by certificate configuration.
         job_id: String,
     },
+
+    /// Configuration succeeded; retries compute-host restart admission without
+    /// querying completed RMS jobs.
+    Completed,
 
     /// Retired sub-state. The braces make this a struct variant, which absorbs
     /// the payload the retired workflow wrote; a unit variant would reject it.
@@ -627,6 +632,7 @@ impl Display for ConfigureNmxClusterState {
             ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { job_id } => {
                 write!(f, "WaitForPrimarySwitchCertificateJob({job_id})")
             }
+            ConfigureNmxClusterState::Completed => write!(f, "Completed"),
             ConfigureNmxClusterState::ConfigureCertificates {} => {
                 write!(f, "ConfigureCertificates")
             }

@@ -1207,9 +1207,8 @@ pub(crate) fn first_maintenance_state(scope: &MaintenanceScope) -> RackMaintenan
 }
 
 /// Returns the state to advance to when the current maintenance state's
-/// activity is not requested. Every [`RackMaintenanceState`] variant is
-/// checked here so a persisted or stale state cannot execute outside the
-/// current scope.
+/// activity is not requested. Successful NMX-C configuration and submitted
+/// reset batches must complete their restart handoff regardless of scope.
 fn next_state_if_activity_not_requested(
     maintenance_state: &RackMaintenanceState,
     scope: &MaintenanceScope,
@@ -1226,9 +1225,12 @@ fn next_state_if_activity_not_requested(
         RackMaintenanceState::NVOSUpdate { .. } => {
             (!nvos_update_selected(scope)).then(|| next_state_after_nvos(scope))
         }
-        // A submitted reset batch must finish even when PowerSequence was not
-        // explicitly selected (NMX-C success also submits this batch).
-        RackMaintenanceState::PowerSequence {
+        // Successful NMX-C configuration must hand off to resets, and a submitted
+        // batch must finish, even without an explicit PowerSequence activity.
+        RackMaintenanceState::ConfigureNmxCluster {
+            configure_nmx_cluster: ConfigureNmxClusterState::Completed,
+        }
+        | RackMaintenanceState::PowerSequence {
             rack_power: RackPowerState::PowerReset,
             restart_machine_ids: Some(_),
         } => None,
@@ -1651,7 +1653,11 @@ async fn wait_for_switch_certificate_job(
                 configure_scale_up_fabric_manager_v2(id, state, ctx, rack_profile_id, scope).await
             }
             SwitchCertificateJobCompletion::CompleteMaintenanceActivity => {
-                request_compute_host_restarts(state, ctx).await
+                Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+                    maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                        configure_nmx_cluster: ConfigureNmxClusterState::Completed,
+                    },
+                }))
             }
         },
         ConfigureSwitchCertificateState::Failed => {
@@ -2118,13 +2124,18 @@ async fn verify_scale_up_fabric_manager_v2(
         return transition_to_rack_error(id, state, cause, ctx).await;
     }
 
-    txn.commit().await?;
-
     if !effective_switch_mtls_services(&ctx.services.switch_mtls_services)
         .contains(&SwitchMtlsService::ScaleUpFabricTelemetry)
     {
-        return request_compute_host_restarts(state, ctx).await;
+        return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::Completed,
+            },
+        })
+        .with_txn(txn));
     }
+
+    txn.commit().await?;
 
     start_primary_switch_certificate_configuration(
         id,
@@ -3315,6 +3326,7 @@ pub async fn handle_maintenance(
                 )
                 .await
             }
+            ConfigureNmxClusterState::Completed => request_compute_host_restarts(state, ctx).await,
             retired @ (ConfigureNmxClusterState::ConfigureCertificates {}
             | ConfigureNmxClusterState::DisableScaleUpFabricState
             | ConfigureNmxClusterState::ConfigureScaleUpFabricManager
@@ -3858,6 +3870,16 @@ mod tests {
                     scenario: "compute restart always continues",
                     input: (
                         restarting_compute_hosts(),
+                        scope_of(vec![firmware_upgrade()]),
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "successful configure still admits resets outside scope",
+                    input: (
+                        RackMaintenanceState::ConfigureNmxCluster {
+                            configure_nmx_cluster: ConfigureNmxClusterState::Completed,
+                        },
                         scope_of(vec![firmware_upgrade()]),
                     ),
                     expect: None,
