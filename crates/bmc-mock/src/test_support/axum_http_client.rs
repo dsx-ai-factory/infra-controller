@@ -24,7 +24,7 @@ use http_body_util::BodyExt;
 use nv_redfish::bmc_http::{
     BmcCredentials, CacheableError, HttpClient, RejectedUriReferenceError, RequestError,
 };
-use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
+use nv_redfish::core::upload::{HttpPushUriUpdateRequest, MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     BmcError, BmcErrorClass, BoxTryStream, ModificationResponse, ODataETag, Repair,
     SessionCreateResponse,
@@ -270,6 +270,22 @@ impl HttpClient for AxumRouterHttpClient {
         V: Serialize + Send + Sync,
     {
         Err(Error::NotSupported("Multipart update is not supported yet"))
+    }
+
+    async fn post_http_push_uri_update<U, T>(
+        &self,
+        _: Url,
+        _: HttpPushUriUpdateRequest<U>,
+        _: &BmcCredentials,
+        _: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        U: UploadReader,
+        T: DeserializeOwned + Send + Sync,
+    {
+        Err(Error::NotSupported(
+            "HttpPushUri update is not supported yet",
+        ))
     }
 }
 
