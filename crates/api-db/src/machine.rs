@@ -1296,6 +1296,32 @@ pub async fn update_accepted_lldp_snapshot_fingerprint(
     Ok(())
 }
 
+/// Reads the accepted LLDP fingerprint while locking its machine row so a
+/// caller can validate snapshot identity against current serialized state.
+pub async fn lock_accepted_lldp_snapshot_fingerprint(
+    txn: &mut PgConnection,
+    machine_id: &DpuMachineId,
+) -> Result<Option<Vec<u8>>, DatabaseError> {
+    let query = r#"
+        SELECT network_status_observation->'accepted_lldp_snapshot_fingerprint'
+        FROM machines
+        WHERE id = $1
+        FOR UPDATE
+    "#;
+    let fingerprint: Option<Option<sqlx::types::Json<Vec<u8>>>> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    fingerprint
+        .map(|value| value.map(|json| json.0))
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "machine",
+            id: machine_id.to_string(),
+        })
+}
+
 /// `ExtensionServiceObservationNotCurrent` means the conditional observation
 /// update did not match, but the machine was present when rechecked. The
 /// rejected observation does not replace the stored service entry.

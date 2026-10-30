@@ -1055,7 +1055,17 @@ async fn handle_dpu_lldp_report(
             }
             Some(computed)
         }
-        rpc::LldpReportResult::Unchanged => None,
+        rpc::LldpReportResult::Unchanged => {
+            if let Some(supplied) = supplied_fingerprint {
+                // The operational-status update already locked this row. Read
+                // its current value rather than the earlier unlocked snapshot.
+                let accepted =
+                    db::machine::lock_accepted_lldp_snapshot_fingerprint(txn, dpu_machine_id)
+                        .await?;
+                validate_unchanged_lldp_fingerprint(supplied, accepted.as_deref())?;
+            }
+            None
+        }
         rpc::LldpReportResult::CollectionFailed => {
             if supplied_fingerprint.is_some() {
                 return Err(CarbideError::InvalidArgument(
@@ -1073,6 +1083,49 @@ async fn handle_dpu_lldp_report(
             .await?;
     }
     Ok(())
+}
+
+/// Requires a fingerprint-aware UNCHANGED report to identify Core's exact
+/// accepted snapshot so stale agent state cannot confirm a different topology.
+fn validate_unchanged_lldp_fingerprint(
+    supplied: &[u8],
+    accepted: Option<&[u8]>,
+) -> Result<(), CarbideError> {
+    if accepted != Some(supplied) {
+        return Err(CarbideError::InvalidArgument(
+            "unchanged LLDP snapshot fingerprint does not match the accepted snapshot".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod lldp_fingerprint_validation_tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::validate_unchanged_lldp_fingerprint;
+
+    /// Verifies fingerprint-bearing UNCHANGED reports identify exactly one
+    /// previously accepted snapshot rather than merely claiming no change.
+    #[test]
+    fn unchanged_fingerprint_requires_exact_stored_acceptance() {
+        scenarios!(
+            run = |(supplied, accepted): (Vec<u8>, Option<Vec<u8>>)| {
+                validate_unchanged_lldp_fingerprint(&supplied, accepted.as_deref()).map_err(drop)
+            };
+            "accepted snapshot" {
+                // An exact match is the only fingerprint-aware success path.
+                (vec![0x0a], Some(vec![0x0a])) => Yields(()),
+            }
+            "rejected snapshot" {
+                // A different accepted snapshot proves the agent claim is stale.
+                (vec![0x0b], Some(vec![0x0a])) => Fails,
+                // Absence cannot establish that Core accepted the supplied snapshot.
+                (vec![0x0a], None) => Fails,
+            }
+        );
+    }
 }
 
 /// Applies one DPU status report, retaining an LLDP rejection until operational
