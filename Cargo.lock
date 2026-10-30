@@ -3375,6 +3375,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-scale-test"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "carbide-site-health-probe-api",
+ "carbide-test-support",
+ "chrono",
+ "futures",
+ "regex",
+ "reqwest 0.13.4",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "carbide-scout"
 version = "0.0.1"
 dependencies = [
