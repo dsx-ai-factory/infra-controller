@@ -221,6 +221,7 @@ const (
 	Forge_TriggerNicLockdownCredentialRotation_FullMethodName               = "/forge.Forge/TriggerNicLockdownCredentialRotation"
 	Forge_MarkManualFirmwareUpgradeComplete_FullMethodName                  = "/forge.Forge/MarkManualFirmwareUpgradeComplete"
 	Forge_ReportScoutFirmwareUpgradeStatus_FullMethodName                   = "/forge.Forge/ReportScoutFirmwareUpgradeStatus"
+	Forge_AcknowledgeScoutFirmwareUpgrade_FullMethodName                    = "/forge.Forge/AcknowledgeScoutFirmwareUpgrade"
 	Forge_GetDpuInfoList_FullMethodName                                     = "/forge.Forge/GetDpuInfoList"
 	Forge_GetMachineBootOverride_FullMethodName                             = "/forge.Forge/GetMachineBootOverride"
 	Forge_SetMachineBootOverride_FullMethodName                             = "/forge.Forge/SetMachineBootOverride"
@@ -987,6 +988,9 @@ type ForgeClient interface {
 	MarkManualFirmwareUpgradeComplete(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Report the result of a scout-based firmware upgrade
 	ReportScoutFirmwareUpgradeStatus(ctx context.Context, in *ScoutFirmwareUpgradeStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Persist task acceptance before Scout downloads or executes firmware work.
+	// Repeated acknowledgement of the current task does not extend its deadline.
+	AcknowledgeScoutFirmwareUpgrade(ctx context.Context, in *ScoutFirmwareUpgradeAcknowledgement, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetDpuInfoList(ctx context.Context, in *GetDpuInfoListRequest, opts ...grpc.CallOption) (*GetDpuInfoListResponse, error)
 	GetMachineBootOverride(ctx context.Context, in *MachineInterfaceId, opts ...grpc.CallOption) (*MachineBootOverride, error)
 	SetMachineBootOverride(ctx context.Context, in *MachineBootOverride, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -3662,6 +3666,16 @@ func (c *forgeClient) ReportScoutFirmwareUpgradeStatus(ctx context.Context, in *
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Forge_ReportScoutFirmwareUpgradeStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AcknowledgeScoutFirmwareUpgrade(ctx context.Context, in *ScoutFirmwareUpgradeAcknowledgement, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_AcknowledgeScoutFirmwareUpgrade_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7576,6 +7590,9 @@ type ForgeServer interface {
 	MarkManualFirmwareUpgradeComplete(context.Context, *MachineId) (*emptypb.Empty, error)
 	// Report the result of a scout-based firmware upgrade
 	ReportScoutFirmwareUpgradeStatus(context.Context, *ScoutFirmwareUpgradeStatusRequest) (*emptypb.Empty, error)
+	// Persist task acceptance before Scout downloads or executes firmware work.
+	// Repeated acknowledgement of the current task does not extend its deadline.
+	AcknowledgeScoutFirmwareUpgrade(context.Context, *ScoutFirmwareUpgradeAcknowledgement) (*emptypb.Empty, error)
 	GetDpuInfoList(context.Context, *GetDpuInfoListRequest) (*GetDpuInfoListResponse, error)
 	GetMachineBootOverride(context.Context, *MachineInterfaceId) (*MachineBootOverride, error)
 	SetMachineBootOverride(context.Context, *MachineBootOverride) (*emptypb.Empty, error)
@@ -8853,6 +8870,9 @@ func (UnimplementedForgeServer) MarkManualFirmwareUpgradeComplete(context.Contex
 }
 func (UnimplementedForgeServer) ReportScoutFirmwareUpgradeStatus(context.Context, *ScoutFirmwareUpgradeStatusRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportScoutFirmwareUpgradeStatus not implemented")
+}
+func (UnimplementedForgeServer) AcknowledgeScoutFirmwareUpgrade(context.Context, *ScoutFirmwareUpgradeAcknowledgement) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method AcknowledgeScoutFirmwareUpgrade not implemented")
 }
 func (UnimplementedForgeServer) GetDpuInfoList(context.Context, *GetDpuInfoListRequest) (*GetDpuInfoListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDpuInfoList not implemented")
@@ -13474,6 +13494,24 @@ func _Forge_ReportScoutFirmwareUpgradeStatus_Handler(srv interface{}, ctx contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).ReportScoutFirmwareUpgradeStatus(ctx, req.(*ScoutFirmwareUpgradeStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AcknowledgeScoutFirmwareUpgrade_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ScoutFirmwareUpgradeAcknowledgement)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AcknowledgeScoutFirmwareUpgrade(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AcknowledgeScoutFirmwareUpgrade_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AcknowledgeScoutFirmwareUpgrade(ctx, req.(*ScoutFirmwareUpgradeAcknowledgement))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20543,6 +20581,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportScoutFirmwareUpgradeStatus",
 			Handler:    _Forge_ReportScoutFirmwareUpgradeStatus_Handler,
+		},
+		{
+			MethodName: "AcknowledgeScoutFirmwareUpgrade",
+			Handler:    _Forge_AcknowledgeScoutFirmwareUpgrade_Handler,
 		},
 		{
 			MethodName: "GetDpuInfoList",

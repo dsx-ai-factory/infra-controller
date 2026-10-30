@@ -2048,6 +2048,7 @@ async fn put_in_waiting_for_scout_upgrade(
             power_drains_needed,
             started_at: chrono::Utc::now(),
             deadline,
+            delivery: None,
             task_json: String::new(),
             result,
         },

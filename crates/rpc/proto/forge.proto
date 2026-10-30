@@ -511,6 +511,9 @@ service Forge {
   rpc MarkManualFirmwareUpgradeComplete(common.MachineId) returns (google.protobuf.Empty);
   // Report the result of a scout-based firmware upgrade
   rpc ReportScoutFirmwareUpgradeStatus(ScoutFirmwareUpgradeStatusRequest) returns (google.protobuf.Empty);
+  // Persist task acceptance before Scout downloads or executes firmware work.
+  // Repeated acknowledgement of the current task does not extend its deadline.
+  rpc AcknowledgeScoutFirmwareUpgrade(ScoutFirmwareUpgradeAcknowledgement) returns (google.protobuf.Empty);
 
   rpc GetDpuInfoList(GetDpuInfoListRequest) returns (GetDpuInfoListResponse);
 
@@ -6372,6 +6375,8 @@ enum ForgeAgentControlCapability {
   // Supports immutable, digest-checked MlxDeviceUpdateFirmware workflows and
   // correlated firmware_update_result observations.
   NIC_FIRMWARE_UPDATE_V1 = 1;
+  // Acknowledges host firmware tasks before execution and retries result delivery.
+  SCOUT_FIRMWARE_UPGRADE_ACK_V1 = 2;
 }
 
 message ForgeAgentControlRequest {
@@ -6527,6 +6532,9 @@ message ForgeAgentControlResponse {
 
   message FirmwareUpgrade {
     scout_firmware_upgrade.ScoutFirmwareUpgradeTask task = 1;
+    // Requires SCOUT_FIRMWARE_UPGRADE_ACK_V1. Scout must receive a successful
+    // acknowledgement response before starting. Omission preserves legacy tasks.
+    bool requires_acknowledgement = 2;
   }
 
 
@@ -7906,6 +7914,14 @@ message MachineRebootCompletedResponse {
 
 message MachineRebootCompletedRequest {
   common.MachineId machine_id = 1;
+}
+
+// Identifies the current host firmware task. A stale ID, expired deadline,
+// completed task, or wrong machine state returns FAILED_PRECONDITION without
+// changing state. A repeated acceptance preserves the original deadline.
+message ScoutFirmwareUpgradeAcknowledgement {
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
+  string upgrade_task_id = 2;
 }
 
 message ScoutFirmwareUpgradeStatusRequest {

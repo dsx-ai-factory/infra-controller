@@ -415,6 +415,8 @@ pub(crate) async fn forge_agent_control(
                 reprovision_state:
                     HostReprovisionState::WaitingForScoutUpgrade {
                         task_json,
+                        deadline,
+                        delivery,
                         result: None,
                         ..
                     },
@@ -426,19 +428,48 @@ pub(crate) async fn forge_agent_control(
                         reprovision_state:
                             HostReprovisionState::WaitingForScoutUpgrade {
                                 task_json,
+                                deadline,
+                                delivery,
                                 result: None,
                                 ..
                             },
                     },
             } => {
-                tracing::info!(
-                    machine_id = %machine.id,
-                    "Sending firmware upgrade task to scout",
-                );
-                let action = match serde_json::from_str::<sfu::ScoutFirmwareUpgradeTask>(task_json)
-                {
-                    Ok(task) => Action::FirmwareUpgrade(fac::FirmwareUpgrade { task: Some(task) }),
-                    Err(e) => {
+                let active_deadline = delivery.as_ref().map(|delivery| {
+                    if delivery.accepted_at.is_some() {
+                        (*deadline, "completion")
+                    } else {
+                        (delivery.deadline, "delivery")
+                    }
+                });
+                let action = match (
+                    serde_json::from_str::<sfu::ScoutFirmwareUpgradeTask>(task_json),
+                    active_deadline,
+                ) {
+                    (Ok(task), Some((deadline, deadline_type)))
+                        if chrono::Utc::now() > deadline =>
+                    {
+                        tracing::info!(
+                            machine_id = %machine.id,
+                            upgrade_task_id = %task.upgrade_task_id,
+                            deadline_type,
+                            %deadline,
+                            "Scout firmware upgrade deadline expired, sending no-op action to scout",
+                        );
+                        Action::noop()
+                    }
+                    (Ok(task), _) => {
+                        tracing::info!(
+                            machine_id = %machine.id,
+                            upgrade_task_id = %task.upgrade_task_id,
+                            "Preparing firmware upgrade task for scout",
+                        );
+                        Action::FirmwareUpgrade(fac::FirmwareUpgrade {
+                            task: Some(task),
+                            requires_acknowledgement: delivery.is_some(),
+                        })
+                    }
+                    (Err(e), _) => {
                         tracing::warn!(
                             error = %e,
                             "Could not deserialize firmware upgrade task, sending no-op action to scout",
@@ -483,6 +514,14 @@ fn build_agent_control_response(
     action: fac::Action,
     capabilities: &[i32],
 ) -> Result<ForgeAgentControlResponse, CarbideError> {
+    if matches!(&action, fac::Action::FirmwareUpgrade(task) if task.requires_acknowledgement)
+        && !capabilities
+            .contains(&(rpc::ForgeAgentControlCapability::ScoutFirmwareUpgradeAckV1 as i32))
+    {
+        return Err(CarbideError::FailedPrecondition(
+            "scout does not advertise SCOUT_FIRMWARE_UPGRADE_ACK_V1".into(),
+        ));
+    }
     let requires_firmware_update = match &action {
         fac::Action::MlxAction(action) => action.device_actions.iter().any(|device| {
             matches!(

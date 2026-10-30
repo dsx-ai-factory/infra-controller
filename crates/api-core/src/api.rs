@@ -1626,6 +1626,14 @@ impl Forge for Api {
             .await
     }
 
+    async fn acknowledge_scout_firmware_upgrade(
+        &self,
+        request: Request<rpc::ScoutFirmwareUpgradeAcknowledgement>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::host_reprovisioning::acknowledge_scout_firmware_upgrade(self, request)
+            .await
+    }
+
     async fn report_scout_firmware_upgrade_status(
         &self,
         request: Request<rpc::ScoutFirmwareUpgradeStatusRequest>,

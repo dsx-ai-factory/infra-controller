@@ -473,6 +473,7 @@ mod tests {
     fn firmware_upgrade_converts_to_legacy_task_json() {
         let upgrade_task_id = uuid::Uuid::new_v4().to_string();
         let action = fac::Action::FirmwareUpgrade(fac::FirmwareUpgrade {
+            requires_acknowledgement: false,
             task: Some(sfu::ScoutFirmwareUpgradeTask {
                 upgrade_task_id: upgrade_task_id.clone(),
                 component_type: "cpld".to_string(),
@@ -519,6 +520,7 @@ mod tests {
     fn response_from_firmware_upgrade_sets_typed_payload_and_legacy_pairs() {
         let response = ForgeAgentControlResponse::build_and_fill_legacy_fields(
             fac::Action::FirmwareUpgrade(fac::FirmwareUpgrade {
+                requires_acknowledgement: false,
                 task: Some(sfu::ScoutFirmwareUpgradeTask {
                     upgrade_task_id: uuid::Uuid::new_v4().to_string(),
                     component_type: "cpld".to_string(),
