@@ -24,7 +24,7 @@ var _ MappedNullable = &HostLifecycleProfile{}
 type HostLifecycleProfile struct {
 	// When true, the server is not locked down during host lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown NullableBool `json:"disableLockdown,omitempty"`
-	// When true, the machine is designated as a control-plane machine. After completion of https://github.com/dsx-ai-factory/infra-controller/issues/7568, its management addresses stay usable while the control plane is down. A designated machine requires a fixed or retained IP allocation on every host BMC, DPU BMC, and DPU OS interface. When omitted, the existing value is preserved.
+	// When true, the machine is designated as a control-plane machine. A designated machine requires a fixed or retained IP allocation on every host BMC, DPU BMC, and DPU OS interface. When omitted, the existing value is preserved. After completion of https://github.com/dsx-ai-factory/infra-controller/issues/7568, its management addresses stay usable while the control plane is down.
 	ControlPlane NullableBool `json:"controlPlane,omitempty"`
 }
 
