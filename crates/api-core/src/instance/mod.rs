@@ -107,6 +107,8 @@ fn build_requested_linknet_prefix(
 }
 use crate::{CarbideError, CarbideResult};
 
+pub(crate) mod service_vpc;
+
 async fn validate_zero_dpu_auto_vpc(
     txn: &mut PgConnection,
     vpc_id: VpcId,
@@ -484,6 +486,9 @@ pub(crate) struct InstanceAllocationRequest {
     /// Desired configuration of the instance
     pub(crate) config: InstanceConfig,
 
+    /// Caller VPC selections retained until NICo allocates the attachment's service interfaces.
+    pub(crate) requested_extension_services: RequestedInstanceExtensionServicesConfig,
+
     /// Whether NICo must replace converter-assigned VF placeholders with effective inventory IDs.
     pub(crate) implicit_vf_allocation: bool,
 
@@ -524,15 +529,8 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
             .map(RequestedInstanceExtensionServicesConfig::try_from)
             .transpose()?
             .unwrap_or_default();
-        if requested_extension_services.has_service_vpc_selections() {
-            return Err(CarbideError::FailedPrecondition(
-                "service VPC attachment is unavailable until network resource reconciliation is implemented"
-                    .to_string(),
-            ));
-        }
-
         let mut config = InstanceConfig::try_from(rpc_config)?;
-        config.extension_services = requested_extension_services.into_new_attachments();
+        config.extension_services = requested_extension_services.clone().into_new_attachments();
         // Empty power-policy values are clear sentinels only on update. During
         // creation there is no association to clear, so persist them as unset.
         config.power_profile = normalize_created_power_profile(config.power_profile);
@@ -555,6 +553,7 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
             instance_type_id,
             machine_id: machine_id.into(),
             config,
+            requested_extension_services,
             implicit_vf_allocation,
             metadata,
             allow_unhealthy_machine,
@@ -1578,6 +1577,11 @@ async fn allocate_networks(
         };
         plan_prefix_allocations(targets, &context)?
     };
+    if !works.is_empty() {
+        // Lock `instance_addresses` before VPC-prefix rows so host allocation, service-VPC
+        // activation, and network-segment deletion use one database lock order.
+        db::instance_address::lock_table_for_allocation(txn).await?;
+    }
     execute_prefix_allocations(targets, txn, works).await
 }
 
@@ -1792,8 +1796,8 @@ pub(crate) async fn validate_tenant_nic_firmware_preparation(
 }
 
 /// Loads and locks the extension-service rows and their live versions for
-/// `service_ids`, keyed by service ID. Soft-deleted services and versions are
-/// left out, so a missing entry reads as "does not exist" to callers.
+/// `service_ids`, keyed by service ID. Service rows include soft-deleted records so validation can
+/// distinguish deletion from absence, while versions remain active-only.
 #[allow(clippy::type_complexity)]
 pub(crate) async fn load_extension_services(
     txn: &mut db::Transaction<'_>,
@@ -1805,7 +1809,7 @@ pub(crate) async fn load_extension_services(
     ),
     CarbideError,
 > {
-    let services = extension_service::find_by_ids(txn, service_ids, false, true)
+    let services = extension_service::find_by_ids(txn, service_ids, true, true)
         .await?
         .into_iter()
         .map(|service| (service.id, service))
@@ -1845,12 +1849,20 @@ pub(crate) fn validate_instance_extension_services(
     }
 
     for config in &active_services {
-        let service = services.get(&config.service_id).ok_or_else(|| {
-            CarbideError::FailedPrecondition(format!(
-                "extension service {} does not exist",
-                config.service_id,
-            ))
-        })?;
+        let service =
+            services
+                .get(&config.service_id)
+                .ok_or_else(|| CarbideError::NotFoundError {
+                    kind: "extension service",
+                    id: config.service_id.to_string(),
+                })?;
+
+        if service.deleted.is_some() {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "extension service {} is deleted",
+                config.service_id
+            )));
+        }
 
         // Baseline services are deployed to all DPUs at creation time
         // and never participate in instance attachment.
@@ -1861,17 +1873,12 @@ pub(crate) fn validate_instance_extension_services(
             )));
         }
 
-        // Issue #6125 adds service-interface reconciliation. Until then, an existing
-        // attachment may be retained or removed but a networked service cannot be attached.
-        // Networked definitions cannot create another native version, so the
-        // existing service ID is sufficient at this interim guard.
+        // Existing attachments may terminate or survive unrelated writes, but a new networked
+        // attachment must pass the binary's address-family implementation check.
         if !service.service_vpc_interfaces.is_empty()
             && !existing_active_service_ids.contains(&config.service_id)
         {
-            return Err(CarbideError::FailedPrecondition(
-                "service VPC attachment is unavailable until network resource reconciliation is implemented"
-                    .to_string(),
-            ));
+            service_vpc::validate_implementation_support(service)?;
         }
 
         // A service type can only be attached to the host model able to
@@ -2628,6 +2635,31 @@ pub(crate) async fn batch_allocate_instances(
 
     let _persisted_instances = db::instance::batch_persist(new_instances, &mut txn).await?;
 
+    // Allocate normalized service addresses only after their Instance foreign key exists; the
+    // surrounding creation transaction keeps attachments and every endpoint invisible until commit.
+    for (request, mh_snapshot) in &mut processed_requests {
+        let expected_machine_has_cx9 = expected_machine_declares_cx9(
+            mh_snapshot
+                .host_snapshot
+                .status
+                .bmc_info
+                .mac
+                .and_then(|bmc_mac| expected_machines_by_bmc.get(&bmc_mac)),
+        );
+        request.config.network = service_vpc::allocate_for_instance(
+            api,
+            &mut txn,
+            request.instance_id,
+            &request.config.extension_services,
+            &request.requested_extension_services,
+            &request.config.network,
+            mh_snapshot,
+            expected_machine_has_cx9,
+            None,
+        )
+        .await?;
+    }
+
     // ==== Phase 7: Process configs (IPs, inband interfaces, IB GUIDs) ====
     // These need to be done per-instance but we collect results for batch update
     // Tuple format: (instance_id, expected_version, config)
@@ -3230,12 +3262,12 @@ mod tests {
         }
     }
 
-    /// Verifies request conversion rejects service-VPC activation before database
-    /// work, so allocation cannot persist attachment identity without the required
-    /// service-interface resources before issue #6125 adds reconciliation.
+    /// Verifies request conversion retains service-VPC selections and assigns an attachment ID
+    /// because atomic admission needs both values after referenced services are locked.
     #[test]
-    fn service_vpc_activation_is_unavailable_before_persistence() {
+    fn service_vpc_selection_survives_request_conversion_for_atomic_admission() {
         // Build an otherwise valid allocation that requests a service VPC.
+        let requested_vpc = VpcId::new();
         let request = rpc::InstanceAllocationRequest {
             machine_id: Some(
                 "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
@@ -3243,11 +3275,26 @@ mod tests {
                     .expect("valid host machine ID"),
             ),
             config: Some(rpc::InstanceConfig {
+                os: Some(rpc::InstanceOperatingSystemConfig {
+                    phone_home_enabled: false,
+                    run_provisioning_instructions_on_every_boot: false,
+                    user_data: None,
+                    variant: Some(rpc::instance_operating_system_config::Variant::Ipxe(
+                        rpc::InlineIpxe {
+                            ipxe_script: String::new(),
+                        },
+                    )),
+                }),
+                tenant: Some(rpc::TenantConfig {
+                    tenant_organization_id: "test-tenant".to_string(),
+                    tenant_keyset_ids: vec![],
+                    hostname: None,
+                }),
                 dpu_extension_services: Some(rpc::InstanceDpuExtensionServicesConfig {
                     service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
                         service_id: ExtensionServiceId::new().to_string(),
                         version: ConfigVersion::initial().to_string(),
-                        service_vpc_ids: vec![VpcId::new()],
+                        service_vpc_ids: vec![requested_vpc], // Request conversion must retain the selected VPC.
                     }],
                 }),
                 ..Default::default()
@@ -3255,11 +3302,21 @@ mod tests {
             ..Default::default()
         };
 
-        // Request conversion is the earliest boundary and must reject activation.
-        assert!(matches!(
-            InstanceAllocationRequest::try_from(request),
-            Err(CarbideError::FailedPrecondition(_))
-        ));
+        // Convert wire intent before the referenced service rows and allocation prerequisites are available.
+        let converted = InstanceAllocationRequest::try_from(request)
+            .expect("well-formed service-VPC selection converts");
+
+        // The coordinator receives the exact VPC selection and assigned attachment ID that later
+        // allocation persists with its service-interface records.
+        assert_eq!(
+            converted.requested_extension_services.service_configs[0].service_vpc_ids,
+            vec![requested_vpc]
+        );
+        assert!(
+            converted.config.extension_services.service_configs[0]
+                .id
+                .is_some()
+        );
     }
 
     /// Test-specific helper that builds one allocated physical IB interface.

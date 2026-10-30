@@ -56,7 +56,7 @@ const ADDRESS_BINDS_PER_ROW: usize = 6;
 /// Call this before locking any row in `network_prefixes`. Segment deletion
 /// takes an ACCESS SHARE lock on this table before deleting prefix rows, so
 /// keeping this lock order prevents allocation/deletion deadlocks.
-pub(crate) async fn lock_table_for_allocation(txn: &mut PgConnection) -> Result<(), DatabaseError> {
+pub async fn lock_table_for_allocation(txn: &mut PgConnection) -> Result<(), DatabaseError> {
     let query = "LOCK TABLE instance_addresses IN ACCESS EXCLUSIVE MODE";
     sqlx::query(query)
         .execute(txn)
@@ -123,6 +123,26 @@ pub async fn find_by_segment_id(
         .map_err(|e| DatabaseError::query(&query, e))
 }
 
+/// Returns every address stored on the selected segments in stable `segment_id`, `instance_id`, then
+/// `address` order so callers can verify generated service segments without one query per persisted
+/// service-interface record.
+pub async fn find_all_by_segment_ids(
+    txn: impl DbReader<'_>,
+    segment_ids: &[NetworkSegmentId],
+) -> Result<Vec<InstanceAddress>, DatabaseError> {
+    let query = format!(
+        "SELECT {} FROM instance_addresses
+        WHERE segment_id = ANY($1)
+        ORDER BY segment_id, instance_id, address",
+        InstanceAddress::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(segment_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(&query, e))
+}
+
 /// Locks every address row for an instance in stable ID order.
 ///
 /// Both deletion paths call this before choosing rows to delete. Full instance
@@ -167,7 +187,7 @@ pub async fn delete(txn: &mut PgConnection, instance_id: InstanceId) -> Result<(
 }
 
 /// `delete_addresses_for_instance` releases exact segment/address pairs from
-/// one instance. The segment is part of the identity because an FNN instance
+/// one Instance. The segment is required because an FNN Instance
 /// can use more than one VPC, including VPCs with equal address space.
 /// Missing rows are ignored so a retried release remains idempotent.
 pub async fn delete_addresses_for_instance(
@@ -387,6 +407,58 @@ async fn insert_instance_addresses(
     }
 
     Ok(())
+}
+
+/// Returns the normalized service address at offset one in a generated `/31` or `/127` link prefix
+/// so activation and cleanup derive the same `instance_addresses.address`.
+pub fn service_address_for_prefix(prefix: IpNetwork) -> DatabaseResult<IpAddr> {
+    let address = match prefix {
+        IpNetwork::V4(prefix) if prefix.prefix() == 31 => u32::from(prefix.network())
+            .checked_add(1)
+            .map(std::net::Ipv4Addr::from)
+            .map(IpAddr::V4),
+        IpNetwork::V6(prefix) if prefix.prefix() == 127 => u128::from(prefix.network())
+            .checked_add(1)
+            .map(std::net::Ipv6Addr::from)
+            .map(IpAddr::V6),
+        _ => {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "service-VPC link prefix {prefix} must be an IPv4 /31 or IPv6 /127"
+            )));
+        }
+    };
+
+    address.ok_or_else(|| {
+        DatabaseError::InvalidArgument(format!(
+            "service-VPC link prefix {prefix} has no address at offset one"
+        ))
+    })
+}
+
+/// Inserts the normalized service address for one generated service prefix while the caller holds the
+/// address allocation lock, preventing host and service allocations from selecting concurrently.
+pub async fn insert_service_address(
+    txn: &mut PgConnection,
+    instance_id: InstanceId,
+    segment_id: NetworkSegmentId,
+    vpc_id: VpcId,
+    network_prefix: &NetworkPrefix,
+) -> DatabaseResult<IpAddr> {
+    let address = service_address_for_prefix(network_prefix.prefix)?;
+    insert_instance_addresses(
+        txn,
+        &[InstanceAddress {
+            instance_id,
+            segment_id,
+            vpc_id,
+            address,
+            prefix: network_prefix.prefix,
+            hostname: None,
+        }],
+    )
+    .await?;
+    crate::dns::domain::bump_serial_for_segments(txn, &[segment_id]).await?;
+    Ok(address)
 }
 
 /// Tries to allocate IP addresses for a tenant network configuration
@@ -911,6 +983,21 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    /// Verifies service addresses use offset one for both supported link families so activation
+    /// and guarded cleanup derive the same `instance_addresses.address` from `link_prefix`.
+    #[test]
+    fn service_address_uses_second_link_address() {
+        // Derive the service address from one canonical link prefix per supported family.
+        let ipv4 = service_address_for_prefix("192.0.2.8/31".parse().expect("valid IPv4 /31"))
+            .expect("IPv4 service address");
+        let ipv6 = service_address_for_prefix("2001:db8::8/127".parse().expect("valid IPv6 /127"))
+            .expect("IPv6 service address");
+
+        // Both families reserve the network base for HBN and use offset one for the service address.
+        assert_eq!(ipv4, "192.0.2.9".parse::<IpAddr>().expect("valid IPv4"));
+        assert_eq!(ipv6, "2001:db8::9".parse::<IpAddr>().expect("valid IPv6"));
+    }
 
     fn create_valid_validation_data() -> Vec<NetworkSegment> {
         let vpc_id = VpcId::from_str("11609f10-c11d-1101-3261-6293ea0c0100").unwrap();

@@ -23,10 +23,7 @@ use model::machine::PowerState;
 use model::machine::machine_search_config::MachineSearchConfig;
 use tonic::{Request, Response, Status};
 
-use super::{
-    fetch_compute_tray_bmc_credentials, fetch_powershelf_pmc_credentials,
-    fetch_switch_bmc_credentials, fetch_switch_nvos_credentials, is_rack_scale_server,
-};
+use super::{RackComponent, fetch_credentials, is_rack_scale_server};
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
@@ -469,17 +466,12 @@ async fn read_actual(
         PowerReadEndpoint::Shelf(row) => row.pmc_mac,
     };
 
-    let credentials = match &endpoint {
-        PowerReadEndpoint::Compute { .. } => {
-            fetch_compute_tray_bmc_credentials(api.credential_manager.as_ref(), mac).await
-        }
-        PowerReadEndpoint::Switch(_) => {
-            fetch_switch_bmc_credentials(api.credential_manager.as_ref(), mac).await
-        }
-        PowerReadEndpoint::Shelf(_) => {
-            fetch_powershelf_pmc_credentials(api.credential_manager.as_ref(), mac).await
-        }
+    let credential_kind = match &endpoint {
+        PowerReadEndpoint::Compute { .. } => RackComponent::ComputeBmc,
+        PowerReadEndpoint::Switch(_) => RackComponent::SwitchBmc,
+        PowerReadEndpoint::Shelf(_) => RackComponent::PowerShelfPmc,
     };
+    let credentials = fetch_credentials(api, credential_kind, mac).await;
     // The caller's `timeout_at` polls ready results before checking expiry.
     // Check here so a late error cannot replace `DeadlineExceeded` and late
     // credentials cannot start another read.
@@ -515,8 +507,7 @@ async fn read_actual(
             let (Some(nvos_mac), Some(nvos_ip)) = (row.nvos_mac, row.nvos_ip) else {
                 return failed_observation(ErrorCode::EndpointUnavailable, Some(source));
             };
-            let nvos_credentials =
-                fetch_switch_nvos_credentials(api.credential_manager.as_ref(), mac).await;
+            let nvos_credentials = fetch_credentials(api, RackComponent::SwitchNvos, mac).await;
             // Apply the same guard before classifying the second credential lookup.
             if tokio::time::Instant::now() >= deadline {
                 return failed_observation(ErrorCode::DeadlineExceeded, Some(source));

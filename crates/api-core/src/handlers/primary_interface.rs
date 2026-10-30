@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{
     DpuMachineId, MachineIdSubtypeTrait, MachineInterfaceId, StableHostMachineId,
 };
@@ -46,6 +47,14 @@ pub(super) enum PrimaryInterfaceSelector {
 pub(super) struct PrimaryInterfaceUpdate {
     /// Whether the machine controller should be woken to reconcile the target.
     pub(super) reconciliation_needed: bool,
+}
+
+/// Describes whether one primary-interface transaction completed or must restart after allocation.
+enum PrimaryInterfaceUpdateAttempt {
+    /// The primary-interface update committed successfully.
+    Applied(PrimaryInterfaceUpdate),
+    /// Allocation created this Instance while the transaction waited for the Machine lock.
+    RetryAfterInstanceAppeared(InstanceId),
 }
 
 /// Returns whether scout may replace a selection recorded as `RedfishChassisId` or
@@ -127,8 +136,11 @@ fn scout_boot_target_for_interface(
 }
 
 /// Updates the database primary and desired boot target atomically using Site Explorer's shared
-/// lock order. Commits before returning; when `reconciliation_needed` is true, the caller invokes
-/// `enqueue_boot_interface_reconciliation` after the commit.
+/// admin-segment and machine-interface lock order, then locks the Instance before the Machine and
+/// restarts once if allocation commits an Instance after the initial lookup found none.
+///
+/// A successful return means the transaction has committed. The caller then passes
+/// `reconciliation_needed` to `enqueue_boot_interface_reconciliation`.
 pub(super) async fn update_primary_interface(
     api: &Api,
     host_machine_id: StableHostMachineId,
@@ -137,6 +149,36 @@ pub(super) async fn update_primary_interface(
 ) -> CarbideResult<PrimaryInterfaceUpdate> {
     // Take the Admin lock permit first so excess requests wait without using database connections.
     let _admin_admission = db::machine_interface::admin_lock_admission().await;
+
+    let mut association_retried = false;
+    loop {
+        match update_primary_interface_once(api, host_machine_id, selector, force_reconcile).await?
+        {
+            PrimaryInterfaceUpdateAttempt::Applied(update) => return Ok(update),
+            PrimaryInterfaceUpdateAttempt::RetryAfterInstanceAppeared(instance_id)
+                if association_retried =>
+            {
+                return Err(CarbideError::ConcurrentModificationError(
+                    "instance",
+                    instance_id.to_string(),
+                ));
+            }
+            // Restart without holding Machine so the next attempt can lock the new Instance first.
+            PrimaryInterfaceUpdateAttempt::RetryAfterInstanceAppeared(_) => {
+                association_retried = true;
+            }
+        }
+    }
+}
+
+/// Runs one primary-interface transaction and requests a full restart when allocation commits an
+/// Instance while the operation waits for the Machine row lock.
+async fn update_primary_interface_once(
+    api: &Api,
+    host_machine_id: StableHostMachineId,
+    selector: PrimaryInterfaceSelector,
+    force_reconcile: bool,
+) -> CarbideResult<PrimaryInterfaceUpdateAttempt> {
     let mut txn = api.txn_begin().await?;
 
     // This transaction locks interface rows, moves the primary flag, and
@@ -145,6 +187,11 @@ pub(super) async fn update_primary_interface(
     db::machine_interface::lock_all_admin_segments(&mut txn).await?;
     let interface_snapshots =
         db::machine_interface::find_by_machine_id_for_update(&mut txn, &host_machine_id).await?;
+
+    // Lock an assigned Instance before Machine to match config updates and endpoint activation.
+    let instance =
+        db::instance::find_live_by_machine_id_for_update(&mut txn, &host_machine_id).await?;
+
     // This locks the Machine row with `FOR UPDATE`; the snapshot below is read after that wait.
     db::machine_desired_boot_interface::lock(txn.as_pgconn(), &host_machine_id).await?;
     let machine = db::machine::find_one(&mut txn, &host_machine_id, MachineSearchConfig::default())
@@ -154,6 +201,18 @@ pub(super) async fn update_primary_interface(
                 "machine {host_machine_id} disappeared while its database record was locked"
             ),
         })?;
+
+    // An empty Instance lookup locks no gap, so allocation may have committed while Machine was
+    // unavailable. Restart to acquire the new Instance before Machine rather than reversing order.
+    if instance.is_none()
+        && let Some(instance_id) =
+            db::instance::find_id_by_machine_id(txn.as_pgconn(), &host_machine_id).await?
+    {
+        txn.rollback().await?;
+        return Ok(PrimaryInterfaceUpdateAttempt::RetryAfterInstanceAppeared(
+            instance_id,
+        ));
+    }
 
     let new_primary_interface_id = match selector {
         PrimaryInterfaceSelector::Interface(interface_id) => interface_id,
@@ -224,8 +283,6 @@ pub(super) async fn update_primary_interface(
         )));
     }
 
-    let instance =
-        db::instance::find_live_by_machine_id_for_update(&mut txn, &host_machine_id).await?;
     let reconciliation_is_pending = machine.pending_boot_interface_config_version().is_some();
     let reconciliation_is_eligible =
         matches!(machine.current_state(), ManagedHostState::Ready) && instance.is_none();
@@ -252,10 +309,12 @@ pub(super) async fn update_primary_interface(
     }
     txn.commit().await?;
 
-    Ok(PrimaryInterfaceUpdate {
-        reconciliation_needed: reconciliation_is_eligible
-            && (reconciliation_is_pending || desired_changed),
-    })
+    Ok(PrimaryInterfaceUpdateAttempt::Applied(
+        PrimaryInterfaceUpdate {
+            reconciliation_needed: reconciliation_is_eligible
+                && (reconciliation_is_pending || desired_changed),
+        },
+    ))
 }
 
 /// Compares the PCI slots in a scout report with the stored boot interface.

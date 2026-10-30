@@ -2402,7 +2402,19 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn request_concurrency_limits_parallel_transport_attempts() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn respond(connection: &mut tokio::net::TcpStream, response: &str) {
+            // Read the GET headers before replying so Hyper cannot see an unsolicited response.
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(connection.read_u8().await.expect("read request headers"));
+            }
+            connection
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -2473,11 +2485,11 @@ mod tests {
             SERVICE_ROOT_BODY.len(),
             SERVICE_ROOT_BODY,
         );
-        first_connection
-            .write_all(response.as_bytes())
+        respond(&mut first_connection, &response).await;
+        first
             .await
-            .unwrap();
-        assert!(first.await.expect("first task joins").is_ok());
+            .expect("first task joins")
+            .expect("first request succeeds");
 
         let (mut second_connection, _) =
             tokio::time::timeout(Duration::from_secs(1), listener.accept())
@@ -2485,11 +2497,11 @@ mod tests {
                 .expect("second request reaches transport after permit release")
                 .expect("accept second request");
 
-        second_connection
-            .write_all(response.as_bytes())
+        respond(&mut second_connection, &response).await;
+        second
             .await
-            .unwrap();
-        assert!(second.await.expect("second task joins").is_ok());
+            .expect("second task joins")
+            .expect("second request succeeds");
     }
 
     #[test]
