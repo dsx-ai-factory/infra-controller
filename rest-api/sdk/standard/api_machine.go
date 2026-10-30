@@ -756,7 +756,7 @@ func (r ApiGetAllMachineRequest) IsMissingOnSite(isMissingOnSite bool) ApiGetAll
 	return r
 }
 
-// Include Machine metadata e.g. BMC, DPU, GPU and Interface data. Can only be requested by Provider.
+// Include Machine metadata such as BMC, DPU, GPU, and Interface data. Can only be requested by Provider.
 func (r ApiGetAllMachineRequest) IncludeMetadata(includeMetadata bool) ApiGetAllMachineRequest {
 	r.includeMetadata = &includeMetadata
 	return r
@@ -2230,7 +2230,7 @@ func (r ApiGetMachineRequest) IncludeRelation(includeRelation string) ApiGetMach
 	return r
 }
 
-// Include Machine metadata e.g. BMC, DPU, GPU and Interface data. Can only be requested by Provider.
+// Include Machine metadata such as BMC, DPU, GPU, and Interface data. Can only be requested by Provider.
 func (r ApiGetMachineRequest) IncludeMetadata(includeMetadata bool) ApiGetMachineRequest {
 	r.includeMetadata = &includeMetadata
 	return r

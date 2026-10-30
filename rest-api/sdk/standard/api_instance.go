@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -554,12 +555,12 @@ type ApiGetAllInstanceRequest struct {
 	infrastructureProviderId *string
 	siteId                   *string
 	vpcId                    *string
-	instanceTypeId           *string
+	instanceTypeId           *[]string
 	operatingSystemId        *string
-	machineId                *string
+	machineId                *[]string
 	name                     *string
 	status                   *string
-	ipAddress                *string
+	ipAddress                *[]string
 	query                    *string
 	includeRelation          *string
 	pageNumber               *int32
@@ -588,7 +589,7 @@ func (r ApiGetAllInstanceRequest) VpcId(vpcId string) ApiGetAllInstanceRequest {
 }
 
 // Filter by instance type ID. Can be specified multiple times to filter on more than one instance type.
-func (r ApiGetAllInstanceRequest) InstanceTypeId(instanceTypeId string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) InstanceTypeId(instanceTypeId ...string) ApiGetAllInstanceRequest {
 	r.instanceTypeId = &instanceTypeId
 	return r
 }
@@ -600,7 +601,7 @@ func (r ApiGetAllInstanceRequest) OperatingSystemId(operatingSystemId string) Ap
 }
 
 // Filter by machine ID. Can be specified multiple times to filter on more than one machine.
-func (r ApiGetAllInstanceRequest) MachineId(machineId string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) MachineId(machineId ...string) ApiGetAllInstanceRequest {
 	r.machineId = &machineId
 	return r
 }
@@ -618,7 +619,7 @@ func (r ApiGetAllInstanceRequest) Status(status string) ApiGetAllInstanceRequest
 }
 
 // Filter by IP address. Can be specified multiple times to filter on more than one IP address.
-func (r ApiGetAllInstanceRequest) IpAddress(ipAddress string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) IpAddress(ipAddress ...string) ApiGetAllInstanceRequest {
 	r.ipAddress = &ipAddress
 	return r
 }
@@ -715,13 +716,29 @@ func (a *InstanceAPIService) GetAllInstanceExecute(r ApiGetAllInstanceRequest) (
 		parameterAddToHeaderOrQuery(localVarQueryParams, "vpcId", r.vpcId, "form", "")
 	}
 	if r.instanceTypeId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", r.instanceTypeId, "form", "")
+		t := *r.instanceTypeId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", t, "form", "multi")
+		}
 	}
 	if r.operatingSystemId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "operatingSystemId", r.operatingSystemId, "form", "")
 	}
 	if r.machineId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "machineId", r.machineId, "form", "")
+		t := *r.machineId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "machineId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "machineId", t, "form", "multi")
+		}
 	}
 	if r.name != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "name", r.name, "form", "")
@@ -730,7 +747,15 @@ func (a *InstanceAPIService) GetAllInstanceExecute(r ApiGetAllInstanceRequest) (
 		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
 	}
 	if r.ipAddress != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "ipAddress", r.ipAddress, "form", "")
+		t := *r.ipAddress
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "ipAddress", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "ipAddress", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")

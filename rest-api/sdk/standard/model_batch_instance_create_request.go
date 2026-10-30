@@ -24,7 +24,7 @@ var _ MappedNullable = &BatchInstanceCreateRequest{}
 
 // BatchInstanceCreateRequest Request data to batch create multiple Instances with topology-optimized machine allocation. Explicit interface `ipAddress` values are not supported in batch requests.
 type BatchInstanceCreateRequest struct {
-	// Prefix for instance names. Instances will be named with this prefix followed by a random 6-character suffix (e.g., \"worker\" becomes \"worker-abc123\")
+	// Prefix for instance names. Instances will be named with this prefix followed by a random 6-character suffix (for example, \"worker\" becomes \"worker-abc123\")
 	NamePrefix string `json:"namePrefix"`
 	// Number of instances to create in this batch. Minimum 2, maximum 18 (limited by topology domain size)
 	Count int32 `json:"count"`
