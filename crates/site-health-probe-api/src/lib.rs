@@ -36,6 +36,13 @@ use serde::{Deserialize, Serialize};
 /// Quantiles `/v1/summary` reports when the request has no `q`.
 pub const DEFAULT_Q: &str = "0.5,0.9,0.95,0.99,0.995,1";
 
+/// Decimal places a `q` entry may have.
+pub const Q_DECIMALS: usize = 6;
+
+/// The largest count `/v1/summary` handles, 2^53: the largest an f64 holds
+/// exactly. No crossing target may exceed it.
+pub const MAX_COUNT: u64 = 1 << 53;
+
 /// Kind of unit a [`Filter`] selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -71,6 +78,20 @@ pub enum Source {
     NicoApi,
     #[serde(rename = "rest")]
     Rest,
+}
+
+/// Whether the REST site's machines are this NICo site's machines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SiteMatch {
+    /// Every machine on a nonempty page is a machine of this NICo site.
+    Match,
+    /// No machine on the page is.
+    Mismatch,
+    /// An empty page, a mixed page, a machine without a NICo ID, or no
+    /// device sweep yet. Never binds the site.
+    Unknown,
 }
 
 /// Kind of expected record.
@@ -415,13 +436,28 @@ pub struct ReadInfo {
     pub last_attempt_error: Option<String>,
 }
 
-/// `GET /v1/config` reply. A source is `null` before its first good read.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `GET /v1/config` reply. A source is `null` before its first good read,
+/// and while its reader is off.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigResponse {
     pub nico_api: Option<ConfigNicoApi>,
     pub rest: Option<ConfigRest>,
+    #[serde(default)]
+    pub rest_site: Option<RestSiteBinding>,
+}
+
+/// The REST site checked against the NICo device census, with the times of
+/// that check. Only `match` from a fresh read with no newer failed attempt
+/// binds the site.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RestSiteBinding {
+    #[serde(flatten)]
+    pub read: ReadInfo,
+    pub result: SiteMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -500,7 +536,11 @@ pub struct SummaryParams {
     pub base: u64,
     pub n: u64,
     pub direction: Direction,
-    /// Comma list of quantiles. [`DEFAULT_Q`] when absent.
+    /// Comma list of quantiles, each a decimal in (0, 1] with at most
+    /// [`Q_DECIMALS`] places. [`DEFAULT_Q`] when absent. The target of `q`
+    /// is `base + ceil(q * n)` going up and `base - ceil(q * n)` going down,
+    /// computed exactly. A `q` outside this form, or a target above
+    /// [`MAX_COUNT`] or below 0, is a 400 `invalid_param`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
     pub add_window_seconds: f64,
@@ -615,13 +655,24 @@ pub struct ErrorDetail {
     pub field: Option<String>,
 }
 
-/// Parses a `q` comma list. Every entry must be in (0, 1]. The result is
-/// sorted and deduplicated.
+/// Parses a `q` comma list. Every entry must be a plain decimal in (0, 1]
+/// with at most [`Q_DECIMALS`] places, checked on the text before it becomes
+/// an f64, which would round extra places away. The result is sorted and
+/// deduplicated.
 pub fn parse_q(raw: &str) -> Result<Vec<f64>, String> {
     let mut qs = Vec::new();
     for entry in raw.split(',').map(str::trim) {
         if entry.is_empty() {
             return Err("q has an empty entry".to_string());
+        }
+        let (whole, places) = entry.split_once('.').unwrap_or((entry, ""));
+        if !(whole.bytes().chain(places.bytes())).all(|b| b.is_ascii_digit()) {
+            return Err(format!("q entry {entry:?} is not a decimal number"));
+        }
+        if places.len() > Q_DECIMALS {
+            return Err(format!(
+                "q entry {entry:?} has more than {Q_DECIMALS} decimal places"
+            ));
         }
         let q: f64 = entry
             .parse()
@@ -771,6 +822,11 @@ mod tests {
             (Component::Uefi, "uefi"),
             (Component::BmcUefi, "bmc_uefi"),
             (Component::Other, "other"),
+        ]);
+        assert_wire_names(&[
+            (SiteMatch::Match, "match"),
+            (SiteMatch::Mismatch, "mismatch"),
+            (SiteMatch::Unknown, "unknown"),
         ]);
         assert_wire_names(&[
             (MismatchKind::AmbiguousLink, "ambiguous_link"),
@@ -1138,6 +1194,67 @@ mod tests {
         );
     }
 
+    fn read_info() -> ReadInfo {
+        ReadInfo {
+            read_start: t("2026-10-23T10:00:00Z"),
+            read_at: t("2026-10-23T10:00:02Z"),
+            read_age_seconds: 5.0,
+            read_interval_seconds: 120.0,
+            last_attempt_error: None,
+        }
+    }
+
+    fn read_info_json() -> serde_json::Value {
+        json!({
+            "readStart": "2026-10-23T10:00:00Z",
+            "readAt": "2026-10-23T10:00:02Z",
+            "readAgeSeconds": 5.0,
+            "readIntervalSeconds": 120.0,
+            "lastAttemptError": null,
+        })
+    }
+
+    #[test]
+    fn config_response_json_golden() {
+        let reply = ConfigResponse {
+            nico_api: None,
+            rest: None,
+            rest_site: Some(RestSiteBinding {
+                read: read_info(),
+                result: SiteMatch::Match,
+            }),
+        };
+        let mut rest_site = read_info_json();
+        rest_site["result"] = json!("match");
+        assert_json_golden(
+            &reply,
+            json!({"nicoApi": null, "rest": null, "restSite": rest_site}),
+        );
+
+        // A reply from before restSite reads as no site check.
+        let old: ConfigResponse =
+            serde_json::from_value(json!({"nicoApi": null, "rest": null})).unwrap();
+        assert_eq!(old, ConfigResponse::default());
+
+        // Clients built on the first contract (16bc37890) read the new
+        // reply: restSite is a field they do not know, and they ignore it.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FirstConfigResponse {
+            nico_api: Option<ConfigNicoApi>,
+            rest: Option<ConfigRest>,
+        }
+        let first: FirstConfigResponse =
+            serde_json::from_value(serde_json::to_value(&reply).unwrap()).unwrap();
+        assert_eq!(
+            first,
+            FirstConfigResponse {
+                nico_api: None,
+                rest: None
+            }
+        );
+    }
+
     #[test]
     fn request_none_fields_omitted() {
         let filter = Filter::new(UnitType::Host);
@@ -1231,8 +1348,18 @@ mod tests {
         );
         assert_eq!(parse_q("1").unwrap(), vec![1.0]);
         assert_eq!(parse_q("0.9, 0.5,0.9").unwrap(), vec![0.5, 0.9]);
-        for bad in ["", "0", "-0.5", "1.01", "0.5,", "x", "NaN", "inf"] {
+        assert_eq!(parse_q("0.500001,.25").unwrap(), vec![0.25, 0.500001]);
+        for bad in [
+            "", "0", "-0.5", "1.01", "0.5,", "x", "NaN", "inf", "5e-1", "+0.5", ".",
+        ] {
             assert!(parse_q(bad).is_err(), "{bad:?} should be rejected");
+        }
+        // Places past the sixth are refused before f64 could round them
+        // away: this one parses to exactly 0.5.
+        assert_eq!("0.50000000000000001".parse::<f64>().unwrap(), 0.5);
+        for precise in ["0.50000000000000001", "0.5000001", "1.0000000"] {
+            let err = parse_q(precise).expect_err("too precise");
+            assert!(err.contains("decimal places"), "{precise}: {err}");
         }
     }
 
@@ -1286,6 +1413,13 @@ mod tests {
         let units = property_names(&schema::<UnitsResponse>());
         for name in ["units", "missingIds", "nextCursor", "snapshotId"] {
             assert!(units.contains(name), "UnitsResponse lacks {name}");
+        }
+
+        let config = property_names(&schema::<ConfigResponse>());
+        assert!(config.contains("restSite"), "ConfigResponse lacks restSite");
+        let site = property_names(&schema::<RestSiteBinding>());
+        for name in ["result", "readAt", "lastAttemptError"] {
+            assert!(site.contains(name), "RestSiteBinding lacks {name}");
         }
 
         // Every other top-level request and reply has a schema.

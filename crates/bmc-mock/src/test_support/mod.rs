@@ -259,14 +259,6 @@ impl TestCallbacks {
 }
 
 impl Callbacks for TestCallbacks {
-    fn supports_bmc_factory_reset(&self) -> bool {
-        true
-    }
-
-    fn supports_aux_power_cycle(&self) -> bool {
-        true
-    }
-
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,

@@ -3375,6 +3375,21 @@ impl PreingestionManagerStatic {
             }
         };
 
+        // Re-ingested XCC hosts may retain firmware lockdown from their
+        // previous lifecycle. HostInit restores policy after pre-ingestion.
+        if endpoint_clone.report.vendor == Some(bmc_vendor::BMCVendor::Lenovo)
+            && let Err(error) = redfish_client
+                .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
+                .await
+        {
+            tracing::warn!(
+                bmc_ip_address = %endpoint_clone.address,
+                %error,
+                "Failed to unlock Lenovo firmware updates; upload deferred"
+            );
+            return Ok(false);
+        }
+
         tracing::debug!(
             bmc_ip_address = %endpoint_clone.address,
             "Started firmware upload"
@@ -3644,8 +3659,14 @@ mod tests {
     /// cycle is not supported; other errors still stop the reset.
     #[tokio::test]
     async fn power_off_for_hgx_reset_falls_back_to_force_off() {
+        use carbide_instrument::testing::MetricsCapture;
         use carbide_redfish::libredfish::RedfishAuth;
         use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
+
+        // `power_off_for_hgx_reset` records `carbide_preingestion_power_control_total`,
+        // which a `metrics` test measures as a delta. Hold the shared `MetricsCapture`
+        // lock so these calls can't land inside that measurement.
+        let _metrics = MetricsCapture::start();
 
         let not_supported = || RedfishError::NotSupported("ACCycle".to_string());
         let generic = || RedfishError::GenericError {

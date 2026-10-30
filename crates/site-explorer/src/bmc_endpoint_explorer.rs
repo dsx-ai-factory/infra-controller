@@ -522,6 +522,7 @@ impl BmcEndpointExplorer {
         bmc_ip_address: SocketAddr,
         bmc_mac_address: MacAddress,
         username: &str,
+        vendor: RedfishVendor,
     ) -> Result<Credentials, EndpointExplorationError> {
         tracing::info!(
             %bmc_ip_address, %bmc_mac_address,
@@ -548,6 +549,11 @@ impl BmcEndpointExplorer {
         self.bmc_client
             .redfish_client
             .validate_bmc_credentials(bmc_ip_address, credentials.clone())
+            .await?;
+
+        self.bmc_client
+            .redfish_client
+            .restore_bmc_root_ipmi_access(bmc_ip_address, vendor, credentials.clone())
             .await?;
 
         self.set_bmc_root_credentials(bmc_mac_address, &credentials, Some(version))
@@ -913,6 +919,7 @@ impl EndpointExplorer for BmcEndpointExplorer {
                             bmc_ip_address,
                             bmc_mac_address,
                             bmc_cred_data.username,
+                            vendor,
                         )
                         .await?
                     }
@@ -2529,6 +2536,61 @@ mod tests {
             reingest_with_sitewide_password,
         )
         .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovered_lenovo_credentials_require_ipmi_repair_before_storage() {
+        let _metrics_window = MetricsCapture::start();
+        let fixture = prepare_reingestion_fixture(DpuGeneration {
+            product: "BlueField-3 DPU",
+            username: "root",
+        })
+        .await
+        .unwrap();
+        // Model a Lenovo whose password changed before the IPMI repair completed.
+        fixture.sim.seed_user("1", SITEWIDE_PASSWORD);
+        fixture
+            .sim
+            .fail_next_ipmi_access("transient IPMI repair failure");
+        let result = fixture
+            .explorer
+            .try_sitewide_bmc_root_credentials(
+                fixture.bmc_ip_address,
+                fixture.interface.mac_address,
+                "1",
+                RedfishVendor::Lenovo,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!fixture.sim.ipmi_account_access_enabled("1"));
+        assert!(
+            fixture
+                .credential_manager
+                .get_credentials(&fixture.per_bmc_credential_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        fixture
+            .explorer
+            .try_sitewide_bmc_root_credentials(
+                fixture.bmc_ip_address,
+                fixture.interface.mac_address,
+                "1",
+                RedfishVendor::Lenovo,
+            )
+            .await
+            .unwrap();
+        assert!(fixture.sim.ipmi_account_access_enabled("1"));
+        assert_eq!(
+            fixture
+                .credential_manager
+                .get_credentials(&fixture.per_bmc_credential_key)
+                .await
+                .unwrap(),
+            Some(Credentials::new("1", SITEWIDE_PASSWORD))
+        );
     }
 
     // Authentication failures are throttled, so pause time to test rejection without waiting.

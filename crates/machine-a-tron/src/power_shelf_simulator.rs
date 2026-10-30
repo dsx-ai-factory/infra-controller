@@ -84,10 +84,6 @@ impl PowerShelfCallbacks {
 }
 
 impl Callbacks for PowerShelfCallbacks {
-    fn supports_bmc_factory_reset(&self) -> bool {
-        true
-    }
-
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
