@@ -66,10 +66,7 @@ axum = { workspace = true }
 bmc-explorer = { path = "../bmc-explorer", features = ["test-support"] }
 bmc-mock = { path = "../bmc-mock" }
 opentelemetry-prometheus = { workspace = true }
-opentelemetry_sdk = { workspace = true, features = ["testing"] }
 prometheus = { workspace = true }
-tracing-opentelemetry = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
