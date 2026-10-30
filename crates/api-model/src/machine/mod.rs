@@ -158,6 +158,11 @@ pub struct ManagedHostStateSnapshot {
     /// Health overrides inherited from the rack this host belongs to (if any).
     /// Populated at read time; not stored on the machines table.
     pub rack_health_overrides: Option<HealthReportSources>,
+    /// Which parts of `hardware_info` the host and DPU snapshots hold.
+    /// Populated at read time by the loader. Compact snapshots from
+    /// `load_compact_by_host_ids` load no topology at all, so their
+    /// `hardware_info` is always `None` and this field doesn't describe them.
+    pub hardware_info_scope: HardwareInfoScope,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
@@ -232,6 +237,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
             // This will need to be modified by callers, as its value depends on a
             // HardwareHealthReportsConfig being specified.
             aggregate_health: health_report::HealthReport::empty("".to_string()),
+            // Every snapshot query loads full hardware unless a `WithoutComponents`
+            // load overwrites this.
+            hardware_info_scope: HardwareInfoScope::Full,
         };
 
         result.sort_dpu_snapshots()?;
@@ -3757,6 +3765,18 @@ impl Display for MachineValidationFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
     }
+}
+
+/// Which parts of each machine's `status.hardware_info` a snapshot load decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HardwareInfoScope {
+    /// All discovered hardware, including the component lists.
+    Full,
+    /// Everything except the component lists a SKU is built from: CPUs, memory,
+    /// block devices, NVMe devices, GPUs, InfiniBand interfaces and the TPM
+    /// description. Those aren't loaded: the lists are empty when decoded, and
+    /// `tpm_description` is `None`.
+    WithoutComponents,
 }
 
 pub struct LoadSnapshotOptions {
