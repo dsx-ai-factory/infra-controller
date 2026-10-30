@@ -26,7 +26,12 @@ Important configuration fields:
 - `metrics_endpoint`: metrics listen address, default `[::]:1080`
 - `allowed_principals`: authorized caller principals, for example `spiffe-service-id/<name>`
 - `tls.*`: server certificate, key, and trust roots for mTLS
-- `nico_api.*`: nico-api gRPC endpoint and mTLS material used for BMC IP resolution and `GetBmcCredentials`
+- `carbide_api.*`: nico-api gRPC endpoint (`api_url`) and mTLS material (`root_ca`,
+  `client_cert`, `client_key`) used to resolve targets and fetch their BMC or NVOS
+  credentials. Without the table, the proxy dials
+  `https://nico-api.nico-system.svc.cluster.local:1079` with the files under
+  `/var/run/secrets/spiffe.io`; a table must set all four keys. The Helm chart's default
+  config dials its `apiServiceName` in the release namespace
 - `auth.trust.*`: SPIFFE trust domain and allowed base paths
 - `auth.acls`: per-principal ACL rules for HTTP method and path authorization
 - `auth.cli_certs`: optional criteria for externally issued admin/client certs
@@ -55,7 +60,7 @@ identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"
 root_cafile_path = "/var/run/secrets/spiffe.io/ca.crt"
 admin_root_cafile_path = "/etc/nico/nico-bmc-proxy/site/admin_root_cert_pem"
 
-[nico_api]
+[carbide_api]
 root_ca = "/var/run/secrets/spiffe.io/ca.crt"
 client_cert = "/var/run/secrets/spiffe.io/tls.crt"
 client_key = "/var/run/secrets/spiffe.io/tls.key"

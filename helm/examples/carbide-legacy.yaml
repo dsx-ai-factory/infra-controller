@@ -32,6 +32,7 @@ nico-api:
 
 nico-bmc-proxy:
   nameOverride: carbide-bmc-proxy
+  apiServiceName: carbide-api
   certificate:
     identityNamespace: forge-system
   auth:
