@@ -185,6 +185,7 @@ for component inclusion and list ordering.
 - [GET /v2/org/{org}/nico/tray/{id}](api:GET/v2/org/:org/nico/tray/:id): Retrieve a tray and its health snapshot with the specified ID.
 - [GET /v2/org/{org}/nico/tray/validation](api:GET/v2/org/:org/nico/tray/validation): Validate all or selected trays in the site by comparing the expected inventory data to the actual inventory data.
 - [GET /v2/org/{org}/nico/tray/{id}/validation](api:GET/v2/org/:org/nico/tray/:id/validation): Validate the specified tray by comparing the expected inventory data to the actual inventory data.
+- [GET /v2/org/{org}/nico/tray/{id}/power](api:GET/v2/org/:org/nico/tray/:id/power): Retrieve the actual power state, stored desired power policy, tracked power actions, and outstanding power tasks for the specified tray.
 - [PATCH /v2/org/{org}/nico/tray/power](api:PATCH/v2/org/:org/nico/tray/power): Control the power of all or selected trays in the site.
 - [PATCH /v2/org/{org}/nico/tray/{id}/power](api:PATCH/v2/org/:org/nico/tray/:id/power): Control the power of the specified tray.
 - [PATCH /v2/org/{org}/nico/tray/firmware](api:PATCH/v2/org/:org/nico/tray/firmware): Update the firmware on all or selected trays in the site.
