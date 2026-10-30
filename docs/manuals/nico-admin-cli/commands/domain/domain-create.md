@@ -30,7 +30,7 @@ VPC that owns the domain. A VPC owns at most one live domain
 
 `--default-ttl <SECONDS>`
 
-Default TTL for the zone’s records, 30 to 86400 seconds. Omit for the
+Default TTL for the zones records, 30 to 86400 seconds. Omit for the
 site default
 
 `-h, --help`
