@@ -422,10 +422,10 @@ type APIExpectedMachineCreateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
-	// BmcRetainCredentials, when true, makes site-explorer keep the BMC's
+	// RetainBmcCredentials, when true, makes Site Explorer keep the BMC's
 	// factory-default credentials instead of rotating them. Omission or null
-	// stores false, matching nico-admin-cli.
-	BmcRetainCredentials *bool `json:"bmcRetainCredentials"`
+	// stores false, the same as omitting --bmc-retain-credentials from nico-admin-cli.
+	RetainBmcCredentials *bool `json:"retainBmcCredentials"`
 	// Labels is the labels of the expected machine
 	Labels map[string]string `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -539,10 +539,10 @@ type APIExpectedMachineUpdateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
-	// BmcRetainCredentials, when non-nil, replaces whether site-explorer keeps
+	// RetainBmcCredentials, when non-nil, replaces whether Site Explorer keeps
 	// the BMC's factory-default credentials. Changing it does not rotate or
 	// restore stored credentials; a later BMC factory reset uses the new value.
-	BmcRetainCredentials *bool `json:"bmcRetainCredentials"`
+	RetainBmcCredentials *bool `json:"retainBmcCredentials"`
 	// Labels is the labels of the expected machine
 	Labels map[string]string `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -638,8 +638,8 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 	if emur.ServerName != nil {
 		resource.ServerName = cutil.GetPtrIfNotZero(*emur.ServerName)
 	}
-	if emur.BmcRetainCredentials != nil {
-		resource.BmcRetainCredentials = emur.BmcRetainCredentials
+	if emur.RetainBmcCredentials != nil {
+		resource.BmcRetainCredentials = emur.RetainBmcCredentials
 	}
 	if emur.Interfaces != nil {
 		resource.ReplaceDpuLoopbacks = emur.ReplaceDpuLoopbacks != nil && *emur.ReplaceDpuLoopbacks
@@ -669,7 +669,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "sku_id", Present: emur.SkuID != nil},
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
-			util.ExpectedComponentUpdateField{Path: "bmc_retain_credentials", Present: emur.BmcRetainCredentials != nil},
+			util.ExpectedComponentUpdateField{Path: "bmc_retain_credentials", Present: emur.RetainBmcCredentials != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.retain_hbn_config_on_boot", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.RetainHBNConfigOnBoot != nil},
 		),
@@ -722,8 +722,8 @@ type APIExpectedMachine struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
 	IsDpfEnabled bool `json:"isDpfEnabled"`
-	// BmcRetainCredentials indicates whether site-explorer keeps the BMC's factory-default credentials
-	BmcRetainCredentials bool `json:"bmcRetainCredentials"`
+	// RetainBmcCredentials indicates whether Site Explorer keeps the BMC's factory-default credentials
+	RetainBmcCredentials bool `json:"retainBmcCredentials"`
 	// Labels is the labels of the expected machine
 	Labels APILabels `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -763,7 +763,7 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,
 		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
-		BmcRetainCredentials:     dibp.RetainsBmcCredentials(),
+		RetainBmcCredentials:     dibp.RetainsBmcCredentials(),
 		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),
 		Created:                  dibp.Created,

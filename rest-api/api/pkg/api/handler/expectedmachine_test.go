@@ -279,7 +279,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 		expectedErrorMsg         *string
 		rejectsMutation          bool
 		failSKULookup            bool
-		wantBmcRetainCredentials bool
+		wantRetainBmcCredentials bool
 	}{
 		{
 			name: "successful creation",
@@ -543,7 +543,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				DefaultBmcUsername:   cutil.GetPtr("admin"),
 				DefaultBmcPassword:   cutil.GetPtr("password"),
 				ChassisSerialNumber:  "CHASSIS-RETAIN-001",
-				BmcRetainCredentials: cutil.GetPtr(true),
+				RetainBmcCredentials: cutil.GetPtr(true),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -551,7 +551,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				c.SetParamValues(org)
 			},
 			expectedStatus:           http.StatusCreated,
-			wantBmcRetainCredentials: true,
+			wantRetainBmcCredentials: true,
 		},
 		{
 			name: "duplicate MAC address should return 409",
@@ -663,9 +663,9 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				workflowRequest := mockTemporalClient.Calls[workflowCallsBefore].Arguments.Get(3).(*corev1.ExpectedMachine)
 				assert.Equal(t, tt.requestBody.SkuID, workflowRequest.SkuId)
 				assert.Nil(t, stored.IsDpfEnabled, "response default must not change the stored optional value")
-				assert.Equal(t, fmt.Sprint(tt.wantBmcRetainCredentials), string(fields["bmcRetainCredentials"]))
-				assert.Equal(t, cutil.GetPtr(tt.wantBmcRetainCredentials), stored.BmcRetainCredentials)
-				assert.Equal(t, cutil.GetPtr(tt.wantBmcRetainCredentials), workflowRequest.BmcRetainCredentials)
+				assert.Equal(t, fmt.Sprint(tt.wantRetainBmcCredentials), string(fields["retainBmcCredentials"]))
+				assert.Equal(t, cutil.GetPtr(tt.wantRetainBmcCredentials), stored.RetainBmcCredentials)
+				assert.Equal(t, cutil.GetPtr(tt.wantRetainBmcCredentials), workflowRequest.BmcRetainCredentials)
 				if tt.requestBodyJSON != "" {
 					assert.JSONEq(t, `{}`, string(fields["labels"]))
 					assert.JSONEq(t, `[]`, string(fields["fallbackDPUSerialNumbers"]))
@@ -1821,7 +1821,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			name: "BMC credential retention update reaches Core",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
-				BmcRetainCredentials: cutil.GetPtr(true),
+				RetainBmcCredentials: cutil.GetPtr(true),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1833,11 +1833,11 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			checkResponseContent: func(t *testing.T, body []byte) {
 				var response model.APIExpectedMachine
 				require.NoError(t, json.Unmarshal(body, &response))
-				assert.True(t, response.BmcRetainCredentials)
+				assert.True(t, response.RetainBmcCredentials)
 				assert.Equal(t, cutil.GetPtr(true), capturedRequest.BmcRetainCredentials)
 				stored, err := emDAO.Get(ctx, nil, testEM.ID, nil, false)
 				require.NoError(t, err)
-				assert.Equal(t, cutil.GetPtr(true), stored.BmcRetainCredentials)
+				assert.Equal(t, cutil.GetPtr(true), stored.RetainBmcCredentials)
 			},
 		},
 		{
@@ -3139,7 +3139,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 						FixedIP:    cutil.GetPtr("192.0.2.9"),
 					}},
 					Labels:               map[string]string{"env": "test"},
-					BmcRetainCredentials: cutil.GetPtr(true),
+					RetainBmcCredentials: cutil.GetPtr(true),
 				},
 				{
 					SiteID:              site.ID.String(),
@@ -3174,8 +3174,8 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				require.Len(t, response[0].Interfaces, 1)
 				assert.Equal(t, cutil.GetPtr("02:AA:BB:CC:DD:EE"), response[0].Interfaces[0].MacAddress)
 				assert.Equal(t, "CX9", batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics[0].GetNicType())
-				assert.Equal(t, "true", string(fields[0]["bmcRetainCredentials"]))
-				assert.Equal(t, "false", string(fields[1]["bmcRetainCredentials"]))
+				assert.Equal(t, "true", string(fields[0]["retainBmcCredentials"]))
+				assert.Equal(t, "false", string(fields[1]["retainBmcCredentials"]))
 				assert.Equal(t, cutil.GetPtr(true), batchRequest.ExpectedMachines.ExpectedMachines[0].BmcRetainCredentials)
 				assert.Equal(t, cutil.GetPtr(false), batchRequest.ExpectedMachines.ExpectedMachines[1].BmcRetainCredentials)
 				assert.Contains(t, fields[0], "id")
@@ -3885,7 +3885,7 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 		},
 		{
 			name:     "BMC credential retention",
-			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.BmcRetainCredentials = cutil.GetPtr(false) },
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.RetainBmcCredentials = cutil.GetPtr(false) },
 		},
 		{
 			name:     "empty labels",
@@ -4318,8 +4318,8 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		{
 			name: "batch BMC credential retention updates reach Core",
 			requestBody: []model.APIExpectedMachineUpdateRequest{
-				{ID: cutil.GetPtr(testEM1.ID.String()), BmcRetainCredentials: cutil.GetPtr(true)},
-				{ID: cutil.GetPtr(testEM2.ID.String()), BmcRetainCredentials: cutil.GetPtr(false)},
+				{ID: cutil.GetPtr(testEM1.ID.String()), RetainBmcCredentials: cutil.GetPtr(true)},
+				{ID: cutil.GetPtr(testEM2.ID.String()), RetainBmcCredentials: cutil.GetPtr(false)},
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -4339,10 +4339,10 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 				require.NoError(t, json.Unmarshal(body, &response))
 				require.Len(t, response, 2)
 				for _, machine := range response {
-					assert.Equal(t, want[machine.ID.String()], machine.BmcRetainCredentials)
+					assert.Equal(t, want[machine.ID.String()], machine.RetainBmcCredentials)
 					stored, err := emDAO.Get(ctx, nil, machine.ID, nil, false)
 					require.NoError(t, err)
-					assert.Equal(t, cutil.GetPtr(want[machine.ID.String()]), stored.BmcRetainCredentials)
+					assert.Equal(t, cutil.GetPtr(want[machine.ID.String()]), stored.RetainBmcCredentials)
 				}
 			},
 		},

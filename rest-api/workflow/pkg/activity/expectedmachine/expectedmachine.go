@@ -235,7 +235,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					IsDpfEnabled:             reported.IsDpfEnabled,
-					BmcRetainCredentials:     reported.BmcRetainCredentials,
+					RetainBmcCredentials:     reported.RetainBmcCredentials,
 					HostLifecycleProfile:     reported.HostLifecycleProfile,
 					Labels:                   reported.Labels,
 					CreatedBy:                siteID, /* This would normally be a user ID, but that isn't something NICo provides */
@@ -343,9 +343,9 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 
 				// Core reports bmc_retain_credentials only when true, so absence
 				// is false. Leave the column alone when the effective value matches.
-				var bmcRetainCredentials *bool
+				var retainBmcCredentials *bool
 				if cur.RetainsBmcCredentials() != reported.RetainsBmcCredentials() {
-					bmcRetainCredentials = cutil.GetPtr(reported.RetainsBmcCredentials())
+					retainBmcCredentials = cutil.GetPtr(reported.RetainsBmcCredentials())
 				}
 
 				var hostLifecycleProfile *cdbm.HostLifecycleProfile
@@ -366,7 +366,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					Interfaces:               reported.Interfaces,
 					IsDpfEnabled:             reported.IsDpfEnabled,
-					BmcRetainCredentials:     bmcRetainCredentials,
+					RetainBmcCredentials:     retainBmcCredentials,
 					HostLifecycleProfile:     hostLifecycleProfile,
 					Labels:                   reported.Labels,
 				})

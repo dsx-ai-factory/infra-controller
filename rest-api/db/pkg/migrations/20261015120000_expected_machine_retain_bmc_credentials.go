@@ -19,7 +19,7 @@ func init() {
 		}
 
 		// Existing rows stay NULL, which reads as false.
-		_, err := tx.Exec("ALTER TABLE expected_machine ADD COLUMN IF NOT EXISTS bmc_retain_credentials BOOLEAN")
+		_, err := tx.Exec("ALTER TABLE expected_machine ADD COLUMN IF NOT EXISTS retain_bmc_credentials BOOLEAN")
 		handleError(tx, err)
 
 		terr = tx.Commit()
@@ -27,7 +27,7 @@ func init() {
 			handlePanic(terr, "failed to commit transaction")
 		}
 
-		fmt.Print(" [up migration] Added bmc_retain_credentials column to 'expected_machine'. ")
+		fmt.Print(" [up migration] Added retain_bmc_credentials column to 'expected_machine'. ")
 		return nil
 	}, func(ctx context.Context, db *bun.DB) error {
 		fmt.Print(" [down migration] No action taken")
