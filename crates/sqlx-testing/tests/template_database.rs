@@ -189,6 +189,8 @@ fn template_database_modes() {
 fn template_probe() {
     let prepared = std::env::var("NICO_TEST_EXPECT_PREPARED").is_ok();
     for test_path in ["template_probe_first", "template_probe_second"] {
+        let database = std::cell::OnceCell::new();
+        let database_name = &database;
         sqlx_testing::run_test_with_pool(
             TestArgs {
                 test_path,
@@ -196,6 +198,14 @@ fn template_probe() {
                 fixtures: &[],
             },
             |pool| async move {
+                database_name
+                    .set(
+                        sqlx::query_scalar::<_, String>("SELECT current_database()")
+                            .fetch_one(&pool)
+                            .await
+                            .unwrap(),
+                    )
+                    .unwrap();
                 let migrations: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
                     .fetch_one(&pool)
                     .await
@@ -225,5 +235,24 @@ fn template_probe() {
                 }
             },
         );
+        // The harness must finish cleanup before its per-test runtime exits.
+        sqlx_core::rt::test_block_on(async {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&std::env::var("DATABASE_URL").unwrap())
+                .await
+                .unwrap();
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+                    .bind(database.get().unwrap())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(
+                !exists,
+                "the harness returned before deleting the test database"
+            );
+            pool.close().await;
+        });
     }
 }

@@ -24,6 +24,11 @@
 //! is an error. Without the variable, each process prepares its own template as
 //! before. `cargo make test-release-container-services` prepares a shared template
 //! once before running the suite; direct `cargo test` retains the default mode.
+//!
+//! Database deletion is limited to 25 independent administrative connections
+//! per process. Tests wait for cleanup capacity without holding a test-pool
+//! connection, and await their own deletion before returning. Failed tests keep
+//! their databases for inspection.
 
 use std::ops::Deref;
 use std::str::FromStr;
@@ -35,9 +40,15 @@ use sqlx::pool::PoolOptions;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::testing::{TestArgs, TestContext, TestTermination};
 use sqlx::{ConnectOptions, Connection, Executor, Postgres};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, Semaphore};
+
+const MAX_CONCURRENT_CLEANUPS: usize = 25;
 
 static POOL: OnceCell<PgPool> = OnceCell::const_new();
+// Allow more drops to share a checkpoint while bounding independent connections.
+// Waiting tests provide backpressure and own their cleanup; no work is detached
+// from the per-test runtime or left for process shutdown.
+static CLEANUP_SLOTS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_CLEANUPS);
 static DB_NUMBER: AtomicUsize = AtomicUsize::new(0);
 static TEMPLATE_DB: &str = "sqlx_test_template_db";
 static PREPARED_TEMPLATE_DB: LazyLock<Option<String>> =
@@ -49,6 +60,9 @@ static PREPARED_TEMPLATE_DB: LazyLock<Option<String>> =
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => panic!("cannot read NICO_TEST_TEMPLATE_DB: {error}"),
     });
+
+#[cfg(test)]
+mod tests;
 
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
@@ -172,14 +186,36 @@ where
 }
 
 async fn cleanup_test(db_name: &str) -> Result<(), sqlx::Error> {
-    let query = drop_database_query(db_name);
-    POOL.get()
-        .unwrap()
+    // Acquire capacity before connecting. Queue waits deliberately have no pool
+    // acquisition timeout: a slow checkpoint must not time out unrelated tests.
+    let _slot = CLEANUP_SLOTS
         .acquire()
-        .await?
+        .await
+        .expect("cleanup semaphore is never closed");
+    let pool = POOL.get().unwrap();
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .application_name("carbide-sqlx-cleanup");
+    // Preserve the existing connection-establishment deadline, starting only
+    // after admission to cleanup so queued drops cannot exhaust that deadline.
+    let mut connection =
+        sqlx_core::rt::timeout(pool.options().get_acquire_timeout(), options.connect())
+            .await
+            .map_err(|_| {
+                sqlx::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out connecting to PostgreSQL for test database cleanup",
+                ))
+            })??;
+    let query = drop_database_query(db_name);
+    let result = connection
         .execute(sqlx::AssertSqlSafe(query))
         .await
-        .map(|_| ())
+        .map(|_| ());
+    let close_result = connection.close().await;
+    result.and(close_result)
 }
 
 async fn setup_test_db(copts: &PgConnectOptions, args: &TestArgs) {
@@ -278,11 +314,7 @@ async fn test_context(args: &TestArgs) -> Result<TestContext<Postgres>, sqlx::Er
         args.test_path.replace(":", "_"),
     );
 
-    let drop_test_query = drop_database_query(&new_db_name);
-    pool.acquire()
-        .await?
-        .execute(sqlx::AssertSqlSafe(drop_test_query))
-        .await?;
+    cleanup_test(&new_db_name).await?;
 
     let template_db = PREPARED_TEMPLATE_DB.as_deref().unwrap_or(TEMPLATE_DB);
     let create_test_query = create_database_from_template_query(&new_db_name, template_db);
