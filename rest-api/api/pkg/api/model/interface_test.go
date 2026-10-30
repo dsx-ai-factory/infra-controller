@@ -182,6 +182,7 @@ func TestNewAPIInterface(t *testing.T) {
 func TestAPIInterfaceGetAllRequest_Validate(t *testing.T) {
 	validID := uuid.NewString()
 	invalidID := "not-a-uuid"
+	emptyID := ""
 	tests := []struct {
 		name    string
 		request APIInterfaceGetAllRequest
@@ -192,6 +193,9 @@ func TestAPIInterfaceGetAllRequest_Validate(t *testing.T) {
 		{name: "invalid VPC ID", request: APIInterfaceGetAllRequest{VpcID: &invalidID}, wantErr: true},
 		{name: "invalid Instance Tenant ID", request: APIInterfaceGetAllRequest{InstanceTenantID: &invalidID}, wantErr: true},
 		{name: "invalid VPC Tenant ID", request: APIInterfaceGetAllRequest{VpcTenantID: &invalidID}, wantErr: true},
+		{name: "empty VPC ID", request: APIInterfaceGetAllRequest{VpcID: &emptyID}, wantErr: true},
+		{name: "empty Instance Tenant ID", request: APIInterfaceGetAllRequest{InstanceTenantID: &emptyID}, wantErr: true},
+		{name: "empty VPC Tenant ID", request: APIInterfaceGetAllRequest{VpcTenantID: &emptyID}, wantErr: true},
 	}
 
 	for _, tc := range tests {

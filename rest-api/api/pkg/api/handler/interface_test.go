@@ -882,6 +882,13 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			statusCode: http.StatusBadRequest,
 		},
 		{
+			name:       "empty VPC ID is rejected",
+			org:        ownerOrg,
+			user:       ownerUser,
+			query:      url.Values{"vpcId": {""}},
+			statusCode: http.StatusBadRequest,
+		},
+		{
 			name:       "invalid cross-Tenant boolean is rejected",
 			org:        ownerOrg,
 			user:       ownerUser,

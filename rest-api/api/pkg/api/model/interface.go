@@ -280,9 +280,9 @@ type APIInterfaceGetAllRequest struct {
 // Validate ensures Interface filter IDs are valid UUIDs.
 func (r APIInterfaceGetAllRequest) Validate() error {
 	return validation.ValidateStruct(&r,
-		validation.Field(&r.VpcID, validation.When(r.VpcID != nil, validationis.UUID)),
-		validation.Field(&r.InstanceTenantID, validation.When(r.InstanceTenantID != nil, validationis.UUID)),
-		validation.Field(&r.VpcTenantID, validation.When(r.VpcTenantID != nil, validationis.UUID)),
+		validation.Field(&r.VpcID, validation.When(r.VpcID != nil, validation.Required, validationis.UUID)),
+		validation.Field(&r.InstanceTenantID, validation.When(r.InstanceTenantID != nil, validation.Required, validationis.UUID)),
+		validation.Field(&r.VpcTenantID, validation.When(r.VpcTenantID != nil, validation.Required, validationis.UUID)),
 	)
 }
 
