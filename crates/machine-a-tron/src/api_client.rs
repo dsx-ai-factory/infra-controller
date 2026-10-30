@@ -343,6 +343,8 @@ impl ApiClient {
         Ok(out.machines)
     }
 
+    /// Records the simulated DPU's applied network and health status through
+    /// the original RPC contract used by machine-a-tron.
     pub async fn record_dpu_network_status(
         &self,
         DpuNetworkStatusArgs {
@@ -387,6 +389,7 @@ impl ApiClient {
                 dpu_extension_services: vec![],
                 astra_config_status: None,
                 lldp: None,
+                lldp_snapshot_fingerprint: None,
             })
             .await
             .map_err(ClientApiError::InvocationError)

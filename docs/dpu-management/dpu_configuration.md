@@ -23,7 +23,7 @@ The NICo site controller configures DPUs using a **declarative** and
 - The agent converts each configuration from the site controller into an [NVUE](https://docs.nvidia.com/networking-ethernet-software/cumulus-linux/System-Configuration/NVIDIA-User-Experience-NVUE/) configuration file. It then reconfigures HBN with the NVUE CLI tool (`nv config apply`).
 - The `dpu-agent` also reconfigures a DHCP server running on the DPU, which responds to DHCP requests from the attached host.
 - After HBN and the DHCP server are reconfigured, `dpu-agent` checks whether the desired configuration is in place and the DPU is healthy. The checks include BGP peering with top-of-rack (ToR) switches and route servers.
-- The `dpu-agent` uses the `RecordDpuNetworkStatus` gRPC API call to report back to the site control plane whether the desired configurations are applied, and whether all health checks are succeeding.
+- The `dpu-agent` uses `RecordDpuNetworkStatus` to report applied configuration versions, health status, and attached LLDP. Each complete LLDP snapshot carries a stable fingerprint. Core returns its last committed fingerprint in the next `GetManagedHostNetworkConfig` response, and the agent reports `UNCHANGED` only when that fingerprint matches its current snapshot. An older Core omits the fingerprint, so a newer agent safely keeps sending complete snapshots. If `lldp` is omitted, Core leaves the accepted fingerprint unchanged; later configuration responses can still contain the previously accepted fingerprint. When Core rejects LLDP from an older agent that does not send fingerprints, it commits operational status before returning a non-OK status.
 - After an agent iteration changes HBN or reloads local DHCP in ContainerExec mode, the agent adds a `PostConfigCheckWait` alert to one health report. The controller waits for a fresh health sample before it advances the host lifecycle.
 
 ```mermaid
@@ -43,7 +43,7 @@ sequenceDiagram
         Agent->>Nvue: Apply requested configuration
         Agent->>Dhcp: Reconfigure DHCP Server
         Agent->>Agent: Health checks
-        Agent->>NICo: RecordDpuNetworkStatus()<br>Report applied config versions<br>Report DPU health
+        Agent->>NICo: RecordDpuNetworkStatus()<br>Report applied config versions<br>Report DPU health and LLDP
     end
 ```
 
@@ -233,7 +233,7 @@ artifact and its CA.
 NICo uses versioned immutable configuration data in order to detect whether any intended changes have not yet been deployed:
 
 - Every time a configuration for the DPU changes, an associated version number is increased.
-- The version number is sent back from the DPU to the site controller as part of the `RecordDpuNetworkStatus` call.
+- The version number and attached LLDP are sent through `RecordDpuNetworkStatus`.
 - If the reported version number of the DPU does match the last desired version number and if the DPU reports itself as healthy/operational, the control plane knows that the configuration was deployed and can report that fact to tenants. If the version number does not match the desired version number, or if the DPU is not yet healthy, the instance will appear as `Provisioning`/`Configuring`/`Terminating` to the administrator.
 - NICo will never show a configuration as applied without feedback from the DPU. Doing so would cause reliability issues (e.g. double-assignment of IPs), as well as raise security concerns.
 
@@ -272,7 +272,7 @@ sequenceDiagram
         Agent->>Nvue: Apply requested configuration
         Agent->>Dhcp: Reconfigure DHCP Server
         Agent->>Agent: Health checks
-        Agent->>NICo: RecordDpuNetworkStatus()<br>Report applied config versions<br>Report DPU health
+        Agent->>NICo: RecordDpuNetworkStatus()<br>Report applied config versions<br>Report DPU health and LLDP
         Note right of NICo: Transition Host between required states
         NICo ->> User: Report the Instance is Ready for usage
     end
@@ -283,7 +283,7 @@ sequenceDiagram
         Agent->>Nvue: Apply requested configuration
         Agent->>Dhcp: Reconfigure DHCP Server
         Agent->>Agent: Health checks
-        Agent->>NICo: RecordDpuNetworkStatus()<br>Report applied config versions<br>Report DPU health
+        Agent->>NICo: RecordDpuNetworkStatus()<br>Report applied config versions<br>Report DPU health and LLDP
         NICo->>NICo: Observe that expected ManagedHost network config is applied<br>Transition Host to cleanup states
         Note right of NICo: Additional Host cleanup
         NICo ->> User: Notify User that instance deletion succeeded

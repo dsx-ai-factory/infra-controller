@@ -49,7 +49,7 @@ To implement these workflows, the following patterns had been developed and prov
 
   Two integration patterns have been developed over time:
     1. The actual observed state is updated by a "monitoring and reconciliation task" specific to the networking technology. Examples of this integration are the `IbFabricMonitor` services (for InfiniBand) and `NvlPartitionMonitor` (for NVLink). This kind of monitoring and integration is favorable if the external networking is controlled via an external service, since the integration is able to fetch the actual networking state for more than one device and host at the same time and can update all affected machine objects at once.
-    2. The actual observed state is updated for each interface or host by a service associated with this interface by making an API call into NICo. An example of this integration is `dpu-agent` sending the observed DPU configuration via a gRPC call (`RecordDpuNetworkStatus`).
+    2. The actual observed state is updated for each interface or host by a service associated with this interface by making an API call into NICo. An example of this integration is `dpu-agent` sending the observed DPU configuration and attached LLDP via `RecordDpuNetworkStatus`.
 - Site admins need to be able to view both the desired configuration for any interface as well as the actual configuration.
 
 ### State Reconciliation

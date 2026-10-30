@@ -223,6 +223,7 @@ pub(crate) fn set_dynamic_config(
 mod tests {
     use super::*;
 
+    /// Keeps the Version response aligned with every optional behavior Core implements.
     #[test]
     fn advertised_build_capabilities_include_supported_features() {
         let capabilities = advertised_build_capabilities();

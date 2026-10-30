@@ -29196,8 +29196,12 @@ type ManagedHostNetworkConfigResponse struct {
 	// not supply an inventory; present and empty means the deployment has zero
 	// service slots.
 	ServiceVpcSlotInventory *ServiceVpcSlotInventory `protobuf:"bytes,122,opt,name=service_vpc_slot_inventory,json=serviceVpcSlotInventory,proto3,oneof" json:"service_vpc_slot_inventory,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	// Identifies the last complete LLDP snapshot Core committed for this DPU.
+	// Absent means Core cannot confirm any snapshot. Agents may report UNCHANGED
+	// only when this value matches the fingerprint of their current snapshot.
+	AcceptedLldpSnapshotFingerprint []byte `protobuf:"bytes,123,opt,name=accepted_lldp_snapshot_fingerprint,json=acceptedLldpSnapshotFingerprint,proto3,oneof" json:"accepted_lldp_snapshot_fingerprint,omitempty"`
+	unknownFields                   protoimpl.UnknownFields
+	sizeCache                       protoimpl.SizeCache
 }
 
 func (x *ManagedHostNetworkConfigResponse) Reset() {
@@ -29534,6 +29538,13 @@ func (x *ManagedHostNetworkConfigResponse) GetServiceInterfaces() []*ManagedHost
 func (x *ManagedHostNetworkConfigResponse) GetServiceVpcSlotInventory() *ServiceVpcSlotInventory {
 	if x != nil {
 		return x.ServiceVpcSlotInventory
+	}
+	return nil
+}
+
+func (x *ManagedHostNetworkConfigResponse) GetAcceptedLldpSnapshotFingerprint() []byte {
+	if x != nil {
+		return x.AcceptedLldpSnapshotFingerprint
 	}
 	return nil
 }
@@ -34417,9 +34428,13 @@ type DpuNetworkStatus struct {
 	AstraConfigStatus *AstraConfigStatus `protobuf:"bytes,17,opt,name=astra_config_status,json=astraConfigStatus,proto3,oneof" json:"astra_config_status,omitempty"`
 	// LLDP neighbors this DPU sees, attached to the status push rather than sent
 	// on its own RPC. Absent when the agent did not attempt a collection.
-	Lldp          *LldpReport `protobuf:"bytes,18,opt,name=lldp,proto3,oneof" json:"lldp,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Lldp *LldpReport `protobuf:"bytes,18,opt,name=lldp,proto3,oneof" json:"lldp,omitempty"`
+	// Stable fingerprint of the complete attached LLDP snapshot. New agents set
+	// this for UPDATED and UNCHANGED reports. Core recomputes it for UPDATED
+	// reports and advances its accepted fingerprint only with committed writes.
+	LldpSnapshotFingerprint []byte `protobuf:"bytes,19,opt,name=lldp_snapshot_fingerprint,json=lldpSnapshotFingerprint,proto3,oneof" json:"lldp_snapshot_fingerprint,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *DpuNetworkStatus) Reset() {
@@ -34567,6 +34582,13 @@ func (x *DpuNetworkStatus) GetAstraConfigStatus() *AstraConfigStatus {
 func (x *DpuNetworkStatus) GetLldp() *LldpReport {
 	if x != nil {
 		return x.Lldp
+	}
+	return nil
+}
+
+func (x *DpuNetworkStatus) GetLldpSnapshotFingerprint() []byte {
+	if x != nil {
+		return x.LldpSnapshotFingerprint
 	}
 	return nil
 }
@@ -78378,7 +78400,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x13MachineHardwareInfo\x12*\n" +
 	"\x04gpus\x18\x01 \x03(\v2\x16.machine_discovery.GpuR\x04gpus\"Z\n" +
 	"\x1fManagedHostNetworkConfigRequest\x127\n" +
-	"\x0edpu_machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\fdpuMachineId\"\xc7\x18\n" +
+	"\x0edpu_machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\fdpuMachineId\"\xc0\x19\n" +
 	" ManagedHostNetworkConfigResponse\x12\x10\n" +
 	"\x03asn\x18\x02 \x01(\rR\x03asn\x12!\n" +
 	"\fdhcp_servers\x18\x03 \x03(\tR\vdhcpServers\x12\x1d\n" +
@@ -78429,7 +78451,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\fastra_config\x18w \x01(\v2\x12.forge.AstraConfigH\x0fR\vastraConfig\x88\x01\x01\x12>\n" +
 	"\x19use_admin_network_changed\x18x \x01(\bH\x10R\x16useAdminNetworkChanged\x88\x01\x01\x12W\n" +
 	"\x12service_interfaces\x18y \x03(\v2(.forge.ManagedHostServiceInterfaceConfigR\x11serviceInterfaces\x12`\n" +
-	"\x1aservice_vpc_slot_inventory\x18z \x01(\v2\x1e.forge.ServiceVpcSlotInventoryH\x11R\x17serviceVpcSlotInventory\x88\x01\x01B\x0e\n" +
+	"\x1aservice_vpc_slot_inventory\x18z \x01(\v2\x1e.forge.ServiceVpcSlotInventoryH\x11R\x17serviceVpcSlotInventory\x88\x01\x01\x12P\n" +
+	"\"accepted_lldp_snapshot_fingerprint\x18{ \x01(\fH\x12R\x1facceptedLldpSnapshotFingerprint\x88\x01\x01B\x0e\n" +
 	"\f_instance_idB\x1e\n" +
 	"\x1c_network_virtualization_typeB\n" +
 	"\n" +
@@ -78448,7 +78471,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1a_bgp_leaf_session_passwordB\x0f\n" +
 	"\r_astra_configB\x1c\n" +
 	"\x1a_use_admin_network_changedB\x1d\n" +
-	"\x1b_service_vpc_slot_inventoryJ\x04\b\x01\x10\x02J\x04\bi\x10jJ\x04\bq\x10rR\x18traffic_intercept_config\"\xf4\x06\n" +
+	"\x1b_service_vpc_slot_inventoryB%\n" +
+	"#_accepted_lldp_snapshot_fingerprintJ\x04\b\x01\x10\x02J\x04\bi\x10jJ\x04\bq\x10rR\x18traffic_intercept_config\"\xf4\x06\n" +
 	"!ManagedHostServiceInterfaceConfig\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x01 \x01(\tR\tserviceId\x121\n" +
@@ -78985,7 +79009,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x17_discovery_instructionsB\v\n" +
 	"\t_metadataB\x13\n" +
 	"\x11_api_url_overrideB\x13\n" +
-	"\x11_pxe_url_override\"\x92\v\n" +
+	"\x11_pxe_url_override\"\xf1\v\n" +
 	"\x10DpuNetworkStatus\x127\n" +
 	"\x0edpu_machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\fdpuMachineId\x12;\n" +
 	"\vobserved_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
@@ -79009,7 +79033,9 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1ddpu_extension_service_version\x18\x0f \x01(\tH\aR\x1adpuExtensionServiceVersion\x88\x01\x01\x12a\n" +
 	"\x16dpu_extension_services\x18\x10 \x03(\v2+.forge.DpuExtensionServiceStatusObservationR\x14dpuExtensionServices\x12M\n" +
 	"\x13astra_config_status\x18\x11 \x01(\v2\x18.forge.AstraConfigStatusH\bR\x11astraConfigStatus\x88\x01\x01\x12*\n" +
-	"\x04lldp\x18\x12 \x01(\v2\x11.forge.LldpReportH\tR\x04lldp\x88\x01\x01B\x19\n" +
+	"\x04lldp\x18\x12 \x01(\v2\x11.forge.LldpReportH\tR\x04lldp\x88\x01\x01\x12?\n" +
+	"\x19lldp_snapshot_fingerprint\x18\x13 \x01(\fH\n" +
+	"R\x17lldpSnapshotFingerprint\x88\x01\x01B\x19\n" +
 	"\x17_network_config_versionB\"\n" +
 	" _instance_network_config_versionB\x17\n" +
 	"\x15_network_config_errorB\x0e\n" +
@@ -79019,7 +79045,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x18_instance_config_versionB \n" +
 	"\x1e_dpu_extension_service_versionB\x16\n" +
 	"\x14_astra_config_statusB\a\n" +
-	"\x05_lldpJ\x04\b\x03\x10\x04\"w\n" +
+	"\x05_lldpB\x1c\n" +
+	"\x1a_lldp_snapshot_fingerprintJ\x04\b\x03\x10\x04\"w\n" +
 	"\x0fLastDhcpRequest\x12F\n" +
 	"\x11host_interface_id\x18\x01 \x01(\v2\x1a.common.MachineInterfaceIdR\x0fhostInterfaceId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\tR\ttimestamp\"\x91\x03\n" +

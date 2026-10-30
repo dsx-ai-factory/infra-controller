@@ -4865,6 +4865,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         }
     }
 
@@ -5671,6 +5672,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         };
 
         // Include sibling backup files in the fixture's cleanup on every exit.
@@ -5913,6 +5915,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         };
 
         let directory = tempfile::tempdir()?;

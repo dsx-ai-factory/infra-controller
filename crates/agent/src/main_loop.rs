@@ -29,7 +29,7 @@ use ::rpc::forge::ManagedHostNetworkConfigResponse;
 use ::rpc::forge_tls_client::ForgeClientConfig;
 use ::rpc::{forge as rpc, forge_tls_client};
 use carbide_host_support::agent_config::AgentConfig;
-use carbide_host_support::lldp_snapshot_cache::LldpSnapshotCache;
+use carbide_host_support::lldp_snapshot_cache::classify_against_accepted_snapshot;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_rpc_utils::dhcp::{DhcpTimestamps, DhcpTimestampsFilePath};
 use carbide_systemd::systemd;
@@ -488,7 +488,6 @@ pub(super) async fn setup_and_run(
         ca_republish_time: std::time::Instant::now(),
         started_at: std::time::Instant::now(),
         inventory_updater_config,
-        lldp_cache: LldpSnapshotCache::new(),
         latest_lldp,
         options,
         agent_config,
@@ -572,7 +571,6 @@ struct MainLoop {
     inventory_updater_time: std::time::Instant,
     ca_republish_time: std::time::Instant,
     inventory_updater_config: MachineInventoryUpdaterConfig,
-    lldp_cache: LldpSnapshotCache,
     latest_lldp: carbide_host_support::lldp_collector_task::LatestLldpCollection,
     options: command_line::RunOptions,
     agent_config: AgentConfig,
@@ -724,6 +722,7 @@ impl CurrentNetworkVersion {
         config.dpu_extension_services.clear();
         config.astra_config = None;
         config.use_admin_network_changed = None;
+        config.accepted_lldp_snapshot_fingerprint = None;
 
         // DHCP is reconciled before this HBN skip decision on every iteration.
         config.ntp_servers.clear();
@@ -1103,6 +1102,7 @@ impl MainLoop {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
         };
 
         // `read` does not block
@@ -1529,24 +1529,21 @@ impl MainLoop {
                 // Absent until the collector task finishes its first attempt.
                 // The status push still happens; it just carries no LLDP, which
                 // is a legal wire state and is what an unobserved topology is.
-                let lldp = self
-                    .latest_lldp
-                    .latest()
-                    .map(|collected| self.lldp_cache.classify(collected));
-                status_out.lldp = lldp.clone();
-
-                if record_network_status(
+                if let Some(lldp) = self.latest_lldp.latest().map(|collected| {
+                    classify_against_accepted_snapshot(
+                        collected,
+                        conf.accepted_lldp_snapshot_fingerprint.as_deref(),
+                    )
+                }) {
+                    status_out.lldp = Some(lldp.report);
+                    status_out.lldp_snapshot_fingerprint = lldp.snapshot_fingerprint;
+                }
+                let _ = record_network_status(
                     status_out,
                     &self.forge_api_server,
                     &self.forge_client_config,
                 )
-                .await
-                .is_ok()
-                    && let Some(lldp) = lldp
-                {
-                    // The cache advances only once nico-api has the report
-                    self.lldp_cache.confirm_reported(lldp);
-                }
+                .await;
                 self.seen_blank = false;
             }
             None => {
@@ -1943,7 +1940,7 @@ fn fmds_reply_routes(
     Ok(routes)
 }
 
-/// Push the DPU's network status to nico-api.
+/// Pushes DPU network status through the existing Core RPC.
 async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,
@@ -1963,8 +1960,11 @@ async fn record_network_status(
             return Err(err.into());
         }
     };
-    let request = tonic::Request::new(status);
-    match client.record_dpu_network_status(request).await {
+
+    match client
+        .record_dpu_network_status(tonic::Request::new(status))
+        .await
+    {
         Ok(_) => {
             NetworkStatus::Succeeded.emit();
             Ok(())

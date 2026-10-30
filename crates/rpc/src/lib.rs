@@ -80,6 +80,7 @@ pub mod admission_retry;
 pub mod errors;
 pub mod forge_tls_client;
 pub mod libmlx;
+pub mod lldp_snapshot;
 pub mod measured_boot;
 pub mod network;
 pub mod node_jwt;

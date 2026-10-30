@@ -2363,7 +2363,7 @@ pub(in crate::tests) async fn network_configured_with_health(
 }
 
 /// Fake an iteration of forge-dpu-agent requesting network config, applying it, and reporting back.
-/// When reporting back, the health and extension services statuses reported by the DPU can be overrridden
+/// When reporting back, the health and extension services statuses reported by the DPU can be overridden.
 pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
     env: &TestEnv,
     dpu_machine_id: &DpuMachineId,
@@ -2376,9 +2376,10 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
         dpu_health,
         extension_services_state,
         None,
+        NetworkStatusClient::Legacy,
     )
     .await
-    .unwrap()
+    .unwrap();
 }
 
 /// Fake an iteration of forge-dpu-agent that attaches `lldp` to its network status report.
@@ -2387,21 +2388,101 @@ pub(in crate::tests) async fn network_configured_with_lldp(
     dpu_machine_id: &DpuMachineId,
     lldp: rpc::forge::LldpReport,
 ) {
+    let expected_fingerprint = (lldp.result == rpc::forge::LldpReportResult::Updated as i32)
+        .then(|| ::rpc::lldp_snapshot::fingerprint(&lldp.interfaces));
+
+    // Send the snapshot through the fingerprint-aware status contract.
     try_network_configured_with_lldp(env, dpu_machine_id, lldp)
         .await
-        .unwrap()
+        .unwrap();
+
+    // A successful replacement is not complete until config confirms that
+    // exact snapshot; RPC success alone does not establish acceptance.
+    if let Some(expected_fingerprint) = expected_fingerprint {
+        let config = env
+            .api
+            .get_managed_host_network_config(Request::new(
+                rpc::forge::ManagedHostNetworkConfigRequest {
+                    dpu_machine_id: Some(*dpu_machine_id),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            config.accepted_lldp_snapshot_fingerprint,
+            Some(expected_fingerprint)
+        );
+    }
 }
 
-/// Like [`network_configured_with_lldp`], but returns the status report's result.
+/// Sends attached LLDP as a fingerprint-aware agent using the existing status
+/// RPC.
 pub(in crate::tests) async fn try_network_configured_with_lldp(
     env: &TestEnv,
     dpu_machine_id: &DpuMachineId,
     lldp: rpc::forge::LldpReport,
 ) -> Result<(), tonic::Status> {
-    report_network_status(env, dpu_machine_id, None, None, Some(lldp)).await
+    report_network_status(
+        env,
+        dpu_machine_id,
+        None,
+        None,
+        Some(lldp),
+        NetworkStatusClient::FingerprintAware,
+    )
+    .await
 }
 
-// This fixture reports the compatibility fields populated for older agents.
+/// Sends attached LLDP as a fingerprint-aware agent while overriding the
+/// identifier, allowing validation-failure tests to exercise a mismatch.
+pub(in crate::tests) async fn try_network_configured_with_lldp_fingerprint(
+    env: &TestEnv,
+    dpu_machine_id: &DpuMachineId,
+    lldp: rpc::forge::LldpReport,
+    fingerprint: Vec<u8>,
+) -> Result<(), tonic::Status> {
+    report_network_status(
+        env,
+        dpu_machine_id,
+        None,
+        None,
+        Some(lldp),
+        NetworkStatusClient::FingerprintOverride(fingerprint),
+    )
+    .await
+}
+
+/// Sends attached LLDP through the original status method so tests can verify
+/// that older agents receive rejection as an RPC error after status commits.
+pub(in crate::tests) async fn try_legacy_network_configured_with_lldp(
+    env: &TestEnv,
+    dpu_machine_id: &DpuMachineId,
+    lldp: rpc::forge::LldpReport,
+) -> Result<(), tonic::Status> {
+    report_network_status(
+        env,
+        dpu_machine_id,
+        None,
+        None,
+        Some(lldp),
+        NetworkStatusClient::Legacy,
+    )
+    .await
+}
+
+/// Selects whether the network-status fixture behaves as a current or legacy
+/// agent.
+enum NetworkStatusClient {
+    Legacy,
+    FingerprintAware,
+    FingerprintOverride(Vec<u8>),
+}
+
+/// Builds one representative status and sends it through the existing RPC so
+/// tests can compare legacy and fingerprint-aware semantics.
+///
+/// This fixture reports the compatibility fields populated for older agents.
 #[allow(deprecated)]
 async fn report_network_status(
     env: &TestEnv,
@@ -2409,6 +2490,7 @@ async fn report_network_status(
     dpu_health: Option<rpc::health::HealthReport>,
     extension_services_state: Option<rpc::forge::DpuExtensionServiceDeploymentStatus>,
     lldp: Option<rpc::forge::LldpReport>,
+    client: NetworkStatusClient,
 ) -> Result<(), tonic::Status> {
     let network_config = env
         .api
@@ -2525,6 +2607,23 @@ async fn report_network_status(
             )
             .collect();
 
+    let lldp_snapshot_fingerprint = match (&client, &lldp) {
+        (NetworkStatusClient::FingerprintOverride(fingerprint), Some(_)) => {
+            Some(fingerprint.clone())
+        }
+        (NetworkStatusClient::FingerprintAware, Some(report))
+            if report.result == rpc::forge::LldpReportResult::Updated as i32 =>
+        {
+            Some(::rpc::lldp_snapshot::fingerprint(&report.interfaces))
+        }
+        (NetworkStatusClient::FingerprintAware, Some(report))
+            if report.result == rpc::forge::LldpReportResult::Unchanged as i32 =>
+        {
+            network_config.accepted_lldp_snapshot_fingerprint.clone()
+        }
+        _ => None,
+    };
+
     let status = rpc::forge::DpuNetworkStatus {
         dpu_machine_id: Some(*dpu_machine_id),
         dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
@@ -2545,6 +2644,7 @@ async fn report_network_status(
         dpu_extension_services,
         astra_config_status: None,
         lldp,
+        lldp_snapshot_fingerprint,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),

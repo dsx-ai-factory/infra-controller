@@ -24,7 +24,7 @@ The DPU agent runs as a daemon on the DPU. A systemd deployment uses
 and centralized logs identify it as `nico-dpu-agent`. This documentation uses
 `dpu-agent` when the distinction does not matter.
 
-The agent periodically calls `GetManagedHostNetworkConfig` to fetch the desired configuration from NICo Core. It applies the configuration locally, runs health checks, and reports status back with `RecordDpuNetworkStatus`. The report includes applied configuration versions and DPU health.
+The agent periodically calls `GetManagedHostNetworkConfig` to fetch the desired configuration from NICo Core. It applies the configuration locally, runs health checks, and reports applied configuration versions, DPU health, and attached LLDP through `RecordDpuNetworkStatus`. Core exposes the fingerprint of its last committed LLDP snapshot in a later configuration response, so RPC success alone does not confirm the agent's current snapshot.
 
 The agent is responsible for:
 

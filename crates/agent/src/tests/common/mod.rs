@@ -144,7 +144,7 @@ pub(super) fn setup_agent_run_options(
     Ok(opts)
 }
 
-pub(super) async fn run_grpc_server(
+pub(crate) async fn run_grpc_server(
     app: axum::Router<()>,
 ) -> eyre::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?; // 0 let OS choose available port
@@ -269,7 +269,7 @@ impl HttpBody for GrpcBody {
 }
 
 /// Takes an rpc object (built from rpc/proto/forge.proto) and turns into into a gRPC axum response
-pub(super) fn respond(out: impl prost::Message) -> impl IntoResponse {
+pub(crate) fn respond(out: impl prost::Message) -> impl IntoResponse {
     let msg_len = out.encoded_len() as u32;
     let mut body = Vec::with_capacity(1 + 4 + msg_len as usize);
     // first byte is compression: 0 means none

@@ -727,6 +727,10 @@ type ForgeClient interface {
 	FindInstanceByMachineID(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*InstanceList, error)
 	// nico-dpu-agent -> nico-core-api
 	GetManagedHostNetworkConfig(ctx context.Context, in *ManagedHostNetworkConfigRequest, opts ...grpc.CallOption) (*ManagedHostNetworkConfigResponse, error)
+	// Records operational status and optional LLDP. When a fingerprint-aware
+	// agent's LLDP is rejected, Core commits operational status but leaves the
+	// accepted fingerprint unchanged. Requests without a fingerprint retain the
+	// legacy non-OK result after operational status and follow-up work complete.
 	RecordDpuNetworkStatus(ctx context.Context, in *DpuNetworkStatus, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Lists all health report sources for a Machine
 	ListMachineHealthReports(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*ListHealthReportResponse, error)
@@ -7316,6 +7320,10 @@ type ForgeServer interface {
 	FindInstanceByMachineID(context.Context, *MachineId) (*InstanceList, error)
 	// nico-dpu-agent -> nico-core-api
 	GetManagedHostNetworkConfig(context.Context, *ManagedHostNetworkConfigRequest) (*ManagedHostNetworkConfigResponse, error)
+	// Records operational status and optional LLDP. When a fingerprint-aware
+	// agent's LLDP is rejected, Core commits operational status but leaves the
+	// accepted fingerprint unchanged. Requests without a fingerprint retain the
+	// legacy non-OK result after operational status and follow-up work complete.
 	RecordDpuNetworkStatus(context.Context, *DpuNetworkStatus) (*emptypb.Empty, error)
 	// Lists all health report sources for a Machine
 	ListMachineHealthReports(context.Context, *MachineId) (*ListHealthReportResponse, error)
