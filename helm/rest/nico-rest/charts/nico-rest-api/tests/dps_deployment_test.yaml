@@ -4,11 +4,15 @@
 suite: REST API direct DPS secret mount
 templates:
   - deployment.yaml
+  # The Deployment hashes the rendered ConfigMap into a pod annotation.
+  - configmap.yaml
 set:
   global.image.repository: example.test
   global.image.tag: latest
+  config.keycloak.enabled: true
 tests:
   - it: does not mount DPS credentials when DPS is disabled
+    template: deployment.yaml
     asserts:
       - notContains:
           path: spec.template.spec.containers[0].volumeMounts
@@ -20,6 +24,7 @@ tests:
             name: dps-creds
 
   - it: mounts DPS credentials when DPS is enabled
+    template: deployment.yaml
     set:
       config.powerProvisioning.dps.enabled: true
       config.powerProvisioning.dps.endpoint: dps.example.test:443

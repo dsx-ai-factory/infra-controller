@@ -118,15 +118,22 @@ func AuthProcessor(c echo.Context, toCfg *config.TokenOriginConfig) *util.APIErr
 		return util.NewAPIError(http.StatusUnauthorized, "Invalid authorization token in request", nil)
 	}
 
-	// Get the appropriate processor for this issuer
-	processor := toCfg.GetProcessorByIssuer(issuer)
+	// Falls back to the DB when this replica has not reloaded since the issuer was
+	// created.
+	jwksCfg := toCfg.ResolveConfig(c.Request().Context(), issuer)
+	if jwksCfg == nil {
+		logger.Error().Str("issuer", issuer).Msg("No configuration found for token issuer")
+		return util.NewAPIError(http.StatusUnauthorized, "Invalid authorization token in request", nil)
+	}
+
+	processor := toCfg.GetProcessorByOrigin(jwksCfg.Origin)
 	if processor == nil {
 		logger.Error().Str("issuer", issuer).Msg("No processor found for token issuer")
 		return util.NewAPIError(http.StatusUnauthorized, "Invalid authorization token in request", nil)
 	}
 
 	// Use the processor to process the token
-	_, apiErr := processor.ProcessToken(c, tokenStr, toCfg.GetConfig(issuer), logger)
+	_, apiErr := processor.ProcessToken(c, tokenStr, jwksCfg, logger)
 	if apiErr != nil {
 		return apiErr
 	}
