@@ -5,7 +5,6 @@ package nvlinklogicalpartition
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -109,12 +108,11 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 			}
 
 			existingNVLinkLogicalPartitionIDMap[nvllp.ID.String()] = nvllp
-			slogger.Info().Str("NVLink Logical Partition ID", nvllp.ID.String()).Msg("created or undeleted NVLink Logical Partition from Site inventory")
+			slogger.Info().Msg("created or undeleted NVLink Logical Partition from Site inventory")
 		}
 
 		reportedNVLinkLogicalPartitionIDMap[nvllp.ID] = true
 
-		var name *string
 		var description *string
 		var status *cdbm.NVLinkLogicalPartitionStatus
 		var statusMessage *string
@@ -126,34 +124,9 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 		}
 
 		if controllerNvllp.Config != nil && controllerNvllp.Config.Metadata != nil {
-			siteName := controllerNvllp.Config.Metadata.Name
-			if siteName != nvllp.Name {
-				// Adopt the Site name only if the API would accept it. Otherwise this would undo the
-				// name chosen during recovery, or fail validation and block the rest of this update.
-				siteNameLen := utf8.RuneCountInString(siteName)
-				usable := siteNameLen >= cdbm.NVLinkLogicalPartitionNameMinLength &&
-					siteNameLen <= cdbm.NVLinkLogicalPartitionNameMaxLength &&
-					strings.TrimSpace(siteName) == siteName
-				if usable {
-					sameNameNvllps, _, terr := nvlinklogicalpartitionDAO.GetAll(ctx, nil, cdbm.NVLinkLogicalPartitionFilterInput{
-						Names:     []string{siteName},
-						TenantIDs: []uuid.UUID{nvllp.TenantID},
-					}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
-					if terr != nil {
-						slogger.Error().Err(terr).Msg("failed to check NVLink Logical Partition name uniqueness in DB")
-						continue
-					}
-
-					usable = len(sameNameNvllps) == 0
-				}
-
-				if usable {
-					name = cutil.GetPtr(siteName)
-				} else {
-					slogger.Debug().Str("Site Name", siteName).Msg("keeping NVLink Logical Partition name, Site name is invalid or used by another Partition of the Tenant")
-				}
-			}
-
+			// REST owns the name, the same as for InfiniBand Partitions. Adopting the Site name here
+			// would replace the name chosen during recovery and could collide with another
+			// Partition of the Tenant.
 			if nvllp.Description == nil || (nvllp.Description != nil && controllerNvllp.Config.Metadata.Description != *nvllp.Description) {
 				description = cutil.GetPtr(controllerNvllp.Config.Metadata.Description)
 			}
@@ -174,7 +147,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 			}
 		}
 
-		needsUpdate := name != nil || description != nil || isMissingOnSite != nil || status != nil
+		needsUpdate := description != nil || isMissingOnSite != nil || status != nil
 
 		// A row written since the Site collected this inventory holds changes the snapshot cannot
 		// know about, including any made through the API, so writing the reported values over
@@ -191,7 +164,6 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 				nil,
 				cdbm.NVLinkLogicalPartitionUpdateInput{
 					NVLinkLogicalPartitionID: nvllp.ID,
-					Name:                     name,
 					Description:              description,
 					IsMissingOnSite:          isMissingOnSite,
 					Status:                   status,
@@ -353,16 +325,8 @@ func (mnlp ManageNVLinkLogicalPartition) createOrUpdateNVLinkLogicalPartitionFro
 
 		tenant := &tenants[0]
 
-		_, tenantSiteErr := cdbm.NewTenantSiteDAO(mnlp.dbSession).GetByTenantIDAndSiteID(ctx, tx, tenant.ID, site.ID, nil)
-		if tenantSiteErr != nil {
-			if errors.Is(tenantSiteErr, cdb.ErrDoesNotExist) {
-				logger.Warn().Msgf("unable to create NVLink Logical Partition found on Site: Tenant for org %s does not have access to Site", reportedNvllp.Org)
-
-				return nil, nil
-			}
-
-			return nil, fmt.Errorf("unable to create NVLink Logical Partition found on Site: failed to validate Tenant access to Site, DB error: %w", tenantSiteErr)
-		}
+		// Recover even without Site access. The Tenant can still delete the Partition, and
+		// skipping it would leave it on Site with no way to remove it.
 
 		// Names are unique per Tenant across Sites, so recoveries for one Tenant must not
 		// pick names concurrently even when they come from different Sites.
