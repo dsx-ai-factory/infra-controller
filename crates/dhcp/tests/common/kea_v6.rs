@@ -66,6 +66,7 @@ pub(crate) struct Kea6Config {
     pub(crate) provisioning_server_ipv6: &'static str,
     pub(crate) dns_servers_ipv6: &'static [&'static str],
     pub(crate) prefix_pool: bool,
+    pub(crate) address_pool: &'static str,
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -82,6 +83,7 @@ impl Default for Kea6Config {
             provisioning_server_ipv6: "",
             dns_servers_ipv6: &HOOK_DNS_SERVERS_IPV6,
             prefix_pool: false,
+            address_pool: "2001:db8::1-2001:db8::ffff",
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -223,9 +225,17 @@ impl Kea6 {
             .unwrap_or_else(|| temp_base_directory.path().join("kea-leases6.csv"));
 
         let mut temp_conf_fd = File::create(&temp_conf_file)?;
-        temp_conf_fd.write_all(
-            Kea6::config(api_server_url, &lease_file, metrics_endpoint, config).as_bytes(),
-        )?;
+        let mut configuration: serde_json::Value = serde_json::from_str(&Kea6::config(
+            api_server_url,
+            &lease_file,
+            metrics_endpoint,
+            config,
+        ))?;
+        configuration["Dhcp6"]["control-socket"] = json!({
+            "socket-type": "unix",
+            "socket-name": temp_base_directory.path().join("control.sock"),
+        });
+        temp_conf_fd.write_all(serde_json::to_string(&configuration)?.as_bytes())?;
 
         // Close the config before spawning Kea so the child reads complete JSON.
         drop(temp_conf_fd);
@@ -313,7 +323,23 @@ impl Kea6 {
 
         // Point Kea runtime files at the per-test temp dir instead of system
         // paths that unprivileged integration tests cannot safely share.
-        let mut process = Command::new("/usr/sbin/kea-dhcp6")
+        let mut command = Command::new("/usr/sbin/kea-dhcp6");
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: Only the async-signal-safe signal syscall runs after fork.
+            // Ignore SIGXFSZ so a test's file-size limit produces an I/O error
+            // in the real memfile backend instead of terminating Kea.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let mut process = command
             .env("KEA_PIDFILE_DIR", self.temp_base_directory.path())
             .env("KEA_LOCKFILE_DIR", self.temp_base_directory.path())
             .arg("-c")
@@ -422,19 +448,28 @@ impl Kea6 {
     }
 
     pub(crate) fn wait_for_log(&self, needle: &str, timeout: Duration) -> bool {
+        self.wait_for_log_count(needle, 1, timeout) > 0
+    }
+
+    /// Wait for at least `minimum` matching log lines; return the observed count,
+    /// including a smaller count if the timeout expires first.
+    pub(crate) fn wait_for_log_count(
+        &self,
+        needle: &str,
+        minimum: usize,
+        timeout: Duration,
+    ) -> usize {
         let deadline = Instant::now() + timeout;
         loop {
-            if self
+            let count = self
                 .logs
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|line| line.contains(needle))
-            {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
+                .filter(|line| line.contains(needle))
+                .count();
+            if count >= minimum || Instant::now() >= deadline {
+                return count;
             }
             thread::sleep(Duration::from_millis(20));
         }
@@ -442,6 +477,63 @@ impl Kea6 {
 
     pub(crate) fn metrics_endpoint(&self) -> SocketAddr {
         self.metrics_endpoint
+    }
+
+    /// Read native Kea counters through its control socket, including pool counters
+    /// on versions that expose them. Missing counters remain absent.
+    pub(crate) fn statistics(&self) -> Result<serde_json::Value, eyre::Report> {
+        Ok(self.control_command(json!({"command": "statistic-get-all"}))?["arguments"].clone())
+    }
+
+    /// Run one native reclamation sweep, using the same engine as the timer.
+    pub(crate) fn reclaim_expired_leases(&self, remove: bool) -> Result<(), eyre::Report> {
+        self.control_command(
+            json!({"command": "leases-reclaim", "arguments": {"remove": remove}}),
+        )?;
+        Ok(())
+    }
+
+    /// Bound regular-file writes in the child to inject real memfile I/O errors.
+    /// Passing None restores the soft limit to the unchanged hard limit.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_file_size_limit(&self, limit: Option<u64>) -> Result<(), eyre::Report> {
+        let pid = self.process.as_ref().expect("Kea must be running").id() as libc::pid_t;
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: The unreaped child owns this PID, and limits points to writable
+        // memory of the required layout; a null new limit only queries it.
+        if unsafe { libc::prlimit(pid, libc::RLIMIT_FSIZE, std::ptr::null(), &mut limits) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        limits.rlim_cur = limit.unwrap_or(limits.rlim_max);
+        // SAFETY: limits remains valid for this synchronous syscall. Only the
+        // child soft limit changes, so the test can restore it without privilege.
+        if unsafe { libc::prlimit(pid, libc::RLIMIT_FSIZE, &limits, std::ptr::null_mut()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    fn control_command(
+        &self,
+        command: serde_json::Value,
+    ) -> Result<serde_json::Value, eyre::Report> {
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(self.temp_base_directory.path().join("control.sock"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        stream.write_all(&serde_json::to_vec(&command)?)?;
+        let response = serde_json::Deserializer::from_reader(stream)
+            .into_iter::<serde_json::Value>()
+            .next()
+            .ok_or_else(|| eyre::eyre!("empty kea control response"))??;
+        eyre::ensure!(
+            response["result"] == 0,
+            "kea control command {command} failed: {response}"
+        );
+        Ok(response)
     }
 
     /// Restart the same Kea6 config and memfile, clearing process-local hook cache.
@@ -554,11 +646,17 @@ impl Kea6 {
                     // remains the policy gate by stripping option 14.
                     "rapid-commit": config.kea_rapid_commit_v6,
                     "pools": [{
-                        "pool": "2001:db8::1-2001:db8::ffff"
+                        "pool": config.address_pool
                     }]
                 }
             ],
             "loggers": [
+                {
+                    "name": "kea-dhcp6.bad-packets",
+                    "output_options": [{"output": "stdout"}],
+                    "severity": "DEBUG",
+                    "debuglevel": 99
+                },
                 {
                     "name": "kea-dhcp6",
                     "output_options": [{"output": "stdout"}],
