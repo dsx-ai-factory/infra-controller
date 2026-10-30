@@ -9152,6 +9152,11 @@ message Sku {
   uint32 schema_version = 6;
   repeated common.MachineId associated_machine_ids = 7;
   optional string device_type = 8;
+  // Time the SKU was last modified. Set to the creation time on creation and
+  // advanced by UpdateSkuMetadata, ReplaceSku and ReplaceSkuComponents. Ignored
+  // on input. Unset for SKUs that predate update tracking or when the server
+  // predates this field.
+  optional google.protobuf.Timestamp updated = 9;
 }
 
 message SkuMachinePair {

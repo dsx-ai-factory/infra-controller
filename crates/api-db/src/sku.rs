@@ -40,6 +40,8 @@ use crate::{DatabaseError, ObjectFilter, Transaction, machine};
 mod test_decode;
 #[cfg(test)]
 mod test_explicit_columns;
+#[cfg(test)]
+mod test_updated_migration;
 
 /// The current version of the SKU format.  The state machine will create older
 /// versions from hardware using the currently assigned sku's version so that
@@ -256,16 +258,16 @@ pub async fn update_metadata(
     if let Some(description) = description {
         builder.push(" description = ");
         builder.push_bind(description);
-        if device_type.is_some() {
-            builder.push(",");
-        }
+        builder.push(", ");
     }
 
     if let Some(device_type) = device_type {
         builder.push(" device_type = ");
         builder.push_bind(device_type);
+        builder.push(", ");
     }
 
+    builder.push(" updated = clock_timestamp()");
     builder.push(" WHERE id = ");
     builder.push_bind(sku_id);
     builder.push(" RETURNING id");
@@ -392,7 +394,7 @@ async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), Databas
         )));
     }
 
-    let query = "UPDATE machine_skus set description=$1, components=$2, schema_version=$3, device_type=$4 WHERE id=$5 RETURNING id";
+    let query = "UPDATE machine_skus set description=$1, components=$2, schema_version=$3, device_type=$4, updated=clock_timestamp() WHERE id=$5 RETURNING id";
 
     sqlx::query_as::<_, ()>(query)
         .bind(&sku.description)
@@ -576,6 +578,7 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
         id: format!("{} {}", chassis.model, Utc::now()),
         description,
         created,
+        updated: None,
         components: SkuComponents {
             chassis,
             cpus: hardware_info
@@ -676,6 +679,7 @@ pub fn generate_base_sku_from_hardware(
         id: format!("{} {}", chassis.model, Utc::now()),
         description,
         created,
+        updated: None,
         components: SkuComponents {
             chassis,
             cpus,
