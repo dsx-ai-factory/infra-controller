@@ -1912,6 +1912,9 @@ jobs:
           cache: true
           cache-dependency-path: rest-api/go.sum
 
+      - name: Download REST dependencies
+        uses: ./.github/actions/go-mod-download
+
       - name: Regenerate REST protos from Core protos
         run: make -C rest-api core-proto
 
