@@ -1,0 +1,40 @@
+# Fixture for helm lint and the helm-unittest suites beside it. The addresses
+# are documentation ranges, not the resolver addresses nico-api renders, and
+# the VPC id is a placeholder.
+image:
+  repository: example.invalid/nico-unbound
+dnsDir: /opt/forge/dns/00000000-0000-0000-0000-00000000000a
+zoneName: nico.internal
+unboundConfig: |
+  server:
+      interface: 198.51.100.251
+      interface: 2001:db8::251
+      ip-freebind: yes
+      port: 53
+      do-ip6: yes
+      do-udp: yes
+      do-tcp: yes
+      access-control: 0.0.0.0/0 allow
+      access-control: ::0/0 allow
+      username: ""
+      chroot: ""
+      directory: "/tmp"
+      pidfile: ""
+      do-daemonize: no
+      use-syslog: no
+      logfile: ""
+      module-config: "iterator"
+      msg-cache-size: 4m
+      rrset-cache-size: 8m
+      serve-expired: no
+  remote-control:
+      control-enable: yes
+      control-interface: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/run/control.sock
+  auth-zone:
+      name: "nico.internal."
+      zonefile: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/zone/zonefile
+      for-downstream: yes
+      fallback-enabled: no
+  forward-zone:
+      name: "."
+      forward-addr: 192.0.2.53

@@ -1,0 +1,103 @@
+suite: DPF serviceDaemonSet contract
+templates:
+  - daemonset.yaml
+  - configmap.yaml
+values:
+  - ./values.yaml
+tests:
+  # Several registrations deploy side by side on one DPU, so every resource
+  # and selector follows the release name, never the chart name.
+  - it: names resources and selectors after the release
+    release:
+      name: dns-a
+    asserts:
+      - equal:
+          path: metadata.name
+          value: dns-a
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: nico-unbound-local
+            app.kubernetes.io/instance: dns-a
+        template: daemonset.yaml
+      - equal:
+          path: spec.template.metadata.labels
+          value:
+            app.kubernetes.io/name: nico-unbound-local
+            app.kubernetes.io/instance: dns-a
+        template: daemonset.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: config
+            configMap:
+              name: dns-a
+        template: daemonset.yaml
+
+  # What the DPUService controller writes into spec.serviceDaemonSet must
+  # reach the pod: the placement selector, the Multus annotation that attaches
+  # the slot interface, labels, update strategy and resources (applied to the
+  # Unbound container; the chart sets none itself).
+  - it: passes DPF placement, metadata, strategy and resources to the pod
+    template: daemonset.yaml
+    set:
+      serviceDaemonSet:
+        nodeSelector:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values: [dpu-a]
+        labels:
+          dpu.nvidia.com/service: dns-a
+        annotations:
+          k8s.v1.cni.cncf.io/networks: dns-network
+        resources:
+          cpu: 250m
+          memory: 128Mi
+        updateStrategy:
+          type: OnDelete
+      image.tag: test-tag
+      imagePullSecrets:
+        - name: registry
+    asserts:
+      - equal:
+          path: metadata.labels["dpu.nvidia.com/service"]
+          value: dns-a
+      - equal:
+          path: metadata.annotations["k8s.v1.cni.cncf.io/networks"]
+          value: dns-network
+      - equal:
+          path: spec.template.metadata.labels["dpu.nvidia.com/service"]
+          value: dns-a
+      - equal:
+          path: spec.template.metadata.annotations["k8s.v1.cni.cncf.io/networks"]
+          value: dns-network
+      - equal:
+          path: spec.updateStrategy
+          value:
+            type: OnDelete
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution
+          value:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: [dpu-a]
+      - equal:
+          path: spec.template.spec.imagePullSecrets
+          value:
+            - name: registry
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: example.invalid/nico-unbound:test-tag
+      - equal:
+          path: spec.template.spec.containers[0].resources
+          value:
+            limits:
+              cpu: 250m
+              memory: 128Mi
+            requests:
+              cpu: 250m
+              memory: 128Mi

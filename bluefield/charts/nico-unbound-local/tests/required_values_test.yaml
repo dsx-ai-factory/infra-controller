@@ -1,0 +1,60 @@
+suite: values nico-api must render
+templates:
+  - daemonset.yaml
+tests:
+  # Each value has two boundaries in values.schema.json: the "required" list
+  # rejects an absent key, and the pattern rejects the chart's own default,
+  # which is empty because nico-api owns the value. Each case supplies every
+  # other required value, and the pattern names the value so the test does
+  # not depend on the schema library's message format.
+  - it: rejects an absent unboundConfig
+    set:
+      unboundConfig: null
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+    asserts:
+      - failedTemplate:
+          errorPattern: unboundConfig
+
+  - it: rejects the empty default unboundConfig
+    set:
+      dnsDir: /opt/forge/dns/a
+      image.repository: x
+    asserts:
+      - failedTemplate:
+          errorPattern: unboundConfig
+
+  - it: rejects an absent dnsDir
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: null
+      image.repository: x
+    asserts:
+      - failedTemplate:
+          errorPattern: dnsDir
+
+  - it: rejects a relative dnsDir
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: opt/forge/dns/a
+      image.repository: x
+    asserts:
+      - failedTemplate:
+          errorPattern: dnsDir
+
+  - it: rejects an absent image repository
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+      image.repository: null
+    asserts:
+      - failedTemplate:
+          errorPattern: repository
+
+  - it: rejects the empty default image repository
+    set:
+      unboundConfig: "server:\n"
+      dnsDir: /opt/forge/dns/a
+    asserts:
+      - failedTemplate:
+          errorPattern: repository
