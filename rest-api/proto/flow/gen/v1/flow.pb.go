@@ -1787,6 +1787,56 @@ func (TaskKind) EnumDescriptor() ([]byte, []int) {
 	return file_flow_proto_rawDescGZIP(), []int{30}
 }
 
+// EventResourceType identifies the inventory resource that emitted an event.
+type EventResourceType int32
+
+const (
+	EventResourceType_EVENT_RESOURCE_TYPE_UNSPECIFIED EventResourceType = 0
+	EventResourceType_EVENT_RESOURCE_TYPE_COMPONENT   EventResourceType = 1
+	EventResourceType_EVENT_RESOURCE_TYPE_RACK        EventResourceType = 2
+)
+
+// Enum value maps for EventResourceType.
+var (
+	EventResourceType_name = map[int32]string{
+		0: "EVENT_RESOURCE_TYPE_UNSPECIFIED",
+		1: "EVENT_RESOURCE_TYPE_COMPONENT",
+		2: "EVENT_RESOURCE_TYPE_RACK",
+	}
+	EventResourceType_value = map[string]int32{
+		"EVENT_RESOURCE_TYPE_UNSPECIFIED": 0,
+		"EVENT_RESOURCE_TYPE_COMPONENT":   1,
+		"EVENT_RESOURCE_TYPE_RACK":        2,
+	}
+)
+
+func (x EventResourceType) Enum() *EventResourceType {
+	p := new(EventResourceType)
+	*p = x
+	return p
+}
+
+func (x EventResourceType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EventResourceType) Descriptor() protoreflect.EnumDescriptor {
+	return file_flow_proto_enumTypes[31].Descriptor()
+}
+
+func (EventResourceType) Type() protoreflect.EnumType {
+	return &file_flow_proto_enumTypes[31]
+}
+
+func (x EventResourceType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EventResourceType.Descriptor instead.
+func (EventResourceType) EnumDescriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{31}
+}
+
 type OperationRunPhysicalLocationOrdering_Strategy int32
 
 const (
@@ -1820,11 +1870,11 @@ func (x OperationRunPhysicalLocationOrdering_Strategy) String() string {
 }
 
 func (OperationRunPhysicalLocationOrdering_Strategy) Descriptor() protoreflect.EnumDescriptor {
-	return file_flow_proto_enumTypes[31].Descriptor()
+	return file_flow_proto_enumTypes[32].Descriptor()
 }
 
 func (OperationRunPhysicalLocationOrdering_Strategy) Type() protoreflect.EnumType {
-	return &file_flow_proto_enumTypes[31]
+	return &file_flow_proto_enumTypes[32]
 }
 
 func (x OperationRunPhysicalLocationOrdering_Strategy) Number() protoreflect.EnumNumber {
@@ -1833,7 +1883,7 @@ func (x OperationRunPhysicalLocationOrdering_Strategy) Number() protoreflect.Enu
 
 // Deprecated: Use OperationRunPhysicalLocationOrdering_Strategy.Descriptor instead.
 func (OperationRunPhysicalLocationOrdering_Strategy) EnumDescriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{178, 0}
+	return file_flow_proto_rawDescGZIP(), []int{179, 0}
 }
 
 type UUID struct {
@@ -9438,6 +9488,104 @@ func (x *EventRuleScope) GetId() *UUID {
 	return nil
 }
 
+// EventRuleScopeSelector identifies a Site scope or a Rack scope. Site
+// selectors must omit rack_identifier; Rack selectors must set exactly one
+// canonical Flow UUID or external inventory ID. Flow resolves external Rack IDs
+// before calling the event rule manager, whose scope representation always uses
+// canonical UUIDs.
+type EventRuleScopeSelector struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. SITE or RACK.
+	Type EventRuleScopeType `protobuf:"varint,1,opt,name=type,proto3,enum=v1.EventRuleScopeType" json:"type,omitempty"`
+	// Types that are valid to be assigned to RackIdentifier:
+	//
+	//	*EventRuleScopeSelector_RackId
+	//	*EventRuleScopeSelector_RackExternalId
+	RackIdentifier isEventRuleScopeSelector_RackIdentifier `protobuf_oneof:"rack_identifier"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *EventRuleScopeSelector) Reset() {
+	*x = EventRuleScopeSelector{}
+	mi := &file_flow_proto_msgTypes[120]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventRuleScopeSelector) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventRuleScopeSelector) ProtoMessage() {}
+
+func (x *EventRuleScopeSelector) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[120]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventRuleScopeSelector.ProtoReflect.Descriptor instead.
+func (*EventRuleScopeSelector) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{120}
+}
+
+func (x *EventRuleScopeSelector) GetType() EventRuleScopeType {
+	if x != nil {
+		return x.Type
+	}
+	return EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_UNSPECIFIED
+}
+
+func (x *EventRuleScopeSelector) GetRackIdentifier() isEventRuleScopeSelector_RackIdentifier {
+	if x != nil {
+		return x.RackIdentifier
+	}
+	return nil
+}
+
+func (x *EventRuleScopeSelector) GetRackId() *UUID {
+	if x != nil {
+		if x, ok := x.RackIdentifier.(*EventRuleScopeSelector_RackId); ok {
+			return x.RackId
+		}
+	}
+	return nil
+}
+
+func (x *EventRuleScopeSelector) GetRackExternalId() string {
+	if x != nil {
+		if x, ok := x.RackIdentifier.(*EventRuleScopeSelector_RackExternalId); ok {
+			return x.RackExternalId
+		}
+	}
+	return ""
+}
+
+type isEventRuleScopeSelector_RackIdentifier interface {
+	isEventRuleScopeSelector_RackIdentifier()
+}
+
+type EventRuleScopeSelector_RackId struct {
+	// Canonical Flow Rack UUID. Valid only for RACK.
+	RackId *UUID `protobuf:"bytes,2,opt,name=rack_id,json=rackId,proto3,oneof"`
+}
+
+type EventRuleScopeSelector_RackExternalId struct {
+	// External inventory Rack ID resolved by Flow. Valid only for RACK.
+	RackExternalId string `protobuf:"bytes,3,opt,name=rack_external_id,json=rackExternalId,proto3,oneof"`
+}
+
+func (*EventRuleScopeSelector_RackId) isEventRuleScopeSelector_RackIdentifier() {}
+
+func (*EventRuleScopeSelector_RackExternalId) isEventRuleScopeSelector_RackIdentifier() {}
+
 type EventRuleBinding struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            *UUID                  `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -9450,7 +9598,7 @@ type EventRuleBinding struct {
 
 func (x *EventRuleBinding) Reset() {
 	*x = EventRuleBinding{}
-	mi := &file_flow_proto_msgTypes[120]
+	mi := &file_flow_proto_msgTypes[121]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9462,7 +9610,7 @@ func (x *EventRuleBinding) String() string {
 func (*EventRuleBinding) ProtoMessage() {}
 
 func (x *EventRuleBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[120]
+	mi := &file_flow_proto_msgTypes[121]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9475,7 +9623,7 @@ func (x *EventRuleBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventRuleBinding.ProtoReflect.Descriptor instead.
 func (*EventRuleBinding) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{120}
+	return file_flow_proto_rawDescGZIP(), []int{121}
 }
 
 func (x *EventRuleBinding) GetId() *UUID {
@@ -9517,7 +9665,7 @@ type CreateEventRuleBindingRequest struct {
 
 func (x *CreateEventRuleBindingRequest) Reset() {
 	*x = CreateEventRuleBindingRequest{}
-	mi := &file_flow_proto_msgTypes[121]
+	mi := &file_flow_proto_msgTypes[122]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9529,7 +9677,7 @@ func (x *CreateEventRuleBindingRequest) String() string {
 func (*CreateEventRuleBindingRequest) ProtoMessage() {}
 
 func (x *CreateEventRuleBindingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[121]
+	mi := &file_flow_proto_msgTypes[122]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9542,7 +9690,7 @@ func (x *CreateEventRuleBindingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateEventRuleBindingRequest.ProtoReflect.Descriptor instead.
 func (*CreateEventRuleBindingRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{121}
+	return file_flow_proto_rawDescGZIP(), []int{122}
 }
 
 func (x *CreateEventRuleBindingRequest) GetRuleId() *UUID {
@@ -9571,7 +9719,7 @@ type GetEventRuleBindingRequest struct {
 
 func (x *GetEventRuleBindingRequest) Reset() {
 	*x = GetEventRuleBindingRequest{}
-	mi := &file_flow_proto_msgTypes[122]
+	mi := &file_flow_proto_msgTypes[123]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9583,7 +9731,7 @@ func (x *GetEventRuleBindingRequest) String() string {
 func (*GetEventRuleBindingRequest) ProtoMessage() {}
 
 func (x *GetEventRuleBindingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[122]
+	mi := &file_flow_proto_msgTypes[123]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9596,7 +9744,7 @@ func (x *GetEventRuleBindingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEventRuleBindingRequest.ProtoReflect.Descriptor instead.
 func (*GetEventRuleBindingRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{122}
+	return file_flow_proto_rawDescGZIP(), []int{123}
 }
 
 func (x *GetEventRuleBindingRequest) GetEventType() string {
@@ -9626,7 +9774,7 @@ type DeleteEventRuleBindingRequest struct {
 
 func (x *DeleteEventRuleBindingRequest) Reset() {
 	*x = DeleteEventRuleBindingRequest{}
-	mi := &file_flow_proto_msgTypes[123]
+	mi := &file_flow_proto_msgTypes[124]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9638,7 +9786,7 @@ func (x *DeleteEventRuleBindingRequest) String() string {
 func (*DeleteEventRuleBindingRequest) ProtoMessage() {}
 
 func (x *DeleteEventRuleBindingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[123]
+	mi := &file_flow_proto_msgTypes[124]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9651,7 +9799,7 @@ func (x *DeleteEventRuleBindingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteEventRuleBindingRequest.ProtoReflect.Descriptor instead.
 func (*DeleteEventRuleBindingRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{123}
+	return file_flow_proto_rawDescGZIP(), []int{124}
 }
 
 func (x *DeleteEventRuleBindingRequest) GetEventType() string {
@@ -9678,7 +9826,7 @@ type AssociateRuleWithRackRequest struct {
 
 func (x *AssociateRuleWithRackRequest) Reset() {
 	*x = AssociateRuleWithRackRequest{}
-	mi := &file_flow_proto_msgTypes[124]
+	mi := &file_flow_proto_msgTypes[125]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9690,7 +9838,7 @@ func (x *AssociateRuleWithRackRequest) String() string {
 func (*AssociateRuleWithRackRequest) ProtoMessage() {}
 
 func (x *AssociateRuleWithRackRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[124]
+	mi := &file_flow_proto_msgTypes[125]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9703,7 +9851,7 @@ func (x *AssociateRuleWithRackRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssociateRuleWithRackRequest.ProtoReflect.Descriptor instead.
 func (*AssociateRuleWithRackRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{124}
+	return file_flow_proto_rawDescGZIP(), []int{125}
 }
 
 func (x *AssociateRuleWithRackRequest) GetRackId() *UUID {
@@ -9731,7 +9879,7 @@ type DisassociateRuleFromRackRequest struct {
 
 func (x *DisassociateRuleFromRackRequest) Reset() {
 	*x = DisassociateRuleFromRackRequest{}
-	mi := &file_flow_proto_msgTypes[125]
+	mi := &file_flow_proto_msgTypes[126]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9743,7 +9891,7 @@ func (x *DisassociateRuleFromRackRequest) String() string {
 func (*DisassociateRuleFromRackRequest) ProtoMessage() {}
 
 func (x *DisassociateRuleFromRackRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[125]
+	mi := &file_flow_proto_msgTypes[126]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9756,7 +9904,7 @@ func (x *DisassociateRuleFromRackRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisassociateRuleFromRackRequest.ProtoReflect.Descriptor instead.
 func (*DisassociateRuleFromRackRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{125}
+	return file_flow_proto_rawDescGZIP(), []int{126}
 }
 
 func (x *DisassociateRuleFromRackRequest) GetRackId() *UUID {
@@ -9791,7 +9939,7 @@ type GetRackRuleAssociationRequest struct {
 
 func (x *GetRackRuleAssociationRequest) Reset() {
 	*x = GetRackRuleAssociationRequest{}
-	mi := &file_flow_proto_msgTypes[126]
+	mi := &file_flow_proto_msgTypes[127]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9803,7 +9951,7 @@ func (x *GetRackRuleAssociationRequest) String() string {
 func (*GetRackRuleAssociationRequest) ProtoMessage() {}
 
 func (x *GetRackRuleAssociationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[126]
+	mi := &file_flow_proto_msgTypes[127]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9816,7 +9964,7 @@ func (x *GetRackRuleAssociationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRackRuleAssociationRequest.ProtoReflect.Descriptor instead.
 func (*GetRackRuleAssociationRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{126}
+	return file_flow_proto_rawDescGZIP(), []int{127}
 }
 
 func (x *GetRackRuleAssociationRequest) GetRackId() *UUID {
@@ -9849,7 +9997,7 @@ type GetRackRuleAssociationResponse struct {
 
 func (x *GetRackRuleAssociationResponse) Reset() {
 	*x = GetRackRuleAssociationResponse{}
-	mi := &file_flow_proto_msgTypes[127]
+	mi := &file_flow_proto_msgTypes[128]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9861,7 +10009,7 @@ func (x *GetRackRuleAssociationResponse) String() string {
 func (*GetRackRuleAssociationResponse) ProtoMessage() {}
 
 func (x *GetRackRuleAssociationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[127]
+	mi := &file_flow_proto_msgTypes[128]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9874,7 +10022,7 @@ func (x *GetRackRuleAssociationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRackRuleAssociationResponse.ProtoReflect.Descriptor instead.
 func (*GetRackRuleAssociationResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{127}
+	return file_flow_proto_rawDescGZIP(), []int{128}
 }
 
 func (x *GetRackRuleAssociationResponse) GetRuleId() *UUID {
@@ -9893,7 +10041,7 @@ type ListRackRuleAssociationsRequest struct {
 
 func (x *ListRackRuleAssociationsRequest) Reset() {
 	*x = ListRackRuleAssociationsRequest{}
-	mi := &file_flow_proto_msgTypes[128]
+	mi := &file_flow_proto_msgTypes[129]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9905,7 +10053,7 @@ func (x *ListRackRuleAssociationsRequest) String() string {
 func (*ListRackRuleAssociationsRequest) ProtoMessage() {}
 
 func (x *ListRackRuleAssociationsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[128]
+	mi := &file_flow_proto_msgTypes[129]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9918,7 +10066,7 @@ func (x *ListRackRuleAssociationsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRackRuleAssociationsRequest.ProtoReflect.Descriptor instead.
 func (*ListRackRuleAssociationsRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{128}
+	return file_flow_proto_rawDescGZIP(), []int{129}
 }
 
 func (x *ListRackRuleAssociationsRequest) GetRackId() *UUID {
@@ -9942,7 +10090,7 @@ type RackRuleAssociation struct {
 
 func (x *RackRuleAssociation) Reset() {
 	*x = RackRuleAssociation{}
-	mi := &file_flow_proto_msgTypes[129]
+	mi := &file_flow_proto_msgTypes[130]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9954,7 +10102,7 @@ func (x *RackRuleAssociation) String() string {
 func (*RackRuleAssociation) ProtoMessage() {}
 
 func (x *RackRuleAssociation) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[129]
+	mi := &file_flow_proto_msgTypes[130]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9967,7 +10115,7 @@ func (x *RackRuleAssociation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RackRuleAssociation.ProtoReflect.Descriptor instead.
 func (*RackRuleAssociation) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{129}
+	return file_flow_proto_rawDescGZIP(), []int{130}
 }
 
 func (x *RackRuleAssociation) GetRackId() *UUID {
@@ -10021,7 +10169,7 @@ type ListRackRuleAssociationsResponse struct {
 
 func (x *ListRackRuleAssociationsResponse) Reset() {
 	*x = ListRackRuleAssociationsResponse{}
-	mi := &file_flow_proto_msgTypes[130]
+	mi := &file_flow_proto_msgTypes[131]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10033,7 +10181,7 @@ func (x *ListRackRuleAssociationsResponse) String() string {
 func (*ListRackRuleAssociationsResponse) ProtoMessage() {}
 
 func (x *ListRackRuleAssociationsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[130]
+	mi := &file_flow_proto_msgTypes[131]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10046,7 +10194,7 @@ func (x *ListRackRuleAssociationsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRackRuleAssociationsResponse.ProtoReflect.Descriptor instead.
 func (*ListRackRuleAssociationsResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{130}
+	return file_flow_proto_rawDescGZIP(), []int{131}
 }
 
 func (x *ListRackRuleAssociationsResponse) GetAssociations() []*RackRuleAssociation {
@@ -10069,7 +10217,7 @@ type ScheduleSpec struct {
 
 func (x *ScheduleSpec) Reset() {
 	*x = ScheduleSpec{}
-	mi := &file_flow_proto_msgTypes[131]
+	mi := &file_flow_proto_msgTypes[132]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10081,7 +10229,7 @@ func (x *ScheduleSpec) String() string {
 func (*ScheduleSpec) ProtoMessage() {}
 
 func (x *ScheduleSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[131]
+	mi := &file_flow_proto_msgTypes[132]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10094,7 +10242,7 @@ func (x *ScheduleSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScheduleSpec.ProtoReflect.Descriptor instead.
 func (*ScheduleSpec) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{131}
+	return file_flow_proto_rawDescGZIP(), []int{132}
 }
 
 func (x *ScheduleSpec) GetType() ScheduleSpecType {
@@ -10130,7 +10278,7 @@ type ScheduleConfig struct {
 
 func (x *ScheduleConfig) Reset() {
 	*x = ScheduleConfig{}
-	mi := &file_flow_proto_msgTypes[132]
+	mi := &file_flow_proto_msgTypes[133]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10142,7 +10290,7 @@ func (x *ScheduleConfig) String() string {
 func (*ScheduleConfig) ProtoMessage() {}
 
 func (x *ScheduleConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[132]
+	mi := &file_flow_proto_msgTypes[133]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10155,7 +10303,7 @@ func (x *ScheduleConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScheduleConfig.ProtoReflect.Descriptor instead.
 func (*ScheduleConfig) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{132}
+	return file_flow_proto_rawDescGZIP(), []int{133}
 }
 
 func (x *ScheduleConfig) GetName() string {
@@ -10206,7 +10354,7 @@ type TaskSchedule struct {
 
 func (x *TaskSchedule) Reset() {
 	*x = TaskSchedule{}
-	mi := &file_flow_proto_msgTypes[133]
+	mi := &file_flow_proto_msgTypes[134]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10218,7 +10366,7 @@ func (x *TaskSchedule) String() string {
 func (*TaskSchedule) ProtoMessage() {}
 
 func (x *TaskSchedule) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[133]
+	mi := &file_flow_proto_msgTypes[134]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10231,7 +10379,7 @@ func (x *TaskSchedule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskSchedule.ProtoReflect.Descriptor instead.
 func (*TaskSchedule) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{133}
+	return file_flow_proto_rawDescGZIP(), []int{134}
 }
 
 func (x *TaskSchedule) GetId() *UUID {
@@ -10337,7 +10485,7 @@ type ScheduledOperation struct {
 
 func (x *ScheduledOperation) Reset() {
 	*x = ScheduledOperation{}
-	mi := &file_flow_proto_msgTypes[134]
+	mi := &file_flow_proto_msgTypes[135]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10349,7 +10497,7 @@ func (x *ScheduledOperation) String() string {
 func (*ScheduledOperation) ProtoMessage() {}
 
 func (x *ScheduledOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[134]
+	mi := &file_flow_proto_msgTypes[135]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10362,7 +10510,7 @@ func (x *ScheduledOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScheduledOperation.ProtoReflect.Descriptor instead.
 func (*ScheduledOperation) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{134}
+	return file_flow_proto_rawDescGZIP(), []int{135}
 }
 
 func (x *ScheduledOperation) GetOperation() isScheduledOperation_Operation {
@@ -10480,7 +10628,7 @@ type CreateTaskScheduleRequest struct {
 
 func (x *CreateTaskScheduleRequest) Reset() {
 	*x = CreateTaskScheduleRequest{}
-	mi := &file_flow_proto_msgTypes[135]
+	mi := &file_flow_proto_msgTypes[136]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10492,7 +10640,7 @@ func (x *CreateTaskScheduleRequest) String() string {
 func (*CreateTaskScheduleRequest) ProtoMessage() {}
 
 func (x *CreateTaskScheduleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[135]
+	mi := &file_flow_proto_msgTypes[136]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10505,7 +10653,7 @@ func (x *CreateTaskScheduleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateTaskScheduleRequest.ProtoReflect.Descriptor instead.
 func (*CreateTaskScheduleRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{135}
+	return file_flow_proto_rawDescGZIP(), []int{136}
 }
 
 func (x *CreateTaskScheduleRequest) GetSchedule() *ScheduleConfig {
@@ -10531,7 +10679,7 @@ type GetTaskScheduleRequest struct {
 
 func (x *GetTaskScheduleRequest) Reset() {
 	*x = GetTaskScheduleRequest{}
-	mi := &file_flow_proto_msgTypes[136]
+	mi := &file_flow_proto_msgTypes[137]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10543,7 +10691,7 @@ func (x *GetTaskScheduleRequest) String() string {
 func (*GetTaskScheduleRequest) ProtoMessage() {}
 
 func (x *GetTaskScheduleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[136]
+	mi := &file_flow_proto_msgTypes[137]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10556,7 +10704,7 @@ func (x *GetTaskScheduleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTaskScheduleRequest.ProtoReflect.Descriptor instead.
 func (*GetTaskScheduleRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{136}
+	return file_flow_proto_rawDescGZIP(), []int{137}
 }
 
 func (x *GetTaskScheduleRequest) GetId() *UUID {
@@ -10579,7 +10727,7 @@ type ListTaskSchedulesRequest struct {
 
 func (x *ListTaskSchedulesRequest) Reset() {
 	*x = ListTaskSchedulesRequest{}
-	mi := &file_flow_proto_msgTypes[137]
+	mi := &file_flow_proto_msgTypes[138]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10591,7 +10739,7 @@ func (x *ListTaskSchedulesRequest) String() string {
 func (*ListTaskSchedulesRequest) ProtoMessage() {}
 
 func (x *ListTaskSchedulesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[137]
+	mi := &file_flow_proto_msgTypes[138]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10604,7 +10752,7 @@ func (x *ListTaskSchedulesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTaskSchedulesRequest.ProtoReflect.Descriptor instead.
 func (*ListTaskSchedulesRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{137}
+	return file_flow_proto_rawDescGZIP(), []int{138}
 }
 
 func (x *ListTaskSchedulesRequest) GetRackId() *UUID {
@@ -10638,7 +10786,7 @@ type ListTaskSchedulesResponse struct {
 
 func (x *ListTaskSchedulesResponse) Reset() {
 	*x = ListTaskSchedulesResponse{}
-	mi := &file_flow_proto_msgTypes[138]
+	mi := &file_flow_proto_msgTypes[139]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10650,7 +10798,7 @@ func (x *ListTaskSchedulesResponse) String() string {
 func (*ListTaskSchedulesResponse) ProtoMessage() {}
 
 func (x *ListTaskSchedulesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[138]
+	mi := &file_flow_proto_msgTypes[139]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10663,7 +10811,7 @@ func (x *ListTaskSchedulesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTaskSchedulesResponse.ProtoReflect.Descriptor instead.
 func (*ListTaskSchedulesResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{138}
+	return file_flow_proto_rawDescGZIP(), []int{139}
 }
 
 func (x *ListTaskSchedulesResponse) GetTaskSchedules() []*TaskSchedule {
@@ -10701,7 +10849,7 @@ type UpdateTaskScheduleRequest struct {
 
 func (x *UpdateTaskScheduleRequest) Reset() {
 	*x = UpdateTaskScheduleRequest{}
-	mi := &file_flow_proto_msgTypes[139]
+	mi := &file_flow_proto_msgTypes[140]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10713,7 +10861,7 @@ func (x *UpdateTaskScheduleRequest) String() string {
 func (*UpdateTaskScheduleRequest) ProtoMessage() {}
 
 func (x *UpdateTaskScheduleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[139]
+	mi := &file_flow_proto_msgTypes[140]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10726,7 +10874,7 @@ func (x *UpdateTaskScheduleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateTaskScheduleRequest.ProtoReflect.Descriptor instead.
 func (*UpdateTaskScheduleRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{139}
+	return file_flow_proto_rawDescGZIP(), []int{140}
 }
 
 func (x *UpdateTaskScheduleRequest) GetId() *UUID {
@@ -10762,7 +10910,7 @@ type PauseTaskScheduleRequest struct {
 
 func (x *PauseTaskScheduleRequest) Reset() {
 	*x = PauseTaskScheduleRequest{}
-	mi := &file_flow_proto_msgTypes[140]
+	mi := &file_flow_proto_msgTypes[141]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10774,7 +10922,7 @@ func (x *PauseTaskScheduleRequest) String() string {
 func (*PauseTaskScheduleRequest) ProtoMessage() {}
 
 func (x *PauseTaskScheduleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[140]
+	mi := &file_flow_proto_msgTypes[141]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10787,7 +10935,7 @@ func (x *PauseTaskScheduleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PauseTaskScheduleRequest.ProtoReflect.Descriptor instead.
 func (*PauseTaskScheduleRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{140}
+	return file_flow_proto_rawDescGZIP(), []int{141}
 }
 
 func (x *PauseTaskScheduleRequest) GetId() *UUID {
@@ -10809,7 +10957,7 @@ type ResumeTaskScheduleRequest struct {
 
 func (x *ResumeTaskScheduleRequest) Reset() {
 	*x = ResumeTaskScheduleRequest{}
-	mi := &file_flow_proto_msgTypes[141]
+	mi := &file_flow_proto_msgTypes[142]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10821,7 +10969,7 @@ func (x *ResumeTaskScheduleRequest) String() string {
 func (*ResumeTaskScheduleRequest) ProtoMessage() {}
 
 func (x *ResumeTaskScheduleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[141]
+	mi := &file_flow_proto_msgTypes[142]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10834,7 +10982,7 @@ func (x *ResumeTaskScheduleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeTaskScheduleRequest.ProtoReflect.Descriptor instead.
 func (*ResumeTaskScheduleRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{141}
+	return file_flow_proto_rawDescGZIP(), []int{142}
 }
 
 func (x *ResumeTaskScheduleRequest) GetId() *UUID {
@@ -10855,7 +11003,7 @@ type DeleteTaskScheduleRequest struct {
 
 func (x *DeleteTaskScheduleRequest) Reset() {
 	*x = DeleteTaskScheduleRequest{}
-	mi := &file_flow_proto_msgTypes[142]
+	mi := &file_flow_proto_msgTypes[143]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10867,7 +11015,7 @@ func (x *DeleteTaskScheduleRequest) String() string {
 func (*DeleteTaskScheduleRequest) ProtoMessage() {}
 
 func (x *DeleteTaskScheduleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[142]
+	mi := &file_flow_proto_msgTypes[143]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10880,7 +11028,7 @@ func (x *DeleteTaskScheduleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteTaskScheduleRequest.ProtoReflect.Descriptor instead.
 func (*DeleteTaskScheduleRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{142}
+	return file_flow_proto_rawDescGZIP(), []int{143}
 }
 
 func (x *DeleteTaskScheduleRequest) GetId() *UUID {
@@ -10903,7 +11051,7 @@ type TriggerTaskScheduleRequest struct {
 
 func (x *TriggerTaskScheduleRequest) Reset() {
 	*x = TriggerTaskScheduleRequest{}
-	mi := &file_flow_proto_msgTypes[143]
+	mi := &file_flow_proto_msgTypes[144]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10915,7 +11063,7 @@ func (x *TriggerTaskScheduleRequest) String() string {
 func (*TriggerTaskScheduleRequest) ProtoMessage() {}
 
 func (x *TriggerTaskScheduleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[143]
+	mi := &file_flow_proto_msgTypes[144]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10928,7 +11076,7 @@ func (x *TriggerTaskScheduleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TriggerTaskScheduleRequest.ProtoReflect.Descriptor instead.
 func (*TriggerTaskScheduleRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{143}
+	return file_flow_proto_rawDescGZIP(), []int{144}
 }
 
 func (x *TriggerTaskScheduleRequest) GetId() *UUID {
@@ -10964,7 +11112,7 @@ type TaskScheduleScope struct {
 
 func (x *TaskScheduleScope) Reset() {
 	*x = TaskScheduleScope{}
-	mi := &file_flow_proto_msgTypes[144]
+	mi := &file_flow_proto_msgTypes[145]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10976,7 +11124,7 @@ func (x *TaskScheduleScope) String() string {
 func (*TaskScheduleScope) ProtoMessage() {}
 
 func (x *TaskScheduleScope) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[144]
+	mi := &file_flow_proto_msgTypes[145]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10989,7 +11137,7 @@ func (x *TaskScheduleScope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskScheduleScope.ProtoReflect.Descriptor instead.
 func (*TaskScheduleScope) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{144}
+	return file_flow_proto_rawDescGZIP(), []int{145}
 }
 
 func (x *TaskScheduleScope) GetId() *UUID {
@@ -11089,7 +11237,7 @@ type AddTaskScheduleScopeRequest struct {
 
 func (x *AddTaskScheduleScopeRequest) Reset() {
 	*x = AddTaskScheduleScopeRequest{}
-	mi := &file_flow_proto_msgTypes[145]
+	mi := &file_flow_proto_msgTypes[146]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11101,7 +11249,7 @@ func (x *AddTaskScheduleScopeRequest) String() string {
 func (*AddTaskScheduleScopeRequest) ProtoMessage() {}
 
 func (x *AddTaskScheduleScopeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[145]
+	mi := &file_flow_proto_msgTypes[146]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11114,7 +11262,7 @@ func (x *AddTaskScheduleScopeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddTaskScheduleScopeRequest.ProtoReflect.Descriptor instead.
 func (*AddTaskScheduleScopeRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{145}
+	return file_flow_proto_rawDescGZIP(), []int{146}
 }
 
 func (x *AddTaskScheduleScopeRequest) GetScheduleId() *UUID {
@@ -11141,7 +11289,7 @@ type AddTaskScheduleScopeResponse struct {
 
 func (x *AddTaskScheduleScopeResponse) Reset() {
 	*x = AddTaskScheduleScopeResponse{}
-	mi := &file_flow_proto_msgTypes[146]
+	mi := &file_flow_proto_msgTypes[147]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11153,7 +11301,7 @@ func (x *AddTaskScheduleScopeResponse) String() string {
 func (*AddTaskScheduleScopeResponse) ProtoMessage() {}
 
 func (x *AddTaskScheduleScopeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[146]
+	mi := &file_flow_proto_msgTypes[147]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11166,7 +11314,7 @@ func (x *AddTaskScheduleScopeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddTaskScheduleScopeResponse.ProtoReflect.Descriptor instead.
 func (*AddTaskScheduleScopeResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{146}
+	return file_flow_proto_rawDescGZIP(), []int{147}
 }
 
 func (x *AddTaskScheduleScopeResponse) GetScopes() []*TaskScheduleScope {
@@ -11187,7 +11335,7 @@ type RemoveTaskScheduleScopeRequest struct {
 
 func (x *RemoveTaskScheduleScopeRequest) Reset() {
 	*x = RemoveTaskScheduleScopeRequest{}
-	mi := &file_flow_proto_msgTypes[147]
+	mi := &file_flow_proto_msgTypes[148]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11199,7 +11347,7 @@ func (x *RemoveTaskScheduleScopeRequest) String() string {
 func (*RemoveTaskScheduleScopeRequest) ProtoMessage() {}
 
 func (x *RemoveTaskScheduleScopeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[147]
+	mi := &file_flow_proto_msgTypes[148]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11212,7 +11360,7 @@ func (x *RemoveTaskScheduleScopeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveTaskScheduleScopeRequest.ProtoReflect.Descriptor instead.
 func (*RemoveTaskScheduleScopeRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{147}
+	return file_flow_proto_rawDescGZIP(), []int{148}
 }
 
 func (x *RemoveTaskScheduleScopeRequest) GetScopeId() *UUID {
@@ -11237,7 +11385,7 @@ type UpdateTaskScheduleScopeRequest struct {
 
 func (x *UpdateTaskScheduleScopeRequest) Reset() {
 	*x = UpdateTaskScheduleScopeRequest{}
-	mi := &file_flow_proto_msgTypes[148]
+	mi := &file_flow_proto_msgTypes[149]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11249,7 +11397,7 @@ func (x *UpdateTaskScheduleScopeRequest) String() string {
 func (*UpdateTaskScheduleScopeRequest) ProtoMessage() {}
 
 func (x *UpdateTaskScheduleScopeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[148]
+	mi := &file_flow_proto_msgTypes[149]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11262,7 +11410,7 @@ func (x *UpdateTaskScheduleScopeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateTaskScheduleScopeRequest.ProtoReflect.Descriptor instead.
 func (*UpdateTaskScheduleScopeRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{148}
+	return file_flow_proto_rawDescGZIP(), []int{149}
 }
 
 func (x *UpdateTaskScheduleScopeRequest) GetScheduleId() *UUID {
@@ -11292,7 +11440,7 @@ type UpdateTaskScheduleScopeResponse struct {
 
 func (x *UpdateTaskScheduleScopeResponse) Reset() {
 	*x = UpdateTaskScheduleScopeResponse{}
-	mi := &file_flow_proto_msgTypes[149]
+	mi := &file_flow_proto_msgTypes[150]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11304,7 +11452,7 @@ func (x *UpdateTaskScheduleScopeResponse) String() string {
 func (*UpdateTaskScheduleScopeResponse) ProtoMessage() {}
 
 func (x *UpdateTaskScheduleScopeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[149]
+	mi := &file_flow_proto_msgTypes[150]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11317,7 +11465,7 @@ func (x *UpdateTaskScheduleScopeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateTaskScheduleScopeResponse.ProtoReflect.Descriptor instead.
 func (*UpdateTaskScheduleScopeResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{149}
+	return file_flow_proto_rawDescGZIP(), []int{150}
 }
 
 func (x *UpdateTaskScheduleScopeResponse) GetScopes() []*TaskScheduleScope {
@@ -11358,7 +11506,7 @@ type ListTaskScheduleScopesRequest struct {
 
 func (x *ListTaskScheduleScopesRequest) Reset() {
 	*x = ListTaskScheduleScopesRequest{}
-	mi := &file_flow_proto_msgTypes[150]
+	mi := &file_flow_proto_msgTypes[151]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11370,7 +11518,7 @@ func (x *ListTaskScheduleScopesRequest) String() string {
 func (*ListTaskScheduleScopesRequest) ProtoMessage() {}
 
 func (x *ListTaskScheduleScopesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[150]
+	mi := &file_flow_proto_msgTypes[151]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11383,7 +11531,7 @@ func (x *ListTaskScheduleScopesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTaskScheduleScopesRequest.ProtoReflect.Descriptor instead.
 func (*ListTaskScheduleScopesRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{150}
+	return file_flow_proto_rawDescGZIP(), []int{151}
 }
 
 func (x *ListTaskScheduleScopesRequest) GetScheduleId() *UUID {
@@ -11402,7 +11550,7 @@ type ListTaskScheduleScopesResponse struct {
 
 func (x *ListTaskScheduleScopesResponse) Reset() {
 	*x = ListTaskScheduleScopesResponse{}
-	mi := &file_flow_proto_msgTypes[151]
+	mi := &file_flow_proto_msgTypes[152]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11414,7 +11562,7 @@ func (x *ListTaskScheduleScopesResponse) String() string {
 func (*ListTaskScheduleScopesResponse) ProtoMessage() {}
 
 func (x *ListTaskScheduleScopesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[151]
+	mi := &file_flow_proto_msgTypes[152]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11427,7 +11575,7 @@ func (x *ListTaskScheduleScopesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTaskScheduleScopesResponse.ProtoReflect.Descriptor instead.
 func (*ListTaskScheduleScopesResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{151}
+	return file_flow_proto_rawDescGZIP(), []int{152}
 }
 
 func (x *ListTaskScheduleScopesResponse) GetScopes() []*TaskScheduleScope {
@@ -11463,7 +11611,7 @@ type CheckScheduleConflictsRequest struct {
 
 func (x *CheckScheduleConflictsRequest) Reset() {
 	*x = CheckScheduleConflictsRequest{}
-	mi := &file_flow_proto_msgTypes[152]
+	mi := &file_flow_proto_msgTypes[153]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11475,7 +11623,7 @@ func (x *CheckScheduleConflictsRequest) String() string {
 func (*CheckScheduleConflictsRequest) ProtoMessage() {}
 
 func (x *CheckScheduleConflictsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[152]
+	mi := &file_flow_proto_msgTypes[153]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11488,7 +11636,7 @@ func (x *CheckScheduleConflictsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckScheduleConflictsRequest.ProtoReflect.Descriptor instead.
 func (*CheckScheduleConflictsRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{152}
+	return file_flow_proto_rawDescGZIP(), []int{153}
 }
 
 func (x *CheckScheduleConflictsRequest) GetOperation() *ScheduledOperation {
@@ -11517,7 +11665,7 @@ type CheckScheduleConflictsResponse struct {
 
 func (x *CheckScheduleConflictsResponse) Reset() {
 	*x = CheckScheduleConflictsResponse{}
-	mi := &file_flow_proto_msgTypes[153]
+	mi := &file_flow_proto_msgTypes[154]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11529,7 +11677,7 @@ func (x *CheckScheduleConflictsResponse) String() string {
 func (*CheckScheduleConflictsResponse) ProtoMessage() {}
 
 func (x *CheckScheduleConflictsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[153]
+	mi := &file_flow_proto_msgTypes[154]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11542,7 +11690,7 @@ func (x *CheckScheduleConflictsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckScheduleConflictsResponse.ProtoReflect.Descriptor instead.
 func (*CheckScheduleConflictsResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{153}
+	return file_flow_proto_rawDescGZIP(), []int{154}
 }
 
 func (x *CheckScheduleConflictsResponse) GetConflicts() []*TaskSchedule {
@@ -11570,7 +11718,7 @@ type CreateOperationRunRequest struct {
 
 func (x *CreateOperationRunRequest) Reset() {
 	*x = CreateOperationRunRequest{}
-	mi := &file_flow_proto_msgTypes[154]
+	mi := &file_flow_proto_msgTypes[155]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11582,7 +11730,7 @@ func (x *CreateOperationRunRequest) String() string {
 func (*CreateOperationRunRequest) ProtoMessage() {}
 
 func (x *CreateOperationRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[154]
+	mi := &file_flow_proto_msgTypes[155]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11595,7 +11743,7 @@ func (x *CreateOperationRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateOperationRunRequest.ProtoReflect.Descriptor instead.
 func (*CreateOperationRunRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{154}
+	return file_flow_proto_rawDescGZIP(), []int{155}
 }
 
 func (x *CreateOperationRunRequest) GetName() string {
@@ -11628,7 +11776,7 @@ type CreateOperationRunResponse struct {
 
 func (x *CreateOperationRunResponse) Reset() {
 	*x = CreateOperationRunResponse{}
-	mi := &file_flow_proto_msgTypes[155]
+	mi := &file_flow_proto_msgTypes[156]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11640,7 +11788,7 @@ func (x *CreateOperationRunResponse) String() string {
 func (*CreateOperationRunResponse) ProtoMessage() {}
 
 func (x *CreateOperationRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[155]
+	mi := &file_flow_proto_msgTypes[156]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11653,7 +11801,7 @@ func (x *CreateOperationRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateOperationRunResponse.ProtoReflect.Descriptor instead.
 func (*CreateOperationRunResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{155}
+	return file_flow_proto_rawDescGZIP(), []int{156}
 }
 
 func (x *CreateOperationRunResponse) GetId() *UUID {
@@ -11676,7 +11824,7 @@ type OperationRunConfiguration struct {
 
 func (x *OperationRunConfiguration) Reset() {
 	*x = OperationRunConfiguration{}
-	mi := &file_flow_proto_msgTypes[156]
+	mi := &file_flow_proto_msgTypes[157]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11688,7 +11836,7 @@ func (x *OperationRunConfiguration) String() string {
 func (*OperationRunConfiguration) ProtoMessage() {}
 
 func (x *OperationRunConfiguration) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[156]
+	mi := &file_flow_proto_msgTypes[157]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11701,7 +11849,7 @@ func (x *OperationRunConfiguration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunConfiguration.ProtoReflect.Descriptor instead.
 func (*OperationRunConfiguration) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{156}
+	return file_flow_proto_rawDescGZIP(), []int{157}
 }
 
 func (x *OperationRunConfiguration) GetSelector() *OperationRunSelector {
@@ -11737,7 +11885,7 @@ type GetOperationRunRequest struct {
 
 func (x *GetOperationRunRequest) Reset() {
 	*x = GetOperationRunRequest{}
-	mi := &file_flow_proto_msgTypes[157]
+	mi := &file_flow_proto_msgTypes[158]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11749,7 +11897,7 @@ func (x *GetOperationRunRequest) String() string {
 func (*GetOperationRunRequest) ProtoMessage() {}
 
 func (x *GetOperationRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[157]
+	mi := &file_flow_proto_msgTypes[158]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11762,7 +11910,7 @@ func (x *GetOperationRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetOperationRunRequest.ProtoReflect.Descriptor instead.
 func (*GetOperationRunRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{157}
+	return file_flow_proto_rawDescGZIP(), []int{158}
 }
 
 func (x *GetOperationRunRequest) GetId() *UUID {
@@ -11788,7 +11936,7 @@ type GetOperationRunResponse struct {
 
 func (x *GetOperationRunResponse) Reset() {
 	*x = GetOperationRunResponse{}
-	mi := &file_flow_proto_msgTypes[158]
+	mi := &file_flow_proto_msgTypes[159]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11800,7 +11948,7 @@ func (x *GetOperationRunResponse) String() string {
 func (*GetOperationRunResponse) ProtoMessage() {}
 
 func (x *GetOperationRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[158]
+	mi := &file_flow_proto_msgTypes[159]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11813,7 +11961,7 @@ func (x *GetOperationRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetOperationRunResponse.ProtoReflect.Descriptor instead.
 func (*GetOperationRunResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{158}
+	return file_flow_proto_rawDescGZIP(), []int{159}
 }
 
 func (x *GetOperationRunResponse) GetOperationRun() *OperationRun {
@@ -11835,7 +11983,7 @@ type ListOperationRunsRequest struct {
 
 func (x *ListOperationRunsRequest) Reset() {
 	*x = ListOperationRunsRequest{}
-	mi := &file_flow_proto_msgTypes[159]
+	mi := &file_flow_proto_msgTypes[160]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11847,7 +11995,7 @@ func (x *ListOperationRunsRequest) String() string {
 func (*ListOperationRunsRequest) ProtoMessage() {}
 
 func (x *ListOperationRunsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[159]
+	mi := &file_flow_proto_msgTypes[160]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11860,7 +12008,7 @@ func (x *ListOperationRunsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListOperationRunsRequest.ProtoReflect.Descriptor instead.
 func (*ListOperationRunsRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{159}
+	return file_flow_proto_rawDescGZIP(), []int{160}
 }
 
 func (x *ListOperationRunsRequest) GetFilter() *OperationRunFilter {
@@ -11887,7 +12035,7 @@ type ListOperationRunsResponse struct {
 
 func (x *ListOperationRunsResponse) Reset() {
 	*x = ListOperationRunsResponse{}
-	mi := &file_flow_proto_msgTypes[160]
+	mi := &file_flow_proto_msgTypes[161]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11899,7 +12047,7 @@ func (x *ListOperationRunsResponse) String() string {
 func (*ListOperationRunsResponse) ProtoMessage() {}
 
 func (x *ListOperationRunsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[160]
+	mi := &file_flow_proto_msgTypes[161]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11912,7 +12060,7 @@ func (x *ListOperationRunsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListOperationRunsResponse.ProtoReflect.Descriptor instead.
 func (*ListOperationRunsResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{160}
+	return file_flow_proto_rawDescGZIP(), []int{161}
 }
 
 func (x *ListOperationRunsResponse) GetOperationRuns() []*OperationRunSummary {
@@ -11945,7 +12093,7 @@ type OperationRunFilter struct {
 
 func (x *OperationRunFilter) Reset() {
 	*x = OperationRunFilter{}
-	mi := &file_flow_proto_msgTypes[161]
+	mi := &file_flow_proto_msgTypes[162]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11957,7 +12105,7 @@ func (x *OperationRunFilter) String() string {
 func (*OperationRunFilter) ProtoMessage() {}
 
 func (x *OperationRunFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[161]
+	mi := &file_flow_proto_msgTypes[162]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11970,7 +12118,7 @@ func (x *OperationRunFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunFilter.ProtoReflect.Descriptor instead.
 func (*OperationRunFilter) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{161}
+	return file_flow_proto_rawDescGZIP(), []int{162}
 }
 
 func (x *OperationRunFilter) GetName() *StringQueryInfo {
@@ -12004,7 +12152,7 @@ type OperationRunStateFilter struct {
 
 func (x *OperationRunStateFilter) Reset() {
 	*x = OperationRunStateFilter{}
-	mi := &file_flow_proto_msgTypes[162]
+	mi := &file_flow_proto_msgTypes[163]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12016,7 +12164,7 @@ func (x *OperationRunStateFilter) String() string {
 func (*OperationRunStateFilter) ProtoMessage() {}
 
 func (x *OperationRunStateFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[162]
+	mi := &file_flow_proto_msgTypes[163]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12029,7 +12177,7 @@ func (x *OperationRunStateFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunStateFilter.ProtoReflect.Descriptor instead.
 func (*OperationRunStateFilter) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{162}
+	return file_flow_proto_rawDescGZIP(), []int{163}
 }
 
 func (x *OperationRunStateFilter) GetStatus() OperationRunStatus {
@@ -12062,7 +12210,7 @@ type ListOperationRunTargetsRequest struct {
 
 func (x *ListOperationRunTargetsRequest) Reset() {
 	*x = ListOperationRunTargetsRequest{}
-	mi := &file_flow_proto_msgTypes[163]
+	mi := &file_flow_proto_msgTypes[164]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12074,7 +12222,7 @@ func (x *ListOperationRunTargetsRequest) String() string {
 func (*ListOperationRunTargetsRequest) ProtoMessage() {}
 
 func (x *ListOperationRunTargetsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[163]
+	mi := &file_flow_proto_msgTypes[164]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12087,7 +12235,7 @@ func (x *ListOperationRunTargetsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListOperationRunTargetsRequest.ProtoReflect.Descriptor instead.
 func (*ListOperationRunTargetsRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{163}
+	return file_flow_proto_rawDescGZIP(), []int{164}
 }
 
 func (x *ListOperationRunTargetsRequest) GetOperationRunId() *UUID {
@@ -12128,7 +12276,7 @@ type ListOperationRunTargetsResponse struct {
 
 func (x *ListOperationRunTargetsResponse) Reset() {
 	*x = ListOperationRunTargetsResponse{}
-	mi := &file_flow_proto_msgTypes[164]
+	mi := &file_flow_proto_msgTypes[165]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12140,7 +12288,7 @@ func (x *ListOperationRunTargetsResponse) String() string {
 func (*ListOperationRunTargetsResponse) ProtoMessage() {}
 
 func (x *ListOperationRunTargetsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[164]
+	mi := &file_flow_proto_msgTypes[165]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12153,7 +12301,7 @@ func (x *ListOperationRunTargetsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListOperationRunTargetsResponse.ProtoReflect.Descriptor instead.
 func (*ListOperationRunTargetsResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{164}
+	return file_flow_proto_rawDescGZIP(), []int{165}
 }
 
 func (x *ListOperationRunTargetsResponse) GetTargets() []*OperationRunTarget {
@@ -12179,7 +12327,7 @@ type PauseOperationRunRequest struct {
 
 func (x *PauseOperationRunRequest) Reset() {
 	*x = PauseOperationRunRequest{}
-	mi := &file_flow_proto_msgTypes[165]
+	mi := &file_flow_proto_msgTypes[166]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12191,7 +12339,7 @@ func (x *PauseOperationRunRequest) String() string {
 func (*PauseOperationRunRequest) ProtoMessage() {}
 
 func (x *PauseOperationRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[165]
+	mi := &file_flow_proto_msgTypes[166]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12204,7 +12352,7 @@ func (x *PauseOperationRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PauseOperationRunRequest.ProtoReflect.Descriptor instead.
 func (*PauseOperationRunRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{165}
+	return file_flow_proto_rawDescGZIP(), []int{166}
 }
 
 func (x *PauseOperationRunRequest) GetId() *UUID {
@@ -12223,7 +12371,7 @@ type ResumeOperationRunRequest struct {
 
 func (x *ResumeOperationRunRequest) Reset() {
 	*x = ResumeOperationRunRequest{}
-	mi := &file_flow_proto_msgTypes[166]
+	mi := &file_flow_proto_msgTypes[167]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12235,7 +12383,7 @@ func (x *ResumeOperationRunRequest) String() string {
 func (*ResumeOperationRunRequest) ProtoMessage() {}
 
 func (x *ResumeOperationRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[166]
+	mi := &file_flow_proto_msgTypes[167]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12248,7 +12396,7 @@ func (x *ResumeOperationRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeOperationRunRequest.ProtoReflect.Descriptor instead.
 func (*ResumeOperationRunRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{166}
+	return file_flow_proto_rawDescGZIP(), []int{167}
 }
 
 func (x *ResumeOperationRunRequest) GetId() *UUID {
@@ -12269,7 +12417,7 @@ type AdvanceOperationRunPhaseRequest struct {
 
 func (x *AdvanceOperationRunPhaseRequest) Reset() {
 	*x = AdvanceOperationRunPhaseRequest{}
-	mi := &file_flow_proto_msgTypes[167]
+	mi := &file_flow_proto_msgTypes[168]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12281,7 +12429,7 @@ func (x *AdvanceOperationRunPhaseRequest) String() string {
 func (*AdvanceOperationRunPhaseRequest) ProtoMessage() {}
 
 func (x *AdvanceOperationRunPhaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[167]
+	mi := &file_flow_proto_msgTypes[168]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12294,7 +12442,7 @@ func (x *AdvanceOperationRunPhaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdvanceOperationRunPhaseRequest.ProtoReflect.Descriptor instead.
 func (*AdvanceOperationRunPhaseRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{167}
+	return file_flow_proto_rawDescGZIP(), []int{168}
 }
 
 func (x *AdvanceOperationRunPhaseRequest) GetId() *UUID {
@@ -12321,7 +12469,7 @@ type CancelOperationRunRequest struct {
 
 func (x *CancelOperationRunRequest) Reset() {
 	*x = CancelOperationRunRequest{}
-	mi := &file_flow_proto_msgTypes[168]
+	mi := &file_flow_proto_msgTypes[169]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12333,7 +12481,7 @@ func (x *CancelOperationRunRequest) String() string {
 func (*CancelOperationRunRequest) ProtoMessage() {}
 
 func (x *CancelOperationRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[168]
+	mi := &file_flow_proto_msgTypes[169]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12346,7 +12494,7 @@ func (x *CancelOperationRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelOperationRunRequest.ProtoReflect.Descriptor instead.
 func (*CancelOperationRunRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{168}
+	return file_flow_proto_rawDescGZIP(), []int{169}
 }
 
 func (x *CancelOperationRunRequest) GetId() *UUID {
@@ -12375,7 +12523,7 @@ type OperationRunSelector struct {
 
 func (x *OperationRunSelector) Reset() {
 	*x = OperationRunSelector{}
-	mi := &file_flow_proto_msgTypes[169]
+	mi := &file_flow_proto_msgTypes[170]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12387,7 +12535,7 @@ func (x *OperationRunSelector) String() string {
 func (*OperationRunSelector) ProtoMessage() {}
 
 func (x *OperationRunSelector) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[169]
+	mi := &file_flow_proto_msgTypes[170]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12400,7 +12548,7 @@ func (x *OperationRunSelector) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunSelector.ProtoReflect.Descriptor instead.
 func (*OperationRunSelector) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{169}
+	return file_flow_proto_rawDescGZIP(), []int{170}
 }
 
 func (x *OperationRunSelector) GetSelector() isOperationRunSelector_Selector {
@@ -12442,7 +12590,7 @@ type PercentageSelector struct {
 
 func (x *PercentageSelector) Reset() {
 	*x = PercentageSelector{}
-	mi := &file_flow_proto_msgTypes[170]
+	mi := &file_flow_proto_msgTypes[171]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12454,7 +12602,7 @@ func (x *PercentageSelector) String() string {
 func (*PercentageSelector) ProtoMessage() {}
 
 func (x *PercentageSelector) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[170]
+	mi := &file_flow_proto_msgTypes[171]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12467,7 +12615,7 @@ func (x *PercentageSelector) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PercentageSelector.ProtoReflect.Descriptor instead.
 func (*PercentageSelector) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{170}
+	return file_flow_proto_rawDescGZIP(), []int{171}
 }
 
 func (x *PercentageSelector) GetPercentage() int32 {
@@ -12506,7 +12654,7 @@ type OperationRunOptions struct {
 
 func (x *OperationRunOptions) Reset() {
 	*x = OperationRunOptions{}
-	mi := &file_flow_proto_msgTypes[171]
+	mi := &file_flow_proto_msgTypes[172]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12518,7 +12666,7 @@ func (x *OperationRunOptions) String() string {
 func (*OperationRunOptions) ProtoMessage() {}
 
 func (x *OperationRunOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[171]
+	mi := &file_flow_proto_msgTypes[172]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12531,7 +12679,7 @@ func (x *OperationRunOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunOptions.ProtoReflect.Descriptor instead.
 func (*OperationRunOptions) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{171}
+	return file_flow_proto_rawDescGZIP(), []int{172}
 }
 
 func (x *OperationRunOptions) GetMaxConcurrentTargets() int32 {
@@ -12580,7 +12728,7 @@ type OperationRunSafetyPolicy struct {
 
 func (x *OperationRunSafetyPolicy) Reset() {
 	*x = OperationRunSafetyPolicy{}
-	mi := &file_flow_proto_msgTypes[172]
+	mi := &file_flow_proto_msgTypes[173]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12592,7 +12740,7 @@ func (x *OperationRunSafetyPolicy) String() string {
 func (*OperationRunSafetyPolicy) ProtoMessage() {}
 
 func (x *OperationRunSafetyPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[172]
+	mi := &file_flow_proto_msgTypes[173]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12605,7 +12753,7 @@ func (x *OperationRunSafetyPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunSafetyPolicy.ProtoReflect.Descriptor instead.
 func (*OperationRunSafetyPolicy) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{172}
+	return file_flow_proto_rawDescGZIP(), []int{173}
 }
 
 func (x *OperationRunSafetyPolicy) GetGates() []*OperationRunSafetyGate {
@@ -12628,7 +12776,7 @@ type OperationRunSafetyGate struct {
 
 func (x *OperationRunSafetyGate) Reset() {
 	*x = OperationRunSafetyGate{}
-	mi := &file_flow_proto_msgTypes[173]
+	mi := &file_flow_proto_msgTypes[174]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12640,7 +12788,7 @@ func (x *OperationRunSafetyGate) String() string {
 func (*OperationRunSafetyGate) ProtoMessage() {}
 
 func (x *OperationRunSafetyGate) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[173]
+	mi := &file_flow_proto_msgTypes[174]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12653,7 +12801,7 @@ func (x *OperationRunSafetyGate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunSafetyGate.ProtoReflect.Descriptor instead.
 func (*OperationRunSafetyGate) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{173}
+	return file_flow_proto_rawDescGZIP(), []int{174}
 }
 
 func (x *OperationRunSafetyGate) GetGate() isOperationRunSafetyGate_Gate {
@@ -12710,7 +12858,7 @@ type OperationRunFailureRateGate struct {
 
 func (x *OperationRunFailureRateGate) Reset() {
 	*x = OperationRunFailureRateGate{}
-	mi := &file_flow_proto_msgTypes[174]
+	mi := &file_flow_proto_msgTypes[175]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12722,7 +12870,7 @@ func (x *OperationRunFailureRateGate) String() string {
 func (*OperationRunFailureRateGate) ProtoMessage() {}
 
 func (x *OperationRunFailureRateGate) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[174]
+	mi := &file_flow_proto_msgTypes[175]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12735,7 +12883,7 @@ func (x *OperationRunFailureRateGate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunFailureRateGate.ProtoReflect.Descriptor instead.
 func (*OperationRunFailureRateGate) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{174}
+	return file_flow_proto_rawDescGZIP(), []int{175}
 }
 
 func (x *OperationRunFailureRateGate) GetScope() OperationRunSafetyGateScope {
@@ -12765,7 +12913,7 @@ type OperationRunFailureCountGate struct {
 
 func (x *OperationRunFailureCountGate) Reset() {
 	*x = OperationRunFailureCountGate{}
-	mi := &file_flow_proto_msgTypes[175]
+	mi := &file_flow_proto_msgTypes[176]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12777,7 +12925,7 @@ func (x *OperationRunFailureCountGate) String() string {
 func (*OperationRunFailureCountGate) ProtoMessage() {}
 
 func (x *OperationRunFailureCountGate) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[175]
+	mi := &file_flow_proto_msgTypes[176]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12790,7 +12938,7 @@ func (x *OperationRunFailureCountGate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunFailureCountGate.ProtoReflect.Descriptor instead.
 func (*OperationRunFailureCountGate) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{175}
+	return file_flow_proto_rawDescGZIP(), []int{176}
 }
 
 func (x *OperationRunFailureCountGate) GetScope() OperationRunSafetyGateScope {
@@ -12820,7 +12968,7 @@ type OperationRunOrderingPolicy struct {
 
 func (x *OperationRunOrderingPolicy) Reset() {
 	*x = OperationRunOrderingPolicy{}
-	mi := &file_flow_proto_msgTypes[176]
+	mi := &file_flow_proto_msgTypes[177]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12832,7 +12980,7 @@ func (x *OperationRunOrderingPolicy) String() string {
 func (*OperationRunOrderingPolicy) ProtoMessage() {}
 
 func (x *OperationRunOrderingPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[176]
+	mi := &file_flow_proto_msgTypes[177]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12845,7 +12993,7 @@ func (x *OperationRunOrderingPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunOrderingPolicy.ProtoReflect.Descriptor instead.
 func (*OperationRunOrderingPolicy) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{176}
+	return file_flow_proto_rawDescGZIP(), []int{177}
 }
 
 func (x *OperationRunOrderingPolicy) GetOrdering() isOperationRunOrderingPolicy_Ordering {
@@ -12901,7 +13049,7 @@ type OperationRunRandomOrdering struct {
 
 func (x *OperationRunRandomOrdering) Reset() {
 	*x = OperationRunRandomOrdering{}
-	mi := &file_flow_proto_msgTypes[177]
+	mi := &file_flow_proto_msgTypes[178]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12913,7 +13061,7 @@ func (x *OperationRunRandomOrdering) String() string {
 func (*OperationRunRandomOrdering) ProtoMessage() {}
 
 func (x *OperationRunRandomOrdering) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[177]
+	mi := &file_flow_proto_msgTypes[178]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12926,7 +13074,7 @@ func (x *OperationRunRandomOrdering) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunRandomOrdering.ProtoReflect.Descriptor instead.
 func (*OperationRunRandomOrdering) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{177}
+	return file_flow_proto_rawDescGZIP(), []int{178}
 }
 
 func (x *OperationRunRandomOrdering) GetSeed() string {
@@ -12945,7 +13093,7 @@ type OperationRunPhysicalLocationOrdering struct {
 
 func (x *OperationRunPhysicalLocationOrdering) Reset() {
 	*x = OperationRunPhysicalLocationOrdering{}
-	mi := &file_flow_proto_msgTypes[178]
+	mi := &file_flow_proto_msgTypes[179]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12957,7 +13105,7 @@ func (x *OperationRunPhysicalLocationOrdering) String() string {
 func (*OperationRunPhysicalLocationOrdering) ProtoMessage() {}
 
 func (x *OperationRunPhysicalLocationOrdering) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[178]
+	mi := &file_flow_proto_msgTypes[179]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12970,7 +13118,7 @@ func (x *OperationRunPhysicalLocationOrdering) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use OperationRunPhysicalLocationOrdering.ProtoReflect.Descriptor instead.
 func (*OperationRunPhysicalLocationOrdering) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{178}
+	return file_flow_proto_rawDescGZIP(), []int{179}
 }
 
 func (x *OperationRunPhysicalLocationOrdering) GetStrategy() OperationRunPhysicalLocationOrdering_Strategy {
@@ -12996,7 +13144,7 @@ type OperationRunPhasePolicy struct {
 
 func (x *OperationRunPhasePolicy) Reset() {
 	*x = OperationRunPhasePolicy{}
-	mi := &file_flow_proto_msgTypes[179]
+	mi := &file_flow_proto_msgTypes[180]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13008,7 +13156,7 @@ func (x *OperationRunPhasePolicy) String() string {
 func (*OperationRunPhasePolicy) ProtoMessage() {}
 
 func (x *OperationRunPhasePolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[179]
+	mi := &file_flow_proto_msgTypes[180]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13021,7 +13169,7 @@ func (x *OperationRunPhasePolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunPhasePolicy.ProtoReflect.Descriptor instead.
 func (*OperationRunPhasePolicy) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{179}
+	return file_flow_proto_rawDescGZIP(), []int{180}
 }
 
 func (x *OperationRunPhasePolicy) GetPlan() isOperationRunPhasePolicy_Plan {
@@ -13097,7 +13245,7 @@ type EqualOperationRunPhases struct {
 
 func (x *EqualOperationRunPhases) Reset() {
 	*x = EqualOperationRunPhases{}
-	mi := &file_flow_proto_msgTypes[180]
+	mi := &file_flow_proto_msgTypes[181]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13109,7 +13257,7 @@ func (x *EqualOperationRunPhases) String() string {
 func (*EqualOperationRunPhases) ProtoMessage() {}
 
 func (x *EqualOperationRunPhases) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[180]
+	mi := &file_flow_proto_msgTypes[181]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13122,7 +13270,7 @@ func (x *EqualOperationRunPhases) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EqualOperationRunPhases.ProtoReflect.Descriptor instead.
 func (*EqualOperationRunPhases) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{180}
+	return file_flow_proto_rawDescGZIP(), []int{181}
 }
 
 func (x *EqualOperationRunPhases) GetPhaseCount() int32 {
@@ -13141,7 +13289,7 @@ type PercentageOperationRunPhases struct {
 
 func (x *PercentageOperationRunPhases) Reset() {
 	*x = PercentageOperationRunPhases{}
-	mi := &file_flow_proto_msgTypes[181]
+	mi := &file_flow_proto_msgTypes[182]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13153,7 +13301,7 @@ func (x *PercentageOperationRunPhases) String() string {
 func (*PercentageOperationRunPhases) ProtoMessage() {}
 
 func (x *PercentageOperationRunPhases) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[181]
+	mi := &file_flow_proto_msgTypes[182]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13166,7 +13314,7 @@ func (x *PercentageOperationRunPhases) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PercentageOperationRunPhases.ProtoReflect.Descriptor instead.
 func (*PercentageOperationRunPhases) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{181}
+	return file_flow_proto_rawDescGZIP(), []int{182}
 }
 
 func (x *PercentageOperationRunPhases) GetPhases() []*OperationRunPercentagePhase {
@@ -13186,7 +13334,7 @@ type OperationRunPercentagePhase struct {
 
 func (x *OperationRunPercentagePhase) Reset() {
 	*x = OperationRunPercentagePhase{}
-	mi := &file_flow_proto_msgTypes[182]
+	mi := &file_flow_proto_msgTypes[183]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13198,7 +13346,7 @@ func (x *OperationRunPercentagePhase) String() string {
 func (*OperationRunPercentagePhase) ProtoMessage() {}
 
 func (x *OperationRunPercentagePhase) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[182]
+	mi := &file_flow_proto_msgTypes[183]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13211,7 +13359,7 @@ func (x *OperationRunPercentagePhase) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunPercentagePhase.ProtoReflect.Descriptor instead.
 func (*OperationRunPercentagePhase) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{182}
+	return file_flow_proto_rawDescGZIP(), []int{183}
 }
 
 func (x *OperationRunPercentagePhase) GetPercentage() int32 {
@@ -13233,7 +13381,7 @@ type CountOperationRunPhases struct {
 
 func (x *CountOperationRunPhases) Reset() {
 	*x = CountOperationRunPhases{}
-	mi := &file_flow_proto_msgTypes[183]
+	mi := &file_flow_proto_msgTypes[184]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13245,7 +13393,7 @@ func (x *CountOperationRunPhases) String() string {
 func (*CountOperationRunPhases) ProtoMessage() {}
 
 func (x *CountOperationRunPhases) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[183]
+	mi := &file_flow_proto_msgTypes[184]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13258,7 +13406,7 @@ func (x *CountOperationRunPhases) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CountOperationRunPhases.ProtoReflect.Descriptor instead.
 func (*CountOperationRunPhases) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{183}
+	return file_flow_proto_rawDescGZIP(), []int{184}
 }
 
 func (x *CountOperationRunPhases) GetPhases() []*OperationRunCountPhase {
@@ -13278,7 +13426,7 @@ type OperationRunCountPhase struct {
 
 func (x *OperationRunCountPhase) Reset() {
 	*x = OperationRunCountPhase{}
-	mi := &file_flow_proto_msgTypes[184]
+	mi := &file_flow_proto_msgTypes[185]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13290,7 +13438,7 @@ func (x *OperationRunCountPhase) String() string {
 func (*OperationRunCountPhase) ProtoMessage() {}
 
 func (x *OperationRunCountPhase) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[184]
+	mi := &file_flow_proto_msgTypes[185]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13303,7 +13451,7 @@ func (x *OperationRunCountPhase) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunCountPhase.ProtoReflect.Descriptor instead.
 func (*OperationRunCountPhase) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{184}
+	return file_flow_proto_rawDescGZIP(), []int{185}
 }
 
 func (x *OperationRunCountPhase) GetCount() int32 {
@@ -13325,7 +13473,7 @@ type OperationRunPhaseAdvancePolicy struct {
 
 func (x *OperationRunPhaseAdvancePolicy) Reset() {
 	*x = OperationRunPhaseAdvancePolicy{}
-	mi := &file_flow_proto_msgTypes[185]
+	mi := &file_flow_proto_msgTypes[186]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13337,7 +13485,7 @@ func (x *OperationRunPhaseAdvancePolicy) String() string {
 func (*OperationRunPhaseAdvancePolicy) ProtoMessage() {}
 
 func (x *OperationRunPhaseAdvancePolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[185]
+	mi := &file_flow_proto_msgTypes[186]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13350,7 +13498,7 @@ func (x *OperationRunPhaseAdvancePolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunPhaseAdvancePolicy.ProtoReflect.Descriptor instead.
 func (*OperationRunPhaseAdvancePolicy) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{185}
+	return file_flow_proto_rawDescGZIP(), []int{186}
 }
 
 func (x *OperationRunPhaseAdvancePolicy) GetAutoAdvance() bool {
@@ -13372,7 +13520,7 @@ type OperationRunConflictPolicy struct {
 
 func (x *OperationRunConflictPolicy) Reset() {
 	*x = OperationRunConflictPolicy{}
-	mi := &file_flow_proto_msgTypes[186]
+	mi := &file_flow_proto_msgTypes[187]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13384,7 +13532,7 @@ func (x *OperationRunConflictPolicy) String() string {
 func (*OperationRunConflictPolicy) ProtoMessage() {}
 
 func (x *OperationRunConflictPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[186]
+	mi := &file_flow_proto_msgTypes[187]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13397,7 +13545,7 @@ func (x *OperationRunConflictPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunConflictPolicy.ProtoReflect.Descriptor instead.
 func (*OperationRunConflictPolicy) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{186}
+	return file_flow_proto_rawDescGZIP(), []int{187}
 }
 
 func (x *OperationRunConflictPolicy) GetStrategy() isOperationRunConflictPolicy_Strategy {
@@ -13438,7 +13586,7 @@ type OperationRunConflictRetryPolicy struct {
 
 func (x *OperationRunConflictRetryPolicy) Reset() {
 	*x = OperationRunConflictRetryPolicy{}
-	mi := &file_flow_proto_msgTypes[187]
+	mi := &file_flow_proto_msgTypes[188]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13450,7 +13598,7 @@ func (x *OperationRunConflictRetryPolicy) String() string {
 func (*OperationRunConflictRetryPolicy) ProtoMessage() {}
 
 func (x *OperationRunConflictRetryPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[187]
+	mi := &file_flow_proto_msgTypes[188]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13463,7 +13611,7 @@ func (x *OperationRunConflictRetryPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunConflictRetryPolicy.ProtoReflect.Descriptor instead.
 func (*OperationRunConflictRetryPolicy) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{187}
+	return file_flow_proto_rawDescGZIP(), []int{188}
 }
 
 func (x *OperationRunConflictRetryPolicy) GetRetryTimeout() *durationpb.Duration {
@@ -13505,7 +13653,7 @@ type OperationRunTargetScope struct {
 
 func (x *OperationRunTargetScope) Reset() {
 	*x = OperationRunTargetScope{}
-	mi := &file_flow_proto_msgTypes[188]
+	mi := &file_flow_proto_msgTypes[189]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13517,7 +13665,7 @@ func (x *OperationRunTargetScope) String() string {
 func (*OperationRunTargetScope) ProtoMessage() {}
 
 func (x *OperationRunTargetScope) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[188]
+	mi := &file_flow_proto_msgTypes[189]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13530,7 +13678,7 @@ func (x *OperationRunTargetScope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunTargetScope.ProtoReflect.Descriptor instead.
 func (*OperationRunTargetScope) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{188}
+	return file_flow_proto_rawDescGZIP(), []int{189}
 }
 
 func (x *OperationRunTargetScope) GetExcludeOperationRunIds() []*UUID {
@@ -13562,7 +13710,7 @@ type OperationRunOperation struct {
 
 func (x *OperationRunOperation) Reset() {
 	*x = OperationRunOperation{}
-	mi := &file_flow_proto_msgTypes[189]
+	mi := &file_flow_proto_msgTypes[190]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13574,7 +13722,7 @@ func (x *OperationRunOperation) String() string {
 func (*OperationRunOperation) ProtoMessage() {}
 
 func (x *OperationRunOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[189]
+	mi := &file_flow_proto_msgTypes[190]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13587,7 +13735,7 @@ func (x *OperationRunOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunOperation.ProtoReflect.Descriptor instead.
 func (*OperationRunOperation) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{189}
+	return file_flow_proto_rawDescGZIP(), []int{190}
 }
 
 func (x *OperationRunOperation) GetOperation() isOperationRunOperation_Operation {
@@ -13636,7 +13784,7 @@ type OperationRunState struct {
 
 func (x *OperationRunState) Reset() {
 	*x = OperationRunState{}
-	mi := &file_flow_proto_msgTypes[190]
+	mi := &file_flow_proto_msgTypes[191]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13648,7 +13796,7 @@ func (x *OperationRunState) String() string {
 func (*OperationRunState) ProtoMessage() {}
 
 func (x *OperationRunState) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[190]
+	mi := &file_flow_proto_msgTypes[191]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13661,7 +13809,7 @@ func (x *OperationRunState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunState.ProtoReflect.Descriptor instead.
 func (*OperationRunState) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{190}
+	return file_flow_proto_rawDescGZIP(), []int{191}
 }
 
 func (x *OperationRunState) GetStatus() OperationRunStatus {
@@ -13688,7 +13836,7 @@ type OperationKind struct {
 
 func (x *OperationKind) Reset() {
 	*x = OperationKind{}
-	mi := &file_flow_proto_msgTypes[191]
+	mi := &file_flow_proto_msgTypes[192]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13700,7 +13848,7 @@ func (x *OperationKind) String() string {
 func (*OperationKind) ProtoMessage() {}
 
 func (x *OperationKind) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[191]
+	mi := &file_flow_proto_msgTypes[192]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13713,7 +13861,7 @@ func (x *OperationKind) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationKind.ProtoReflect.Descriptor instead.
 func (*OperationKind) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{191}
+	return file_flow_proto_rawDescGZIP(), []int{192}
 }
 
 func (x *OperationKind) GetType() OperationType {
@@ -13742,7 +13890,7 @@ type OperationRun struct {
 
 func (x *OperationRun) Reset() {
 	*x = OperationRun{}
-	mi := &file_flow_proto_msgTypes[192]
+	mi := &file_flow_proto_msgTypes[193]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13754,7 +13902,7 @@ func (x *OperationRun) String() string {
 func (*OperationRun) ProtoMessage() {}
 
 func (x *OperationRun) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[192]
+	mi := &file_flow_proto_msgTypes[193]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13767,7 +13915,7 @@ func (x *OperationRun) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRun.ProtoReflect.Descriptor instead.
 func (*OperationRun) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{192}
+	return file_flow_proto_rawDescGZIP(), []int{193}
 }
 
 func (x *OperationRun) GetSummary() *OperationRunSummary {
@@ -13813,7 +13961,7 @@ type OperationRunSummary struct {
 
 func (x *OperationRunSummary) Reset() {
 	*x = OperationRunSummary{}
-	mi := &file_flow_proto_msgTypes[193]
+	mi := &file_flow_proto_msgTypes[194]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13825,7 +13973,7 @@ func (x *OperationRunSummary) String() string {
 func (*OperationRunSummary) ProtoMessage() {}
 
 func (x *OperationRunSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[193]
+	mi := &file_flow_proto_msgTypes[194]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13838,7 +13986,7 @@ func (x *OperationRunSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunSummary.ProtoReflect.Descriptor instead.
 func (*OperationRunSummary) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{193}
+	return file_flow_proto_rawDescGZIP(), []int{194}
 }
 
 func (x *OperationRunSummary) GetId() *UUID {
@@ -13928,7 +14076,7 @@ type OperationRunStats struct {
 
 func (x *OperationRunStats) Reset() {
 	*x = OperationRunStats{}
-	mi := &file_flow_proto_msgTypes[194]
+	mi := &file_flow_proto_msgTypes[195]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13940,7 +14088,7 @@ func (x *OperationRunStats) String() string {
 func (*OperationRunStats) ProtoMessage() {}
 
 func (x *OperationRunStats) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[194]
+	mi := &file_flow_proto_msgTypes[195]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13953,7 +14101,7 @@ func (x *OperationRunStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunStats.ProtoReflect.Descriptor instead.
 func (*OperationRunStats) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{194}
+	return file_flow_proto_rawDescGZIP(), []int{195}
 }
 
 func (x *OperationRunStats) GetCurrentPhaseStats() *OperationRunPhaseStats {
@@ -13983,7 +14131,7 @@ type OperationRunPhaseStats struct {
 
 func (x *OperationRunPhaseStats) Reset() {
 	*x = OperationRunPhaseStats{}
-	mi := &file_flow_proto_msgTypes[195]
+	mi := &file_flow_proto_msgTypes[196]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13995,7 +14143,7 @@ func (x *OperationRunPhaseStats) String() string {
 func (*OperationRunPhaseStats) ProtoMessage() {}
 
 func (x *OperationRunPhaseStats) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[195]
+	mi := &file_flow_proto_msgTypes[196]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14008,7 +14156,7 @@ func (x *OperationRunPhaseStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunPhaseStats.ProtoReflect.Descriptor instead.
 func (*OperationRunPhaseStats) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{195}
+	return file_flow_proto_rawDescGZIP(), []int{196}
 }
 
 func (x *OperationRunPhaseStats) GetPhaseIndex() int32 {
@@ -14044,7 +14192,7 @@ type OperationRunTargetOutcomeCounts struct {
 
 func (x *OperationRunTargetOutcomeCounts) Reset() {
 	*x = OperationRunTargetOutcomeCounts{}
-	mi := &file_flow_proto_msgTypes[196]
+	mi := &file_flow_proto_msgTypes[197]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14056,7 +14204,7 @@ func (x *OperationRunTargetOutcomeCounts) String() string {
 func (*OperationRunTargetOutcomeCounts) ProtoMessage() {}
 
 func (x *OperationRunTargetOutcomeCounts) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[196]
+	mi := &file_flow_proto_msgTypes[197]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14069,7 +14217,7 @@ func (x *OperationRunTargetOutcomeCounts) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunTargetOutcomeCounts.ProtoReflect.Descriptor instead.
 func (*OperationRunTargetOutcomeCounts) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{196}
+	return file_flow_proto_rawDescGZIP(), []int{197}
 }
 
 func (x *OperationRunTargetOutcomeCounts) GetCompleted() int32 {
@@ -14120,7 +14268,7 @@ type OperationRunTarget struct {
 
 func (x *OperationRunTarget) Reset() {
 	*x = OperationRunTarget{}
-	mi := &file_flow_proto_msgTypes[197]
+	mi := &file_flow_proto_msgTypes[198]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14132,7 +14280,7 @@ func (x *OperationRunTarget) String() string {
 func (*OperationRunTarget) ProtoMessage() {}
 
 func (x *OperationRunTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[197]
+	mi := &file_flow_proto_msgTypes[198]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14145,7 +14293,7 @@ func (x *OperationRunTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationRunTarget.ProtoReflect.Descriptor instead.
 func (*OperationRunTarget) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{197}
+	return file_flow_proto_rawDescGZIP(), []int{198}
 }
 
 func (x *OperationRunTarget) GetId() *UUID {
@@ -14242,7 +14390,7 @@ type NVLDomainTargets struct {
 
 func (x *NVLDomainTargets) Reset() {
 	*x = NVLDomainTargets{}
-	mi := &file_flow_proto_msgTypes[198]
+	mi := &file_flow_proto_msgTypes[199]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14254,7 +14402,7 @@ func (x *NVLDomainTargets) String() string {
 func (*NVLDomainTargets) ProtoMessage() {}
 
 func (x *NVLDomainTargets) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[198]
+	mi := &file_flow_proto_msgTypes[199]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14267,7 +14415,7 @@ func (x *NVLDomainTargets) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NVLDomainTargets.ProtoReflect.Descriptor instead.
 func (*NVLDomainTargets) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{198}
+	return file_flow_proto_rawDescGZIP(), []int{199}
 }
 
 func (x *NVLDomainTargets) GetTargets() []*NVLDomainTarget {
@@ -14295,7 +14443,7 @@ type NVLDomainTarget struct {
 
 func (x *NVLDomainTarget) Reset() {
 	*x = NVLDomainTarget{}
-	mi := &file_flow_proto_msgTypes[199]
+	mi := &file_flow_proto_msgTypes[200]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14307,7 +14455,7 @@ func (x *NVLDomainTarget) String() string {
 func (*NVLDomainTarget) ProtoMessage() {}
 
 func (x *NVLDomainTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[199]
+	mi := &file_flow_proto_msgTypes[200]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14320,7 +14468,7 @@ func (x *NVLDomainTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NVLDomainTarget.ProtoReflect.Descriptor instead.
 func (*NVLDomainTarget) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{199}
+	return file_flow_proto_rawDescGZIP(), []int{200}
 }
 
 func (x *NVLDomainTarget) GetIdentifier() isNVLDomainTarget_Identifier {
@@ -14400,7 +14548,7 @@ type HealthReport struct {
 
 func (x *HealthReport) Reset() {
 	*x = HealthReport{}
-	mi := &file_flow_proto_msgTypes[200]
+	mi := &file_flow_proto_msgTypes[201]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14412,7 +14560,7 @@ func (x *HealthReport) String() string {
 func (*HealthReport) ProtoMessage() {}
 
 func (x *HealthReport) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[200]
+	mi := &file_flow_proto_msgTypes[201]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14425,7 +14573,7 @@ func (x *HealthReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthReport.ProtoReflect.Descriptor instead.
 func (*HealthReport) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{200}
+	return file_flow_proto_rawDescGZIP(), []int{201}
 }
 
 func (x *HealthReport) GetSource() string {
@@ -14473,7 +14621,7 @@ type HealthProbeSuccess struct {
 
 func (x *HealthProbeSuccess) Reset() {
 	*x = HealthProbeSuccess{}
-	mi := &file_flow_proto_msgTypes[201]
+	mi := &file_flow_proto_msgTypes[202]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14485,7 +14633,7 @@ func (x *HealthProbeSuccess) String() string {
 func (*HealthProbeSuccess) ProtoMessage() {}
 
 func (x *HealthProbeSuccess) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[201]
+	mi := &file_flow_proto_msgTypes[202]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14498,7 +14646,7 @@ func (x *HealthProbeSuccess) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthProbeSuccess.ProtoReflect.Descriptor instead.
 func (*HealthProbeSuccess) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{201}
+	return file_flow_proto_rawDescGZIP(), []int{202}
 }
 
 func (x *HealthProbeSuccess) GetId() string {
@@ -14529,7 +14677,7 @@ type HealthProbeAlert struct {
 
 func (x *HealthProbeAlert) Reset() {
 	*x = HealthProbeAlert{}
-	mi := &file_flow_proto_msgTypes[202]
+	mi := &file_flow_proto_msgTypes[203]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14541,7 +14689,7 @@ func (x *HealthProbeAlert) String() string {
 func (*HealthProbeAlert) ProtoMessage() {}
 
 func (x *HealthProbeAlert) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[202]
+	mi := &file_flow_proto_msgTypes[203]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14554,7 +14702,7 @@ func (x *HealthProbeAlert) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthProbeAlert.ProtoReflect.Descriptor instead.
 func (*HealthProbeAlert) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{202}
+	return file_flow_proto_rawDescGZIP(), []int{203}
 }
 
 func (x *HealthProbeAlert) GetId() string {
@@ -14612,7 +14760,7 @@ type GetTrayPowerDetailsRequest struct {
 
 func (x *GetTrayPowerDetailsRequest) Reset() {
 	*x = GetTrayPowerDetailsRequest{}
-	mi := &file_flow_proto_msgTypes[203]
+	mi := &file_flow_proto_msgTypes[204]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14624,7 +14772,7 @@ func (x *GetTrayPowerDetailsRequest) String() string {
 func (*GetTrayPowerDetailsRequest) ProtoMessage() {}
 
 func (x *GetTrayPowerDetailsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[203]
+	mi := &file_flow_proto_msgTypes[204]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14637,7 +14785,7 @@ func (x *GetTrayPowerDetailsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTrayPowerDetailsRequest.ProtoReflect.Descriptor instead.
 func (*GetTrayPowerDetailsRequest) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{203}
+	return file_flow_proto_rawDescGZIP(), []int{204}
 }
 
 func (x *GetTrayPowerDetailsRequest) GetId() string {
@@ -14657,7 +14805,7 @@ type GetTrayPowerDetailsResponse struct {
 
 func (x *GetTrayPowerDetailsResponse) Reset() {
 	*x = GetTrayPowerDetailsResponse{}
-	mi := &file_flow_proto_msgTypes[204]
+	mi := &file_flow_proto_msgTypes[205]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14669,7 +14817,7 @@ func (x *GetTrayPowerDetailsResponse) String() string {
 func (*GetTrayPowerDetailsResponse) ProtoMessage() {}
 
 func (x *GetTrayPowerDetailsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[204]
+	mi := &file_flow_proto_msgTypes[205]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14682,7 +14830,7 @@ func (x *GetTrayPowerDetailsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTrayPowerDetailsResponse.ProtoReflect.Descriptor instead.
 func (*GetTrayPowerDetailsResponse) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{204}
+	return file_flow_proto_rawDescGZIP(), []int{205}
 }
 
 func (x *GetTrayPowerDetailsResponse) GetDetails() *TrayPowerDetails {
@@ -14725,7 +14873,7 @@ type TrayPowerDetails struct {
 
 func (x *TrayPowerDetails) Reset() {
 	*x = TrayPowerDetails{}
-	mi := &file_flow_proto_msgTypes[205]
+	mi := &file_flow_proto_msgTypes[206]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14737,7 +14885,7 @@ func (x *TrayPowerDetails) String() string {
 func (*TrayPowerDetails) ProtoMessage() {}
 
 func (x *TrayPowerDetails) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[205]
+	mi := &file_flow_proto_msgTypes[206]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14750,7 +14898,7 @@ func (x *TrayPowerDetails) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrayPowerDetails.ProtoReflect.Descriptor instead.
 func (*TrayPowerDetails) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{205}
+	return file_flow_proto_rawDescGZIP(), []int{206}
 }
 
 func (x *TrayPowerDetails) GetComponentId() string {
@@ -14816,7 +14964,7 @@ type PowerActualDetails struct {
 
 func (x *PowerActualDetails) Reset() {
 	*x = PowerActualDetails{}
-	mi := &file_flow_proto_msgTypes[206]
+	mi := &file_flow_proto_msgTypes[207]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14828,7 +14976,7 @@ func (x *PowerActualDetails) String() string {
 func (*PowerActualDetails) ProtoMessage() {}
 
 func (x *PowerActualDetails) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[206]
+	mi := &file_flow_proto_msgTypes[207]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14841,7 +14989,7 @@ func (x *PowerActualDetails) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerActualDetails.ProtoReflect.Descriptor instead.
 func (*PowerActualDetails) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{206}
+	return file_flow_proto_rawDescGZIP(), []int{207}
 }
 
 func (x *PowerActualDetails) GetResult() isPowerActualDetails_Result {
@@ -14899,7 +15047,7 @@ type PowerDesiredDetails struct {
 
 func (x *PowerDesiredDetails) Reset() {
 	*x = PowerDesiredDetails{}
-	mi := &file_flow_proto_msgTypes[207]
+	mi := &file_flow_proto_msgTypes[208]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14911,7 +15059,7 @@ func (x *PowerDesiredDetails) String() string {
 func (*PowerDesiredDetails) ProtoMessage() {}
 
 func (x *PowerDesiredDetails) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[207]
+	mi := &file_flow_proto_msgTypes[208]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14924,7 +15072,7 @@ func (x *PowerDesiredDetails) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerDesiredDetails.ProtoReflect.Descriptor instead.
 func (*PowerDesiredDetails) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{207}
+	return file_flow_proto_rawDescGZIP(), []int{208}
 }
 
 func (x *PowerDesiredDetails) GetResult() isPowerDesiredDetails_Result {
@@ -14979,7 +15127,7 @@ type PowerOperations struct {
 
 func (x *PowerOperations) Reset() {
 	*x = PowerOperations{}
-	mi := &file_flow_proto_msgTypes[208]
+	mi := &file_flow_proto_msgTypes[209]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14991,7 +15139,7 @@ func (x *PowerOperations) String() string {
 func (*PowerOperations) ProtoMessage() {}
 
 func (x *PowerOperations) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[208]
+	mi := &file_flow_proto_msgTypes[209]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15004,7 +15152,7 @@ func (x *PowerOperations) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerOperations.ProtoReflect.Descriptor instead.
 func (*PowerOperations) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{208}
+	return file_flow_proto_rawDescGZIP(), []int{209}
 }
 
 func (x *PowerOperations) GetActions() *PowerActionDetails {
@@ -15038,7 +15186,7 @@ type PowerActionDetails struct {
 
 func (x *PowerActionDetails) Reset() {
 	*x = PowerActionDetails{}
-	mi := &file_flow_proto_msgTypes[209]
+	mi := &file_flow_proto_msgTypes[210]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15050,7 +15198,7 @@ func (x *PowerActionDetails) String() string {
 func (*PowerActionDetails) ProtoMessage() {}
 
 func (x *PowerActionDetails) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[209]
+	mi := &file_flow_proto_msgTypes[210]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15063,7 +15211,7 @@ func (x *PowerActionDetails) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerActionDetails.ProtoReflect.Descriptor instead.
 func (*PowerActionDetails) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{209}
+	return file_flow_proto_rawDescGZIP(), []int{210}
 }
 
 func (x *PowerActionDetails) GetResult() isPowerActionDetails_Result {
@@ -15125,7 +15273,7 @@ type PowerTaskDetailsList struct {
 
 func (x *PowerTaskDetailsList) Reset() {
 	*x = PowerTaskDetailsList{}
-	mi := &file_flow_proto_msgTypes[210]
+	mi := &file_flow_proto_msgTypes[211]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15137,7 +15285,7 @@ func (x *PowerTaskDetailsList) String() string {
 func (*PowerTaskDetailsList) ProtoMessage() {}
 
 func (x *PowerTaskDetailsList) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[210]
+	mi := &file_flow_proto_msgTypes[211]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15150,7 +15298,7 @@ func (x *PowerTaskDetailsList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerTaskDetailsList.ProtoReflect.Descriptor instead.
 func (*PowerTaskDetailsList) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{210}
+	return file_flow_proto_rawDescGZIP(), []int{211}
 }
 
 func (x *PowerTaskDetailsList) GetEntries() []*PowerTaskDetails {
@@ -15196,7 +15344,7 @@ type PowerTaskDetails struct {
 
 func (x *PowerTaskDetails) Reset() {
 	*x = PowerTaskDetails{}
-	mi := &file_flow_proto_msgTypes[211]
+	mi := &file_flow_proto_msgTypes[212]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15208,7 +15356,7 @@ func (x *PowerTaskDetails) String() string {
 func (*PowerTaskDetails) ProtoMessage() {}
 
 func (x *PowerTaskDetails) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[211]
+	mi := &file_flow_proto_msgTypes[212]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15221,7 +15369,7 @@ func (x *PowerTaskDetails) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerTaskDetails.ProtoReflect.Descriptor instead.
 func (*PowerTaskDetails) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{211}
+	return file_flow_proto_rawDescGZIP(), []int{212}
 }
 
 func (x *PowerTaskDetails) GetId() *UUID {
@@ -15329,7 +15477,7 @@ type PowerTaskExternalTargets struct {
 
 func (x *PowerTaskExternalTargets) Reset() {
 	*x = PowerTaskExternalTargets{}
-	mi := &file_flow_proto_msgTypes[212]
+	mi := &file_flow_proto_msgTypes[213]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15341,7 +15489,7 @@ func (x *PowerTaskExternalTargets) String() string {
 func (*PowerTaskExternalTargets) ProtoMessage() {}
 
 func (x *PowerTaskExternalTargets) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[212]
+	mi := &file_flow_proto_msgTypes[213]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15354,7 +15502,7 @@ func (x *PowerTaskExternalTargets) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerTaskExternalTargets.ProtoReflect.Descriptor instead.
 func (*PowerTaskExternalTargets) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{212}
+	return file_flow_proto_rawDescGZIP(), []int{213}
 }
 
 func (x *PowerTaskExternalTargets) GetRackId() string {
@@ -15404,7 +15552,7 @@ type PowerTaskWaitingContext struct {
 
 func (x *PowerTaskWaitingContext) Reset() {
 	*x = PowerTaskWaitingContext{}
-	mi := &file_flow_proto_msgTypes[213]
+	mi := &file_flow_proto_msgTypes[214]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15416,7 +15564,7 @@ func (x *PowerTaskWaitingContext) String() string {
 func (*PowerTaskWaitingContext) ProtoMessage() {}
 
 func (x *PowerTaskWaitingContext) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[213]
+	mi := &file_flow_proto_msgTypes[214]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15429,7 +15577,7 @@ func (x *PowerTaskWaitingContext) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PowerTaskWaitingContext.ProtoReflect.Descriptor instead.
 func (*PowerTaskWaitingContext) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{213}
+	return file_flow_proto_rawDescGZIP(), []int{214}
 }
 
 func (x *PowerTaskWaitingContext) GetActiveConflicts() []*TaskBrief {
@@ -15468,7 +15616,7 @@ type TaskBrief struct {
 
 func (x *TaskBrief) Reset() {
 	*x = TaskBrief{}
-	mi := &file_flow_proto_msgTypes[214]
+	mi := &file_flow_proto_msgTypes[215]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15480,7 +15628,7 @@ func (x *TaskBrief) String() string {
 func (*TaskBrief) ProtoMessage() {}
 
 func (x *TaskBrief) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[214]
+	mi := &file_flow_proto_msgTypes[215]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15493,7 +15641,7 @@ func (x *TaskBrief) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskBrief.ProtoReflect.Descriptor instead.
 func (*TaskBrief) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{214}
+	return file_flow_proto_rawDescGZIP(), []int{215}
 }
 
 func (x *TaskBrief) GetId() *UUID {
@@ -15515,6 +15663,486 @@ func (x *TaskBrief) GetStatus() TaskStatus {
 		return x.Status
 	}
 	return TaskStatus_TASK_STATUS_UNKNOWN
+}
+
+type SetEventRuleOverrideRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. Must be an event type registered by Flow.
+	EventType string `protobuf:"bytes,1,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	// Required Site or Rack policy slot to replace.
+	Scope *EventRuleScopeSelector `protobuf:"bytes,2,opt,name=scope,proto3" json:"scope,omitempty"`
+	// Required rule name.
+	Name string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// Optional human-readable rule description.
+	Description string `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"`
+	// Required event-rule actions. Event-specific validation applies.
+	Actions       []*EventRuleAction `protobuf:"bytes,5,rep,name=actions,proto3" json:"actions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetEventRuleOverrideRequest) Reset() {
+	*x = SetEventRuleOverrideRequest{}
+	mi := &file_flow_proto_msgTypes[216]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetEventRuleOverrideRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetEventRuleOverrideRequest) ProtoMessage() {}
+
+func (x *SetEventRuleOverrideRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[216]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetEventRuleOverrideRequest.ProtoReflect.Descriptor instead.
+func (*SetEventRuleOverrideRequest) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{216}
+}
+
+func (x *SetEventRuleOverrideRequest) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *SetEventRuleOverrideRequest) GetScope() *EventRuleScopeSelector {
+	if x != nil {
+		return x.Scope
+	}
+	return nil
+}
+
+func (x *SetEventRuleOverrideRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SetEventRuleOverrideRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *SetEventRuleOverrideRequest) GetActions() []*EventRuleAction {
+	if x != nil {
+		return x.Actions
+	}
+	return nil
+}
+
+type GetEffectiveEventRuleForScopeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. Must be an event type registered by Flow.
+	EventType string `protobuf:"bytes,1,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	// Required Site or Rack scope at which to resolve inheritance.
+	Scope         *EventRuleScopeSelector `protobuf:"bytes,2,opt,name=scope,proto3" json:"scope,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetEffectiveEventRuleForScopeRequest) Reset() {
+	*x = GetEffectiveEventRuleForScopeRequest{}
+	mi := &file_flow_proto_msgTypes[217]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetEffectiveEventRuleForScopeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetEffectiveEventRuleForScopeRequest) ProtoMessage() {}
+
+func (x *GetEffectiveEventRuleForScopeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[217]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetEffectiveEventRuleForScopeRequest.ProtoReflect.Descriptor instead.
+func (*GetEffectiveEventRuleForScopeRequest) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{217}
+}
+
+func (x *GetEffectiveEventRuleForScopeRequest) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *GetEffectiveEventRuleForScopeRequest) GetScope() *EventRuleScopeSelector {
+	if x != nil {
+		return x.Scope
+	}
+	return nil
+}
+
+type DeleteEventRuleOverrideRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. Must be an event type registered by Flow.
+	EventType string `protobuf:"bytes,1,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	// Required Site or Rack policy slot to clear. An empty slot succeeds.
+	Scope         *EventRuleScopeSelector `protobuf:"bytes,2,opt,name=scope,proto3" json:"scope,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteEventRuleOverrideRequest) Reset() {
+	*x = DeleteEventRuleOverrideRequest{}
+	mi := &file_flow_proto_msgTypes[218]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteEventRuleOverrideRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteEventRuleOverrideRequest) ProtoMessage() {}
+
+func (x *DeleteEventRuleOverrideRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[218]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteEventRuleOverrideRequest.ProtoReflect.Descriptor instead.
+func (*DeleteEventRuleOverrideRequest) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{218}
+}
+
+func (x *DeleteEventRuleOverrideRequest) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *DeleteEventRuleOverrideRequest) GetScope() *EventRuleScopeSelector {
+	if x != nil {
+		return x.Scope
+	}
+	return nil
+}
+
+// EventHandlingTask summarizes a Task created by one event-rule action.
+type EventHandlingTask struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stable Flow Task UUID.
+	Id *UUID `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Current Task lifecycle status.
+	Status TaskStatus `protobuf:"varint,2,opt,name=status,proto3,enum=v1.TaskStatus" json:"status,omitempty"`
+	// Time Flow created the Task.
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EventHandlingTask) Reset() {
+	*x = EventHandlingTask{}
+	mi := &file_flow_proto_msgTypes[219]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventHandlingTask) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventHandlingTask) ProtoMessage() {}
+
+func (x *EventHandlingTask) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[219]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventHandlingTask.ProtoReflect.Descriptor instead.
+func (*EventHandlingTask) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{219}
+}
+
+func (x *EventHandlingTask) GetId() *UUID {
+	if x != nil {
+		return x.Id
+	}
+	return nil
+}
+
+func (x *EventHandlingTask) GetStatus() TaskStatus {
+	if x != nil {
+		return x.Status
+	}
+	return TaskStatus_TASK_STATUS_UNKNOWN
+}
+
+func (x *EventHandlingTask) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+type EventHandling struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stable UUID for the source event that caused this handling decision.
+	Id *UUID `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Registered event type handled by the rule.
+	EventType string `protobuf:"bytes,2,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	// Current public identifier of the resource whose event was handled.
+	ResourceId string `protobuf:"bytes,3,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	// Kind of inventory resource identified by resource_id.
+	ResourceType EventResourceType `protobuf:"varint,4,opt,name=resource_type,json=resourceType,proto3,enum=v1.EventResourceType" json:"resource_type,omitempty"`
+	// Tasks created by event-rule actions, ordered by creation time then UUID
+	// ascending. Empty when handling created no Tasks.
+	Tasks []*EventHandlingTask `protobuf:"bytes,5,rep,name=tasks,proto3" json:"tasks,omitempty"`
+	// Time Flow first applied an event rule for this source event.
+	HandledAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=handled_at,json=handledAt,proto3" json:"handled_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EventHandling) Reset() {
+	*x = EventHandling{}
+	mi := &file_flow_proto_msgTypes[220]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventHandling) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventHandling) ProtoMessage() {}
+
+func (x *EventHandling) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[220]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventHandling.ProtoReflect.Descriptor instead.
+func (*EventHandling) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{220}
+}
+
+func (x *EventHandling) GetId() *UUID {
+	if x != nil {
+		return x.Id
+	}
+	return nil
+}
+
+func (x *EventHandling) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *EventHandling) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *EventHandling) GetResourceType() EventResourceType {
+	if x != nil {
+		return x.ResourceType
+	}
+	return EventResourceType_EVENT_RESOURCE_TYPE_UNSPECIFIED
+}
+
+func (x *EventHandling) GetTasks() []*EventHandlingTask {
+	if x != nil {
+		return x.Tasks
+	}
+	return nil
+}
+
+func (x *EventHandling) GetHandledAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.HandledAt
+	}
+	return nil
+}
+
+type GetEventHandlingRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. Must be an event type registered by Flow.
+	EventType string `protobuf:"bytes,1,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	// Required kind of resource whose handling history is requested.
+	ResourceType EventResourceType `protobuf:"varint,2,opt,name=resource_type,json=resourceType,proto3,enum=v1.EventResourceType" json:"resource_type,omitempty"`
+	// Required current public identifier of the resource.
+	ResourceId string `protobuf:"bytes,3,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
+	// Maximum records to return. Zero defaults to one; accepted range is 1-100.
+	Limit int32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Opaque continuation cursor returned by the previous response. Empty starts
+	// from the newest handling.
+	Cursor        string `protobuf:"bytes,5,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetEventHandlingRequest) Reset() {
+	*x = GetEventHandlingRequest{}
+	mi := &file_flow_proto_msgTypes[221]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetEventHandlingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetEventHandlingRequest) ProtoMessage() {}
+
+func (x *GetEventHandlingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[221]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetEventHandlingRequest.ProtoReflect.Descriptor instead.
+func (*GetEventHandlingRequest) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{221}
+}
+
+func (x *GetEventHandlingRequest) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *GetEventHandlingRequest) GetResourceType() EventResourceType {
+	if x != nil {
+		return x.ResourceType
+	}
+	return EventResourceType_EVENT_RESOURCE_TYPE_UNSPECIFIED
+}
+
+func (x *GetEventHandlingRequest) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+func (x *GetEventHandlingRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *GetEventHandlingRequest) GetCursor() string {
+	if x != nil {
+		return x.Cursor
+	}
+	return ""
+}
+
+type GetEventHandlingResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Handling records in descending handled_at and event UUID order.
+	Handlings []*EventHandling `protobuf:"bytes,1,rep,name=handlings,proto3" json:"handlings,omitempty"`
+	// Opaque continuation cursor. Empty means no more records remain.
+	NextCursor    string `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetEventHandlingResponse) Reset() {
+	*x = GetEventHandlingResponse{}
+	mi := &file_flow_proto_msgTypes[222]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetEventHandlingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetEventHandlingResponse) ProtoMessage() {}
+
+func (x *GetEventHandlingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[222]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetEventHandlingResponse.ProtoReflect.Descriptor instead.
+func (*GetEventHandlingResponse) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{222}
+}
+
+func (x *GetEventHandlingResponse) GetHandlings() []*EventHandling {
+	if x != nil {
+		return x.Handlings
+	}
+	return nil
+}
+
+func (x *GetEventHandlingResponse) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
 }
 
 var File_flow_proto protoreflect.FileDescriptor
@@ -16178,7 +16806,12 @@ const file_flow_proto_rawDesc = "" +
 	"\arule_id\x18\x01 \x01(\v2\b.v1.UUIDR\x06ruleId\"V\n" +
 	"\x0eEventRuleScope\x12*\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x16.v1.EventRuleScopeTypeR\x04type\x12\x18\n" +
-	"\x02id\x18\x02 \x01(\v2\b.v1.UUIDR\x02id\"\x98\x01\n" +
+	"\x02id\x18\x02 \x01(\v2\b.v1.UUIDR\x02id\"\xa8\x01\n" +
+	"\x16EventRuleScopeSelector\x12*\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x16.v1.EventRuleScopeTypeR\x04type\x12#\n" +
+	"\arack_id\x18\x02 \x01(\v2\b.v1.UUIDH\x00R\x06rackId\x12*\n" +
+	"\x10rack_external_id\x18\x03 \x01(\tH\x00R\x0erackExternalIdB\x11\n" +
+	"\x0frack_identifier\"\x98\x01\n" +
 	"\x10EventRuleBinding\x12\x18\n" +
 	"\x02id\x18\x01 \x01(\v2\b.v1.UUIDR\x02id\x12!\n" +
 	"\arule_id\x18\x02 \x01(\v2\b.v1.UUIDR\x06ruleId\x12\x1d\n" +
@@ -16625,7 +17258,49 @@ const file_flow_proto_rawDesc = "" +
 	"\tTaskBrief\x12\x18\n" +
 	"\x02id\x18\x01 \x01(\v2\b.v1.UUIDR\x02id\x12 \n" +
 	"\x04kind\x18\x02 \x01(\x0e2\f.v1.TaskKindR\x04kind\x12&\n" +
-	"\x06status\x18\x03 \x01(\x0e2\x0e.v1.TaskStatusR\x06status*D\n" +
+	"\x06status\x18\x03 \x01(\x0e2\x0e.v1.TaskStatusR\x06status\"\xd3\x01\n" +
+	"\x1bSetEventRuleOverrideRequest\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x01 \x01(\tR\teventType\x120\n" +
+	"\x05scope\x18\x02 \x01(\v2\x1a.v1.EventRuleScopeSelectorR\x05scope\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x04 \x01(\tR\vdescription\x12-\n" +
+	"\aactions\x18\x05 \x03(\v2\x13.v1.EventRuleActionR\aactions\"w\n" +
+	"$GetEffectiveEventRuleForScopeRequest\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x01 \x01(\tR\teventType\x120\n" +
+	"\x05scope\x18\x02 \x01(\v2\x1a.v1.EventRuleScopeSelectorR\x05scope\"q\n" +
+	"\x1eDeleteEventRuleOverrideRequest\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x01 \x01(\tR\teventType\x120\n" +
+	"\x05scope\x18\x02 \x01(\v2\x1a.v1.EventRuleScopeSelectorR\x05scope\"\x90\x01\n" +
+	"\x11EventHandlingTask\x12\x18\n" +
+	"\x02id\x18\x01 \x01(\v2\b.v1.UUIDR\x02id\x12&\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x0e.v1.TaskStatusR\x06status\x129\n" +
+	"\n" +
+	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x8d\x02\n" +
+	"\rEventHandling\x12\x18\n" +
+	"\x02id\x18\x01 \x01(\v2\b.v1.UUIDR\x02id\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x02 \x01(\tR\teventType\x12\x1f\n" +
+	"\vresource_id\x18\x03 \x01(\tR\n" +
+	"resourceId\x12:\n" +
+	"\rresource_type\x18\x04 \x01(\x0e2\x15.v1.EventResourceTypeR\fresourceType\x12+\n" +
+	"\x05tasks\x18\x05 \x03(\v2\x15.v1.EventHandlingTaskR\x05tasks\x129\n" +
+	"\n" +
+	"handled_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\thandledAt\"\xc3\x01\n" +
+	"\x17GetEventHandlingRequest\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x01 \x01(\tR\teventType\x12:\n" +
+	"\rresource_type\x18\x02 \x01(\x0e2\x15.v1.EventResourceTypeR\fresourceType\x12\x1f\n" +
+	"\vresource_id\x18\x03 \x01(\tR\n" +
+	"resourceId\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\x12\x16\n" +
+	"\x06cursor\x18\x05 \x01(\tR\x06cursor\"l\n" +
+	"\x18GetEventHandlingResponse\x12/\n" +
+	"\thandlings\x18\x01 \x03(\v2\x11.v1.EventHandlingR\thandlings\x12\x1f\n" +
+	"\vnext_cursor\x18\x02 \x01(\tR\n" +
+	"nextCursor*D\n" +
 	"\aBMCType\x12\x14\n" +
 	"\x10BMC_TYPE_UNKNOWN\x10\x00\x12\x11\n" +
 	"\rBMC_TYPE_HOST\x10\x01\x12\x10\n" +
@@ -16809,7 +17484,11 @@ const file_flow_proto_rawDesc = "" +
 	"\x1aTASK_KIND_FIRMWARE_CONTROL\x10\x02\x12\x16\n" +
 	"\x12TASK_KIND_BRING_UP\x10\x03\x12\x1a\n" +
 	"\x16TASK_KIND_DECOMMISSION\x10\x04\x12 \n" +
-	"\x1cTASK_KIND_INJECT_EXPECTATION\x10\x052\x81.\n" +
+	"\x1cTASK_KIND_INJECT_EXPECTATION\x10\x05*y\n" +
+	"\x11EventResourceType\x12#\n" +
+	"\x1fEVENT_RESOURCE_TYPE_UNSPECIFIED\x10\x00\x12!\n" +
+	"\x1dEVENT_RESOURCE_TYPE_COMPONENT\x10\x01\x12\x1c\n" +
+	"\x18EVENT_RESOURCE_TYPE_RACK\x10\x022\xc90\n" +
 	"\x04Flow\x12,\n" +
 	"\aVersion\x12\x12.v1.VersionRequest\x1a\r.v1.BuildInfo\x12E\n" +
 	"\x12CreateTaskSchedule\x12\x1d.v1.CreateTaskScheduleRequest\x1a\x10.v1.TaskSchedule\x12?\n" +
@@ -16877,7 +17556,11 @@ const file_flow_proto_rawDesc = "" +
 	"\x0fDeleteEventRule\x12\x1a.v1.DeleteEventRuleRequest\x1a\x16.google.protobuf.Empty\x12Q\n" +
 	"\x16CreateEventRuleBinding\x12!.v1.CreateEventRuleBindingRequest\x1a\x14.v1.EventRuleBinding\x12K\n" +
 	"\x13GetEventRuleBinding\x12\x1e.v1.GetEventRuleBindingRequest\x1a\x14.v1.EventRuleBinding\x12S\n" +
-	"\x16DeleteEventRuleBinding\x12!.v1.DeleteEventRuleBindingRequest\x1a\x16.google.protobuf.Empty\x12Q\n" +
+	"\x16DeleteEventRuleBinding\x12!.v1.DeleteEventRuleBindingRequest\x1a\x16.google.protobuf.Empty\x12F\n" +
+	"\x14SetEventRuleOverride\x12\x1f.v1.SetEventRuleOverrideRequest\x1a\r.v1.EventRule\x12X\n" +
+	"\x1dGetEffectiveEventRuleForScope\x12(.v1.GetEffectiveEventRuleForScopeRequest\x1a\r.v1.EventRule\x12U\n" +
+	"\x17DeleteEventRuleOverride\x12\".v1.DeleteEventRuleOverrideRequest\x1a\x16.google.protobuf.Empty\x12M\n" +
+	"\x10GetEventHandling\x12\x1b.v1.GetEventHandlingRequest\x1a\x1c.v1.GetEventHandlingResponse\x12Q\n" +
 	"\x15AssociateRuleWithRack\x12 .v1.AssociateRuleWithRackRequest\x1a\x16.google.protobuf.Empty\x12W\n" +
 	"\x18DisassociateRuleFromRack\x12#.v1.DisassociateRuleFromRackRequest\x1a\x16.google.protobuf.Empty\x12_\n" +
 	"\x16GetRackRuleAssociation\x12!.v1.GetRackRuleAssociationRequest\x1a\".v1.GetRackRuleAssociationResponse\x12e\n" +
@@ -16904,8 +17587,8 @@ func file_flow_proto_rawDescGZIP() []byte {
 	return file_flow_proto_rawDescData
 }
 
-var file_flow_proto_enumTypes = make([]protoimpl.EnumInfo, 32)
-var file_flow_proto_msgTypes = make([]protoimpl.MessageInfo, 215)
+var file_flow_proto_enumTypes = make([]protoimpl.EnumInfo, 33)
+var file_flow_proto_msgTypes = make([]protoimpl.MessageInfo, 223)
 var file_flow_proto_goTypes = []any{
 	(BMCType)(0),                                       // 0: v1.BMCType
 	(ComponentType)(0),                                 // 1: v1.ComponentType
@@ -16938,773 +17621,805 @@ var file_flow_proto_goTypes = []any{
 	(PowerDetailsReadError)(0),                         // 28: v1.PowerDetailsReadError
 	(PowerTaskRelevance)(0),                            // 29: v1.PowerTaskRelevance
 	(TaskKind)(0),                                      // 30: v1.TaskKind
-	(OperationRunPhysicalLocationOrdering_Strategy)(0), // 31: v1.OperationRunPhysicalLocationOrdering.Strategy
-	(*UUID)(nil),                                       // 32: v1.UUID
-	(*DeviceInfo)(nil),                                 // 33: v1.DeviceInfo
-	(*Location)(nil),                                   // 34: v1.Location
-	(*DeviceSerialInfo)(nil),                           // 35: v1.DeviceSerialInfo
-	(*BMCInfo)(nil),                                    // 36: v1.BMCInfo
-	(*RackPosition)(nil),                               // 37: v1.RackPosition
-	(*ComponentOperationStatus)(nil),                   // 38: v1.ComponentOperationStatus
-	(*TaskStats)(nil),                                  // 39: v1.TaskStats
-	(*Component)(nil),                                  // 40: v1.Component
-	(*Rack)(nil),                                       // 41: v1.Rack
-	(*Identifier)(nil),                                 // 42: v1.Identifier
-	(*OperationTargetSpec)(nil),                        // 43: v1.OperationTargetSpec
-	(*RackTargets)(nil),                                // 44: v1.RackTargets
-	(*ComponentTargets)(nil),                           // 45: v1.ComponentTargets
-	(*ComponentTypes)(nil),                             // 46: v1.ComponentTypes
-	(*ComponentFilter)(nil),                            // 47: v1.ComponentFilter
-	(*ComponentsByType)(nil),                           // 48: v1.ComponentsByType
-	(*ComponentsForType)(nil),                          // 49: v1.ComponentsForType
-	(*RackTarget)(nil),                                 // 50: v1.RackTarget
-	(*ComponentTarget)(nil),                            // 51: v1.ComponentTarget
-	(*ExternalRef)(nil),                                // 52: v1.ExternalRef
-	(*NVLDomain)(nil),                                  // 53: v1.NVLDomain
-	(*Pagination)(nil),                                 // 54: v1.Pagination
-	(*StringQueryInfo)(nil),                            // 55: v1.StringQueryInfo
-	(*Filter)(nil),                                     // 56: v1.Filter
-	(*OrderBy)(nil),                                    // 57: v1.OrderBy
-	(*Task)(nil),                                       // 58: v1.Task
-	(*CreateExpectedRackRequest)(nil),                  // 59: v1.CreateExpectedRackRequest
-	(*CreateExpectedRackResponse)(nil),                 // 60: v1.CreateExpectedRackResponse
-	(*GetRackInfoByIDRequest)(nil),                     // 61: v1.GetRackInfoByIDRequest
-	(*GetRackInfoBySerialRequest)(nil),                 // 62: v1.GetRackInfoBySerialRequest
-	(*GetRackInfoResponse)(nil),                        // 63: v1.GetRackInfoResponse
-	(*PatchRackRequest)(nil),                           // 64: v1.PatchRackRequest
-	(*PatchRackResponse)(nil),                          // 65: v1.PatchRackResponse
-	(*GetComponentInfoByIDRequest)(nil),                // 66: v1.GetComponentInfoByIDRequest
-	(*GetComponentInfoBySerialRequest)(nil),            // 67: v1.GetComponentInfoBySerialRequest
-	(*GetComponentInfoResponse)(nil),                   // 68: v1.GetComponentInfoResponse
-	(*GetListOfRacksRequest)(nil),                      // 69: v1.GetListOfRacksRequest
-	(*GetListOfRacksResponse)(nil),                     // 70: v1.GetListOfRacksResponse
-	(*CreateNVLDomainRequest)(nil),                     // 71: v1.CreateNVLDomainRequest
-	(*CreateNVLDomainResponse)(nil),                    // 72: v1.CreateNVLDomainResponse
-	(*AttachRacksToNVLDomainRequest)(nil),              // 73: v1.AttachRacksToNVLDomainRequest
-	(*DetachRacksFromNVLDomainRequest)(nil),            // 74: v1.DetachRacksFromNVLDomainRequest
-	(*GetListOfNVLDomainsRequest)(nil),                 // 75: v1.GetListOfNVLDomainsRequest
-	(*GetListOfNVLDomainsResponse)(nil),                // 76: v1.GetListOfNVLDomainsResponse
-	(*GetNVLinkDomainRequest)(nil),                     // 77: v1.GetNVLinkDomainRequest
-	(*NVLinkDomain)(nil),                               // 78: v1.NVLinkDomain
-	(*GetNVLinkDomainResponse)(nil),                    // 79: v1.GetNVLinkDomainResponse
-	(*GetListOfNVLinkDomainsRequest)(nil),              // 80: v1.GetListOfNVLinkDomainsRequest
-	(*GetListOfNVLinkDomainsResponse)(nil),             // 81: v1.GetListOfNVLinkDomainsResponse
-	(*GetRacksForNVLDomainRequest)(nil),                // 82: v1.GetRacksForNVLDomainRequest
-	(*GetRacksForNVLDomainResponse)(nil),               // 83: v1.GetRacksForNVLDomainResponse
-	(*UpgradeFirmwareRequest)(nil),                     // 84: v1.UpgradeFirmwareRequest
-	(*FirmwareAuthenticationData)(nil),                 // 85: v1.FirmwareAuthenticationData
-	(*PerComponentFirmwareAuthenticationData)(nil),     // 86: v1.PerComponentFirmwareAuthenticationData
-	(*GetComponentsRequest)(nil),                       // 87: v1.GetComponentsRequest
-	(*GetComponentsResponse)(nil),                      // 88: v1.GetComponentsResponse
-	(*ValidateComponentsRequest)(nil),                  // 89: v1.ValidateComponentsRequest
-	(*ValidateComponentsResponse)(nil),                 // 90: v1.ValidateComponentsResponse
-	(*ComponentDiff)(nil),                              // 91: v1.ComponentDiff
-	(*FieldDiff)(nil),                                  // 92: v1.FieldDiff
-	(*AddComponentRequest)(nil),                        // 93: v1.AddComponentRequest
-	(*AddComponentResponse)(nil),                       // 94: v1.AddComponentResponse
-	(*DeleteComponentRequest)(nil),                     // 95: v1.DeleteComponentRequest
-	(*DeleteComponentResponse)(nil),                    // 96: v1.DeleteComponentResponse
-	(*DeleteRackRequest)(nil),                          // 97: v1.DeleteRackRequest
-	(*DeleteRackResponse)(nil),                         // 98: v1.DeleteRackResponse
-	(*PurgeRackRequest)(nil),                           // 99: v1.PurgeRackRequest
-	(*PurgeRackResponse)(nil),                          // 100: v1.PurgeRackResponse
-	(*PurgeComponentRequest)(nil),                      // 101: v1.PurgeComponentRequest
-	(*PurgeComponentResponse)(nil),                     // 102: v1.PurgeComponentResponse
-	(*PatchComponentRequest)(nil),                      // 103: v1.PatchComponentRequest
-	(*PatchComponentResponse)(nil),                     // 104: v1.PatchComponentResponse
-	(*SubmitTaskResponse)(nil),                         // 105: v1.SubmitTaskResponse
-	(*QueueOptions)(nil),                               // 106: v1.QueueOptions
-	(*PowerOnRackRequest)(nil),                         // 107: v1.PowerOnRackRequest
-	(*PowerOffRackRequest)(nil),                        // 108: v1.PowerOffRackRequest
-	(*PowerResetRackRequest)(nil),                      // 109: v1.PowerResetRackRequest
-	(*ACPowerCycleRackRequest)(nil),                    // 110: v1.ACPowerCycleRackRequest
-	(*BringUpRackRequest)(nil),                         // 111: v1.BringUpRackRequest
-	(*IngestRackRequest)(nil),                          // 112: v1.IngestRackRequest
-	(*DecommissionRackRequest)(nil),                    // 113: v1.DecommissionRackRequest
-	(*ListTasksRequest)(nil),                           // 114: v1.ListTasksRequest
-	(*ListTasksResponse)(nil),                          // 115: v1.ListTasksResponse
-	(*GetTasksByIDsRequest)(nil),                       // 116: v1.GetTasksByIDsRequest
-	(*GetTasksByIDsResponse)(nil),                      // 117: v1.GetTasksByIDsResponse
-	(*CancelTaskRequest)(nil),                          // 118: v1.CancelTaskRequest
-	(*CancelTaskResponse)(nil),                         // 119: v1.CancelTaskResponse
-	(*VersionRequest)(nil),                             // 120: v1.VersionRequest
-	(*BuildInfo)(nil),                                  // 121: v1.BuildInfo
-	(*TaskOperation)(nil),                              // 122: v1.TaskOperation
-	(*PowerControlTaskOperation)(nil),                  // 123: v1.PowerControlTaskOperation
-	(*FirmwareControlTaskOperation)(nil),               // 124: v1.FirmwareControlTaskOperation
-	(*OperationRule)(nil),                              // 125: v1.OperationRule
-	(*CreateOperationRuleRequest)(nil),                 // 126: v1.CreateOperationRuleRequest
-	(*CreateOperationRuleResponse)(nil),                // 127: v1.CreateOperationRuleResponse
-	(*UpdateOperationRuleRequest)(nil),                 // 128: v1.UpdateOperationRuleRequest
-	(*DeleteOperationRuleRequest)(nil),                 // 129: v1.DeleteOperationRuleRequest
-	(*SetRuleAsDefaultRequest)(nil),                    // 130: v1.SetRuleAsDefaultRequest
-	(*GetOperationRuleRequest)(nil),                    // 131: v1.GetOperationRuleRequest
-	(*ListOperationRulesRequest)(nil),                  // 132: v1.ListOperationRulesRequest
-	(*ListOperationRulesResponse)(nil),                 // 133: v1.ListOperationRulesResponse
-	(*EventRuleActionCondition)(nil),                   // 134: v1.EventRuleActionCondition
-	(*EventRuleSubmitTaskAction)(nil),                  // 135: v1.EventRuleSubmitTaskAction
-	(*EventRuleSendAlertAction)(nil),                   // 136: v1.EventRuleSendAlertAction
-	(*EventRuleNoopAction)(nil),                        // 137: v1.EventRuleNoopAction
-	(*EventRuleAction)(nil),                            // 138: v1.EventRuleAction
-	(*EventRule)(nil),                                  // 139: v1.EventRule
-	(*CreateEventRuleRequest)(nil),                     // 140: v1.CreateEventRuleRequest
-	(*GetEventRuleRequest)(nil),                        // 141: v1.GetEventRuleRequest
-	(*GetEffectiveEventRuleRequest)(nil),               // 142: v1.GetEffectiveEventRuleRequest
-	(*ListEventRulesRequest)(nil),                      // 143: v1.ListEventRulesRequest
-	(*ListEventRulesResponse)(nil),                     // 144: v1.ListEventRulesResponse
-	(*EventRuleMetadataUpdate)(nil),                    // 145: v1.EventRuleMetadataUpdate
-	(*EventRuleActionsUpdate)(nil),                     // 146: v1.EventRuleActionsUpdate
-	(*UpdateEventRuleRequest)(nil),                     // 147: v1.UpdateEventRuleRequest
-	(*EnableEventRuleRequest)(nil),                     // 148: v1.EnableEventRuleRequest
-	(*DisableEventRuleRequest)(nil),                    // 149: v1.DisableEventRuleRequest
-	(*DeleteEventRuleRequest)(nil),                     // 150: v1.DeleteEventRuleRequest
-	(*EventRuleScope)(nil),                             // 151: v1.EventRuleScope
-	(*EventRuleBinding)(nil),                           // 152: v1.EventRuleBinding
-	(*CreateEventRuleBindingRequest)(nil),              // 153: v1.CreateEventRuleBindingRequest
-	(*GetEventRuleBindingRequest)(nil),                 // 154: v1.GetEventRuleBindingRequest
-	(*DeleteEventRuleBindingRequest)(nil),              // 155: v1.DeleteEventRuleBindingRequest
-	(*AssociateRuleWithRackRequest)(nil),               // 156: v1.AssociateRuleWithRackRequest
-	(*DisassociateRuleFromRackRequest)(nil),            // 157: v1.DisassociateRuleFromRackRequest
-	(*GetRackRuleAssociationRequest)(nil),              // 158: v1.GetRackRuleAssociationRequest
-	(*GetRackRuleAssociationResponse)(nil),             // 159: v1.GetRackRuleAssociationResponse
-	(*ListRackRuleAssociationsRequest)(nil),            // 160: v1.ListRackRuleAssociationsRequest
-	(*RackRuleAssociation)(nil),                        // 161: v1.RackRuleAssociation
-	(*ListRackRuleAssociationsResponse)(nil),           // 162: v1.ListRackRuleAssociationsResponse
-	(*ScheduleSpec)(nil),                               // 163: v1.ScheduleSpec
-	(*ScheduleConfig)(nil),                             // 164: v1.ScheduleConfig
-	(*TaskSchedule)(nil),                               // 165: v1.TaskSchedule
-	(*ScheduledOperation)(nil),                         // 166: v1.ScheduledOperation
-	(*CreateTaskScheduleRequest)(nil),                  // 167: v1.CreateTaskScheduleRequest
-	(*GetTaskScheduleRequest)(nil),                     // 168: v1.GetTaskScheduleRequest
-	(*ListTaskSchedulesRequest)(nil),                   // 169: v1.ListTaskSchedulesRequest
-	(*ListTaskSchedulesResponse)(nil),                  // 170: v1.ListTaskSchedulesResponse
-	(*UpdateTaskScheduleRequest)(nil),                  // 171: v1.UpdateTaskScheduleRequest
-	(*PauseTaskScheduleRequest)(nil),                   // 172: v1.PauseTaskScheduleRequest
-	(*ResumeTaskScheduleRequest)(nil),                  // 173: v1.ResumeTaskScheduleRequest
-	(*DeleteTaskScheduleRequest)(nil),                  // 174: v1.DeleteTaskScheduleRequest
-	(*TriggerTaskScheduleRequest)(nil),                 // 175: v1.TriggerTaskScheduleRequest
-	(*TaskScheduleScope)(nil),                          // 176: v1.TaskScheduleScope
-	(*AddTaskScheduleScopeRequest)(nil),                // 177: v1.AddTaskScheduleScopeRequest
-	(*AddTaskScheduleScopeResponse)(nil),               // 178: v1.AddTaskScheduleScopeResponse
-	(*RemoveTaskScheduleScopeRequest)(nil),             // 179: v1.RemoveTaskScheduleScopeRequest
-	(*UpdateTaskScheduleScopeRequest)(nil),             // 180: v1.UpdateTaskScheduleScopeRequest
-	(*UpdateTaskScheduleScopeResponse)(nil),            // 181: v1.UpdateTaskScheduleScopeResponse
-	(*ListTaskScheduleScopesRequest)(nil),              // 182: v1.ListTaskScheduleScopesRequest
-	(*ListTaskScheduleScopesResponse)(nil),             // 183: v1.ListTaskScheduleScopesResponse
-	(*CheckScheduleConflictsRequest)(nil),              // 184: v1.CheckScheduleConflictsRequest
-	(*CheckScheduleConflictsResponse)(nil),             // 185: v1.CheckScheduleConflictsResponse
-	(*CreateOperationRunRequest)(nil),                  // 186: v1.CreateOperationRunRequest
-	(*CreateOperationRunResponse)(nil),                 // 187: v1.CreateOperationRunResponse
-	(*OperationRunConfiguration)(nil),                  // 188: v1.OperationRunConfiguration
-	(*GetOperationRunRequest)(nil),                     // 189: v1.GetOperationRunRequest
-	(*GetOperationRunResponse)(nil),                    // 190: v1.GetOperationRunResponse
-	(*ListOperationRunsRequest)(nil),                   // 191: v1.ListOperationRunsRequest
-	(*ListOperationRunsResponse)(nil),                  // 192: v1.ListOperationRunsResponse
-	(*OperationRunFilter)(nil),                         // 193: v1.OperationRunFilter
-	(*OperationRunStateFilter)(nil),                    // 194: v1.OperationRunStateFilter
-	(*ListOperationRunTargetsRequest)(nil),             // 195: v1.ListOperationRunTargetsRequest
-	(*ListOperationRunTargetsResponse)(nil),            // 196: v1.ListOperationRunTargetsResponse
-	(*PauseOperationRunRequest)(nil),                   // 197: v1.PauseOperationRunRequest
-	(*ResumeOperationRunRequest)(nil),                  // 198: v1.ResumeOperationRunRequest
-	(*AdvanceOperationRunPhaseRequest)(nil),            // 199: v1.AdvanceOperationRunPhaseRequest
-	(*CancelOperationRunRequest)(nil),                  // 200: v1.CancelOperationRunRequest
-	(*OperationRunSelector)(nil),                       // 201: v1.OperationRunSelector
-	(*PercentageSelector)(nil),                         // 202: v1.PercentageSelector
-	(*OperationRunOptions)(nil),                        // 203: v1.OperationRunOptions
-	(*OperationRunSafetyPolicy)(nil),                   // 204: v1.OperationRunSafetyPolicy
-	(*OperationRunSafetyGate)(nil),                     // 205: v1.OperationRunSafetyGate
-	(*OperationRunFailureRateGate)(nil),                // 206: v1.OperationRunFailureRateGate
-	(*OperationRunFailureCountGate)(nil),               // 207: v1.OperationRunFailureCountGate
-	(*OperationRunOrderingPolicy)(nil),                 // 208: v1.OperationRunOrderingPolicy
-	(*OperationRunRandomOrdering)(nil),                 // 209: v1.OperationRunRandomOrdering
-	(*OperationRunPhysicalLocationOrdering)(nil),       // 210: v1.OperationRunPhysicalLocationOrdering
-	(*OperationRunPhasePolicy)(nil),                    // 211: v1.OperationRunPhasePolicy
-	(*EqualOperationRunPhases)(nil),                    // 212: v1.EqualOperationRunPhases
-	(*PercentageOperationRunPhases)(nil),               // 213: v1.PercentageOperationRunPhases
-	(*OperationRunPercentagePhase)(nil),                // 214: v1.OperationRunPercentagePhase
-	(*CountOperationRunPhases)(nil),                    // 215: v1.CountOperationRunPhases
-	(*OperationRunCountPhase)(nil),                     // 216: v1.OperationRunCountPhase
-	(*OperationRunPhaseAdvancePolicy)(nil),             // 217: v1.OperationRunPhaseAdvancePolicy
-	(*OperationRunConflictPolicy)(nil),                 // 218: v1.OperationRunConflictPolicy
-	(*OperationRunConflictRetryPolicy)(nil),            // 219: v1.OperationRunConflictRetryPolicy
-	(*OperationRunTargetScope)(nil),                    // 220: v1.OperationRunTargetScope
-	(*OperationRunOperation)(nil),                      // 221: v1.OperationRunOperation
-	(*OperationRunState)(nil),                          // 222: v1.OperationRunState
-	(*OperationKind)(nil),                              // 223: v1.OperationKind
-	(*OperationRun)(nil),                               // 224: v1.OperationRun
-	(*OperationRunSummary)(nil),                        // 225: v1.OperationRunSummary
-	(*OperationRunStats)(nil),                          // 226: v1.OperationRunStats
-	(*OperationRunPhaseStats)(nil),                     // 227: v1.OperationRunPhaseStats
-	(*OperationRunTargetOutcomeCounts)(nil),            // 228: v1.OperationRunTargetOutcomeCounts
-	(*OperationRunTarget)(nil),                         // 229: v1.OperationRunTarget
-	(*NVLDomainTargets)(nil),                           // 230: v1.NVLDomainTargets
-	(*NVLDomainTarget)(nil),                            // 231: v1.NVLDomainTarget
-	(*HealthReport)(nil),                               // 232: v1.HealthReport
-	(*HealthProbeSuccess)(nil),                         // 233: v1.HealthProbeSuccess
-	(*HealthProbeAlert)(nil),                           // 234: v1.HealthProbeAlert
-	(*GetTrayPowerDetailsRequest)(nil),                 // 235: v1.GetTrayPowerDetailsRequest
-	(*GetTrayPowerDetailsResponse)(nil),                // 236: v1.GetTrayPowerDetailsResponse
-	(*TrayPowerDetails)(nil),                           // 237: v1.TrayPowerDetails
-	(*PowerActualDetails)(nil),                         // 238: v1.PowerActualDetails
-	(*PowerDesiredDetails)(nil),                        // 239: v1.PowerDesiredDetails
-	(*PowerOperations)(nil),                            // 240: v1.PowerOperations
-	(*PowerActionDetails)(nil),                         // 241: v1.PowerActionDetails
-	(*PowerTaskDetailsList)(nil),                       // 242: v1.PowerTaskDetailsList
-	(*PowerTaskDetails)(nil),                           // 243: v1.PowerTaskDetails
-	(*PowerTaskExternalTargets)(nil),                   // 244: v1.PowerTaskExternalTargets
-	(*PowerTaskWaitingContext)(nil),                    // 245: v1.PowerTaskWaitingContext
-	(*TaskBrief)(nil),                                  // 246: v1.TaskBrief
-	(*timestamppb.Timestamp)(nil),                      // 247: google.protobuf.Timestamp
-	(*fieldmaskpb.FieldMask)(nil),                      // 248: google.protobuf.FieldMask
-	(*durationpb.Duration)(nil),                        // 249: google.protobuf.Duration
-	(*v1.ComponentPowerObservation)(nil),               // 250: forge.ComponentPowerObservation
-	(*v1.ComponentPowerPolicy)(nil),                    // 251: forge.ComponentPowerPolicy
-	(*v1.ComponentPowerActionDetails)(nil),             // 252: forge.ComponentPowerActionDetails
-	(*emptypb.Empty)(nil),                              // 253: google.protobuf.Empty
+	(EventResourceType)(0),                             // 31: v1.EventResourceType
+	(OperationRunPhysicalLocationOrdering_Strategy)(0), // 32: v1.OperationRunPhysicalLocationOrdering.Strategy
+	(*UUID)(nil),                                       // 33: v1.UUID
+	(*DeviceInfo)(nil),                                 // 34: v1.DeviceInfo
+	(*Location)(nil),                                   // 35: v1.Location
+	(*DeviceSerialInfo)(nil),                           // 36: v1.DeviceSerialInfo
+	(*BMCInfo)(nil),                                    // 37: v1.BMCInfo
+	(*RackPosition)(nil),                               // 38: v1.RackPosition
+	(*ComponentOperationStatus)(nil),                   // 39: v1.ComponentOperationStatus
+	(*TaskStats)(nil),                                  // 40: v1.TaskStats
+	(*Component)(nil),                                  // 41: v1.Component
+	(*Rack)(nil),                                       // 42: v1.Rack
+	(*Identifier)(nil),                                 // 43: v1.Identifier
+	(*OperationTargetSpec)(nil),                        // 44: v1.OperationTargetSpec
+	(*RackTargets)(nil),                                // 45: v1.RackTargets
+	(*ComponentTargets)(nil),                           // 46: v1.ComponentTargets
+	(*ComponentTypes)(nil),                             // 47: v1.ComponentTypes
+	(*ComponentFilter)(nil),                            // 48: v1.ComponentFilter
+	(*ComponentsByType)(nil),                           // 49: v1.ComponentsByType
+	(*ComponentsForType)(nil),                          // 50: v1.ComponentsForType
+	(*RackTarget)(nil),                                 // 51: v1.RackTarget
+	(*ComponentTarget)(nil),                            // 52: v1.ComponentTarget
+	(*ExternalRef)(nil),                                // 53: v1.ExternalRef
+	(*NVLDomain)(nil),                                  // 54: v1.NVLDomain
+	(*Pagination)(nil),                                 // 55: v1.Pagination
+	(*StringQueryInfo)(nil),                            // 56: v1.StringQueryInfo
+	(*Filter)(nil),                                     // 57: v1.Filter
+	(*OrderBy)(nil),                                    // 58: v1.OrderBy
+	(*Task)(nil),                                       // 59: v1.Task
+	(*CreateExpectedRackRequest)(nil),                  // 60: v1.CreateExpectedRackRequest
+	(*CreateExpectedRackResponse)(nil),                 // 61: v1.CreateExpectedRackResponse
+	(*GetRackInfoByIDRequest)(nil),                     // 62: v1.GetRackInfoByIDRequest
+	(*GetRackInfoBySerialRequest)(nil),                 // 63: v1.GetRackInfoBySerialRequest
+	(*GetRackInfoResponse)(nil),                        // 64: v1.GetRackInfoResponse
+	(*PatchRackRequest)(nil),                           // 65: v1.PatchRackRequest
+	(*PatchRackResponse)(nil),                          // 66: v1.PatchRackResponse
+	(*GetComponentInfoByIDRequest)(nil),                // 67: v1.GetComponentInfoByIDRequest
+	(*GetComponentInfoBySerialRequest)(nil),            // 68: v1.GetComponentInfoBySerialRequest
+	(*GetComponentInfoResponse)(nil),                   // 69: v1.GetComponentInfoResponse
+	(*GetListOfRacksRequest)(nil),                      // 70: v1.GetListOfRacksRequest
+	(*GetListOfRacksResponse)(nil),                     // 71: v1.GetListOfRacksResponse
+	(*CreateNVLDomainRequest)(nil),                     // 72: v1.CreateNVLDomainRequest
+	(*CreateNVLDomainResponse)(nil),                    // 73: v1.CreateNVLDomainResponse
+	(*AttachRacksToNVLDomainRequest)(nil),              // 74: v1.AttachRacksToNVLDomainRequest
+	(*DetachRacksFromNVLDomainRequest)(nil),            // 75: v1.DetachRacksFromNVLDomainRequest
+	(*GetListOfNVLDomainsRequest)(nil),                 // 76: v1.GetListOfNVLDomainsRequest
+	(*GetListOfNVLDomainsResponse)(nil),                // 77: v1.GetListOfNVLDomainsResponse
+	(*GetNVLinkDomainRequest)(nil),                     // 78: v1.GetNVLinkDomainRequest
+	(*NVLinkDomain)(nil),                               // 79: v1.NVLinkDomain
+	(*GetNVLinkDomainResponse)(nil),                    // 80: v1.GetNVLinkDomainResponse
+	(*GetListOfNVLinkDomainsRequest)(nil),              // 81: v1.GetListOfNVLinkDomainsRequest
+	(*GetListOfNVLinkDomainsResponse)(nil),             // 82: v1.GetListOfNVLinkDomainsResponse
+	(*GetRacksForNVLDomainRequest)(nil),                // 83: v1.GetRacksForNVLDomainRequest
+	(*GetRacksForNVLDomainResponse)(nil),               // 84: v1.GetRacksForNVLDomainResponse
+	(*UpgradeFirmwareRequest)(nil),                     // 85: v1.UpgradeFirmwareRequest
+	(*FirmwareAuthenticationData)(nil),                 // 86: v1.FirmwareAuthenticationData
+	(*PerComponentFirmwareAuthenticationData)(nil),     // 87: v1.PerComponentFirmwareAuthenticationData
+	(*GetComponentsRequest)(nil),                       // 88: v1.GetComponentsRequest
+	(*GetComponentsResponse)(nil),                      // 89: v1.GetComponentsResponse
+	(*ValidateComponentsRequest)(nil),                  // 90: v1.ValidateComponentsRequest
+	(*ValidateComponentsResponse)(nil),                 // 91: v1.ValidateComponentsResponse
+	(*ComponentDiff)(nil),                              // 92: v1.ComponentDiff
+	(*FieldDiff)(nil),                                  // 93: v1.FieldDiff
+	(*AddComponentRequest)(nil),                        // 94: v1.AddComponentRequest
+	(*AddComponentResponse)(nil),                       // 95: v1.AddComponentResponse
+	(*DeleteComponentRequest)(nil),                     // 96: v1.DeleteComponentRequest
+	(*DeleteComponentResponse)(nil),                    // 97: v1.DeleteComponentResponse
+	(*DeleteRackRequest)(nil),                          // 98: v1.DeleteRackRequest
+	(*DeleteRackResponse)(nil),                         // 99: v1.DeleteRackResponse
+	(*PurgeRackRequest)(nil),                           // 100: v1.PurgeRackRequest
+	(*PurgeRackResponse)(nil),                          // 101: v1.PurgeRackResponse
+	(*PurgeComponentRequest)(nil),                      // 102: v1.PurgeComponentRequest
+	(*PurgeComponentResponse)(nil),                     // 103: v1.PurgeComponentResponse
+	(*PatchComponentRequest)(nil),                      // 104: v1.PatchComponentRequest
+	(*PatchComponentResponse)(nil),                     // 105: v1.PatchComponentResponse
+	(*SubmitTaskResponse)(nil),                         // 106: v1.SubmitTaskResponse
+	(*QueueOptions)(nil),                               // 107: v1.QueueOptions
+	(*PowerOnRackRequest)(nil),                         // 108: v1.PowerOnRackRequest
+	(*PowerOffRackRequest)(nil),                        // 109: v1.PowerOffRackRequest
+	(*PowerResetRackRequest)(nil),                      // 110: v1.PowerResetRackRequest
+	(*ACPowerCycleRackRequest)(nil),                    // 111: v1.ACPowerCycleRackRequest
+	(*BringUpRackRequest)(nil),                         // 112: v1.BringUpRackRequest
+	(*IngestRackRequest)(nil),                          // 113: v1.IngestRackRequest
+	(*DecommissionRackRequest)(nil),                    // 114: v1.DecommissionRackRequest
+	(*ListTasksRequest)(nil),                           // 115: v1.ListTasksRequest
+	(*ListTasksResponse)(nil),                          // 116: v1.ListTasksResponse
+	(*GetTasksByIDsRequest)(nil),                       // 117: v1.GetTasksByIDsRequest
+	(*GetTasksByIDsResponse)(nil),                      // 118: v1.GetTasksByIDsResponse
+	(*CancelTaskRequest)(nil),                          // 119: v1.CancelTaskRequest
+	(*CancelTaskResponse)(nil),                         // 120: v1.CancelTaskResponse
+	(*VersionRequest)(nil),                             // 121: v1.VersionRequest
+	(*BuildInfo)(nil),                                  // 122: v1.BuildInfo
+	(*TaskOperation)(nil),                              // 123: v1.TaskOperation
+	(*PowerControlTaskOperation)(nil),                  // 124: v1.PowerControlTaskOperation
+	(*FirmwareControlTaskOperation)(nil),               // 125: v1.FirmwareControlTaskOperation
+	(*OperationRule)(nil),                              // 126: v1.OperationRule
+	(*CreateOperationRuleRequest)(nil),                 // 127: v1.CreateOperationRuleRequest
+	(*CreateOperationRuleResponse)(nil),                // 128: v1.CreateOperationRuleResponse
+	(*UpdateOperationRuleRequest)(nil),                 // 129: v1.UpdateOperationRuleRequest
+	(*DeleteOperationRuleRequest)(nil),                 // 130: v1.DeleteOperationRuleRequest
+	(*SetRuleAsDefaultRequest)(nil),                    // 131: v1.SetRuleAsDefaultRequest
+	(*GetOperationRuleRequest)(nil),                    // 132: v1.GetOperationRuleRequest
+	(*ListOperationRulesRequest)(nil),                  // 133: v1.ListOperationRulesRequest
+	(*ListOperationRulesResponse)(nil),                 // 134: v1.ListOperationRulesResponse
+	(*EventRuleActionCondition)(nil),                   // 135: v1.EventRuleActionCondition
+	(*EventRuleSubmitTaskAction)(nil),                  // 136: v1.EventRuleSubmitTaskAction
+	(*EventRuleSendAlertAction)(nil),                   // 137: v1.EventRuleSendAlertAction
+	(*EventRuleNoopAction)(nil),                        // 138: v1.EventRuleNoopAction
+	(*EventRuleAction)(nil),                            // 139: v1.EventRuleAction
+	(*EventRule)(nil),                                  // 140: v1.EventRule
+	(*CreateEventRuleRequest)(nil),                     // 141: v1.CreateEventRuleRequest
+	(*GetEventRuleRequest)(nil),                        // 142: v1.GetEventRuleRequest
+	(*GetEffectiveEventRuleRequest)(nil),               // 143: v1.GetEffectiveEventRuleRequest
+	(*ListEventRulesRequest)(nil),                      // 144: v1.ListEventRulesRequest
+	(*ListEventRulesResponse)(nil),                     // 145: v1.ListEventRulesResponse
+	(*EventRuleMetadataUpdate)(nil),                    // 146: v1.EventRuleMetadataUpdate
+	(*EventRuleActionsUpdate)(nil),                     // 147: v1.EventRuleActionsUpdate
+	(*UpdateEventRuleRequest)(nil),                     // 148: v1.UpdateEventRuleRequest
+	(*EnableEventRuleRequest)(nil),                     // 149: v1.EnableEventRuleRequest
+	(*DisableEventRuleRequest)(nil),                    // 150: v1.DisableEventRuleRequest
+	(*DeleteEventRuleRequest)(nil),                     // 151: v1.DeleteEventRuleRequest
+	(*EventRuleScope)(nil),                             // 152: v1.EventRuleScope
+	(*EventRuleScopeSelector)(nil),                     // 153: v1.EventRuleScopeSelector
+	(*EventRuleBinding)(nil),                           // 154: v1.EventRuleBinding
+	(*CreateEventRuleBindingRequest)(nil),              // 155: v1.CreateEventRuleBindingRequest
+	(*GetEventRuleBindingRequest)(nil),                 // 156: v1.GetEventRuleBindingRequest
+	(*DeleteEventRuleBindingRequest)(nil),              // 157: v1.DeleteEventRuleBindingRequest
+	(*AssociateRuleWithRackRequest)(nil),               // 158: v1.AssociateRuleWithRackRequest
+	(*DisassociateRuleFromRackRequest)(nil),            // 159: v1.DisassociateRuleFromRackRequest
+	(*GetRackRuleAssociationRequest)(nil),              // 160: v1.GetRackRuleAssociationRequest
+	(*GetRackRuleAssociationResponse)(nil),             // 161: v1.GetRackRuleAssociationResponse
+	(*ListRackRuleAssociationsRequest)(nil),            // 162: v1.ListRackRuleAssociationsRequest
+	(*RackRuleAssociation)(nil),                        // 163: v1.RackRuleAssociation
+	(*ListRackRuleAssociationsResponse)(nil),           // 164: v1.ListRackRuleAssociationsResponse
+	(*ScheduleSpec)(nil),                               // 165: v1.ScheduleSpec
+	(*ScheduleConfig)(nil),                             // 166: v1.ScheduleConfig
+	(*TaskSchedule)(nil),                               // 167: v1.TaskSchedule
+	(*ScheduledOperation)(nil),                         // 168: v1.ScheduledOperation
+	(*CreateTaskScheduleRequest)(nil),                  // 169: v1.CreateTaskScheduleRequest
+	(*GetTaskScheduleRequest)(nil),                     // 170: v1.GetTaskScheduleRequest
+	(*ListTaskSchedulesRequest)(nil),                   // 171: v1.ListTaskSchedulesRequest
+	(*ListTaskSchedulesResponse)(nil),                  // 172: v1.ListTaskSchedulesResponse
+	(*UpdateTaskScheduleRequest)(nil),                  // 173: v1.UpdateTaskScheduleRequest
+	(*PauseTaskScheduleRequest)(nil),                   // 174: v1.PauseTaskScheduleRequest
+	(*ResumeTaskScheduleRequest)(nil),                  // 175: v1.ResumeTaskScheduleRequest
+	(*DeleteTaskScheduleRequest)(nil),                  // 176: v1.DeleteTaskScheduleRequest
+	(*TriggerTaskScheduleRequest)(nil),                 // 177: v1.TriggerTaskScheduleRequest
+	(*TaskScheduleScope)(nil),                          // 178: v1.TaskScheduleScope
+	(*AddTaskScheduleScopeRequest)(nil),                // 179: v1.AddTaskScheduleScopeRequest
+	(*AddTaskScheduleScopeResponse)(nil),               // 180: v1.AddTaskScheduleScopeResponse
+	(*RemoveTaskScheduleScopeRequest)(nil),             // 181: v1.RemoveTaskScheduleScopeRequest
+	(*UpdateTaskScheduleScopeRequest)(nil),             // 182: v1.UpdateTaskScheduleScopeRequest
+	(*UpdateTaskScheduleScopeResponse)(nil),            // 183: v1.UpdateTaskScheduleScopeResponse
+	(*ListTaskScheduleScopesRequest)(nil),              // 184: v1.ListTaskScheduleScopesRequest
+	(*ListTaskScheduleScopesResponse)(nil),             // 185: v1.ListTaskScheduleScopesResponse
+	(*CheckScheduleConflictsRequest)(nil),              // 186: v1.CheckScheduleConflictsRequest
+	(*CheckScheduleConflictsResponse)(nil),             // 187: v1.CheckScheduleConflictsResponse
+	(*CreateOperationRunRequest)(nil),                  // 188: v1.CreateOperationRunRequest
+	(*CreateOperationRunResponse)(nil),                 // 189: v1.CreateOperationRunResponse
+	(*OperationRunConfiguration)(nil),                  // 190: v1.OperationRunConfiguration
+	(*GetOperationRunRequest)(nil),                     // 191: v1.GetOperationRunRequest
+	(*GetOperationRunResponse)(nil),                    // 192: v1.GetOperationRunResponse
+	(*ListOperationRunsRequest)(nil),                   // 193: v1.ListOperationRunsRequest
+	(*ListOperationRunsResponse)(nil),                  // 194: v1.ListOperationRunsResponse
+	(*OperationRunFilter)(nil),                         // 195: v1.OperationRunFilter
+	(*OperationRunStateFilter)(nil),                    // 196: v1.OperationRunStateFilter
+	(*ListOperationRunTargetsRequest)(nil),             // 197: v1.ListOperationRunTargetsRequest
+	(*ListOperationRunTargetsResponse)(nil),            // 198: v1.ListOperationRunTargetsResponse
+	(*PauseOperationRunRequest)(nil),                   // 199: v1.PauseOperationRunRequest
+	(*ResumeOperationRunRequest)(nil),                  // 200: v1.ResumeOperationRunRequest
+	(*AdvanceOperationRunPhaseRequest)(nil),            // 201: v1.AdvanceOperationRunPhaseRequest
+	(*CancelOperationRunRequest)(nil),                  // 202: v1.CancelOperationRunRequest
+	(*OperationRunSelector)(nil),                       // 203: v1.OperationRunSelector
+	(*PercentageSelector)(nil),                         // 204: v1.PercentageSelector
+	(*OperationRunOptions)(nil),                        // 205: v1.OperationRunOptions
+	(*OperationRunSafetyPolicy)(nil),                   // 206: v1.OperationRunSafetyPolicy
+	(*OperationRunSafetyGate)(nil),                     // 207: v1.OperationRunSafetyGate
+	(*OperationRunFailureRateGate)(nil),                // 208: v1.OperationRunFailureRateGate
+	(*OperationRunFailureCountGate)(nil),               // 209: v1.OperationRunFailureCountGate
+	(*OperationRunOrderingPolicy)(nil),                 // 210: v1.OperationRunOrderingPolicy
+	(*OperationRunRandomOrdering)(nil),                 // 211: v1.OperationRunRandomOrdering
+	(*OperationRunPhysicalLocationOrdering)(nil),       // 212: v1.OperationRunPhysicalLocationOrdering
+	(*OperationRunPhasePolicy)(nil),                    // 213: v1.OperationRunPhasePolicy
+	(*EqualOperationRunPhases)(nil),                    // 214: v1.EqualOperationRunPhases
+	(*PercentageOperationRunPhases)(nil),               // 215: v1.PercentageOperationRunPhases
+	(*OperationRunPercentagePhase)(nil),                // 216: v1.OperationRunPercentagePhase
+	(*CountOperationRunPhases)(nil),                    // 217: v1.CountOperationRunPhases
+	(*OperationRunCountPhase)(nil),                     // 218: v1.OperationRunCountPhase
+	(*OperationRunPhaseAdvancePolicy)(nil),             // 219: v1.OperationRunPhaseAdvancePolicy
+	(*OperationRunConflictPolicy)(nil),                 // 220: v1.OperationRunConflictPolicy
+	(*OperationRunConflictRetryPolicy)(nil),            // 221: v1.OperationRunConflictRetryPolicy
+	(*OperationRunTargetScope)(nil),                    // 222: v1.OperationRunTargetScope
+	(*OperationRunOperation)(nil),                      // 223: v1.OperationRunOperation
+	(*OperationRunState)(nil),                          // 224: v1.OperationRunState
+	(*OperationKind)(nil),                              // 225: v1.OperationKind
+	(*OperationRun)(nil),                               // 226: v1.OperationRun
+	(*OperationRunSummary)(nil),                        // 227: v1.OperationRunSummary
+	(*OperationRunStats)(nil),                          // 228: v1.OperationRunStats
+	(*OperationRunPhaseStats)(nil),                     // 229: v1.OperationRunPhaseStats
+	(*OperationRunTargetOutcomeCounts)(nil),            // 230: v1.OperationRunTargetOutcomeCounts
+	(*OperationRunTarget)(nil),                         // 231: v1.OperationRunTarget
+	(*NVLDomainTargets)(nil),                           // 232: v1.NVLDomainTargets
+	(*NVLDomainTarget)(nil),                            // 233: v1.NVLDomainTarget
+	(*HealthReport)(nil),                               // 234: v1.HealthReport
+	(*HealthProbeSuccess)(nil),                         // 235: v1.HealthProbeSuccess
+	(*HealthProbeAlert)(nil),                           // 236: v1.HealthProbeAlert
+	(*GetTrayPowerDetailsRequest)(nil),                 // 237: v1.GetTrayPowerDetailsRequest
+	(*GetTrayPowerDetailsResponse)(nil),                // 238: v1.GetTrayPowerDetailsResponse
+	(*TrayPowerDetails)(nil),                           // 239: v1.TrayPowerDetails
+	(*PowerActualDetails)(nil),                         // 240: v1.PowerActualDetails
+	(*PowerDesiredDetails)(nil),                        // 241: v1.PowerDesiredDetails
+	(*PowerOperations)(nil),                            // 242: v1.PowerOperations
+	(*PowerActionDetails)(nil),                         // 243: v1.PowerActionDetails
+	(*PowerTaskDetailsList)(nil),                       // 244: v1.PowerTaskDetailsList
+	(*PowerTaskDetails)(nil),                           // 245: v1.PowerTaskDetails
+	(*PowerTaskExternalTargets)(nil),                   // 246: v1.PowerTaskExternalTargets
+	(*PowerTaskWaitingContext)(nil),                    // 247: v1.PowerTaskWaitingContext
+	(*TaskBrief)(nil),                                  // 248: v1.TaskBrief
+	(*SetEventRuleOverrideRequest)(nil),                // 249: v1.SetEventRuleOverrideRequest
+	(*GetEffectiveEventRuleForScopeRequest)(nil),       // 250: v1.GetEffectiveEventRuleForScopeRequest
+	(*DeleteEventRuleOverrideRequest)(nil),             // 251: v1.DeleteEventRuleOverrideRequest
+	(*EventHandlingTask)(nil),                          // 252: v1.EventHandlingTask
+	(*EventHandling)(nil),                              // 253: v1.EventHandling
+	(*GetEventHandlingRequest)(nil),                    // 254: v1.GetEventHandlingRequest
+	(*GetEventHandlingResponse)(nil),                   // 255: v1.GetEventHandlingResponse
+	(*timestamppb.Timestamp)(nil),                      // 256: google.protobuf.Timestamp
+	(*fieldmaskpb.FieldMask)(nil),                      // 257: google.protobuf.FieldMask
+	(*durationpb.Duration)(nil),                        // 258: google.protobuf.Duration
+	(*v1.ComponentPowerObservation)(nil),               // 259: forge.ComponentPowerObservation
+	(*v1.ComponentPowerPolicy)(nil),                    // 260: forge.ComponentPowerPolicy
+	(*v1.ComponentPowerActionDetails)(nil),             // 261: forge.ComponentPowerActionDetails
+	(*emptypb.Empty)(nil),                              // 262: google.protobuf.Empty
 }
 var file_flow_proto_depIdxs = []int32{
-	32,  // 0: v1.DeviceInfo.id:type_name -> v1.UUID
+	33,  // 0: v1.DeviceInfo.id:type_name -> v1.UUID
 	0,   // 1: v1.BMCInfo.type:type_name -> v1.BMCType
 	9,   // 2: v1.ComponentOperationStatus.phase:type_name -> v1.Phase
 	14,  // 3: v1.ComponentOperationStatus.blocked_operations:type_name -> v1.OperationType
 	1,   // 4: v1.Component.type:type_name -> v1.ComponentType
-	33,  // 5: v1.Component.info:type_name -> v1.DeviceInfo
-	37,  // 6: v1.Component.position:type_name -> v1.RackPosition
-	36,  // 7: v1.Component.bmcs:type_name -> v1.BMCInfo
-	32,  // 8: v1.Component.rack_id:type_name -> v1.UUID
-	38,  // 9: v1.Component.status:type_name -> v1.ComponentOperationStatus
+	34,  // 5: v1.Component.info:type_name -> v1.DeviceInfo
+	38,  // 6: v1.Component.position:type_name -> v1.RackPosition
+	37,  // 7: v1.Component.bmcs:type_name -> v1.BMCInfo
+	33,  // 8: v1.Component.rack_id:type_name -> v1.UUID
+	39,  // 9: v1.Component.status:type_name -> v1.ComponentOperationStatus
 	10,  // 10: v1.Component.leak_status:type_name -> v1.LeakStatus
-	32,  // 11: v1.Component.nvl_domain_id:type_name -> v1.UUID
-	39,  // 12: v1.Component.task_stats:type_name -> v1.TaskStats
+	33,  // 11: v1.Component.nvl_domain_id:type_name -> v1.UUID
+	40,  // 12: v1.Component.task_stats:type_name -> v1.TaskStats
 	11,  // 13: v1.Component.leak_handling_status:type_name -> v1.LeakHandlingStatus
-	232, // 14: v1.Component.health:type_name -> v1.HealthReport
-	33,  // 15: v1.Rack.info:type_name -> v1.DeviceInfo
-	34,  // 16: v1.Rack.location:type_name -> v1.Location
-	40,  // 17: v1.Rack.components:type_name -> v1.Component
-	32,  // 18: v1.Rack.nvl_domain_ids:type_name -> v1.UUID
-	39,  // 19: v1.Rack.task_stats:type_name -> v1.TaskStats
+	234, // 14: v1.Component.health:type_name -> v1.HealthReport
+	34,  // 15: v1.Rack.info:type_name -> v1.DeviceInfo
+	35,  // 16: v1.Rack.location:type_name -> v1.Location
+	41,  // 17: v1.Rack.components:type_name -> v1.Component
+	33,  // 18: v1.Rack.nvl_domain_ids:type_name -> v1.UUID
+	40,  // 19: v1.Rack.task_stats:type_name -> v1.TaskStats
 	9,   // 20: v1.Rack.operation_status:type_name -> v1.Phase
-	232, // 21: v1.Rack.health:type_name -> v1.HealthReport
-	32,  // 22: v1.Identifier.id:type_name -> v1.UUID
-	44,  // 23: v1.OperationTargetSpec.racks:type_name -> v1.RackTargets
-	45,  // 24: v1.OperationTargetSpec.components:type_name -> v1.ComponentTargets
-	230, // 25: v1.OperationTargetSpec.nvl_domains:type_name -> v1.NVLDomainTargets
-	50,  // 26: v1.RackTargets.targets:type_name -> v1.RackTarget
-	51,  // 27: v1.ComponentTargets.targets:type_name -> v1.ComponentTarget
+	234, // 21: v1.Rack.health:type_name -> v1.HealthReport
+	33,  // 22: v1.Identifier.id:type_name -> v1.UUID
+	45,  // 23: v1.OperationTargetSpec.racks:type_name -> v1.RackTargets
+	46,  // 24: v1.OperationTargetSpec.components:type_name -> v1.ComponentTargets
+	232, // 25: v1.OperationTargetSpec.nvl_domains:type_name -> v1.NVLDomainTargets
+	51,  // 26: v1.RackTargets.targets:type_name -> v1.RackTarget
+	52,  // 27: v1.ComponentTargets.targets:type_name -> v1.ComponentTarget
 	1,   // 28: v1.ComponentTypes.types:type_name -> v1.ComponentType
-	46,  // 29: v1.ComponentFilter.types:type_name -> v1.ComponentTypes
-	45,  // 30: v1.ComponentFilter.components:type_name -> v1.ComponentTargets
-	49,  // 31: v1.ComponentsByType.groups:type_name -> v1.ComponentsForType
+	47,  // 29: v1.ComponentFilter.types:type_name -> v1.ComponentTypes
+	46,  // 30: v1.ComponentFilter.components:type_name -> v1.ComponentTargets
+	50,  // 31: v1.ComponentsByType.groups:type_name -> v1.ComponentsForType
 	1,   // 32: v1.ComponentsForType.type:type_name -> v1.ComponentType
-	32,  // 33: v1.ComponentsForType.component_ids:type_name -> v1.UUID
-	32,  // 34: v1.RackTarget.id:type_name -> v1.UUID
+	33,  // 33: v1.ComponentsForType.component_ids:type_name -> v1.UUID
+	33,  // 34: v1.RackTarget.id:type_name -> v1.UUID
 	1,   // 35: v1.RackTarget.component_types:type_name -> v1.ComponentType
-	32,  // 36: v1.ComponentTarget.id:type_name -> v1.UUID
-	52,  // 37: v1.ComponentTarget.external:type_name -> v1.ExternalRef
+	33,  // 36: v1.ComponentTarget.id:type_name -> v1.UUID
+	53,  // 37: v1.ComponentTarget.external:type_name -> v1.ExternalRef
 	1,   // 38: v1.ExternalRef.type:type_name -> v1.ComponentType
-	42,  // 39: v1.NVLDomain.identifier:type_name -> v1.Identifier
+	43,  // 39: v1.NVLDomain.identifier:type_name -> v1.Identifier
 	2,   // 40: v1.Filter.rack_field:type_name -> v1.RackFilterField
 	3,   // 41: v1.Filter.component_field:type_name -> v1.ComponentFilterField
-	55,  // 42: v1.Filter.query_info:type_name -> v1.StringQueryInfo
+	56,  // 42: v1.Filter.query_info:type_name -> v1.StringQueryInfo
 	5,   // 43: v1.OrderBy.rack_field:type_name -> v1.RackOrderByField
 	4,   // 44: v1.OrderBy.component_field:type_name -> v1.ComponentOrderByField
-	32,  // 45: v1.Task.id:type_name -> v1.UUID
-	32,  // 46: v1.Task.rack_id:type_name -> v1.UUID
-	32,  // 47: v1.Task.component_uuids:type_name -> v1.UUID
+	33,  // 45: v1.Task.id:type_name -> v1.UUID
+	33,  // 46: v1.Task.rack_id:type_name -> v1.UUID
+	33,  // 47: v1.Task.component_uuids:type_name -> v1.UUID
 	8,   // 48: v1.Task.executor_type:type_name -> v1.TaskExecutorType
 	7,   // 49: v1.Task.status:type_name -> v1.TaskStatus
-	247, // 50: v1.Task.queue_expires_at:type_name -> google.protobuf.Timestamp
-	247, // 51: v1.Task.created_at:type_name -> google.protobuf.Timestamp
-	247, // 52: v1.Task.finished_at:type_name -> google.protobuf.Timestamp
-	32,  // 53: v1.Task.applied_rule_id:type_name -> v1.UUID
-	247, // 54: v1.Task.updated_at:type_name -> google.protobuf.Timestamp
-	247, // 55: v1.Task.started_at:type_name -> google.protobuf.Timestamp
-	41,  // 56: v1.CreateExpectedRackRequest.rack:type_name -> v1.Rack
-	32,  // 57: v1.CreateExpectedRackResponse.id:type_name -> v1.UUID
-	32,  // 58: v1.GetRackInfoByIDRequest.id:type_name -> v1.UUID
-	35,  // 59: v1.GetRackInfoBySerialRequest.serial_info:type_name -> v1.DeviceSerialInfo
-	41,  // 60: v1.GetRackInfoResponse.rack:type_name -> v1.Rack
-	41,  // 61: v1.PatchRackRequest.rack:type_name -> v1.Rack
-	32,  // 62: v1.GetComponentInfoByIDRequest.id:type_name -> v1.UUID
-	35,  // 63: v1.GetComponentInfoBySerialRequest.serial_info:type_name -> v1.DeviceSerialInfo
-	40,  // 64: v1.GetComponentInfoResponse.component:type_name -> v1.Component
-	41,  // 65: v1.GetComponentInfoResponse.rack:type_name -> v1.Rack
-	56,  // 66: v1.GetListOfRacksRequest.filters:type_name -> v1.Filter
-	54,  // 67: v1.GetListOfRacksRequest.pagination:type_name -> v1.Pagination
-	57,  // 68: v1.GetListOfRacksRequest.order_by:type_name -> v1.OrderBy
-	41,  // 69: v1.GetListOfRacksResponse.racks:type_name -> v1.Rack
-	53,  // 70: v1.CreateNVLDomainRequest.nvl_domain:type_name -> v1.NVLDomain
-	32,  // 71: v1.CreateNVLDomainResponse.id:type_name -> v1.UUID
-	42,  // 72: v1.AttachRacksToNVLDomainRequest.nvl_domain_identifier:type_name -> v1.Identifier
-	42,  // 73: v1.AttachRacksToNVLDomainRequest.rack_identifiers:type_name -> v1.Identifier
-	42,  // 74: v1.DetachRacksFromNVLDomainRequest.rack_identifiers:type_name -> v1.Identifier
-	55,  // 75: v1.GetListOfNVLDomainsRequest.info:type_name -> v1.StringQueryInfo
-	54,  // 76: v1.GetListOfNVLDomainsRequest.pagination:type_name -> v1.Pagination
-	53,  // 77: v1.GetListOfNVLDomainsResponse.nvl_domains:type_name -> v1.NVLDomain
+	256, // 50: v1.Task.queue_expires_at:type_name -> google.protobuf.Timestamp
+	256, // 51: v1.Task.created_at:type_name -> google.protobuf.Timestamp
+	256, // 52: v1.Task.finished_at:type_name -> google.protobuf.Timestamp
+	33,  // 53: v1.Task.applied_rule_id:type_name -> v1.UUID
+	256, // 54: v1.Task.updated_at:type_name -> google.protobuf.Timestamp
+	256, // 55: v1.Task.started_at:type_name -> google.protobuf.Timestamp
+	42,  // 56: v1.CreateExpectedRackRequest.rack:type_name -> v1.Rack
+	33,  // 57: v1.CreateExpectedRackResponse.id:type_name -> v1.UUID
+	33,  // 58: v1.GetRackInfoByIDRequest.id:type_name -> v1.UUID
+	36,  // 59: v1.GetRackInfoBySerialRequest.serial_info:type_name -> v1.DeviceSerialInfo
+	42,  // 60: v1.GetRackInfoResponse.rack:type_name -> v1.Rack
+	42,  // 61: v1.PatchRackRequest.rack:type_name -> v1.Rack
+	33,  // 62: v1.GetComponentInfoByIDRequest.id:type_name -> v1.UUID
+	36,  // 63: v1.GetComponentInfoBySerialRequest.serial_info:type_name -> v1.DeviceSerialInfo
+	41,  // 64: v1.GetComponentInfoResponse.component:type_name -> v1.Component
+	42,  // 65: v1.GetComponentInfoResponse.rack:type_name -> v1.Rack
+	57,  // 66: v1.GetListOfRacksRequest.filters:type_name -> v1.Filter
+	55,  // 67: v1.GetListOfRacksRequest.pagination:type_name -> v1.Pagination
+	58,  // 68: v1.GetListOfRacksRequest.order_by:type_name -> v1.OrderBy
+	42,  // 69: v1.GetListOfRacksResponse.racks:type_name -> v1.Rack
+	54,  // 70: v1.CreateNVLDomainRequest.nvl_domain:type_name -> v1.NVLDomain
+	33,  // 71: v1.CreateNVLDomainResponse.id:type_name -> v1.UUID
+	43,  // 72: v1.AttachRacksToNVLDomainRequest.nvl_domain_identifier:type_name -> v1.Identifier
+	43,  // 73: v1.AttachRacksToNVLDomainRequest.rack_identifiers:type_name -> v1.Identifier
+	43,  // 74: v1.DetachRacksFromNVLDomainRequest.rack_identifiers:type_name -> v1.Identifier
+	56,  // 75: v1.GetListOfNVLDomainsRequest.info:type_name -> v1.StringQueryInfo
+	55,  // 76: v1.GetListOfNVLDomainsRequest.pagination:type_name -> v1.Pagination
+	54,  // 77: v1.GetListOfNVLDomainsResponse.nvl_domains:type_name -> v1.NVLDomain
 	9,   // 78: v1.NVLinkDomain.operation_status:type_name -> v1.Phase
-	40,  // 79: v1.NVLinkDomain.components:type_name -> v1.Component
-	78,  // 80: v1.GetNVLinkDomainResponse.domain:type_name -> v1.NVLinkDomain
-	55,  // 81: v1.GetListOfNVLinkDomainsRequest.info:type_name -> v1.StringQueryInfo
-	54,  // 82: v1.GetListOfNVLinkDomainsRequest.pagination:type_name -> v1.Pagination
-	78,  // 83: v1.GetListOfNVLinkDomainsResponse.domains:type_name -> v1.NVLinkDomain
-	42,  // 84: v1.GetRacksForNVLDomainRequest.nvl_domain_identifier:type_name -> v1.Identifier
-	41,  // 85: v1.GetRacksForNVLDomainResponse.racks:type_name -> v1.Rack
-	43,  // 86: v1.UpgradeFirmwareRequest.target_spec:type_name -> v1.OperationTargetSpec
-	247, // 87: v1.UpgradeFirmwareRequest.start_time:type_name -> google.protobuf.Timestamp
-	247, // 88: v1.UpgradeFirmwareRequest.end_time:type_name -> google.protobuf.Timestamp
-	106, // 89: v1.UpgradeFirmwareRequest.queue_options:type_name -> v1.QueueOptions
-	32,  // 90: v1.UpgradeFirmwareRequest.rule_id:type_name -> v1.UUID
-	85,  // 91: v1.UpgradeFirmwareRequest.authentication_data:type_name -> v1.FirmwareAuthenticationData
-	86,  // 92: v1.FirmwareAuthenticationData.per_component:type_name -> v1.PerComponentFirmwareAuthenticationData
-	43,  // 93: v1.GetComponentsRequest.target_spec:type_name -> v1.OperationTargetSpec
-	56,  // 94: v1.GetComponentsRequest.filters:type_name -> v1.Filter
-	54,  // 95: v1.GetComponentsRequest.pagination:type_name -> v1.Pagination
-	57,  // 96: v1.GetComponentsRequest.order_by:type_name -> v1.OrderBy
-	40,  // 97: v1.GetComponentsResponse.components:type_name -> v1.Component
-	43,  // 98: v1.ValidateComponentsRequest.target_spec:type_name -> v1.OperationTargetSpec
-	56,  // 99: v1.ValidateComponentsRequest.filters:type_name -> v1.Filter
-	54,  // 100: v1.ValidateComponentsRequest.pagination:type_name -> v1.Pagination
-	57,  // 101: v1.ValidateComponentsRequest.order_by:type_name -> v1.OrderBy
-	91,  // 102: v1.ValidateComponentsResponse.diffs:type_name -> v1.ComponentDiff
+	41,  // 79: v1.NVLinkDomain.components:type_name -> v1.Component
+	79,  // 80: v1.GetNVLinkDomainResponse.domain:type_name -> v1.NVLinkDomain
+	56,  // 81: v1.GetListOfNVLinkDomainsRequest.info:type_name -> v1.StringQueryInfo
+	55,  // 82: v1.GetListOfNVLinkDomainsRequest.pagination:type_name -> v1.Pagination
+	79,  // 83: v1.GetListOfNVLinkDomainsResponse.domains:type_name -> v1.NVLinkDomain
+	43,  // 84: v1.GetRacksForNVLDomainRequest.nvl_domain_identifier:type_name -> v1.Identifier
+	42,  // 85: v1.GetRacksForNVLDomainResponse.racks:type_name -> v1.Rack
+	44,  // 86: v1.UpgradeFirmwareRequest.target_spec:type_name -> v1.OperationTargetSpec
+	256, // 87: v1.UpgradeFirmwareRequest.start_time:type_name -> google.protobuf.Timestamp
+	256, // 88: v1.UpgradeFirmwareRequest.end_time:type_name -> google.protobuf.Timestamp
+	107, // 89: v1.UpgradeFirmwareRequest.queue_options:type_name -> v1.QueueOptions
+	33,  // 90: v1.UpgradeFirmwareRequest.rule_id:type_name -> v1.UUID
+	86,  // 91: v1.UpgradeFirmwareRequest.authentication_data:type_name -> v1.FirmwareAuthenticationData
+	87,  // 92: v1.FirmwareAuthenticationData.per_component:type_name -> v1.PerComponentFirmwareAuthenticationData
+	44,  // 93: v1.GetComponentsRequest.target_spec:type_name -> v1.OperationTargetSpec
+	57,  // 94: v1.GetComponentsRequest.filters:type_name -> v1.Filter
+	55,  // 95: v1.GetComponentsRequest.pagination:type_name -> v1.Pagination
+	58,  // 96: v1.GetComponentsRequest.order_by:type_name -> v1.OrderBy
+	41,  // 97: v1.GetComponentsResponse.components:type_name -> v1.Component
+	44,  // 98: v1.ValidateComponentsRequest.target_spec:type_name -> v1.OperationTargetSpec
+	57,  // 99: v1.ValidateComponentsRequest.filters:type_name -> v1.Filter
+	55,  // 100: v1.ValidateComponentsRequest.pagination:type_name -> v1.Pagination
+	58,  // 101: v1.ValidateComponentsRequest.order_by:type_name -> v1.OrderBy
+	92,  // 102: v1.ValidateComponentsResponse.diffs:type_name -> v1.ComponentDiff
 	12,  // 103: v1.ComponentDiff.type:type_name -> v1.DiffType
-	40,  // 104: v1.ComponentDiff.expected:type_name -> v1.Component
-	40,  // 105: v1.ComponentDiff.actual:type_name -> v1.Component
-	92,  // 106: v1.ComponentDiff.field_diffs:type_name -> v1.FieldDiff
-	32,  // 107: v1.ComponentDiff.id:type_name -> v1.UUID
-	40,  // 108: v1.AddComponentRequest.component:type_name -> v1.Component
-	40,  // 109: v1.AddComponentResponse.component:type_name -> v1.Component
-	32,  // 110: v1.DeleteComponentRequest.id:type_name -> v1.UUID
-	32,  // 111: v1.DeleteRackRequest.id:type_name -> v1.UUID
-	32,  // 112: v1.PurgeRackRequest.id:type_name -> v1.UUID
-	32,  // 113: v1.PurgeComponentRequest.id:type_name -> v1.UUID
-	32,  // 114: v1.PatchComponentRequest.id:type_name -> v1.UUID
-	37,  // 115: v1.PatchComponentRequest.position:type_name -> v1.RackPosition
-	32,  // 116: v1.PatchComponentRequest.rack_id:type_name -> v1.UUID
-	36,  // 117: v1.PatchComponentRequest.bmcs:type_name -> v1.BMCInfo
-	248, // 118: v1.PatchComponentRequest.update_mask:type_name -> google.protobuf.FieldMask
-	40,  // 119: v1.PatchComponentResponse.component:type_name -> v1.Component
-	32,  // 120: v1.SubmitTaskResponse.task_ids:type_name -> v1.UUID
+	41,  // 104: v1.ComponentDiff.expected:type_name -> v1.Component
+	41,  // 105: v1.ComponentDiff.actual:type_name -> v1.Component
+	93,  // 106: v1.ComponentDiff.field_diffs:type_name -> v1.FieldDiff
+	33,  // 107: v1.ComponentDiff.id:type_name -> v1.UUID
+	41,  // 108: v1.AddComponentRequest.component:type_name -> v1.Component
+	41,  // 109: v1.AddComponentResponse.component:type_name -> v1.Component
+	33,  // 110: v1.DeleteComponentRequest.id:type_name -> v1.UUID
+	33,  // 111: v1.DeleteRackRequest.id:type_name -> v1.UUID
+	33,  // 112: v1.PurgeRackRequest.id:type_name -> v1.UUID
+	33,  // 113: v1.PurgeComponentRequest.id:type_name -> v1.UUID
+	33,  // 114: v1.PatchComponentRequest.id:type_name -> v1.UUID
+	38,  // 115: v1.PatchComponentRequest.position:type_name -> v1.RackPosition
+	33,  // 116: v1.PatchComponentRequest.rack_id:type_name -> v1.UUID
+	37,  // 117: v1.PatchComponentRequest.bmcs:type_name -> v1.BMCInfo
+	257, // 118: v1.PatchComponentRequest.update_mask:type_name -> google.protobuf.FieldMask
+	41,  // 119: v1.PatchComponentResponse.component:type_name -> v1.Component
+	33,  // 120: v1.SubmitTaskResponse.task_ids:type_name -> v1.UUID
 	13,  // 121: v1.QueueOptions.conflict_strategy:type_name -> v1.ConflictStrategy
-	43,  // 122: v1.PowerOnRackRequest.target_spec:type_name -> v1.OperationTargetSpec
-	106, // 123: v1.PowerOnRackRequest.queue_options:type_name -> v1.QueueOptions
-	32,  // 124: v1.PowerOnRackRequest.rule_id:type_name -> v1.UUID
-	43,  // 125: v1.PowerOffRackRequest.target_spec:type_name -> v1.OperationTargetSpec
-	106, // 126: v1.PowerOffRackRequest.queue_options:type_name -> v1.QueueOptions
-	32,  // 127: v1.PowerOffRackRequest.rule_id:type_name -> v1.UUID
-	43,  // 128: v1.PowerResetRackRequest.target_spec:type_name -> v1.OperationTargetSpec
-	106, // 129: v1.PowerResetRackRequest.queue_options:type_name -> v1.QueueOptions
-	32,  // 130: v1.PowerResetRackRequest.rule_id:type_name -> v1.UUID
-	43,  // 131: v1.ACPowerCycleRackRequest.target_spec:type_name -> v1.OperationTargetSpec
-	106, // 132: v1.ACPowerCycleRackRequest.queue_options:type_name -> v1.QueueOptions
-	32,  // 133: v1.ACPowerCycleRackRequest.rule_id:type_name -> v1.UUID
-	43,  // 134: v1.BringUpRackRequest.target_spec:type_name -> v1.OperationTargetSpec
-	32,  // 135: v1.BringUpRackRequest.rule_id:type_name -> v1.UUID
-	43,  // 136: v1.IngestRackRequest.target_spec:type_name -> v1.OperationTargetSpec
-	56,  // 137: v1.IngestRackRequest.filters:type_name -> v1.Filter
-	32,  // 138: v1.IngestRackRequest.rule_id:type_name -> v1.UUID
-	43,  // 139: v1.DecommissionRackRequest.target_spec:type_name -> v1.OperationTargetSpec
-	106, // 140: v1.DecommissionRackRequest.queue_options:type_name -> v1.QueueOptions
-	32,  // 141: v1.DecommissionRackRequest.rule_id:type_name -> v1.UUID
-	32,  // 142: v1.ListTasksRequest.rack_id:type_name -> v1.UUID
-	54,  // 143: v1.ListTasksRequest.pagination:type_name -> v1.Pagination
-	32,  // 144: v1.ListTasksRequest.component_id:type_name -> v1.UUID
-	58,  // 145: v1.ListTasksResponse.tasks:type_name -> v1.Task
-	32,  // 146: v1.GetTasksByIDsRequest.task_ids:type_name -> v1.UUID
-	58,  // 147: v1.GetTasksByIDsResponse.tasks:type_name -> v1.Task
-	32,  // 148: v1.CancelTaskRequest.task_id:type_name -> v1.UUID
-	58,  // 149: v1.CancelTaskResponse.task:type_name -> v1.Task
-	123, // 150: v1.TaskOperation.power_control:type_name -> v1.PowerControlTaskOperation
-	124, // 151: v1.TaskOperation.firmware_control:type_name -> v1.FirmwareControlTaskOperation
+	44,  // 122: v1.PowerOnRackRequest.target_spec:type_name -> v1.OperationTargetSpec
+	107, // 123: v1.PowerOnRackRequest.queue_options:type_name -> v1.QueueOptions
+	33,  // 124: v1.PowerOnRackRequest.rule_id:type_name -> v1.UUID
+	44,  // 125: v1.PowerOffRackRequest.target_spec:type_name -> v1.OperationTargetSpec
+	107, // 126: v1.PowerOffRackRequest.queue_options:type_name -> v1.QueueOptions
+	33,  // 127: v1.PowerOffRackRequest.rule_id:type_name -> v1.UUID
+	44,  // 128: v1.PowerResetRackRequest.target_spec:type_name -> v1.OperationTargetSpec
+	107, // 129: v1.PowerResetRackRequest.queue_options:type_name -> v1.QueueOptions
+	33,  // 130: v1.PowerResetRackRequest.rule_id:type_name -> v1.UUID
+	44,  // 131: v1.ACPowerCycleRackRequest.target_spec:type_name -> v1.OperationTargetSpec
+	107, // 132: v1.ACPowerCycleRackRequest.queue_options:type_name -> v1.QueueOptions
+	33,  // 133: v1.ACPowerCycleRackRequest.rule_id:type_name -> v1.UUID
+	44,  // 134: v1.BringUpRackRequest.target_spec:type_name -> v1.OperationTargetSpec
+	33,  // 135: v1.BringUpRackRequest.rule_id:type_name -> v1.UUID
+	44,  // 136: v1.IngestRackRequest.target_spec:type_name -> v1.OperationTargetSpec
+	57,  // 137: v1.IngestRackRequest.filters:type_name -> v1.Filter
+	33,  // 138: v1.IngestRackRequest.rule_id:type_name -> v1.UUID
+	44,  // 139: v1.DecommissionRackRequest.target_spec:type_name -> v1.OperationTargetSpec
+	107, // 140: v1.DecommissionRackRequest.queue_options:type_name -> v1.QueueOptions
+	33,  // 141: v1.DecommissionRackRequest.rule_id:type_name -> v1.UUID
+	33,  // 142: v1.ListTasksRequest.rack_id:type_name -> v1.UUID
+	55,  // 143: v1.ListTasksRequest.pagination:type_name -> v1.Pagination
+	33,  // 144: v1.ListTasksRequest.component_id:type_name -> v1.UUID
+	59,  // 145: v1.ListTasksResponse.tasks:type_name -> v1.Task
+	33,  // 146: v1.GetTasksByIDsRequest.task_ids:type_name -> v1.UUID
+	59,  // 147: v1.GetTasksByIDsResponse.tasks:type_name -> v1.Task
+	33,  // 148: v1.CancelTaskRequest.task_id:type_name -> v1.UUID
+	59,  // 149: v1.CancelTaskResponse.task:type_name -> v1.Task
+	124, // 150: v1.TaskOperation.power_control:type_name -> v1.PowerControlTaskOperation
+	125, // 151: v1.TaskOperation.firmware_control:type_name -> v1.FirmwareControlTaskOperation
 	15,  // 152: v1.PowerControlTaskOperation.operation:type_name -> v1.PowerControlOperation
 	16,  // 153: v1.FirmwareControlTaskOperation.operation:type_name -> v1.FirmwareControlOperation
-	247, // 154: v1.FirmwareControlTaskOperation.start_time:type_name -> google.protobuf.Timestamp
-	247, // 155: v1.FirmwareControlTaskOperation.end_time:type_name -> google.protobuf.Timestamp
-	32,  // 156: v1.OperationRule.id:type_name -> v1.UUID
+	256, // 154: v1.FirmwareControlTaskOperation.start_time:type_name -> google.protobuf.Timestamp
+	256, // 155: v1.FirmwareControlTaskOperation.end_time:type_name -> google.protobuf.Timestamp
+	33,  // 156: v1.OperationRule.id:type_name -> v1.UUID
 	14,  // 157: v1.OperationRule.operation_type:type_name -> v1.OperationType
-	247, // 158: v1.OperationRule.created_at:type_name -> google.protobuf.Timestamp
-	247, // 159: v1.OperationRule.updated_at:type_name -> google.protobuf.Timestamp
+	256, // 158: v1.OperationRule.created_at:type_name -> google.protobuf.Timestamp
+	256, // 159: v1.OperationRule.updated_at:type_name -> google.protobuf.Timestamp
 	14,  // 160: v1.CreateOperationRuleRequest.operation_type:type_name -> v1.OperationType
-	32,  // 161: v1.CreateOperationRuleResponse.id:type_name -> v1.UUID
-	32,  // 162: v1.UpdateOperationRuleRequest.rule_id:type_name -> v1.UUID
-	32,  // 163: v1.DeleteOperationRuleRequest.rule_id:type_name -> v1.UUID
-	32,  // 164: v1.SetRuleAsDefaultRequest.rule_id:type_name -> v1.UUID
-	32,  // 165: v1.GetOperationRuleRequest.rule_id:type_name -> v1.UUID
+	33,  // 161: v1.CreateOperationRuleResponse.id:type_name -> v1.UUID
+	33,  // 162: v1.UpdateOperationRuleRequest.rule_id:type_name -> v1.UUID
+	33,  // 163: v1.DeleteOperationRuleRequest.rule_id:type_name -> v1.UUID
+	33,  // 164: v1.SetRuleAsDefaultRequest.rule_id:type_name -> v1.UUID
+	33,  // 165: v1.GetOperationRuleRequest.rule_id:type_name -> v1.UUID
 	14,  // 166: v1.ListOperationRulesRequest.operation_type:type_name -> v1.OperationType
-	125, // 167: v1.ListOperationRulesResponse.rules:type_name -> v1.OperationRule
+	126, // 167: v1.ListOperationRulesResponse.rules:type_name -> v1.OperationRule
 	17,  // 168: v1.EventRuleActionCondition.severities:type_name -> v1.EventRuleSeverity
 	1,   // 169: v1.EventRuleActionCondition.component_types:type_name -> v1.ComponentType
 	18,  // 170: v1.EventRuleSubmitTaskAction.target_strategy:type_name -> v1.EventRuleTargetStrategy
 	19,  // 171: v1.EventRuleSubmitTaskAction.conflict_strategy:type_name -> v1.EventRuleConflictStrategy
-	122, // 172: v1.EventRuleSubmitTaskAction.operation:type_name -> v1.TaskOperation
+	123, // 172: v1.EventRuleSubmitTaskAction.operation:type_name -> v1.TaskOperation
 	17,  // 173: v1.EventRuleSendAlertAction.severity:type_name -> v1.EventRuleSeverity
-	134, // 174: v1.EventRuleAction.condition:type_name -> v1.EventRuleActionCondition
-	135, // 175: v1.EventRuleAction.submit_task:type_name -> v1.EventRuleSubmitTaskAction
-	136, // 176: v1.EventRuleAction.send_alert:type_name -> v1.EventRuleSendAlertAction
-	137, // 177: v1.EventRuleAction.noop:type_name -> v1.EventRuleNoopAction
-	32,  // 178: v1.EventRule.id:type_name -> v1.UUID
-	138, // 179: v1.EventRule.actions:type_name -> v1.EventRuleAction
-	247, // 180: v1.EventRule.created_at:type_name -> google.protobuf.Timestamp
-	247, // 181: v1.EventRule.updated_at:type_name -> google.protobuf.Timestamp
-	138, // 182: v1.CreateEventRuleRequest.actions:type_name -> v1.EventRuleAction
-	32,  // 183: v1.GetEventRuleRequest.rule_id:type_name -> v1.UUID
-	32,  // 184: v1.GetEffectiveEventRuleRequest.rack_id:type_name -> v1.UUID
-	32,  // 185: v1.GetEffectiveEventRuleRequest.component_id:type_name -> v1.UUID
-	54,  // 186: v1.ListEventRulesRequest.pagination:type_name -> v1.Pagination
-	139, // 187: v1.ListEventRulesResponse.rules:type_name -> v1.EventRule
-	138, // 188: v1.EventRuleActionsUpdate.actions:type_name -> v1.EventRuleAction
-	32,  // 189: v1.UpdateEventRuleRequest.rule_id:type_name -> v1.UUID
-	145, // 190: v1.UpdateEventRuleRequest.metadata:type_name -> v1.EventRuleMetadataUpdate
-	146, // 191: v1.UpdateEventRuleRequest.actions:type_name -> v1.EventRuleActionsUpdate
-	32,  // 192: v1.EnableEventRuleRequest.rule_id:type_name -> v1.UUID
-	32,  // 193: v1.DisableEventRuleRequest.rule_id:type_name -> v1.UUID
-	32,  // 194: v1.DeleteEventRuleRequest.rule_id:type_name -> v1.UUID
+	135, // 174: v1.EventRuleAction.condition:type_name -> v1.EventRuleActionCondition
+	136, // 175: v1.EventRuleAction.submit_task:type_name -> v1.EventRuleSubmitTaskAction
+	137, // 176: v1.EventRuleAction.send_alert:type_name -> v1.EventRuleSendAlertAction
+	138, // 177: v1.EventRuleAction.noop:type_name -> v1.EventRuleNoopAction
+	33,  // 178: v1.EventRule.id:type_name -> v1.UUID
+	139, // 179: v1.EventRule.actions:type_name -> v1.EventRuleAction
+	256, // 180: v1.EventRule.created_at:type_name -> google.protobuf.Timestamp
+	256, // 181: v1.EventRule.updated_at:type_name -> google.protobuf.Timestamp
+	139, // 182: v1.CreateEventRuleRequest.actions:type_name -> v1.EventRuleAction
+	33,  // 183: v1.GetEventRuleRequest.rule_id:type_name -> v1.UUID
+	33,  // 184: v1.GetEffectiveEventRuleRequest.rack_id:type_name -> v1.UUID
+	33,  // 185: v1.GetEffectiveEventRuleRequest.component_id:type_name -> v1.UUID
+	55,  // 186: v1.ListEventRulesRequest.pagination:type_name -> v1.Pagination
+	140, // 187: v1.ListEventRulesResponse.rules:type_name -> v1.EventRule
+	139, // 188: v1.EventRuleActionsUpdate.actions:type_name -> v1.EventRuleAction
+	33,  // 189: v1.UpdateEventRuleRequest.rule_id:type_name -> v1.UUID
+	146, // 190: v1.UpdateEventRuleRequest.metadata:type_name -> v1.EventRuleMetadataUpdate
+	147, // 191: v1.UpdateEventRuleRequest.actions:type_name -> v1.EventRuleActionsUpdate
+	33,  // 192: v1.EnableEventRuleRequest.rule_id:type_name -> v1.UUID
+	33,  // 193: v1.DisableEventRuleRequest.rule_id:type_name -> v1.UUID
+	33,  // 194: v1.DeleteEventRuleRequest.rule_id:type_name -> v1.UUID
 	20,  // 195: v1.EventRuleScope.type:type_name -> v1.EventRuleScopeType
-	32,  // 196: v1.EventRuleScope.id:type_name -> v1.UUID
-	32,  // 197: v1.EventRuleBinding.id:type_name -> v1.UUID
-	32,  // 198: v1.EventRuleBinding.rule_id:type_name -> v1.UUID
-	151, // 199: v1.EventRuleBinding.scope:type_name -> v1.EventRuleScope
-	32,  // 200: v1.CreateEventRuleBindingRequest.rule_id:type_name -> v1.UUID
-	151, // 201: v1.CreateEventRuleBindingRequest.scope:type_name -> v1.EventRuleScope
-	151, // 202: v1.GetEventRuleBindingRequest.scope:type_name -> v1.EventRuleScope
-	151, // 203: v1.DeleteEventRuleBindingRequest.scope:type_name -> v1.EventRuleScope
-	32,  // 204: v1.AssociateRuleWithRackRequest.rack_id:type_name -> v1.UUID
-	32,  // 205: v1.AssociateRuleWithRackRequest.rule_id:type_name -> v1.UUID
-	32,  // 206: v1.DisassociateRuleFromRackRequest.rack_id:type_name -> v1.UUID
-	14,  // 207: v1.DisassociateRuleFromRackRequest.operation_type:type_name -> v1.OperationType
-	32,  // 208: v1.GetRackRuleAssociationRequest.rack_id:type_name -> v1.UUID
-	14,  // 209: v1.GetRackRuleAssociationRequest.operation_type:type_name -> v1.OperationType
-	32,  // 210: v1.GetRackRuleAssociationResponse.rule_id:type_name -> v1.UUID
-	32,  // 211: v1.ListRackRuleAssociationsRequest.rack_id:type_name -> v1.UUID
-	32,  // 212: v1.RackRuleAssociation.rack_id:type_name -> v1.UUID
-	14,  // 213: v1.RackRuleAssociation.operation_type:type_name -> v1.OperationType
-	32,  // 214: v1.RackRuleAssociation.rule_id:type_name -> v1.UUID
-	247, // 215: v1.RackRuleAssociation.created_at:type_name -> google.protobuf.Timestamp
-	247, // 216: v1.RackRuleAssociation.updated_at:type_name -> google.protobuf.Timestamp
-	161, // 217: v1.ListRackRuleAssociationsResponse.associations:type_name -> v1.RackRuleAssociation
-	21,  // 218: v1.ScheduleSpec.type:type_name -> v1.ScheduleSpecType
-	163, // 219: v1.ScheduleConfig.spec:type_name -> v1.ScheduleSpec
-	22,  // 220: v1.ScheduleConfig.overlap_policy:type_name -> v1.OverlapPolicy
-	32,  // 221: v1.TaskSchedule.id:type_name -> v1.UUID
-	163, // 222: v1.TaskSchedule.spec:type_name -> v1.ScheduleSpec
-	22,  // 223: v1.TaskSchedule.overlap_policy:type_name -> v1.OverlapPolicy
-	247, // 224: v1.TaskSchedule.next_run_at:type_name -> google.protobuf.Timestamp
-	247, // 225: v1.TaskSchedule.last_run_at:type_name -> google.protobuf.Timestamp
-	247, // 226: v1.TaskSchedule.created_at:type_name -> google.protobuf.Timestamp
-	247, // 227: v1.TaskSchedule.updated_at:type_name -> google.protobuf.Timestamp
-	107, // 228: v1.ScheduledOperation.power_on:type_name -> v1.PowerOnRackRequest
-	108, // 229: v1.ScheduledOperation.power_off:type_name -> v1.PowerOffRackRequest
-	109, // 230: v1.ScheduledOperation.power_reset:type_name -> v1.PowerResetRackRequest
-	111, // 231: v1.ScheduledOperation.bring_up:type_name -> v1.BringUpRackRequest
-	84,  // 232: v1.ScheduledOperation.upgrade_firmware:type_name -> v1.UpgradeFirmwareRequest
-	112, // 233: v1.ScheduledOperation.ingest:type_name -> v1.IngestRackRequest
-	164, // 234: v1.CreateTaskScheduleRequest.schedule:type_name -> v1.ScheduleConfig
-	166, // 235: v1.CreateTaskScheduleRequest.operation:type_name -> v1.ScheduledOperation
-	32,  // 236: v1.GetTaskScheduleRequest.id:type_name -> v1.UUID
-	32,  // 237: v1.ListTaskSchedulesRequest.rack_id:type_name -> v1.UUID
-	54,  // 238: v1.ListTaskSchedulesRequest.pagination:type_name -> v1.Pagination
-	165, // 239: v1.ListTaskSchedulesResponse.task_schedules:type_name -> v1.TaskSchedule
-	32,  // 240: v1.UpdateTaskScheduleRequest.id:type_name -> v1.UUID
-	164, // 241: v1.UpdateTaskScheduleRequest.schedule:type_name -> v1.ScheduleConfig
-	248, // 242: v1.UpdateTaskScheduleRequest.update_mask:type_name -> google.protobuf.FieldMask
-	32,  // 243: v1.PauseTaskScheduleRequest.id:type_name -> v1.UUID
-	32,  // 244: v1.ResumeTaskScheduleRequest.id:type_name -> v1.UUID
-	32,  // 245: v1.DeleteTaskScheduleRequest.id:type_name -> v1.UUID
-	32,  // 246: v1.TriggerTaskScheduleRequest.id:type_name -> v1.UUID
-	32,  // 247: v1.TaskScheduleScope.id:type_name -> v1.UUID
-	32,  // 248: v1.TaskScheduleScope.schedule_id:type_name -> v1.UUID
-	32,  // 249: v1.TaskScheduleScope.rack_id:type_name -> v1.UUID
-	46,  // 250: v1.TaskScheduleScope.types:type_name -> v1.ComponentTypes
-	45,  // 251: v1.TaskScheduleScope.components:type_name -> v1.ComponentTargets
-	32,  // 252: v1.TaskScheduleScope.last_task_id:type_name -> v1.UUID
-	247, // 253: v1.TaskScheduleScope.created_at:type_name -> google.protobuf.Timestamp
-	32,  // 254: v1.AddTaskScheduleScopeRequest.schedule_id:type_name -> v1.UUID
-	43,  // 255: v1.AddTaskScheduleScopeRequest.target_spec:type_name -> v1.OperationTargetSpec
-	176, // 256: v1.AddTaskScheduleScopeResponse.scopes:type_name -> v1.TaskScheduleScope
-	32,  // 257: v1.RemoveTaskScheduleScopeRequest.scope_id:type_name -> v1.UUID
-	32,  // 258: v1.UpdateTaskScheduleScopeRequest.schedule_id:type_name -> v1.UUID
-	43,  // 259: v1.UpdateTaskScheduleScopeRequest.desired_scope:type_name -> v1.OperationTargetSpec
-	176, // 260: v1.UpdateTaskScheduleScopeResponse.scopes:type_name -> v1.TaskScheduleScope
-	32,  // 261: v1.ListTaskScheduleScopesRequest.schedule_id:type_name -> v1.UUID
-	176, // 262: v1.ListTaskScheduleScopesResponse.scopes:type_name -> v1.TaskScheduleScope
-	166, // 263: v1.CheckScheduleConflictsRequest.operation:type_name -> v1.ScheduledOperation
-	32,  // 264: v1.CheckScheduleConflictsRequest.exclude_schedule_id:type_name -> v1.UUID
-	165, // 265: v1.CheckScheduleConflictsResponse.conflicts:type_name -> v1.TaskSchedule
-	188, // 266: v1.CreateOperationRunRequest.configuration:type_name -> v1.OperationRunConfiguration
-	32,  // 267: v1.CreateOperationRunResponse.id:type_name -> v1.UUID
-	201, // 268: v1.OperationRunConfiguration.selector:type_name -> v1.OperationRunSelector
-	203, // 269: v1.OperationRunConfiguration.options:type_name -> v1.OperationRunOptions
-	221, // 270: v1.OperationRunConfiguration.operation:type_name -> v1.OperationRunOperation
-	32,  // 271: v1.GetOperationRunRequest.id:type_name -> v1.UUID
-	224, // 272: v1.GetOperationRunResponse.operation_run:type_name -> v1.OperationRun
-	193, // 273: v1.ListOperationRunsRequest.filter:type_name -> v1.OperationRunFilter
-	54,  // 274: v1.ListOperationRunsRequest.pagination:type_name -> v1.Pagination
-	225, // 275: v1.ListOperationRunsResponse.operation_runs:type_name -> v1.OperationRunSummary
-	55,  // 276: v1.OperationRunFilter.name:type_name -> v1.StringQueryInfo
-	194, // 277: v1.OperationRunFilter.states:type_name -> v1.OperationRunStateFilter
-	223, // 278: v1.OperationRunFilter.operation_kinds:type_name -> v1.OperationKind
-	25,  // 279: v1.OperationRunStateFilter.status:type_name -> v1.OperationRunStatus
-	26,  // 280: v1.OperationRunStateFilter.reason:type_name -> v1.OperationRunStatusReason
-	32,  // 281: v1.ListOperationRunTargetsRequest.operation_run_id:type_name -> v1.UUID
-	27,  // 282: v1.ListOperationRunTargetsRequest.status:type_name -> v1.OperationRunTargetStatus
-	54,  // 283: v1.ListOperationRunTargetsRequest.pagination:type_name -> v1.Pagination
-	23,  // 284: v1.ListOperationRunTargetsRequest.phase_scope:type_name -> v1.OperationRunTargetPhaseScope
-	229, // 285: v1.ListOperationRunTargetsResponse.targets:type_name -> v1.OperationRunTarget
-	32,  // 286: v1.PauseOperationRunRequest.id:type_name -> v1.UUID
-	32,  // 287: v1.ResumeOperationRunRequest.id:type_name -> v1.UUID
-	32,  // 288: v1.AdvanceOperationRunPhaseRequest.id:type_name -> v1.UUID
-	32,  // 289: v1.CancelOperationRunRequest.id:type_name -> v1.UUID
-	202, // 290: v1.OperationRunSelector.percentage:type_name -> v1.PercentageSelector
-	204, // 291: v1.OperationRunOptions.safety_policy:type_name -> v1.OperationRunSafetyPolicy
-	218, // 292: v1.OperationRunOptions.conflict_policy:type_name -> v1.OperationRunConflictPolicy
-	208, // 293: v1.OperationRunOptions.ordering_policy:type_name -> v1.OperationRunOrderingPolicy
-	211, // 294: v1.OperationRunOptions.phase_policy:type_name -> v1.OperationRunPhasePolicy
-	205, // 295: v1.OperationRunSafetyPolicy.gates:type_name -> v1.OperationRunSafetyGate
-	206, // 296: v1.OperationRunSafetyGate.failure_rate:type_name -> v1.OperationRunFailureRateGate
-	207, // 297: v1.OperationRunSafetyGate.failure_count:type_name -> v1.OperationRunFailureCountGate
-	24,  // 298: v1.OperationRunFailureRateGate.scope:type_name -> v1.OperationRunSafetyGateScope
-	24,  // 299: v1.OperationRunFailureCountGate.scope:type_name -> v1.OperationRunSafetyGateScope
-	209, // 300: v1.OperationRunOrderingPolicy.random:type_name -> v1.OperationRunRandomOrdering
-	210, // 301: v1.OperationRunOrderingPolicy.physical_location:type_name -> v1.OperationRunPhysicalLocationOrdering
-	31,  // 302: v1.OperationRunPhysicalLocationOrdering.strategy:type_name -> v1.OperationRunPhysicalLocationOrdering.Strategy
-	212, // 303: v1.OperationRunPhasePolicy.equal:type_name -> v1.EqualOperationRunPhases
-	213, // 304: v1.OperationRunPhasePolicy.percentage:type_name -> v1.PercentageOperationRunPhases
-	215, // 305: v1.OperationRunPhasePolicy.count:type_name -> v1.CountOperationRunPhases
-	217, // 306: v1.OperationRunPhasePolicy.advance_policy:type_name -> v1.OperationRunPhaseAdvancePolicy
-	214, // 307: v1.PercentageOperationRunPhases.phases:type_name -> v1.OperationRunPercentagePhase
-	216, // 308: v1.CountOperationRunPhases.phases:type_name -> v1.OperationRunCountPhase
-	219, // 309: v1.OperationRunConflictPolicy.retry:type_name -> v1.OperationRunConflictRetryPolicy
-	249, // 310: v1.OperationRunConflictRetryPolicy.retry_timeout:type_name -> google.protobuf.Duration
-	249, // 311: v1.OperationRunConflictRetryPolicy.initial_retry_delay:type_name -> google.protobuf.Duration
-	249, // 312: v1.OperationRunConflictRetryPolicy.max_retry_delay:type_name -> google.protobuf.Duration
-	32,  // 313: v1.OperationRunTargetScope.exclude_operation_run_ids:type_name -> v1.UUID
-	47,  // 314: v1.OperationRunTargetScope.default_scope_component_filter:type_name -> v1.ComponentFilter
-	84,  // 315: v1.OperationRunOperation.upgrade_firmware:type_name -> v1.UpgradeFirmwareRequest
-	220, // 316: v1.OperationRunOperation.target_scope:type_name -> v1.OperationRunTargetScope
-	25,  // 317: v1.OperationRunState.status:type_name -> v1.OperationRunStatus
-	26,  // 318: v1.OperationRunState.reason:type_name -> v1.OperationRunStatusReason
-	14,  // 319: v1.OperationKind.type:type_name -> v1.OperationType
-	225, // 320: v1.OperationRun.summary:type_name -> v1.OperationRunSummary
-	188, // 321: v1.OperationRun.configuration:type_name -> v1.OperationRunConfiguration
-	226, // 322: v1.OperationRun.stats:type_name -> v1.OperationRunStats
-	32,  // 323: v1.OperationRunSummary.id:type_name -> v1.UUID
-	223, // 324: v1.OperationRunSummary.operation_kind:type_name -> v1.OperationKind
-	222, // 325: v1.OperationRunSummary.state:type_name -> v1.OperationRunState
-	247, // 326: v1.OperationRunSummary.created_at:type_name -> google.protobuf.Timestamp
-	247, // 327: v1.OperationRunSummary.updated_at:type_name -> google.protobuf.Timestamp
-	247, // 328: v1.OperationRunSummary.started_at:type_name -> google.protobuf.Timestamp
-	247, // 329: v1.OperationRunSummary.finished_at:type_name -> google.protobuf.Timestamp
-	227, // 330: v1.OperationRunStats.current_phase_stats:type_name -> v1.OperationRunPhaseStats
-	227, // 331: v1.OperationRunStats.cumulative_phase_stats:type_name -> v1.OperationRunPhaseStats
-	228, // 332: v1.OperationRunPhaseStats.outcome_counts:type_name -> v1.OperationRunTargetOutcomeCounts
-	32,  // 333: v1.OperationRunTarget.id:type_name -> v1.UUID
-	32,  // 334: v1.OperationRunTarget.operation_run_id:type_name -> v1.UUID
-	32,  // 335: v1.OperationRunTarget.rack_id:type_name -> v1.UUID
-	32,  // 336: v1.OperationRunTarget.task_id:type_name -> v1.UUID
-	27,  // 337: v1.OperationRunTarget.status:type_name -> v1.OperationRunTargetStatus
-	48,  // 338: v1.OperationRunTarget.components_by_type:type_name -> v1.ComponentsByType
-	247, // 339: v1.OperationRunTarget.created_at:type_name -> google.protobuf.Timestamp
-	247, // 340: v1.OperationRunTarget.updated_at:type_name -> google.protobuf.Timestamp
-	231, // 341: v1.NVLDomainTargets.targets:type_name -> v1.NVLDomainTarget
-	32,  // 342: v1.NVLDomainTarget.id:type_name -> v1.UUID
-	1,   // 343: v1.NVLDomainTarget.component_types:type_name -> v1.ComponentType
-	247, // 344: v1.HealthReport.observed_at:type_name -> google.protobuf.Timestamp
-	233, // 345: v1.HealthReport.successes:type_name -> v1.HealthProbeSuccess
-	234, // 346: v1.HealthReport.alerts:type_name -> v1.HealthProbeAlert
-	247, // 347: v1.HealthProbeAlert.in_alert_since:type_name -> google.protobuf.Timestamp
-	237, // 348: v1.GetTrayPowerDetailsResponse.details:type_name -> v1.TrayPowerDetails
-	1,   // 349: v1.TrayPowerDetails.component_type:type_name -> v1.ComponentType
-	32,  // 350: v1.TrayPowerDetails.rack_id:type_name -> v1.UUID
-	238, // 351: v1.TrayPowerDetails.actual:type_name -> v1.PowerActualDetails
-	239, // 352: v1.TrayPowerDetails.desired:type_name -> v1.PowerDesiredDetails
-	240, // 353: v1.TrayPowerDetails.operations:type_name -> v1.PowerOperations
-	250, // 354: v1.PowerActualDetails.value:type_name -> forge.ComponentPowerObservation
-	28,  // 355: v1.PowerActualDetails.error:type_name -> v1.PowerDetailsReadError
-	251, // 356: v1.PowerDesiredDetails.value:type_name -> forge.ComponentPowerPolicy
-	28,  // 357: v1.PowerDesiredDetails.error:type_name -> v1.PowerDetailsReadError
-	241, // 358: v1.PowerOperations.actions:type_name -> v1.PowerActionDetails
-	242, // 359: v1.PowerOperations.tasks:type_name -> v1.PowerTaskDetailsList
-	252, // 360: v1.PowerActionDetails.value:type_name -> forge.ComponentPowerActionDetails
-	28,  // 361: v1.PowerActionDetails.error:type_name -> v1.PowerDetailsReadError
-	243, // 362: v1.PowerTaskDetailsList.entries:type_name -> v1.PowerTaskDetails
-	28,  // 363: v1.PowerTaskDetailsList.error:type_name -> v1.PowerDetailsReadError
-	32,  // 364: v1.PowerTaskDetails.id:type_name -> v1.UUID
-	32,  // 365: v1.PowerTaskDetails.rack_id:type_name -> v1.UUID
-	122, // 366: v1.PowerTaskDetails.operation:type_name -> v1.TaskOperation
-	48,  // 367: v1.PowerTaskDetails.targets:type_name -> v1.ComponentsByType
-	7,   // 368: v1.PowerTaskDetails.status:type_name -> v1.TaskStatus
-	247, // 369: v1.PowerTaskDetails.created_at:type_name -> google.protobuf.Timestamp
-	247, // 370: v1.PowerTaskDetails.updated_at:type_name -> google.protobuf.Timestamp
-	247, // 371: v1.PowerTaskDetails.started_at:type_name -> google.protobuf.Timestamp
-	29,  // 372: v1.PowerTaskDetails.relevance:type_name -> v1.PowerTaskRelevance
-	245, // 373: v1.PowerTaskDetails.waiting_context:type_name -> v1.PowerTaskWaitingContext
-	244, // 374: v1.PowerTaskDetails.external_targets:type_name -> v1.PowerTaskExternalTargets
-	52,  // 375: v1.PowerTaskExternalTargets.targets:type_name -> v1.ExternalRef
-	28,  // 376: v1.PowerTaskExternalTargets.error:type_name -> v1.PowerDetailsReadError
-	246, // 377: v1.PowerTaskWaitingContext.active_conflicts:type_name -> v1.TaskBrief
-	246, // 378: v1.PowerTaskWaitingContext.earlier_waiting:type_name -> v1.TaskBrief
-	28,  // 379: v1.PowerTaskWaitingContext.error:type_name -> v1.PowerDetailsReadError
-	32,  // 380: v1.TaskBrief.id:type_name -> v1.UUID
-	30,  // 381: v1.TaskBrief.kind:type_name -> v1.TaskKind
-	7,   // 382: v1.TaskBrief.status:type_name -> v1.TaskStatus
-	120, // 383: v1.Flow.Version:input_type -> v1.VersionRequest
-	167, // 384: v1.Flow.CreateTaskSchedule:input_type -> v1.CreateTaskScheduleRequest
-	168, // 385: v1.Flow.GetTaskSchedule:input_type -> v1.GetTaskScheduleRequest
-	169, // 386: v1.Flow.ListTaskSchedules:input_type -> v1.ListTaskSchedulesRequest
-	171, // 387: v1.Flow.UpdateTaskSchedule:input_type -> v1.UpdateTaskScheduleRequest
-	172, // 388: v1.Flow.PauseTaskSchedule:input_type -> v1.PauseTaskScheduleRequest
-	173, // 389: v1.Flow.ResumeTaskSchedule:input_type -> v1.ResumeTaskScheduleRequest
-	174, // 390: v1.Flow.DeleteTaskSchedule:input_type -> v1.DeleteTaskScheduleRequest
-	175, // 391: v1.Flow.TriggerTaskSchedule:input_type -> v1.TriggerTaskScheduleRequest
-	177, // 392: v1.Flow.AddTaskScheduleScope:input_type -> v1.AddTaskScheduleScopeRequest
-	179, // 393: v1.Flow.RemoveTaskScheduleScope:input_type -> v1.RemoveTaskScheduleScopeRequest
-	180, // 394: v1.Flow.UpdateTaskScheduleScope:input_type -> v1.UpdateTaskScheduleScopeRequest
-	182, // 395: v1.Flow.ListTaskScheduleScopes:input_type -> v1.ListTaskScheduleScopesRequest
-	184, // 396: v1.Flow.CheckScheduleConflicts:input_type -> v1.CheckScheduleConflictsRequest
-	59,  // 397: v1.Flow.CreateExpectedRack:input_type -> v1.CreateExpectedRackRequest
-	61,  // 398: v1.Flow.GetRackInfoByID:input_type -> v1.GetRackInfoByIDRequest
-	62,  // 399: v1.Flow.GetRackInfoBySerial:input_type -> v1.GetRackInfoBySerialRequest
-	69,  // 400: v1.Flow.GetListOfRacks:input_type -> v1.GetListOfRacksRequest
-	64,  // 401: v1.Flow.PatchRack:input_type -> v1.PatchRackRequest
-	97,  // 402: v1.Flow.DeleteRack:input_type -> v1.DeleteRackRequest
-	99,  // 403: v1.Flow.PurgeRack:input_type -> v1.PurgeRackRequest
-	84,  // 404: v1.Flow.UpgradeFirmware:input_type -> v1.UpgradeFirmwareRequest
-	111, // 405: v1.Flow.BringUpRack:input_type -> v1.BringUpRackRequest
-	112, // 406: v1.Flow.IngestRack:input_type -> v1.IngestRackRequest
-	113, // 407: v1.Flow.DecommissionRack:input_type -> v1.DecommissionRackRequest
-	107, // 408: v1.Flow.PowerOnRack:input_type -> v1.PowerOnRackRequest
-	108, // 409: v1.Flow.PowerOffRack:input_type -> v1.PowerOffRackRequest
-	109, // 410: v1.Flow.PowerResetRack:input_type -> v1.PowerResetRackRequest
-	110, // 411: v1.Flow.ACPowerCycleRack:input_type -> v1.ACPowerCycleRackRequest
-	66,  // 412: v1.Flow.GetComponentInfoByID:input_type -> v1.GetComponentInfoByIDRequest
-	67,  // 413: v1.Flow.GetComponentInfoBySerial:input_type -> v1.GetComponentInfoBySerialRequest
-	87,  // 414: v1.Flow.GetComponents:input_type -> v1.GetComponentsRequest
-	89,  // 415: v1.Flow.ValidateComponents:input_type -> v1.ValidateComponentsRequest
-	93,  // 416: v1.Flow.AddComponent:input_type -> v1.AddComponentRequest
-	103, // 417: v1.Flow.PatchComponent:input_type -> v1.PatchComponentRequest
-	95,  // 418: v1.Flow.DeleteComponent:input_type -> v1.DeleteComponentRequest
-	101, // 419: v1.Flow.PurgeComponent:input_type -> v1.PurgeComponentRequest
-	71,  // 420: v1.Flow.CreateNVLDomain:input_type -> v1.CreateNVLDomainRequest
-	73,  // 421: v1.Flow.AttachRacksToNVLDomain:input_type -> v1.AttachRacksToNVLDomainRequest
-	74,  // 422: v1.Flow.DetachRacksFromNVLDomain:input_type -> v1.DetachRacksFromNVLDomainRequest
-	75,  // 423: v1.Flow.GetListOfNVLDomains:input_type -> v1.GetListOfNVLDomainsRequest
-	82,  // 424: v1.Flow.GetRacksForNVLDomain:input_type -> v1.GetRacksForNVLDomainRequest
-	77,  // 425: v1.Flow.GetNVLinkDomain:input_type -> v1.GetNVLinkDomainRequest
-	80,  // 426: v1.Flow.GetListOfNVLinkDomains:input_type -> v1.GetListOfNVLinkDomainsRequest
-	114, // 427: v1.Flow.ListTasks:input_type -> v1.ListTasksRequest
-	116, // 428: v1.Flow.GetTasksByIDs:input_type -> v1.GetTasksByIDsRequest
-	118, // 429: v1.Flow.CancelTask:input_type -> v1.CancelTaskRequest
-	126, // 430: v1.Flow.CreateOperationRule:input_type -> v1.CreateOperationRuleRequest
-	128, // 431: v1.Flow.UpdateOperationRule:input_type -> v1.UpdateOperationRuleRequest
-	129, // 432: v1.Flow.DeleteOperationRule:input_type -> v1.DeleteOperationRuleRequest
-	131, // 433: v1.Flow.GetOperationRule:input_type -> v1.GetOperationRuleRequest
-	132, // 434: v1.Flow.ListOperationRules:input_type -> v1.ListOperationRulesRequest
-	130, // 435: v1.Flow.SetRuleAsDefault:input_type -> v1.SetRuleAsDefaultRequest
-	140, // 436: v1.Flow.CreateEventRule:input_type -> v1.CreateEventRuleRequest
-	141, // 437: v1.Flow.GetEventRule:input_type -> v1.GetEventRuleRequest
-	142, // 438: v1.Flow.GetEffectiveEventRule:input_type -> v1.GetEffectiveEventRuleRequest
-	143, // 439: v1.Flow.ListEventRules:input_type -> v1.ListEventRulesRequest
-	147, // 440: v1.Flow.UpdateEventRule:input_type -> v1.UpdateEventRuleRequest
-	148, // 441: v1.Flow.EnableEventRule:input_type -> v1.EnableEventRuleRequest
-	149, // 442: v1.Flow.DisableEventRule:input_type -> v1.DisableEventRuleRequest
-	150, // 443: v1.Flow.DeleteEventRule:input_type -> v1.DeleteEventRuleRequest
-	153, // 444: v1.Flow.CreateEventRuleBinding:input_type -> v1.CreateEventRuleBindingRequest
-	154, // 445: v1.Flow.GetEventRuleBinding:input_type -> v1.GetEventRuleBindingRequest
-	155, // 446: v1.Flow.DeleteEventRuleBinding:input_type -> v1.DeleteEventRuleBindingRequest
-	156, // 447: v1.Flow.AssociateRuleWithRack:input_type -> v1.AssociateRuleWithRackRequest
-	157, // 448: v1.Flow.DisassociateRuleFromRack:input_type -> v1.DisassociateRuleFromRackRequest
-	158, // 449: v1.Flow.GetRackRuleAssociation:input_type -> v1.GetRackRuleAssociationRequest
-	160, // 450: v1.Flow.ListRackRuleAssociations:input_type -> v1.ListRackRuleAssociationsRequest
-	186, // 451: v1.Flow.CreateOperationRun:input_type -> v1.CreateOperationRunRequest
-	189, // 452: v1.Flow.GetOperationRun:input_type -> v1.GetOperationRunRequest
-	191, // 453: v1.Flow.ListOperationRuns:input_type -> v1.ListOperationRunsRequest
-	195, // 454: v1.Flow.ListOperationRunTargets:input_type -> v1.ListOperationRunTargetsRequest
-	197, // 455: v1.Flow.PauseOperationRun:input_type -> v1.PauseOperationRunRequest
-	198, // 456: v1.Flow.ResumeOperationRun:input_type -> v1.ResumeOperationRunRequest
-	199, // 457: v1.Flow.AdvanceOperationRunPhase:input_type -> v1.AdvanceOperationRunPhaseRequest
-	200, // 458: v1.Flow.CancelOperationRun:input_type -> v1.CancelOperationRunRequest
-	235, // 459: v1.Flow.GetTrayPowerDetails:input_type -> v1.GetTrayPowerDetailsRequest
-	121, // 460: v1.Flow.Version:output_type -> v1.BuildInfo
-	165, // 461: v1.Flow.CreateTaskSchedule:output_type -> v1.TaskSchedule
-	165, // 462: v1.Flow.GetTaskSchedule:output_type -> v1.TaskSchedule
-	170, // 463: v1.Flow.ListTaskSchedules:output_type -> v1.ListTaskSchedulesResponse
-	165, // 464: v1.Flow.UpdateTaskSchedule:output_type -> v1.TaskSchedule
-	165, // 465: v1.Flow.PauseTaskSchedule:output_type -> v1.TaskSchedule
-	165, // 466: v1.Flow.ResumeTaskSchedule:output_type -> v1.TaskSchedule
-	253, // 467: v1.Flow.DeleteTaskSchedule:output_type -> google.protobuf.Empty
-	105, // 468: v1.Flow.TriggerTaskSchedule:output_type -> v1.SubmitTaskResponse
-	178, // 469: v1.Flow.AddTaskScheduleScope:output_type -> v1.AddTaskScheduleScopeResponse
-	253, // 470: v1.Flow.RemoveTaskScheduleScope:output_type -> google.protobuf.Empty
-	181, // 471: v1.Flow.UpdateTaskScheduleScope:output_type -> v1.UpdateTaskScheduleScopeResponse
-	183, // 472: v1.Flow.ListTaskScheduleScopes:output_type -> v1.ListTaskScheduleScopesResponse
-	185, // 473: v1.Flow.CheckScheduleConflicts:output_type -> v1.CheckScheduleConflictsResponse
-	60,  // 474: v1.Flow.CreateExpectedRack:output_type -> v1.CreateExpectedRackResponse
-	63,  // 475: v1.Flow.GetRackInfoByID:output_type -> v1.GetRackInfoResponse
-	63,  // 476: v1.Flow.GetRackInfoBySerial:output_type -> v1.GetRackInfoResponse
-	70,  // 477: v1.Flow.GetListOfRacks:output_type -> v1.GetListOfRacksResponse
-	65,  // 478: v1.Flow.PatchRack:output_type -> v1.PatchRackResponse
-	98,  // 479: v1.Flow.DeleteRack:output_type -> v1.DeleteRackResponse
-	100, // 480: v1.Flow.PurgeRack:output_type -> v1.PurgeRackResponse
-	105, // 481: v1.Flow.UpgradeFirmware:output_type -> v1.SubmitTaskResponse
-	105, // 482: v1.Flow.BringUpRack:output_type -> v1.SubmitTaskResponse
-	105, // 483: v1.Flow.IngestRack:output_type -> v1.SubmitTaskResponse
-	105, // 484: v1.Flow.DecommissionRack:output_type -> v1.SubmitTaskResponse
-	105, // 485: v1.Flow.PowerOnRack:output_type -> v1.SubmitTaskResponse
-	105, // 486: v1.Flow.PowerOffRack:output_type -> v1.SubmitTaskResponse
-	105, // 487: v1.Flow.PowerResetRack:output_type -> v1.SubmitTaskResponse
-	105, // 488: v1.Flow.ACPowerCycleRack:output_type -> v1.SubmitTaskResponse
-	68,  // 489: v1.Flow.GetComponentInfoByID:output_type -> v1.GetComponentInfoResponse
-	68,  // 490: v1.Flow.GetComponentInfoBySerial:output_type -> v1.GetComponentInfoResponse
-	88,  // 491: v1.Flow.GetComponents:output_type -> v1.GetComponentsResponse
-	90,  // 492: v1.Flow.ValidateComponents:output_type -> v1.ValidateComponentsResponse
-	94,  // 493: v1.Flow.AddComponent:output_type -> v1.AddComponentResponse
-	104, // 494: v1.Flow.PatchComponent:output_type -> v1.PatchComponentResponse
-	96,  // 495: v1.Flow.DeleteComponent:output_type -> v1.DeleteComponentResponse
-	102, // 496: v1.Flow.PurgeComponent:output_type -> v1.PurgeComponentResponse
-	72,  // 497: v1.Flow.CreateNVLDomain:output_type -> v1.CreateNVLDomainResponse
-	253, // 498: v1.Flow.AttachRacksToNVLDomain:output_type -> google.protobuf.Empty
-	253, // 499: v1.Flow.DetachRacksFromNVLDomain:output_type -> google.protobuf.Empty
-	76,  // 500: v1.Flow.GetListOfNVLDomains:output_type -> v1.GetListOfNVLDomainsResponse
-	83,  // 501: v1.Flow.GetRacksForNVLDomain:output_type -> v1.GetRacksForNVLDomainResponse
-	79,  // 502: v1.Flow.GetNVLinkDomain:output_type -> v1.GetNVLinkDomainResponse
-	81,  // 503: v1.Flow.GetListOfNVLinkDomains:output_type -> v1.GetListOfNVLinkDomainsResponse
-	115, // 504: v1.Flow.ListTasks:output_type -> v1.ListTasksResponse
-	117, // 505: v1.Flow.GetTasksByIDs:output_type -> v1.GetTasksByIDsResponse
-	119, // 506: v1.Flow.CancelTask:output_type -> v1.CancelTaskResponse
-	127, // 507: v1.Flow.CreateOperationRule:output_type -> v1.CreateOperationRuleResponse
-	253, // 508: v1.Flow.UpdateOperationRule:output_type -> google.protobuf.Empty
-	253, // 509: v1.Flow.DeleteOperationRule:output_type -> google.protobuf.Empty
-	125, // 510: v1.Flow.GetOperationRule:output_type -> v1.OperationRule
-	133, // 511: v1.Flow.ListOperationRules:output_type -> v1.ListOperationRulesResponse
-	253, // 512: v1.Flow.SetRuleAsDefault:output_type -> google.protobuf.Empty
-	139, // 513: v1.Flow.CreateEventRule:output_type -> v1.EventRule
-	139, // 514: v1.Flow.GetEventRule:output_type -> v1.EventRule
-	139, // 515: v1.Flow.GetEffectiveEventRule:output_type -> v1.EventRule
-	144, // 516: v1.Flow.ListEventRules:output_type -> v1.ListEventRulesResponse
-	139, // 517: v1.Flow.UpdateEventRule:output_type -> v1.EventRule
-	139, // 518: v1.Flow.EnableEventRule:output_type -> v1.EventRule
-	139, // 519: v1.Flow.DisableEventRule:output_type -> v1.EventRule
-	253, // 520: v1.Flow.DeleteEventRule:output_type -> google.protobuf.Empty
-	152, // 521: v1.Flow.CreateEventRuleBinding:output_type -> v1.EventRuleBinding
-	152, // 522: v1.Flow.GetEventRuleBinding:output_type -> v1.EventRuleBinding
-	253, // 523: v1.Flow.DeleteEventRuleBinding:output_type -> google.protobuf.Empty
-	253, // 524: v1.Flow.AssociateRuleWithRack:output_type -> google.protobuf.Empty
-	253, // 525: v1.Flow.DisassociateRuleFromRack:output_type -> google.protobuf.Empty
-	159, // 526: v1.Flow.GetRackRuleAssociation:output_type -> v1.GetRackRuleAssociationResponse
-	162, // 527: v1.Flow.ListRackRuleAssociations:output_type -> v1.ListRackRuleAssociationsResponse
-	187, // 528: v1.Flow.CreateOperationRun:output_type -> v1.CreateOperationRunResponse
-	190, // 529: v1.Flow.GetOperationRun:output_type -> v1.GetOperationRunResponse
-	192, // 530: v1.Flow.ListOperationRuns:output_type -> v1.ListOperationRunsResponse
-	196, // 531: v1.Flow.ListOperationRunTargets:output_type -> v1.ListOperationRunTargetsResponse
-	224, // 532: v1.Flow.PauseOperationRun:output_type -> v1.OperationRun
-	224, // 533: v1.Flow.ResumeOperationRun:output_type -> v1.OperationRun
-	224, // 534: v1.Flow.AdvanceOperationRunPhase:output_type -> v1.OperationRun
-	224, // 535: v1.Flow.CancelOperationRun:output_type -> v1.OperationRun
-	236, // 536: v1.Flow.GetTrayPowerDetails:output_type -> v1.GetTrayPowerDetailsResponse
-	460, // [460:537] is the sub-list for method output_type
-	383, // [383:460] is the sub-list for method input_type
-	383, // [383:383] is the sub-list for extension type_name
-	383, // [383:383] is the sub-list for extension extendee
-	0,   // [0:383] is the sub-list for field type_name
+	33,  // 196: v1.EventRuleScope.id:type_name -> v1.UUID
+	20,  // 197: v1.EventRuleScopeSelector.type:type_name -> v1.EventRuleScopeType
+	33,  // 198: v1.EventRuleScopeSelector.rack_id:type_name -> v1.UUID
+	33,  // 199: v1.EventRuleBinding.id:type_name -> v1.UUID
+	33,  // 200: v1.EventRuleBinding.rule_id:type_name -> v1.UUID
+	152, // 201: v1.EventRuleBinding.scope:type_name -> v1.EventRuleScope
+	33,  // 202: v1.CreateEventRuleBindingRequest.rule_id:type_name -> v1.UUID
+	152, // 203: v1.CreateEventRuleBindingRequest.scope:type_name -> v1.EventRuleScope
+	152, // 204: v1.GetEventRuleBindingRequest.scope:type_name -> v1.EventRuleScope
+	152, // 205: v1.DeleteEventRuleBindingRequest.scope:type_name -> v1.EventRuleScope
+	33,  // 206: v1.AssociateRuleWithRackRequest.rack_id:type_name -> v1.UUID
+	33,  // 207: v1.AssociateRuleWithRackRequest.rule_id:type_name -> v1.UUID
+	33,  // 208: v1.DisassociateRuleFromRackRequest.rack_id:type_name -> v1.UUID
+	14,  // 209: v1.DisassociateRuleFromRackRequest.operation_type:type_name -> v1.OperationType
+	33,  // 210: v1.GetRackRuleAssociationRequest.rack_id:type_name -> v1.UUID
+	14,  // 211: v1.GetRackRuleAssociationRequest.operation_type:type_name -> v1.OperationType
+	33,  // 212: v1.GetRackRuleAssociationResponse.rule_id:type_name -> v1.UUID
+	33,  // 213: v1.ListRackRuleAssociationsRequest.rack_id:type_name -> v1.UUID
+	33,  // 214: v1.RackRuleAssociation.rack_id:type_name -> v1.UUID
+	14,  // 215: v1.RackRuleAssociation.operation_type:type_name -> v1.OperationType
+	33,  // 216: v1.RackRuleAssociation.rule_id:type_name -> v1.UUID
+	256, // 217: v1.RackRuleAssociation.created_at:type_name -> google.protobuf.Timestamp
+	256, // 218: v1.RackRuleAssociation.updated_at:type_name -> google.protobuf.Timestamp
+	163, // 219: v1.ListRackRuleAssociationsResponse.associations:type_name -> v1.RackRuleAssociation
+	21,  // 220: v1.ScheduleSpec.type:type_name -> v1.ScheduleSpecType
+	165, // 221: v1.ScheduleConfig.spec:type_name -> v1.ScheduleSpec
+	22,  // 222: v1.ScheduleConfig.overlap_policy:type_name -> v1.OverlapPolicy
+	33,  // 223: v1.TaskSchedule.id:type_name -> v1.UUID
+	165, // 224: v1.TaskSchedule.spec:type_name -> v1.ScheduleSpec
+	22,  // 225: v1.TaskSchedule.overlap_policy:type_name -> v1.OverlapPolicy
+	256, // 226: v1.TaskSchedule.next_run_at:type_name -> google.protobuf.Timestamp
+	256, // 227: v1.TaskSchedule.last_run_at:type_name -> google.protobuf.Timestamp
+	256, // 228: v1.TaskSchedule.created_at:type_name -> google.protobuf.Timestamp
+	256, // 229: v1.TaskSchedule.updated_at:type_name -> google.protobuf.Timestamp
+	108, // 230: v1.ScheduledOperation.power_on:type_name -> v1.PowerOnRackRequest
+	109, // 231: v1.ScheduledOperation.power_off:type_name -> v1.PowerOffRackRequest
+	110, // 232: v1.ScheduledOperation.power_reset:type_name -> v1.PowerResetRackRequest
+	112, // 233: v1.ScheduledOperation.bring_up:type_name -> v1.BringUpRackRequest
+	85,  // 234: v1.ScheduledOperation.upgrade_firmware:type_name -> v1.UpgradeFirmwareRequest
+	113, // 235: v1.ScheduledOperation.ingest:type_name -> v1.IngestRackRequest
+	166, // 236: v1.CreateTaskScheduleRequest.schedule:type_name -> v1.ScheduleConfig
+	168, // 237: v1.CreateTaskScheduleRequest.operation:type_name -> v1.ScheduledOperation
+	33,  // 238: v1.GetTaskScheduleRequest.id:type_name -> v1.UUID
+	33,  // 239: v1.ListTaskSchedulesRequest.rack_id:type_name -> v1.UUID
+	55,  // 240: v1.ListTaskSchedulesRequest.pagination:type_name -> v1.Pagination
+	167, // 241: v1.ListTaskSchedulesResponse.task_schedules:type_name -> v1.TaskSchedule
+	33,  // 242: v1.UpdateTaskScheduleRequest.id:type_name -> v1.UUID
+	166, // 243: v1.UpdateTaskScheduleRequest.schedule:type_name -> v1.ScheduleConfig
+	257, // 244: v1.UpdateTaskScheduleRequest.update_mask:type_name -> google.protobuf.FieldMask
+	33,  // 245: v1.PauseTaskScheduleRequest.id:type_name -> v1.UUID
+	33,  // 246: v1.ResumeTaskScheduleRequest.id:type_name -> v1.UUID
+	33,  // 247: v1.DeleteTaskScheduleRequest.id:type_name -> v1.UUID
+	33,  // 248: v1.TriggerTaskScheduleRequest.id:type_name -> v1.UUID
+	33,  // 249: v1.TaskScheduleScope.id:type_name -> v1.UUID
+	33,  // 250: v1.TaskScheduleScope.schedule_id:type_name -> v1.UUID
+	33,  // 251: v1.TaskScheduleScope.rack_id:type_name -> v1.UUID
+	47,  // 252: v1.TaskScheduleScope.types:type_name -> v1.ComponentTypes
+	46,  // 253: v1.TaskScheduleScope.components:type_name -> v1.ComponentTargets
+	33,  // 254: v1.TaskScheduleScope.last_task_id:type_name -> v1.UUID
+	256, // 255: v1.TaskScheduleScope.created_at:type_name -> google.protobuf.Timestamp
+	33,  // 256: v1.AddTaskScheduleScopeRequest.schedule_id:type_name -> v1.UUID
+	44,  // 257: v1.AddTaskScheduleScopeRequest.target_spec:type_name -> v1.OperationTargetSpec
+	178, // 258: v1.AddTaskScheduleScopeResponse.scopes:type_name -> v1.TaskScheduleScope
+	33,  // 259: v1.RemoveTaskScheduleScopeRequest.scope_id:type_name -> v1.UUID
+	33,  // 260: v1.UpdateTaskScheduleScopeRequest.schedule_id:type_name -> v1.UUID
+	44,  // 261: v1.UpdateTaskScheduleScopeRequest.desired_scope:type_name -> v1.OperationTargetSpec
+	178, // 262: v1.UpdateTaskScheduleScopeResponse.scopes:type_name -> v1.TaskScheduleScope
+	33,  // 263: v1.ListTaskScheduleScopesRequest.schedule_id:type_name -> v1.UUID
+	178, // 264: v1.ListTaskScheduleScopesResponse.scopes:type_name -> v1.TaskScheduleScope
+	168, // 265: v1.CheckScheduleConflictsRequest.operation:type_name -> v1.ScheduledOperation
+	33,  // 266: v1.CheckScheduleConflictsRequest.exclude_schedule_id:type_name -> v1.UUID
+	167, // 267: v1.CheckScheduleConflictsResponse.conflicts:type_name -> v1.TaskSchedule
+	190, // 268: v1.CreateOperationRunRequest.configuration:type_name -> v1.OperationRunConfiguration
+	33,  // 269: v1.CreateOperationRunResponse.id:type_name -> v1.UUID
+	203, // 270: v1.OperationRunConfiguration.selector:type_name -> v1.OperationRunSelector
+	205, // 271: v1.OperationRunConfiguration.options:type_name -> v1.OperationRunOptions
+	223, // 272: v1.OperationRunConfiguration.operation:type_name -> v1.OperationRunOperation
+	33,  // 273: v1.GetOperationRunRequest.id:type_name -> v1.UUID
+	226, // 274: v1.GetOperationRunResponse.operation_run:type_name -> v1.OperationRun
+	195, // 275: v1.ListOperationRunsRequest.filter:type_name -> v1.OperationRunFilter
+	55,  // 276: v1.ListOperationRunsRequest.pagination:type_name -> v1.Pagination
+	227, // 277: v1.ListOperationRunsResponse.operation_runs:type_name -> v1.OperationRunSummary
+	56,  // 278: v1.OperationRunFilter.name:type_name -> v1.StringQueryInfo
+	196, // 279: v1.OperationRunFilter.states:type_name -> v1.OperationRunStateFilter
+	225, // 280: v1.OperationRunFilter.operation_kinds:type_name -> v1.OperationKind
+	25,  // 281: v1.OperationRunStateFilter.status:type_name -> v1.OperationRunStatus
+	26,  // 282: v1.OperationRunStateFilter.reason:type_name -> v1.OperationRunStatusReason
+	33,  // 283: v1.ListOperationRunTargetsRequest.operation_run_id:type_name -> v1.UUID
+	27,  // 284: v1.ListOperationRunTargetsRequest.status:type_name -> v1.OperationRunTargetStatus
+	55,  // 285: v1.ListOperationRunTargetsRequest.pagination:type_name -> v1.Pagination
+	23,  // 286: v1.ListOperationRunTargetsRequest.phase_scope:type_name -> v1.OperationRunTargetPhaseScope
+	231, // 287: v1.ListOperationRunTargetsResponse.targets:type_name -> v1.OperationRunTarget
+	33,  // 288: v1.PauseOperationRunRequest.id:type_name -> v1.UUID
+	33,  // 289: v1.ResumeOperationRunRequest.id:type_name -> v1.UUID
+	33,  // 290: v1.AdvanceOperationRunPhaseRequest.id:type_name -> v1.UUID
+	33,  // 291: v1.CancelOperationRunRequest.id:type_name -> v1.UUID
+	204, // 292: v1.OperationRunSelector.percentage:type_name -> v1.PercentageSelector
+	206, // 293: v1.OperationRunOptions.safety_policy:type_name -> v1.OperationRunSafetyPolicy
+	220, // 294: v1.OperationRunOptions.conflict_policy:type_name -> v1.OperationRunConflictPolicy
+	210, // 295: v1.OperationRunOptions.ordering_policy:type_name -> v1.OperationRunOrderingPolicy
+	213, // 296: v1.OperationRunOptions.phase_policy:type_name -> v1.OperationRunPhasePolicy
+	207, // 297: v1.OperationRunSafetyPolicy.gates:type_name -> v1.OperationRunSafetyGate
+	208, // 298: v1.OperationRunSafetyGate.failure_rate:type_name -> v1.OperationRunFailureRateGate
+	209, // 299: v1.OperationRunSafetyGate.failure_count:type_name -> v1.OperationRunFailureCountGate
+	24,  // 300: v1.OperationRunFailureRateGate.scope:type_name -> v1.OperationRunSafetyGateScope
+	24,  // 301: v1.OperationRunFailureCountGate.scope:type_name -> v1.OperationRunSafetyGateScope
+	211, // 302: v1.OperationRunOrderingPolicy.random:type_name -> v1.OperationRunRandomOrdering
+	212, // 303: v1.OperationRunOrderingPolicy.physical_location:type_name -> v1.OperationRunPhysicalLocationOrdering
+	32,  // 304: v1.OperationRunPhysicalLocationOrdering.strategy:type_name -> v1.OperationRunPhysicalLocationOrdering.Strategy
+	214, // 305: v1.OperationRunPhasePolicy.equal:type_name -> v1.EqualOperationRunPhases
+	215, // 306: v1.OperationRunPhasePolicy.percentage:type_name -> v1.PercentageOperationRunPhases
+	217, // 307: v1.OperationRunPhasePolicy.count:type_name -> v1.CountOperationRunPhases
+	219, // 308: v1.OperationRunPhasePolicy.advance_policy:type_name -> v1.OperationRunPhaseAdvancePolicy
+	216, // 309: v1.PercentageOperationRunPhases.phases:type_name -> v1.OperationRunPercentagePhase
+	218, // 310: v1.CountOperationRunPhases.phases:type_name -> v1.OperationRunCountPhase
+	221, // 311: v1.OperationRunConflictPolicy.retry:type_name -> v1.OperationRunConflictRetryPolicy
+	258, // 312: v1.OperationRunConflictRetryPolicy.retry_timeout:type_name -> google.protobuf.Duration
+	258, // 313: v1.OperationRunConflictRetryPolicy.initial_retry_delay:type_name -> google.protobuf.Duration
+	258, // 314: v1.OperationRunConflictRetryPolicy.max_retry_delay:type_name -> google.protobuf.Duration
+	33,  // 315: v1.OperationRunTargetScope.exclude_operation_run_ids:type_name -> v1.UUID
+	48,  // 316: v1.OperationRunTargetScope.default_scope_component_filter:type_name -> v1.ComponentFilter
+	85,  // 317: v1.OperationRunOperation.upgrade_firmware:type_name -> v1.UpgradeFirmwareRequest
+	222, // 318: v1.OperationRunOperation.target_scope:type_name -> v1.OperationRunTargetScope
+	25,  // 319: v1.OperationRunState.status:type_name -> v1.OperationRunStatus
+	26,  // 320: v1.OperationRunState.reason:type_name -> v1.OperationRunStatusReason
+	14,  // 321: v1.OperationKind.type:type_name -> v1.OperationType
+	227, // 322: v1.OperationRun.summary:type_name -> v1.OperationRunSummary
+	190, // 323: v1.OperationRun.configuration:type_name -> v1.OperationRunConfiguration
+	228, // 324: v1.OperationRun.stats:type_name -> v1.OperationRunStats
+	33,  // 325: v1.OperationRunSummary.id:type_name -> v1.UUID
+	225, // 326: v1.OperationRunSummary.operation_kind:type_name -> v1.OperationKind
+	224, // 327: v1.OperationRunSummary.state:type_name -> v1.OperationRunState
+	256, // 328: v1.OperationRunSummary.created_at:type_name -> google.protobuf.Timestamp
+	256, // 329: v1.OperationRunSummary.updated_at:type_name -> google.protobuf.Timestamp
+	256, // 330: v1.OperationRunSummary.started_at:type_name -> google.protobuf.Timestamp
+	256, // 331: v1.OperationRunSummary.finished_at:type_name -> google.protobuf.Timestamp
+	229, // 332: v1.OperationRunStats.current_phase_stats:type_name -> v1.OperationRunPhaseStats
+	229, // 333: v1.OperationRunStats.cumulative_phase_stats:type_name -> v1.OperationRunPhaseStats
+	230, // 334: v1.OperationRunPhaseStats.outcome_counts:type_name -> v1.OperationRunTargetOutcomeCounts
+	33,  // 335: v1.OperationRunTarget.id:type_name -> v1.UUID
+	33,  // 336: v1.OperationRunTarget.operation_run_id:type_name -> v1.UUID
+	33,  // 337: v1.OperationRunTarget.rack_id:type_name -> v1.UUID
+	33,  // 338: v1.OperationRunTarget.task_id:type_name -> v1.UUID
+	27,  // 339: v1.OperationRunTarget.status:type_name -> v1.OperationRunTargetStatus
+	49,  // 340: v1.OperationRunTarget.components_by_type:type_name -> v1.ComponentsByType
+	256, // 341: v1.OperationRunTarget.created_at:type_name -> google.protobuf.Timestamp
+	256, // 342: v1.OperationRunTarget.updated_at:type_name -> google.protobuf.Timestamp
+	233, // 343: v1.NVLDomainTargets.targets:type_name -> v1.NVLDomainTarget
+	33,  // 344: v1.NVLDomainTarget.id:type_name -> v1.UUID
+	1,   // 345: v1.NVLDomainTarget.component_types:type_name -> v1.ComponentType
+	256, // 346: v1.HealthReport.observed_at:type_name -> google.protobuf.Timestamp
+	235, // 347: v1.HealthReport.successes:type_name -> v1.HealthProbeSuccess
+	236, // 348: v1.HealthReport.alerts:type_name -> v1.HealthProbeAlert
+	256, // 349: v1.HealthProbeAlert.in_alert_since:type_name -> google.protobuf.Timestamp
+	239, // 350: v1.GetTrayPowerDetailsResponse.details:type_name -> v1.TrayPowerDetails
+	1,   // 351: v1.TrayPowerDetails.component_type:type_name -> v1.ComponentType
+	33,  // 352: v1.TrayPowerDetails.rack_id:type_name -> v1.UUID
+	240, // 353: v1.TrayPowerDetails.actual:type_name -> v1.PowerActualDetails
+	241, // 354: v1.TrayPowerDetails.desired:type_name -> v1.PowerDesiredDetails
+	242, // 355: v1.TrayPowerDetails.operations:type_name -> v1.PowerOperations
+	259, // 356: v1.PowerActualDetails.value:type_name -> forge.ComponentPowerObservation
+	28,  // 357: v1.PowerActualDetails.error:type_name -> v1.PowerDetailsReadError
+	260, // 358: v1.PowerDesiredDetails.value:type_name -> forge.ComponentPowerPolicy
+	28,  // 359: v1.PowerDesiredDetails.error:type_name -> v1.PowerDetailsReadError
+	243, // 360: v1.PowerOperations.actions:type_name -> v1.PowerActionDetails
+	244, // 361: v1.PowerOperations.tasks:type_name -> v1.PowerTaskDetailsList
+	261, // 362: v1.PowerActionDetails.value:type_name -> forge.ComponentPowerActionDetails
+	28,  // 363: v1.PowerActionDetails.error:type_name -> v1.PowerDetailsReadError
+	245, // 364: v1.PowerTaskDetailsList.entries:type_name -> v1.PowerTaskDetails
+	28,  // 365: v1.PowerTaskDetailsList.error:type_name -> v1.PowerDetailsReadError
+	33,  // 366: v1.PowerTaskDetails.id:type_name -> v1.UUID
+	33,  // 367: v1.PowerTaskDetails.rack_id:type_name -> v1.UUID
+	123, // 368: v1.PowerTaskDetails.operation:type_name -> v1.TaskOperation
+	49,  // 369: v1.PowerTaskDetails.targets:type_name -> v1.ComponentsByType
+	7,   // 370: v1.PowerTaskDetails.status:type_name -> v1.TaskStatus
+	256, // 371: v1.PowerTaskDetails.created_at:type_name -> google.protobuf.Timestamp
+	256, // 372: v1.PowerTaskDetails.updated_at:type_name -> google.protobuf.Timestamp
+	256, // 373: v1.PowerTaskDetails.started_at:type_name -> google.protobuf.Timestamp
+	29,  // 374: v1.PowerTaskDetails.relevance:type_name -> v1.PowerTaskRelevance
+	247, // 375: v1.PowerTaskDetails.waiting_context:type_name -> v1.PowerTaskWaitingContext
+	246, // 376: v1.PowerTaskDetails.external_targets:type_name -> v1.PowerTaskExternalTargets
+	53,  // 377: v1.PowerTaskExternalTargets.targets:type_name -> v1.ExternalRef
+	28,  // 378: v1.PowerTaskExternalTargets.error:type_name -> v1.PowerDetailsReadError
+	248, // 379: v1.PowerTaskWaitingContext.active_conflicts:type_name -> v1.TaskBrief
+	248, // 380: v1.PowerTaskWaitingContext.earlier_waiting:type_name -> v1.TaskBrief
+	28,  // 381: v1.PowerTaskWaitingContext.error:type_name -> v1.PowerDetailsReadError
+	33,  // 382: v1.TaskBrief.id:type_name -> v1.UUID
+	30,  // 383: v1.TaskBrief.kind:type_name -> v1.TaskKind
+	7,   // 384: v1.TaskBrief.status:type_name -> v1.TaskStatus
+	153, // 385: v1.SetEventRuleOverrideRequest.scope:type_name -> v1.EventRuleScopeSelector
+	139, // 386: v1.SetEventRuleOverrideRequest.actions:type_name -> v1.EventRuleAction
+	153, // 387: v1.GetEffectiveEventRuleForScopeRequest.scope:type_name -> v1.EventRuleScopeSelector
+	153, // 388: v1.DeleteEventRuleOverrideRequest.scope:type_name -> v1.EventRuleScopeSelector
+	33,  // 389: v1.EventHandlingTask.id:type_name -> v1.UUID
+	7,   // 390: v1.EventHandlingTask.status:type_name -> v1.TaskStatus
+	256, // 391: v1.EventHandlingTask.created_at:type_name -> google.protobuf.Timestamp
+	33,  // 392: v1.EventHandling.id:type_name -> v1.UUID
+	31,  // 393: v1.EventHandling.resource_type:type_name -> v1.EventResourceType
+	252, // 394: v1.EventHandling.tasks:type_name -> v1.EventHandlingTask
+	256, // 395: v1.EventHandling.handled_at:type_name -> google.protobuf.Timestamp
+	31,  // 396: v1.GetEventHandlingRequest.resource_type:type_name -> v1.EventResourceType
+	253, // 397: v1.GetEventHandlingResponse.handlings:type_name -> v1.EventHandling
+	121, // 398: v1.Flow.Version:input_type -> v1.VersionRequest
+	169, // 399: v1.Flow.CreateTaskSchedule:input_type -> v1.CreateTaskScheduleRequest
+	170, // 400: v1.Flow.GetTaskSchedule:input_type -> v1.GetTaskScheduleRequest
+	171, // 401: v1.Flow.ListTaskSchedules:input_type -> v1.ListTaskSchedulesRequest
+	173, // 402: v1.Flow.UpdateTaskSchedule:input_type -> v1.UpdateTaskScheduleRequest
+	174, // 403: v1.Flow.PauseTaskSchedule:input_type -> v1.PauseTaskScheduleRequest
+	175, // 404: v1.Flow.ResumeTaskSchedule:input_type -> v1.ResumeTaskScheduleRequest
+	176, // 405: v1.Flow.DeleteTaskSchedule:input_type -> v1.DeleteTaskScheduleRequest
+	177, // 406: v1.Flow.TriggerTaskSchedule:input_type -> v1.TriggerTaskScheduleRequest
+	179, // 407: v1.Flow.AddTaskScheduleScope:input_type -> v1.AddTaskScheduleScopeRequest
+	181, // 408: v1.Flow.RemoveTaskScheduleScope:input_type -> v1.RemoveTaskScheduleScopeRequest
+	182, // 409: v1.Flow.UpdateTaskScheduleScope:input_type -> v1.UpdateTaskScheduleScopeRequest
+	184, // 410: v1.Flow.ListTaskScheduleScopes:input_type -> v1.ListTaskScheduleScopesRequest
+	186, // 411: v1.Flow.CheckScheduleConflicts:input_type -> v1.CheckScheduleConflictsRequest
+	60,  // 412: v1.Flow.CreateExpectedRack:input_type -> v1.CreateExpectedRackRequest
+	62,  // 413: v1.Flow.GetRackInfoByID:input_type -> v1.GetRackInfoByIDRequest
+	63,  // 414: v1.Flow.GetRackInfoBySerial:input_type -> v1.GetRackInfoBySerialRequest
+	70,  // 415: v1.Flow.GetListOfRacks:input_type -> v1.GetListOfRacksRequest
+	65,  // 416: v1.Flow.PatchRack:input_type -> v1.PatchRackRequest
+	98,  // 417: v1.Flow.DeleteRack:input_type -> v1.DeleteRackRequest
+	100, // 418: v1.Flow.PurgeRack:input_type -> v1.PurgeRackRequest
+	85,  // 419: v1.Flow.UpgradeFirmware:input_type -> v1.UpgradeFirmwareRequest
+	112, // 420: v1.Flow.BringUpRack:input_type -> v1.BringUpRackRequest
+	113, // 421: v1.Flow.IngestRack:input_type -> v1.IngestRackRequest
+	114, // 422: v1.Flow.DecommissionRack:input_type -> v1.DecommissionRackRequest
+	108, // 423: v1.Flow.PowerOnRack:input_type -> v1.PowerOnRackRequest
+	109, // 424: v1.Flow.PowerOffRack:input_type -> v1.PowerOffRackRequest
+	110, // 425: v1.Flow.PowerResetRack:input_type -> v1.PowerResetRackRequest
+	111, // 426: v1.Flow.ACPowerCycleRack:input_type -> v1.ACPowerCycleRackRequest
+	67,  // 427: v1.Flow.GetComponentInfoByID:input_type -> v1.GetComponentInfoByIDRequest
+	68,  // 428: v1.Flow.GetComponentInfoBySerial:input_type -> v1.GetComponentInfoBySerialRequest
+	88,  // 429: v1.Flow.GetComponents:input_type -> v1.GetComponentsRequest
+	90,  // 430: v1.Flow.ValidateComponents:input_type -> v1.ValidateComponentsRequest
+	94,  // 431: v1.Flow.AddComponent:input_type -> v1.AddComponentRequest
+	104, // 432: v1.Flow.PatchComponent:input_type -> v1.PatchComponentRequest
+	96,  // 433: v1.Flow.DeleteComponent:input_type -> v1.DeleteComponentRequest
+	102, // 434: v1.Flow.PurgeComponent:input_type -> v1.PurgeComponentRequest
+	72,  // 435: v1.Flow.CreateNVLDomain:input_type -> v1.CreateNVLDomainRequest
+	74,  // 436: v1.Flow.AttachRacksToNVLDomain:input_type -> v1.AttachRacksToNVLDomainRequest
+	75,  // 437: v1.Flow.DetachRacksFromNVLDomain:input_type -> v1.DetachRacksFromNVLDomainRequest
+	76,  // 438: v1.Flow.GetListOfNVLDomains:input_type -> v1.GetListOfNVLDomainsRequest
+	83,  // 439: v1.Flow.GetRacksForNVLDomain:input_type -> v1.GetRacksForNVLDomainRequest
+	78,  // 440: v1.Flow.GetNVLinkDomain:input_type -> v1.GetNVLinkDomainRequest
+	81,  // 441: v1.Flow.GetListOfNVLinkDomains:input_type -> v1.GetListOfNVLinkDomainsRequest
+	115, // 442: v1.Flow.ListTasks:input_type -> v1.ListTasksRequest
+	117, // 443: v1.Flow.GetTasksByIDs:input_type -> v1.GetTasksByIDsRequest
+	119, // 444: v1.Flow.CancelTask:input_type -> v1.CancelTaskRequest
+	127, // 445: v1.Flow.CreateOperationRule:input_type -> v1.CreateOperationRuleRequest
+	129, // 446: v1.Flow.UpdateOperationRule:input_type -> v1.UpdateOperationRuleRequest
+	130, // 447: v1.Flow.DeleteOperationRule:input_type -> v1.DeleteOperationRuleRequest
+	132, // 448: v1.Flow.GetOperationRule:input_type -> v1.GetOperationRuleRequest
+	133, // 449: v1.Flow.ListOperationRules:input_type -> v1.ListOperationRulesRequest
+	131, // 450: v1.Flow.SetRuleAsDefault:input_type -> v1.SetRuleAsDefaultRequest
+	141, // 451: v1.Flow.CreateEventRule:input_type -> v1.CreateEventRuleRequest
+	142, // 452: v1.Flow.GetEventRule:input_type -> v1.GetEventRuleRequest
+	143, // 453: v1.Flow.GetEffectiveEventRule:input_type -> v1.GetEffectiveEventRuleRequest
+	144, // 454: v1.Flow.ListEventRules:input_type -> v1.ListEventRulesRequest
+	148, // 455: v1.Flow.UpdateEventRule:input_type -> v1.UpdateEventRuleRequest
+	149, // 456: v1.Flow.EnableEventRule:input_type -> v1.EnableEventRuleRequest
+	150, // 457: v1.Flow.DisableEventRule:input_type -> v1.DisableEventRuleRequest
+	151, // 458: v1.Flow.DeleteEventRule:input_type -> v1.DeleteEventRuleRequest
+	155, // 459: v1.Flow.CreateEventRuleBinding:input_type -> v1.CreateEventRuleBindingRequest
+	156, // 460: v1.Flow.GetEventRuleBinding:input_type -> v1.GetEventRuleBindingRequest
+	157, // 461: v1.Flow.DeleteEventRuleBinding:input_type -> v1.DeleteEventRuleBindingRequest
+	249, // 462: v1.Flow.SetEventRuleOverride:input_type -> v1.SetEventRuleOverrideRequest
+	250, // 463: v1.Flow.GetEffectiveEventRuleForScope:input_type -> v1.GetEffectiveEventRuleForScopeRequest
+	251, // 464: v1.Flow.DeleteEventRuleOverride:input_type -> v1.DeleteEventRuleOverrideRequest
+	254, // 465: v1.Flow.GetEventHandling:input_type -> v1.GetEventHandlingRequest
+	158, // 466: v1.Flow.AssociateRuleWithRack:input_type -> v1.AssociateRuleWithRackRequest
+	159, // 467: v1.Flow.DisassociateRuleFromRack:input_type -> v1.DisassociateRuleFromRackRequest
+	160, // 468: v1.Flow.GetRackRuleAssociation:input_type -> v1.GetRackRuleAssociationRequest
+	162, // 469: v1.Flow.ListRackRuleAssociations:input_type -> v1.ListRackRuleAssociationsRequest
+	188, // 470: v1.Flow.CreateOperationRun:input_type -> v1.CreateOperationRunRequest
+	191, // 471: v1.Flow.GetOperationRun:input_type -> v1.GetOperationRunRequest
+	193, // 472: v1.Flow.ListOperationRuns:input_type -> v1.ListOperationRunsRequest
+	197, // 473: v1.Flow.ListOperationRunTargets:input_type -> v1.ListOperationRunTargetsRequest
+	199, // 474: v1.Flow.PauseOperationRun:input_type -> v1.PauseOperationRunRequest
+	200, // 475: v1.Flow.ResumeOperationRun:input_type -> v1.ResumeOperationRunRequest
+	201, // 476: v1.Flow.AdvanceOperationRunPhase:input_type -> v1.AdvanceOperationRunPhaseRequest
+	202, // 477: v1.Flow.CancelOperationRun:input_type -> v1.CancelOperationRunRequest
+	237, // 478: v1.Flow.GetTrayPowerDetails:input_type -> v1.GetTrayPowerDetailsRequest
+	122, // 479: v1.Flow.Version:output_type -> v1.BuildInfo
+	167, // 480: v1.Flow.CreateTaskSchedule:output_type -> v1.TaskSchedule
+	167, // 481: v1.Flow.GetTaskSchedule:output_type -> v1.TaskSchedule
+	172, // 482: v1.Flow.ListTaskSchedules:output_type -> v1.ListTaskSchedulesResponse
+	167, // 483: v1.Flow.UpdateTaskSchedule:output_type -> v1.TaskSchedule
+	167, // 484: v1.Flow.PauseTaskSchedule:output_type -> v1.TaskSchedule
+	167, // 485: v1.Flow.ResumeTaskSchedule:output_type -> v1.TaskSchedule
+	262, // 486: v1.Flow.DeleteTaskSchedule:output_type -> google.protobuf.Empty
+	106, // 487: v1.Flow.TriggerTaskSchedule:output_type -> v1.SubmitTaskResponse
+	180, // 488: v1.Flow.AddTaskScheduleScope:output_type -> v1.AddTaskScheduleScopeResponse
+	262, // 489: v1.Flow.RemoveTaskScheduleScope:output_type -> google.protobuf.Empty
+	183, // 490: v1.Flow.UpdateTaskScheduleScope:output_type -> v1.UpdateTaskScheduleScopeResponse
+	185, // 491: v1.Flow.ListTaskScheduleScopes:output_type -> v1.ListTaskScheduleScopesResponse
+	187, // 492: v1.Flow.CheckScheduleConflicts:output_type -> v1.CheckScheduleConflictsResponse
+	61,  // 493: v1.Flow.CreateExpectedRack:output_type -> v1.CreateExpectedRackResponse
+	64,  // 494: v1.Flow.GetRackInfoByID:output_type -> v1.GetRackInfoResponse
+	64,  // 495: v1.Flow.GetRackInfoBySerial:output_type -> v1.GetRackInfoResponse
+	71,  // 496: v1.Flow.GetListOfRacks:output_type -> v1.GetListOfRacksResponse
+	66,  // 497: v1.Flow.PatchRack:output_type -> v1.PatchRackResponse
+	99,  // 498: v1.Flow.DeleteRack:output_type -> v1.DeleteRackResponse
+	101, // 499: v1.Flow.PurgeRack:output_type -> v1.PurgeRackResponse
+	106, // 500: v1.Flow.UpgradeFirmware:output_type -> v1.SubmitTaskResponse
+	106, // 501: v1.Flow.BringUpRack:output_type -> v1.SubmitTaskResponse
+	106, // 502: v1.Flow.IngestRack:output_type -> v1.SubmitTaskResponse
+	106, // 503: v1.Flow.DecommissionRack:output_type -> v1.SubmitTaskResponse
+	106, // 504: v1.Flow.PowerOnRack:output_type -> v1.SubmitTaskResponse
+	106, // 505: v1.Flow.PowerOffRack:output_type -> v1.SubmitTaskResponse
+	106, // 506: v1.Flow.PowerResetRack:output_type -> v1.SubmitTaskResponse
+	106, // 507: v1.Flow.ACPowerCycleRack:output_type -> v1.SubmitTaskResponse
+	69,  // 508: v1.Flow.GetComponentInfoByID:output_type -> v1.GetComponentInfoResponse
+	69,  // 509: v1.Flow.GetComponentInfoBySerial:output_type -> v1.GetComponentInfoResponse
+	89,  // 510: v1.Flow.GetComponents:output_type -> v1.GetComponentsResponse
+	91,  // 511: v1.Flow.ValidateComponents:output_type -> v1.ValidateComponentsResponse
+	95,  // 512: v1.Flow.AddComponent:output_type -> v1.AddComponentResponse
+	105, // 513: v1.Flow.PatchComponent:output_type -> v1.PatchComponentResponse
+	97,  // 514: v1.Flow.DeleteComponent:output_type -> v1.DeleteComponentResponse
+	103, // 515: v1.Flow.PurgeComponent:output_type -> v1.PurgeComponentResponse
+	73,  // 516: v1.Flow.CreateNVLDomain:output_type -> v1.CreateNVLDomainResponse
+	262, // 517: v1.Flow.AttachRacksToNVLDomain:output_type -> google.protobuf.Empty
+	262, // 518: v1.Flow.DetachRacksFromNVLDomain:output_type -> google.protobuf.Empty
+	77,  // 519: v1.Flow.GetListOfNVLDomains:output_type -> v1.GetListOfNVLDomainsResponse
+	84,  // 520: v1.Flow.GetRacksForNVLDomain:output_type -> v1.GetRacksForNVLDomainResponse
+	80,  // 521: v1.Flow.GetNVLinkDomain:output_type -> v1.GetNVLinkDomainResponse
+	82,  // 522: v1.Flow.GetListOfNVLinkDomains:output_type -> v1.GetListOfNVLinkDomainsResponse
+	116, // 523: v1.Flow.ListTasks:output_type -> v1.ListTasksResponse
+	118, // 524: v1.Flow.GetTasksByIDs:output_type -> v1.GetTasksByIDsResponse
+	120, // 525: v1.Flow.CancelTask:output_type -> v1.CancelTaskResponse
+	128, // 526: v1.Flow.CreateOperationRule:output_type -> v1.CreateOperationRuleResponse
+	262, // 527: v1.Flow.UpdateOperationRule:output_type -> google.protobuf.Empty
+	262, // 528: v1.Flow.DeleteOperationRule:output_type -> google.protobuf.Empty
+	126, // 529: v1.Flow.GetOperationRule:output_type -> v1.OperationRule
+	134, // 530: v1.Flow.ListOperationRules:output_type -> v1.ListOperationRulesResponse
+	262, // 531: v1.Flow.SetRuleAsDefault:output_type -> google.protobuf.Empty
+	140, // 532: v1.Flow.CreateEventRule:output_type -> v1.EventRule
+	140, // 533: v1.Flow.GetEventRule:output_type -> v1.EventRule
+	140, // 534: v1.Flow.GetEffectiveEventRule:output_type -> v1.EventRule
+	145, // 535: v1.Flow.ListEventRules:output_type -> v1.ListEventRulesResponse
+	140, // 536: v1.Flow.UpdateEventRule:output_type -> v1.EventRule
+	140, // 537: v1.Flow.EnableEventRule:output_type -> v1.EventRule
+	140, // 538: v1.Flow.DisableEventRule:output_type -> v1.EventRule
+	262, // 539: v1.Flow.DeleteEventRule:output_type -> google.protobuf.Empty
+	154, // 540: v1.Flow.CreateEventRuleBinding:output_type -> v1.EventRuleBinding
+	154, // 541: v1.Flow.GetEventRuleBinding:output_type -> v1.EventRuleBinding
+	262, // 542: v1.Flow.DeleteEventRuleBinding:output_type -> google.protobuf.Empty
+	140, // 543: v1.Flow.SetEventRuleOverride:output_type -> v1.EventRule
+	140, // 544: v1.Flow.GetEffectiveEventRuleForScope:output_type -> v1.EventRule
+	262, // 545: v1.Flow.DeleteEventRuleOverride:output_type -> google.protobuf.Empty
+	255, // 546: v1.Flow.GetEventHandling:output_type -> v1.GetEventHandlingResponse
+	262, // 547: v1.Flow.AssociateRuleWithRack:output_type -> google.protobuf.Empty
+	262, // 548: v1.Flow.DisassociateRuleFromRack:output_type -> google.protobuf.Empty
+	161, // 549: v1.Flow.GetRackRuleAssociation:output_type -> v1.GetRackRuleAssociationResponse
+	164, // 550: v1.Flow.ListRackRuleAssociations:output_type -> v1.ListRackRuleAssociationsResponse
+	189, // 551: v1.Flow.CreateOperationRun:output_type -> v1.CreateOperationRunResponse
+	192, // 552: v1.Flow.GetOperationRun:output_type -> v1.GetOperationRunResponse
+	194, // 553: v1.Flow.ListOperationRuns:output_type -> v1.ListOperationRunsResponse
+	198, // 554: v1.Flow.ListOperationRunTargets:output_type -> v1.ListOperationRunTargetsResponse
+	226, // 555: v1.Flow.PauseOperationRun:output_type -> v1.OperationRun
+	226, // 556: v1.Flow.ResumeOperationRun:output_type -> v1.OperationRun
+	226, // 557: v1.Flow.AdvanceOperationRunPhase:output_type -> v1.OperationRun
+	226, // 558: v1.Flow.CancelOperationRun:output_type -> v1.OperationRun
+	238, // 559: v1.Flow.GetTrayPowerDetails:output_type -> v1.GetTrayPowerDetailsResponse
+	479, // [479:560] is the sub-list for method output_type
+	398, // [398:479] is the sub-list for method input_type
+	398, // [398:398] is the sub-list for extension type_name
+	398, // [398:398] is the sub-list for extension extendee
+	0,   // [0:398] is the sub-list for field type_name
 }
 
 func init() { file_flow_proto_init() }
@@ -17786,8 +18501,12 @@ func file_flow_proto_init() {
 		(*UpdateEventRuleRequest_Metadata)(nil),
 		(*UpdateEventRuleRequest_Actions)(nil),
 	}
-	file_flow_proto_msgTypes[133].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[134].OneofWrappers = []any{
+	file_flow_proto_msgTypes[120].OneofWrappers = []any{
+		(*EventRuleScopeSelector_RackId)(nil),
+		(*EventRuleScopeSelector_RackExternalId)(nil),
+	}
+	file_flow_proto_msgTypes[134].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[135].OneofWrappers = []any{
 		(*ScheduledOperation_PowerOn)(nil),
 		(*ScheduledOperation_PowerOff)(nil),
 		(*ScheduledOperation_PowerReset)(nil),
@@ -17795,71 +18514,71 @@ func file_flow_proto_init() {
 		(*ScheduledOperation_UpgradeFirmware)(nil),
 		(*ScheduledOperation_Ingest)(nil),
 	}
-	file_flow_proto_msgTypes[137].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[144].OneofWrappers = []any{
+	file_flow_proto_msgTypes[138].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[145].OneofWrappers = []any{
 		(*TaskScheduleScope_Types)(nil),
 		(*TaskScheduleScope_Components)(nil),
 	}
-	file_flow_proto_msgTypes[152].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[159].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[162].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[153].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[160].OneofWrappers = []any{}
 	file_flow_proto_msgTypes[163].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[167].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[169].OneofWrappers = []any{
+	file_flow_proto_msgTypes[164].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[168].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[170].OneofWrappers = []any{
 		(*OperationRunSelector_Percentage)(nil),
 	}
-	file_flow_proto_msgTypes[173].OneofWrappers = []any{
+	file_flow_proto_msgTypes[174].OneofWrappers = []any{
 		(*OperationRunSafetyGate_FailureRate)(nil),
 		(*OperationRunSafetyGate_FailureCount)(nil),
 	}
-	file_flow_proto_msgTypes[176].OneofWrappers = []any{
+	file_flow_proto_msgTypes[177].OneofWrappers = []any{
 		(*OperationRunOrderingPolicy_Random)(nil),
 		(*OperationRunOrderingPolicy_PhysicalLocation)(nil),
 	}
-	file_flow_proto_msgTypes[179].OneofWrappers = []any{
+	file_flow_proto_msgTypes[180].OneofWrappers = []any{
 		(*OperationRunPhasePolicy_Equal)(nil),
 		(*OperationRunPhasePolicy_Percentage)(nil),
 		(*OperationRunPhasePolicy_Count)(nil),
 	}
-	file_flow_proto_msgTypes[186].OneofWrappers = []any{
+	file_flow_proto_msgTypes[187].OneofWrappers = []any{
 		(*OperationRunConflictPolicy_Retry)(nil),
 	}
-	file_flow_proto_msgTypes[189].OneofWrappers = []any{
+	file_flow_proto_msgTypes[190].OneofWrappers = []any{
 		(*OperationRunOperation_UpgradeFirmware)(nil),
 	}
-	file_flow_proto_msgTypes[191].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[193].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[199].OneofWrappers = []any{
+	file_flow_proto_msgTypes[192].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[194].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[200].OneofWrappers = []any{
 		(*NVLDomainTarget_Id)(nil),
 		(*NVLDomainTarget_Name)(nil),
 		(*NVLDomainTarget_ExternalId)(nil),
 	}
-	file_flow_proto_msgTypes[200].OneofWrappers = []any{}
 	file_flow_proto_msgTypes[201].OneofWrappers = []any{}
 	file_flow_proto_msgTypes[202].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[205].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[206].OneofWrappers = []any{
+	file_flow_proto_msgTypes[203].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[206].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[207].OneofWrappers = []any{
 		(*PowerActualDetails_Value)(nil),
 		(*PowerActualDetails_Error)(nil),
 	}
-	file_flow_proto_msgTypes[207].OneofWrappers = []any{
+	file_flow_proto_msgTypes[208].OneofWrappers = []any{
 		(*PowerDesiredDetails_Value)(nil),
 		(*PowerDesiredDetails_Error)(nil),
 	}
-	file_flow_proto_msgTypes[209].OneofWrappers = []any{
+	file_flow_proto_msgTypes[210].OneofWrappers = []any{
 		(*PowerActionDetails_Value)(nil),
 		(*PowerActionDetails_Error)(nil),
 	}
-	file_flow_proto_msgTypes[210].OneofWrappers = []any{}
-	file_flow_proto_msgTypes[212].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[211].OneofWrappers = []any{}
 	file_flow_proto_msgTypes[213].OneofWrappers = []any{}
+	file_flow_proto_msgTypes[214].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_flow_proto_rawDesc), len(file_flow_proto_rawDesc)),
-			NumEnums:      32,
-			NumMessages:   215,
+			NumEnums:      33,
+			NumMessages:   223,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

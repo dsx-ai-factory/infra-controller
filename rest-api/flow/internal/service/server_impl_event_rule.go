@@ -34,6 +34,10 @@ type eventRuleManager interface {
 		eventrule.Scope,
 	) (*eventrule.Binding, error)
 	Unbind(context.Context, eventrule.Type, eventrule.Scope) error
+	SetOverride(context.Context, eventrule.RuleCreate, eventrule.Scope) (*eventrule.Rule, error)
+	GetEffectiveForScope(context.Context, eventrule.Type, eventrule.Scope) (*eventrule.Rule, error)
+	DeleteOverride(context.Context, eventrule.Type, eventrule.Scope) error
+	GetEventHandling(context.Context, eventrule.Type, eventrule.ResourceKind, uuid.UUID, int, *eventrule.HandlingCursor) ([]eventrule.Handling, bool, error)
 }
 
 func (rs *FlowServerImpl) requireEventRuleManager() (eventRuleManager, error) {
@@ -348,6 +352,274 @@ func (rs *FlowServerImpl) DeleteEventRuleBinding(
 	}
 
 	return &emptypb.Empty{}, nil
+}
+
+func (rs *FlowServerImpl) SetEventRuleOverride(
+	ctx context.Context,
+	req *pb.SetEventRuleOverrideRequest,
+) (*pb.EventRule, error) {
+	manager, err := rs.requireEventRuleManager()
+	if err != nil {
+		return nil, err
+	}
+
+	scope, err := rs.resolveEventRuleScope(ctx, req.GetScope())
+	if err != nil {
+		return nil, err
+	}
+
+	actions, err := protobuf.EventRuleActionsFrom(req.GetActions())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	rule, err := manager.SetOverride(
+		ctx,
+		eventrule.RuleCreate{
+			Metadata: eventrule.RuleMetadata{
+				Name:        req.GetName(),
+				Description: req.GetDescription(),
+			},
+			EventType: eventrule.Type(req.GetEventType()),
+			Policy:    eventrule.Policy{Actions: actions},
+		},
+		scope,
+	)
+	if err != nil {
+		return nil, eventRuleStatusError(codes.Internal, err)
+	}
+
+	return eventRuleResponse(rule)
+}
+
+func (rs *FlowServerImpl) GetEffectiveEventRuleForScope(
+	ctx context.Context,
+	req *pb.GetEffectiveEventRuleForScopeRequest,
+) (*pb.EventRule, error) {
+	manager, err := rs.requireEventRuleManager()
+	if err != nil {
+		return nil, err
+	}
+
+	scope, err := rs.resolveEventRuleScope(ctx, req.GetScope())
+	if err != nil {
+		return nil, err
+	}
+
+	rule, err := manager.GetEffectiveForScope(
+		ctx, eventrule.Type(req.GetEventType()), scope,
+	)
+	if err != nil {
+		return nil, eventRuleStatusError(codes.Internal, err)
+	}
+
+	return eventRuleResponse(rule)
+}
+
+func (rs *FlowServerImpl) DeleteEventRuleOverride(
+	ctx context.Context,
+	req *pb.DeleteEventRuleOverrideRequest,
+) (*emptypb.Empty, error) {
+	manager, err := rs.requireEventRuleManager()
+	if err != nil {
+		return nil, err
+	}
+
+	scope, err := rs.resolveEventRuleScope(ctx, req.GetScope())
+	if err != nil {
+		return nil, err
+	}
+
+	err = manager.DeleteOverride(ctx, eventrule.Type(req.GetEventType()), scope)
+	if err != nil {
+		return nil, eventRuleStatusError(codes.Internal, err)
+	}
+
+	return &emptypb.Empty{}, nil
+}
+
+func (rs *FlowServerImpl) resolveEventRuleScope(
+	ctx context.Context,
+	selector *pb.EventRuleScopeSelector,
+) (eventrule.Scope, error) {
+	if selector == nil {
+		return eventrule.Scope{}, status.Error(codes.InvalidArgument, "event rule scope is required")
+	}
+
+	canonical := &pb.EventRuleScope{Type: selector.GetType()}
+	switch selector.GetType() {
+	case pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_SITE:
+		if selector.GetRackIdentifier() != nil {
+			return eventrule.Scope{}, status.Error(
+				codes.InvalidArgument,
+				"site scope must not include a rack identifier",
+			)
+		}
+	case pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_RACK:
+		switch identifier := selector.GetRackIdentifier().(type) {
+		case *pb.EventRuleScopeSelector_RackId:
+			canonical.Id = identifier.RackId
+		case *pb.EventRuleScopeSelector_RackExternalId:
+			if identifier.RackExternalId == "" {
+				return eventrule.Scope{}, status.Error(
+					codes.InvalidArgument,
+					"rack external ID is required",
+				)
+			}
+			if rs.inventoryManager == nil {
+				return eventrule.Scope{}, status.Error(
+					codes.FailedPrecondition,
+					"inventory manager is not configured",
+				)
+			}
+			rack, err := rs.inventoryManager.GetRackByIdentifier(
+				ctx,
+				externalRackIdentifier(identifier.RackExternalId),
+				false,
+			)
+			if err != nil {
+				return eventrule.Scope{}, err
+			}
+			canonical.Id = protobuf.UUIDTo(rack.Info.ID)
+		default:
+			return eventrule.Scope{}, status.Error(
+				codes.InvalidArgument,
+				"rack scope requires a rack ID or rack external ID",
+			)
+		}
+	default:
+		return eventrule.Scope{}, status.Errorf(
+			codes.InvalidArgument,
+			"unknown event rule scope type %q",
+			selector.GetType(),
+		)
+	}
+
+	scope, err := protobuf.EventRuleScopeFrom(canonical)
+	if err != nil {
+		return eventrule.Scope{}, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	return scope, nil
+}
+
+const maxEventHandlingLimit = 100
+
+func eventHandlingLimit(requested int32) (int, error) {
+	if requested == 0 {
+		return 1, nil
+	}
+
+	if requested < 1 || requested > maxEventHandlingLimit {
+		return 0, fmt.Errorf(
+			"limit must be between 1 and %d",
+			maxEventHandlingLimit,
+		)
+	}
+
+	return int(requested), nil
+}
+
+// GetEventHandling returns one cursor-paginated page of handling decisions for
+// an event type and component or rack resource.
+func (rs *FlowServerImpl) GetEventHandling(
+	ctx context.Context,
+	req *pb.GetEventHandlingRequest,
+) (*pb.GetEventHandlingResponse, error) {
+	manager, err := rs.requireEventRuleManager()
+	if err != nil {
+		return nil, err
+	}
+
+	if req.GetEventType() == "" {
+		return nil, status.Error(codes.InvalidArgument, "event_type is required")
+	}
+
+	if req.GetResourceId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "resource_id is required")
+	}
+
+	resourceType, resourceID, err := rs.resolveEventHandlingResource(
+		ctx,
+		req.GetResourceType(),
+		req.GetResourceId(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	limit, err := eventHandlingLimit(req.GetLimit())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	cursor, err := eventrule.DecodeHandlingCursor(req.GetCursor())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	handlings, hasMore, err := manager.GetEventHandling(
+		ctx,
+		eventrule.Type(req.GetEventType()),
+		resourceType,
+		resourceID,
+		limit,
+		cursor,
+	)
+	if err != nil {
+		return nil, eventRuleStatusError(codes.Internal, err)
+	}
+
+	converted := make([]*pb.EventHandling, 0, len(handlings))
+	for _, item := range handlings {
+		converted = append(converted, protobuf.EventHandlingTo(item))
+	}
+
+	response := &pb.GetEventHandlingResponse{Handlings: converted}
+	if hasMore && len(handlings) > 0 {
+		last := handlings[len(handlings)-1]
+		response.NextCursor, err = eventrule.EncodeHandlingCursor(
+			eventrule.HandlingCursor{
+				HandledAt: last.HandledAt,
+				ID:        last.ID,
+			},
+		)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+	}
+
+	return response, nil
+}
+
+func (rs *FlowServerImpl) resolveEventHandlingResource(
+	ctx context.Context,
+	resourceType pb.EventResourceType,
+	resourceID string,
+) (eventrule.ResourceKind, uuid.UUID, error) {
+	switch resourceType {
+	case pb.EventResourceType_EVENT_RESOURCE_TYPE_COMPONENT:
+		component, err := rs.resolveComponentIdentifier(ctx, resourceID)
+		if err != nil {
+			return "", uuid.Nil, err
+		}
+		return eventrule.ResourceKindComponent, component.Info.ID, nil
+	case pb.EventResourceType_EVENT_RESOURCE_TYPE_RACK:
+		rack, err := rs.inventoryManager.GetRackByIdentifier(
+			ctx,
+			externalRackIdentifier(resourceID),
+			false,
+		)
+		if err != nil {
+			return "", uuid.Nil, err
+		}
+		return eventrule.ResourceKindRack, rack.Info.ID, nil
+	default:
+		return "", uuid.Nil, status.Error(
+			codes.InvalidArgument,
+			"resource_type must be COMPONENT or RACK",
+		)
+	}
 }
 
 func requiredEventRuleUUID(value *pb.UUID, name string) (uuid.UUID, error) {

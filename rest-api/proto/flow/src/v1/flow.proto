@@ -106,6 +106,19 @@ service Flow {
     rpc GetEventRuleBinding(GetEventRuleBindingRequest) returns (EventRuleBinding);
     rpc DeleteEventRuleBinding(DeleteEventRuleBindingRequest) returns (google.protobuf.Empty);
 
+    // Atomically creates or replaces the override in one event-type and scope
+    // slot, regardless of which client or API created the existing rule.
+    rpc SetEventRuleOverride(SetEventRuleOverrideRequest) returns (EventRule);
+    // Returns the effective enabled rule for one Site or Rack scope.
+    rpc GetEffectiveEventRuleForScope(GetEffectiveEventRuleForScopeRequest) returns (EventRule);
+    // Idempotently removes the override in one event-type and scope slot.
+    rpc DeleteEventRuleOverride(DeleteEventRuleOverrideRequest) returns (google.protobuf.Empty);
+
+    // Returns event-rule handling records for one resource and event type.
+    // Results are ordered by handling time then event ID, descending, and use
+    // an opaque cursor for pagination. Limit defaults to one.
+    rpc GetEventHandling(GetEventHandlingRequest) returns (GetEventHandlingResponse);
+
     // Rack-rule associations
     rpc AssociateRuleWithRack(AssociateRuleWithRackRequest) returns (google.protobuf.Empty);
     rpc DisassociateRuleFromRack(DisassociateRuleFromRackRequest) returns (google.protobuf.Empty);
@@ -1217,6 +1230,22 @@ message EventRuleScope {
     UUID id = 2;
 }
 
+// EventRuleScopeSelector identifies a Site scope or a Rack scope. Site
+// selectors must omit rack_identifier; Rack selectors must set exactly one
+// canonical Flow UUID or external inventory ID. Flow resolves external Rack IDs
+// before calling the event rule manager, whose scope representation always uses
+// canonical UUIDs.
+message EventRuleScopeSelector {
+    // Required. SITE or RACK.
+    EventRuleScopeType type = 1;
+    oneof rack_identifier {
+        // Canonical Flow Rack UUID. Valid only for RACK.
+        UUID rack_id = 2;
+        // External inventory Rack ID resolved by Flow. Valid only for RACK.
+        string rack_external_id = 3;
+    }
+}
+
 message EventRuleBinding {
     UUID id = 1;
     UUID rule_id = 2;
@@ -2184,4 +2213,85 @@ enum TaskKind {
     TASK_KIND_DECOMMISSION = 4;
     // Installing expected inventory for a rack.
     TASK_KIND_INJECT_EXPECTATION = 5;
+}
+
+message SetEventRuleOverrideRequest {
+    // Required. Must be an event type registered by Flow.
+    string event_type = 1;
+    // Required Site or Rack policy slot to replace.
+    EventRuleScopeSelector scope = 2;
+    // Required rule name.
+    string name = 3;
+    // Optional human-readable rule description.
+    string description = 4;
+    // Required event-rule actions. Event-specific validation applies.
+    repeated EventRuleAction actions = 5;
+}
+
+message GetEffectiveEventRuleForScopeRequest {
+    // Required. Must be an event type registered by Flow.
+    string event_type = 1;
+    // Required Site or Rack scope at which to resolve inheritance.
+    EventRuleScopeSelector scope = 2;
+}
+
+message DeleteEventRuleOverrideRequest {
+    // Required. Must be an event type registered by Flow.
+    string event_type = 1;
+    // Required Site or Rack policy slot to clear. An empty slot succeeds.
+    EventRuleScopeSelector scope = 2;
+}
+
+// EventResourceType identifies the inventory resource that emitted an event.
+enum EventResourceType {
+    EVENT_RESOURCE_TYPE_UNSPECIFIED = 0;
+    EVENT_RESOURCE_TYPE_COMPONENT = 1;
+    EVENT_RESOURCE_TYPE_RACK = 2;
+}
+
+// EventHandlingTask summarizes a Task created by one event-rule action.
+message EventHandlingTask {
+    // Stable Flow Task UUID.
+    UUID id = 1;
+    // Current Task lifecycle status.
+    TaskStatus status = 2;
+    // Time Flow created the Task.
+    google.protobuf.Timestamp created_at = 3;
+}
+
+message EventHandling {
+    // Stable UUID for the source event that caused this handling decision.
+    UUID id = 1;
+    // Registered event type handled by the rule.
+    string event_type = 2;
+    // Current public identifier of the resource whose event was handled.
+    string resource_id = 3;
+    // Kind of inventory resource identified by resource_id.
+    EventResourceType resource_type = 4;
+    // Tasks created by event-rule actions, ordered by creation time then UUID
+    // ascending. Empty when handling created no Tasks.
+    repeated EventHandlingTask tasks = 5;
+    // Time Flow first applied an event rule for this source event.
+    google.protobuf.Timestamp handled_at = 6;
+}
+
+message GetEventHandlingRequest {
+    // Required. Must be an event type registered by Flow.
+    string event_type = 1;
+    // Required kind of resource whose handling history is requested.
+    EventResourceType resource_type = 2;
+    // Required current public identifier of the resource.
+    string resource_id = 3;
+    // Maximum records to return. Zero defaults to one; accepted range is 1-100.
+    int32 limit = 4;
+    // Opaque continuation cursor returned by the previous response. Empty starts
+    // from the newest handling.
+    string cursor = 5;
+}
+
+message GetEventHandlingResponse {
+    // Handling records in descending handled_at and event UUID order.
+    repeated EventHandling handlings = 1;
+    // Opaque continuation cursor. Empty means no more records remain.
+    string next_cursor = 2;
 }

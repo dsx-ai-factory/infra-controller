@@ -17,6 +17,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
@@ -466,22 +469,236 @@ func TestFlowServerImpl_DeleteEventRuleBinding(t *testing.T) {
 	}
 }
 
+func TestFlowServerImpl_resolveEventRuleScope(t *testing.T) {
+	rackID := uuid.New()
+	inventoryManager := newMockManager()
+	inventoryManager.racks[rackID] = &rack.Rack{
+		Info:       deviceinfo.DeviceInfo{ID: rackID},
+		ExternalID: "rack-external-1",
+	}
+	server := &FlowServerImpl{inventoryManager: inventoryManager}
+
+	tests := []struct {
+		name      string
+		selector  *pb.EventRuleScopeSelector
+		wantScope eventrule.Scope
+		wantCode  codes.Code
+	}{
+		{
+			name: "site scope",
+			selector: &pb.EventRuleScopeSelector{
+				Type: pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_SITE,
+			},
+			wantScope: eventrule.Scope{Type: eventrule.ScopeTypeSite},
+		},
+		{
+			name: "rack Flow UUID",
+			selector: &pb.EventRuleScopeSelector{
+				Type: pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_RACK,
+				RackIdentifier: &pb.EventRuleScopeSelector_RackId{
+					RackId: &pb.UUID{Id: rackID.String()},
+				},
+			},
+			wantScope: eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: rackID},
+		},
+		{
+			name: "rack external ID",
+			selector: &pb.EventRuleScopeSelector{
+				Type: pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_RACK,
+				RackIdentifier: &pb.EventRuleScopeSelector_RackExternalId{
+					RackExternalId: "rack-external-1",
+				},
+			},
+			wantScope: eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: rackID},
+		},
+		{
+			name:     "missing selector",
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "site with rack identifier",
+			selector: &pb.EventRuleScopeSelector{
+				Type: pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_SITE,
+				RackIdentifier: &pb.EventRuleScopeSelector_RackExternalId{
+					RackExternalId: "rack-external-1",
+				},
+			},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "rack without identifier",
+			selector: &pb.EventRuleScopeSelector{
+				Type: pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_RACK,
+			},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "invalid rack Flow UUID",
+			selector: &pb.EventRuleScopeSelector{
+				Type: pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_RACK,
+				RackIdentifier: &pb.EventRuleScopeSelector_RackId{
+					RackId: &pb.UUID{Id: "not-a-uuid"},
+				},
+			},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "unknown rack external ID",
+			selector: &pb.EventRuleScopeSelector{
+				Type: pb.EventRuleScopeType_EVENT_RULE_SCOPE_TYPE_RACK,
+				RackIdentifier: &pb.EventRuleScopeSelector_RackExternalId{
+					RackExternalId: "missing-rack",
+				},
+			},
+			wantCode: codes.NotFound,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := server.resolveEventRuleScope(t.Context(), test.selector)
+			require.Equal(t, test.wantCode, status.Code(err))
+			if test.wantCode != codes.OK {
+				return
+			}
+			require.Equal(t, test.wantScope, got)
+		})
+	}
+}
+
+func TestFlowServerImpl_GetEventHandling(t *testing.T) {
+	componentUUID, handlingID := uuid.New(), uuid.New()
+	handledAt := time.Date(2026, 10, 26, 16, 0, 0, 0, time.UTC)
+	ruleManager := &mockEventRuleManager{handlingHasMore: true, handling: []eventrule.Handling{{
+		ID:           handlingID,
+		EventType:    eventrule.Type("hardware.leak.detected"),
+		ResourceID:   "component-17",
+		ResourceType: eventrule.ResourceKindComponent,
+		HandledAt:    handledAt,
+	}}}
+	inventoryManager := newMockManager()
+	inventoryManager.components[componentUUID] = &component.Component{
+		Info:        deviceinfo.DeviceInfo{ID: componentUUID},
+		ComponentID: "component-17",
+	}
+	server := &FlowServerImpl{
+		eventRuleManager: ruleManager,
+		inventoryManager: inventoryManager,
+	}
+
+	response, err := server.GetEventHandling(t.Context(), &pb.GetEventHandlingRequest{
+		EventType:    "hardware.leak.detected",
+		ResourceType: pb.EventResourceType_EVENT_RESOURCE_TYPE_COMPONENT,
+		ResourceId:   "component-17",
+		Limit:        20,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, eventrule.Type("hardware.leak.detected"), ruleManager.handlingEventType)
+	require.Equal(t, eventrule.ResourceKindComponent, ruleManager.handlingResourceType)
+	require.Equal(t, componentUUID, ruleManager.handlingResourceID)
+	require.Equal(t, 20, ruleManager.handlingLimit)
+	require.Nil(t, ruleManager.handlingCursor)
+	require.Len(t, response.GetHandlings(), 1)
+	require.Equal(t, handlingID.String(), response.GetHandlings()[0].GetId().GetId())
+	next, err := eventrule.DecodeHandlingCursor(response.GetNextCursor())
+	require.NoError(t, err)
+	require.Equal(t, eventrule.HandlingCursor{HandledAt: handledAt, ID: handlingID}, *next)
+
+	t.Run("rack source", func(t *testing.T) {
+		rackUUID := uuid.New()
+		inventoryManager.racks[rackUUID] = &rack.Rack{
+			Info:       deviceinfo.DeviceInfo{ID: rackUUID},
+			ExternalID: "rack-17",
+		}
+		ruleManager.handlingHasMore = false
+		_, err := server.GetEventHandling(t.Context(), &pb.GetEventHandlingRequest{
+			EventType:    "hardware.leak.detected",
+			ResourceType: pb.EventResourceType_EVENT_RESOURCE_TYPE_RACK,
+			ResourceId:   "rack-17",
+		})
+		require.NoError(t, err)
+		require.Equal(t, eventrule.ResourceKindRack, ruleManager.handlingResourceType)
+		require.Equal(t, rackUUID, ruleManager.handlingResourceID)
+		require.Equal(t, 1, ruleManager.handlingLimit)
+	})
+
+	t.Run("missing source", func(t *testing.T) {
+		server := &FlowServerImpl{eventRuleManager: &mockEventRuleManager{}}
+		_, err := server.GetEventHandling(t.Context(), &pb.GetEventHandlingRequest{})
+		require.Error(t, err)
+	})
+
+	t.Run("invalid manager input", func(t *testing.T) {
+		server := &FlowServerImpl{
+			eventRuleManager: &mockEventRuleManager{
+				handlingErr: fmt.Errorf(
+					"%w: unsupported event type",
+					eventrule.ErrInvalidRuleInput,
+				),
+			},
+			inventoryManager: inventoryManager,
+		}
+		_, err := server.GetEventHandling(t.Context(), &pb.GetEventHandlingRequest{
+			EventType:    "hardware.temperature.high",
+			ResourceType: pb.EventResourceType_EVENT_RESOURCE_TYPE_COMPONENT,
+			ResourceId:   "component-17",
+		})
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+}
+
+func TestEventHandlingLimit(t *testing.T) {
+	tests := map[string]struct {
+		requested int32
+		want      int
+		wantError bool
+	}{
+		"default":       {want: 1},
+		"minimum":       {requested: 1, want: 1},
+		"maximum":       {requested: maxEventHandlingLimit, want: maxEventHandlingLimit},
+		"negative":      {requested: -1, wantError: true},
+		"above maximum": {requested: maxEventHandlingLimit + 1, wantError: true},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := eventHandlingLimit(test.requested)
+			if test.wantError {
+				require.EqualError(t, err, "limit must be between 1 and 100")
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, test.want, got)
+		})
+	}
+}
+
 type mockEventRuleManager struct {
-	rule              *eventrule.Rule
-	createCalls       int
-	createErr         error
-	updateMetadataErr error
-	setEnabledErr     error
-	bindErr           error
-	unbindErr         error
-	binding           *eventrule.Binding
-	effectiveRule     *eventrule.Rule
-	effectiveTarget   eventrule.ResourceIdentity
-	listPage          eventrule.RuleListPage
-	listRequest       eventrule.RuleListRequest
-	listCalls         int
-	unboundEventType  eventrule.Type
-	unboundScope      eventrule.Scope
+	rule                 *eventrule.Rule
+	createCalls          int
+	createErr            error
+	updateMetadataErr    error
+	setEnabledErr        error
+	bindErr              error
+	unbindErr            error
+	binding              *eventrule.Binding
+	effectiveRule        *eventrule.Rule
+	effectiveTarget      eventrule.ResourceIdentity
+	listPage             eventrule.RuleListPage
+	listRequest          eventrule.RuleListRequest
+	listCalls            int
+	unboundEventType     eventrule.Type
+	unboundScope         eventrule.Scope
+	handling             []eventrule.Handling
+	handlingHasMore      bool
+	handlingErr          error
+	handlingEventType    eventrule.Type
+	handlingResourceType eventrule.ResourceKind
+	handlingResourceID   uuid.UUID
+	handlingLimit        int
+	handlingCursor       *eventrule.HandlingCursor
 }
 
 func (m *mockEventRuleManager) ensureRule() *eventrule.Rule {
@@ -602,6 +819,43 @@ func (m *mockEventRuleManager) Unbind(
 	m.unboundScope = scope
 
 	return m.unbindErr
+}
+
+func (m *mockEventRuleManager) SetOverride(
+	ctx context.Context,
+	input eventrule.RuleCreate,
+	_ eventrule.Scope,
+) (*eventrule.Rule, error) {
+	return m.Create(ctx, input)
+}
+
+func (m *mockEventRuleManager) GetEffectiveForScope(
+	ctx context.Context,
+	eventType eventrule.Type,
+	_ eventrule.Scope,
+) (*eventrule.Rule, error) {
+	rule, err := m.GetEffective(ctx, eventType, eventrule.ResourceIdentity{})
+	return rule, err
+}
+
+func (*mockEventRuleManager) DeleteOverride(context.Context, eventrule.Type, eventrule.Scope) error {
+	return nil
+}
+
+func (m *mockEventRuleManager) GetEventHandling(
+	_ context.Context,
+	eventType eventrule.Type,
+	resourceType eventrule.ResourceKind,
+	resourceID uuid.UUID,
+	limit int,
+	cursor *eventrule.HandlingCursor,
+) ([]eventrule.Handling, bool, error) {
+	m.handlingEventType = eventType
+	m.handlingResourceType = resourceType
+	m.handlingResourceID = resourceID
+	m.handlingLimit = limit
+	m.handlingCursor = cursor
+	return m.handling, m.handlingHasMore, m.handlingErr
 }
 
 func validCreateEventRuleRequest() *pb.CreateEventRuleRequest {

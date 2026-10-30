@@ -14204,6 +14204,119 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Tray
+  '/v2/org/{org}/nico/leakage/policy':
+    parameters:
+      - {name: org, in: path, required: true, schema: {type: string}, description: Name of the Org}
+      - {name: siteId, in: query, required: true, schema: {type: string, format: uuid}, description: Site whose effective leakage policy is read or changed}
+    get:
+      operationId: get-site-leakage-policy
+      summary: Retrieve the effective Site leakage policy
+      description: Returns the enabled Site override, or the built-in automatic-shutdown fallback. Requires Provider Admin authorization, Provider ownership of the Site, and Flow enabled for the Site.
+      tags: [Leakage]
+      responses:
+        '200': {description: Effective policy, content: {application/json: {schema: {$ref: '#/components/schemas/LeakagePolicy'}, examples: {builtIn: {value: {action: ForcePowerOff, target: AffectedComponents, onConflict: Queue, updated: null}}, noAction: {value: {action: NoAction, target: null, onConflict: null, updated: '2026-10-20T18:32:00Z'}}}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/ForbiddenError'}
+        '412': {$ref: '#/components/responses/PreconditionFailedError'}
+        '429': {$ref: '#/components/responses/TooManyRequestsError'}
+        '503': {$ref: '#/components/responses/ServiceUnavailableError'}
+    put:
+      operationId: put-site-leakage-policy
+      summary: Create or replace the Site leakage policy override
+      description: Idempotently replaces the Site policy slot. Flow does not prioritize callers; an existing override is replaced regardless of which client or API created it.
+      tags: [Leakage]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PutLeakagePolicyRequest'}}}}
+      responses:
+        '200': {description: Resulting Site override, content: {application/json: {schema: {$ref: '#/components/schemas/LeakagePolicy'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/ForbiddenError'}
+        '412': {$ref: '#/components/responses/PreconditionFailedError'}
+        '429': {$ref: '#/components/responses/TooManyRequestsError'}
+        '503': {$ref: '#/components/responses/ServiceUnavailableError'}
+    delete:
+      operationId: delete-site-leakage-policy
+      summary: Remove the Site leakage policy override
+      description: Idempotently removes the Site override and reveals the built-in policy, regardless of which client or API created the override.
+      tags: [Leakage]
+      responses:
+        '204': {description: Override absent; the built-in policy is effective}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/ForbiddenError'}
+        '412': {$ref: '#/components/responses/PreconditionFailedError'}
+  '/v2/org/{org}/nico/rack/{rackId}/leakage/policy':
+    parameters:
+      - {name: org, in: path, required: true, schema: {type: string}, description: Name of the Org}
+      - {name: rackId, in: path, required: true, schema: {type: string}, description: Public Rack identifier resolved to Flow's canonical Rack UUID}
+      - {name: siteId, in: query, required: true, schema: {type: string, format: uuid}, description: Site routing scope}
+    get:
+      operationId: get-rack-leakage-policy
+      summary: Retrieve the effective Rack leakage policy
+      description: Resolution order is Rack override, Site override, then built-in automatic shutdown. Requires Provider Admin authorization.
+      tags: [Leakage]
+      responses:
+        '200': {description: Effective policy, content: {application/json: {schema: {$ref: '#/components/schemas/LeakagePolicy'}, examples: {rackAffected: {value: {action: ForcePowerOff, target: AffectedComponents, onConflict: Queue, updated: '2026-10-20T18:32:00Z'}}, rackComponent: {value: {action: ForcePowerOff, target: LeakingComponent, onConflict: Reject, updated: '2026-10-20T18:32:00Z'}}, inherited: {value: {action: NoAction, target: null, onConflict: null, updated: '2026-10-20T18:30:00Z'}}}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/ForbiddenError'}
+        '404': {$ref: '#/components/responses/NotFoundError'}
+        '412': {$ref: '#/components/responses/PreconditionFailedError'}
+    put:
+      operationId: put-rack-leakage-policy
+      summary: Create or replace a Rack leakage policy override
+      description: Idempotently replaces the Rack policy slot. Flow does not prioritize callers; an existing override is replaced regardless of which client or API created it.
+      tags: [Leakage]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PutLeakagePolicyRequest'}}}}
+      responses:
+        '200': {description: Resulting Rack override, content: {application/json: {schema: {$ref: '#/components/schemas/LeakagePolicy'}}}}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/ForbiddenError'}
+        '404': {$ref: '#/components/responses/NotFoundError'}
+        '412': {$ref: '#/components/responses/PreconditionFailedError'}
+    delete:
+      operationId: delete-rack-leakage-policy
+      summary: Remove a Rack leakage policy override
+      description: Idempotently removes the Rack override, revealing the Site override or built-in fallback, regardless of which client or API created it.
+      tags: [Leakage]
+      responses:
+        '204': {description: Rack override absent}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/ForbiddenError'}
+        '404': {$ref: '#/components/responses/NotFoundError'}
+        '412': {$ref: '#/components/responses/PreconditionFailedError'}
+  '/v2/org/{org}/nico/leakage/handling':
+    parameters:
+      - {name: org, in: path, required: true, schema: {type: string}, description: Name of the Org}
+      - {name: siteId, in: query, required: true, schema: {type: string, format: uuid}, description: Site routing scope}
+    get:
+      operationId: get-leakage-handling
+      summary: Retrieve leakage handling for a component or Rack
+      description: Returns leakage policy-handling records for exactly one source. Flow reports its handling decisions and Tasks; it does not report whether the underlying leakage condition is active or cleared. Results use cursor pagination and default to the latest record. Requires Provider Admin authorization.
+      tags: [Leakage]
+      parameters:
+        - {name: sourceType, in: query, required: true, schema: {$ref: '#/components/schemas/LeakageHandlingSourceType'}, description: Kind of inventory source whose handling is requested.}
+        - {name: sourceId, in: query, required: true, schema: {type: string}, description: Current public component or Rack identifier. It must resolve to exactly one source of sourceType.}
+        - {name: limit, in: query, schema: {type: integer, format: int32, minimum: 1, maximum: 100, default: 1}, description: Maximum number of records to return.}
+        - {name: cursor, in: query, schema: {type: string}, description: Opaque nextCursor from the preceding page. Omit to start with the newest handling.}
+      responses:
+        '200':
+          description: Leakage handling ordered by handledAt descending and then handling UUID descending
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LeakageHandlingPage'}
+              examples:
+                latest:
+                  value:
+                    items:
+                      - {id: 95de143d-f3e7-4650-987d-d655198cf869, sourceId: component-17, sourceType: Component, handlingStatus: Down, taskIds: [c483cf2c-2be7-4aa7-9f16-c65fb83efe1c], handledAt: '2026-10-20T18:30:00Z'}
+                    nextCursor: null
+                noAction:
+                  value:
+                    items:
+                      - {id: 29f621f8-f622-471f-8da2-31594bbca570, sourceId: rack-17, sourceType: Rack, handlingStatus: None, taskIds: [], handledAt: '2026-10-20T17:00:00Z'}
+                    nextCursor: eyJ2IjoxLCJoYW5kbGVkQXQiOiIyMDI2LTEwLTIwVDE3OjAwOjAwWiIsImlkIjoiMjlmNjIxZjgtZjYyMi00NzFmLThkYTItMzE1OTRiYmNhNTcwIn0
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/ForbiddenError'}
+        '404': {$ref: '#/components/responses/NotFoundError'}
+        '412': {$ref: '#/components/responses/PreconditionFailedError'}
   '/v2/org/{org}/nico/task/rule':
     parameters:
       - schema:
@@ -29073,6 +29186,92 @@ components:
         error:
           type: string
           description: Failure summary when `status == failed`. Truncated to 512 bytes.
+    LeakageAction:
+      type: string
+      description: ForcePowerOff submits a forced shutdown Task; NoAction records detections through an enabled no-op rule.
+      enum: [ForcePowerOff, NoAction]
+    LeakageTarget:
+      type: string
+      description: LeakingComponent targets only the reporter; AffectedComponents uses Flow's leakage-impact resolver.
+      enum: [LeakingComponent, AffectedComponents]
+    LeakageConflictBehavior:
+      type: string
+      description: Queue waits behind conflicting work; Reject rejects that attempt and leaves retry behavior to Flow.
+      enum: [Queue, Reject]
+    PutLeakagePolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [action, target, onConflict]
+      properties:
+        action: {$ref: '#/components/schemas/LeakageAction'}
+        target:
+          oneOf: [{$ref: '#/components/schemas/LeakageTarget'}, {type: 'null'}]
+          description: Required and non-null for ForcePowerOff; must be null for NoAction.
+        onConflict:
+          oneOf: [{$ref: '#/components/schemas/LeakageConflictBehavior'}, {type: 'null'}]
+          description: Required and non-null for ForcePowerOff; must be null for NoAction.
+      if:
+        properties:
+          action: {const: ForcePowerOff}
+      then:
+        properties:
+          action: {const: ForcePowerOff}
+          target: {$ref: '#/components/schemas/LeakageTarget'}
+          onConflict: {$ref: '#/components/schemas/LeakageConflictBehavior'}
+      else:
+        properties:
+          action: {const: NoAction}
+          target: {type: 'null'}
+          onConflict: {type: 'null'}
+      examples:
+        - {action: ForcePowerOff, target: AffectedComponents, onConflict: Queue}
+        - {action: NoAction, target: null, onConflict: null}
+    LeakagePolicy:
+      type: object
+      additionalProperties: false
+      required: [action, target, onConflict, updated]
+      properties:
+        action: {$ref: '#/components/schemas/LeakageAction'}
+        target:
+          oneOf: [{$ref: '#/components/schemas/LeakageTarget'}, {type: 'null'}]
+        onConflict:
+          oneOf: [{$ref: '#/components/schemas/LeakageConflictBehavior'}, {type: 'null'}]
+        updated:
+          type: [string, 'null']
+          format: date-time
+          description: Persisted rule update time, or null for the code-defined built-in policy.
+    LeakageHandling:
+      type: object
+      additionalProperties: false
+      required: [id, sourceId, sourceType, handlingStatus, taskIds, handledAt]
+      properties:
+        id: {type: string, format: uuid, description: Stable identity of the detected event that caused this handling decision}
+        sourceId: {type: string, description: Current public ID of the component or Rack whose event was handled}
+        sourceType: {$ref: '#/components/schemas/LeakageHandlingSourceType'}
+        handlingStatus:
+          allOf: [{$ref: '#/components/schemas/LeakHandlingStatus'}]
+          description: Status of the latest supported shutdown Task associated with this handling; None when the effective policy created no such Task.
+        taskIds:
+          type: array
+          items: {type: string, format: uuid}
+          description: Canonical handling Task IDs ordered by creation time and UUID ascending.
+        handledAt: {type: string, format: date-time, description: Time Flow first applied leakage policy for the detected event}
+    LeakageHandlingPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/LeakageHandling'}
+          description: Handling records in descending handledAt and UUID order. Empty when no matching handling exists.
+        nextCursor:
+          type: [string, 'null']
+          description: Opaque cursor for the next page, or null when no more records remain.
+    LeakageHandlingSourceType:
+      type: string
+      enum: [Component, Rack]
+      description: Inventory source kind that emitted the detected leakage event.
     LeakHandlingStatus:
       title: LeakHandlingStatus
       type: string
@@ -36352,6 +36551,15 @@ components:
         curl -v -X GET -H "Content-Type: application/json" -H "Authorization: Bearer $JWT_BEARER_TOKEN" https://nico-rest-api.nico.svc.cluster.local/v2/org/$ORG_NAME/nico/user/current
         ```
   responses:
+    PreconditionFailedError:
+      description: Flow is disabled for the Site or rejected a request precondition
+      content: {application/json: {schema: {$ref: '#/components/schemas/NICoAPIError'}}}
+    TooManyRequestsError:
+      description: Flow exhausted a bounded resource
+      content: {application/json: {schema: {$ref: '#/components/schemas/NICoAPIError'}}}
+    ServiceUnavailableError:
+      description: Flow is unavailable
+      content: {application/json: {schema: {$ref: '#/components/schemas/NICoAPIError'}}}
     GenericHttpError:
       description: Response when the API handler encounters an unexpected error
       content:

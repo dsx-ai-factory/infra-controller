@@ -32,8 +32,9 @@ func TestManagerIntegration(t *testing.T) {
 			Runtime:    eventscheduler.DefaultRuntimeConfig(),
 			Policy:     eventscheduler.DefaultPolicyConfig(),
 		},
-		Inventory:   integrationInventory{},
-		TaskManager: integrationTaskManager{},
+		Inventory:      integrationInventory{},
+		TaskManager:    integrationTaskManager{},
+		HandlingReader: integrationHandlingReader{},
 	})
 	require.NoError(t, err)
 
@@ -83,6 +84,19 @@ func (integrationInventory) GetComponentByID(
 }
 
 type integrationTaskManager struct{}
+
+type integrationHandlingReader struct{}
+
+func (integrationHandlingReader) GetEventHandling(
+	context.Context,
+	eventrule.Type,
+	eventrule.ResourceKind,
+	uuid.UUID,
+	int,
+	*eventrule.HandlingCursor,
+) ([]eventrule.Handling, bool, error) {
+	return nil, false, nil
+}
 
 func (integrationTaskManager) SubmitTask(
 	context.Context,

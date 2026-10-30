@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
@@ -120,6 +121,48 @@ func TestEventRuleTo(t *testing.T) {
 	require.True(t, converted.GetReadOnly())
 	require.Nil(t, converted.GetCreatedAt())
 	require.Nil(t, converted.GetUpdatedAt())
+}
+
+func TestEventHandlingTo(t *testing.T) {
+	handlingID := uuid.New()
+	taskID := uuid.New()
+	handledAt := time.Date(2026, 10, 26, 16, 0, 0, 0, time.UTC)
+	item := eventrule.Handling{
+		ID:           handlingID,
+		EventType:    eventrule.Type("hardware.temperature.high"),
+		ResourceID:   "component-17",
+		ResourceType: eventrule.ResourceKindComponent,
+		Tasks: []eventrule.HandlingTask{{
+			ID:        taskID,
+			Status:    taskcommon.TaskStatusCompleted,
+			CreatedAt: handledAt,
+		}},
+		HandledAt: handledAt,
+	}
+
+	converted := EventHandlingTo(item)
+	require.Equal(t, handlingID.String(), converted.GetId().GetId())
+	require.Equal(t, "hardware.temperature.high", converted.GetEventType())
+	require.Equal(t, "component-17", converted.GetResourceId())
+	require.Equal(t, pb.EventResourceType_EVENT_RESOURCE_TYPE_COMPONENT, converted.GetResourceType())
+	require.Equal(t, taskID.String(), converted.GetTasks()[0].GetId().GetId())
+	require.Equal(t, pb.TaskStatus_TASK_STATUS_COMPLETED, converted.GetTasks()[0].GetStatus())
+	require.Equal(t, handledAt, converted.GetTasks()[0].GetCreatedAt().AsTime())
+	require.Equal(t, handledAt, converted.GetHandledAt().AsTime())
+
+	item.ResourceType = eventrule.ResourceKindRack
+	require.Equal(
+		t,
+		pb.EventResourceType_EVENT_RESOURCE_TYPE_RACK,
+		EventHandlingTo(item).GetResourceType(),
+	)
+
+	item.ResourceType = eventrule.ResourceKind("unknown")
+	require.Equal(
+		t,
+		pb.EventResourceType_EVENT_RESOURCE_TYPE_UNSPECIFIED,
+		EventHandlingTo(item).GetResourceType(),
+	)
 }
 
 func TestEventRuleListRequestFrom(t *testing.T) {

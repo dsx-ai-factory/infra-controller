@@ -419,6 +419,38 @@ func eventRuleSeverityFrom(
 	return eventrule.SeverityUnspecified, fmt.Errorf("unknown event rule severity %q", severity)
 }
 
+// EventHandlingTo converts an event-handling record to its protobuf response.
+func EventHandlingTo(item eventrule.Handling) *pb.EventHandling {
+	tasks := make([]*pb.EventHandlingTask, 0, len(item.Tasks))
+	for _, task := range item.Tasks {
+		tasks = append(tasks, &pb.EventHandlingTask{
+			Id:        UUIDTo(task.ID),
+			Status:    TaskStatusTo(task.Status),
+			CreatedAt: timestamppb.New(task.CreatedAt),
+		})
+	}
+
+	return &pb.EventHandling{
+		Id:           UUIDTo(item.ID),
+		EventType:    string(item.EventType),
+		ResourceId:   item.ResourceID,
+		ResourceType: eventResourceTypeToProto(item.ResourceType),
+		Tasks:        tasks,
+		HandledAt:    timestamppb.New(item.HandledAt),
+	}
+}
+
+func eventResourceTypeToProto(resourceType eventrule.ResourceKind) pb.EventResourceType {
+	switch resourceType {
+	case eventrule.ResourceKindComponent:
+		return pb.EventResourceType_EVENT_RESOURCE_TYPE_COMPONENT
+	case eventrule.ResourceKindRack:
+		return pb.EventResourceType_EVENT_RESOURCE_TYPE_RACK
+	default:
+		return pb.EventResourceType_EVENT_RESOURCE_TYPE_UNSPECIFIED
+	}
+}
+
 func eventRuleSeverityTo(severity eventrule.Severity) pb.EventRuleSeverity {
 	switch severity {
 	case eventrule.SeverityInfo:

@@ -4,13 +4,29 @@
 package manager
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	eventexecutor "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/executor"
 	eventscheduler "github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/scheduler"
 	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
+	"github.com/google/uuid"
 )
+
+// HandlingReader retrieves the handling history produced by event-rule
+// processing. Its implementation may combine event-rule execution data with
+// work created in another subsystem.
+type HandlingReader interface {
+	GetEventHandling(
+		context.Context,
+		eventrule.Type,
+		eventrule.ResourceKind,
+		uuid.UUID,
+		int,
+		*eventrule.HandlingCursor,
+	) ([]eventrule.Handling, bool, error)
+}
 
 // SchedulerConfig identifies the manager-owned scheduler and controls its
 // runtime mechanics and execution policy.
@@ -37,11 +53,12 @@ func (c SchedulerConfig) Validate() error {
 // manager. Internal registries, the processor, and the scheduler are
 // constructed by New.
 type Config struct {
-	Store       eventrule.Store
-	Scheduler   SchedulerConfig
-	Inventory   inventoryresolver.InventoryReader
-	TaskManager eventexecutor.TaskManager
-	AlertSender eventexecutor.AlertSender
+	Store          eventrule.Store
+	Scheduler      SchedulerConfig
+	Inventory      inventoryresolver.InventoryReader
+	TaskManager    eventexecutor.TaskManager
+	AlertSender    eventexecutor.AlertSender
+	HandlingReader HandlingReader
 }
 
 // Validate checks that the manager can assemble a complete internal runtime.
@@ -60,6 +77,9 @@ func (c Config) Validate() error {
 
 	if c.TaskManager == nil {
 		return fmt.Errorf("task manager is required")
+	}
+	if c.HandlingReader == nil {
+		return fmt.Errorf("event handling reader is required")
 	}
 
 	return nil
