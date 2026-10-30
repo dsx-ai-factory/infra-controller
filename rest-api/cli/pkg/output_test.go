@@ -42,6 +42,98 @@ func TestValidateOutputFormat(t *testing.T) {
 	}
 }
 
+func TestNestedString(t *testing.T) {
+	tests := []struct {
+		name string
+		item map[string]interface{}
+		path string
+		want string
+	}{
+		{
+			name: "nested string",
+			item: map[string]interface{}{"vpc1": map[string]interface{}{"name": "Application VPC"}},
+			path: "vpc1.name",
+			want: "Application VPC",
+		},
+		{
+			name: "top-level string",
+			item: map[string]interface{}{"id": "peering-id"},
+			path: "id",
+			want: "peering-id",
+		},
+		{
+			name: "missing field",
+			item: map[string]interface{}{"vpc1": map[string]interface{}{}},
+			path: "vpc1.name",
+		},
+		{
+			name: "non-object intermediate value",
+			item: map[string]interface{}{"vpc1": "not-an-object"},
+			path: "vpc1.name",
+		},
+		{
+			name: "non-string value",
+			item: map[string]interface{}{"vpc1": map[string]interface{}{"name": 42}},
+			path: "vpc1.name",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, nestedString(test.item, test.path))
+		})
+	}
+}
+
+func TestEscapeTableCell(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "plain text", want: "plain text"},
+		{input: "a\tb", want: `a\tb`},
+		{input: "a\nb", want: `a\nb`},
+		{input: `a"b`, want: `a\"b`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			assert.Equal(t, test.want, escapeTableCell(test.input))
+		})
+	}
+}
+
+func TestFormatTableWithColumns(t *testing.T) {
+	tests := []struct {
+		name        string
+		data        string
+		wantContain []string
+		wantAbsent  []string
+	}{
+		{
+			name:        "escapes cell whitespace",
+			data:        `{"id":"peering-id","vpc1":{"name":"Application\tVPC\nprimary"},"vpc1Id":"vpc1-id","vpc2":{"name":"Storage VPC"},"vpc2Id":"vpc2-id"}`,
+			wantContain: []string{`Application\tVPC\nprimary`},
+			wantAbsent:  []string{"Application\tVPC", "VPC\nprimary"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var formatErr error
+			output := captureStdout(t, func() {
+				formatErr = formatTableWithColumns([]byte(test.data), tableColumnsByOperation[vpcPeeringListOperationID])
+			})
+			require.NoError(t, formatErr)
+			for _, want := range test.wantContain {
+				assert.Contains(t, output, want)
+			}
+			for _, absent := range test.wantAbsent {
+				assert.NotContains(t, output, absent)
+			}
+		})
+	}
+}
+
 func TestFormatOutput_RejectsUnknownFormatAsDefenseInDepth(t *testing.T) {
 	// FormatOutput is called from generated commands and from the --all
 	// pagination path; if a future code path forgets to attach the

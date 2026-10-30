@@ -227,6 +227,7 @@ jobs:
           - api
           - auth
           - cert-manager
+          - cli
           - common
           - db
           - flow

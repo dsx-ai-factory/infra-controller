@@ -650,8 +650,8 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		"measured-boot profile remove|id",
 		"measured-boot-trusted-machine delete|id",
 		"measured-boot-trusted-profile delete|id",
-		"domain firmware-update-nvlink-domain firmware-update-nvlink-domain|id",
-		"domain power-control-nvlink-domain|id",
+		"rack health-report delete|source",
+		"tray health-report delete|source",
 		"task cancel|id",
 		"task cancel cancel-task|id",
 		"task get|id",
@@ -706,11 +706,22 @@ func testResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 	tests := []struct {
 		name         string
 		command      string
+		site         string
 		cache        map[string][]NamedItem
 		listPath     string
 		listResponse string
 		want         []string
 	}{
+		{
+			name: "expected rack group", command: "expected-rack-group get", site: "site-1",
+			listPath: "/v2/org/acme/nico/expected-rack-group", listResponse: `[{"id":"group-1","name":"Group One","siteId":"site-1"}]`,
+			want: []string{"group-1"},
+		},
+		{
+			name: "NVLink domain", command: "domain get", site: "site-1",
+			listPath: "/v2/org/acme/nico/domain/nvlink", listResponse: `[{"id":"domain-1","name":"Domain One"}]`,
+			want: []string{"domain-1"},
+		},
 		{
 			name:    "allocation constraint",
 			command: "allocation constraint update",
@@ -781,6 +792,7 @@ func testResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 			requestPath := make(chan string, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestPath <- r.URL.Path
+				assert.Equal(t, test.site, r.URL.Query().Get("siteId"))
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, test.listResponse)
 			}))
@@ -791,6 +803,7 @@ func testResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 				"acme",
 				"",
 			)
+			session.Scope.SiteID = test.site
 			for resourceType, items := range test.cache {
 				session.Cache.Set(resourceType, items)
 			}
@@ -959,6 +972,8 @@ func TestResolveGeneratedResource_RejectsAmbiguousNames(t *testing.T) {
 		return []NamedItem{
 			{Name: "duplicate", ID: "machine-1"},
 			{Name: "duplicate", ID: "machine-2"},
+			{Name: "case-a", ID: "machine-a"},
+			{Name: "case-b", ID: "Machine-A"},
 		}, nil
 	})
 	session := &Session{Resolver: resolver}
@@ -985,6 +1000,28 @@ func TestResolveGeneratedResource_RejectsAmbiguousNames(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, supported)
 	assert.Equal(t, "machine-2", item.ID)
+
+	item, supported, err = session.ResolveGeneratedResource(
+		context.Background(),
+		descriptor,
+		nil,
+		"Machine",
+		"Machine-A",
+	)
+	require.NoError(t, err, "IDs that differ only in case must not be ambiguous")
+	assert.True(t, supported)
+	assert.Equal(t, "Machine-A", item.ID)
+
+	_, supported, err = session.ResolveGeneratedResource(
+		context.Background(),
+		descriptor,
+		nil,
+		"Machine",
+		"MACHINE-A",
+	)
+	assert.True(t, supported)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no machine matching")
 }
 
 func TestFetchAllocationConstraints_UsesIDWhenDisplayPartsAreEmpty(t *testing.T) {
@@ -1259,6 +1296,7 @@ func TestRunGeneratedTUICommand(t *testing.T) {
 		{name: "resource selectors", run: testRunGeneratedTUICommand_ResourceSelectors},
 		{name: "registered Sites", run: testRunGeneratedTUICommand_RegisteredSites},
 		{name: "expected machine SKU Site", run: testRunGeneratedTUICommandExpectedMachineSKU},
+		{name: "domain body Site", run: testRunGeneratedTUICommand_DomainBodyScope},
 	} {
 		t.Run(test.name, test.run)
 	}

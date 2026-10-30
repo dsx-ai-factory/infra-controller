@@ -423,7 +423,7 @@ func TestAppendScopeFlags_SiteOnly(t *testing.T) {
 	siteOnlyResources := []string{
 		"vpc", "allocation", "ip-block", "operating-system", "ssh-key-group",
 		"network-security-group", "sku", "rack", "expected-machine",
-		"expected-rack", "expected-switch", "expected-power-shelf", "tray",
+		"expected-rack", "expected-rack-group", "expected-switch", "expected-power-shelf", "tray", "domain",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 	}
 
@@ -525,7 +525,7 @@ func TestInvalidateFiltered_MatchesScopeFilteredFetchers(t *testing.T) {
 		"allocation", "machine", "ip-block", "operating-system",
 		"ssh-key-group", "network-security-group",
 		"vpc-prefix", "rack", "expected-machine",
-		"expected-rack", "expected-switch", "expected-power-shelf", "tray", "sku",
+		"expected-rack", "expected-rack-group", "expected-switch", "expected-power-shelf", "tray", "sku", "domain",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 	}
 
@@ -563,7 +563,7 @@ func TestAppendScopeFlags_ScopeFlagCategories_Consistent(t *testing.T) {
 		"allocation", "ip-block", "operating-system",
 		"ssh-key-group", "network-security-group",
 		"sku", "rack", "expected-machine", "vpc-prefix",
-		"expected-rack", "expected-switch", "expected-power-shelf", "tray",
+		"expected-rack", "expected-rack-group", "expected-switch", "expected-power-shelf", "tray", "domain",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 	}
 
@@ -597,7 +597,7 @@ func TestInvalidateFiltered_ListMatchesAppendScopeFlags(t *testing.T) {
 		"allocation", "machine", "ip-block", "operating-system",
 		"ssh-key-group", "network-security-group",
 		"vpc-prefix", "rack", "expected-machine",
-		"expected-rack", "expected-switch", "expected-power-shelf", "tray", "sku",
+		"expected-rack", "expected-rack-group", "expected-switch", "expected-power-shelf", "tray", "sku", "domain",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 		"site", "audit", "ssh-key", "tenant-account",
 	}
