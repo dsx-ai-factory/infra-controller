@@ -558,8 +558,8 @@ pub async fn run_service(
             // The loop observes the same cancellation and drains its collectors.
             match join_discovery.await {
                 Ok(shutdown) => tracing::info!(
-                    closed = shutdown.closed,
-                    timed_out = shutdown.timed_out,
+                    closed_collector_count = shutdown.closed,
+                    timed_out_collector_count = shutdown.timed_out,
                     "Collectors drained"
                 ),
                 Err(e) => {

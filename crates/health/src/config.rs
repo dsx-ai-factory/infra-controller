@@ -113,7 +113,8 @@ pub struct Config {
     pub endpoint_discovery_interval: Duration,
 
     /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
-    /// still running when it passes are abandoned.
+    /// still running when it passes are abandoned. Defaults to 20 seconds and
+    /// must be greater than zero.
     #[serde(with = "humantime_serde")]
     pub shutdown_timeout: Duration,
 
