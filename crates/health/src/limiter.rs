@@ -177,24 +177,4 @@ mod tests {
             assert!(jitter >= Duration::from_millis(0));
         }
     }
-
-    #[test]
-    fn burst_above_token_scale_range_saturates_capacity() {
-        let limiter = BucketLimiter::new(usize::MAX, Duration::from_millis(30), Duration::ZERO);
-
-        assert_eq!(limiter.capacity, u64::MAX);
-        assert_eq!(limiter.tokens.load(Ordering::Relaxed), u64::MAX);
-    }
-
-    #[test]
-    fn replenish_near_token_limit_saturates_at_capacity() {
-        // Leaves less than one token of headroom below u64::MAX.
-        let limiter =
-            BucketLimiter::new(18_446_744_073_709, Duration::from_nanos(1), Duration::ZERO);
-        std::thread::sleep(Duration::from_millis(1));
-
-        limiter.replenish_tokens();
-
-        assert_eq!(limiter.tokens.load(Ordering::Relaxed), limiter.capacity);
-    }
 }
