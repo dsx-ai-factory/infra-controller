@@ -4,8 +4,8 @@
 #
 # Prepare an x86_64 or aarch64 Ubuntu VM to run tests and stack for NICo.
 # You should be able to execute the following tasks:
-#   - run `cargo test`
-#   - run `cargo test --profile ci-tests`
+#   - run `cargo test --workspace --exclude carbide-dhcp`
+#   - run `cargo test --workspace --exclude carbide-dhcp --profile ci-tests`
 #   - run `make -C rest-api test`
 #   - bring up the devspace stack
 #
@@ -818,9 +818,15 @@ show_summary() {
 Start a fresh login shell, then run:
 
   cd ${REPO_DIR}
-  cargo test
-  cargo test --profile ci-tests
+  cargo test --workspace --exclude carbide-dhcp
+  cargo test --workspace --exclude carbide-dhcp --profile ci-tests
   make -C rest-api test
+
+Run DHCP tests separately in the patched repository build image.
+The existing cargo make test-dhcp-docker task selects the x86_64 Dockerfile.
+Running that task on ARM64 is unverified; it does not select the native image.
+The distribution Kea installed here is rejected by the DHCPv6 hook at startup.
+See docs/provisioning/dhcpv6-deployment.md#kea-runtime-compatibility.
 
 Rust tests use ${CORE_POSTGRES_CONTAINER} on localhost:5432.
 REST tests manage their own project-test container on localhost:30432.
