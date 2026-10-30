@@ -18,6 +18,7 @@
 pub(crate) mod common;
 mod configure_switch_certificate;
 mod power_control;
+mod sdn_factory_reset;
 mod status;
 mod update_firmware;
 mod versions;
@@ -54,4 +55,10 @@ pub(crate) enum Cmd {
         visible_alias = "rotate-switch-certificate"
     )]
     ConfigureSwitchCertificate(configure_switch_certificate::Args),
+
+    #[clap(about = "Reset switch SDN configuration directly through RMS (disrupts fabric traffic)")]
+    ResetSwitchSdnFactoryDefault(sdn_factory_reset::ResetArgs),
+
+    #[clap(about = "Get the parent and child job result for a switch SDN factory reset")]
+    GetSwitchSdnFactoryResetStatus(sdn_factory_reset::StatusArgs),
 }
