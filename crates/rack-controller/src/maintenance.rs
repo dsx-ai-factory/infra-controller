@@ -52,7 +52,7 @@ use db::{
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
 use model::component_manager::ConfigureSwitchCertificateState;
-use model::machine::{HostMachine, MachineMaintenanceOperation, ManagedHostState};
+use model::machine::{HostMachine, MachineMaintenanceOperation};
 use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosPasswordUpdateState,
