@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+{{- include "nico-site-health-probe.validateState" . }}
 {{- $restCaPath := "" }}
 {{- if .Values.restCa.existingSecret.name }}
 {{- $restCaPath = printf "/var/secrets/rest-ca/%s" (required "restCa.existingSecret.key is required when restCa.existingSecret.name is set" .Values.restCa.existingSecret.key) }}
@@ -14,6 +15,7 @@ metadata:
 data:
   config.yaml: |
     metrics_listen: ":{{ .Values.metrics.port }}"
+    api_listen: ":{{ .Values.api.port }}"
     probes:
       grpc_machines:
         {{- with .Values.probes.grpcMachines }}
@@ -57,3 +59,45 @@ data:
         {{- with $restCaPath }}
         ca: {{ . | quote }}
         {{- end }}
+    {{- with .Values.state }}
+    {{- /* The latency probes call through the caps' gates with state off too. */}}
+    state:
+      enabled: {{ .enabled }}
+      caps:
+        calls_per_second: {{ .caps.callsPerSecond }}
+        call_timeout: {{ .caps.callTimeout | quote }}
+        max_backoff: {{ .caps.maxBackoff | quote }}
+    {{- if .enabled }}
+    {{- $tlsDir := include "nico-site-health-probe.stateTlsDir" $ }}
+      site_id: {{ .siteId | quote }}
+      nico_api:
+        target: {{ .nicoApi.target | quote }}
+        host_read: {{ .nicoApi.hostRead }}
+        batch_size: {{ .nicoApi.batchSize }}
+        max_decoding_message_size: {{ int64 .nicoApi.maxDecodingMessageSize }}
+        tls:
+          ca: {{ $tlsDir }}/ca.crt
+          cert: {{ $tlsDir }}/tls.crt
+          key: {{ $tlsDir }}/tls.key
+      rest:
+        target: {{ .rest.target | quote }}
+        {{- with $restCaPath }}
+        ca: {{ . | quote }}
+        {{- end }}
+        provider:
+          org: {{ .rest.provider.org | quote }}
+          auth:
+            {{- include "nico-site-health-probe.restAuth" (dict "auth" .rest.provider.auth "dir" "/var/secrets/state-provider") | nindent 12 }}
+      readers:
+        {{- range $name, $key := dict "devices" "devices" "restInventory" "rest_inventory" }}
+        {{- $reader := index $.Values.state.readers $name }}
+        {{ $key }}:
+          enabled: {{ $reader.enabled }}
+          interval: {{ $reader.interval | quote }}
+          timeout: {{ $reader.timeout | quote }}
+        {{- end }}
+      paging:
+        keep_seconds: {{ .paging.keepSeconds }}
+        max_kept_snapshots: {{ .paging.maxKeptSnapshots }}
+    {{- end }}
+    {{- end }}

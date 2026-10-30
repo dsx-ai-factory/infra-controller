@@ -90,7 +90,9 @@ pub(crate) struct RestInventoryReader {
     cfg: ReaderConfig,
     client: Arc<RestClient>,
     target: Inventory,
-    census: Arc<dyn CensusView>,
+    /// The device census the site check reads. `None` when no device reader
+    /// runs: the site is then always unknown.
+    census: Option<Arc<dyn CensusView>>,
     sink: Arc<dyn SnapshotSink>,
     process: u64,
     seq: AtomicU64,
@@ -102,7 +104,7 @@ impl RestInventoryReader {
         cfg: ReaderConfig,
         client: Arc<RestClient>,
         target: Inventory,
-        census: Arc<dyn CensusView>,
+        census: Option<Arc<dyn CensusView>>,
         sink: Arc<dyn SnapshotSink>,
         process_start: SystemTime,
     ) -> Self {
@@ -161,6 +163,10 @@ impl RestInventoryReader {
     /// census, and mismatches when none does. A page with a machine that
     /// names no NICo machine, or a mix (a machine ingested after the census
     /// could explain it), is unknown: missing evidence never makes a match.
+    /// With the devices reader enabled, a nonempty page with controller IDs
+    /// waits for the first device census: the check stays unresolved and the
+    /// family unpublished. Empty or ID-less pages publish unknown. Without a
+    /// device reader the site is always unknown.
     async fn site_match(&self, rec: &ObservationRecorder) -> Result<SiteMatchData, Failure> {
         let reply = self
             .client
@@ -184,10 +190,15 @@ impl RestInventoryReader {
             .into_iter()
             .map(|m| m.controller_machine_id)
             .collect();
-        let result = match self.census.machine_ids() {
+        let result = match self.census.as_ref().map(|census| census.machine_ids()) {
             _ if ids.is_empty() || ids.iter().any(String::is_empty) => SiteMatch::Unknown,
             None => SiteMatch::Unknown,
-            Some(census) => {
+            Some(None) => {
+                return Err(Failure::unresolved(
+                    "site check: no device census yet".to_string(),
+                ));
+            }
+            Some(Some(census)) => {
                 let known = ids.iter().filter(|id| census.contains(*id)).count();
                 if known == ids.len() {
                     SiteMatch::Match
@@ -283,6 +294,14 @@ mod tests {
     ) -> RestInventoryReader {
         let fixed = FixedCensus::default();
         *fixed.0.lock().unwrap() = census.map(|ids| ids.iter().map(|id| id.to_string()).collect());
+        reader_with(rest, sink, Some(Arc::new(fixed)))
+    }
+
+    fn reader_with(
+        rest: &FakeRest,
+        sink: &Arc<FakeSink>,
+        census: Option<Arc<dyn CensusView>>,
+    ) -> RestInventoryReader {
         RestInventoryReader::new(
             ReaderConfig {
                 enabled: true,
@@ -295,7 +314,7 @@ mod tests {
                 provider_org: "provider-org".to_string(),
                 site_id: "site-1".to_string(),
             },
-            Arc::new(fixed),
+            census,
             Arc::clone(sink) as Arc<dyn SnapshotSink>,
             SystemTime::now(),
         )
@@ -433,14 +452,33 @@ mod tests {
             .await
             .expect("sweep");
         assert_eq!(site_match(&sink), SiteMatch::Unknown);
+    }
 
-        // Machines on the page, but no device sweep yet.
+    /// Machines on the page, but no device sweep yet: the site check is not
+    /// published, so readiness and `/v1/config` keep waiting for it.
+    #[tokio::test]
+    async fn site_match_waits_for_the_device_census() {
+        let rest = FakeRest::start().await;
         rest.set_pages(
             "machine",
             vec![vec![json!({"controllerMachineId": "fm100a"})]],
         );
         let sink = Arc::new(FakeSink::default());
-        reader(&rest, &sink, None)
+        let err = reader(&rest, &sink, None)
+            .run(&ObservationRecorder::default())
+            .await
+            .expect_err("the site check is incomplete");
+        assert!(err.to_string().contains("RestSiteMatch"), "{err}");
+        assert_eq!(sink.count(Family::RestSiteMatch), 0);
+        assert_eq!(
+            sink.failure_kinds(Family::RestSiteMatch),
+            vec![crate::snapshot::FailureKind::Unresolved]
+        );
+        assert_eq!(sink.count(Family::RestTotals), 1, "totals still publish");
+
+        // Without a device reader there is no census to wait for.
+        let sink = Arc::new(FakeSink::default());
+        reader_with(&rest, &sink, None)
             .run(&ObservationRecorder::default())
             .await
             .expect("sweep");
