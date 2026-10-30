@@ -363,8 +363,8 @@ max_backoff = "30s"
 # zero. Default: 5s.
 close_timeout = "5s"
 # Delete every SSE destination on a BMC at its cap. Enable only where hw-health
-# is the BMC's sole SSE consumer. Not yet effective on BMCs that drop a capped
-# SSE open without an HTTP response (LiteOn). Each BMC is swept at most once per
+# is the BMC's sole SSE consumer. Has no effect on BMCs that drop a capped SSE
+# open without an HTTP response (LiteOn). Each BMC is swept at most once per
 # 30 minutes, and recovery does not reset that interval. The DELETEs run one at a
 # time within close_timeout, so a sweep can stop before reaching every
 # destination; the rest wait for the next sweep. Default: false.

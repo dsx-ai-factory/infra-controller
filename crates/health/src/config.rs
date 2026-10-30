@@ -1551,9 +1551,8 @@ pub struct SseLogConfig {
     pub close_timeout: Duration,
 
     /// Delete every SSE destination on a BMC at its cap. Enable only where
-    /// hw-health is the BMC's sole SSE consumer. Not yet effective on BMCs that
-    /// drop a capped SSE open without an HTTP response (LiteOn). Disabled by
-    /// default.
+    /// hw-health is the BMC's sole SSE consumer. Has no effect on BMCs that drop
+    /// a capped SSE open without an HTTP response (LiteOn). Disabled by default.
     ///
     /// Each BMC is swept at most once per 30 minutes, and recovery does not
     /// reset that interval. The DELETEs run one at a time within `close_timeout`,
