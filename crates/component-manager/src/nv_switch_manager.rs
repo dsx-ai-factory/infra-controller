@@ -267,7 +267,8 @@ pub struct SwitchFactoryResetJobStatus {
 pub struct SwitchSdnFactoryResetSubmission {
     /// Non-empty RMS parent handle for the jobs that were created.
     pub job_id: String,
-    /// Per-node submission failures; these nodes are not necessarily in the job tree.
+    /// Submission failures, including node diagnostics when available. Rejected
+    /// targets are not necessarily represented in the job tree.
     pub errors: Vec<String>,
 }
 
@@ -445,7 +446,7 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     }
 
     /// Observes an SDN reset's parent and child jobs. Completion requires every
-    /// target to complete; lost or unknown job state is an unknown outcome error.
+    /// submitted child to complete; lost or unknown state is an unknown outcome error.
     async fn get_switch_sdn_factory_reset_job_status(
         &self,
         _job_id: &str,

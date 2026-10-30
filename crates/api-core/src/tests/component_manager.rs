@@ -524,6 +524,7 @@ async fn untracked_backend_switch_job_is_unknown_for_every_switch_target(
 
 #[crate::sqlx_test]
 async fn sdn_reset_rpc_validates_before_dispatch_and_maps_job_status(pool: sqlx::PgPool) {
+    use ::rpc::forge::forge_server::Forge;
     use api_test_helper::mock_rms::MockRmsApi;
     use component_manager::rms::RmsBackend;
     let env = create_test_env(pool.clone()).await;
@@ -533,14 +534,15 @@ async fn sdn_reset_rpc_validates_before_dispatch_and_maps_job_status(pool: sqlx:
         mock.clone(),
         None,
         pool.clone(),
-        Arc::new(Default::default()),
+        Arc::new(crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles),
         false,
     ));
     let api = TestApiBuilder::new(
-        pool,
+        pool.clone(),
         env.common_pools.clone(),
         env.api.work_lock_manager_handle.clone(),
     )
+    .with_credential_manager(env.api.credential_manager.clone())
     .with_component_manager(Arc::new(cm))
     .build();
     let id = SwitchId::from(uuid::Uuid::new_v4());
@@ -587,6 +589,86 @@ async fn sdn_reset_rpc_validates_before_dispatch_and_maps_job_status(pool: sqlx:
         mock.batch_reset_switch_sdn_factory_default_calls()
             .await
             .is_empty()
+    );
+    let rack_id = RackId::new("sdn-reset-rack");
+    let mut txn = pool.begin().await.unwrap();
+    crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .unwrap();
+    let switch = db::test_support::switch::create_seeded_discovered(&mut txn, 61, "sdn-reset")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
+        .bind(&rack_id)
+        .bind(switch.id)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    let bmc_mac_address = switch.bmc_mac_address.unwrap();
+    for key in [
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+        },
+        CredentialKey::SwitchNvosAdmin { bmc_mac_address },
+    ] {
+        env.api
+            .credential_manager
+            .set_credentials(&key, &Credentials::new("reset-operator", "test-password"))
+            .await
+            .unwrap();
+    }
+    // A resolvable target must not be dispatched when another target is unknown.
+    let mixed = api
+        .component_reset_switch_sdn_factory_default(Request::new(
+            rpc::ComponentResetSwitchSdnFactoryDefaultRequest {
+                switch_ids: Some(rpc::SwitchIdList {
+                    ids: vec![switch.id, id],
+                }),
+                domain_name: None,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(mixed.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        mock.batch_reset_switch_sdn_factory_default_calls()
+            .await
+            .is_empty()
+    );
+    use librms::protos::rack_manager as rms;
+    mock.enqueue_batch_reset_switch_sdn_factory_default(Ok(
+        rms::BatchResetSwitchSdnFactoryDefaultResponse {
+            response: Some(rms::NodeBatchResponse {
+                job_id: "parent".into(),
+                status: rms::ReturnCode::Success as i32,
+                ..Default::default()
+            }),
+        },
+    ))
+    .await;
+    let submitted = api
+        .component_reset_switch_sdn_factory_default(Request::new(
+            rpc::ComponentResetSwitchSdnFactoryDefaultRequest {
+                switch_ids: Some(rpc::SwitchIdList {
+                    ids: vec![switch.id],
+                }),
+                domain_name: None,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(submitted.job_id, "parent");
+    assert!(submitted.submission_errors.is_empty());
+    let calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].domain, None);
+    assert_eq!(
+        calls[0].nodes.as_ref().unwrap().nodes[0].node_id,
+        switch.id.to_string()
     );
     for (execution_state, expected) in [
         (

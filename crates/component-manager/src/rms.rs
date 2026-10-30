@@ -4503,7 +4503,7 @@ async fn rms_batch_reset_switch_sdn_factory_default(
             )
         }
         _ => ComponentManagerError::OperationOutcomeUnknown(
-            "RMS switch SDN factory-reset submission returned no durable job ID".to_string(),
+            "RMS switch SDN factory-reset submission returned no parent job ID".to_string(),
         ),
     })?;
 
