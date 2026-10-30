@@ -2477,7 +2477,10 @@ mod tests {
             .write_all(response.as_bytes())
             .await
             .unwrap();
-        assert!(first.await.expect("first task joins").is_ok());
+        first
+            .await
+            .expect("first task joins")
+            .expect("first request succeeds");
 
         let (mut second_connection, _) =
             tokio::time::timeout(Duration::from_secs(1), listener.accept())
@@ -2489,7 +2492,10 @@ mod tests {
             .write_all(response.as_bytes())
             .await
             .unwrap();
-        assert!(second.await.expect("second task joins").is_ok());
+        second
+            .await
+            .expect("second task joins")
+            .expect("second request succeeds");
     }
 
     #[test]
