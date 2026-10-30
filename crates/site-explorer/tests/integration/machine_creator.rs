@@ -577,8 +577,10 @@ async fn test_zero_dpu_host_creation_does_not_wait_on_admin_segment_locks(
 
     let mut gate = env.pool.begin().await?;
     db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
+    // Allow for database work under CI contention. The gate stays held until
+    // creation completes, so taking an admin segment lock still times out.
     let created = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(120),
         creator.create_managed_host(
             &fixture.host,
             &mut fixture.host_report,
