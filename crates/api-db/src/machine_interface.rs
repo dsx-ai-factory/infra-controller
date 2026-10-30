@@ -102,6 +102,8 @@ mod test_allocation_removal;
 #[cfg(test)]
 mod test_duplicate_mac;
 #[cfg(test)]
+mod test_explicit_columns;
+#[cfg(test)]
 mod tests;
 
 #[derive(Clone, Copy)]
@@ -153,7 +155,11 @@ impl ColumnInfo<'_> for SwitchIdColumn {
 macro_rules! machine_interface_snapshot_query {
     () => {
         r#"
-    SELECT mi.*,
+    SELECT
+        mi.id, mi.attached_dpu_machine_id, mi.machine_id, mi.segment_id,
+        mi.domain_id, mi.hostname, mi.interface_type, mi.mac_address, mi.boot_interface_id,
+        mi.primary_interface, mi.created, mi.last_dhcp, mi.power_shelf_id, mi.switch_id,
+        mi.association_type,
         COALESCE(addresses_agg.json, '[]'::json) AS addresses,
         COALESCE(vendors_agg.json, '[]'::json) AS vendors,
         ns.network_segment_type

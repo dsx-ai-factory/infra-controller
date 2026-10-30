@@ -317,9 +317,14 @@ mode = "auto"
 
 # auto-mode downgrade thresholds and periodic fallback; read only when
 # mode = "auto". omit the whole section to use defaults.
+# If [collectors.logs.auto] is omitted, auto fallback uses [collectors.logs.periodic]
+# when present, otherwise defaults. An explicit auto section replaces that fallback.
 [collectors.logs.auto]
 # auto uses [collectors.logs.sse] while attempting SSE, then switches to
 # these periodic fallback parameters after downgrade.
+# Paginated periodic collections require a stable Members@odata.count matching
+# all returned members, except that filtered counts may be oversized on NVIDIA and
+# Vera Rubin platforms. Numeric IDs must be distinct; incomplete scans retry without advancing progress.
 sse_not_available_threshold = 1
 # Transient failures must reach this duration and the count threshold below.
 connect_failure_window = "5m"
@@ -329,15 +334,21 @@ connect_failure_threshold = 5
 # periodic collection cover different LogService endpoints.
 retry_sse_after_downgrade = false
 logs_collection_interval = "5m"
+# Refresh log service discovery; continuity is checked each collection poll.
 state_refresh_interval = "30m"
 logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 # Skip any Redfish LogService whose odata id contains one of these substrings.
 # Applies when auto-mode downgrades to periodic collection. See [collectors.logs.periodic].
 exclude_services = ["Journal"]
-# When true, on first encounter of a LogService with no saved state, anchor at
-# the current highest entry ID without emitting historical entries. Matches
-# SSE real-time behaviour. Default: false (collect all existing entries on
-# first run). Also read by auto-mode after downgrade to periodic.
+# Skip history only during a new service's first successful baseline.
+# Numeric IDs must grow between resets; existing entries remain unchanged.
+# Nonnumeric entries are emitted when collecting or replaying retained history.
+# Incremental scans and completed history-skipping baselines ignore them.
+# A missing saved entry or changed mapped log record triggers replay at the next poll.
+# Changes below an unchanged anchor are not detected.
+# Default: false (emit retained history). Auto reads this after downgrade.
+# Failed baselines and old fingerprint or numeric/SSE checkpoints replay history.
+# Disable this option when rolling back to the numeric-only checkpoint reader.
 # skip_initial_history = false
 
 # SSE reconnect backoff; read when mode = "sse" and during auto-mode SSE attempts.
@@ -345,10 +356,14 @@ exclude_services = ["Journal"]
 initial_backoff = "1s"
 max_backoff = "30s"
 
-# required when
-# mode = "periodic"; must not be set when mode = "sse"
+# Required when mode = "periodic"; ignored when mode = "sse".
 [collectors.logs.periodic]
+# Paginated collections require a stable Members@odata.count matching all returned
+# members, except that filtered counts may be oversized on NVIDIA and Vera Rubin
+# platforms. Numeric IDs must be distinct; incomplete scans retry without advancing progress.
+# Single pages may omit count.
 logs_collection_interval = "5m"
+# Refresh log service discovery; continuity is checked each collection poll.
 state_refresh_interval = "30m"
 logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 # Skip any Redfish LogService whose odata id contains one of these substrings.
@@ -356,10 +371,15 @@ logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 # self-referential since polling generates Journal entries). Set to [] to collect
 # from every discovered LogService. Also read by auto-mode after downgrade.
 exclude_services = ["Journal"]
-# When true, on first encounter of a LogService with no saved state, anchor at
-# the current highest entry ID without emitting historical entries. Matches
-# SSE real-time behaviour. Default: false (collect all existing entries on
-# first run).
+# Skip history only during a new service's first successful baseline.
+# Numeric IDs must grow between resets; existing entries remain unchanged.
+# Nonnumeric entries are emitted when collecting or replaying retained history.
+# Incremental scans and completed history-skipping baselines ignore them.
+# A missing saved entry or changed mapped log record triggers replay at the next poll.
+# Changes below an unchanged anchor are not detected.
+# Default: false (emit retained history).
+# Failed baselines and old fingerprint or numeric/SSE checkpoints replay history.
+# Disable this option when rolling back to the numeric-only checkpoint reader.
 # skip_initial_history = false
 
 # ==============================================================================
@@ -511,13 +531,22 @@ sample_interval = "5m"
 # Applied independently to connection establishment, opening the Subscribe RPC,
 # and initial synchronization. One attempt may take nearly three times this
 # duration before reconnect backoff. Updates before sync_response=true do not
-# extend the synchronization timeout.
+# extend the synchronization timeout. Each reconciliation attempt uses
+# this duration as one overall deadline, including credentials and snapshot reads.
+# Must be positive when gNMI reconciliation is enabled.
 request_timeout = "30s"
 # Keep strict TLS certificate and hostname verification by default. Set true only
 # for lab/self-signed NVOS gNMI endpoints where that dangerous bypass is required.
 dangerously_skip_tls_verification = false
 # streaming ON_CHANGE
 system_events_enabled = true
+# Omit or set 0s to disable cleanup. Positive intervals up to 366d enable it.
+# ONCE reads leave switch state unchanged and do not replay events into metrics.
+# Cleanup removes confirmed stale metrics; failed or incomplete snapshots preserve
+# metrics. Applies to every synchronized built-in SAMPLE, system-event, and
+# additional subscription stream. A complete empty snapshot removes cached metrics
+# except those updated concurrently.
+# reconcile_interval = "30m"
 
 [collectors.nvue.gnmi.paths]
 components_enabled = true
@@ -583,6 +612,8 @@ leak_sensors_enabled = false
 # metric path. Label names cannot use `subscription`, `state`, or the endpoint
 # and hardware metadata labels added by the service. Each distinct key
 # combination creates a metric series. At least one metric is required.
+# Mappings under `/system-events/system-event` do not produce Prometheus
+# `/telemetry` series and are still sent to configured OTLP sinks.
 # [[collectors.nvue.gnmi.additional_subscriptions.metrics]]
 # path = ["component", "state", "reading"]
 # metric_type = "component_reading"

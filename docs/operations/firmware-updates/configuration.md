@@ -342,8 +342,8 @@ firmware work:
 | Setting | Default | Meaning |
 |---|---|---|
 | `machine_update_run_interval` | `300` | Seconds between Machine Update Manager passes. |
-| `machine_updater.max_concurrent_machine_updates_absolute` | unset | Maximum number of distinct hosts that may be in machine-update workflows. Set this to a positive value to allow automatic managed-host or DPU work. |
-| `machine_updater.max_concurrent_machine_updates_percent` | unset | Intended percentage-based capacity. The current implementation calculates this incorrectly; leave it unset and use the absolute limit. |
+| `machine_updater.max_concurrent_machine_updates_absolute` | unset | Fixed ceiling on the number of distinct hosts in machine-update workflows. Used directly when the percentage is unset; otherwise caps the percentage budget after unhealthy hosts are subtracted. |
+| `machine_updater.max_concurrent_machine_updates_percent` | unset | Percentage of all managed hosts, rounded up, minus unhealthy hosts, with a minimum of zero. An absolute limit, if set, further caps this budget. Zero or negative percentages disable automatic machine updates. |
 | `machine_updater.instance_autoreboot_period.start` | unset | Start of a one-time UTC window in which an assigned host may consume an existing update request without tenant approval. |
 | `machine_updater.instance_autoreboot_period.end` | unset | End of that one-time UTC window. |
 

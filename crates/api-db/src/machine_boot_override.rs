@@ -40,7 +40,7 @@ pub async fn create(
     custom_pxe: Option<String>,
     custom_user_data: Option<String>,
 ) -> DatabaseResult<Option<MachineBootOverride>> {
-    let query = "INSERT INTO machine_boot_override VALUES ($1, $2, $3) RETURNING *";
+    let query = "INSERT INTO machine_boot_override VALUES ($1, $2, $3) RETURNING machine_interface_id, custom_pxe, custom_user_data";
     let res = sqlx::query_as(query)
         .bind(machine_interface_id)
         .bind(custom_pxe)
@@ -129,8 +129,10 @@ async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineBootOverride>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<MachineBootOverride>, DatabaseError> {
-    let mut query =
-        FilterableQueryBuilder::new("SELECT * FROM machine_boot_override").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT machine_interface_id, custom_pxe, custom_user_data FROM machine_boot_override",
+    )
+    .filter(&filter);
 
     query
         .build_query_as()

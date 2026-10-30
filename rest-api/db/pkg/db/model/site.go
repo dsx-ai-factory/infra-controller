@@ -111,12 +111,17 @@ type SiteContact struct {
 // to the default for a Site that has not reported one yet, so an unreported Site keeps the
 // protection it had before the field existed. The Site Agent refuses a schedule slower than
 // cutil.MaxInventoryReceiptInterval, so the reported interval is followed as given.
+//
+// The window is exactly the interval, with no padding. Consecutive cycles can start closer
+// together than the interval, so a reconciler that writes on every cycle has to backdate those
+// writes for the next cycle to read them as older than the window. Padding here would make them
+// look recent again.
 func (st *Site) IsTimeWithinStaleInventoryThreshold(actionTime time.Time) bool {
 	interval := cutil.DefaultInventoryReceiptInterval
 	if st != nil && st.InventoryIntervalSeconds != nil && *st.InventoryIntervalSeconds > 0 {
 		interval = time.Duration(*st.InventoryIntervalSeconds) * time.Second
 	}
-	return time.Since(actionTime) < interval+cutil.StaleInventoryBuffer
+	return time.Since(actionTime) < interval
 }
 
 type SiteCreateInput struct {

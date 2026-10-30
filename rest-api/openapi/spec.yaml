@@ -4448,6 +4448,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     get:
@@ -4560,6 +4563,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     delete:
@@ -4586,6 +4592,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/label/key':
@@ -4832,6 +4841,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     delete:
@@ -4855,6 +4867,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/batch':
@@ -4925,6 +4940,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     patch:
@@ -4992,6 +5010,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+        '409':
+          description: One or more target Expected Machines changed before they could be locked, or another complete Expected Inventory mutation is in progress for the same Site. The batch can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-power-shelf':
@@ -5041,6 +5062,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Power Shelf with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     get:
@@ -5154,6 +5178,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     delete:
@@ -5180,6 +5207,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId}':
@@ -5273,6 +5303,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     delete:
@@ -5296,6 +5329,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-rack':
@@ -5352,6 +5388,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Rack with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     get:
@@ -5486,6 +5525,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/all':
@@ -5527,6 +5569,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5555,6 +5600,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/{id}':
@@ -5651,6 +5699,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5673,6 +5724,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack-group':
@@ -5732,6 +5786,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Rack Group with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     get:
@@ -5879,6 +5936,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/all':
@@ -5920,6 +5980,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -5948,6 +6011,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/{id}':
@@ -6048,6 +6114,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -6070,6 +6139,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-switch':
@@ -6123,6 +6195,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     get:
@@ -6236,6 +6311,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     delete:
@@ -6262,6 +6340,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
   '/v2/org/{org}/nico/expected-switch/{expectedSwitchId}':
@@ -6359,6 +6440,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: An Expected Switch with a conflicting NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     delete:
@@ -6382,6 +6466,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
   '/v2/org/{org}/nico/sku':
@@ -7238,12 +7325,20 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site still has Instance attachments, including attachments on terminating Instances. The Partition and its status history remain unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific SpectrumX Partition by ID.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-        Tenant must own the Partition. The request is rejected while any Instance is still attached to the Partition. The Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
+        Tenant must own the Partition. The request is rejected with `400` while the API lists an attached Instance and `412` when the Site reports remaining attachments, including on terminating Instances. A rejected deletion leaves the Partition and its status history unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+
+        Once deletion is accepted, the Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
       tags:
         - SpectrumX Partition
   '/v2/org/{org}/nico/nvlink-logical-partition':
@@ -26417,7 +26512,12 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version. When empty, null, or omitted, use the default firmware version for each targeted component.
+          description: |-
+            Target firmware input. NVLink Domain targets resolve to their member
+            racks. For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         ruleId:
           type: string
           format: uuid
@@ -26471,7 +26571,12 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version. When empty, null, or omitted, use the default firmware version for each targeted component.
+          description: |-
+            Target firmware input. NVLink Domain targets resolve to their member
+            racks. For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         ruleId:
           type: string
           format: uuid
@@ -26618,9 +26723,12 @@ components:
             `nvswitch`, `powershelf`) to firmware input.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
-            A missing tray type in the mapping receives an empty input, which
-            does not guarantee a skipped update. Empty, null, or omitted input
-            is handled by the selected backend and operation rule.
+            A missing tray type in the mapping skips that component type.
+            A non-empty, non-layered value is forwarded unchanged.
+            For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -27824,9 +27932,12 @@ components:
             `nvswitch`, `powershelf`) to firmware input.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
-            A missing tray type in the mapping receives an empty input, which
-            does not guarantee a skipped update. Empty, null, or omitted input
-            is handled by the selected backend and operation rule.
+            A missing tray type in the mapping skips that component type.
+            A non-empty, non-layered value is forwarded unchanged.
+            For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         targets:
           type: array
           items:
@@ -27850,14 +27961,14 @@ components:
               - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
               - powershelf trays (PowerShelfComponent): currently pmc, psu
               - compute trays (ComputeTrayComponent): currently bmc, bios
-                (currently NOT honored end-to-end: the NICo compute-firmware
-                path goes through SetFirmwareUpdateTimeWindow + auto-update,
-                which has no per-target selection; the request is logged
-                and the whole bundle is applied. Will be honored once
-                compute moves to UpdateComponentFirmware.)
+
+            The default `nico` compute component manager forwards BMC and BIOS
+            selections through `UpdateComponentFirmware`. The opt-in
+            `nicolegacy` manager schedules the whole configured host firmware
+            bundle; it does not honor BMC or BIOS sub-target selection.
             Omitted or empty means "update everything in the bundle"
             (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected. Requires `version` to be set.
+            Unknown names are rejected.
             The special target `dpu`, valid only on compute trays,
             requests DPU reprovisioning on each matched host. Unlike
             the other targets, `dpu` is NOT covered by the
@@ -28039,9 +28150,12 @@ components:
             `nvswitch`, `powershelf`) to firmware input.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
-            A missing tray type in the mapping receives an empty input, which
-            does not guarantee a skipped update. Empty, null, or omitted input
-            is handled by the selected backend and operation rule.
+            A missing tray type in the mapping skips that component type.
+            A non-empty, non-layered value is forwarded unchanged.
+            For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         targets:
           type: array
           items:
@@ -28065,14 +28179,14 @@ components:
               - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
               - powershelf trays (PowerShelfComponent): currently pmc, psu
               - compute trays (ComputeTrayComponent): currently bmc, bios
-                (currently NOT honored end-to-end: the NICo compute-firmware
-                path goes through SetFirmwareUpdateTimeWindow + auto-update,
-                which has no per-target selection; the request is logged
-                and the whole bundle is applied. Will be honored once
-                compute moves to UpdateComponentFirmware.)
+
+            The default `nico` compute component manager forwards BMC and BIOS
+            selections through `UpdateComponentFirmware`. The opt-in
+            `nicolegacy` manager schedules the whole configured host firmware
+            bundle; it does not honor BMC or BIOS sub-target selection.
             Omitted or empty means "update everything in the bundle"
             (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected. Requires `version` to be set.
+            Unknown names are rejected.
             The special target `dpu`, valid only on compute trays,
             requests DPU reprovisioning on the matched host. Unlike
             the other targets, `dpu` is NOT covered by the
@@ -32652,6 +32766,8 @@ components:
         - repoURL
         - chartName
         - chartVersion
+        - serviceID
+        - deployInCluster
         - security
       properties:
         repoURL:
@@ -32667,6 +32783,15 @@ components:
           type: string
           minLength: 1
           description: Helm chart version
+        serviceID:
+          type: string
+          minLength: 1
+          description: Required immutable DPF workload identity. Its value must be unique case-insensitively among active NICo-managed DPF Helm services.
+        deployInCluster:
+          type: boolean
+          enum:
+            - false
+          description: Required DPF deployment location. NICo currently accepts only an explicit false value, which deploys the chart on DPUs.
         security:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSecurity'
         values:
@@ -32777,7 +32902,7 @@ components:
           serviceType: DpfHelmChart
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
-          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","serviceID":"storage-client-v2","deployInCluster":false,"security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string
@@ -34594,6 +34719,18 @@ components:
               value:
                 source: nico
                 message: Error handling API request
+                data: null
+    ConflictError:
+      description: Error response when the request conflicts with an existing resource or operation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NICoAPIError'
+          examples:
+            example-1:
+              value:
+                source: nico
+                message: Expected Inventory for this Site is being updated; retry the request
                 data: null
     GatewayTimeoutError:
       description: |-

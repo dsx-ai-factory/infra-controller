@@ -339,19 +339,22 @@ func TestManageSitePrefixInventory_DiscoverSitePrefixInventory(t *testing.T) {
 				require.Equal(t, tt.wantTotalPages, page.GetTotalPages())
 				require.Equal(t, tt.wantPageSizes[pageIndex], page.GetPageSize())
 				require.Equal(t, int32(tt.wantCompleteItemCount), page.GetTotalItems())
-				if pageIndex == 0 {
+				// Cloud sweeps deletions against the reported ID list, so the page reporting
+				// itself last carries it and no other page does. A run that stops short never
+				// reports a final page, so it never sends the list at all. The predicate is
+				// Cloud's, which counts a run with no pages of its own as complete.
+				if page.GetTotalPages() == 0 || page.GetCurrentPage() == page.GetTotalPages() {
 					completeIDs = slices.Clone(page.GetItemIds())
 					require.Len(t, completeIDs, tt.wantCompleteItemCount)
 					require.True(t, slices.IsSorted(completeIDs))
 				} else {
-					require.Equal(t, completeIDs, page.GetItemIds())
+					require.Empty(t, page.GetItemIds())
 				}
 				require.True(t, slices.IsSortedFunc(inventory.GetSitePrefixes(), func(left, right *corev1.SitePrefix) int {
 					return strings.Compare(left.GetId().GetValue(), right.GetId().GetValue())
 				}))
 				for _, sitePrefix := range inventory.GetSitePrefixes() {
 					id := sitePrefix.GetId().GetValue()
-					require.Contains(t, completeIDs, id)
 					require.NotContains(t, seenIDs, id)
 					seenIDs[id] = struct{}{}
 					publishedIDs = append(publishedIDs, id)
@@ -362,7 +365,10 @@ func TestManageSitePrefixInventory_DiscoverSitePrefixInventory(t *testing.T) {
 				require.True(t, ok)
 				lastPage := lastInventory.GetInventoryPage()
 				require.Less(t, lastPage.GetCurrentPage(), lastPage.GetTotalPages())
-				require.NotEqual(t, completeIDs, publishedIDs)
+				// No page reported itself last, so Cloud never receives a list to sweep
+				// against and cannot delete what this run failed to publish.
+				require.Nil(t, completeIDs)
+				require.NotEmpty(t, publishedIDs)
 			} else if tt.wantStatus == corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS {
 				require.Equal(t, completeIDs, publishedIDs)
 			}

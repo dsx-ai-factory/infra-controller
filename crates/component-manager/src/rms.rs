@@ -878,6 +878,7 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
         let response = self
             .client
             .apply_switch_system_image(rms::ApplySwitchSystemImageRequest {
+                allow_onie_recovery: false,
                 rack_id: request.rack_id.to_string(),
                 config_json: request.config_json.to_string(),
                 access_token: Some(rms_access_token_or_noauth(Some(request.access_token))),
@@ -1855,7 +1856,8 @@ async fn resolve_pre_ingestion_switch_identities(
 fn to_rms_power_operation(action: PowerAction) -> i32 {
     match action {
         PowerAction::On => rms::PowerOperation::On as i32,
-        PowerAction::GracefulShutdown | PowerAction::ForceOff => rms::PowerOperation::Off as i32,
+        PowerAction::GracefulShutdown => rms::PowerOperation::Off as i32,
+        PowerAction::ForceOff => rms::PowerOperation::ForceOff as i32,
         PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
             rms::PowerOperation::Reset as i32
         }
@@ -1929,6 +1931,7 @@ fn build_power_shelf_node_info(
     resolved: &ResolvedRmsNode<'_>,
 ) -> rms::NodeInfo {
     let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: resolved.identity.node_id.clone(),
         rack_id: resolved.identity.rack_id.clone(),
         r#type: None,
@@ -2493,6 +2496,7 @@ fn build_switch_node_info(
     nvos_host_name: Option<String>,
 ) -> rms::NodeInfo {
     let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: resolved.identity.node_id.clone(),
         rack_id: resolved.identity.rack_id.clone(),
         r#type: None,
@@ -2548,6 +2552,7 @@ fn build_switch_certificate_node_info(
     resolved: &ResolvedRmsNode<'_>,
 ) -> rms::NodeInfo {
     let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: resolved.identity.node_id.clone(),
         rack_id: resolved.identity.rack_id.clone(),
         r#type: None,
@@ -2766,6 +2771,7 @@ fn apply_switch_system_image_request(
     }
 
     Ok(rms::ApplySwitchSystemImageRequest {
+        allow_onie_recovery: false,
         rack_id: identity.rack_id.clone(),
         config_json: config_json.to_owned(),
         access_token,
@@ -2833,6 +2839,7 @@ fn build_compute_tray_node_info(
     bmc_mac: MacAddress,
 ) -> rms::NodeInfo {
     let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: resolved.identity.node_id.clone(),
         rack_id: resolved.identity.rack_id.clone(),
         r#type: None,
@@ -3935,6 +3942,7 @@ impl NvSwitchManager for RmsBackend {
             "configure_scale_up_fabric_manager_v2",
             self.client.configure_scale_up_fabric_manager_v2(
                 rms_v2::ConfigureScaleUpFabricManagerRequest {
+                    layout: None,
                     nodes: Some(rms::NodeSet { nodes }),
                     // RMS selects the V2 primary across the supplied fabric.
                     primary_switch_node_id: None,
@@ -4152,16 +4160,19 @@ fn map_rms_password_rotation_state(job: &rms::JobStatus) -> SwitchPasswordRotati
     }
 }
 
-/// Submits one destructive factory-reset batch and requires a durable job handle.
+/// Submits a factory-reset batch and requires RMS to return a job ID.
 ///
-/// The backend-neutral TLS server domain maps to the RMS `domain` field. RMS uses its
-/// configured switch domain when this value is absent.
+/// `tls_server_domain` overrides the RMS switch domain. If omitted, RMS uses its
+/// configured domain.
+/// The request enables SSH fallback for NVUE connection or TLS failures before
+/// reset submission.
 async fn rms_batch_reset_switch_factory_default(
     client: &dyn RmsApi,
     nodes: Vec<rms::NodeInfo>,
     tls_server_domain: Option<&str>,
 ) -> Result<String, ComponentManagerError> {
     let request = rms::BatchResetSwitchFactoryDefaultRequest {
+        allow_ssh_fallback: true,
         nodes: Some(rms::NodeSet { nodes }),
         domain: tls_server_domain.map(str::to_owned),
     };
@@ -5349,7 +5360,7 @@ mod tests {
 
             "power off" {
                 PowerAction::GracefulShutdown => rms::PowerOperation::Off as i32,
-                PowerAction::ForceOff => rms::PowerOperation::Off as i32,
+                PowerAction::ForceOff => rms::PowerOperation::ForceOff as i32,
             }
 
             "reset" {
@@ -5680,6 +5691,7 @@ mod tests {
         assert_eq!(call.access_token.as_deref(), Some("token"));
         assert_eq!(call.software_type, "prod");
         assert_eq!(call.hardware_type, ANY_RACK_HARDWARE_TYPE);
+        assert!(!call.allow_onie_recovery);
 
         let nodes = call.nodes.as_ref().expect("request nodes");
 
@@ -6079,6 +6091,7 @@ mod tests {
         for job_id in ["", " \t"] {
             let result = scale_up_fabric_manager_job_id_from_rms(
                 rms_v2::ConfigureScaleUpFabricManagerResponse {
+                    selected_fabrics: Vec::new(),
                     job_id: job_id.to_string(),
                 },
             );
@@ -7908,6 +7921,7 @@ mod tests {
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].domain.as_deref(), Some(tls_server_domain));
+        assert!(calls[0].allow_ssh_fallback);
 
         let nodes = calls[0]
             .nodes
@@ -8497,7 +8511,7 @@ mod tests {
 
         let calls = mock.batch_set_power_state_calls().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].operation, rms::PowerOperation::Off as i32);
+        assert_eq!(calls[0].operation, rms::PowerOperation::ForceOff as i32);
     }
 
     #[carbide_macros::sqlx_test]
@@ -8612,6 +8626,7 @@ mod tests {
         assert_eq!(calls[0].access_token.as_deref(), Some("token"));
         assert_eq!(calls[0].software_type, "prod");
         assert_eq!(calls[0].hardware_type, "any");
+        assert!(!calls[0].allow_onie_recovery);
         assert_eq!(calls[0].rack_id, rack_id.to_string());
         let dev0 = &calls[0].nodes.as_ref().unwrap().nodes[0];
         assert_eq!(dev0.node_id, sw1.to_string());

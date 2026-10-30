@@ -2428,6 +2428,9 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		deletingInstance                      *cdbm.Instance
 		deletedInstances                      []*cdbm.Instance
 		missingInstances                      []*cdbm.Instance
+		// notMissingInstances are absent from the inventory but must keep their state,
+		// because the page carried no basis for calling them missing.
+		notMissingInstances                   []*cdbm.Instance
 		restoredInstance                      *cdbm.Instance
 		unpairedInstances                     []*cdbm.Instance
 		bootCompletedInstances                []*cdbm.Instance
@@ -2546,6 +2549,26 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				},
 			},
 			readyInstances: pagedIns[0:34],
+		},
+		{
+			// The Site sends the ID list on the last page alone, so a middle page gives Cloud
+			// no basis to mark anything missing even though 4 of the Site's 38 Instances have
+			// stopped being reported.
+			name:             "test paged Instance inventory processing, middle page without item IDs",
+			siteID:           site2.ID,
+			clientPoolSiteID: site2.ID.String(),
+			clientPoolClient: mtc3,
+			instanceInventory: &corev1.InstanceInventory{
+				Instances: pagedCtrlIns[10:20],
+				Timestamp: timestamppb.Now(),
+				InventoryPage: &corev1.InventoryPage{
+					CurrentPage: 2,
+					TotalPages:  4,
+					PageSize:    10,
+					TotalItems:  34,
+				},
+			},
+			notMissingInstances: pagedIns[34:38],
 		},
 		{
 			name:             "test paged Instance inventory processing, last page",
@@ -2868,6 +2891,15 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
 				assert.Nil(t, serr)
 				assert.Equal(t, cdbm.InstancePowerStatusBootCompleted, *ui.PowerStatus)
+			}
+
+			for _, instance := range tc.notMissingInstances {
+				// The page carried no ID list, so absence from it is not evidence the Site
+				// dropped the Instance and its state has to survive untouched.
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				assert.Nil(t, serr)
+				assert.False(t, ui.IsMissingOnSite)
+				assert.NotEqual(t, cdbm.InstanceStatusError, ui.Status)
 			}
 
 			for _, instance := range tc.unchangedInstances {

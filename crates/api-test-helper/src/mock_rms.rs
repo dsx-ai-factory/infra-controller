@@ -42,17 +42,19 @@ use std::sync::Arc;
 
 use librms::protos::rack_manager as rms;
 use librms::{RackManagerError, RmsApi};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
-/// A configurable mock `RmsApi` client that lets tests queue responses
-/// per method and inspect what requests were sent.
+struct BlockedRmsRequest {
+    entered: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
+/// The mock records RMS requests and returns queued responses.
 ///
-/// Every `RmsApi` method has a corresponding:
-/// - `enqueue_*()` - push a response to be returned on the next call
-/// - `*_calls()` - retrieve all recorded requests for that method
+/// Use `enqueue_*()` to queue responses and `*_calls()` to inspect requests.
 ///
-/// If no response is queued when a method is called, it returns a
-/// clear "no response queued" error so tests fail explicitly.
+/// Calling a supported method with no queued response returns a
+/// `mock: no response queued` error.
 pub struct MockRmsApi {
     // Power control calls.
     set_power_state_responses:
@@ -70,10 +72,6 @@ pub struct MockRmsApi {
     batch_get_power_state_responses:
         Mutex<VecDeque<Result<rms::BatchGetPowerStateResponse, RackManagerError>>>,
     batch_get_power_state_calls: Mutex<Vec<rms::BatchGetPowerStateRequest>>,
-
-    sequence_rack_power_responses:
-        Mutex<VecDeque<Result<rms::SequenceRackPowerResponse, RackManagerError>>>,
-    sequence_rack_power_calls: Mutex<Vec<rms::SequenceRackPowerRequest>>,
 
     // Inventory calls.
     list_node_inventory_responses:
@@ -104,15 +102,6 @@ pub struct MockRmsApi {
     batch_get_node_device_info_responses:
         Mutex<VecDeque<Result<rms::BatchGetNodeDeviceInfoResponse, RackManagerError>>>,
     batch_get_node_device_info_calls: Mutex<Vec<rms::BatchGetNodeDeviceInfoRequest>>,
-
-    // Power-on sequence calls.
-    get_rack_power_on_sequence_responses:
-        Mutex<VecDeque<Result<rms::GetRackPowerOnSequenceResponse, RackManagerError>>>,
-    get_rack_power_on_sequence_calls: Mutex<Vec<rms::GetRackPowerOnSequenceRequest>>,
-
-    set_rack_power_on_sequence_responses:
-        Mutex<VecDeque<Result<rms::SetRackPowerOnSequenceResponse, RackManagerError>>>,
-    set_rack_power_on_sequence_calls: Mutex<Vec<rms::SetRackPowerOnSequenceRequest>>,
 
     // Node firmware calls.
     get_node_firmware_inventory_responses:
@@ -150,6 +139,7 @@ pub struct MockRmsApi {
     apply_firmware_object_responses:
         Mutex<VecDeque<Result<rms::ApplyFirmwareObjectResponse, RackManagerError>>>,
     apply_firmware_object_calls: Mutex<Vec<rms::ApplyFirmwareObjectRequest>>,
+    blocked_firmware_submission: Mutex<Option<BlockedRmsRequest>>,
 
     apply_switch_system_image_responses:
         Mutex<VecDeque<Result<rms::ApplySwitchSystemImageResponse, RackManagerError>>>,
@@ -199,6 +189,7 @@ pub struct MockRmsApi {
     get_firmware_job_status_responses:
         Mutex<VecDeque<Result<rms::GetFirmwareJobStatusResponse, RackManagerError>>>,
     get_firmware_job_status_calls: Mutex<Vec<rms::GetFirmwareJobStatusRequest>>,
+    blocked_firmware_status: Mutex<Option<BlockedRmsRequest>>,
 
     // Switch firmware calls.
     list_switch_firmware_responses:
@@ -282,8 +273,6 @@ impl MockRmsApi {
             get_power_state_calls: Default::default(),
             batch_get_power_state_responses: Default::default(),
             batch_get_power_state_calls: Default::default(),
-            sequence_rack_power_responses: Default::default(),
-            sequence_rack_power_calls: Default::default(),
             list_node_inventory_responses: Default::default(),
             list_node_inventory_calls: Default::default(),
             create_nodes_responses: Default::default(),
@@ -300,10 +289,6 @@ impl MockRmsApi {
             list_node_device_info_by_node_type_calls: Default::default(),
             batch_get_node_device_info_responses: Default::default(),
             batch_get_node_device_info_calls: Default::default(),
-            get_rack_power_on_sequence_responses: Default::default(),
-            get_rack_power_on_sequence_calls: Default::default(),
-            set_rack_power_on_sequence_responses: Default::default(),
-            set_rack_power_on_sequence_calls: Default::default(),
             get_node_firmware_inventory_responses: Default::default(),
             get_node_firmware_inventory_calls: Default::default(),
             get_rack_firmware_inventory_responses: Default::default(),
@@ -322,6 +307,7 @@ impl MockRmsApi {
             apply_stored_firmware_object_calls: Default::default(),
             apply_firmware_object_responses: Default::default(),
             apply_firmware_object_calls: Default::default(),
+            blocked_firmware_submission: Default::default(),
             apply_switch_system_image_responses: Default::default(),
             apply_switch_system_image_calls: Default::default(),
             apply_stored_switch_system_image_responses: Default::default(),
@@ -346,6 +332,7 @@ impl MockRmsApi {
             get_job_status_calls: Default::default(),
             get_firmware_job_status_responses: Default::default(),
             get_firmware_job_status_calls: Default::default(),
+            blocked_firmware_status: Default::default(),
             list_switch_firmware_responses: Default::default(),
             list_switch_firmware_calls: Default::default(),
             push_switch_firmware_responses: Default::default(),
@@ -411,14 +398,52 @@ impl MockRmsApi {
         rms::BatchGetPowerStateRequest,
         rms::BatchGetPowerStateResponse
     );
-    impl_enqueue_inspect!(
-        enqueue_sequence_rack_power,
-        sequence_rack_power_calls,
-        sequence_rack_power_responses,
-        sequence_rack_power_calls,
-        rms::SequenceRackPowerRequest,
-        rms::SequenceRackPowerResponse
-    );
+
+    /// Pauses the next firmware submission after recording the request and before
+    /// taking its queued response. The returned receiver signals when the call pauses.
+    /// Send `()` through the returned sender, or drop the sender, to resume the call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next firmware submission is already set to pause.
+    pub async fn block_next_apply_firmware_object(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_firmware_submission.lock().await;
+
+        assert!(
+            blocked.is_none(),
+            "a firmware submission blocker is already armed"
+        );
+
+        *blocked = Some(BlockedRmsRequest { entered, resume });
+        (arrival, release)
+    }
+
+    /// Pauses the next firmware status request after recording the request and before
+    /// taking its queued response. The returned receiver signals when the call pauses.
+    /// Send `()` through the returned sender, or drop the sender, to resume the call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next firmware status request is already set to pause.
+    pub async fn block_next_get_firmware_job_status(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_firmware_status.lock().await;
+
+        assert!(
+            blocked.is_none(),
+            "a firmware status blocker is already armed"
+        );
+
+        *blocked = Some(BlockedRmsRequest { entered, resume });
+        (arrival, release)
+    }
 
     // Inventory
     impl_enqueue_inspect!(
@@ -486,24 +511,6 @@ impl MockRmsApi {
         batch_get_node_device_info_calls,
         rms::BatchGetNodeDeviceInfoRequest,
         rms::BatchGetNodeDeviceInfoResponse
-    );
-
-    // Power-on sequence
-    impl_enqueue_inspect!(
-        enqueue_get_rack_power_on_sequence,
-        get_rack_power_on_sequence_calls,
-        get_rack_power_on_sequence_responses,
-        get_rack_power_on_sequence_calls,
-        rms::GetRackPowerOnSequenceRequest,
-        rms::GetRackPowerOnSequenceResponse
-    );
-    impl_enqueue_inspect!(
-        enqueue_set_rack_power_on_sequence,
-        set_rack_power_on_sequence_calls,
-        set_rack_power_on_sequence_responses,
-        set_rack_power_on_sequence_calls,
-        rms::SetRackPowerOnSequenceRequest,
-        rms::SetRackPowerOnSequenceResponse
     );
 
     // Node firmware
@@ -1177,13 +1184,6 @@ impl RmsApi for MockRmsApi {
         pop_or_err(&mut self.batch_get_power_state_responses.lock().await)
     }
 
-    async fn sequence_rack_power(
-        &self,
-        cmd: rms::SequenceRackPowerRequest,
-    ) -> Result<rms::SequenceRackPowerResponse, RackManagerError> {
-        self.sequence_rack_power_calls.lock().await.push(cmd);
-        pop_or_err(&mut self.sequence_rack_power_responses.lock().await)
-    }
     async fn list_node_inventory(
         &self,
     ) -> Result<rms::ListNodeInventoryResponse, RackManagerError> {
@@ -1250,20 +1250,7 @@ impl RmsApi for MockRmsApi {
         self.batch_get_node_device_info_calls.lock().await.push(cmd);
         pop_or_err(&mut self.batch_get_node_device_info_responses.lock().await)
     }
-    async fn get_rack_power_on_sequence(
-        &self,
-        cmd: rms::GetRackPowerOnSequenceRequest,
-    ) -> Result<rms::GetRackPowerOnSequenceResponse, RackManagerError> {
-        self.get_rack_power_on_sequence_calls.lock().await.push(cmd);
-        pop_or_err(&mut self.get_rack_power_on_sequence_responses.lock().await)
-    }
-    async fn set_rack_power_on_sequence(
-        &self,
-        cmd: rms::SetRackPowerOnSequenceRequest,
-    ) -> Result<rms::SetRackPowerOnSequenceResponse, RackManagerError> {
-        self.set_rack_power_on_sequence_calls.lock().await.push(cmd);
-        pop_or_err(&mut self.set_rack_power_on_sequence_responses.lock().await)
-    }
+
     async fn get_node_firmware_inventory(
         &self,
         cmd: rms::GetNodeFirmwareInventoryRequest,
@@ -1274,6 +1261,21 @@ impl RmsApi for MockRmsApi {
             .push(cmd);
         pop_or_err(&mut self.get_node_firmware_inventory_responses.lock().await)
     }
+
+    async fn batch_get_firmware_inventory(
+        &self,
+        _cmd: rms::BatchGetFirmwareInventoryRequest,
+    ) -> Result<rms::BatchGetFirmwareInventoryResponse, RackManagerError> {
+        Err(tonic::Status::unimplemented("batch_get_firmware_inventory is not implemented").into())
+    }
+
+    async fn compare_firmware_object(
+        &self,
+        _cmd: rms::CompareFirmwareObjectRequest,
+    ) -> Result<rms::CompareFirmwareObjectResponse, RackManagerError> {
+        Err(tonic::Status::unimplemented("compare_firmware_object is not implemented").into())
+    }
+
     async fn get_rack_firmware_inventory(
         &self,
         cmd: rms::GetRackFirmwareInventoryRequest,
@@ -1342,6 +1344,14 @@ impl RmsApi for MockRmsApi {
         cmd: rms::ApplyFirmwareObjectRequest,
     ) -> Result<rms::ApplyFirmwareObjectResponse, RackManagerError> {
         self.apply_firmware_object_calls.lock().await.push(cmd);
+
+        let blocked = self.blocked_firmware_submission.lock().await.take();
+
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+
         pop_or_err(&mut self.apply_firmware_object_responses.lock().await)
     }
 
@@ -1416,6 +1426,14 @@ impl RmsApi for MockRmsApi {
         cmd: rms::GetFirmwareJobStatusRequest,
     ) -> Result<rms::GetFirmwareJobStatusResponse, RackManagerError> {
         self.get_firmware_job_status_calls.lock().await.push(cmd);
+
+        let blocked = self.blocked_firmware_status.lock().await.take();
+
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+
         pop_or_err(&mut self.get_firmware_job_status_responses.lock().await)
     }
     async fn list_switch_firmware(

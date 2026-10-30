@@ -179,7 +179,7 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 	// Delete any Expected Power Shelf present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedIDs.
-	if expectedPowerShelfInventory.InventoryPage == nil || expectedPowerShelfInventory.InventoryPage.TotalPages == 0 || (expectedPowerShelfInventory.InventoryPage.CurrentPage == expectedPowerShelfInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedPowerShelfInventory.GetInventoryPage()) {
 		for _, eps := range existingExpectedPowerShelves {
 			if _, keep := reportedIDs[eps.ID]; keep {
 				continue

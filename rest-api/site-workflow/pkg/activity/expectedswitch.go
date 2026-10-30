@@ -220,7 +220,7 @@ func getPagedExpectedSwitchInventory(
 			CurrentPage: int32(page),
 			PageSize:    int32(pageSize),
 			TotalItems:  int32(totalCount),
-			ItemIds:     allExpectedSwitchIDs,
+			ItemIds:     itemIDsForPage(page, totalPages, allExpectedSwitchIDs),
 		},
 	}
 

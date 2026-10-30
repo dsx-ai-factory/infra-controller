@@ -381,7 +381,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 	vpcsToDelete := []*cdbm.Vpc{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if vpcInventory.InventoryPage == nil || vpcInventory.InventoryPage.TotalPages == 0 || (vpcInventory.InventoryPage.CurrentPage == vpcInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(vpcInventory.GetInventoryPage()) {
 		for _, vpc := range existingVpcIDMap {
 			found := false
 
@@ -676,10 +676,11 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 		TaskQueue: queue.SiteTaskQueue,
 	}
 
-	// Prepare the config update request workflow object. NetworkSecurityGroupId is
-	// intentionally omitted: this activity only syncs metadata fields.
+	// Carry the persisted NSG association while syncing metadata because Core
+	// treats an omitted NetworkSecurityGroupId as detachment.
 	updateVpcRequest := &corev1.VpcUpdateRequest{
-		Id: &corev1.VpcId{Value: vpc.ID.String()},
+		Id:                     &corev1.VpcId{Value: vpc.ID.String()},
+		NetworkSecurityGroupId: vpc.NetworkSecurityGroupID,
 		Metadata: &corev1.Metadata{
 			Name:        vpc.Name,
 			Description: description,

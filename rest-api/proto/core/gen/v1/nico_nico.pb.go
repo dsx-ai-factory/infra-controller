@@ -15029,7 +15029,12 @@ type PowerShelfMaintenanceRequest struct {
 	Operation     PowerShelfMaintenanceOperation `protobuf:"varint,2,opt,name=operation,proto3,enum=forge.PowerShelfMaintenanceOperation" json:"operation,omitempty"`
 	// URL of a ticket / issue tracking this maintenance request. Used as the
 	// request initiator in audit logs.
-	Reference     *string `protobuf:"bytes,3,opt,name=reference,proto3,oneof" json:"reference,omitempty"`
+	Reference *string `protobuf:"bytes,3,opt,name=reference,proto3,oneof" json:"reference,omitempty"`
+	// Only meaningful for POWER_OFF: when true, request a graceful OS-ordered
+	// shutdown; when false or omitted, request a forced power-off. Forced is the
+	// default so omission preserves the behavior of clients that predate this
+	// field.
+	Graceful      *bool `protobuf:"varint,4,opt,name=graceful,proto3,oneof" json:"graceful,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -15083,6 +15088,13 @@ func (x *PowerShelfMaintenanceRequest) GetReference() string {
 		return *x.Reference
 	}
 	return ""
+}
+
+func (x *PowerShelfMaintenanceRequest) GetGraceful() bool {
+	if x != nil && x.Graceful != nil {
+		return *x.Graceful
+	}
+	return false
 }
 
 type PowerShelfStateHistoriesRequest struct {
@@ -15961,7 +15973,10 @@ type SwitchStatus struct {
 	FabricManagerStatusDetails *FabricManagerStatus `protobuf:"bytes,11,opt,name=fabric_manager_status_details,json=fabricManagerStatusDetails,proto3,oneof" json:"fabric_manager_status_details,omitempty"`
 	// NVOS management ports, ordered by MAC address. Addresses within each port
 	// are ordered by address family, IPv4 before IPv6.
-	NvosPorts     []*SwitchNvosPortInfo `protobuf:"bytes,12,rep,name=nvos_ports,json=nvosPorts,proto3" json:"nvos_ports,omitempty"`
+	NvosPorts []*SwitchNvosPortInfo `protobuf:"bytes,12,rep,name=nvos_ports,json=nvosPorts,proto3" json:"nvos_ports,omitempty"`
+	// Chassis serial from the cached BMC exploration report. Absent when no
+	// usable switch chassis serial has been discovered.
+	SerialNumber  *string `protobuf:"bytes,13,opt,name=serial_number,json=serialNumber,proto3,oneof" json:"serial_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -16078,6 +16093,13 @@ func (x *SwitchStatus) GetNvosPorts() []*SwitchNvosPortInfo {
 		return x.NvosPorts
 	}
 	return nil
+}
+
+func (x *SwitchStatus) GetSerialNumber() string {
+	if x != nil && x.SerialNumber != nil {
+		return *x.SerialNumber
+	}
+	return ""
 }
 
 type PlacementInRack struct {
@@ -70197,13 +70219,15 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1eDecommissionPowerShelfResponse\"A\n" +
 	"\x19PowerShelfDeletionRequest\x12$\n" +
 	"\x02id\x18\x01 \x01(\v2\x14.common.PowerShelfIdR\x02id\"\x1a\n" +
-	"\x18PowerShelfDeletionResult\"\xd2\x01\n" +
+	"\x18PowerShelfDeletionResult\"\x80\x02\n" +
 	"\x1cPowerShelfMaintenanceRequest\x12<\n" +
 	"\x0fpower_shelf_ids\x18\x01 \x03(\v2\x14.common.PowerShelfIdR\rpowerShelfIds\x12C\n" +
 	"\toperation\x18\x02 \x01(\x0e2%.forge.PowerShelfMaintenanceOperationR\toperation\x12!\n" +
-	"\treference\x18\x03 \x01(\tH\x00R\treference\x88\x01\x01B\f\n" +
+	"\treference\x18\x03 \x01(\tH\x00R\treference\x88\x01\x01\x12\x1f\n" +
+	"\bgraceful\x18\x04 \x01(\bH\x01R\bgraceful\x88\x01\x01B\f\n" +
 	"\n" +
-	"_reference\"_\n" +
+	"_referenceB\v\n" +
+	"\t_graceful\"_\n" +
 	"\x1fPowerShelfStateHistoriesRequest\x12<\n" +
 	"\x0fpower_shelf_ids\x18\x01 \x03(\v2\x14.common.PowerShelfIdR\rpowerShelfIds\"\xd2\x01\n" +
 	" PowerShelfHealthHistoriesRequest\x12<\n" +
@@ -70298,7 +70322,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\rerror_message\x18\x04 \x01(\tH\x02R\ferrorMessage\x88\x01\x01B\x10\n" +
 	"\x0e_addition_infoB\t\n" +
 	"\a_reasonB\x10\n" +
-	"\x0e_error_message\"\xb9\x06\n" +
+	"\x0e_error_message\"\xf5\x06\n" +
 	"\fSwitchStatus\x12D\n" +
 	"\fstate_reason\x18\x01 \x01(\v2\x1c.forge.ControllerStateReasonH\x00R\vstateReason\x88\x01\x01\x12,\n" +
 	"\tstate_sla\x18\x02 \x01(\v2\x0f.forge.StateSlaR\bstateSla\x12$\n" +
@@ -70315,14 +70339,16 @@ const file_nico_nico_proto_rawDesc = "" +
 	" \x01(\tH\x05R\x13fabricManagerStatus\x88\x01\x01\x12b\n" +
 	"\x1dfabric_manager_status_details\x18\v \x01(\v2\x1a.forge.FabricManagerStatusH\x06R\x1afabricManagerStatusDetails\x88\x01\x01\x128\n" +
 	"\n" +
-	"nvos_ports\x18\f \x03(\v2\x19.forge.SwitchNvosPortInfoR\tnvosPortsB\x0f\n" +
+	"nvos_ports\x18\f \x03(\v2\x19.forge.SwitchNvosPortInfoR\tnvosPorts\x12(\n" +
+	"\rserial_number\x18\r \x01(\tH\aR\fserialNumber\x88\x01\x01B\x0f\n" +
 	"\r_state_reasonB\x0e\n" +
 	"\f_switch_nameB\x0e\n" +
 	"\f_power_stateB\x10\n" +
 	"\x0e_health_statusB\x13\n" +
 	"\x11_controller_stateB\x18\n" +
 	"\x16_fabric_manager_statusB \n" +
-	"\x1e_fabric_manager_status_details\"z\n" +
+	"\x1e_fabric_manager_status_detailsB\x10\n" +
+	"\x0e_serial_number\"z\n" +
 	"\x0fPlacementInRack\x12$\n" +
 	"\vslot_number\x18\x01 \x01(\x05H\x00R\n" +
 	"slotNumber\x88\x01\x01\x12\"\n" +

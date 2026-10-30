@@ -193,9 +193,10 @@ async fn resolve_client_ip(
 }
 
 /// Resolve a client IP to the host's `machine_interface` for PXE-script
-/// generation. For direct-interface IPs this returns the matching
-/// interface; for tenant-allocated IPs it resolves through the instance
-/// to the host's machine_interfaces, and prefers an admin-segment one.
+/// generation and discovery cloud-init. For direct-interface IPs this returns
+/// the matching interface. For tenant-allocated IPs it resolves through the
+/// instance to the host's primary interface, falling back to an admin-segment
+/// interface and then the first host interface if no primary is set.
 pub(super) async fn resolve_machine_interface(
     conn: &mut PgConnection,
     client_ip: IpAddr,
@@ -222,9 +223,16 @@ pub(super) async fn resolve_machine_interface(
                 .map(|s| s.id)
                 .collect();
 
+            // During release Scout boots over tenant networking. Other DPU-backed
+            // admin interfaces may have no address or domain, so prefer the primary.
             host_interfaces
                 .iter()
-                .find(|i| admin_segment_ids.contains(&i.segment_id))
+                .find(|i| i.primary_interface)
+                .or_else(|| {
+                    host_interfaces
+                        .iter()
+                        .find(|i| admin_segment_ids.contains(&i.segment_id))
+                })
                 .or_else(|| host_interfaces.first())
                 .cloned()
                 .ok_or_else(|| {

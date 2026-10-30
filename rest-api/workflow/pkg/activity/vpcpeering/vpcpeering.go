@@ -16,6 +16,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -134,7 +135,7 @@ func (mvp ManageVpcPeering) UpdateVpcPeeringsInDB(
 	}
 
 	// Delete VPC Peerings that are not in the inventory. If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if vpcPeeringInventory.InventoryPage == nil || vpcPeeringInventory.InventoryPage.TotalPages == 0 || (vpcPeeringInventory.InventoryPage.CurrentPage == vpcPeeringInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(vpcPeeringInventory.GetInventoryPage()) {
 		for _, vpcPeering := range existingVpcPeeringIDMap {
 			slogger := logger.With().Str("VPC Peering ID", vpcPeering.ID.String()).Logger()
 			slogger.Info().Msg("checking for deletion")

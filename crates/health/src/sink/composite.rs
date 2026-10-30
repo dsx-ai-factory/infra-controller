@@ -91,6 +91,15 @@ impl DataSink for CompositeDataSink {
         context: &EventContext,
         event: &CollectorEvent,
     ) -> Result<(), HealthError> {
+        self.try_handle_classified_event(context, event, false)
+    }
+
+    fn try_handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        is_event_record: bool,
+    ) -> Result<(), HealthError> {
         let sample = match event {
             CollectorEvent::Metric(sample) if self.share_metrics => Some(sample.as_ref()),
             _ => None,
@@ -109,7 +118,7 @@ impl DataSink for CompositeDataSink {
 
                 sink.try_handle_shared_metric(context, event, shared_metric)
             } else {
-                sink.try_handle_event(context, event)
+                sink.try_handle_classified_event(context, event, is_event_record)
             };
 
             self.record_sink_operation(sink.as_ref(), start.elapsed(), result.is_ok());

@@ -81,6 +81,11 @@ service Forge {
   rpc GetVpcRoutingState(VpcRoutingStateRequest) returns (VpcRoutingState);
 
   rpc CreateSpxPartition(SpxPartitionCreationRequest) returns (SpxPartition);
+  // Marks the partition deleted and releases its VNI if the partition still owns
+  // that reservation, committing both changes together. Repeating the request
+  // for a deleted, unreferenced partition succeeds. Returns FailedPrecondition
+  // while any instance, including a terminating one, still references it.
+  // An omitted id returns InvalidArgument; an unknown partition returns Internal.
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
   rpc FindSpxPartitionIds(SpxPartitionSearchFilter) returns (SpxPartitionIdList);
   rpc FindSpxPartitionsByIds(SpxPartitionsByIdsRequest) returns (SpxPartitionList);
@@ -2780,6 +2785,11 @@ message PowerShelfMaintenanceRequest {
   // URL of a ticket / issue tracking this maintenance request. Used as the
   // request initiator in audit logs.
   optional string reference = 3;
+  // Only meaningful for POWER_OFF: when true, request a graceful OS-ordered
+  // shutdown; when false or omitted, request a forced power-off. Forced is the
+  // default so omission preserves the behavior of clients that predate this
+  // field.
+  optional bool graceful = 4;
 }
 
 message PowerShelfStateHistoriesRequest {
@@ -2925,6 +2935,10 @@ message SwitchStatus {
   // NVOS management ports, ordered by MAC address. Addresses within each port
   // are ordered by address family, IPv4 before IPv6.
   repeated SwitchNvosPortInfo nvos_ports = 12;
+
+  // Chassis serial from the cached BMC exploration report. Absent when no
+  // usable switch chassis serial has been discovered.
+  optional string serial_number = 13;
 }
 
 message PlacementInRack {

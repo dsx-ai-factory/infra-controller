@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -2440,6 +2441,90 @@ func TestMachineSQLDAO_UpdateMultiple_AllFields(t *testing.T) {
 	assert.Equal(t, MachineStatusReady, updated.Status, "Status not updated")
 	assert.Equal(t, map[string]string{"env": "prod", "team": "infra"}, updated.Labels, "Labels not updated")
 	assert.True(t, updated.IsMissingOnSite, "IsMissingOnSite not updated")
+}
+
+// Machine inventory anchors every write of one reconcile to the time that reconcile started, so
+// the staleness guard reading the same column does not treat the reconciler's own write as an
+// external change. Both write paths have to honor the anchor and both have to keep stamping the
+// current time when the caller does not supply one.
+func TestMachineSQLDAO_WriteTimeAnchor(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	mcsExp := testMachineSQLDAOCreateMachines(ctx, t, dbSession)
+	msd := NewMachineDAO(dbSession)
+	anchor := db.GetCurTime().Add(-30 * time.Second)
+
+	tests := []struct {
+		desc  string
+		write func(machineID string) (*Machine, error)
+		want  func(t *testing.T, before time.Time, got *Machine)
+	}{
+		{
+			desc: "Update stamps the supplied anchor",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Update(ctx, nil, MachineUpdateInput{
+					MachineID: machineID,
+					Status:    cutil.GetPtr(MachineStatusReady),
+					Updated:   &anchor,
+				})
+			},
+			want: func(t *testing.T, _ time.Time, got *Machine) {
+				assert.Equal(t, anchor.UTC(), got.Updated.UTC())
+			},
+		},
+		{
+			desc: "Update without an anchor stamps the write time",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Update(ctx, nil, MachineUpdateInput{
+					MachineID: machineID,
+					Status:    cutil.GetPtr(MachineStatusReady),
+				})
+			},
+			want: func(t *testing.T, before time.Time, got *Machine) {
+				assert.False(t, got.Updated.Before(before), "want a write time at or after the call")
+			},
+		},
+		{
+			desc: "Clear stamps the supplied anchor",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Clear(ctx, nil, MachineClearInput{
+					MachineID: machineID,
+					Hostname:  true,
+					Updated:   &anchor,
+				})
+			},
+			want: func(t *testing.T, _ time.Time, got *Machine) {
+				assert.Equal(t, anchor.UTC(), got.Updated.UTC())
+			},
+		},
+		{
+			desc: "Clear without an anchor stamps the write time",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Clear(ctx, nil, MachineClearInput{
+					MachineID: machineID,
+					Vendor:    true,
+				})
+			},
+			want: func(t *testing.T, before time.Time, got *Machine) {
+				assert.False(t, got.Updated.Before(before), "want a write time at or after the call")
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			before := db.GetCurTime()
+
+			got, err := tc.write(mcsExp[i].ID)
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+
+			tc.want(t, before, got)
+		})
+	}
 }
 
 func TestSiteControllerMachine_GetNormalizedState(t *testing.T) {

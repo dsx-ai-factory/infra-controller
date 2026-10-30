@@ -43,8 +43,11 @@ Power on several at once, citing a reference ticket:
     #[command(after_long_help = "\
 EXAMPLES:
 
-Power off a power shelf:
+Power off a power shelf (forced, the default):
     $ nico-admin-cli power-shelf maintenance power-off --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
+
+Request a graceful shutdown instead of a forced power-off:
+    $ nico-admin-cli power-shelf maintenance power-off --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --graceful
 
 Power off several at once, citing a reference ticket:
     $ nico-admin-cli power-shelf maintenance power-off \
@@ -52,7 +55,7 @@ Power off several at once, citing a reference ticket:
     --reference https://tickets.example.com/PS-42
 
 ")]
-    PowerOff(MaintenancePowerArgs),
+    PowerOff(PowerOffArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -78,16 +81,37 @@ pub(crate) struct MaintenancePowerArgs {
     reference: Option<String>,
 }
 
+/// Arguments for `power-off`. Adds `--graceful` to the shared power arguments so
+/// an operator can opt into an OS-ordered shutdown; without it a power-off is
+/// forced.
+#[derive(Parser, Debug)]
+pub(crate) struct PowerOffArgs {
+    #[clap(flatten)]
+    common: MaintenancePowerArgs,
+
+    #[clap(
+        long,
+        help = "Request a graceful OS-ordered shutdown instead of the default forced power-off"
+    )]
+    graceful: bool,
+}
+
 impl Args {
     pub(super) fn into_request(self) -> forgerpc::PowerShelfMaintenanceRequest {
-        let (operation, args) = match self {
-            Args::PowerOn(args) => (forgerpc::PowerShelfMaintenanceOperation::PowerOn, args),
-            Args::PowerOff(args) => (forgerpc::PowerShelfMaintenanceOperation::PowerOff, args),
-        };
-        forgerpc::PowerShelfMaintenanceRequest {
-            power_shelf_ids: args.power_shelf_ids,
-            operation: operation.into(),
-            reference: args.reference,
+        match self {
+            Args::PowerOn(args) => forgerpc::PowerShelfMaintenanceRequest {
+                power_shelf_ids: args.power_shelf_ids,
+                operation: forgerpc::PowerShelfMaintenanceOperation::PowerOn.into(),
+                reference: args.reference,
+                // `graceful` applies only to power-off; leave it unset here.
+                graceful: None,
+            },
+            Args::PowerOff(args) => forgerpc::PowerShelfMaintenanceRequest {
+                power_shelf_ids: args.common.power_shelf_ids,
+                operation: forgerpc::PowerShelfMaintenanceOperation::PowerOff.into(),
+                reference: args.common.reference,
+                graceful: Some(args.graceful),
+            },
         }
     }
 }
@@ -98,7 +122,7 @@ mod tests {
 
     use carbide_uuid::power_shelf::PowerShelfId;
 
-    use super::{Args, MaintenancePowerArgs};
+    use super::{Args, MaintenancePowerArgs, PowerOffArgs};
 
     const SAMPLE_PS_ID_1: &str = "ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0";
     const SAMPLE_PS_ID_2: &str = "ps100hsasb5dsh6e6ogogslpovne4rj82rp9jlf00qd7mcvmaadv85phk3g";
@@ -122,13 +146,20 @@ mod tests {
         );
         assert_eq!(request.power_shelf_ids, vec![parse_ps_id(SAMPLE_PS_ID_1)]);
         assert_eq!(request.reference.as_deref(), Some("ref-1"));
+        assert_eq!(
+            request.graceful, None,
+            "power-on must not set the power-off graceful flag"
+        );
     }
 
     #[test]
     fn power_off_into_request_uses_power_off_operation() {
-        let args = Args::PowerOff(MaintenancePowerArgs {
-            power_shelf_ids: vec![parse_ps_id(SAMPLE_PS_ID_1), parse_ps_id(SAMPLE_PS_ID_2)],
-            reference: None,
+        let args = Args::PowerOff(PowerOffArgs {
+            common: MaintenancePowerArgs {
+                power_shelf_ids: vec![parse_ps_id(SAMPLE_PS_ID_1), parse_ps_id(SAMPLE_PS_ID_2)],
+                reference: None,
+            },
+            graceful: false,
         });
         let request = args.into_request();
 
@@ -141,5 +172,28 @@ mod tests {
             vec![parse_ps_id(SAMPLE_PS_ID_1), parse_ps_id(SAMPLE_PS_ID_2)],
         );
         assert!(request.reference.is_none());
+        assert_eq!(
+            request.graceful,
+            Some(false),
+            "omitting --graceful requests a forced power-off"
+        );
+    }
+
+    #[test]
+    fn power_off_into_request_sets_graceful_flag() {
+        let args = Args::PowerOff(PowerOffArgs {
+            common: MaintenancePowerArgs {
+                power_shelf_ids: vec![parse_ps_id(SAMPLE_PS_ID_1)],
+                reference: None,
+            },
+            graceful: true,
+        });
+        let request = args.into_request();
+
+        assert_eq!(
+            request.operation,
+            rpc::forge::PowerShelfMaintenanceOperation::PowerOff as i32,
+        );
+        assert_eq!(request.graceful, Some(true));
     }
 }

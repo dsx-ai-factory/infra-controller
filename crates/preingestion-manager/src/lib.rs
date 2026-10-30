@@ -21,6 +21,9 @@ mod errors;
 mod metrics;
 mod rack_firmware;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 use std::collections::HashMap;
 use std::default::Default;
 use std::io;
@@ -118,6 +121,10 @@ struct PreingestionManagerStatic {
     bfb_copy_limiter: Arc<Semaphore>,
     ntp_servers: Vec<Ipv4Addr>,
     rack_firmware: Option<RackFirmwareDependencies>,
+
+    // Bound individual requests; firmware jobs may outlive these deadlines.
+    rack_firmware_submission_timeout: Duration,
+    rack_firmware_status_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -166,6 +173,8 @@ impl PreingestionManager {
                 bfb_copy_limiter: Arc::new(Semaphore::new(config.max_concurrent_bfb_copies)),
                 ntp_servers,
                 rack_firmware: None,
+                rack_firmware_submission_timeout: Duration::from_secs(60),
+                rack_firmware_status_timeout: Duration::from_secs(30),
                 config,
             }),
             metric_holder,
@@ -1341,22 +1350,9 @@ impl PreingestionManagerStatic {
             || *upgrade_type == FirmwareComponentType::Gpu
         {
             // Needs a host power reset
-            // DGX models only had an "off", GB200 (and presumably later ones) has an actual AC powercycle.
-            let poweroff_style = if redfish_client.ac_powercycle_supported_by_power() {
-                SystemPowerControl::ACPowercycle
-            } else {
-                SystemPowerControl::ForceOff
-            };
-            if instrument_power_op(
-                poweroff_style.into(),
-                redfish_client.power(poweroff_style),
-                PowerControlLog::Step {
-                    bmc_ip_address: endpoint.address,
-                    step: PowerControlStep::PowerOff,
-                },
-            )
-            .await
-            .is_err()
+            if power_off_for_hgx_reset(redfish_client.as_ref(), endpoint.address)
+                .await
+                .is_err()
             {
                 return Ok(());
             }
@@ -3532,11 +3528,111 @@ impl CreateClientForIngestedHost for Arc<dyn RedfishClientPool> {
     }
 }
 
+/// Powers the host off for an HGX BMC or GPU firmware reset. DGX models only
+/// have an "off"; GB200 and later have an AC power cycle. Falls back to
+/// `ForceOff` when the BMC does not support AC power cycle.
+async fn power_off_for_hgx_reset(
+    redfish_client: &dyn Redfish,
+    bmc_ip_address: IpAddr,
+) -> Result<(), RedfishError> {
+    let log = PowerControlLog::Step {
+        bmc_ip_address,
+        step: PowerControlStep::PowerOff,
+    };
+    if redfish_client.ac_powercycle_supported_by_power() {
+        match instrument_power_op(
+            PowerOperation::AcPowercycle,
+            redfish_client.power(SystemPowerControl::ACPowercycle),
+            log,
+        )
+        .await
+        {
+            Err(RedfishError::NotSupported(_)) => {}
+            result => return result,
+        }
+    }
+    instrument_power_op(
+        PowerOperation::ForceOff,
+        redfish_client.power(SystemPowerControl::ForceOff),
+        log,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    /// The HGX BMC and GPU reset falls back to `ForceOff` only when AC power
+    /// cycle is not supported; other errors still stop the reset.
+    #[tokio::test]
+    async fn power_off_for_hgx_reset_falls_back_to_force_off() {
+        use carbide_redfish::libredfish::RedfishAuth;
+        use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
+
+        let not_supported = || RedfishError::NotSupported("ACCycle".to_string());
+        let generic = || RedfishError::GenericError {
+            error: "sim: BMC busy".to_string(),
+        };
+        for (case, ac_supported, ac_error, expected_ok, expected) in [
+            (
+                "AC power cycle supported",
+                true,
+                None,
+                true,
+                vec![RedfishSimAction::Power(SystemPowerControl::ACPowercycle)],
+            ),
+            (
+                "AC power cycle not supported by the BMC",
+                true,
+                Some(not_supported()),
+                true,
+                vec![
+                    RedfishSimAction::PowerFailed(SystemPowerControl::ACPowercycle),
+                    RedfishSimAction::Power(SystemPowerControl::ForceOff),
+                ],
+            ),
+            (
+                "other AC power cycle error",
+                true,
+                Some(generic()),
+                false,
+                vec![RedfishSimAction::PowerFailed(
+                    SystemPowerControl::ACPowercycle,
+                )],
+            ),
+            (
+                "client reports no AC power cycle",
+                false,
+                None,
+                true,
+                vec![RedfishSimAction::Power(SystemPowerControl::ForceOff)],
+            ),
+        ] {
+            let sim = RedfishSim::default();
+            sim.set_ac_powercycle_supported(ac_supported);
+            if let Some(error) = ac_error {
+                sim.fail_next_power_action_with(SystemPowerControl::ACPowercycle, error);
+            }
+            let client = sim
+                .create_client("192.0.2.10", None, RedfishAuth::Anonymous, None)
+                .await
+                .unwrap();
+            let timepoint = sim.timepoint();
+
+            let result =
+                power_off_for_hgx_reset(client.as_ref(), "192.0.2.10".parse().unwrap()).await;
+
+            assert_eq!(result.is_ok(), expected_ok, "{case}: {result:?}");
+            assert_eq!(
+                sim.actions_since(&timepoint).for_host("192.0.2.10"),
+                expected,
+                "{case}"
+            );
+        }
+    }
 
     #[test]
     fn resolve_preingestion_firmware_artifact_preserves_legacy_local_entries() {

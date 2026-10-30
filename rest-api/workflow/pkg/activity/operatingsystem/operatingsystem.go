@@ -18,6 +18,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -197,7 +198,7 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 	ossasToDelete := []*cdbm.OperatingSystemSiteAssociation{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if osImageInventory.InventoryPage == nil || osImageInventory.InventoryPage.TotalPages == 0 || (osImageInventory.InventoryPage.CurrentPage == osImageInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(osImageInventory.GetInventoryPage()) {
 		for _, ossa := range existingOsImageMap {
 			found := false
 			_, found = reportedOsImageIDMap[ossa.OperatingSystemID]
@@ -417,15 +418,15 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 }
 
 // UpdateOperatingSystemsInDB reconciles the operating_system table for a Site based on Operating Systems reported from Site
-func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID uuid.UUID, inventory *corev1.OperatingSystemInventory) error {
+func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID uuid.UUID, operatingSystemInventory *corev1.OperatingSystemInventory) error {
 	logger := log.With().Str("Activity", "UpdateOperatingSystemsInDB").Str("Site ID", siteID.String()).Logger()
 	logger.Info().Msg("Starting activity")
 
-	if inventory == nil {
+	if operatingSystemInventory == nil {
 		return errors.New("UpdateOperatingSystemsInDB called with nil inventory")
 	}
 
-	if inventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if operatingSystemInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("Received failed inventory status from Site Agent, skipping")
 		return nil
 	}
@@ -453,7 +454,7 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 	// Collect the UUIDs of all reported OS records (active only — the new Find APIs do not
 	// return deleted records). Site and REST share the same UUID as PK.
 	reportedOSIDs := mapset.NewSet[uuid.UUID]()
-	for _, reportedOS := range inventory.GetOperatingSystems() {
+	for _, reportedOS := range operatingSystemInventory.GetOperatingSystems() {
 		if reportedOS == nil {
 			logger.Error().Msg("Received nil OS record in inventory, skipping")
 			continue
@@ -471,6 +472,21 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 			continue
 		}
 		reportedOSIDs.Add(reportedOSID)
+	}
+
+	// The complete set this run reports as present on the Site, which is what deletion below
+	// reads. A paged run carries it in InventoryPage.ItemIds while each page holds only a
+	// subset of the records, and an unpaged run reports it as the records themselves, so the
+	// union is complete either way. reportedOSIDs stays the page's own records because the
+	// lookups below are scoped to them.
+	siteReportedOSIDs := reportedOSIDs.Clone()
+	for _, strID := range operatingSystemInventory.GetInventoryPage().GetItemIds() {
+		id, perr := uuid.Parse(strID)
+		if perr != nil {
+			logger.Error().Err(perr).Str("ID", strID).Msg("Failed to parse OS ID from inventory page, skipping")
+			continue
+		}
+		siteReportedOSIDs.Add(id)
 	}
 
 	// Fetch DB records matching the reported IDs (including soft-deleted so we can detect
@@ -500,7 +516,7 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 	tenantOrgToID := map[string]*uuid.UUID{}
 
 	// Create or update OSes based on the Site inventory.
-	for _, reportedOS := range inventory.GetOperatingSystems() {
+	for _, reportedOS := range operatingSystemInventory.GetOperatingSystems() {
 		if reportedOS == nil || reportedOS.GetId().GetValue() == "" {
 			continue
 		}
@@ -851,30 +867,7 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 	// Only single-site OSes (exactly one associated Site) are bidirectionally synced and
 	// therefore subject to deletion-by-absence; multi-site OSes are REST-owned and must
 	// not be deleted from Site inventory, and raw iPXE OSes have no associations at all.
-	//
-	// Inventory may be paged: each page carries only a subset in OperatingSystems but the
-	// full reported ID set in InventoryPage.ItemIds. Deletion must therefore run against
-	// the complete reported set, and only once per sweep — on the final page — so that an
-	// earlier page does not prematurely soft-delete an OS that appears on a later page.
-	page := inventory.GetInventoryPage()
-	isFinalPage := page == nil || page.TotalPages == 0 || page.CurrentPage == page.TotalPages
-	if isFinalPage {
-		// Build the complete set of reported OS IDs. When paging is in use the full set
-		// lives in InventoryPage.ItemIds; otherwise the single message's OperatingSystems
-		// already is the complete set (captured above in reportedOSIDs).
-		deletionReportedIDs := reportedOSIDs
-		if page != nil && len(page.ItemIds) > 0 {
-			deletionReportedIDs = mapset.NewSet[uuid.UUID]()
-			for _, strID := range page.ItemIds {
-				id, perr := uuid.Parse(strID)
-				if perr != nil {
-					logger.Error().Err(perr).Str("ID", strID).Msg("Failed to parse OS ID from inventory page, skipping")
-					continue
-				}
-				deletionReportedIDs.Add(id)
-			}
-		}
-
+	if util.ShouldReconcileDeletions(operatingSystemInventory.GetInventoryPage()) {
 		// Scope deletion to the reporting Site: only OSes associated with this Site
 		// are candidates, so an OS that lives at a different Site is not soft-deleted
 		// just because it is absent from this Site's inventory.
@@ -928,7 +921,7 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 
 				slogger := logger.With().Str("OperatingSystemID", ipxeOS.ID.String()).Logger()
 
-				if !deletionReportedIDs.Contains(ipxeOS.ID) {
+				if !siteReportedOSIDs.Contains(ipxeOS.ID) {
 					// An OS associated to this Site after the inventory was collected is absent
 					// from it for that reason alone. A later inventory reads an already-deleted
 					// OS as a user decision and will not restore it, so defer to the next run.

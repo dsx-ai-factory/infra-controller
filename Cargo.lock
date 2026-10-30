@@ -2183,6 +2183,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -2865,6 +2866,7 @@ dependencies = [
  "carbide-api-test-helper",
  "carbide-firmware",
  "carbide-instrument",
+ "carbide-preingestion-manager",
  "carbide-rack-controller",
  "carbide-redfish",
  "carbide-secrets",
@@ -6957,7 +6959,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.7#a963e59d7106f62991a5c3abd6886fe62fb4cbe0"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.20.1#81248da0dc44be5a10786246025ddb61bbc597d2"
 dependencies = [
  "chrono",
  "clap",
@@ -6986,8 +6988,8 @@ dependencies = [
 
 [[package]]
 name = "librms"
-version = "0.0.14"
-source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.1#4bbd502d3d9822fb1dcb8d205b7edaecabb497a6"
+version = "0.11.0"
+source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.11.0#85c77bc3159014d061b48cee77fdc0011970ef64"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7004,7 +7006,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tonic",
- "tonic-client-wrapper 1.0.0",
+ "tonic-client-wrapper 1.1.0",
  "tonic-prost",
  "tonic-prost-build",
  "tower",
@@ -7887,15 +7889,16 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish"
-version = "0.18.1"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac60c45f115a91789492313830485242f8c7d35d72d5ec751f83bee6fb248973"
+checksum = "acd6484a6e5b88755fad4b0e2ba36c4bda0b701ba0946487988b151c6fd6a884"
 dependencies = [
  "futures-core",
  "futures-util",
  "nv-redfish-bmc-http",
  "nv-redfish-core",
  "nv-redfish-csdl-compiler",
+ "nv-redfish-quirks",
  "nv-redfish-schema",
  "serde",
  "serde_json",
@@ -7904,9 +7907,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-bmc-http"
-version = "0.18.1"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9364a5dacd2de43198f706cd429fe47250e17b28fd43dda88ba7032c840bf31c"
+checksum = "a50c9200ed52f628439eff21bb9504f168056e4004db90463593c74ed8935ff0"
 dependencies = [
  "bytes",
  "futures-core",
@@ -7929,24 +7932,25 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-core"
-version = "0.18.1"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "919bd334a894768de8bf5bbc9abd3db49ebe61de8d32aea9b41e35fe4b3cdb7b"
+checksum = "8b6504b43da56399b23255783ddd7c72e717f1d5dcf00113aa5fa5833ac19e11"
 dependencies = [
  "futures-core",
  "futures-io",
  "rust_decimal",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "time",
  "uuid",
 ]
 
 [[package]]
 name = "nv-redfish-csdl-compiler"
-version = "0.18.1"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3695e2694aa540c99925db5b06a99ddf405ebc87cc9a669da062bf139e9eb6e7"
+checksum = "1cc5b5991c63249233f89d58af7316fa18a12e7bd06a7eb99e8b4b3ee3727501"
 dependencies = [
  "clap",
  "clap_derive",
@@ -7962,19 +7966,31 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-dispatcher"
-version = "0.18.1"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a6d645d4a275997e876a870a76d4bc2af2245a56aee341e4a018acb5191034f"
+checksum = "2b200ff267925477a2341cf2d29e39e57714b3bab91ceed2ce8d1a990274e553"
 dependencies = [
  "futures-core",
  "futures-util",
 ]
 
 [[package]]
-name = "nv-redfish-schema"
-version = "0.18.1"
+name = "nv-redfish-quirks"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ea649b6951a9f0152a0ddefd9a067c7ac0cef88acf03147301eb430ddb8305f"
+checksum = "2682e8ad23f717d94460dfc57e3c418a53bf79fc8c3305a31b2f2f5474f177c2"
+dependencies = [
+ "futures-util",
+ "nv-redfish-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nv-redfish-schema"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ed4cfdf4afa05b3c96b3663d9694c2e05ab7fe1014e87f3e067be6d91a447b1"
 dependencies = [
  "glob",
 ]
@@ -7996,6 +8012,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
  "urlencoding",
 ]
@@ -11751,20 +11768,22 @@ dependencies = [
 
 [[package]]
 name = "tonic-client-wrapper"
-version = "1.0.0"
-source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.10.1#4bbd502d3d9822fb1dcb8d205b7edaecabb497a6"
+version = "1.1.0"
+source = "git+https://github.com/dsx-ai-factory/nv-rms-client.git?tag=v0.11.0#85c77bc3159014d061b48cee77fdc0011970ef64"
 dependencies = [
  "async-trait",
  "heck",
  "lazy_static",
  "prettyplease",
  "proc-macro2",
+ "prost",
  "prost-types",
  "quote",
  "syn 2.0.117",
  "thiserror 2.0.18",
  "tonic",
  "tonic-prost-build",
+ "tracing",
 ]
 
 [[package]]

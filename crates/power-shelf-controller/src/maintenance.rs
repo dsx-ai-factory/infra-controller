@@ -54,8 +54,8 @@ pub async fn handle_maintenance(
         PowerShelfMaintenanceOperation::PowerOn => {
             handle_power_on(power_shelf_id, state, request, ctx).await
         }
-        PowerShelfMaintenanceOperation::PowerOff => {
-            handle_power_off(power_shelf_id, state, request, ctx).await
+        PowerShelfMaintenanceOperation::PowerOff { graceful } => {
+            handle_power_off(power_shelf_id, state, request, ctx, *graceful).await
         }
     }
 }
@@ -86,20 +86,19 @@ async fn handle_power_off(
     state: &PowerShelf,
     request: Option<&PowerShelfMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<PowerShelfControllerState>, StateHandlerError> {
+    let action = if graceful {
+        PowerAction::GracefulShutdown
+    } else {
+        PowerAction::ForceOff
+    };
     tracing::info!(
         power_shelf_id = %power_shelf_id,
+        graceful,
         "PowerShelf maintenance: PowerOff"
     );
-    invoke_power_operation(
-        power_shelf_id,
-        state,
-        request,
-        ctx,
-        PowerAction::ForceOff,
-        "PowerOff",
-    )
-    .await
+    invoke_power_operation(power_shelf_id, state, request, ctx, action, "PowerOff").await
 }
 
 /// Common driver for component-manager-backed power maintenance operations.

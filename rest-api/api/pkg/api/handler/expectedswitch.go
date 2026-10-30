@@ -168,6 +168,9 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 
 	expectedSwitch, err := cdb.WithTxResult(ctx, cesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Note: NvOsUsername and NvOsPassword are not stored in DB, only passed to workflow
 		es, err := esDAO.Create(
 			ctx,
@@ -641,6 +644,9 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 
 	updatedExpectedSwitch, err := cdb.WithTxResult(ctx, uesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Note: NvOsUsername and NvOsPassword are not stored in DB, only passed to workflow
 		es, err := esDAO.Update(
 			ctx,
@@ -780,6 +786,9 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 
 	err = cdb.WithTx(ctx, desh.dbSession, func(tx *cdb.Tx) error {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return apiErr
+		}
 		if err := esDAO.Delete(ctx, tx, expectedSwitch.ID); err != nil {
 			logger.Error().Err(err).Msg("unable to delete ExpectedSwitch record from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Expected Switch due to DB error", nil)
@@ -819,11 +828,11 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 }
 
 // ReplaceAllExpectedSwitchesHandler replaces the complete ExpectedSwitch set for one Site.
-type ReplaceAllExpectedSwitchesHandler struct{ expectedInventoryBulkBase }
+type ReplaceAllExpectedSwitchesHandler struct{ expectedInventoryBatchBase }
 
 // NewReplaceAllExpectedSwitchesHandler creates a full-Site ExpectedSwitch replacement handler.
 func NewReplaceAllExpectedSwitchesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedSwitchesHandler {
-	return ReplaceAllExpectedSwitchesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+	return ReplaceAllExpectedSwitchesHandler{newExpectedInventoryBatchBase(dbSession, scp, cfg)}
 }
 
 // Handle godoc
@@ -879,6 +888,10 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 	}
 	dao := cdbm.NewExpectedSwitchDAO(h.dbSession)
 	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedSwitch, error) {
+		apiErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
+			return nil, apiErr
+		}
 		switches, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error replacing ExpectedSwitch records in DB")
@@ -895,7 +908,7 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 		}) {
 			secretFields = []string{"expectedSwitches"}
 		}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
 		if apiErr != nil {
 			return nil, apiErr
 		}
@@ -912,11 +925,11 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 }
 
 // DeleteAllExpectedSwitchesHandler deletes the complete ExpectedSwitch set for one Site.
-type DeleteAllExpectedSwitchesHandler struct{ expectedInventoryBulkBase }
+type DeleteAllExpectedSwitchesHandler struct{ expectedInventoryBatchBase }
 
 // NewDeleteAllExpectedSwitchesHandler creates a full-Site ExpectedSwitch deletion handler.
 func NewDeleteAllExpectedSwitchesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedSwitchesHandler {
-	return DeleteAllExpectedSwitchesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+	return DeleteAllExpectedSwitchesHandler{newExpectedInventoryBatchBase(dbSession, scp, cfg)}
 }
 
 // Handle godoc

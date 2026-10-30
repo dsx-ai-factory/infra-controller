@@ -186,6 +186,9 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 	}
 
 	expectedMachine, err := cdb.WithTxResult(ctx, cemh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedMachine, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Note: DefaultBmcUsername and BmcPassword are not stored in DB, only passed to workflow
 		em, err := emDAO.Create(
 			ctx,
@@ -696,6 +699,9 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 	}
 
 	updatedExpectedMachine, err := cdb.WithTxResult(ctx, uemh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedMachine, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Note: DefaultBmcUsername and BmcPassword are not stored in DB, only passed to workflow
 		em, err := emDAO.Update(
 			ctx,
@@ -850,6 +856,9 @@ func (demh DeleteExpectedMachineHandler) Handle(c echo.Context) error {
 	}
 
 	err = cdb.WithTx(ctx, demh.dbSession, func(tx *cdb.Tx) error {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return apiErr
+		}
 		if err := emDAO.Delete(ctx, tx, expectedMachine.ID); err != nil {
 			logger.Error().Err(err).Msg("unable to delete ExpectedMachine record from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Expected Machine due to DB error", nil)
@@ -1138,6 +1147,9 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 	}
 
 	createdExpectedMachines, err := cdb.WithTxResult(ctx, cemh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		createdMachines, derr := emDAO.CreateMultiple(ctx, tx, createInputs)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error creating ExpectedMachine records in DB")
@@ -1625,10 +1637,13 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 	}
 	// Update provided ExpectedMachines in DB
 	updatedExpectedMachines, err := cdb.WithTxResult(ctx, uemh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Lock the full target set before clearing any one row. Clear touches
 		// only a subset, while UpdateMultiple writes every target; without this
 		// canonical lock pass, overlapping batches can each hold a different
-		// cleared row and deadlock during the bulk update.
+		// cleared row and deadlock during the batch update.
 		derr := emDAO.LockForUpdate(ctx, tx, slices.Collect(maps.Keys(idMap)))
 		if derr != nil {
 			if errors.Is(derr, cdb.ErrDoesNotExist) {
@@ -1712,11 +1727,11 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 
 // ReplaceAllExpectedMachinesHandler replaces the complete ExpectedMachine set
 // for one Site.
-type ReplaceAllExpectedMachinesHandler struct{ expectedInventoryBulkBase }
+type ReplaceAllExpectedMachinesHandler struct{ expectedInventoryBatchBase }
 
 // NewReplaceAllExpectedMachinesHandler creates a full-Site ExpectedMachine replacement handler.
 func NewReplaceAllExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedMachinesHandler {
-	return ReplaceAllExpectedMachinesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+	return ReplaceAllExpectedMachinesHandler{newExpectedInventoryBatchBase(dbSession, scp, cfg)}
 }
 
 // Handle godoc
@@ -1806,6 +1821,10 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 	}
 	dao := cdbm.NewExpectedMachineDAO(h.dbSession)
 	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		apiErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
+			return nil, apiErr
+		}
 		machines, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error replacing ExpectedMachine records in DB")
@@ -1825,7 +1844,7 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 		}) {
 			secretFields = []string{"expectedMachines"}
 		}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedMachines_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedMachines_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
 		if apiErr != nil {
 			return nil, apiErr
 		}
@@ -1843,11 +1862,11 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 }
 
 // DeleteAllExpectedMachinesHandler deletes the complete ExpectedMachine set for one Site.
-type DeleteAllExpectedMachinesHandler struct{ expectedInventoryBulkBase }
+type DeleteAllExpectedMachinesHandler struct{ expectedInventoryBatchBase }
 
 // NewDeleteAllExpectedMachinesHandler creates a full-Site ExpectedMachine deletion handler.
 func NewDeleteAllExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedMachinesHandler {
-	return DeleteAllExpectedMachinesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+	return DeleteAllExpectedMachinesHandler{newExpectedInventoryBatchBase(dbSession, scp, cfg)}
 }
 
 // Handle godoc

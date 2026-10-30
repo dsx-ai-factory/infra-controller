@@ -15,6 +15,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -200,7 +201,7 @@ func (mv ManageNetworkSecurityGroup) UpdateNetworkSecurityGroupsInDB(ctx context
 	// and the call to this function was a one-shot with all inventory,
 	// and reportedNetworkSecurityGroupIDMap was populated while processing the unpaged
 	// inventory.
-	if networkSecurityGroupInventory.InventoryPage == nil || networkSecurityGroupInventory.InventoryPage.TotalPages == 0 || (networkSecurityGroupInventory.InventoryPage.CurrentPage == networkSecurityGroupInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(networkSecurityGroupInventory.GetInventoryPage()) {
 
 		// Clear out any that don't exist on site.
 		for _, networkSecurityGroup := range existingNetworkSecurityGroupIDMap {

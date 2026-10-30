@@ -11,9 +11,6 @@ const (
 	// Site.IsTimeWithinStaleInventoryThreshold, which follows the reported interval where there
 	// is one.
 	DefaultInventoryReceiptInterval = 3 * time.Minute
-	// StaleInventoryBuffer keeps the staleness check from sitting exactly on the collection
-	// interval, where clock skew between the Site and REST layer decides the outcome.
-	StaleInventoryBuffer = 10 * time.Second
 	// MaxInventoryReceiptInterval is the slowest inventory collection the system supports. REST
 	// layer waits out the reported interval before acting on an object, so a slower Site would
 	// hold off deletions and status updates long enough to destabilize it. The Site Agent rejects

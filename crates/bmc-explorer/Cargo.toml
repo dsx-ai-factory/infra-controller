@@ -53,6 +53,7 @@ nv-redfish = { workspace = true, features = [
   "pcie-devices",
   "ports",
   "power-supplies",
+  "processors",
   "update-service",
   "secure-boot",
   "oem-nvidia",

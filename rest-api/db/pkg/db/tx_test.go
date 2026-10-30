@@ -374,6 +374,53 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 	}
 }
 
+func TestTxTryAcquireSharedAdvisoryLock(t *testing.T) {
+	dbSession := testTxGetTestSession(t)
+	defer dbSession.Close()
+	ctx := context.Background()
+	zero := time.Duration(0)
+	options := &LockRetryOptions{Retries: cutil.GetPtr(1), Delay: &zero, Jitter: &zero}
+
+	t.Run("shared holders coexist", func(t *testing.T) {
+		lockID := GetAdvisoryLockIDFromString(t.Name())
+		tx1, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, tx1.Rollback()) })
+		tx2, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, tx2.Rollback()) })
+
+		require.NoError(t, tx1.TryAcquireSharedAdvisoryLock(ctx, lockID, options))
+		require.NoError(t, tx2.TryAcquireSharedAdvisoryLock(ctx, lockID, options))
+	})
+
+	t.Run("shared holder excludes exclusive holder", func(t *testing.T) {
+		lockID := GetAdvisoryLockIDFromString(t.Name())
+		sharedTx, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, sharedTx.Rollback()) })
+		exclusiveTx, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, exclusiveTx.Rollback()) })
+
+		require.NoError(t, sharedTx.TryAcquireSharedAdvisoryLock(ctx, lockID, options))
+		require.ErrorIs(t, exclusiveTx.TryAcquireAdvisoryLock(ctx, lockID, options), ErrXactAdvisoryLockFailed)
+	})
+
+	t.Run("exclusive holder excludes shared holder", func(t *testing.T) {
+		lockID := GetAdvisoryLockIDFromString(t.Name())
+		exclusiveTx, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, exclusiveTx.Rollback()) })
+		sharedTx, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, sharedTx.Rollback()) })
+
+		require.NoError(t, exclusiveTx.TryAcquireAdvisoryLock(ctx, lockID, options))
+		require.ErrorIs(t, sharedTx.TryAcquireSharedAdvisoryLock(ctx, lockID, options), ErrXactAdvisoryLockFailed)
+	})
+}
+
 func TestWithTx_CommitsOnSuccess(t *testing.T) {
 	dbSession := testTxGetTestSession(t)
 	defer dbSession.Close()

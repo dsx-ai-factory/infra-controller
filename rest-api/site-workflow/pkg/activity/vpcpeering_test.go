@@ -302,7 +302,7 @@ func TestManageVpcPeeringInventory_DiscoverVpcPeeringInventory(t *testing.T) {
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }

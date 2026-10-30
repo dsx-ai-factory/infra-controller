@@ -4506,6 +4506,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, inst1)
 
 	sxp1 := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-1", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
+	sxpReplacement := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-replacement", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
 	sxpPending := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-pending", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusPending)
 	assert.NotNil(t, sxp1)
 
@@ -5085,6 +5086,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
+	spectrumXRejectedSCP := sc.NewClientPool(tcfg)
+	spectrumXPartitionNotFound := fmt.Sprintf("SPX partition %s is not found", sxpReplacement.ID)
+
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
@@ -5125,6 +5129,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedRespSpectrumXAttachmentCount  *int
 		expectedSiteSpectrumXAttachmentType   *corev1.SpxAttachmentType
 		expectedSiteSpectrumXAttachmentBridge *string
+		expectSpectrumXUnchanged              bool
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -5171,6 +5176,74 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			verifySiteControllerRequest: true,
 			verifyChildSpanner:          true,
+		},
+		{
+			name: "Core rejects a SpectrumX replacement without persisting the update",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       spectrumXRejectedSCP,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:           cutil.GetPtr("must-not-persist"),
+					IpxeScript:     os2.IpxeScript,
+					SSHKeyGroupIDs: []string{skg2.ID.String()},
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+						SpectrumXPartitionID: sxpReplacement.ID.String(),
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+					}},
+				},
+				reqInstance:              inst1.ID.String(),
+				reqOrg:                   tnOrg1,
+				reqUser:                  tnu1,
+				respCode:                 http.StatusBadRequest,
+				respMessage:              &spectrumXPartitionNotFound,
+				expectSpectrumXUnchanged: true,
+				beforeHandle: func(t *testing.T) {
+					association := testInstanceBuildSSHKeyGroupInstanceAssociation(t, dbSession, skg1.ID, st1.ID, inst1.ID)
+					attachment, err := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
+						InstanceID:           inst1.ID,
+						SiteID:               st1.ID,
+						SpectrumXPartitionID: sxp1.ID,
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       0,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+						Status:               cdbm.SpectrumXAttachmentStatusReady,
+						CreatedBy:            tnu1.ID,
+					})
+					require.NoError(t, err)
+					t.Cleanup(func() {
+						_, err := dbSession.DB.NewDelete().Model(association).WherePK().Exec(ctx)
+						require.NoError(t, err)
+						_, err = dbSession.DB.NewDelete().Model(attachment).WherePK().Exec(ctx)
+						require.NoError(t, err)
+					})
+
+					run := &tmocks.WorkflowRun{}
+					run.On("GetID").Return("spectrumx-rejected-update").Once()
+					run.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError(
+						spectrumXPartitionNotFound, swe.ErrTypeNICoInvalidArgument, nil,
+					)).Once()
+					client := &tmocks.Client{}
+					client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+						"UpdateInstance", mock.MatchedBy(func(request *corev1.InstanceConfigUpdateRequest) bool {
+							attachments := request.GetConfig().GetSpxconfig().GetSpxAttachments()
+							keysetIDs := request.GetConfig().GetTenant().GetTenantKeysetIds()
+							return request.GetInstanceId().GetValue() == inst1.ID.String() &&
+								len(attachments) == 1 && attachments[0].GetSpxPartitionId().GetValue() == sxpReplacement.ID.String() &&
+								len(keysetIDs) == 1 && keysetIDs[0] == skg2.ID.String()
+						})).Return(run, nil).Once()
+					spectrumXRejectedSCP.IDClientMap[st1.ID.String()] = client
+					t.Cleanup(func() {
+						client.AssertExpectations(t)
+						run.AssertExpectations(t)
+					})
+				},
+			},
 		},
 		{
 			name: "test Instance update marks the Instance configuring for a SpectrumX-only update",
@@ -7833,9 +7906,48 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			if tt.args.beforeHandle != nil {
 				tt.args.beforeHandle(t)
 			}
+			ec.Set(cutil.APINameContextKey, "nico")
+			var beforeSpectrumXInstance *cdbm.Instance
+			var beforeSpectrumXAttachments []cdbm.SpectrumXAttachment
+			var beforeSpectrumXStatusDetails []cdbm.StatusDetail
+			var beforeSpectrumXSSHAssociations []cdbm.SSHKeyGroupInstanceAssociation
+			if tt.args.expectSpectrumXUnchanged {
+				var readErr error
+				beforeSpectrumXInstance, readErr = cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
+				require.NoError(t, readErr)
+				page := cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}
+				beforeSpectrumXAttachments, _, readErr = cdbm.NewSpectrumXAttachmentDAO(dbSession).GetAll(ctx, nil, cdbm.SpectrumXAttachmentFilterInput{InstanceIDs: []uuid.UUID{beforeSpectrumXInstance.ID}}, page, nil)
+				require.NoError(t, readErr)
+				require.NotEmpty(t, beforeSpectrumXAttachments)
+				beforeSpectrumXStatusDetails, _, readErr = cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{beforeSpectrumXInstance.ID.String()}}, page)
+				require.NoError(t, readErr)
+				beforeSpectrumXSSHAssociations, _, readErr = cdbm.NewSSHKeyGroupInstanceAssociationDAO(dbSession).GetAll(ctx, nil, cdbm.SSHKeyGroupInstanceAssociationFilterInput{InstanceIDs: []uuid.UUID{beforeSpectrumXInstance.ID}}, page, nil)
+				require.NoError(t, readErr)
+				require.NotEmpty(t, beforeSpectrumXSSHAssociations)
+			}
 
 			if err := uih.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateInstanceHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.args.expectSpectrumXUnchanged {
+				var response struct {
+					Source string `json:"source"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, "nico", response.Source)
+				after, readErr := cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, beforeSpectrumXInstance.ID, nil)
+				require.NoError(t, readErr)
+				assert.Equal(t, beforeSpectrumXInstance, after)
+				page := cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}
+				attachments, _, readErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).GetAll(ctx, nil, cdbm.SpectrumXAttachmentFilterInput{InstanceIDs: []uuid.UUID{after.ID}}, page, nil)
+				require.NoError(t, readErr)
+				assert.ElementsMatch(t, beforeSpectrumXAttachments, attachments)
+				statusDetails, _, readErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{after.ID.String()}}, page)
+				require.NoError(t, readErr)
+				assert.ElementsMatch(t, beforeSpectrumXStatusDetails, statusDetails)
+				associations, _, readErr := cdbm.NewSSHKeyGroupInstanceAssociationDAO(dbSession).GetAll(ctx, nil, cdbm.SSHKeyGroupInstanceAssociationFilterInput{InstanceIDs: []uuid.UUID{after.ID}}, page, nil)
+				require.NoError(t, readErr)
+				assert.ElementsMatch(t, beforeSpectrumXSSHAssociations, associations)
 			}
 
 			if tt.args.respCode != rec.Code {

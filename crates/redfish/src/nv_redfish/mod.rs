@@ -38,7 +38,7 @@ use nv_redfish::core::query::{ExpandQuery, FilterQuery};
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
-    SessionCreateResponse,
+    Repair, RepairError, SessionCreateResponse,
 };
 use nv_redfish::oem::hpe::ilo_service_ext::ManagerType as HpeManagerType;
 use nv_redfish::{Error as NvError, ServiceRoot as NvServiceRoot};
@@ -100,6 +100,18 @@ impl RedfishBmc {
         result
     }
 
+    fn finish_repaired<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, RepairError<BmcError>>,
+    ) -> Result<T, RepairError<BmcError>> {
+        let result = redact_repair_error(result, &self.sensitive_values);
+        if let Err(RepairError::Transport(error)) = &result {
+            log_bmc_error(operation, error, &self.sensitive_values);
+        }
+        result
+    }
+
     /// Session creation can submit credentials that differ from the client's
     /// authentication credential. Include every non-empty string in that small
     /// request document when sanitizing the returned and logged HTTP error.
@@ -118,6 +130,21 @@ impl RedfishBmc {
 
         self.finish_with_sensitive_values(operation, result, &sensitive_values)
     }
+}
+
+fn redact_repair_error<T>(
+    result: Result<T, RepairError<BmcError>>,
+    sensitive_values: &[String],
+) -> Result<T, RepairError<BmcError>> {
+    result.map_err(|error| match error {
+        RepairError::Transport(error) => {
+            RepairError::Transport(match redact_bmc_error::<()>(Err(error), sensitive_values) {
+                Err(error) => error,
+                Ok(()) => unreachable!("an Err result stays an Err"),
+            })
+        }
+        error @ RepairError::Decode(_) => error,
+    })
 }
 
 fn redact_bmc_error<T>(
@@ -166,7 +193,7 @@ fn sensitive_values(credentials: &BmcCredentials) -> Arc<[String]> {
             // Session tokens are already sent verbatim in X-Auth-Token.
             vec![token.clone()]
         }
-        BmcCredentials::Token { .. } => Vec::new(),
+        BmcCredentials::Token { .. } | BmcCredentials::Anonymous => Vec::new(),
     };
     Arc::from(sensitive_values)
 }
@@ -209,6 +236,35 @@ impl Bmc for RedfishBmc {
     ) -> Result<Arc<T>, Self::Error> {
         let result = self.inner.get(id).await;
         self.finish("get", result)
+    }
+
+    async fn get_repaired<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self.inner.get_repaired(id, repair).await;
+        self.finish_repaired("get", result)
+    }
+
+    async fn expand_repaired<T: Expandable>(
+        &self,
+        id: &ODataId,
+        query: ExpandQuery,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self.inner.expand_repaired(id, query, repair).await;
+        self.finish_repaired("expand", result)
+    }
+
+    async fn filter_repaired<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        query: FilterQuery,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self.inner.filter_repaired(id, query, repair).await;
+        self.finish_repaired("filter", result)
     }
 
     async fn poll<R: Send + Sync + for<'de> Deserialize<'de>>(

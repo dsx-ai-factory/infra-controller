@@ -235,7 +235,7 @@ impl MachineUpdateManager {
             db::machine::count_healthy_unhealthy_host_machines(&snapshots);
         let max_concurrent_updates = self
             .max_concurrent_machine_updates
-            .max_concurrent_updates(all_count, unhealthy_count)
+            .max_concurrent_updates(unhealthy_count, all_count)
             .unwrap_or(MachineUpdateManager::DEFAULT_MAX_CONCURRENT_MACHINE_UPDATES); // XXX
         for update_module in self.update_modules.iter() {
             if (current_updating_machines.len() as i32) >= max_concurrent_updates {

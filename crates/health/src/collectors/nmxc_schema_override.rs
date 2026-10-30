@@ -54,6 +54,11 @@ const NMX_C_CURRENT_MAJOR_VERSION: &str = "PROTO_MSG_MAJOR_VERSION";
 const NMX_C_CURRENT_MINOR_VERSION: &str = "PROTO_MSG_MINOR_VERSION";
 const NMX_C_SUCCESS_RETURN_CODE: &str = "NMX_ST_SUCCESS";
 
+// The collector populates protobuf fields 1, 2, and 3 in each request:
+// Hello: gateway_id, major_version, minor_version.
+// Subscribe: gateway_id, notify_on_self_change, heart_beat_rate.
+const NMX_C_CORE_REQUEST_FIELDS: [u32; 3] = [1, 2, 3];
+
 /// Validated descriptor state and immutable requests for one NMX-C schema override.
 ///
 /// Loading verifies the Hello and Subscribe method shapes, the base NMX-C
@@ -647,6 +652,8 @@ fn build_hello_request(
 ) -> Result<DynamicMessage, NmxcSchemaOverrideError> {
     let mut request = DynamicMessage::new(descriptor);
 
+    validate_request_oneofs(&request)?;
+
     set_field(
         &mut request,
         1,
@@ -668,7 +675,10 @@ fn build_subscribe_request(
     configured: &serde_json::Map<String, serde_json::Value>,
     nmxc: &NmxcCollectorOptions,
 ) -> Result<DynamicMessage, NmxcSchemaOverrideError> {
-    for field in descriptor.fields().filter(|field| field.number() <= 3) {
+    for field in descriptor
+        .fields()
+        .filter(|field| NMX_C_CORE_REQUEST_FIELDS.contains(&field.number()))
+    {
         if configured.contains_key(field.name()) || configured.contains_key(field.json_name()) {
             return Err(invalid_descriptor(format!(
                 "subscribe request field {} is owned by [collectors.nmxc] and must not be repeated in schema override config",
@@ -681,6 +691,8 @@ fn build_subscribe_request(
 
     let mut request = DynamicMessage::deserialize(descriptor, configured.into_deserializer())
         .map_err(NmxcSchemaOverrideError::InvalidSubscribeRequest)?;
+
+    validate_request_oneofs(&request)?;
 
     set_field(
         &mut request,
@@ -704,6 +716,33 @@ fn build_subscribe_request(
     )?;
 
     Ok(request)
+}
+
+fn validate_request_oneofs(request: &DynamicMessage) -> Result<(), NmxcSchemaOverrideError> {
+    for oneof in request.descriptor().oneofs() {
+        let Some(core) = oneof
+            .fields()
+            .find(|field| NMX_C_CORE_REQUEST_FIELDS.contains(&field.number()))
+        else {
+            continue;
+        };
+
+        // Core fields must coexist regardless of their configured values. A selected
+        // extension must also survive the subsequent core field assignments.
+        if let Some(conflict) = oneof.fields().find(|field| {
+            field.number() != core.number()
+                && (NMX_C_CORE_REQUEST_FIELDS.contains(&field.number()) || request.has_field(field))
+        }) {
+            return Err(invalid_descriptor(format!(
+                "request fields {} and {} cannot coexist in oneof {}",
+                core.full_name(),
+                conflict.full_name(),
+                oneof.full_name()
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_response_header(descriptor: MessageDescriptor) -> Result<(), NmxcSchemaOverrideError> {
@@ -845,9 +884,12 @@ impl Codec for DynamicRpcCodec {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::{Case, Outcome, check_cases};
     use prost::Message;
     use prost_types::field_descriptor_proto::{Label, Type};
-    use prost_types::{EnumValueDescriptorProto, FieldDescriptorProto, FileDescriptorSet};
+    use prost_types::{
+        EnumValueDescriptorProto, FieldDescriptorProto, FileDescriptorSet, OneofDescriptorProto,
+    };
     use tempfile::NamedTempFile;
 
     use super::*;
@@ -1033,6 +1075,11 @@ mod tests {
         assert_eq!(
             hello.get_field_by_number(3).as_deref(),
             Some(&Value::EnumNumber(99))
+        );
+
+        assert_eq!(
+            subscribe.get_field_by_number(1).as_deref(),
+            Some(&Value::String("test-gateway".to_string()))
         );
 
         assert_eq!(
@@ -1299,6 +1346,164 @@ mod tests {
         .expect_err("runtime-owned field should be rejected");
 
         assert!(error.to_string().contains("owned by [collectors.nmxc]"));
+    }
+
+    #[test]
+    fn schema_override_validates_request_oneof_conflicts() {
+        let cases = [
+            (
+                "Subscribe core fields must coexist",
+                "SubscribeRequest",
+                vec![1, 2, 3],
+                serde_json::json!({}),
+                false,
+            ),
+            (
+                "Hello core fields must coexist",
+                "ClientHello",
+                vec![1, 2],
+                serde_json::json!({}),
+                false,
+            ),
+            (
+                "selected extension conflicts with a core field",
+                "SubscribeRequest",
+                vec![1, 4],
+                serde_json::json!({"testOption": true}),
+                false,
+            ),
+            (
+                "default-valued extension still selects its oneof",
+                "SubscribeRequest",
+                vec![1, 4],
+                serde_json::json!({"test_option": false}),
+                false,
+            ),
+            (
+                "omitted extension does not conflict",
+                "SubscribeRequest",
+                vec![1, 4],
+                serde_json::json!({}),
+                true,
+            ),
+            (
+                "null extension does not select its oneof",
+                "SubscribeRequest",
+                vec![1, 4],
+                serde_json::json!({"testOption": null}),
+                true,
+            ),
+            (
+                "unrelated extension oneof is preserved",
+                "SubscribeRequest",
+                vec![4],
+                serde_json::json!({"testOption": true}),
+                true,
+            ),
+        ]
+        .map(|(scenario, message, fields, configured, succeeds)| Case {
+            scenario,
+            input: (message, fields, configured),
+            expect: Outcome::Yields(succeeds),
+        });
+
+        check_cases(cases, |(message_name, field_numbers, configured)| {
+            let mut descriptor_set = override_descriptor_set();
+
+            let request = descriptor_set
+                .file
+                .iter_mut()
+                .flat_map(|file| &mut file.message_type)
+                .find(|message| message.name.as_deref() == Some(message_name))
+                .expect("request message should exist");
+
+            request.oneof_decl.push(OneofDescriptorProto {
+                name: Some("request_choice".to_string()),
+                ..Default::default()
+            });
+
+            for field in &mut request.field {
+                if field
+                    .number
+                    .is_some_and(|number| field_numbers.contains(&number))
+                {
+                    field.oneof_index = Some(0);
+                }
+            }
+
+            let expected_option = configured
+                .get("testOption")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_default();
+
+            let result = load_schema_override(&descriptor_set, configured);
+
+            match result {
+                Ok(schema) => {
+                    assert_eq!(
+                        schema.subscribe_request.get_field_by_number(1).as_deref(),
+                        Some(&Value::String("test-gateway".to_string()))
+                    );
+
+                    assert_eq!(
+                        schema.subscribe_request.get_field_by_number(4).as_deref(),
+                        Some(&Value::Bool(expected_option))
+                    );
+
+                    Ok(true)
+                }
+                Err(NmxcSchemaOverrideError::InvalidDescriptor(reason)) => {
+                    assert!(reason.contains(message_name), "{reason}");
+                    assert!(reason.contains("request_choice"), "{reason}");
+                    assert!(reason.contains("cannot coexist"), "{reason}");
+
+                    Ok(false)
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        });
+    }
+
+    #[test]
+    fn schema_override_preserves_optional_core_fields() {
+        let mut descriptor_set = override_descriptor_set();
+
+        let request = descriptor_set
+            .file
+            .iter_mut()
+            .flat_map(|file| &mut file.message_type)
+            .find(|message| message.name.as_deref() == Some("SubscribeRequest"))
+            .expect("SubscribeRequest should exist");
+
+        for (index, field) in request.field.iter_mut().take(3).enumerate() {
+            request.oneof_decl.push(OneofDescriptorProto {
+                name: Some(format!("_{}", field.name())),
+                ..Default::default()
+            });
+
+            field.oneof_index = Some(index as i32);
+            field.proto3_optional = Some(true);
+        }
+
+        let schema = load_schema_override(&descriptor_set, serde_json::json!({}))
+            .expect("independent optional core fields should load");
+
+        let request = schema.subscribe_request;
+
+        assert_eq!(
+            request.get_field_by_number(1).as_deref(),
+            Some(&Value::String("test-gateway".to_string()))
+        );
+
+        assert_eq!(
+            request.get_field_by_number(2).as_deref(),
+            Some(&Value::Bool(true))
+        );
+
+        assert_eq!(
+            request.get_field_by_number(3).as_deref(),
+            Some(&Value::U32(17))
+        );
     }
 
     #[test]

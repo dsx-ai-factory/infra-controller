@@ -25,6 +25,7 @@ import (
 
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -236,7 +237,7 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 	subnetsToDelete := []*cdbm.Subnet{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if subnetInventory.InventoryPage == nil || subnetInventory.InventoryPage.TotalPages == 0 || (subnetInventory.InventoryPage.CurrentPage == subnetInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(subnetInventory.GetInventoryPage()) {
 		for _, subnet := range existingSubnetIDMap {
 			found := false
 

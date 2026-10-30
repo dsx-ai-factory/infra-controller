@@ -199,6 +199,28 @@ pub async fn wiwynn_gb200_bmc() -> TestBmcHandle {
     .await
 }
 
+pub async fn wiwynn_gb200_bmc_at_rack_position(position: u8) -> TestBmcHandle {
+    let mut machine_info = host_info(HardwareType::WiwynnGB200Nvl);
+    let MachineInfo::Host(host) = &mut machine_info else {
+        unreachable!("Wiwynn GB200 test fixture must be a host")
+    };
+    host.rack_placement = Some(
+        crate::RackInfo {
+            rack_type: crate::RackType::WiwynnGb200Nvl72,
+        }
+        .placement(position),
+    );
+
+    test_bmc(machine_router(
+        &machine_info,
+        Arc::new(TestCallbacks::default()),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
 pub async fn lenovo_gb300_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::LenovoGB300Nvl),
@@ -691,6 +713,7 @@ mod test {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use nv_redfish::bmc_http::{BmcCredentials, HttpClient};
+    use nv_redfish::core::NoRepair;
     use tower::ServiceExt;
     use url::Url;
 
@@ -887,6 +910,7 @@ mod test {
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
+                &NoRepair,
             )
             .await
             .expect("expanded GET should succeed");
@@ -912,6 +936,7 @@ mod test {
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
+                &NoRepair,
             )
             .await
             .expect_err("empty router should return transport error");

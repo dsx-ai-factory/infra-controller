@@ -17,6 +17,7 @@ import (
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -133,7 +134,7 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 	tenantsToCreate := []*cdbm.Tenant{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if tenantInventory.InventoryPage == nil || tenantInventory.InventoryPage.TotalPages == 0 || (tenantInventory.InventoryPage.CurrentPage == tenantInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(tenantInventory.GetInventoryPage()) {
 		for _, tenant := range existingTenantOrgMap {
 			found := false
 

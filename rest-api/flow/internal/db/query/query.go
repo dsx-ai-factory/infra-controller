@@ -71,6 +71,8 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// New builds a query with the configured filters, ordering, and pagination,
+// counting matching rows when the pagination total is not positive.
 func New(ctx context.Context, conf *Config) (*Query, error) {
 	if err := conf.Validate(); err != nil {
 		return nil, err
@@ -91,7 +93,11 @@ func New(ctx context.Context, conf *Config) (*Query, error) {
 	}
 
 	for _, orderBy := range conf.DefaultOrderBy {
-		q = q.Order(orderBy.String())
+		if orderBy.IsExpression {
+			q = q.OrderExpr(orderBy.String())
+		} else {
+			q = q.Order(orderBy.String())
+		}
 	}
 
 	if conf.Pagination != nil {
