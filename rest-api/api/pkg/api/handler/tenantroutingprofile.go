@@ -4,8 +4,10 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -55,6 +57,11 @@ func (h UpdateTenantRoutingProfileHandler) Handle(c echo.Context) error {
 	if dbUser == nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
+
+	// all core calls share one wait budget.
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
+
 	var provider *cdbm.InfrastructureProvider
 	var tenant *cdbm.Tenant
 	var apiErr *cutil.APIError
@@ -77,11 +84,13 @@ func (h UpdateTenantRoutingProfileHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid routing profile update request", err)
 	}
 
+	// validate the tenant for provider
 	if provider != nil {
 		tenantID, err := uuid.Parse(c.Param("id"))
 		if err != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tenant ID in URL", nil)
 		}
+
 		tenant, err = cdbm.NewTenantDAO(h.dbSession).GetByID(ctx, nil, tenantID, nil)
 		if err != nil {
 			if errors.Is(err, cdb.ErrDoesNotExist) {
@@ -90,6 +99,7 @@ func (h UpdateTenantRoutingProfileHandler) Handle(c echo.Context) error {
 			logger.Error().Err(err).Msg("failed to retrieve Tenant")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
 		}
+
 		accounts, _, err := cdbm.NewTenantAccountDAO(h.dbSession).GetAll(ctx, nil, cdbm.TenantAccountFilterInput{
 			InfrastructureProviderID: &provider.ID,
 			TenantIDs:                []uuid.UUID{tenant.ID},
@@ -108,6 +118,7 @@ func (h UpdateTenantRoutingProfileHandler) Handle(c echo.Context) error {
 		}
 	}
 
+	// validate the site
 	site, err := common.GetSiteFromIDString(ctx, nil, req.SiteID, h.dbSession)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
@@ -140,6 +151,7 @@ func (h UpdateTenantRoutingProfileHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
+	// retrieve the current tenant routing profile
 	current := &corev1.FindTenantResponse{}
 	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindTenant_FullMethodName, &corev1.FindTenantRequest{
 		TenantOrganizationId: tenant.Org,
@@ -153,6 +165,31 @@ func (h UpdateTenantRoutingProfileHandler) Handle(c echo.Context) error {
 	}
 	if current.Tenant.GetOrganizationId() != tenant.Org || current.Tenant.GetMetadata() == nil || current.Tenant.GetVersion() == "" {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Site returned incomplete or mismatched Tenant data", nil)
+	}
+
+	// validate request routing profile based on current tenant default
+	if provider == nil {
+		defaultName := current.Tenant.GetRoutingProfileType()
+		if defaultName == "" {
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Tenant has no default routing profile on Site", nil)
+		}
+		requestedName := model.NormalizeAPIVpcRoutingProfileForSite(req.DefaultRoutingProfile)
+		names := slices.Compact([]string{defaultName, requestedName})
+		profiles, profileErr := findNamedRoutingProfiles(ctx, stc, names)
+		if profileErr != nil {
+			return cutil.NewAPIErrorResponse(c, profileErr.Code, profileErr.Message, nil)
+		}
+		defaultProfile := profiles[defaultName]
+		if defaultProfile == nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Tenant default routing profile was not found on Site", nil)
+		}
+		requestedProfile := profiles[requestedName]
+		if requestedProfile == nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Requested routing profile was not found on Site", nil)
+		}
+		if requestedProfile.Config.GetAccessTier() < defaultProfile.Config.GetAccessTier() {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Cannot update to a routing profile with an access tier lower than the Tenant's current default routing profile", nil)
+		}
 	}
 
 	updated := &corev1.UpdateTenantResponse{}

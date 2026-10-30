@@ -5,8 +5,12 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
+	"slices"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
@@ -14,6 +18,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -21,7 +26,7 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-// vpcRoutingProfileHandler provides shared dependencies and provider authorization
+// vpcRoutingProfileHandler provides shared dependencies and authorization
 // for routing operations; ordinary VPC PATCH remains a separate tenant operation.
 type vpcRoutingProfileHandler struct {
 	dbSession *cdb.Session
@@ -306,4 +311,330 @@ func vpcRoutingMutationError(c echo.Context, logger zerolog.Logger, apiErr *cuti
 		message += "; the operation may have committed, inspect VPC routing state before submitting another request"
 	}
 	return cutil.NewAPIErrorResponse(c, apiErr.Code, message, nil)
+}
+
+// GetVPCRoutingProfileDefinitionHandler reads one named routing profile definition.
+type GetVPCRoutingProfileDefinitionHandler struct {
+	vpcRoutingProfileHandler
+}
+
+// NewGetVPCRoutingProfileDefinitionHandler initializes the named-profile GET handler.
+func NewGetVPCRoutingProfileDefinitionHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetVPCRoutingProfileDefinitionHandler {
+	return GetVPCRoutingProfileDefinitionHandler{
+		vpcRoutingProfileHandler: newVPCRoutingProfileHandler(dbSession, scp),
+	}
+}
+
+// Handle returns a named definition visible to a Provider or privileged Tenant.
+func (h GetVPCRoutingProfileDefinitionHandler) Handle(c echo.Context) error {
+	org, user, ctx, logger, span := common.SetupHandler("VPCRoutingProfileDefinition", "Get", c)
+	if span != nil {
+		defer span.End()
+	}
+	if user == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// all core calls share one wait budget.
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
+
+	provider, tenant, apiErr := common.IsProviderOrTenant(ctx, logger, h.dbSession, org, user, true, nil)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	req := model.APIVpcRoutingProfileGetAllRequest{
+		SiteID: c.QueryParam("siteId"),
+	}
+	err := common.ValidateKnownQueryParams(c.QueryParams(), struct {
+		SiteID string `query:"siteId"`
+	}{})
+	if err != nil {
+		logger.Warn().Err(err).Msg("error validating known query params")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	err = req.Validate()
+	if err != nil {
+		logger.Warn().Err(err).Msg("error validating site ID for routing profile query")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	// Echo retains escaped path parameters. Decode once, preserving '+' and case.
+	profileName, err := url.PathUnescape(c.Param("profileName"))
+	if err != nil || !utf8.ValidString(profileName) {
+		logger.Warn().Err(err).Msg("error unescaping routing profile name")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid routing profile name", nil)
+	}
+
+	stc, minimumTier, apiErr := h.authorizeProfileDefinition(ctx, logger, provider, tenant, req.SiteID)
+	if apiErr != nil {
+		logger.Warn().Err(apiErr).Msg("error authorizing profile definition")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	profile, profileErr := getNamedRoutingProfile(ctx, stc, profileName)
+	if profileErr != nil {
+		return cutil.NewAPIErrorResponse(c, profileErr.Code, profileErr.Message, nil)
+	}
+
+	if provider == nil && profile.Config.GetAccessTier() < minimumTier {
+		logger.Warn().Msg("Tenant not authorized to view a routing profile with an access tier lower than the Tenant's default routing profile")
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Cannot view a routing profile with an access tier lower than the Tenant's default routing profile", nil)
+	}
+
+	var result model.APIVpcRoutingProfileDefinition
+	result.FromProto(profile)
+	return c.JSON(http.StatusOK, result)
+}
+
+// GetAllVPCRoutingProfileDefinitionHandler lists named routing profile definitions.
+type GetAllVPCRoutingProfileDefinitionHandler struct {
+	vpcRoutingProfileHandler
+}
+
+// NewGetAllVPCRoutingProfileDefinitionHandler initializes the profile collection GET handler.
+func NewGetAllVPCRoutingProfileDefinitionHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetAllVPCRoutingProfileDefinitionHandler {
+	return GetAllVPCRoutingProfileDefinitionHandler{
+		vpcRoutingProfileHandler: newVPCRoutingProfileHandler(dbSession, scp),
+	}
+}
+
+// Handle returns a page of definitions visible to a Provider or privileged Tenant.
+func (h GetAllVPCRoutingProfileDefinitionHandler) Handle(c echo.Context) error {
+	org, user, ctx, logger, span := common.SetupHandler("VPCRoutingProfileDefinition", "GetAll", c)
+	if span != nil {
+		defer span.End()
+	}
+	if user == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// all core calls share one wait budget.
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
+
+	provider, tenant, apiErr := common.IsProviderOrTenant(ctx, logger, h.dbSession, org, user, true, nil)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	var req model.APIVpcRoutingProfileGetAllRequest
+	var page pagination.PageRequest
+	err := common.ValidateKnownQueryParams(c.QueryParams(), req, page)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	// Bind query parameters only: a GET body cannot replace the Site or filters.
+	err = (&echo.DefaultBinder{}).BindQueryParams(c, &req)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding routing profile query data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid routing profile query", nil)
+	}
+
+	err = req.Validate()
+	if err != nil {
+		logger.Warn().Err(err).Msg("error validating routing profile query data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	// Validate pagination request
+	err = (&echo.DefaultBinder{}).BindQueryParams(c, &page)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid pagination query", nil)
+	}
+
+	if page.OrderByStr == nil {
+		page.OrderByStr = cutil.GetPtr("NAME_ASC")
+	}
+
+	err = page.Validate([]string{"name"})
+	if err != nil {
+		logger.Warn().Err(err).Msg("error validating pagination request data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	// Determine organiation's level of access to routing profiles on site
+	stc, minimumTier, apiErr := h.authorizeProfileDefinition(ctx, logger, provider, tenant, req.SiteID)
+	if apiErr != nil {
+		logger.Warn().Err(apiErr).Msg("error authorizing profile definition")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	// Set filter based on tenant's default access tier and request parameter
+	if provider == nil {
+		requestedMinimum := minimumTier
+		if req.MinimumAccessTier != nil {
+			requestedMinimum = *req.MinimumAccessTier
+		}
+
+		// Validate filter parameter against Tenant's access
+		if requestedMinimum < minimumTier {
+			logger.Warn().Msg("Tenant not authorized to query routing profiles of tier below that of their default routing profile")
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Cannot query routing profiles with access tiers lower than the Tenant's default routing profile", nil)
+		}
+
+		req.MinimumAccessTier = cutil.GetPtr(requestedMinimum)
+	}
+
+	var names corev1.RoutingProfileNameList
+	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindRoutingProfileNames_FullMethodName, req.ToProto(), &names, "")
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	// core returns names in ascending order, so reverse if descending
+	if *page.OrderByStr == "NAME_DESC" {
+		slices.Reverse(names.Names)
+	}
+
+	total := len(names.Names)
+	start := min(*page.Offset, total)
+	selected := names.Names[start:min(start+*page.Limit, total)]
+	profiles, apiErr := findNamedRoutingProfiles(ctx, stc, selected)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	result := make([]model.APIVpcRoutingProfileDefinition, 0, len(selected))
+	for _, name := range selected {
+		profile := profiles[name]
+
+		// Configuration can change between name discovery and definition lookup.
+		// Never return a definition that no longer meets the authorized filter.
+		if profile == nil || (req.MinimumAccessTier != nil && profile.Config.GetAccessTier() < *req.MinimumAccessTier) || (req.Internal != nil && profile.Config.GetInternal() != *req.Internal) {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Routing profiles changed during the query; retry the request", nil)
+		}
+
+		var item model.APIVpcRoutingProfileDefinition
+		item.FromProto(profile)
+		result = append(result, item)
+	}
+	header, err := json.Marshal(pagination.NewPageResponse(*page.PageNumber, *page.PageSize, total, page.OrderByStr))
+	if err != nil {
+		logger.Error().Err(err).Msg("error marshaling pagination response")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create pagination response", nil)
+	}
+
+	logger.Info().Int("Count", len(result)).Int("Total", total).Msg("finishing API handler")
+
+	c.Response().Header().Set(pagination.ResponseHeaderName, string(header))
+	return c.JSON(http.StatusOK, result)
+}
+
+// authorizeProfileDefinition checks Site access and resolves the Tenant's minimum tier.
+func (h vpcRoutingProfileHandler) authorizeProfileDefinition(ctx context.Context, logger zerolog.Logger, provider *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, siteID string) (tclient.Client, uint32, *cutil.APIError) {
+	// validate the site
+	site, err := common.GetSiteFromIDString(ctx, nil, siteID, h.dbSession)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return nil, 0, cutil.NewAPIError(http.StatusBadRequest, "Could not find Site specified in request", nil)
+		}
+
+		logger.Error().Err(err).Msg("failed to retrieve Site")
+		return nil, 0, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site", nil)
+	}
+
+	if provider != nil && site.InfrastructureProviderID != provider.ID {
+		return nil, 0, cutil.NewAPIError(http.StatusForbidden, "Site does not belong to org's Provider", nil)
+	}
+
+	if site.Status != cdbm.SiteStatusRegistered || site.Config == nil || !site.Config.NativeNetworking {
+		return nil, 0, cutil.NewAPIError(http.StatusBadRequest, "Site must be Registered with native networking enabled", nil)
+	}
+
+	// handle validation for privileged tenant case
+	if provider == nil {
+		privileged, privilegeErr := common.TenantHasTargetedInstanceCreation(ctx, nil, h.dbSession, tenant, &common.TenantPrivilegeScope{
+			SiteID: &site.ID,
+		})
+		if privilegeErr != nil {
+			logger.Error().Err(privilegeErr).Msg("failed to resolve Tenant privilege for Site")
+			return nil, 0, cutil.NewAPIError(http.StatusInternalServerError, "Failed to resolve Tenant capability, DB error", nil)
+		}
+
+		if !privileged {
+			return nil, 0, cutil.NewAPIError(http.StatusForbidden, "Tenant does not have Targeted Instance Creation capability enabled for Site", nil)
+		}
+	}
+
+	stc, err := h.scp.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return nil, 0, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+
+	// retrieve the tenant default routing profile and extract tenant's access tier
+	var minimumTier uint32
+	if provider == nil {
+		var current corev1.FindTenantResponse
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindTenant_FullMethodName, &corev1.FindTenantRequest{
+			TenantOrganizationId: tenant.Org,
+		}, &current, "")
+		if apiErr != nil {
+			return nil, 0, apiErr
+		}
+
+		if current.GetTenant() == nil {
+			return nil, 0, cutil.NewAPIError(http.StatusNotFound, "Tenant was not found on Site", nil)
+		}
+
+		if current.Tenant.GetOrganizationId() != tenant.Org || current.Tenant.GetRoutingProfileType() == "" {
+			return nil, 0, cutil.NewAPIError(http.StatusInternalServerError, "Site returned incomplete or mismatched Tenant data", nil)
+		}
+
+		defaultProfile, profileErr := getNamedRoutingProfile(ctx, stc, current.Tenant.GetRoutingProfileType())
+		if profileErr != nil {
+			if profileErr.Code == http.StatusNotFound {
+				profileErr = cutil.NewAPIError(http.StatusInternalServerError, "Tenant default routing profile was not found on Site", nil)
+			}
+			return nil, 0, profileErr
+		}
+
+		minimumTier = defaultProfile.Config.GetAccessTier()
+	}
+
+	return stc, minimumTier, nil
+}
+
+// findNamedRoutingProfiles preserves exact configured names and rejects malformed replies.
+func findNamedRoutingProfiles(ctx context.Context, stc tclient.Client, names []string) (map[string]*corev1.NamedRoutingProfile, *cutil.APIError) {
+	profiles := make(map[string]*corev1.NamedRoutingProfile, len(names))
+	if len(names) == 0 {
+		return profiles, nil
+	}
+
+	var response corev1.NamedRoutingProfileList
+	apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindRoutingProfilesByNames_FullMethodName, &corev1.RoutingProfilesByNamesRequest{
+		Names: names,
+	}, &response, "")
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	for _, profile := range response.Profiles {
+		if profile.GetConfig() == nil || !slices.Contains(names, profile.GetName()) || profiles[profile.GetName()] != nil {
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Site returned incomplete or mismatched routing profile data", nil)
+		}
+
+		profiles[profile.Name] = profile
+	}
+
+	return profiles, nil
+}
+
+func getNamedRoutingProfile(ctx context.Context, stc tclient.Client, name string) (*corev1.NamedRoutingProfile, *cutil.APIError) {
+	profiles, apiErr := findNamedRoutingProfiles(ctx, stc, []string{name})
+	if apiErr != nil {
+		return nil, apiErr
+	}
+
+	profile := profiles[name]
+	if profile == nil {
+		return nil, cutil.NewAPIError(http.StatusNotFound, "Routing profile was not found on Site", nil)
+	}
+
+	return profile, nil
 }

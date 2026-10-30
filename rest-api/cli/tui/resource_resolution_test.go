@@ -496,3 +496,100 @@ func testResolveGeneratedPathParameters_ExplicitDiscoveryValues(t *testing.T) {
 		})
 	}
 }
+
+func TestGeneratedRoutingProfileDefinitionGet(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		scope     string
+		args      []string
+		wantSite  string
+		profile   string
+		wantError string
+	}{
+		{
+			name:     "choose Site before discovering all profile pages",
+			args:     []string{"Edge+%/tenant"},
+			wantSite: "site-one",
+		},
+		{
+			name:     "inherit Site scope",
+			scope:    "site-two",
+			args:     []string{"Edge+%/tenant"},
+			wantSite: "site-two",
+		},
+		{
+			name:     "explicit Site overrides scope",
+			scope:    "site-one",
+			args:     []string{"--site-id", "site-two", "Edge+%/tenant"},
+			wantSite: "site-two",
+		},
+		{
+			name:      "profile names remain case sensitive",
+			scope:     "site-one",
+			args:      []string{"edge+%/tenant"},
+			wantSite:  "site-one",
+			wantError: "no vpc-routing-profile-definition matching",
+		},
+		{
+			name:     "profile whitespace distinguishes configured names",
+			scope:    "site-one",
+			args:     []string{" edge "},
+			wantSite: "site-one",
+			profile:  " edge ",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profileName := test.profile
+			if profileName == "" {
+				profileName = "Edge+%/tenant"
+			}
+			var paths []string
+			var pages []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v2/org/acme/nico/site":
+					_, _ = io.WriteString(w, `[{"id":"site-one","name":"Site One","status":"Registered"}]`)
+				case "/v2/org/acme/nico/vpc/routing-profile":
+					assert.Equal(t, test.wantSite, r.URL.Query().Get("siteId"))
+					assert.Equal(t, "100", r.URL.Query().Get("pageSize"))
+					page := r.URL.Query().Get("pageNumber")
+					pages = append(pages, page)
+					w.Header().Set("X-Pagination", `{"total":101}`)
+					if page == "1" {
+						profiles := make([]map[string]string, 100)
+						for i := range profiles {
+							profiles[i] = map[string]string{"name": fmt.Sprintf("profile-%d", i)}
+						}
+						profiles[0] = map[string]string{"name": "edge"}
+						require.NoError(t, json.NewEncoder(w).Encode(profiles))
+					} else {
+						require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{{"name": profileName}}))
+					}
+				case "/v2/org/acme/nico/vpc/routing-profile/" + profileName:
+					assert.Equal(t, test.wantSite, r.URL.Query().Get("siteId"))
+					_, _ = fmt.Fprintf(w, `{"name":%q,"config":{}}`, profileName)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope.SiteID = test.scope
+			var runErr error
+			_ = captureStdout(func() {
+				runErr = requireTUICommand(t, "vpc routing-profile-definition get").Run(session, test.args)
+			})
+			assert.Equal(t, []string{"1", "2"}, pages)
+			if test.wantError != "" {
+				require.ErrorContains(t, runErr, test.wantError)
+				assert.NotContains(t, paths, "/v2/org/acme/nico/vpc/routing-profile/"+profileName)
+				return
+			}
+			require.NoError(t, runErr)
+			assert.Equal(t, "/v2/org/acme/nico/vpc/routing-profile/"+profileName, paths[len(paths)-1])
+			assert.Equal(t, test.wantSite, session.Scope.SiteID)
+		})
+	}
+}

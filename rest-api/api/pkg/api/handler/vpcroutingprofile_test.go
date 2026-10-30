@@ -5,9 +5,11 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -25,8 +27,10 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -570,6 +574,775 @@ func assertVPCRoutingProfileProviderOnly(t *testing.T, method, body string) {
 			rec := f.request(t, context.Background(), method, body)
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 			assert.Empty(t, f.proxiedReqs)
+		})
+	}
+}
+
+func TestGetAllVPCRoutingProfileDefinitionHandler_Handle(t *testing.T) {
+	cases := []struct {
+		name    string
+		tenant  bool
+		prepare func(*testing.T, *profileQueryFixture)
+		status  int
+		calls   int
+		message string
+	}{
+		{
+			name:   "provider omitted filters remain omitted",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  2,
+		},
+		{
+			name:   "provider forwards explicit false and zero",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  2,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("internal", "false")
+				f.query.Set("minimumAccessTier", "0")
+				f.filter.Internal = cutil.GetPtr(false)
+				f.filter.MinimumAccessTier = cutil.GetPtr(uint32(0))
+			},
+		},
+		{
+			name:   "provider forwards true and maximum tier",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  2,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("internal", "true")
+				f.query.Set("minimumAccessTier", "4294967295")
+				f.filter.Internal = cutil.GetPtr(true)
+				f.filter.MinimumAccessTier = cutil.GetPtr(uint32(4294967295))
+				f.profiles.Profiles[0].Config.Internal = cutil.GetPtr(true)
+				f.profiles.Profiles[0].Config.AccessTier = cutil.GetPtr(uint32(4294967295))
+			},
+		},
+		{
+			name:   "tenant omitted minimum uses default",
+			tenant: true,
+			status: http.StatusOK,
+			calls:  4,
+		},
+		{
+			name:   "tenant equal minimum allowed",
+			tenant: true,
+			status: http.StatusOK,
+			calls:  4,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("minimumAccessTier", "2")
+			},
+		},
+		{
+			name:   "tenant higher minimum preserved",
+			tenant: true,
+			status: http.StatusOK,
+			calls:  4,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("minimumAccessTier", "3")
+				f.filter.MinimumAccessTier = cutil.GetPtr(uint32(3))
+			},
+		},
+		{
+			name:    "tenant lower minimum rejected before listing",
+			tenant:  true,
+			status:  http.StatusForbidden,
+			calls:   2,
+			message: "access tiers lower",
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("minimumAccessTier", "1")
+			},
+		},
+		{
+			name:   "unset default tier is zero",
+			tenant: true,
+			status: http.StatusOK,
+			calls:  4,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.defaultProfile.Profiles[0].Config.AccessTier = nil
+				f.query.Set("minimumAccessTier", "0")
+				f.filter.MinimumAccessTier = cutil.GetPtr(uint32(0))
+			},
+		},
+		{
+			name:   "unprivileged tenant denied list",
+			tenant: true,
+			status: http.StatusForbidden,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.setPrivilege(t, false)
+			},
+		},
+		{
+			name:   "site denial overrides account grant",
+			tenant: true,
+			status: http.StatusForbidden,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				cdbm.TestBuildTenantSite(t, f.db, f.tenant, f.site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, f.user)
+			},
+		},
+		{
+			name:   "site grant allows read",
+			tenant: true,
+			status: http.StatusOK,
+			calls:  4,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.setPrivilege(t, false)
+				cdbm.TestBuildTenantSite(t, f.db, f.tenant, f.site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(true)}, f.user)
+			},
+		},
+		{
+			name:   "foreign provider privilege insufficient",
+			tenant: true,
+			status: http.StatusForbidden,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				other := common.TestBuildInfrastructureProvider(t, f.db, "Other", "other-provider", f.user)
+				_, err := f.db.DB.NewUpdate().Model(f.site).Set("infrastructure_provider_id = ?", other.ID).WherePK().Exec(context.Background())
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:   "pending account denied",
+			tenant: true,
+			status: http.StatusForbidden,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				_, err := f.db.DB.NewUpdate().Model(f.account).Set("status = ?", cdbm.TenantAccountStatusInvited).WherePK().Exec(context.Background())
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:   "provider cannot read another providers site",
+			tenant: false,
+			status: http.StatusForbidden,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				other := common.TestBuildInfrastructureProvider(t, f.db, "Other", "other-provider", f.user)
+				_, err := f.db.DB.NewUpdate().Model(f.site).Set("infrastructure_provider_id = ?", other.ID).WherePK().Exec(context.Background())
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:   "missing user",
+			tenant: false,
+			status: http.StatusInternalServerError,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.user = nil
+			},
+		},
+		{
+			name:   "wrong org",
+			tenant: false,
+			status: http.StatusForbidden,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.org = "another-org"
+			},
+		},
+		{
+			name:   "wrong role",
+			tenant: false,
+			status: http.StatusForbidden,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.user = common.TestBuildUser(t, f.db, uuid.NewString(), f.org, nil)
+			},
+		},
+		{
+			name:   "missing site",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Del("siteId")
+			},
+		},
+		{
+			name:   "malformed site",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("siteId", "invalid")
+			},
+		},
+		{
+			name:   "absent site",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("siteId", uuid.NewString())
+			},
+		},
+		{
+			name:   "unknown filter",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("tenantId", uuid.NewString())
+			},
+		},
+		{
+			name:    "negative tier",
+			tenant:  false,
+			status:  http.StatusBadRequest,
+			calls:   0,
+			message: "Invalid routing profile query",
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("minimumAccessTier", "-1")
+			},
+		},
+		{
+			name:   "overflow tier",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("minimumAccessTier", "4294967296")
+			},
+		},
+		{
+			name:   "invalid boolean",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("internal", "not-bool")
+			},
+		},
+		{
+			name:   "bad page size",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("pageSize", "101")
+			},
+		},
+		{
+			name:   "unsupported ordering",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("orderBy", "ACCESS_TIER_ASC")
+			},
+		},
+		{
+			name:   "unregistered site",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				_, err := f.db.DB.NewUpdate().Model(f.site).Set("status = ?", cdbm.SiteStatusPending).WherePK().Exec(context.Background())
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:   "native networking required",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				_, err := cdbm.NewSiteDAO(f.db).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID,
+					Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(false)}})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:    "missing Site client stops before Core queries",
+			tenant:  true,
+			status:  http.StatusInternalServerError,
+			calls:   0,
+			message: "Failed to retrieve client for Site",
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.scp = sc.NewClientPool(&cconfig.TemporalConfig{
+					Host: "%",
+					Port: 7233,
+				})
+			},
+		},
+		{
+			name:    "Tenant query failure stops before default profile lookup",
+			tenant:  true,
+			status:  http.StatusServiceUnavailable,
+			calls:   1,
+			message: "Tenant query unavailable",
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.readErr = tp.NewNonRetryableApplicationError("Tenant query unavailable", swe.ErrTypeNICoUnavailable, nil)
+			},
+		},
+		{
+			name:    "default profile query failure stops before listing",
+			tenant:  true,
+			status:  http.StatusServiceUnavailable,
+			calls:   2,
+			message: "Default profile query unavailable",
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.defaultProfileErr = tp.NewNonRetryableApplicationError("Default profile query unavailable", swe.ErrTypeNICoUnavailable, nil)
+			},
+		},
+		{
+			name:   "missing tenant on site",
+			tenant: true,
+			status: http.StatusNotFound,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.current.Tenant = nil
+			},
+		},
+		{
+			name:   "mismatched tenant fails closed",
+			tenant: true,
+			status: http.StatusInternalServerError,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.current.Tenant.OrganizationId = "other-tenant"
+			},
+		},
+		{
+			name:   "missing default selection fails closed",
+			tenant: true,
+			status: http.StatusInternalServerError,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.current.Tenant.RoutingProfileType = nil
+			},
+		},
+		{
+			name:   "missing default definition fails closed",
+			tenant: true,
+			status: http.StatusInternalServerError,
+			calls:  2,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.defaultProfile.Profiles = nil
+			},
+		},
+		{
+			name:   "missing default config fails closed",
+			tenant: true,
+			status: http.StatusInternalServerError,
+			calls:  2,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.defaultProfile.Profiles[0].Config = nil
+			},
+		},
+		{
+			name:   "name query error propagates",
+			tenant: false,
+			status: http.StatusServiceUnavailable,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.namesErr = tp.NewNonRetryableApplicationError("Core unavailable", swe.ErrTypeNICoUnavailable, nil)
+			},
+		},
+		{
+			name:   "empty list skips definition RPC",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.names.Names = nil
+				f.expectedNames = nil
+			},
+		},
+		{
+			name:   "page beyond end skips definition RPC",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("pageNumber", "2")
+				f.expectedNames = nil
+			},
+		},
+		{
+			name:   "sorted descending page fetches only selected definitions",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  2,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("pageSize", "1")
+				f.query.Set("pageNumber", "2")
+				f.query.Set("orderBy", "NAME_DESC")
+				f.names.Names = []string{"A", "EDGE", "Z"}
+			},
+		},
+		{
+			name:   "lower tier after discovery cannot leak",
+			tenant: true,
+			status: http.StatusConflict,
+			calls:  4,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profiles.Profiles[0].Config.AccessTier = cutil.GetPtr(uint32(1))
+			},
+		},
+		{
+			name:   "profile removed after discovery fails",
+			tenant: false,
+			status: http.StatusConflict,
+			calls:  2,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profiles.Profiles = nil
+			},
+		},
+		{
+			name:   "unexpected profile cannot leak",
+			tenant: false,
+			status: http.StatusInternalServerError,
+			calls:  2,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profiles.Profiles[0].Name = "OTHER"
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newProfileQueryFixture(t, tc.tenant)
+			if tc.prepare != nil {
+				tc.prepare(t, f)
+			}
+			var methods []string
+			var requests []proto.Message
+			var responses []proto.Message
+			var errors []error
+			if tc.tenant {
+				methods = append(methods, corev1.Forge_FindTenant_FullMethodName, corev1.Forge_FindRoutingProfilesByNames_FullMethodName)
+				requests = append(requests, &corev1.FindTenantRequest{TenantOrganizationId: f.tenant.Org}, &corev1.RoutingProfilesByNamesRequest{Names: []string{"EXTERNAL"}})
+				responses = append(responses, f.current, f.defaultProfile)
+				errors = append(errors, f.readErr, f.defaultProfileErr)
+			}
+			methods = append(methods, corev1.Forge_FindRoutingProfileNames_FullMethodName)
+			requests = append(requests, &f.filter)
+			responses = append(responses, &f.names)
+			errors = append(errors, f.namesErr)
+			methods = append(methods, corev1.Forge_FindRoutingProfilesByNames_FullMethodName)
+			requests = append(requests, &corev1.RoutingProfilesByNamesRequest{Names: f.expectedNames})
+			responses = append(responses, f.profiles)
+			errors = append(errors, f.profilesErr)
+			for i := range tc.calls {
+				f.expectProxy(t, methods[i], responses[i], errors[i])
+			}
+			path := "/org/:orgName/nico/vpc/routing-profile"
+			target := "/org/" + f.org + "/nico/vpc/routing-profile"
+
+			e := echo.New()
+			h := NewGetAllVPCRoutingProfileDefinitionHandler(f.db, f.scp)
+			e.GET(path, h.Handle, func(next echo.HandlerFunc) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					c.Set("user", f.user)
+					return next(c)
+				}
+			})
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target+"?"+f.query.Encode(), nil))
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			if tc.message != "" {
+				assert.Contains(t, rec.Body.String(), tc.message)
+			}
+			require.Len(t, f.calls, tc.calls)
+			f.client.AssertExpectations(t)
+			for i, call := range f.calls {
+				got := requests[i].ProtoReflect().New().Interface()
+				require.NoError(t, protojson.Unmarshal(call.RequestJSON, got))
+				assert.True(t, proto.Equal(requests[i], got), "call %d: want %v, got %v", i, requests[i], got)
+				assert.Empty(t, call.EncryptedSecrets)
+			}
+			if tc.status == http.StatusOK {
+				var payload any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+				items := payload.([]any)
+				require.Len(t, items, len(f.expectedNames))
+				for i, name := range f.expectedNames {
+					item := items[i].(map[string]any)
+					assert.Equal(t, name, item["name"])
+					assert.Contains(t, item["config"], "accessTier")
+				}
+				var page pagination.PageResponse
+				require.NoError(t, json.Unmarshal([]byte(rec.Header().Get(pagination.ResponseHeaderName)), &page))
+				assert.Equal(t, len(f.names.Names), page.Total)
+				if f.query.Get("pageNumber") == "2" {
+					assert.Equal(t, 2, page.PageNumber)
+				} else {
+					assert.Equal(t, 1, page.PageNumber)
+				}
+				if f.query.Get("pageSize") == "1" {
+					assert.Equal(t, 1, page.PageSize)
+					assert.Equal(t, "NAME_DESC", *page.OrderBy)
+				} else {
+					assert.Equal(t, 20, page.PageSize)
+					assert.Equal(t, "NAME_ASC", *page.OrderBy)
+				}
+			}
+		})
+	}
+}
+
+func TestGetVPCRoutingProfileDefinitionHandler_Handle(t *testing.T) {
+	cases := []struct {
+		name    string
+		tenant  bool
+		prepare func(*testing.T, *profileQueryFixture)
+		status  int
+		calls   int
+		message string
+	}{
+		{
+			name:   "provider viewer can read",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.user = common.TestBuildUser(t, f.db, uuid.NewString(), f.org, []string{authz.ProviderViewerRole})
+			},
+		},
+		{
+			name:   "unprivileged tenant denied detail",
+			tenant: true,
+			status: http.StatusForbidden,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.setPrivilege(t, false)
+			},
+		},
+		{
+			name:   "definition query error propagates",
+			tenant: false,
+			status: http.StatusServiceUnavailable,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profilesErr = tp.NewNonRetryableApplicationError("Core unavailable", swe.ErrTypeNICoUnavailable, nil)
+			},
+		},
+		{
+			name:   "tenant reads equal tier",
+			tenant: true,
+			status: http.StatusOK,
+			calls:  3,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profiles.Profiles[0].Config.AccessTier = cutil.GetPtr(uint32(2))
+			},
+		},
+		{
+			name:   "tenant reads higher tier",
+			tenant: true,
+			status: http.StatusOK,
+			calls:  3,
+		},
+		{
+			name:    "tenant lower tier denied",
+			tenant:  true,
+			status:  http.StatusForbidden,
+			calls:   3,
+			message: "access tier lower",
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profiles.Profiles[0].Config.AccessTier = cutil.GetPtr(uint32(1))
+			},
+		},
+		{
+			name:   "tenant unset target tier is zero",
+			tenant: true,
+			status: http.StatusForbidden,
+			calls:  3,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profiles.Profiles[0].Config.AccessTier = nil
+			},
+		},
+		{
+			name:   "provider can read tier zero",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profiles.Profiles[0].Config.AccessTier = nil
+			},
+		},
+		{
+			name:   "exact escaped profile name",
+			tenant: false,
+			status: http.StatusOK,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profileName = "edge+%/租户"
+				f.expectedNames = []string{f.profileName}
+				f.profiles.Profiles[0].Name = f.profileName
+			},
+		},
+		{
+			name:   "invalid UTF-8 profile name is a client error",
+			status: http.StatusBadRequest,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profileName = string([]byte{0xff})
+			},
+		},
+		{
+			name:   "missing named profile",
+			tenant: false,
+			status: http.StatusNotFound,
+			calls:  1,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.profiles.Profiles = nil
+			},
+		},
+		{
+			name:   "detail rejects list filters",
+			tenant: false,
+			status: http.StatusBadRequest,
+			calls:  0,
+			prepare: func(t *testing.T, f *profileQueryFixture) {
+				f.query.Set("minimumAccessTier", "5")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newProfileQueryFixture(t, tc.tenant)
+			if tc.prepare != nil {
+				tc.prepare(t, f)
+			}
+			var methods []string
+			var requests []proto.Message
+			var responses []proto.Message
+			var errors []error
+			if tc.tenant {
+				methods = append(methods, corev1.Forge_FindTenant_FullMethodName, corev1.Forge_FindRoutingProfilesByNames_FullMethodName)
+				requests = append(requests, &corev1.FindTenantRequest{TenantOrganizationId: f.tenant.Org}, &corev1.RoutingProfilesByNamesRequest{Names: []string{"EXTERNAL"}})
+				responses = append(responses, f.current, f.defaultProfile)
+				errors = append(errors, f.readErr, nil)
+			}
+
+			methods = append(methods, corev1.Forge_FindRoutingProfilesByNames_FullMethodName)
+			requests = append(requests, &corev1.RoutingProfilesByNamesRequest{Names: f.expectedNames})
+			responses = append(responses, f.profiles)
+			errors = append(errors, f.profilesErr)
+			for i := range tc.calls {
+				f.expectProxy(t, methods[i], responses[i], errors[i])
+			}
+			path := "/org/:orgName/nico/vpc/routing-profile"
+			target := "/org/" + f.org + "/nico/vpc/routing-profile"
+			path += "/:profileName"
+			target += "/" + url.PathEscape(f.profileName)
+			e := echo.New()
+			h := NewGetVPCRoutingProfileDefinitionHandler(f.db, f.scp)
+			e.GET(path, h.Handle, func(next echo.HandlerFunc) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					c.Set("user", f.user)
+					return next(c)
+				}
+			})
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target+"?"+f.query.Encode(), nil))
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			if tc.message != "" {
+				assert.Contains(t, rec.Body.String(), tc.message)
+			}
+			require.Len(t, f.calls, tc.calls)
+			f.client.AssertExpectations(t)
+			for i, call := range f.calls {
+				got := requests[i].ProtoReflect().New().Interface()
+				require.NoError(t, protojson.Unmarshal(call.RequestJSON, got))
+				assert.True(t, proto.Equal(requests[i], got), "call %d: want %v, got %v", i, requests[i], got)
+				assert.Empty(t, call.EncryptedSecrets)
+			}
+			if tc.status == http.StatusOK {
+				var payload any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+				item := payload.(map[string]any)
+				assert.Equal(t, f.profileName, item["name"])
+				assert.Contains(t, item["config"], "routeTargetImports")
+				assert.Empty(t, rec.Header().Get(pagination.ResponseHeaderName))
+			}
+		})
+	}
+}
+
+type profileQueryFixture struct {
+	*tenantRoutingProfileFixture
+	profileName       string
+	query             url.Values
+	filter            corev1.RoutingProfileSearchFilter
+	names             corev1.RoutingProfileNameList
+	expectedNames     []string
+	defaultProfile    *corev1.NamedRoutingProfileList
+	profiles          *corev1.NamedRoutingProfileList
+	namesErr          error
+	profilesErr       error
+	defaultProfileErr error
+}
+
+func newProfileQueryFixture(t *testing.T, tenant bool) *profileQueryFixture {
+	t.Helper()
+	base := newTenantRoutingProfileFixture(t)
+	f := &profileQueryFixture{
+		tenantRoutingProfileFixture: base,
+		profileName:                 "EDGE",
+		query:                       url.Values{"siteId": []string{base.siteID}},
+		names:                       corev1.RoutingProfileNameList{Names: []string{"EDGE"}},
+		expectedNames:               []string{"EDGE"},
+		defaultProfile: &corev1.NamedRoutingProfileList{Profiles: []*corev1.NamedRoutingProfile{{
+			Name:   "EXTERNAL",
+			Config: &corev1.NamedRoutingProfileConfig{AccessTier: cutil.GetPtr(uint32(2))},
+		}}},
+		profiles: &corev1.NamedRoutingProfileList{Profiles: []*corev1.NamedRoutingProfile{{
+			Name:   "EDGE",
+			Config: &corev1.NamedRoutingProfileConfig{AccessTier: cutil.GetPtr(uint32(3))},
+		}}},
+	}
+	if tenant {
+		f.org = f.tenant.Org
+		f.user = common.TestBuildUser(t, f.db, uuid.NewString(), f.org, []string{authz.TenantAdminRole})
+		f.setPrivilege(t, true)
+		f.filter.MinimumAccessTier = cutil.GetPtr(uint32(2))
+	}
+	return f
+}
+
+func TestFindNamedRoutingProfiles(t *testing.T) {
+	cases := []struct {
+		name      string
+		names     []string
+		errorType string
+		status    int
+	}{
+		{
+			name:      "multi-name validation error is preserved",
+			names:     []string{"A", "B"},
+			errorType: swe.ErrTypeNICoInvalidArgument,
+			status:    http.StatusBadRequest,
+		},
+		{
+			name:      "single-name validation error is preserved",
+			names:     []string{"A"},
+			errorType: swe.ErrTypeNICoInvalidArgument,
+			status:    http.StatusBadRequest,
+		},
+		{
+			name:      "unavailable does not trigger more reads",
+			names:     []string{"A", "B"},
+			errorType: swe.ErrTypeNICoUnavailable,
+			status:    http.StatusServiceUnavailable,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &tenantRoutingProfileFixture{client: &tmocks.Client{}}
+			method := corev1.Forge_FindRoutingProfilesByNames_FullMethodName
+			f.expectProxy(t, method, &corev1.NamedRoutingProfileList{}, tp.NewNonRetryableApplicationError("query rejected", tc.errorType, nil))
+			profiles, apiErr := findNamedRoutingProfiles(context.Background(), f.client, tc.names)
+			f.client.AssertExpectations(t)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.status, apiErr.Code)
+			require.Len(t, f.calls, 1)
+			assert.Nil(t, profiles)
+			var request corev1.RoutingProfilesByNamesRequest
+			require.NoError(t, protojson.Unmarshal(f.calls[0].RequestJSON, &request))
+			assert.Equal(t, tc.names, request.Names)
 		})
 	}
 }

@@ -44,7 +44,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"tenant":                    7,
 		"tenant-account":            5,
 		"site":                      6,
-		"vpc":                       10,
+		"vpc":                       12,
 		"vpcpeering":                4,
 		"vpcprefix":                 5,
 		"ip-block":                  6,
@@ -199,10 +199,23 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodPatch, tenantPath+"/current/routing-profile")
 			assertRouteExists(t, got, http.MethodPatch, tenantPath+"/:id/routing-profile")
 			assertRouteBefore(t, got, http.MethodPatch, tenantPath+"/current/routing-profile", http.MethodPatch, tenantPath+"/:id/routing-profile")
+			profileDefinitionsPath := "/org/:orgName/" + cfg.GetAPIName() + "/vpc/routing-profile"
+			assertRouteExists(t, got, http.MethodGet, profileDefinitionsPath)
+			assertRouteExists(t, got, http.MethodGet, profileDefinitionsPath+"/:profileName")
 			for _, route := range got {
-				assert.NotEqual(t, tenantPath+"/account/:id/routing-profile", route.Path)
+				if route.Method != http.MethodGet {
+					continue
+				}
+				switch route.Path {
+				case profileDefinitionsPath:
+					assert.IsType(t, apiHandler.GetAllVPCRoutingProfileDefinitionHandler{}, route.Handler)
+				case profileDefinitionsPath + "/:profileName":
+					assert.IsType(t, apiHandler.GetVPCRoutingProfileDefinitionHandler{}, route.Handler)
+				}
 			}
+			assertRouteBefore(t, got, http.MethodGet, profileDefinitionsPath, http.MethodGet, "/org/:orgName/"+cfg.GetAPIName()+"/vpc/:id")
 			vpcRoutingProfilePath := "/org/:orgName/" + cfg.GetAPIName() + "/vpc/:id/routing-profile"
+			assertRouteBefore(t, got, http.MethodGet, profileDefinitionsPath+"/:profileName", http.MethodGet, vpcRoutingProfilePath)
 			assertRouteExists(t, got, http.MethodGet, vpcRoutingProfilePath)
 			assertRouteExists(t, got, http.MethodPatch, vpcRoutingProfilePath)
 			assertRouteExists(t, got, http.MethodPost, vpcRoutingProfilePath+"/release-inactive-vni")

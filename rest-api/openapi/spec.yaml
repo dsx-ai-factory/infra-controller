@@ -588,11 +588,12 @@ paths:
       tags:
         - Tenant
       description: |-
-        Change the current Tenant's default VPC routing profile at one Site. Requires `TENANT_ADMIN` authorization and effective TargetedInstanceCreation for this Tenant at the requested Site. A Site-specific override takes precedence over the Ready Tenant Account's default privilege. The Site must be Registered with native networking enabled. The target Tenant is always resolved from the request organization.
+        Change the current Tenant's default VPC routing profile at one Site. Requires `TENANT_ADMIN` authorization and effective TargetedInstanceCreation for this Tenant at the requested Site. 
 
-        The profile must exist in the Site configuration. The aliases `external`, `internal`, and `privileged-internal` select the built-in profiles; other configured names are case-sensitive and passed unchanged. The default cannot be cleared. Both request fields are required; omission, null, or an empty value is rejected.
+        A Tenant may only select a profile whose access tier is numerically greater than or equal to that of its current default routing profile. Unset tiers count as zero.
 
-        The Tenant must have no active FNN VPCs when changing the profile. Reapplying the same profile is allowed. Existing VPCs are not modified. Tenant metadata is preserved, and a concurrent Tenant change causes a 412 response instead of overwriting newer state. A timeout does not prove the update failed; inspect the Tenant's default before retrying.
+        The Tenant must have no active FNN VPCs when changing the profile.
+
       requestBody:
         required: true
         content:
@@ -823,11 +824,12 @@ paths:
       tags:
         - Tenant
       description: |-
-        Change the Tenant's default VPC routing profile at one Site. The path parameter is a Tenant ID. Requires `PROVIDER_ADMIN` authorization and a Ready Tenant Account linking that Tenant to the caller's Infrastructure Provider. The Site must belong to the same Provider, be Registered, and have native networking enabled.
+        Change the Tenant's default VPC routing profile at one Site.
 
-        The profile must exist in the Site configuration. The aliases `external`, `internal`, and `privileged-internal` select the built-in profiles; other configured names are case-sensitive and passed unchanged. The default cannot be cleared. Both request fields are required; omission, null, or an empty value is rejected.
+        The Tenant must have no active FNN VPCs when changing the profile.
 
-        The Tenant must have no active FNN VPCs when changing the profile. Reapplying the same profile is allowed. Existing VPCs are not modified. Tenant metadata is preserved, and a concurrent Tenant change causes a 412 response instead of overwriting newer state. A timeout does not prove the update failed; inspect the Tenant's default before retrying.
+        Org must have an Infrastructure Provider entity, and the specified Tenant must have a Tenant Account linking it to the Infrastructure Provider.
+        Infrastructure Provider must be the owner of the site. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
         required: true
         content:
@@ -3632,6 +3634,152 @@ paths:
           in: query
           name: orderBy
           description: Ordering for pagination query; defaults to `CREATED_ASC`
+  '/v2/org/{org}/nico/vpc/routing-profile':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the caller organization
+        schema:
+          type: string
+    get:
+      summary: List named VPC routing profiles
+      operationId: get-all-vpc-routing-profile-definition
+      tags:
+        - VPC
+      description: |-
+        Retrieve all configured routing profiles for site that the caller is eligible to see.
+
+        Org must have an Infrastructure Provider or Tenant entity. Providers require `PROVIDER_ADMIN` or `PROVIDER_VIEWER` authorization and must own the selected Site.
+        Tenants must have effective TargetedInstanceCreation at that Site and a Tenant Account with the Infrastructure Provider owning the selected Site. Tenant users must have authorization role with TENANT_ADMIN suffix.
+
+        Tenant access is bounded by the access tier of their own default routing profile on the selected Site. An unset access tier is treated as zero for authorization.
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          description: ID of Site
+          schema:
+            type: string
+            format: uuid
+        - name: internal
+          in: query
+          description: True selects internal profiles; false selects external profiles. Omission includes both. An unset configured value is treated as false.
+          schema:
+            type: boolean
+        - name: minimumAccessTier
+          in: query
+          description: Inclusive minimum access tier. Lower numbers confer broader access. An unset configured tier is zero; tenants cannot query below their default tier.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            maximum: 4294967295
+        - name: pageNumber
+          in: query
+          description: One-indexed page number
+          schema:
+            $ref: '#/components/schemas/PageNumber'
+            default: 1
+        - name: pageSize
+          in: query
+          description: Number of profiles per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: orderBy
+          in: query
+          description: Sort profiles by their exact configured name before pagination
+          schema:
+            type: string
+            enum:
+              - NAME_ASC
+              - NAME_DESC
+            default: NAME_ASC
+      responses:
+        '200':
+          description: Full configured routing profile definitions
+          headers:
+            X-Pagination:
+              description: JSON pagination metadata including pageNumber, pageSize, total, and orderBy
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VpcRoutingProfileDefinition'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/vpc/routing-profile/{profileName}':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the caller organization
+        schema:
+          type: string
+      - name: profileName
+        in: path
+        required: true
+        description: Exact, case-sensitive configured profile name. URL-encode reserved characters.
+        schema:
+          type: string
+          minLength: 1
+    get:
+      summary: Retrieve a named VPC routing profile
+      operationId: get-vpc-routing-profile-definition
+      tags:
+        - VPC
+      description: |-
+        Retrieve a full configured routing profile by its exact name.
+
+        Org must have an Infrastructure Provider or Tenant entity. Providers require `PROVIDER_ADMIN` or `PROVIDER_VIEWER` authorization and must own the selected Site. Tenants must have effective TargetedInstanceCreation at that Site and a Tenant Account with the Infrastructure Provider
+        owning the selected Site. Tenant users must have authorization role with `TENANT_ADMIN` suffix.
+
+        Tenant access is bounded by the access tier of their own default routing profile on the selected Site -- no tenant can see any profile that has a lower numeric access tier than the access tier of their own default profile. An unset access tier is treated as zero for authorization.
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          description: Id of Site
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Full configured routing profile definitions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VpcRoutingProfileDefinition'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/vpc/{vpcId}/routing-profile':
     parameters:
       - schema:
@@ -21169,11 +21317,11 @@ components:
         siteId:
           type: string
           format: uuid
-          description: Registered native-networking Site owned by the Tenant Account's Provider
+          description: Id of site for which to change tenant's default routing profile. Must be a registered native-networking Site owned by the Tenant Account's Infrastructure Provider
         defaultRoutingProfile:
           type: string
           minLength: 1
-          description: Site-configured profile name or built-in REST alias. Cannot be cleared.
+          description: Site-configured profile name. Cannot be cleared.
       required:
         - siteId
         - defaultRoutingProfile
@@ -22699,6 +22847,7 @@ components:
           minimum: 0
           maximum: 4294967295
           description: Operator-controlled access tier inherited from the named profile.
+          example: 1
       required:
         - routeTargetImports
         - routeTargetsOnExports
@@ -22865,6 +23014,50 @@ components:
         labels:
           $ref: '#/components/schemas/Labels'
           description: 'Update labels of the VPC. Up to 10 key-value pairs can be specified. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.'
+    VpcRoutingProfileDefinition:
+      title: VpcRoutingProfileDefinition
+      type: object
+      description: Full named base definition from the selected Site, before VPC overrides or effective defaults.
+      required:
+        - name
+        - config
+      properties:
+        name:
+          type: string
+          description: Exact configured profile name, without alias normalization.
+        config:
+          $ref: '#/components/schemas/VpcRoutingProfileDefinitionConfig'
+    VpcRoutingProfileDefinitionConfig:
+      title: VpcRoutingProfileDefinitionConfig
+      description: Configured properties of a named profile. Null means unset; explicit false, zero, and empty arrays are preserved.
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - internal
+        - accessTier
+      allOf:
+        - $ref: '#/components/schemas/VpcRoutingProfileOverrides'
+        - type: object
+          required:
+            - internal
+            - accessTier
+            - tenantPrefixOverlapEligible
+          properties:
+            internal:
+              type:
+                - boolean
+                - 'null'
+              description: Whether this is an internal profile. Null is treated as false for filtering.
+            accessTier:
+              type:
+                - integer
+                - 'null'
+              format: int64
+              minimum: 0
+              maximum: 4294967295
+              description: Lower numbers permit broader access. Null is treated as zero for filtering and authorization.
+            tenantPrefixOverlapEligible:
+              type: boolean
+              description: Profile opt-in to tenant prefix reuse; this alone does not establish eligibility.
     VpcRoutingProfileUpdateRequest:
       title: VpcRoutingProfileUpdateRequest
       type: object

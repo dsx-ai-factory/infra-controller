@@ -120,6 +120,7 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("tenant", s.fetchTenants)
 	s.Resolver.RegisterFetcher("tray-component", s.fetchTrayComponents)
 	s.Resolver.RegisterFetcher("domain", s.fetchNVLinkDomains)
+	s.Resolver.RegisterFetcher("vpc-routing-profile-definition", s.fetchVPCRoutingProfileDefinitions)
 }
 
 // fetchAll fetches all pages from a list endpoint and returns raw JSON objects.

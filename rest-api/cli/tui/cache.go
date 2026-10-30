@@ -61,7 +61,7 @@ func (c *Cache) InvalidateFiltered() {
 		"expected-rack", "expected-rack-group", "expected-switch", "expected-power-shelf", "tray", "sku", "domain",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 		"dpu-machine", "machine-label-key", "expected-machine-label-key", "spectrumx-partition",
-		"ipxe-template", "rule", "task-run", "vpc-peering", "tray-component"} {
+		"ipxe-template", "rule", "task-run", "vpc-peering", "tray-component", "vpc-routing-profile-definition"} {
 		delete(c.items, rt)
 		delete(c.fetched, rt)
 	}
