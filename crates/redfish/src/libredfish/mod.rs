@@ -522,13 +522,16 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
                     .map_err(|err| redact_password(err, curr_password.as_str()))
                     .map_err(RedfishClientCreationError::RedfishError)?;
             }
-            // AMI-based BMCs, including Vikings and Lenovo GB300s.
+            // AMI-based BMCs, including Vikings, Lenovo GB300s and Giga Computing.
             // Resolve the admin account by username. If reads are blocked by
             // `PasswordChangeRequired`, use its account URI or fall back to id "2".
             // Any other error propagates.
             //
             // https://docs.nvidia.com/dgx/dgxh100-user-guide/redfish-api-supp.html
-            RedfishVendor::AMI | RedfishVendor::LenovoAMI | RedfishVendor::LenovoGB300 => {
+            RedfishVendor::AMI
+            | RedfishVendor::LenovoAMI
+            | RedfishVendor::LenovoGB300
+            | RedfishVendor::GigaComputingAMI => {
                 match client
                     .change_password(curr_user.as_str(), new_password.as_str())
                     .await
