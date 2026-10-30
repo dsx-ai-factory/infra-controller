@@ -1,0 +1,8 @@
+apiVersion: v2
+name: nico-unbound-local
+description: Per-VPC Unbound resolver for NICo DPU services
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+annotations:
+  dpu.nvidia.com/doca-version: ">= 2.9"

@@ -1,0 +1,35 @@
+suite: native Unbound configuration
+templates:
+  - configmap.yaml
+  - daemonset.yaml
+values:
+  - ./values.yaml
+tests:
+  # Core renders the complete Unbound text; the chart stores it byte for byte
+  # and never treats it as a template.
+  - it: stores unboundConfig literally
+    template: configmap.yaml
+    set:
+      unboundConfig: |
+        server:
+            interface: 198.51.100.251
+        # {{ fail "not a Helm template" }}
+    asserts:
+      - equal:
+          path: data["unbound.conf"]
+          value: |
+            server:
+                interface: 198.51.100.251
+            # {{ fail "not a Helm template" }}
+
+  # A configuration change must restart the pods: the pod template carries the
+  # sha256 of the text, so a new ConfigMap content always rolls the DaemonSet.
+  - it: pins the pod template to the configuration checksum
+    template: daemonset.yaml
+    set:
+      unboundConfig: |
+        server:
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["checksum/config"]
+          value: cf7ac1f7919cdf8ce6a85e554dceb9325790a63cf7307e368076c9f309fd9c4e
