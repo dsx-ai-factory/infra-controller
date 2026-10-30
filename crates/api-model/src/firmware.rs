@@ -17,7 +17,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fmt::{Debug, Display};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use regex::Regex;
@@ -470,14 +470,88 @@ fn firmware_file_artifact_location_is_set(value: &Option<String>) -> bool {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ScoutConfigWire")]
 pub struct ScoutConfig {
-    /// Legacy script metadata accepted for backwards-compatible config parsing.
-    /// Scout script selection is inferred from the PXE script registry.
+    /// Script Scout downloads from `url` and checks against `sha256`. Without a
+    /// `url`, NICo uses the script packaged for the host's vendor, model and
+    /// component. A `filename` is accepted for configs written for NICo v0.10
+    /// and ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<FirmwareFileArtifact>,
+    /// Applies to the script named by `script.url`; a packaged script uses the
+    /// timeouts in its own metadata.
     pub execution_timeout_seconds: u32,
     pub artifact_download_timeout_seconds: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScoutConfigWire {
+    #[serde(default)]
+    script: Option<FirmwareFileArtifact>,
+    execution_timeout_seconds: u32,
+    artifact_download_timeout_seconds: u32,
+}
+
+impl TryFrom<ScoutConfigWire> for ScoutConfig {
+    type Error = String;
+
+    fn try_from(wire: ScoutConfigWire) -> Result<Self, String> {
+        // Scout compares the digest as lowercase hex, as the Host Firmware
+        // Config API stores artifact digests.
+        let script = wire.script.map(|script| FirmwareFileArtifact {
+            sha256: script.sha256.trim().to_ascii_lowercase(),
+            ..script
+        });
+        let config = Self {
+            script,
+            execution_timeout_seconds: wire.execution_timeout_seconds,
+            artifact_download_timeout_seconds: wire.artifact_download_timeout_seconds,
+        };
+        if let Some((url, sha256)) = config.script_url() {
+            validate_scout_script(&config, url, sha256)?;
+        }
+        Ok(config)
+    }
+}
+
+impl ScoutConfig {
+    /// Returns the URL and SHA-256 of the script Scout downloads directly, or
+    /// `None` when NICo should use its packaged script.
+    pub fn script_url(&self) -> Option<(&str, &str)> {
+        let script = self.script.as_ref()?;
+        let url = script
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())?;
+        Some((url, &script.sha256))
+    }
+}
+
+/// Checks what Scout needs to run a script named by URL: an HTTPS URL ending
+/// in a file name, a SHA-256 digest, and non-zero timeouts.
+fn validate_scout_script(config: &ScoutConfig, url: &str, sha256: &str) -> Result<(), String> {
+    let parsed =
+        url::Url::parse(url).map_err(|error| format!("invalid scout script url {url}: {error}"))?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(format!("scout script url must be https with a host: {url}"));
+    }
+    // Scout names the downloaded script after the last path segment and
+    // rejects the URL before downloading when that is not a file name.
+    let names_file = parsed
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_some_and(|segment| Path::new(segment).file_name().is_some());
+    if !names_file {
+        return Err(format!("scout script url must end in a file name: {url}"));
+    }
+    hex::decode_to_slice(sha256, &mut [0u8; 32])
+        .map_err(|error| format!("invalid scout script sha256 {sha256:?}: {error}"))?;
+    if config.execution_timeout_seconds == 0 || config.artifact_download_timeout_seconds == 0 {
+        return Err("scout timeouts must be non-zero when script url is set".to_string());
+    }
+    Ok(())
 }
 
 impl FirmwareEntry {
@@ -615,7 +689,8 @@ pub struct InstalledFirmwareEntry {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::value_scenarios;
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
     use crate::site_explorer::Inventory;
@@ -947,6 +1022,55 @@ sha256 = "abc123"
             error
                 .to_string()
                 .contains("firmware files[] artifact must set filename or url")
+        );
+    }
+
+    /// A Scout script named by URL is used only when Scout can run it; a
+    /// timeout-only block or a v0.10 `filename` keeps the packaged script.
+    #[test]
+    fn scout_config_script_url() {
+        const SHA256: &str = "1c3ce0b4b793cc18232bf5ca542dba93f285873be76f18a8f75368ced95e812d";
+        const URL: &str = "https://scripts.example/cx7/upgrade.sh";
+        let scout = |script: &str, execution_timeout_seconds: u32| {
+            format!(
+                "execution_timeout_seconds = {execution_timeout_seconds}\n\
+                 artifact_download_timeout_seconds = 600\n{script}"
+            )
+        };
+        let script = |location: &str, sha256: &str| {
+            scout(
+                &format!("[script]\n{location}\nsha256 = \"{sha256}\"\n"),
+                1800,
+            )
+        };
+
+        scenarios!(
+            run = |input: String| {
+                toml::from_str::<ScoutConfig>(&input)
+                    .map(|config| {
+                        config
+                            .script_url()
+                            .map(|(url, sha256)| (url.to_string(), sha256.to_string()))
+                    })
+                    .map_err(drop)
+            };
+            "without a url the packaged script is used" {
+                scout("", 1800) => Yields(None),
+                script("filename = \"/opt/carbide/firmware/cx7/upgrade.sh\"", SHA256) => Yields(None),
+            }
+            "an https url is used, with its sha256 lowercased" {
+                script(&format!("url = \"{URL}\""), SHA256) => Yields(Some((URL.to_string(), SHA256.to_string()))),
+                script(&format!("url = \"{URL}\""), &SHA256.to_uppercase()) => Yields(Some((URL.to_string(), SHA256.to_string()))),
+            }
+            "a script Scout cannot run is rejected" {
+                script("url = \"http://scripts.example/cx7/upgrade.sh\"", SHA256) => Fails,
+                script("url = \"upgrade.sh\"", SHA256) => Fails,
+                script("url = \"https://scripts.example/\"", SHA256) => Fails,
+                script("url = \"https://scripts.example/cx7/..\"", SHA256) => Fails,
+                script(&format!("url = \"{URL}\""), &SHA256[..63]) => Fails,
+                script(&format!("url = \"{URL}\""), "") => Fails,
+                scout(&format!("[script]\nurl = \"{URL}\"\nsha256 = \"{SHA256}\"\n"), 0) => Fails,
+            }
         );
     }
 }
