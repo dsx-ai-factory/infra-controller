@@ -2860,8 +2860,7 @@ where
 ///
 /// The caller supplies `new_version` for every machine and its history entry.
 /// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
-/// version changed, or a rack Reset request was cancelled/replaced; no state or
-/// history changes remain. Successful writes return
+/// version changed; no state or history changes remain. Successful writes return
 /// `Applied(())` and remain in the caller's transaction. Database failures remain
 /// errors.
 pub async fn try_update_controller_state(
@@ -2885,19 +2884,10 @@ pub async fn try_update_controller_state(
     )
     .await?;
 
-    // A cancelled rack Reset must not be claimed from a stale controller snapshot.
-    let maintenance_request = match new_state {
-        ManagedHostState::Maintenance {
-            operation: MachineMaintenanceOperation::Reset,
-            request: Some(request),
-        } if request.initiator.starts_with("rack-") => Some(request),
-        _ => None,
-    };
     let query = r#"
         UPDATE machines
         SET controller_state_version = $1, controller_state = $2
         WHERE id = $3 AND controller_state_version = $4
-          AND ($5::jsonb IS NULL OR machine_maintenance_requested = $5)
         RETURNING id
     "#;
     let updated: Option<HostMachineId> = sqlx::query_scalar(query)
@@ -2905,7 +2895,6 @@ pub async fn try_update_controller_state(
         .bind(sqlx::types::Json(new_state))
         .bind(host_id)
         .bind(expected_version)
-        .bind(maintenance_request.map(sqlx::types::Json))
         .fetch_optional(inner_txn.as_pgconn())
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -5864,25 +5853,6 @@ mod test {
                 after.machine_maintenance_requested,
                 (!should_clear).then_some(request)
             );
-            if should_clear {
-                // A controller that read the request before cancellation cannot resurrect it.
-                assert_eq!(
-                    super::try_update_controller_state(
-                        txn.as_mut(),
-                        &machine_id,
-                        machine.state.version,
-                        machine.state.version.increment(),
-                        &claimed_state
-                    )
-                    .await?,
-                    crate::ConditionalWrite::NotApplied(super::ControllerStateNotCurrent)
-                );
-                let after = super::find_one(txn.as_mut(), &machine_id, Default::default())
-                    .await?
-                    .unwrap();
-                assert_eq!(after.state.value, machine.state.value);
-                assert_eq!(after.state.version, machine.state.version);
-            }
             txn.rollback().await?;
         }
         Ok(())
