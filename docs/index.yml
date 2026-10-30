@@ -401,6 +401,9 @@ navigation:
                   path: development/flow/task-schedule-internals.md
             - page: Instrumentation
               path: observability/instrumentation.md
+            - page: Barrier-Free Site Exploration (Proposal)
+              path: design/barrier-free-site-exploration/README.md
+              slug: barrier-free-site-exploration
             - page: Running a PXE Client in a VM
               path: development/vm_pxe_client.md
             - page: TLS and SPIFFE Certificates
