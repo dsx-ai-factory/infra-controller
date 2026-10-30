@@ -3502,8 +3502,6 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tracing",
- "tracing-opentelemetry 0.33.0",
- "tracing-subscriber",
  "uuid",
  "version-compare 0.2.1",
 ]
