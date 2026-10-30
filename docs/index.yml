@@ -269,6 +269,8 @@ navigation:
           path: operations/leak-detection-handling.md
         - section: Managing VPCs
           contents:
+            - page: Tenant Connectivity and Shared Services
+              path: manuals/vpc/tenant_connectivity.md
             - page: VPC Routing Profiles
               path: manuals/vpc/vpc_routing_profiles.md
             - page: Changing a VPC Routing Profile
