@@ -30,7 +30,7 @@ type TrayFilter struct {
 	Type *string `json:"type,omitempty"`
 	// Filter by component ID
 	Ids []string `json:"ids,omitempty"`
-	// Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
+	// Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter using AND.
 	SlotId *int32 `json:"slotId,omitempty"`
 }
 

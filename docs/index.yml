@@ -372,6 +372,277 @@ navigation:
         - page: NVLink Domain Health Reports
           path: operations/nvlink-domain-health-reports.md
 
+    - section: Automation
+      contents:
+        - section: Ansible Collection
+          contents:
+            - page: Getting Started
+              path: automation/ansible/getting-started.md
+            - section: Module Reference
+              contents:
+                - page: Module Index
+                  path: automation/ansible/modules/index.md
+                - page: allocation
+                  path: automation/ansible/modules/allocation.md
+                - page: allocation_constraint
+                  path: automation/ansible/modules/allocation_constraint.md
+                - page: allocation_info
+                  path: automation/ansible/modules/allocation_info.md
+                - page: audit_info
+                  path: automation/ansible/modules/audit_info.md
+                - page: credential_bmc
+                  path: automation/ansible/modules/credential_bmc.md
+                - page: credential_rotation
+                  path: automation/ansible/modules/credential_rotation.md
+                - page: credential_rotation_info
+                  path: automation/ansible/modules/credential_rotation_info.md
+                - page: credential_uefi
+                  path: automation/ansible/modules/credential_uefi.md
+                - page: domain_nvlink_firmware
+                  path: automation/ansible/modules/domain_nvlink_firmware.md
+                - page: domain_nvlink_info
+                  path: automation/ansible/modules/domain_nvlink_info.md
+                - page: domain_nvlink_power
+                  path: automation/ansible/modules/domain_nvlink_power.md
+                - page: dpu_extension_service
+                  path: automation/ansible/modules/dpu_extension_service.md
+                - page: dpu_extension_service_info
+                  path: automation/ansible/modules/dpu_extension_service_info.md
+                - page: dpu_machine_info
+                  path: automation/ansible/modules/dpu_machine_info.md
+                - page: expected_machine
+                  path: automation/ansible/modules/expected_machine.md
+                - page: expected_machine_all
+                  path: automation/ansible/modules/expected_machine_all.md
+                - page: expected_machine_info
+                  path: automation/ansible/modules/expected_machine_info.md
+                - page: expected_machine_label_key_info
+                  path: automation/ansible/modules/expected_machine_label_key_info.md
+                - page: expected_machine_label_key_value_info
+                  path: automation/ansible/modules/expected_machine_label_key_value_info.md
+                - page: expected_power_shelf
+                  path: automation/ansible/modules/expected_power_shelf.md
+                - page: expected_power_shelf_all
+                  path: automation/ansible/modules/expected_power_shelf_all.md
+                - page: expected_power_shelf_info
+                  path: automation/ansible/modules/expected_power_shelf_info.md
+                - page: expected_rack
+                  path: automation/ansible/modules/expected_rack.md
+                - page: expected_rack_all
+                  path: automation/ansible/modules/expected_rack_all.md
+                - page: expected_rack_group
+                  path: automation/ansible/modules/expected_rack_group.md
+                - page: expected_rack_group_all
+                  path: automation/ansible/modules/expected_rack_group_all.md
+                - page: expected_rack_group_info
+                  path: automation/ansible/modules/expected_rack_group_info.md
+                - page: expected_rack_info
+                  path: automation/ansible/modules/expected_rack_info.md
+                - page: expected_switch
+                  path: automation/ansible/modules/expected_switch.md
+                - page: expected_switch_all
+                  path: automation/ansible/modules/expected_switch_all.md
+                - page: expected_switch_info
+                  path: automation/ansible/modules/expected_switch_info.md
+                - page: firmware_config_host
+                  path: automation/ansible/modules/firmware_config_host.md
+                - page: i_pxe_template_info
+                  path: automation/ansible/modules/i_pxe_template_info.md
+                - page: infiniband_partition
+                  path: automation/ansible/modules/infiniband_partition.md
+                - page: infiniband_partition_info
+                  path: automation/ansible/modules/infiniband_partition_info.md
+                - page: infrastructure_provider_info
+                  path: automation/ansible/modules/infrastructure_provider_info.md
+                - page: instance
+                  path: automation/ansible/modules/instance.md
+                - page: instance_batch
+                  path: automation/ansible/modules/instance_batch.md
+                - page: instance_info
+                  path: automation/ansible/modules/instance_info.md
+                - page: instance_nvlink_interface_info
+                  path: automation/ansible/modules/instance_nvlink_interface_info.md
+                - page: instance_type
+                  path: automation/ansible/modules/instance_type.md
+                - page: instance_type_info
+                  path: automation/ansible/modules/instance_type_info.md
+                - page: ip_block
+                  path: automation/ansible/modules/ip_block.md
+                - page: ip_block_info
+                  path: automation/ansible/modules/ip_block_info.md
+                - page: machine
+                  path: automation/ansible/modules/machine.md
+                - page: machine_bmc_reset
+                  path: automation/ansible/modules/machine_bmc_reset.md
+                - page: machine_capability_info
+                  path: automation/ansible/modules/machine_capability_info.md
+                - page: machine_chassis_reset
+                  path: automation/ansible/modules/machine_chassis_reset.md
+                - page: machine_decommission
+                  path: automation/ansible/modules/machine_decommission.md
+                - page: machine_dpu_info
+                  path: automation/ansible/modules/machine_dpu_info.md
+                - page: machine_dpu_reprovision
+                  path: automation/ansible/modules/machine_dpu_reprovision.md
+                - page: machine_health_report
+                  path: automation/ansible/modules/machine_health_report.md
+                - page: machine_health_report_info
+                  path: automation/ansible/modules/machine_health_report_info.md
+                - page: machine_info
+                  path: automation/ansible/modules/machine_info.md
+                - page: machine_label_key_info
+                  path: automation/ansible/modules/machine_label_key_info.md
+                - page: machine_label_key_value_info
+                  path: automation/ansible/modules/machine_label_key_value_info.md
+                - page: machine_power
+                  path: automation/ansible/modules/machine_power.md
+                - page: machine_spectrumx_multiplane
+                  path: automation/ansible/modules/machine_spectrumx_multiplane.md
+                - page: machine_spectrumx_multiplane_info
+                  path: automation/ansible/modules/machine_spectrumx_multiplane_info.md
+                - page: machine_validation_result_info
+                  path: automation/ansible/modules/machine_validation_result_info.md
+                - page: machine_validation_run
+                  path: automation/ansible/modules/machine_validation_run.md
+                - page: machine_validation_run_info
+                  path: automation/ansible/modules/machine_validation_run_info.md
+                - page: measured_boot_trusted_machine
+                  path: automation/ansible/modules/measured_boot_trusted_machine.md
+                - page: measured_boot_trusted_machine_info
+                  path: automation/ansible/modules/measured_boot_trusted_machine_info.md
+                - page: measured_boot_trusted_profile
+                  path: automation/ansible/modules/measured_boot_trusted_profile.md
+                - page: measured_boot_trusted_profile_info
+                  path: automation/ansible/modules/measured_boot_trusted_profile_info.md
+                - page: metadata_info
+                  path: automation/ansible/modules/metadata_info.md
+                - page: network_security_group
+                  path: automation/ansible/modules/network_security_group.md
+                - page: network_security_group_info
+                  path: automation/ansible/modules/network_security_group_info.md
+                - page: nvlink_logical_partition
+                  path: automation/ansible/modules/nvlink_logical_partition.md
+                - page: nvlink_logical_partition_info
+                  path: automation/ansible/modules/nvlink_logical_partition_info.md
+                - page: operating_system
+                  path: automation/ansible/modules/operating_system.md
+                - page: operating_system_info
+                  path: automation/ansible/modules/operating_system_info.md
+                - page: rack_bringup_info
+                  path: automation/ansible/modules/rack_bringup_info.md
+                - page: rack_firmware
+                  path: automation/ansible/modules/rack_firmware.md
+                - page: rack_health_report_info
+                  path: automation/ansible/modules/rack_health_report_info.md
+                - page: rack_info
+                  path: automation/ansible/modules/rack_info.md
+                - page: rack_power
+                  path: automation/ansible/modules/rack_power.md
+                - page: rack_task_info
+                  path: automation/ansible/modules/rack_task_info.md
+                - page: rack_validation
+                  path: automation/ansible/modules/rack_validation.md
+                - page: service_account_info
+                  path: automation/ansible/modules/service_account_info.md
+                - page: site
+                  path: automation/ansible/modules/site.md
+                - page: site_explorer_endpoint_action
+                  path: automation/ansible/modules/site_explorer_endpoint_action.md
+                - page: site_explorer_endpoint_info
+                  path: automation/ansible/modules/site_explorer_endpoint_info.md
+                - page: site_info
+                  path: automation/ansible/modules/site_info.md
+                - page: site_tenant_identity_config
+                  path: automation/ansible/modules/site_tenant_identity_config.md
+                - page: site_tenant_identity_config_info
+                  path: automation/ansible/modules/site_tenant_identity_config_info.md
+                - page: site_tenant_identity_re_encrypt
+                  path: automation/ansible/modules/site_tenant_identity_re_encrypt.md
+                - page: site_tenant_identity_token_delegation
+                  path: automation/ansible/modules/site_tenant_identity_token_delegation.md
+                - page: site_tenant_identity_token_delegation_info
+                  path: automation/ansible/modules/site_tenant_identity_token_delegation_info.md
+                - page: sku_info
+                  path: automation/ansible/modules/sku_info.md
+                - page: spectrum_x_partition
+                  path: automation/ansible/modules/spectrum_x_partition.md
+                - page: spectrum_x_partition_info
+                  path: automation/ansible/modules/spectrum_x_partition_info.md
+                - page: ssh_key
+                  path: automation/ansible/modules/ssh_key.md
+                - page: ssh_key_group
+                  path: automation/ansible/modules/ssh_key_group.md
+                - page: ssh_key_group_info
+                  path: automation/ansible/modules/ssh_key_group_info.md
+                - page: ssh_key_info
+                  path: automation/ansible/modules/ssh_key_info.md
+                - page: subnet
+                  path: automation/ansible/modules/subnet.md
+                - page: subnet_info
+                  path: automation/ansible/modules/subnet_info.md
+                - page: task_cancel
+                  path: automation/ansible/modules/task_cancel.md
+                - page: task_info
+                  path: automation/ansible/modules/task_info.md
+                - page: task_rule
+                  path: automation/ansible/modules/task_rule.md
+                - page: task_rule_info
+                  path: automation/ansible/modules/task_rule_info.md
+                - page: task_run
+                  path: automation/ansible/modules/task_run.md
+                - page: task_run_advance
+                  path: automation/ansible/modules/task_run_advance.md
+                - page: task_run_cancel
+                  path: automation/ansible/modules/task_run_cancel.md
+                - page: task_run_info
+                  path: automation/ansible/modules/task_run_info.md
+                - page: task_run_pause
+                  path: automation/ansible/modules/task_run_pause.md
+                - page: task_run_resume
+                  path: automation/ansible/modules/task_run_resume.md
+                - page: task_run_target_info
+                  path: automation/ansible/modules/task_run_target_info.md
+                - page: tenant_account
+                  path: automation/ansible/modules/tenant_account.md
+                - page: tenant_account_info
+                  path: automation/ansible/modules/tenant_account_info.md
+                - page: tenant_info
+                  path: automation/ansible/modules/tenant_info.md
+                - page: tenant_routing_profile_info
+                  path: automation/ansible/modules/tenant_routing_profile_info.md
+                - page: tray_firmware
+                  path: automation/ansible/modules/tray_firmware.md
+                - page: tray_health_report_info
+                  path: automation/ansible/modules/tray_health_report_info.md
+                - page: tray_info
+                  path: automation/ansible/modules/tray_info.md
+                - page: tray_power
+                  path: automation/ansible/modules/tray_power.md
+                - page: tray_task_info
+                  path: automation/ansible/modules/tray_task_info.md
+                - page: tray_validation
+                  path: automation/ansible/modules/tray_validation.md
+                - page: user_info
+                  path: automation/ansible/modules/user_info.md
+                - page: vpc
+                  path: automation/ansible/modules/vpc.md
+                - page: vpc_info
+                  path: automation/ansible/modules/vpc_info.md
+                - page: vpc_peering
+                  path: automation/ansible/modules/vpc_peering.md
+                - page: vpc_peering_info
+                  path: automation/ansible/modules/vpc_peering_info.md
+                - page: vpc_prefix
+                  path: automation/ansible/modules/vpc_prefix.md
+                - page: vpc_prefix_info
+                  path: automation/ansible/modules/vpc_prefix_info.md
+                - page: vpc_routing_profile
+                  path: automation/ansible/modules/vpc_routing_profile.md
+                - page: vpc_routing_profile_info
+                  path: automation/ansible/modules/vpc_routing_profile_info.md
+                - page: vpc_routing_profile_release_inactive_vni
+                  path: automation/ansible/modules/vpc_routing_profile_release_inactive_vni.md
+
     - section: Reference
       contents:
         - page: Hardware Compatibility List
