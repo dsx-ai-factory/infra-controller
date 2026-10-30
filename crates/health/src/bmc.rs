@@ -2402,7 +2402,40 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn request_concurrency_limits_parallel_transport_attempts() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        /// Reads one complete request head so the fake server cannot respond
+        /// before Hyper has finished dispatching that request.
+        async fn read_request_headers(connection: &mut tokio::net::TcpStream, request_name: &str) {
+            const HEADER_LIMIT: usize = 16 * 1024;
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                let mut headers = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    assert!(
+                        headers.len() < HEADER_LIMIT,
+                        "{request_name} headers exceed {HEADER_LIMIT} bytes"
+                    );
+                    let remaining = HEADER_LIMIT - headers.len();
+                    let read = connection
+                        .read(&mut buffer[..remaining.min(1024)])
+                        .await
+                        .expect("read test request headers");
+                    assert_ne!(
+                        read, 0,
+                        "{request_name} connection closed before request headers completed"
+                    );
+                    headers.extend_from_slice(&buffer[..read]);
+                    if headers.windows(4).any(|window| window == b"\r\n\r\n") {
+                        return;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{request_name} headers timed out"));
+        }
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -2473,6 +2506,7 @@ mod tests {
             SERVICE_ROOT_BODY.len(),
             SERVICE_ROOT_BODY,
         );
+        read_request_headers(&mut first_connection, "first request").await;
         first_connection
             .write_all(response.as_bytes())
             .await
@@ -2488,6 +2522,7 @@ mod tests {
                 .expect("second request reaches transport after permit release")
                 .expect("accept second request");
 
+        read_request_headers(&mut second_connection, "second request").await;
         second_connection
             .write_all(response.as_bytes())
             .await
