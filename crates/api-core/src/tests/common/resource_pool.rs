@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider and API fixtures for resource-pool startup tests.
+//! Provider and API fixtures for resource-pool startup and consumer tests.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -43,9 +43,19 @@ pub(in crate::tests) const SECOND_REMOTE_POOL: &str = "test-remote-manual";
 const AUTHORITY: &str = "test-fabric";
 const PROVIDER_POOL: &str = "test-integers";
 
+/// `RemotePool` binds one logical pool to the provider. Its seed range holds
+/// `start` and `start + 1` (the end is exclusive), all in its automatic or
+/// manual partition. Pick a `start` the fixture's provider serves.
+pub(in crate::tests) struct RemotePool {
+    pub(in crate::tests) name: &'static str,
+    pub(in crate::tests) start: i64,
+    pub(in crate::tests) auto_assign: bool,
+}
+
 /// `RemotePoolFixture` injects a provider below the production selection gate.
-/// Its ordinary integer pools leave mandatory Integrated pools unchanged, so
-/// startup tests exercise provider registration without changing VPC behavior.
+/// `start` binds independent integer pools and leaves mandatory Integrated
+/// pools unchanged, so startup tests exercise registration without changing
+/// VPC behavior. Consumer tests use `start_with` to move a pool they exercise.
 pub(in crate::tests) struct RemotePoolFixture {
     pub(in crate::tests) env: TestEnv,
     pub(in crate::tests) provider: ObservedProvider,
@@ -59,6 +69,35 @@ impl RemotePoolFixture {
     /// `start` prepares the provider without submitting definitions, so a test
     /// can interrupt registration during the first startup attempt.
     pub(in crate::tests) async fn start(database: PgPool) -> eyre::Result<Self> {
+        Self::start_with(
+            database,
+            &[
+                RemotePool {
+                    name: REMOTE_POOL,
+                    start: 20_001,
+                    auto_assign: true,
+                },
+                RemotePool {
+                    name: SECOND_REMOTE_POOL,
+                    start: 50_001,
+                    auto_assign: false,
+                },
+            ],
+            None,
+        )
+        .await
+    }
+
+    /// `start_with` binds `pools` to one provider pool, which returns
+    /// `route_target_policy` with every assignment. A pool the API fixture
+    /// already seeded, such as `vpc-vni`, moves to the provider before anything
+    /// allocates from it. The first pool's name is the alias each binding uses.
+    pub(in crate::tests) async fn start_with(
+        database: PgPool,
+        pools: &[RemotePool],
+        route_target_policy: Option<v1::RouteTargetPolicy>,
+    ) -> eyre::Result<Self> {
+        let alias = pools.first().expect("at least one remote pool").name;
         let mut env = create_test_env_with_overrides(
             database,
             TestEnvOverrides::no_network_segments().with_fnn_config(None),
@@ -70,15 +109,17 @@ impl RemotePoolFixture {
                     authority_id: AUTHORITY.into(),
                     pool_id: PROVIDER_POOL.into(),
                     binding_id: Uuid::new_v4().to_string(),
-                    logical_pool: REMOTE_POOL.into(),
+                    logical_pool: alias.into(),
                 },
                 v1::ValueDomain::Integer,
                 [20_001_i64, 20_002, 20_003, 50_001, 50_002]
                     .into_iter()
                     .map(Into::into)
                     .collect(),
-                None,
+                route_target_policy,
             )?,
+            allocations: Arc::default(),
+            allocate_pause: Arc::default(),
             releases: Arc::default(),
             describes: Arc::default(),
             defines: Arc::default(),
@@ -112,39 +153,61 @@ impl RemotePoolFixture {
         );
         env.config = Arc::new(config);
 
-        // Keep the API fixture's Integrated pools and add independent test pools.
-        let mut definitions = db::resource_pool::all_stored_defs(&env.pool).await?;
-        for (name, start, auto_assign) in [
-            (REMOTE_POOL, 20_001, true),
-            (SECOND_REMOTE_POOL, 50_001, false),
-        ] {
+        // Keep the API fixture's other Integrated pools. A pool it already seeded,
+        // such as `vpc-vni`, loses its Integrated inventory and binding before
+        // it moves; a new test pool has none of these rows yet.
+        let mut txn = env.pool.begin().await?;
+        let mut definitions = db::resource_pool::all_stored_defs(&mut *txn).await?;
+        for pool in pools {
+            let allocations: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM resource_pool_allocations WHERE pool_name = $1",
+            )
+            .bind(pool.name)
+            .fetch_one(&mut *txn)
+            .await?;
+            assert_eq!(
+                allocations, 0,
+                "`{}` must be unused before it moves",
+                pool.name
+            );
+            for query in [
+                "DELETE FROM resource_pool WHERE name = $1",
+                "DELETE FROM resource_pool_binding WHERE pool_name = $1",
+                "DELETE FROM resource_pool_def WHERE name = $1",
+            ] {
+                sqlx::query(query)
+                    .bind(pool.name)
+                    .execute(&mut *txn)
+                    .await?;
+            }
             definitions.insert(
-                name.into(),
+                pool.name.into(),
                 ResourcePoolDef {
                     pool_type: ResourcePoolType::Integer,
                     ranges: vec![Range {
-                        start: start.to_string(),
-                        end: (start + 2).to_string(),
-                        auto_assign,
+                        start: pool.start.to_string(),
+                        end: (pool.start + 2).to_string(),
+                        auto_assign: pool.auto_assign,
                     }],
                     prefix: None,
                     delegate_prefix_len: None,
                 },
             );
         }
-        let selections = [REMOTE_POOL, SECOND_REMOTE_POOL]
-            .into_iter()
-            .map(|name| {
+        txn.commit().await?;
+        let selections = pools
+            .iter()
+            .map(|pool| {
                 (
-                    name.into(),
+                    pool.name.into(),
                     ResourcePoolSelection {
-                        pool_name: name.into(),
+                        pool_name: pool.name.into(),
                         value_domain: ResourcePoolValueDomain::Integer,
                         backend_name: Some("fabric".into()),
                         backend_kind: ResourcePoolBackendKind::Grpc,
                         authority_id: AUTHORITY.into(),
                         // The alias differs from the provider ID returned by Describe.
-                        remote_pool: REMOTE_POOL.into(),
+                        remote_pool: alias.into(),
                     },
                 )
             })
@@ -245,11 +308,14 @@ impl RemotePoolFixture {
 }
 
 /// `ObservedProvider` injects registration and inspection failures around the
-/// local provider. Describe, Define, and Release counters record incoming calls,
-/// including calls that are rejected or paused.
+/// local provider. Describe, Define, Allocate, and Release counters record
+/// incoming calls, including calls that are rejected or paused.
 #[derive(Clone)]
 pub(in crate::tests) struct ObservedProvider {
     pub(in crate::tests) local: LocalProvider,
+    pub(in crate::tests) allocations: Arc<AtomicUsize>,
+    /// Pauses after the local provider allocates, before Core receives the reply.
+    pub(in crate::tests) allocate_pause: Arc<PausedCall>,
     pub(in crate::tests) releases: Arc<AtomicUsize>,
     pub(in crate::tests) describes: Arc<AtomicUsize>,
     pub(in crate::tests) defines: Arc<AtomicUsize>,
@@ -266,12 +332,14 @@ pub(in crate::tests) struct ObservedProvider {
     pub(in crate::tests) release_pause: Arc<PausedCall>,
 }
 
-/// `PausedCall` signals entry and holds one RPC until its caller drops it.
-/// Create a new instance for another pause because `dropped` stays cancelled.
+/// `PausedCall` signals entry and holds one RPC until the test notifies
+/// `resume` or the caller drops it. `dropped` is cancelled only by a drop, and
+/// stays cancelled, so create a new instance for another pause.
 #[derive(Default)]
 pub(in crate::tests) struct PausedCall {
     pub(in crate::tests) pause_next: AtomicBool,
     pub(in crate::tests) entered: Notify,
+    pub(in crate::tests) resume: Notify,
     pub(in crate::tests) dropped: CancellationToken,
 }
 
@@ -279,9 +347,10 @@ impl PausedCall {
     /// `wait` pauses at most one call, so a restarted caller can retry normally.
     async fn wait(&self) {
         if self.pause_next.swap(false, Ordering::SeqCst) {
-            let _dropped = self.dropped.clone().drop_guard();
+            let dropped = self.dropped.clone().drop_guard();
             self.entered.notify_one();
-            std::future::pending::<()>().await;
+            self.resume.notified().await;
+            dropped.disarm();
         }
     }
 }
@@ -337,7 +406,10 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::AllocateRequest>,
     ) -> Result<Response<v1::AllocateResponse>, Status> {
-        self.local.allocate(request).await
+        self.allocations.fetch_add(1, Ordering::SeqCst);
+        let response = self.local.allocate(request).await?;
+        self.allocate_pause.wait().await;
+        Ok(response)
     }
 
     async fn allocate_exact(
