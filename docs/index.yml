@@ -407,6 +407,12 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - section: Switch SDN Reset CLI Reference
+              contents:
+                - link: Reset SDN Configuration
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-reset-switch-sdn-factory-default.md
+                - link: Check Reset Status
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-switch-sdn-factory-reset-status.md
             - section: NIC Firmware CLI Reference
               contents:
                 - link: NIC Firmware Overview

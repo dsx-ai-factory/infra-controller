@@ -1289,6 +1289,15 @@ service Forge {
   // read budgets, whose expiry reports ReadFailed. This method never registers
   // devices, writes policy, or submits power operations.
   rpc GetComponentPowerDetails(GetComponentPowerDetailsRequest) returns (GetComponentPowerDetailsResponse);
+  // Reset SDN configuration directly through the component backend. This disrupts
+  // fabric traffic and does not queue state-controller maintenance or restore SDN.
+  // Requires an RMS backend implementing BatchResetSwitchSdnFactoryDefault.
+  // Returns after submission; poll GetSwitchSdnFactoryResetStatus for completion.
+  // An unavailable response may follow dispatch: do not automatically resubmit.
+  rpc ComponentResetSwitchSdnFactoryDefault(ComponentResetSwitchSdnFactoryDefaultRequest) returns (ComponentResetSwitchSdnFactoryDefaultResponse);
+  // Observe the parent and every child job; unknown/lost jobs return Unavailable,
+  // never Completed. RMS job state is in memory and may be lost on restart.
+  rpc GetSwitchSdnFactoryResetStatus(GetSwitchSdnFactoryResetStatusRequest) returns (GetSwitchSdnFactoryResetStatusResponse);
   rpc ComponentConfigureSwitchCertificate(ComponentConfigureSwitchCertificateRequest) returns (ComponentConfigureSwitchCertificateResponse);
   rpc GetComponentInventory(GetComponentInventoryRequest) returns (GetComponentInventoryResponse);
   rpc UpdateComponentFirmware(UpdateComponentFirmwareRequest) returns (UpdateComponentFirmwareResponse);
@@ -11274,6 +11283,49 @@ message ComponentConfigureSwitchCertificateRequest {
 
 message ComponentConfigureSwitchCertificateResponse {
   repeated ComponentResult results = 1;
+}
+
+// Explicit targets only: absent/empty IDs, duplicates, or an explicitly empty
+// domain are InvalidArgument. Every endpoint must resolve before any dispatch;
+// unresolved targets return FailedPrecondition. RMS can still reject individual
+// targets after dispatch; inspect the job status even after successful submission.
+message ComponentResetSwitchSdnFactoryDefaultRequest {
+  // Required, non-empty list of distinct ingested switch IDs. Order is immaterial.
+  SwitchIdList switch_ids = 1;
+  // Optional NVL certificate-domain selector forwarded to RMS; omitted uses its
+  // configured switch domain. This is not a DNS suffix. Whitespace-only is invalid.
+  optional string domain_name = 2;
+}
+
+message ComponentResetSwitchSdnFactoryDefaultResponse {
+  // Non-empty opaque RMS parent job ID; acceptance does not mean reset completed.
+  string job_id = 1;
+  // Per-target submission failures. These targets may have no child job and must
+  // not be treated as reset even if the accepted jobs later report Completed.
+  // Empty means RMS reported no submission rejection.
+  repeated string submission_errors = 2;
+}
+
+message GetSwitchSdnFactoryResetStatusRequest {
+  // Required, non-whitespace parent job ID returned by reset submission.
+  string job_id = 1;
+}
+
+enum SwitchSdnFactoryResetState {
+  SWITCH_SDN_FACTORY_RESET_STATE_UNSPECIFIED = 0;
+  // Parent or a child is queued/running, or declared children are not yet visible.
+  SWITCH_SDN_FACTORY_RESET_STATE_PENDING = 1;
+  // Parent and every submitted child completed after runtime convergence.
+  // Does not override submission_errors returned during batch submission.
+  SWITCH_SDN_FACTORY_RESET_STATE_COMPLETED = 2;
+  // A parent or child failed; error contains backend diagnostics.
+  SWITCH_SDN_FACTORY_RESET_STATE_FAILED = 3;
+}
+
+message GetSwitchSdnFactoryResetStatusResponse {
+  SwitchSdnFactoryResetState state = 1;
+  // Present for a failed operation; absent otherwise.
+  optional string error = 2;
 }
 
 // --- Component firmware ---

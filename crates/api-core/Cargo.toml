@@ -218,6 +218,7 @@ carbide-api-db = { path = "../api-db", default-features = false, features = [
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }
+carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-firmware = { path = "../firmware", features = ["test-support"] }
 carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }

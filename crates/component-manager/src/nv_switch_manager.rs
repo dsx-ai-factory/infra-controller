@@ -262,6 +262,16 @@ pub struct SwitchFactoryResetJobStatus {
     pub error: Option<String>,
 }
 
+/// Result of SDN reset submission, including targets RMS rejected before job creation.
+#[derive(Debug)]
+pub struct SwitchSdnFactoryResetSubmission {
+    /// Non-empty RMS parent handle for the jobs that were created.
+    pub job_id: String,
+    /// Submission failures, including node diagnostics when available. Rejected
+    /// targets are not necessarily represented in the job tree.
+    pub errors: Vec<String>,
+}
+
 /// Backend trait for NV-Switch management operations.
 ///
 /// Implementations receive physical endpoint information (BMC + NVOS IPs/MACs)
@@ -414,6 +424,35 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     ) -> Result<String, ComponentManagerError> {
         Err(ComponentManagerError::Unsupported(format!(
             "switch factory reset is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Submits an asynchronous SDN factory-default reset for a non-empty set of
+    /// switch endpoints. This disrupts fabric traffic; it does not reinstall NVOS.
+    /// `domain_name` selects the RMS NVL certificate domain; absence uses its default.
+    /// Returns a non-empty parent job ID for [`Self::get_switch_sdn_factory_reset_job_status`].
+    /// An ambiguous submission returns [`ComponentManagerError::OperationOutcomeUnknown`]
+    /// and must not be automatically retried. Unsupported backends reject the call.
+    async fn batch_reset_switch_sdn_factory_default(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+        _domain_name: Option<&str>,
+    ) -> Result<SwitchSdnFactoryResetSubmission, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "switch SDN factory reset is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Observes an SDN reset's parent and child jobs. Completion requires every
+    /// submitted child to complete; lost or unknown state is an unknown outcome error.
+    async fn get_switch_sdn_factory_reset_job_status(
+        &self,
+        _job_id: &str,
+    ) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "switch SDN factory-reset status is not supported by the {} backend",
             self.name()
         )))
     }
