@@ -204,10 +204,9 @@ async fn wait_for_compute_host_restarts(
     let incomplete_machine_ids = machines
         .iter()
         .filter(|machine| {
-            !matches!(machine.state.value, ManagedHostState::Ready)
-                || machine.machine_maintenance_requested.is_some()
+            machine.machine_maintenance_requested.is_some()
                 // Reuse the Scout RebootCompleted observation used by machine validation.
-                // Ready alone only means the power-control call succeeded.
+                // A cleared request only means the power-control call succeeded.
                 || machine.status.last_reboot_time.is_none_or(|reported_at| {
                     reported_at <= rack.controller_state.version.timestamp()
                 })

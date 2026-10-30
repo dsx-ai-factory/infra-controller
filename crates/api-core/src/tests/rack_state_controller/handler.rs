@@ -1947,7 +1947,7 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     }
 
     // Simulate successful power-control calls: these clear requests but do not
-    // prove that the hosts have booted. Keep both hosts Ready throughout.
+    // prove that the hosts have booted.
     let mut txn = pool.begin().await?;
     for machine_id in machine_ids {
         let machine = db::machine::find_one(
@@ -1988,6 +1988,20 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         assert_eq!(rack.controller_state.version, restart_state.version);
     }
 
+    // Boot configuration may start after Reset has completed. Reboot reports
+    // must release the rack barrier without waiting for the host to become Ready.
+    let boot_configuring = model::machine::ManagedHostState::BootConfiguring {
+        desired_version: config_version::ConfigVersion::initial(),
+        desired_boot_interface: model::machine_boot_interface::MachineBootInterfaceTarget::MacOnly(
+            "02:00:00:00:00:01".parse()?,
+        ),
+        post_lock_verification_retry_count: 0,
+        boot_config_state: model::machine::ReadyBootConfigState::Prepare,
+    };
+    let mut txn = pool.begin().await?;
+    db::machine::update_state(txn.as_mut(), &machine_ids[1], &boot_configuring).await?;
+    txn.commit().await?;
+
     for (index, machine_id) in machine_ids.into_iter().enumerate() {
         env.api
             .reboot_completed(tonic::Request::new(
@@ -2019,6 +2033,10 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
             validating_state: RackValidationState::Pending,
         }
     ));
+    let machine = db::machine::find_one(&pool, &machine_ids[1], Default::default())
+        .await?
+        .unwrap();
+    assert_eq!(machine.state.value, boot_configuring);
 
     Ok(())
 }
