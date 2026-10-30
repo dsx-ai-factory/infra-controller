@@ -14,6 +14,19 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// ScopedEventRuleTo converts an enabled policy and its public scope metadata.
+func ScopedEventRuleTo(policy eventrule.ScopedPolicy) (*pb.ScopedEventRule, error) {
+	rule, err := EventRuleTo(policy.Rule)
+	if err != nil {
+		return nil, err
+	}
+	scope, err := EventRuleScopeTo(policy.Scope)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.ScopedEventRule{Rule: rule, ScopeType: scope.Type, RackId: policy.RackID}, nil
+}
+
 // EventRuleCreateFrom converts and validates the boundary representation of a
 // persisted event rule. Runtime compatibility is validated by the manager.
 func EventRuleCreateFrom(req *pb.CreateEventRuleRequest) (eventrule.RuleCreate, error) {
@@ -231,17 +244,14 @@ func EventRuleTo(rule *eventrule.Rule) (*pb.EventRule, error) {
 	if rule == nil {
 		return nil, fmt.Errorf("event rule is required")
 	}
-	if err := rule.Validate(); err != nil {
+	err := rule.Validate()
+	if err != nil {
 		return nil, err
 	}
 
-	actions := make([]*pb.EventRuleAction, len(rule.Actions))
-	for i := range rule.Actions {
-		action, err := eventRuleActionTo(rule.Actions[i])
-		if err != nil {
-			return nil, fmt.Errorf("actions[%d]: %w", i, err)
-		}
-		actions[i] = action
+	actions, err := eventRuleActionsTo(rule.Actions)
+	if err != nil {
+		return nil, err
 	}
 
 	return &pb.EventRule{
@@ -255,6 +265,18 @@ func EventRuleTo(rule *eventrule.Rule) (*pb.EventRule, error) {
 		CreatedAt:   eventRuleTimestampTo(rule.CreatedAt),
 		UpdatedAt:   eventRuleTimestampTo(rule.UpdatedAt),
 	}, nil
+}
+
+func eventRuleActionsTo(actions []eventrule.Action) ([]*pb.EventRuleAction, error) {
+	converted := make([]*pb.EventRuleAction, len(actions))
+	for i, action := range actions {
+		item, err := eventRuleActionTo(action)
+		if err != nil {
+			return nil, fmt.Errorf("actions[%d]: %w", i, err)
+		}
+		converted[i] = item
+	}
+	return converted, nil
 }
 
 func eventRuleActionTo(action eventrule.Action) (*pb.EventRuleAction, error) {
@@ -419,6 +441,67 @@ func eventRuleSeverityFrom(
 	return eventrule.SeverityUnspecified, fmt.Errorf("unknown event rule severity %q", severity)
 }
 
+// EventHandlingTo converts an event-handling record to its protobuf response.
+func EventHandlingTo(item eventrule.Handling) (*pb.EventHandling, error) {
+	actions, err := eventRuleActionsTo(item.AppliedPolicy.Actions)
+	if err != nil {
+		return nil, fmt.Errorf("convert applied event policy: %w", err)
+	}
+	tasks := make([]*pb.EventHandlingTask, 0, len(item.Tasks))
+	for _, task := range item.Tasks {
+		tasks = append(tasks, &pb.EventHandlingTask{
+			Id:        UUIDTo(task.ID),
+			Status:    TaskStatusTo(task.Status),
+			CreatedAt: timestamppb.New(task.CreatedAt),
+		})
+	}
+
+	result := item.Result()
+	handlingStatus := map[eventrule.HandlingStatus]pb.EventHandlingStatus{
+		eventrule.HandlingStatusNoAction:  pb.EventHandlingStatus_EVENT_HANDLING_STATUS_NO_ACTION,
+		eventrule.HandlingStatusStarting:  pb.EventHandlingStatus_EVENT_HANDLING_STATUS_STARTING,
+		eventrule.HandlingStatusRetrying:  pb.EventHandlingStatus_EVENT_HANDLING_STATUS_RETRYING,
+		eventrule.HandlingStatusRunning:   pb.EventHandlingStatus_EVENT_HANDLING_STATUS_RUNNING,
+		eventrule.HandlingStatusCompleted: pb.EventHandlingStatus_EVENT_HANDLING_STATUS_COMPLETED,
+		eventrule.HandlingStatusSkipped:   pb.EventHandlingStatus_EVENT_HANDLING_STATUS_SKIPPED,
+		eventrule.HandlingStatusFailed:    pb.EventHandlingStatus_EVENT_HANDLING_STATUS_FAILED,
+	}[result.Status]
+	reason := map[eventrule.HandlingReason]pb.EventHandlingReason{
+		eventrule.HandlingReasonNoTargets:          pb.EventHandlingReason_EVENT_HANDLING_REASON_NO_TARGETS,
+		eventrule.HandlingReasonAttemptFailed:      pb.EventHandlingReason_EVENT_HANDLING_REASON_ATTEMPT_FAILED,
+		eventrule.HandlingReasonAttemptInterrupted: pb.EventHandlingReason_EVENT_HANDLING_REASON_ATTEMPT_INTERRUPTED,
+		eventrule.HandlingReasonRetryScheduled:     pb.EventHandlingReason_EVENT_HANDLING_REASON_RETRY_SCHEDULED,
+		eventrule.HandlingReasonActionFailed:       pb.EventHandlingReason_EVENT_HANDLING_REASON_ACTION_FAILED,
+		eventrule.HandlingReasonTaskFailed:         pb.EventHandlingReason_EVENT_HANDLING_REASON_TASK_FAILED,
+		eventrule.HandlingReasonIncompleteState:    pb.EventHandlingReason_EVENT_HANDLING_REASON_INCOMPLETE_STATE,
+	}[result.Reason]
+	return &pb.EventHandling{
+		HandlingStatus:       handlingStatus,
+		Reason:               reason,
+		Message:              result.Message,
+		Id:                   UUIDTo(item.ID),
+		EventType:            string(item.EventType),
+		EventSummary:         item.EventSummary,
+		EventFirstObservedAt: eventRuleTimestampTo(item.FirstObservedAt),
+		AppliedPolicy:        &pb.EventRulePolicy{Actions: actions},
+		ResourceId:           item.ResourceID,
+		ResourceType:         eventResourceTypeToProto(item.ResourceType),
+		Tasks:                tasks,
+		HandledAt:            timestamppb.New(item.HandledAt),
+	}, nil
+}
+
+func eventResourceTypeToProto(resourceType eventrule.ResourceKind) pb.EventResourceType {
+	switch resourceType {
+	case eventrule.ResourceKindComponent:
+		return pb.EventResourceType_EVENT_RESOURCE_TYPE_COMPONENT
+	case eventrule.ResourceKindRack:
+		return pb.EventResourceType_EVENT_RESOURCE_TYPE_RACK
+	default:
+		return pb.EventResourceType_EVENT_RESOURCE_TYPE_UNSPECIFIED
+	}
+}
+
 func eventRuleSeverityTo(severity eventrule.Severity) pb.EventRuleSeverity {
 	switch severity {
 	case eventrule.SeverityInfo:
@@ -436,8 +519,8 @@ func eventRuleTargetStrategyFrom(
 	strategy pb.EventRuleTargetStrategy,
 ) (eventrule.TargetStrategy, error) {
 	switch strategy {
-	case pb.EventRuleTargetStrategy_EVENT_RULE_TARGET_STRATEGY_COMPONENT:
-		return eventrule.TargetStrategyComponent, nil
+	case pb.EventRuleTargetStrategy_EVENT_RULE_TARGET_STRATEGY_SOURCE:
+		return eventrule.TargetStrategySource, nil
 	case pb.EventRuleTargetStrategy_EVENT_RULE_TARGET_STRATEGY_RACK:
 		return eventrule.TargetStrategyRack, nil
 	case pb.EventRuleTargetStrategy_EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS:
@@ -449,8 +532,8 @@ func eventRuleTargetStrategyFrom(
 
 func eventRuleTargetStrategyTo(strategy eventrule.TargetStrategy) pb.EventRuleTargetStrategy {
 	switch strategy {
-	case eventrule.TargetStrategyComponent:
-		return pb.EventRuleTargetStrategy_EVENT_RULE_TARGET_STRATEGY_COMPONENT
+	case eventrule.TargetStrategySource:
+		return pb.EventRuleTargetStrategy_EVENT_RULE_TARGET_STRATEGY_SOURCE
 	case eventrule.TargetStrategyRack:
 		return pb.EventRuleTargetStrategy_EVENT_RULE_TARGET_STRATEGY_RACK
 	case eventrule.TargetStrategyAffectedComponents:

@@ -88,7 +88,8 @@ v1 `Task` response.
 
 | Strategy | Resolution |
 |---|---|
-| `COMPONENT` | The component that produced the event; invalid for a rack event. |
+| `SOURCE` | The inventory resource that produced the event: that component for a component event, or all known components in that rack for a rack event. |
+| `COMPONENT` | Deprecated gRPC name for `SOURCE`, with the same numeric value and source-aware behavior. |
 | `RACK` | All currently known components in the event component's owning rack or in the event rack. |
 | `AFFECTED_COMPONENTS` | The targets chosen by the resolver for the event type. Without an event-specific resolver, this selects the event component or all currently known components in the event rack. |
 
@@ -97,6 +98,144 @@ component and components in the same rack with valid, strictly lower slot IDs.
 A rack event selects all currently known components in the rack. See
 [Target resolution](event-rule-architecture.md#target-resolution) for resolver
 selection, failure behavior, and the limitations of this slot-based model.
+
+### Source strategy compatibility
+
+`SOURCE` expresses source-based intent independently of a policy's binding
+scope. A site or rack policy can receive both component and rack events; Flow
+resolves the concrete target from each event's inventory source kind. Rack
+targets expand to their known components. An empty target set produces a
+skipped execution with reason `no_targets`.
+
+The REST leakage value `LeakingSource` maps to gRPC `SOURCE` (number 1).
+`LeakingRack` maps to `RACK` (number 2), selecting all known components in the
+event rack or the reporting component's owning rack. `AffectedComponents` maps
+to `AFFECTED_COMPONENTS` (number 3).
+
+The deprecated gRPC name `COMPONENT` remains an alias for value 1, preserving
+existing generated client symbols and binary messages. It is declared before
+`SOURCE` so ProtoJSON output retains `EVENT_RULE_TARGET_STRATEGY_COMPONENT`,
+which older clients recognize. ProtoJSON input accepts both names. Inside Flow,
+value 1 is represented only as `TargetStrategySource`.
+
+Version 1 policy persistence continues writing the `component` token for source
+selection so existing readers can decode new writes. Reading either `component`
+or `source` normalizes it to the internal source strategy. The `rack` and
+`affected_components` encodings are unchanged, and previously materialized
+execution plans retain their captured targets.
+
+Value 1 intentionally gains rack-event support: a rack event now selects that
+rack's known components instead of failing component-only target resolution.
+Upgrade all event processors before relying on this behavior. Older processors
+can read the compatible encoding but still interpret value 1 as component-only.
+The built-in affected-components policy is unchanged.
+
+### REST leakage policy requests
+
+`GET /nico/leakage/policy?siteId=<uuid>` lists the effective default once,
+followed by enabled explicit Rack overrides. Disabled overrides and unbound
+rules are excluded; the REST API does not expose enable/disable controls or an
+`enabled` field. A policy bound to several Racks appears once for each Rack.
+Each row includes `siteId`, `scope` (`Default` or `Rack`), nullable `rackId`,
+`source` (`BuiltIn` or `Override`), and the nested `policy`. A Rack binding
+without a public inventory identifier has `rackId: null` and remains in the
+list. The list does not repeat inherited defaults for every Rack.
+
+The list uses `pageNumber` (default 1) and `pageSize` (default 20, maximum 100),
+with pagination metadata in `X-Pagination`. Its only ordering is `SCOPE_ASC`:
+default first, then public Rack ID ascending, missing identifiers last, with
+canonical Rack UUID as a tie-breaker. Out-of-range pages return `[]` with the
+full matching total.
+
+`GET /nico/leakage/policy/default?siteId=<uuid>` retrieves the effective default:
+the enabled Site override, or the built-in policy when no enabled override exists.
+`PUT /nico/leakage/policy/default/override` sets the Site override.
+`DELETE /nico/leakage/policy/default/override?siteId=<uuid>` removes that override
+and restores the built-in default; deleting an absent override returns 204.
+Rack policy GET, PUT, and DELETE remain at `/nico/rack/{rackId}/leakage/policy`.
+Rack GET resolves the enabled Rack override, then the enabled Site override,
+then the built-in policy.
+
+Both the default override and Rack policy PUT endpoints require `siteId` in the JSON body.
+It selects the Site for authorization and routing. The Rack endpoint retains
+`rackId` in the URL path. PUT requests require exactly `siteId`, `action`,
+`targetStrategy`, and `onConflict`; query parameters are not accepted.
+
+```json
+{
+  "siteId": "550e8400-e29b-41d4-a716-446655440000",
+  "action": "ForcePowerOff",
+  "targetStrategy": "LeakingSource",
+  "onConflict": "Queue"
+}
+```
+
+For `NoAction`, supply the Site UUID and set both `targetStrategy` and
+`onConflict` to `null`. Policy GET and DELETE requests have no JSON body and
+continue to require query `siteId`.
+
+### REST leakage handling history
+
+Each REST handling record includes the source, event summary, captured policy,
+`handlingStatus`, nullable diagnostic `reason`, curated whole-handling `message`,
+Tasks with their IDs and current statuses, and `handledAt`. Flow computes the
+result from the captured actions, their executions, and their Tasks; REST only
+maps the public representation. It exposes no execution object, attempt count,
+or retry schedule. An empty `tasks` array does not imply successful handling;
+the status and diagnostic explain whether work is starting, retrying, skipped,
+failed, unknown, or intentionally absent.
+
+The event's `detectedAt` is the
+source observation time captured when Flow first accepted the occurrence; it
+can precede `handledAt` and does not represent the actual leak start time.
+Duplicate observations preserve this timestamp. It is `null` for older records
+or sources without an observation timestamp, rather than inferred from
+`handledAt`.
+
+Event and execution UUIDs and polling observation counts remain internal to
+Flow. Task IDs identify Tasks clients can retrieve. REST pagination uses
+`pageNumber` (default 1) and `pageSize` (default 1, maximum 100). The body is an
+array, with pagination metadata in `X-Pagination`: `pageNumber`, `pageSize`,
+`total`, and `orderBy`. The only supported ordering is `HANDLED_AT_DESC`, with
+event UUID descending breaking equal-time ties. Empty or out-of-range pages
+return `[]` with the total matching count. Page numbers must be between 1 and
+21474836, matching the shared REST pagination bounds. The cursor and limit query
+parameters are not supported. Clients must not treat `detectedAt` as a unique
+record identifier.
+
+Flow's gRPC handling request uses nonnegative `offset` and `limit` (zero defaults
+to one, maximum 100). Its response includes the total matching history count
+before pagination. Ordering is applied in PostgreSQL before offset and limit.
+
+### Handling result aggregation
+
+Flow's overall status follows this precedence across all applicable actions:
+`Failed` > `Retrying` > `Starting` > `Unknown` > `Running` > `Skipped` >
+`Completed` > `NoAction`. Any failed or terminated Task makes the handling
+`Failed`. Otherwise, failed actions dominate retries, and retries dominate
+actions still being dispatched. Missing or duplicate matching executions,
+unrecognized states, and completed submissions without their own Tasks produce
+`Unknown`. Tasks from another action cannot satisfy a submission. While any
+known action is still active, it takes precedence over skipped or completed
+work. A partial skip becomes `Skipped` after other work completes; its message
+states that one or more actions were skipped. No applicable actions, or only
+completed no-op actions, produce `NoAction`. Alert actions can complete without
+Tasks. When several actions are retrying, `AttemptFailed` takes precedence over
+`AttemptInterrupted`, then `RetryScheduled`, independently of action ordering.
+
+REST maps Flow's `NoAction`, `Running`, and `Completed` to `None`,
+`ShuttingDown`, and `Down` for leakage. These describe handling progress, not
+the source's current leak or power state. Per-task statuses match the Task API:
+`Waiting` maps to `Pending`, `Completed` maps to `Succeeded`, and unrecognized
+values map to `Unknown`. Task ordering remains creation time then Task UUID
+ascending, and an empty list is serialized as `[]`.
+
+The gRPC handling response exposes aggregate status, reason, and message,
+alongside the captured event, policy, and Tasks. Individual executions, attempt
+counts, and retry schedules are internal processing details. Unspecified or
+unrecognized aggregate statuses map to `Unknown` in REST without reconstructing
+progress from Tasks. Human-readable messages are curated in Flow and never
+include raw backend diagnostics.
 
 ## Binding and selection contract
 

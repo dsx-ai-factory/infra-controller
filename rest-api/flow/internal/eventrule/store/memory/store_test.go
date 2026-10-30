@@ -64,6 +64,62 @@ func TestBindingScansIgnoreUnrelatedInvalidRecords(t *testing.T) {
 	require.NoError(t, store.Delete(ctx, rule.ID))
 }
 
+func TestStore_ScopeMutationDoesNotChangeOtherBindings(t *testing.T) {
+	ctx := t.Context()
+	store := New()
+	eventType := eventrule.Type("test.event")
+	original, err := store.Create(ctx, &eventrule.Rule{
+		ID:        uuid.New(),
+		Origin:    eventrule.RuleOriginPersisted,
+		Name:      "shared rule",
+		Enabled:   true,
+		EventType: eventType,
+		Policy: eventrule.Policy{Actions: []eventrule.Action{
+			{Name: "noop", Spec: &eventrule.Noop{}},
+		}},
+	})
+	require.NoError(t, err)
+	firstScope := eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: uuid.New()}
+	secondScope := eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: uuid.New()}
+	for _, scope := range []eventrule.Scope{firstScope, secondScope} {
+		require.NoError(t, store.Bind(ctx, eventrule.Binding{
+			ID: uuid.New(), RuleID: original.ID, EventType: eventType, Scope: scope,
+		}))
+	}
+
+	replacement := &eventrule.Rule{
+		ID:        uuid.New(),
+		Origin:    eventrule.RuleOriginPersisted,
+		Name:      "replacement",
+		Enabled:   true,
+		EventType: eventType,
+		Policy: eventrule.Policy{Actions: []eventrule.Action{
+			{Name: "noop", Spec: &eventrule.Noop{}},
+		}},
+	}
+	replaced, err := store.SetRuleOverride(ctx, replacement, eventrule.Binding{
+		ID: uuid.New(), RuleID: replacement.ID, EventType: eventType, Scope: firstScope,
+	})
+	require.NoError(t, err)
+	require.Equal(t, replacement.ID, replaced.ID)
+
+	firstBinding, err := store.GetForScope(ctx, eventType, firstScope)
+	require.NoError(t, err)
+	require.Equal(t, replacement.ID, firstBinding.RuleID)
+	secondBinding, err := store.GetForScope(ctx, eventType, secondScope)
+	require.NoError(t, err)
+	require.Equal(t, original.ID, secondBinding.RuleID)
+	unchanged, err := store.GetByID(ctx, original.ID)
+	require.NoError(t, err)
+	require.Equal(t, "shared rule", unchanged.Name)
+
+	require.NoError(t, store.DeleteRuleOverride(ctx, eventType, firstScope))
+	_, err = store.GetByID(ctx, replacement.ID)
+	require.ErrorIs(t, err, eventrule.ErrRuleNotFound)
+	_, err = store.GetByID(ctx, original.ID)
+	require.NoError(t, err)
+}
+
 func TestStore_CommitEventPlanRejectsDanglingIndexes(t *testing.T) {
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	store := NewWithClock(func() time.Time { return now })

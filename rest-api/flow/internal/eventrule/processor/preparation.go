@@ -70,10 +70,11 @@ func (p *Processor) prepare(
 	// and no action applied. The atomic commit creates the event with no
 	// executions.
 	definition := eventrule.Event{
-		Key:           envelope.Key,
-		Type:          envelope.Type,
-		Resource:      eventrule.ResourceIdentity{Kind: resource.Kind, ID: resource.ID},
-		AppliedRuleID: rule.ID,
+		Key:             envelope.Key,
+		Type:            envelope.Type,
+		Resource:        eventrule.ResourceIdentity{Kind: resource.Kind, ID: resource.ID},
+		AppliedRuleID:   rule.ID,
+		FirstObservedAt: envelope.ObservedAt,
 		EffectivePolicy: eventrule.Policy{
 			Actions: applicable,
 		},

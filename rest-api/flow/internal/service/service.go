@@ -172,8 +172,9 @@ func New(ctx context.Context, c Config) (*Service, error) {
 			Runtime:    eventrulescheduler.DefaultRuntimeConfig(),
 			Policy:     eventrulescheduler.DefaultPolicyConfig(),
 		},
-		Inventory:   invManager,
-		TaskManager: taskManager,
+		Inventory:      invManager,
+		TaskManager:    taskManager,
+		HandlingReader: tskStore,
 	})
 	if err != nil {
 		session.Close()

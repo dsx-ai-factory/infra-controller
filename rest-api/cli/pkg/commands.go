@@ -188,6 +188,10 @@ var reservedBodyFlagNames = map[string]bool{
 // commandPathAliases adds concise aliases for generated commands. The original
 // generated paths remain available for compatibility.
 var commandPathAliases = map[string][]string{
+	"get-all-leakage-policy":                            {"leakage", "policy", "list"},
+	"get-default-leakage-policy":                        {"leakage", "policy", "default", "get"},
+	"put-default-leakage-policy-override":               {"leakage", "policy", "default", "override", "put"},
+	"delete-default-leakage-policy-override":            {"leakage", "policy", "default", "override", "delete"},
 	"get-machine-spectrumx-multiplane":                  {"machine", "spectrumx-multiplane", "get"},
 	"update-machine-spectrumx-multiplane":               {"machine", "spectrumx-multiplane", "update"},
 	"bringup-rack":                                      {"rack", "bringup"},
@@ -642,7 +646,9 @@ func detectPrimaryResource(ops []resolvedOp) string {
 	best := ""
 	bestCount := 0
 	for suffix, count := range counts {
-		if count > bestCount || (count == bestCount && len(suffix) < len(best)) {
+		// Equal-count, equal-length resources must not let map iteration choose
+		// different command paths on each invocation.
+		if count > bestCount || (count == bestCount && (len(suffix) < len(best) || (len(suffix) == len(best) && suffix < best))) {
 			bestCount = count
 			best = suffix
 		}

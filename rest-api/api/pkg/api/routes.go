@@ -1256,6 +1256,38 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteTaskRuleHandler(dbSession, tc, scp, cfg),
 		},
+		{
+			Path: apiPathPrefix + "/leakage/policy", Method: http.MethodGet,
+			Handler: apiHandler.NewGetAllLeakagePolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path: apiPathPrefix + "/leakage/policy/default", Method: http.MethodGet,
+			Handler: apiHandler.NewGetDefaultLeakagePolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path: apiPathPrefix + "/leakage/policy/default/override", Method: http.MethodPut,
+			Handler: apiHandler.NewPutDefaultLeakagePolicyOverrideHandler(dbSession, scp, cfg),
+		},
+		{
+			Path: apiPathPrefix + "/leakage/policy/default/override", Method: http.MethodDelete,
+			Handler: apiHandler.NewDeleteDefaultLeakagePolicyOverrideHandler(dbSession, scp, cfg),
+		},
+		{
+			Path: apiPathPrefix + "/rack/:rackId/leakage/policy", Method: http.MethodGet,
+			Handler: apiHandler.NewGetRackLeakagePolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path: apiPathPrefix + "/rack/:rackId/leakage/policy", Method: http.MethodPut,
+			Handler: apiHandler.NewPutRackLeakagePolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path: apiPathPrefix + "/rack/:rackId/leakage/policy", Method: http.MethodDelete,
+			Handler: apiHandler.NewDeleteRackLeakagePolicyHandler(dbSession, scp, cfg),
+		},
+		{
+			Path: apiPathPrefix + "/leakage/handling", Method: http.MethodGet,
+			Handler: apiHandler.NewGetLeakageHandlingHandler(dbSession, scp, cfg),
+		},
 		// Run endpoints (Flow). A run is a phased, policy-gated execution of
 		// one operation across many racks; Flow calls it an operation run.
 		{

@@ -30,7 +30,7 @@ func TestActionRoundTrip(t *testing.T) {
 					SubTargets:             []string{"bmc", "bios"},
 					OverrideReadinessCheck: true,
 				},
-				TargetStrategy:   eventrule.TargetStrategyComponent,
+				TargetStrategy:   eventrule.TargetStrategySource,
 				ConflictStrategy: eventrule.ConflictStrategyQueue,
 				Description:      "power off",
 			},

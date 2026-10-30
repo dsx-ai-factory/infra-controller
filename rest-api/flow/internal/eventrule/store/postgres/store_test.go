@@ -5,11 +5,14 @@ package postgres
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/store/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -18,6 +21,40 @@ import (
 
 type fixedTimestampSource struct {
 	now *time.Time
+}
+
+type pauseAfterSharedBindingCheck struct {
+	once        sync.Once
+	releaseOnce sync.Once
+	reached     chan struct{}
+	release     chan struct{}
+}
+
+func (h *pauseAfterSharedBindingCheck) BeforeQuery(
+	ctx context.Context,
+	_ *bun.QueryEvent,
+) context.Context {
+	return ctx
+}
+
+func (h *pauseAfterSharedBindingCheck) AfterQuery(
+	_ context.Context,
+	event *bun.QueryEvent,
+) {
+	if !strings.Contains(event.Query, "erb.id <>") {
+		return
+	}
+
+	h.once.Do(func() {
+		close(h.reached)
+		<-h.release
+	})
+}
+
+func (h *pauseAfterSharedBindingCheck) resume() {
+	h.releaseOnce.Do(func() {
+		close(h.release)
+	})
 }
 
 func (s fixedTimestampSource) Timestamp(
@@ -48,6 +85,140 @@ func TestStore_ExecutionContract(t *testing.T) {
 
 		return store
 	})
+}
+
+func TestStore_ListRackOverrides(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	rule := leakage.DefaultRule().Clone()
+	rule.ID, rule.Origin = uuid.New(), eventrule.RuleOriginPersisted
+	shared, err := store.Create(ctx, &rule)
+	require.NoError(t, err)
+	// A shared rule produces two bindings; the public ordering deliberately
+	// differs from canonical UUID ordering.
+	ids := []uuid.UUID{uuid.MustParse("10000000-0000-4000-8000-000000000001"), uuid.MustParse("20000000-0000-4000-8000-000000000002")}
+	for i, name := range []string{"rack-z", "rack-a"} {
+		_, err = store.pg.DB.ExecContext(ctx, "INSERT INTO rack (id, external_id, name) VALUES (?, ?, ?)", ids[i], name, name)
+		require.NoError(t, err)
+		require.NoError(t, store.Bind(ctx, eventrule.Binding{ID: uuid.New(), RuleID: shared.ID, EventType: rule.EventType, Scope: eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: ids[i]}}))
+	}
+	// Bindings remain visible even if inventory cannot supply a public Rack ID.
+	require.NoError(t, store.Bind(ctx, eventrule.Binding{ID: uuid.New(), RuleID: shared.ID, EventType: rule.EventType, Scope: eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: uuid.New()}}))
+	rule.ID = uuid.New()
+	rule.Enabled = false
+	disabled, err := store.Create(ctx, &rule)
+	require.NoError(t, err)
+	require.NoError(t, store.Bind(ctx, eventrule.Binding{ID: uuid.New(), RuleID: disabled.ID, EventType: rule.EventType, Scope: eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: uuid.New()}}))
+	rule.ID, rule.Enabled = uuid.New(), true
+	_, err = store.Create(ctx, &rule) // Enabled but unbound must not count.
+	require.NoError(t, err)
+	for _, test := range []struct {
+		name          string
+		offset, limit int
+		want          []string
+		corrupt       bool
+	}{
+		{name: "shared policy ordered before slicing", limit: 10, want: []string{"rack-a", "rack-z", ""}},
+		{name: "next page", offset: 1, limit: 1, want: []string{"rack-z"}},
+		{name: "out of range retains binding total", offset: 50, limit: 1, want: []string{}},
+		{name: "count only does not decode unreturned policies", limit: 0, corrupt: true, want: []string{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.corrupt {
+				_, err = store.pg.DB.ExecContext(ctx, "UPDATE event_rules SET policy = '{}' WHERE id = ?", shared.ID)
+				require.NoError(t, err)
+			}
+			rows, total, err := store.ListRackOverrides(ctx, leakage.TypeHardwareLeakDetected, test.offset, test.limit)
+			require.NoError(t, err)
+			require.Equal(t, 3, total)
+			names := make([]string, 0, len(rows))
+			for _, row := range rows {
+				require.Equal(t, shared.ID, row.Rule.ID)
+				require.Equal(t, eventrule.ScopeTypeRack, row.Scope.Type)
+				name := ""
+				if row.RackID != nil {
+					name = *row.RackID
+				}
+				names = append(names, name)
+			}
+			require.Equal(t, test.want, names)
+		})
+	}
+}
+
+func TestStore_DeleteRuleOverride(t *testing.T) {
+	ctx := t.Context()
+	store := newTestStore(t)
+	rule, err := store.Create(ctx, &eventrule.Rule{
+		ID:        uuid.New(),
+		Origin:    eventrule.RuleOriginPersisted,
+		Name:      "shared binding race",
+		Enabled:   true,
+		EventType: "test.event",
+		Policy: eventrule.Policy{Actions: []eventrule.Action{
+			{Name: "noop", Spec: &eventrule.Noop{}},
+		}},
+	})
+	require.NoError(t, err)
+
+	firstScope := eventrule.Scope{Type: eventrule.ScopeTypeRack, ID: uuid.New()}
+	require.NoError(t, store.Bind(ctx, eventrule.Binding{
+		ID:        uuid.New(),
+		RuleID:    rule.ID,
+		EventType: rule.EventType,
+		Scope:     firstScope,
+	}))
+
+	pause := &pauseAfterSharedBindingCheck{
+		reached: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer pause.resume()
+	store.pg.DB.AddQueryHook(pause)
+
+	deleteResult := make(chan error, 1)
+	go func() {
+		deleteResult <- store.DeleteRuleOverride(ctx, rule.EventType, firstScope)
+	}()
+
+	select {
+	case <-pause.reached:
+	case <-time.After(time.Second):
+		require.FailNow(t, "DeleteRuleOverride did not reach the shared-binding check")
+	}
+
+	bindResult := make(chan error, 1)
+	go func() {
+		bindResult <- store.Bind(ctx, eventrule.Binding{
+			ID:        uuid.New(),
+			RuleID:    rule.ID,
+			EventType: rule.EventType,
+			Scope: eventrule.Scope{
+				Type: eventrule.ScopeTypeRack,
+				ID:   uuid.New(),
+			},
+		})
+	}()
+
+	var earlyBindErr error
+	bindCompletedEarly := false
+	select {
+	case earlyBindErr = <-bindResult:
+		bindCompletedEarly = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	pause.resume()
+
+	require.NoError(t, <-deleteResult)
+	if bindCompletedEarly {
+		require.Failf(
+			t,
+			"Bind completed before DeleteRuleOverride committed",
+			"Bind returned %v while deletion was paused after its ownership check",
+			earlyBindErr,
+		)
+	}
+	require.ErrorIs(t, <-bindResult, eventrule.ErrRuleNotFound)
 }
 
 func TestStore_DuplicateDoesNotResumeExecution(t *testing.T) {
