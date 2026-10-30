@@ -45,7 +45,7 @@ rustflags = [
 # '-fuse-ld=mold'". Keep linker selection with the toolchain that provides it.
 
 [env]
-RUST_TEST_THREADS = "40"
+RUST_TEST_THREADS = "50"
 
 [alias]
 xtask = "run --package xtask --"
