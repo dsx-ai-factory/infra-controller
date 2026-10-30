@@ -35,7 +35,7 @@ type MachineInstanceTypeStats struct {
 	// UsedMachineStats captures the usage status of machines assigned to this instance type that are currently associated with Tenant Instances
 	UsedMachineStats *MachineStatusBreakdown `json:"usedMachineStats,omitempty"`
 	// Per-tenant breakdown for this instance type
-	Tenants []InstanceTypeStats `json:"tenants,omitempty"`
+	Tenants []MachineInstanceTypeTenantStats `json:"tenants,omitempty"`
 }
 
 // NewMachineInstanceTypeStats instantiates a new MachineInstanceTypeStats object
@@ -248,9 +248,9 @@ func (o *MachineInstanceTypeStats) SetUsedMachineStats(v MachineStatusBreakdown)
 }
 
 // GetTenants returns the Tenants field value if set, zero value otherwise.
-func (o *MachineInstanceTypeStats) GetTenants() []InstanceTypeStats {
+func (o *MachineInstanceTypeStats) GetTenants() []MachineInstanceTypeTenantStats {
 	if o == nil || IsNil(o.Tenants) {
-		var ret []InstanceTypeStats
+		var ret []MachineInstanceTypeTenantStats
 		return ret
 	}
 	return o.Tenants
@@ -258,7 +258,7 @@ func (o *MachineInstanceTypeStats) GetTenants() []InstanceTypeStats {
 
 // GetTenantsOk returns a tuple with the Tenants field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *MachineInstanceTypeStats) GetTenantsOk() ([]InstanceTypeStats, bool) {
+func (o *MachineInstanceTypeStats) GetTenantsOk() ([]MachineInstanceTypeTenantStats, bool) {
 	if o == nil || IsNil(o.Tenants) {
 		return nil, false
 	}
@@ -274,8 +274,8 @@ func (o *MachineInstanceTypeStats) HasTenants() bool {
 	return false
 }
 
-// SetTenants gets a reference to the given []InstanceTypeStats and assigns it to the Tenants field.
-func (o *MachineInstanceTypeStats) SetTenants(v []InstanceTypeStats) {
+// SetTenants gets a reference to the given []MachineInstanceTypeTenantStats and assigns it to the Tenants field.
+func (o *MachineInstanceTypeStats) SetTenants(v []MachineInstanceTypeTenantStats) {
 	o.Tenants = v
 }
 

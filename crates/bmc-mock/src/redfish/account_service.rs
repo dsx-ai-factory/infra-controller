@@ -63,9 +63,16 @@ const ADMINISTRATOR_ROLE_ID: &str = "Administrator";
 
 #[derive(Debug)]
 pub struct AccountServiceState {
-    accounts: Mutex<Vec<Account>>,
+    accounts: Mutex<AccountState>,
+    factory_account: Account,
     password_updater: Mutex<Option<Weak<dyn PasswordUpdater>>>,
-    update_lock: tokio::sync::Mutex<()>,
+    update_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Debug)]
+struct AccountState {
+    accounts: Vec<Account>,
+    reset_generation: u64,
 }
 
 pub(crate) trait PasswordUpdater: Send + Sync {
@@ -80,19 +87,78 @@ pub(crate) trait PasswordUpdater: Send + Sync {
 impl AccountServiceState {
     pub(crate) fn new(factory_default_account: Account) -> Self {
         Self {
-            accounts: Mutex::new(vec![factory_default_account]),
+            accounts: Mutex::new(AccountState {
+                accounts: vec![factory_default_account.clone()],
+                reset_generation: 0,
+            }),
+            factory_account: factory_default_account,
             password_updater: Mutex::new(None),
-            update_lock: tokio::sync::Mutex::new(()),
+            update_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
-    pub(crate) fn persisted_accounts(&self) -> Vec<PersistedAccount> {
-        self.accounts().into_iter().map(Into::into).collect()
+    pub(crate) async fn lock_updates(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.update_lock.clone().lock_owned().await
     }
 
-    pub(crate) fn restore_accounts(&self, accounts: &[PersistedAccount]) {
-        *self.accounts.lock().expect("mutex poisoned") =
-            accounts.iter().cloned().map(Into::into).collect();
+    pub(crate) fn reset_generation(&self) -> u64 {
+        self.accounts
+            .lock()
+            .expect("mutex poisoned")
+            .reset_generation
+    }
+
+    /// The caller holds the update lock through external synchronization and publication.
+    pub(crate) async fn reset_to_factory(&self) -> Result<(), String> {
+        let updater = self
+            .password_updater
+            .lock()
+            .expect("mutex poisoned")
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(updater) = updater {
+            let account = self
+                .accounts()
+                .into_iter()
+                .find(|account| account.username == self.factory_account.username)
+                .ok_or_else(|| "factory account is absent from the external backend".to_string())?;
+            updater
+                .update_password(
+                    &account.username,
+                    &account.password,
+                    &self.factory_account.password,
+                )
+                .await?;
+        }
+        let mut state = self.accounts.lock().expect("mutex poisoned");
+        state.accounts = vec![self.factory_account.clone()];
+        state.reset_generation = state.reset_generation.wrapping_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn factory_accounts_restored(&self) -> bool {
+        self.accounts
+            .lock()
+            .expect("mutex poisoned")
+            .accounts
+            .as_slice()
+            == std::slice::from_ref(&self.factory_account)
+    }
+
+    /// Captures credentials and their factory-reset generation under one lock.
+    pub(crate) fn persisted_accounts(&self) -> (Vec<PersistedAccount>, u64) {
+        let state = self.accounts.lock().expect("mutex poisoned");
+        (
+            state.accounts.iter().cloned().map(Into::into).collect(),
+            state.reset_generation,
+        )
+    }
+
+    pub(crate) fn restore_accounts(&self, accounts: &[PersistedAccount], generation: u64) {
+        *self.accounts.lock().expect("mutex poisoned") = AccountState {
+            accounts: accounts.iter().cloned().map(Into::into).collect(),
+            reset_generation: generation,
+        };
     }
 
     pub(crate) fn set_password_updater(&self, updater: &Arc<dyn PasswordUpdater>) {
@@ -100,13 +166,18 @@ impl AccountServiceState {
     }
 
     pub(crate) fn accounts(&self) -> Vec<Account> {
-        self.accounts.lock().expect("mutex poisoned").clone()
+        self.accounts
+            .lock()
+            .expect("mutex poisoned")
+            .accounts
+            .clone()
     }
 
     pub(crate) fn find(&self, account_id: &str) -> Option<Account> {
         self.accounts
             .lock()
             .expect("mutex poisoned")
+            .accounts
             .iter()
             .find(|account| account.id == account_id)
             .cloned()
@@ -116,6 +187,7 @@ impl AccountServiceState {
         self.accounts
             .lock()
             .expect("mutex poisoned")
+            .accounts
             .iter()
             .find(|account| account.role_id == ADMINISTRATOR_ROLE_ID)
             .map(|account| (account.username.clone(), account.password.clone()))
@@ -125,6 +197,7 @@ impl AccountServiceState {
         self.accounts
             .lock()
             .expect("mutex poisoned")
+            .accounts
             .iter()
             .any(|account| account.matches(username, password))
     }
@@ -133,6 +206,7 @@ impl AccountServiceState {
         self.accounts
             .lock()
             .expect("mutex poisoned")
+            .accounts
             .iter()
             .any(|account| account.matches_factory_default_password(username, password))
     }
@@ -163,6 +237,7 @@ impl AccountServiceState {
         {
             let mut accounts = self.accounts.lock().expect("mutex poisoned");
             let account = accounts
+                .accounts
                 .iter_mut()
                 .find(|candidate| candidate.id == account_id)
                 .expect("account existed before password synchronization");
@@ -176,7 +251,7 @@ impl AccountServiceState {
         let new_password = new_password.into();
         {
             let mut accounts = self.accounts.lock().expect("mutex poisoned");
-            for account in accounts.iter_mut() {
+            for account in accounts.accounts.iter_mut() {
                 if account.password == account.factory_default_password {
                     account.password = new_password.clone();
                 }
@@ -363,4 +438,69 @@ async fn get_account<C: Callbacks>(
         .find(&account_id)
         .map(|account| account.to_json().into_ok_response())
         .unwrap_or_else(http::not_found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_snapshot_waits_for_the_whole_reset_publication() {
+        let factory = Account::administrator("id", "user", "factory");
+        let state = AccountServiceState::new(factory.clone());
+        state.change_factory_default_password("rotated");
+        let mut publication = state.accounts.lock().unwrap();
+        // Pause publication between replacing credentials and incrementing the
+        // generation. Readers must not observe this intermediate combination.
+        publication.accounts = vec![factory.clone()];
+        std::thread::scope(|scope| {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+            let account_state = &state;
+            let reader = scope.spawn(move || {
+                entered_tx.send(()).unwrap();
+                assert!(snapshot_tx.send(account_state.persisted_accounts()).is_ok());
+            });
+            entered_rx.recv().unwrap();
+            assert!(matches!(
+                snapshot_rx.recv_timeout(std::time::Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            publication.reset_generation = 1;
+            drop(publication);
+            let (accounts, generation) = snapshot_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            reader.join().unwrap();
+            assert!(accounts == vec![PersistedAccount::from(factory)]);
+            assert_eq!(generation, 1);
+            assert_eq!(state.reset_generation(), 1);
+        });
+    }
+
+    #[test]
+    fn factory_restoration_compares_the_whole_model_account_set() {
+        let factory = Account::administrator("model-id", "model-user", "model-factory-secret");
+        let mut changed_role = factory.clone();
+        changed_role.role_id = "ReadOnly".into();
+        let mut changed_password = factory.clone();
+        changed_password.password = "rotated".into();
+        for (label, accounts, expected) in [
+            ("model factory", vec![factory.clone()], true),
+            ("rotated password", vec![changed_password], false),
+            ("changed role", vec![changed_role], false),
+            (
+                "extra account",
+                vec![
+                    factory.clone(),
+                    Account::administrator("extra", "extra", "extra"),
+                ],
+                false,
+            ),
+        ] {
+            let state = AccountServiceState::new(factory.clone());
+            state.accounts.lock().unwrap().accounts = accounts;
+            assert_eq!(state.factory_accounts_restored(), expected, "{label}");
+        }
+    }
 }

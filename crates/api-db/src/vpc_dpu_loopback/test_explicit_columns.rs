@@ -23,7 +23,6 @@ use model::resource_pool::{
     Range, ResourcePool, ResourcePoolDef, ResourcePoolEntryState, ResourcePoolType, ValueType,
 };
 use sqlx::{Connection, PgPool};
-use tokio::sync::oneshot;
 
 use super::*;
 
@@ -53,7 +52,6 @@ async fn exercise_loopback_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = connection.begin().await?;
-    let (stop_sender, _stop_receiver) = oneshot::channel();
     let common_pools = CommonPools {
         ethernet: EthernetPools {
             pool_loopback_ip: Arc::new(ResourcePool::new(
@@ -94,8 +92,6 @@ async fn exercise_loopback_queries(
             )),
         },
         infiniband: IbPools::default(),
-        pool_stats: Default::default(),
-        _stop_sender: stop_sender,
     };
     crate::resource_pool::define(
         &mut txn,

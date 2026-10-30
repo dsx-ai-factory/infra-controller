@@ -38,7 +38,14 @@ func TestAPIReplaceAllExpectedMachinesRequest_Validate(t *testing.T) {
 
 func TestAPIReplaceAllExpectedSwitchesRequest_Validate(t *testing.T) {
 	valid := func(mac, serial string, nvos ...string) *APIExpectedSwitchCreateRequest {
-		return &APIExpectedSwitchCreateRequest{SiteID: expectedInventoryBatchTestSiteID, BmcMacAddress: mac, SwitchSerialNumber: serial, NvosMacAddresses: nvos}
+		if len(nvos) == 0 {
+			nvos = []string{mac}
+		}
+		interfaces := make(APINvosInterfaces, 0, len(nvos))
+		for i, nvosMAC := range nvos {
+			interfaces = append(interfaces, APINvosInterface{MacAddress: nvosMAC, IsPrimary: i == 0})
+		}
+		return &APIExpectedSwitchCreateRequest{SiteID: expectedInventoryBatchTestSiteID, BmcMacAddress: mac, SwitchSerialNumber: serial, NvosInterfaces: interfaces}
 	}
 	tests := []struct {
 		name    string

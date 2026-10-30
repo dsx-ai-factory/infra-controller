@@ -120,7 +120,7 @@ func applyMigration(ctx context.Context, tx *bun.Tx, id string, name string, con
 	for _, cur := range splitContents {
 		_, err := tx.ExecContext(ctx, cur)
 		if err != nil {
-			return fmt.Errorf("Migration for %s failed: %v       Command: %s", id, err, cur)
+			return fmt.Errorf("migration for %s failed: %v       Command: %s", id, err, cur)
 		}
 	}
 
@@ -191,7 +191,7 @@ func migrateInternal(ctx context.Context, db *postgres.Postgres, rollbackTime *t
 				return nil
 			}
 			if !alternatePresent(path) {
-				return fmt.Errorf("Migration file %s does not have a matching down/up migration", path)
+				return fmt.Errorf("migration file %s does not have a matching down/up migration", path)
 			}
 			file, err := sqlMigrations.Open(path)
 			if err != nil {
@@ -211,7 +211,7 @@ func migrateInternal(ctx context.Context, db *postgres.Postgres, rollbackTime *t
 			} else {
 				if applied {
 					if !hashMatch(contents, migration.hash) && !strings.Contains(string(contents), "Allow hash changing") {
-						return fmt.Errorf("Hash for migration %s (%s) does not match already applied migration.  Something inappropriately altered the migration.  Aborting.", name, id)
+						return fmt.Errorf("hash for migration %s (%s) does not match already applied migration.  Something inappropriately altered the migration.  Aborting", name, id)
 					}
 				} else {
 					pending = append(pending, pendingMigration{id: id, name: name, contents: contents})

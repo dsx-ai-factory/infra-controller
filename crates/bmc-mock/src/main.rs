@@ -17,6 +17,7 @@
 #![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 mod command_line;
+mod listener;
 mod tar_router;
 
 use std::borrow::Cow;
@@ -147,6 +148,7 @@ async fn start_libvirt_app(
             ..MachineRouterOptions::default()
         },
     );
+    let state = Arc::new(state);
     actor.run(&state, &mut backend_tasks, stop).await?;
     let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
         Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
@@ -214,6 +216,7 @@ async fn start_mock_app(
             },
         )
     };
+    let state = Arc::new(state);
     actor.run(&state, &mut backend_tasks, stop);
     let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
         Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
@@ -322,7 +325,7 @@ impl ListenerArgs {
 
     async fn bind(&self) -> std::io::Result<ListenerOrAddress> {
         // Use explicit dual-stack setup, with an IPv4 fallback when IPv6 is unavailable.
-        let listener = metrics_endpoint::bind_tcp_listener(self.listener_address()).await?;
+        let listener = listener::bind_tcp_listener(self.listener_address()).await?;
         Ok(ListenerOrAddress::Listener(listener.into_std()?))
     }
 }
@@ -365,7 +368,6 @@ mod tests {
     use std::time::Duration;
 
     use axum::routing::get;
-    use carbide_test_support::value_scenarios;
 
     use super::*;
 
@@ -514,15 +516,25 @@ mod tests {
 
     #[test]
     fn listener_uses_ipv6_wildcard_and_preserves_ports() {
-        value_scenarios!(run = |port| ListenerArgs {
-            port,
-            ..Default::default()
-        }.listener_address();
-            "configured port" {
-                None => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 1266)),
-                Some(0) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        for (scenario, port, expected) in [
+            (
+                "configured port",
+                None,
+                SocketAddr::from((Ipv6Addr::UNSPECIFIED, 1266)),
+            ),
+            (
+                "configured port",
+                Some(0),
+                SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+            ),
+        ] {
+            let actual = ListenerArgs {
+                port,
+                ..Default::default()
             }
-        );
+            .listener_address();
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     #[tokio::test]

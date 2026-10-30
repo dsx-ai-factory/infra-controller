@@ -64,6 +64,7 @@ mod dpu;
 mod dpu_remediation;
 mod errors;
 mod expected_machines;
+mod expected_nvlink_domain;
 mod expected_power_shelf;
 mod expected_rack;
 mod expected_rack_group;
@@ -112,6 +113,7 @@ mod set;
 mod site_explorer;
 mod site_prefix;
 mod sku;
+mod spx_maintenance;
 mod spx_partition;
 mod ssh;
 mod switch;
@@ -278,6 +280,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::ExpectedPowerShelf(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRack(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRackGroup(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::ExpectedNvlinkDomain(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedSwitch(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExtensionService(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::Firmware(cmd) => cmd.dispatch(ctx).await?,
@@ -305,6 +308,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::NvlDomain(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::NvlPartition(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::SpxPartition(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::SpxMaintenance(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::IpxeTemplate(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::OsImage(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::OperatingSystem(cmd) => cmd.dispatch(ctx).await?,

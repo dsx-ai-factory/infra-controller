@@ -32,11 +32,11 @@ type OperatingSystemUpdateRequest struct {
 	ImageUrl NullableString `json:"imageUrl,omitempty"`
 	// SHA hash of the image file. Immutable after creation: it may be re-sent unchanged, but changing it is rejected.
 	ImageSha NullableString `json:"imageSha,omitempty"`
-	// Authentication type for image URL, if needed, e.g., basic/bearer/token; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha.
+	// Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.
 	ImageAuthType NullableString `json:"imageAuthType,omitempty"`
-	// Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha.
+	// Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.
 	ImageAuthToken NullableString `json:"imageAuthToken,omitempty"`
-	// Optional whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. Omitting this field or sending null preserves the current value. Sending an explicit empty string clears the value and restores automatic selection: prefer a disk with an EFI partition, then fall back to `/dev/nvme0n1` or `/dev/sda`.
+	// Optional whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. Omitting this field or sending null preserves the current value. Sending an explicit empty string clears the value and restores automatic selection: prefer a disk with an EFI partition, then fall back to the first `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
 	ImageDisk NullableString `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\\s]+))$"`
 	// Root filesystem UUID; this or `rootFsLabel` is required for image-based OS
 	RootFsId NullableString `json:"rootFsId,omitempty"`

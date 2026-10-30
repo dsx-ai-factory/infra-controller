@@ -28,37 +28,43 @@ repository.workspace = true
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-resource-pool-api = { path = "../resource-pool-api" }
+carbide-utils = { path = "../utils" }
 trace-propagation = { path = "../trace-propagation" }
 
 hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
+opentelemetry = { workspace = true }
+prost = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 sqlx = { workspace = true, features = ["postgres"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "sync", "time"] }
+tokio-util = { workspace = true }
 tonic = { workspace = true, features = ["tls-native-roots"] }
 tracing = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
+carbide-api-db = { path = "../api-db", features = ["test-support"] }
 carbide-macros = { path = "../macros" }
 carbide-resource-pool-api = { path = "../resource-pool-api", features = [
   "test-support",
 ] }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
 
 bytes = { workspace = true }
+chrono = { workspace = true }
 ctor = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
 nix = { workspace = true, features = ["fs"] }
-opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
-prost = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true, features = ["ring"] }
 tempfile = { workspace = true }
@@ -70,7 +76,6 @@ tokio = { workspace = true, features = [
   "time",
 ] }
 tokio-stream = { workspace = true, features = ["net"] }
-tokio-util = { workspace = true }
 tower = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }

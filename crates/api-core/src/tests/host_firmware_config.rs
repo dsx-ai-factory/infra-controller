@@ -15,7 +15,16 @@
  * limitations under the License.
  */
 
-use model::firmware::FirmwareComponentType;
+use std::sync::Arc;
+
+use carbide_uuid::machine::HostMachineId;
+use chrono::Utc;
+use db::desired_firmware::desired_firmware_rows;
+use db::host_machine_update::{find_update_gates, find_upgrade_needed};
+use model::firmware::{Firmware, FirmwareComponentType};
+use model::host_machine_update::{
+    HostUpdateGateRow, UpdateBlockingReason, host_update_eligibility,
+};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     DeleteHostFirmwareConfigRequest, GetDesiredFirmwareVersionsRequest, HostFirmwareArtifact,
@@ -24,10 +33,12 @@ use rpc::forge::{
 };
 use tonic::{Code, Request};
 
+use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::MachineUpdateManager;
+use crate::tests::common::api_fixtures::dpu::create_dpu_machine_in_waiting_for_network_install;
 use crate::tests::common::api_fixtures::{
-    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides,
-    get_config,
+    TestEnv, TestEnvOverrides, TestManagedHost, create_managed_host, create_test_env,
+    create_test_env_with_overrides, get_config,
 };
 
 #[crate::sqlx_test]
@@ -353,6 +364,366 @@ async fn upsert_host_firmware_config_drives_machine_update_manager(
     txn.commit().await?;
 
     assert!(host.host_reprovision_requested.is_some());
+
+    Ok(())
+}
+
+/// One update gate scenario. `setup` is SQL run after the desired firmware
+/// table is written, with `{host}` replaced by the host ID.
+struct GateCase {
+    scenario: &'static str,
+    setup: &'static str,
+    global_enabled: bool,
+    ready_only: bool,
+    explicit_start: bool,
+    expect: Result<(), &'static str>,
+}
+
+#[crate::sqlx_test]
+async fn update_gates_match_find_upgrade_needed(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_id = HostMachineId::from(&create_managed_host(&env).await.id);
+    let catalog = env.config.get_firmware_config().create_snapshot();
+
+    let case = |scenario, setup, expect| GateCase {
+        scenario,
+        setup,
+        global_enabled: true,
+        ready_only: false,
+        explicit_start: false,
+        expect,
+    };
+    let cases = [
+        case(
+            "own flag unset, global on",
+            "UPDATE machines SET firmware_autoupdate = NULL WHERE id = '{host}'",
+            Ok(()),
+        ),
+        GateCase {
+            global_enabled: false,
+            ..case(
+                "own flag on, global off",
+                "UPDATE machines SET firmware_autoupdate = true WHERE id = '{host}'",
+                Ok(()),
+            )
+        },
+        case(
+            "own flag off",
+            "UPDATE machines SET firmware_autoupdate = false WHERE id = '{host}'",
+            Err("autoupdate_off_host"),
+        ),
+        GateCase {
+            global_enabled: false,
+            ..case(
+                "own flag unset, global off",
+                "UPDATE machines SET firmware_autoupdate = NULL WHERE id = '{host}'",
+                Err("autoupdate_off_global"),
+            )
+        },
+        case(
+            "open reprovisioning request",
+            "UPDATE machines SET host_reprovisioning_requested = '{}' WHERE id = '{host}'",
+            Err("request_open"),
+        ),
+        case(
+            "versions equal",
+            "UPDATE explored_endpoints e
+                SET exploration_report = jsonb_set(e.exploration_report, '{Versions}', d.versions->'Versions')
+                FROM desired_firmware d
+                WHERE d.vendor = e.exploration_report->>'Vendor' AND d.model = e.exploration_report->>'Model'",
+            Err("firmware_current"),
+        ),
+        case(
+            "report without Versions",
+            "UPDATE explored_endpoints SET exploration_report = exploration_report - 'Versions'",
+            Err("firmware_versions_unavailable"),
+        ),
+        case(
+            "report Versions JSON null",
+            "UPDATE explored_endpoints
+                SET exploration_report = jsonb_set(exploration_report, '{Versions}', 'null')",
+            Err("firmware_versions_unavailable"),
+        ),
+        case(
+            "no target for the report model",
+            "UPDATE explored_endpoints
+                SET exploration_report = jsonb_set(exploration_report, '{Model}', '\"Unknown\"')",
+            Err("no_firmware_target"),
+        ),
+        case(
+            "no report",
+            "DELETE FROM explored_endpoints",
+            Err("no_explored_report"),
+        ),
+        case(
+            "only a second BMC address has an outdated report",
+            "INSERT INTO machine_interface_addresses (interface_id, address)
+                SELECT id, 'fd00::8150' FROM machine_interfaces
+                WHERE machine_id = '{host}' AND interface_type = 'Bmc';
+            INSERT INTO explored_endpoints (address, exploration_report, version)
+                SELECT 'fd00::8150', exploration_report, version FROM explored_endpoints
+                WHERE exploration_report->>'Vendor' = 'Dell';
+            UPDATE explored_endpoints SET exploration_report = exploration_report - 'Versions'
+                WHERE address <> 'fd00::8150'",
+            Ok(()),
+        ),
+        GateCase {
+            explicit_start: true,
+            ..case(
+                "explicit start before the window",
+                "UPDATE machines SET firmware_update_time_window_start = now() + interval '1 hour',
+                    firmware_update_time_window_end = now() + interval '2 hours' WHERE id = '{host}'",
+                Err("outside_update_window"),
+            )
+        },
+        GateCase {
+            explicit_start: true,
+            ..case(
+                "explicit start inside the window",
+                "UPDATE machines SET firmware_update_time_window_start = now() - interval '1 hour',
+                    firmware_update_time_window_end = now() + interval '1 hour' WHERE id = '{host}'",
+                Ok(()),
+            )
+        },
+        GateCase {
+            explicit_start: true,
+            ..case(
+                "explicit start after the window",
+                "UPDATE machines SET firmware_update_time_window_start = now() - interval '2 hours',
+                    firmware_update_time_window_end = now() - interval '1 hour' WHERE id = '{host}'",
+                Err("outside_update_window"),
+            )
+        },
+        GateCase {
+            ready_only: true,
+            ..case(
+                "manual tagging and not Ready",
+                "UPDATE machines SET controller_state = jsonb_set(controller_state, '{state}', '\"assigned\"')
+                    WHERE id = '{host}'",
+                Err("not_ready"),
+            )
+        },
+    ];
+
+    for case in cases {
+        let scenario = case.scenario;
+        let models: Vec<Firmware> = catalog
+            .values()
+            .cloned()
+            .map(|mut model| {
+                model.explicit_start_needed |= case.explicit_start;
+                model
+            })
+            .collect();
+        // Each case runs in its own transaction, so both readers see its setup.
+        let mut txn = env.pool.begin().await?;
+        db::desired_firmware::snapshot_desired_firmware(&mut txn, &models).await?;
+        // The setup is a test literal and the substituted host ID is generated.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            case.setup.replace("{host}", &host_id.to_string()),
+        ))
+        .execute(&mut *txn)
+        .await?;
+
+        let selected = find_upgrade_needed(&mut txn, case.global_enabled, case.ready_only)
+            .await?
+            .iter()
+            .any(|update| update.id == host_id);
+        let rows = find_update_gates(
+            &mut txn,
+            Utc::now(),
+            case.global_enabled,
+            case.ready_only,
+            &desired_firmware_rows(&models),
+            &[host_id],
+        )
+        .await?;
+        let firmware_autoupdate: Option<bool> =
+            sqlx::query_scalar("SELECT firmware_autoupdate FROM machines WHERE id = $1")
+                .bind(host_id)
+                .fetch_one(&mut *txn)
+                .await?;
+        txn.rollback().await?;
+
+        assert_eq!(
+            rows.iter().any(HostUpdateGateRow::passes_manager_query),
+            selected,
+            "{scenario}"
+        );
+        assert_eq!(
+            host_update_eligibility(&rows, None, firmware_autoupdate, false)
+                .map_err(|reason| reason.code()),
+            case.expect,
+            "{scenario}"
+        );
+    }
+
+    Ok(())
+}
+
+/// The gate rows for `host_id`, read with a catalog built fresh from config and
+/// overrides, as the compact host read builds it.
+async fn fresh_gate_rows(
+    env: &TestEnv,
+    host_id: HostMachineId,
+) -> Result<Vec<HostUpdateGateRow>, Box<dyn std::error::Error>> {
+    let mut txn = env.pool.begin().await?;
+    let overrides = db::host_firmware_config::list_configs(&mut *txn).await?;
+    let catalog = env
+        .config
+        .get_firmware_config()
+        .create_snapshot_with_overrides(overrides);
+    let firmware_global = &env.config.firmware_global;
+    let rows = find_update_gates(
+        &mut txn,
+        Utc::now(),
+        firmware_global.autoupdate,
+        firmware_global.instance_updates_manual_tagging,
+        &desired_firmware_rows(catalog.values()),
+        &[host_id],
+    )
+    .await?;
+    txn.rollback().await?;
+    Ok(rows)
+}
+
+async fn host_reprovision_requested(env: &TestEnv, host: &TestManagedHost) -> bool {
+    let mut txn = env.pool.begin().await.unwrap();
+    let machine = host.host().db_machine(&mut txn).await;
+    txn.rollback().await.unwrap();
+    machine.host_reprovision_requested.is_some()
+}
+
+fn update_manager(env: &TestEnv, config: Arc<CarbideConfig>) -> MachineUpdateManager {
+    MachineUpdateManager::new(
+        env.pool.clone(),
+        config,
+        env.test_meter.meter(),
+        env.api.work_lock_manager_handle.clone(),
+        None,
+    )
+}
+
+#[crate::sqlx_test]
+async fn gates_follow_override_without_manager(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.host_models.clear();
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await;
+    let upsert_bmc_target = |explicit_start_needed| {
+        env.api
+            .upsert_host_firmware_config(Request::new(upsert_request_for(
+                "Dell",
+                "PowerEdge R750",
+                vec![component_config(
+                    HostFirmwareComponentType::Bmc,
+                    vec![version_config("9.99.99.99", true)],
+                    None,
+                )],
+                vec![HostFirmwareComponentType::Bmc],
+                Some(explicit_start_needed),
+            )))
+    };
+    upsert_bmc_target(true).await?;
+    let managed_host = create_managed_host(&env).await;
+    let host_id = HostMachineId::from(&managed_host.id);
+    let update_manager = update_manager(&env, env.config.clone());
+    // The manager stores the explicit-start target, so the host waits for a window.
+    update_manager.run_single_iteration().await?;
+    assert!(!host_reprovision_requested(&env, &managed_host).await);
+
+    upsert_bmc_target(false).await?;
+    let rows = fresh_gate_rows(&env, host_id).await?;
+    assert_eq!(host_update_eligibility(&rows, None, None, false), Ok(()));
+    let mut txn = env.pool.begin().await?;
+    let stale = find_upgrade_needed(&mut txn, true, false).await?;
+    txn.rollback().await?;
+    assert!(stale.iter().all(|update| update.id != host_id));
+
+    update_manager.run_single_iteration().await?;
+    assert!(host_reprovision_requested(&env, &managed_host).await);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn gates_with_empty_cache_and_zero_capacity(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = Some(0);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await;
+    let managed_host = create_managed_host(&env).await;
+    let host_id = HostMachineId::from(&managed_host.id);
+
+    let rows = fresh_gate_rows(&env, host_id).await?;
+    assert_eq!(host_update_eligibility(&rows, None, None, false), Ok(()));
+
+    update_manager(&env, env.config.clone())
+        .run_single_iteration()
+        .await?;
+    let desired_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM desired_firmware")
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(
+        desired_rows, 0,
+        "a manager without capacity writes no targets"
+    );
+    assert!(!host_reprovision_requested(&env, &managed_host).await);
+
+    let mut config = (*env.config).clone();
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = Some(10);
+    update_manager(&env, Arc::new(config))
+        .run_single_iteration()
+        .await?;
+    assert!(host_reprovision_requested(&env, &managed_host).await);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn predicted_host_has_report_but_not_stable_host(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let predicted_host =
+        create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+
+    let rows = fresh_gate_rows(&env, predicted_host.id.into()).await?;
+    let row = rows
+        .iter()
+        .find(|row| row.report_version.is_some())
+        .expect("the predicted host's BMC report is read");
+    assert_eq!(row.report_vendor.as_deref(), Some("Dell"));
+    assert_eq!(row.report_model.as_deref(), Some("PowerEdge R750"));
+    assert!(row.report_versions.is_some());
+    assert!(!row.stable_host);
+    assert_eq!(
+        host_update_eligibility(&rows, None, None, false),
+        Err(UpdateBlockingReason::NotStableHost)
+    );
 
     Ok(())
 }

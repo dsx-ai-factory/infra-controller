@@ -15,16 +15,17 @@ This service bridges the DSX Exchange Event Bus with NICo's health reporting sys
 
 | Point Type | Probe ID | Description |
 |------------|----------|-------------|
-| `LeakDetectRack` | `BmsLeakDetectRack` | Rack-level leak detection |
-| `LeakSensorFaultRack` | `BmsLeakSensorFaultRack` | Leak sensor fault |
-| `LeakDetectRackTray` | `BmsLeakDetectRackTray` | Rack tray leak detection |
+| `RackLeakDetect` | `BmsLeakDetectRack` | Rack-level leak detection |
+| `RackLeakSensorFault` | `BmsLeakSensorFaultRack` | Leak sensor fault |
+
+`RackLeakDetectTray` is published by integrations such as NICo, not by the BMS, so the consumer ignores it.
 
 ## MQTT Topics
 
-- **Metadata**: `BMS/v1/{pointPath}/Metadata`
-- **Value**: `BMS/v1/{pointPath}/Value`
+- **Metadata**: `BMS/v1/PUB/Metadata/Rack/{pointType}/{tagPath}`
+- **Value**: `BMS/v1/PUB/Value/Rack/{pointType}/{tagPath}`
 
-The `pointPath` is vendor-defined and may contain multiple `/` segments.
+The consumer pairs a value with its metadata by `{pointType}/{tagPath}`. The `tagPath` is vendor-defined and may contain multiple `/` segments. The rack comes from the metadata fields `rackLocationId` (the NICo rack ID) and `rackLocationName`.
 
 ## Configuration
 

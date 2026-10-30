@@ -62,7 +62,7 @@ spec:
                         Name is the endpoint resource name for the device plugin.
                         Should contain only alphanumeric characters, underscores and hyphens.
                         The full extended resource name will be constructed as resource-prefix/name.
-                        Example: pods_vf, ovnk_mgmt_vf
+                        Example: pods_vf, ovnk_mgmt_vf, pods_sf
                       minLength: 1
                       pattern: ^[a-zA-Z0-9_-]+$
                       type: string
@@ -74,18 +74,27 @@ spec:
                           description: IsRdma indicates whether RDMA is enabled for
                             this resource.
                           type: boolean
+                        needVhostNet:
+                          description: |-
+                            NeedVhostNet mounts /dev/vhost-net and /dev/net/tun with the allocated devices.
+                            Defaults to false.
+                          type: boolean
                       type: object
                     ranges:
-                      description: Ranges specifies the VF ranges on PFs to be included
-                        in this resource.
+                      description: |-
+                        Ranges specifies the function ranges on PFs to be included in this resource.
+                        For type sf, each range must set both start and end.
                       items:
-                        description: VFRange defines a range of Virtual Functions
+                        description: |-
+                          FunctionRange defines a range of functions (Virtual Functions or Scalable Functions)
                           on a Physical Function.
                         properties:
                           end:
                             description: |-
-                              End is the ending VF index (inclusive).
-                              If not set, the range extends to the last VF on the PF.
+                              End is the ending function index (inclusive).
+                              If not set, the range extends to the last function of this type on the PF.
+                              Required when type is sf. SF ranges are contiguous: every index from
+                              start to end (inclusive) must exist on the PF.
                             format: int32
                             minimum: 0
                             type: integer
@@ -96,8 +105,10 @@ spec:
                             type: integer
                           start:
                             description: |-
-                              Start is the starting VF index (inclusive).
-                              If not set, the range starts from VF 0.
+                              Start is the starting function index (inclusive).
+                              If not set, the range starts from index 0.
+                              Required when type is sf. SF ranges are contiguous: every index from
+                              start to end (inclusive) must exist on the PF.
                             format: int32
                             minimum: 0
                             type: integer
@@ -108,6 +119,7 @@ spec:
                         - message: start must be less than or equal to end
                           rule: '!has(self.start) || !has(self.end) || self.start
                             <= self.end'
+                      maxItems: 1024
                       minItems: 1
                       type: array
                     resourcePrefix:
@@ -120,12 +132,18 @@ spec:
                       description: Type specifies the type of the device plugin resource.
                       enum:
                       - vf
+                      - sf
                       type: string
                   required:
                   - name
                   - ranges
                   - type
                   type: object
+                  x-kubernetes-validations:
+                  - message: start and end must be set when type is sf
+                    rule: self.type != 'sf' || self.ranges.all(r, has(r.start) &&
+                      has(r.end))
+                maxItems: 64
                 minItems: 1
                 type: array
             required:

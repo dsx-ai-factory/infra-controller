@@ -85,19 +85,30 @@ to the mock. Use it only on simulation-only sites.
 
 ## Limitations
 
-- Job state is in memory and lost on restart. A poll for a job the new
-  process never issued reads completed on `GetJobStatus` and
-  `GetConfigureSwitchCertificateJobStatus`, and answers `RETURN_CODE_FAILURE`
-  on `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus`, as the RMS
-  API specifies.
-- Job retention differs from RMS, which keeps completed and failed jobs for
-  24 hours by default and caps its job tracker at 10,000 records. The mock
-  forgets a job once it has reported completed, keeps the most recent 4,096
-  failed node jobs, and reports a failed job it has forgotten as completed.
-- Firmware, NVOS images, passwords, and factory resets change nothing on the
-  simulated devices: a device's Redfish firmware inventory reads the same
-  after an apply, and a factory reset only clears the switch's fabric primary
-  role in the mock, once the switch's job completes.
+- Job state is in memory and lost on restart. `GetJobStatus` returns
+  `NOT_FOUND` for an unknown job. `GetConfigureSwitchCertificateJobStatus`,
+  `GetFirmwareJobStatus`, and `GetSwitchSystemImageJobStatus` answer
+  `RETURN_CODE_FAILURE` without a completion state. A restart during a reset
+  therefore leaves NICo unable to infer whether that operation completed.
+- Terminal job records keep their actual outcomes and child lists. The
+  `[rms_mock]` setting `max_terminal_jobs` defaults to 100,000 in MAT
+  (10,000 when embedding the standalone Rust mock). The setting
+  `min_terminal_retention_secs` defaults to 3,600 seconds: records younger
+  than that are protected above the count target, up to a hard ceiling of
+  four times the target. Above that ceiling, records are evicted regardless
+  of age and the mock logs one warning per instance.
+  Older records are evicted in completion order while over the target.
+  Zero retention permits immediate count-based eviction.
+- Firmware and NVOS image applies track jobs without installing images, so
+  Redfish firmware inventory is unchanged. A successful password rotation
+  updates the simulated NVOS account. Factory reset restores NVOS factory
+  credentials and clears its fabric primary role once the job completes;
+  it leaves BMC and power state unchanged. Either operation fails its job
+  if the host callback rejects the effect.
+- MAT snapshots devices at startup and graceful shutdown. A graceful
+  restart preserves the current NVOS credentials; an unclean exit can
+  restore credentials from the older startup snapshot. Job records are
+  never persisted.
 - `ListFirmwareObjects` reports object ids only, one by default. The
   `[rms_mock]` table of the machine-a-tron configuration can name others, and
   the chart exposes no setting for it.

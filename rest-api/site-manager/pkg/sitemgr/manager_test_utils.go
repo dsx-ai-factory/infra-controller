@@ -521,7 +521,10 @@ func (s *Suite) TestManagerSiteTest() error {
 		return fmt.Errorf("!SiteAwaitHandshake %+v", sgr.BootstrapState)
 	}
 
-	ts.getSiteCreds(Testuuid1, sgr.OTP)
+	_, err = ts.getSiteCreds(Testuuid1, sgr.OTP)
+	if err != nil {
+		return err
+	}
 	testCase("Roll a non-existent site")
 	r, err = tc.Post(testURL+"/v1/site/roll/"+testuuid2, "", nil)
 	if err != nil {

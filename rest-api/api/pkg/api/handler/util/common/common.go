@@ -191,7 +191,7 @@ func GetSiteFromIDString(ctx context.Context, tx *cdb.Tx, siteID string, dbSessi
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false)
+	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false, false)
 }
 
 // GetInstanceFromIDString gets the site DB model from the id string
@@ -1277,7 +1277,7 @@ func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclie
 
 // UnwrapWorkflowError removes Temporal wrappers and maps backend errors to HTTP status codes.
 func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
-	code, unwrappedError = http.StatusInternalServerError, err
+	code = http.StatusInternalServerError
 
 	// Attempt to unwrap our way through Temporal's WorkflowExecutionError
 	// and ActivityError layers to reach the underlying cause. These types

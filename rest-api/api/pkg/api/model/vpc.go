@@ -64,24 +64,49 @@ func NormalizeAPIVpcRoutingProfileFromSite(routingProfile string) string {
 	return routingProfile
 }
 
-// APIVpcRouteTarget identifies a BGP route target by ASN and VNI.
+// APIVpcRouteTarget identifies a literal or VPC-relative BGP route target.
 type APIVpcRouteTarget struct {
-	ASN uint32 `json:"asn"`
-	VNI uint32 `json:"vni"`
+	ASN     uint32  `json:"asn"`
+	VNI     *uint32 `json:"vni,omitempty"`
+	VniSelf bool    `json:"vniSelf"`
+}
+
+// Validate rejects two competing VNI sources so Core receives an unambiguous target.
+func (target APIVpcRouteTarget) Validate() error {
+	if target.VniSelf && target.VNI != nil {
+		return fmt.Errorf("`vni` value %d cannot be set when `vniSelf` is true", *target.VNI)
+	}
+	return nil
 }
 
 // ToDBModel converts an API route target to its persisted representation.
 func (target APIVpcRouteTarget) ToDBModel() cdbm.VpcRouteTarget {
-	return cdbm.VpcRouteTarget{ASN: target.ASN, VNI: target.VNI}
+	// Preserve predecessor requests that omitted vni, which historically decoded as literal zero.
+	vni := uint32(0)
+	if target.VNI != nil {
+		vni = *target.VNI
+	}
+	return cdbm.VpcRouteTarget{ASN: target.ASN, VNI: vni, VniSelf: target.VniSelf}
 }
 
 // FromDBModel populates an API route target from its persisted representation.
 func (target *APIVpcRouteTarget) FromDBModel(dbTarget cdbm.VpcRouteTarget) {
-	*target = APIVpcRouteTarget{ASN: dbTarget.ASN, VNI: dbTarget.VNI}
+	// Symbolic targets have no literal value, while literal zero must remain explicitly present.
+	var vni *uint32
+	if !dbTarget.VniSelf {
+		literalVNI := dbTarget.VNI
+		vni = &literalVNI
+	}
+	*target = APIVpcRouteTarget{ASN: dbTarget.ASN, VNI: vni, VniSelf: dbTarget.VniSelf}
 }
 
 // APIVpcRouteTargets is a collection of API route targets with DB conversion behavior.
 type APIVpcRouteTargets []APIVpcRouteTarget
+
+// Validate checks that every route target selects exactly one unambiguous VNI source.
+func (targets APIVpcRouteTargets) Validate() error {
+	return validation.Validate([]APIVpcRouteTarget(targets), validation.Each())
+}
 
 // ToDBModel converts route targets to their persisted representation.
 // Nil input is normalized to an allocated empty slice.

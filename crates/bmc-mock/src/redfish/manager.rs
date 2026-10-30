@@ -24,13 +24,18 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
-use crate::json::{JsonExt, JsonPatch};
-use crate::redfish::Builder;
-use crate::{Callbacks, http, redfish};
+use crate::json::JsonExt;
+use crate::redfish::ModelExt;
+use crate::{ActionError, Callbacks, DeviceEffect, http, redfish};
+
+#[cfg(test)]
+#[path = "manager_reset_tests.rs"]
+mod reset_defaults_tests;
 
 pub(super) fn collection() -> redfish::Collection<'static> {
     redfish::Collection {
@@ -44,7 +49,7 @@ fn resource<'a>(manager_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("/redfish/v1/Managers/{manager_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#Manager.v1_12_0.Manager"),
+        odata_type: Cow::Borrowed(redfish::schema::manager::Manager::ODATA_TYPE),
         id: Cow::Borrowed(manager_id),
         name: Cow::Borrowed("Manager"),
     }
@@ -54,129 +59,45 @@ pub(super) fn reset_target(manager_id: &str) -> String {
     format!("{}/Actions/Manager.Reset", resource(manager_id).odata_id)
 }
 
-fn builder(resource: &redfish::Resource<'_>) -> ManagerBuilder {
-    let reset_target = reset_target(&resource.id);
-    ManagerBuilder {
-        manager_id: resource.id.to_string(),
-        reset_target,
-        value: resource.json_patch(),
-    }
+fn reset_defaults_target(manager_id: &str) -> String {
+    format!(
+        "{}/Actions/Manager.ResetToDefaults",
+        resource(manager_id).odata_id
+    )
 }
 
-struct ManagerBuilder {
-    manager_id: String,
-    reset_target: String,
-    value: serde_json::Value,
-}
-
-impl Builder for ManagerBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            manager_id: self.manager_id,
-            reset_target: self.reset_target,
-        }
-    }
-}
-
-impl ManagerBuilder {
-    fn ethernet_interfaces(self, collection: &redfish::Collection<'_>) -> Self {
-        self.apply_patch(collection.nav_property("EthernetInterfaces"))
-    }
-
-    fn host_interfaces(self, collection: &redfish::Collection<'_>) -> Self {
-        self.apply_patch(collection.nav_property("HostInterfaces"))
-    }
-
-    fn serial_interfaces(self, collection: &redfish::Collection<'_>) -> Self {
-        self.apply_patch(collection.nav_property("SerialInterfaces"))
-    }
-
-    fn enable_reset_action(self) -> Self {
-        let patch = json!({
-            "Actions": {
-                "#Manager.Reset": {
-                    "target": &self.reset_target
-                }
-            }
-        });
-        self.apply_patch(patch)
-    }
-
-    fn log_services(self, collection: redfish::Collection<'_>) -> Self {
-        self.apply_patch(collection.nav_property("LogServices"))
-    }
-
-    fn firmware_version(self, v: &str) -> Self {
-        self.add_str_field("FirmwareVersion", v)
-    }
-
-    fn manager_type(self, v: &str) -> Self {
-        self.add_str_field("ManagerType", v)
-    }
-
-    fn network_protocol(self, resource: redfish::Resource<'_>) -> Self {
-        self.apply_patch(resource.nav_property("NetworkProtocol"))
-    }
-
-    fn oem(self, oem: &Oem) -> Self {
-        match oem {
-            Oem::Dell => self.apply_patch(json!({
-                "Oem": {
-                    "Dell": {
-                        // DelliDRACCard is required by libredfish...
-                        "DelliDRACCard": {
-                            "@odata.context": "/redfish/v1/$metadata#DelliDRACCard.DelliDRACCard",
-                            "@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DelliDRACCard/iDRAC.Embedded.1-1_0x23_IDRACinfo",
-                            "@odata.type": "#DelliDRACCard.v1_1_0.DelliDRACCard",
-                            "Description": "An instance of DelliDRACCard will have data specific to the Integrated Dell Remote Access Controller (iDRAC) in the managed system.",
-                            "IPMIVersion": "2.0",
-                            "Id": "iDRAC.Embedded.1-1_0x23_IDRACinfo",
-                            "LastSystemInventoryTime": "2026-02-20T04:38:38+00:00",
-                            "LastUpdateTime": "2026-03-06T04:44:21+00:00",
-                            "Name": "DelliDRACCard",
-                            "URLString": "https://10.217.157.137:443"
-                        }
+fn oem_patch(oem: &Oem, manager_id: &str) -> serde_json::Value {
+    match oem {
+        Oem::Dell => json!({
+            "Oem": {
+                "Dell": {
+                    // Required by libredfish; nv-redfish bundles no DelliDRACCard CSDL.
+                    "DelliDRACCard": {
+                        "@odata.context": "/redfish/v1/$metadata#DelliDRACCard.DelliDRACCard",
+                        "@odata.id": "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DelliDRACCard/iDRAC.Embedded.1-1_0x23_IDRACinfo",
+                        "@odata.type": "#DelliDRACCard.v1_1_0.DelliDRACCard",
+                        "Description": "An instance of DelliDRACCard will have data specific to the Integrated Dell Remote Access Controller (iDRAC) in the managed system.",
+                        "IPMIVersion": "2.0",
+                        "Id": "iDRAC.Embedded.1-1_0x23_IDRACinfo",
+                        "LastSystemInventoryTime": "2026-02-20T04:38:38+00:00",
+                        "LastUpdateTime": "2026-03-06T04:44:21+00:00",
+                        "Name": "DelliDRACCard",
+                        "URLString": "https://10.217.157.137:443"
                     }
                 }
-            })),
-            // bmc-explorer's HPE lockdown check reads
-            // Oem.Hpe.VirtualNICEnabled; false is the locked-down state.
-            Oem::Hpe => self.apply_patch(json!({
-                "Oem": {
-                    "Hpe": {
-                        "@odata.context": "/redfish/v1/$metadata#HpeiLO.HpeiLO",
-                        "@odata.type": "#HpeiLO.v2_11_0.HpeiLO",
-                        "VirtualNICEnabled": false,
-                    }
-                }
-            })),
-            Oem::Supermicro => {
-                let patch =
-                    redfish::oem::supermicro::manager::manager_oem_patch(&self.manager_id);
-                self.apply_patch(patch)
             }
-        }
-    }
-
-    // TODO: we can use typed UUID here, but all these fields are
-    // really not used it just requirements of libredfish model added
-    // "just in case"...
-    fn uuid(self, v: &str) -> Self {
-        self.add_str_field("UUID", v)
-    }
-
-    fn date_time(self, v: DateTime<Utc>) -> Self {
-        let current_time = v.format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
-        self.add_str_field("DateTime", &current_time)
-    }
-
-    fn status(self, status: redfish::resource::Status) -> Self {
-        self.apply_patch(json!({"Status": status.into_json()}))
-    }
-
-    fn build(self) -> serde_json::Value {
-        self.value
+        }),
+        // bmc-explorer's HPE lockdown check reads
+        // Oem.Hpe.VirtualNICEnabled; false is the locked-down state.
+        Oem::Hpe => json!({
+            "Oem": {
+                "Hpe": redfish::oem::object(
+                    "#HpeiLO.v2_11_0.HpeiLO",
+                    super::schema::hpei_lo::HpeiLo::new().virtual_nic_enabled(false)
+                ).patch(json!({"@odata.context": "/redfish/v1/$metadata#HpeiLO.HpeiLO"}))
+            }
+        }),
+        Oem::Supermicro => redfish::oem::supermicro::manager::manager_oem_patch(manager_id),
     }
 }
 
@@ -215,6 +136,10 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
         )
         .route(&reset_target(MGR_ID), post(post_reset_manager::<C>))
         .route(
+            &reset_defaults_target(MGR_ID),
+            post(post_reset_defaults::<C>),
+        )
+        .route(
             &redfish::manager_network_protocol::manager_resource(MGR_ID).odata_id,
             get(get_network_protocol::<C>).patch(patch_network_protocol::<C>),
         )
@@ -251,11 +176,68 @@ pub(crate) struct SingleConfig {
     pub(crate) oem: Option<Oem>,
 }
 
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedManagerState {
+    overrides: serde_json::Value,
+    host_interfaces: HashMap<String, serde_json::Value>,
+}
+
 pub struct ManagerState {
     managers: Vec<SingleManagerState>,
 }
 
 impl ManagerState {
+    pub(crate) fn persisted(&self) -> std::collections::BTreeMap<String, PersistedManagerState> {
+        self.managers
+            .iter()
+            .map(|manager| {
+                (
+                    manager.id.to_string(),
+                    PersistedManagerState {
+                        overrides: manager.overrides.lock().expect("mutex poisoned").clone(),
+                        host_interfaces: manager
+                            .host_interface_overrides
+                            .lock()
+                            .expect("mutex poisoned")
+                            .clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn validate_persisted(
+        &self,
+        saved: &std::collections::BTreeMap<String, PersistedManagerState>,
+    ) -> bool {
+        saved.len() == self.managers.len()
+            && saved.iter().all(|(id, state)| {
+                self.find(id).is_some_and(|manager| {
+                    state.overrides.is_object()
+                        && state.host_interfaces.iter().all(|(iface, value)| {
+                            value.is_object()
+                                && manager.config.host_interfaces.as_ref().is_some_and(
+                                    |interfaces| interfaces.iter().any(|i| i.id == iface.as_str()),
+                                )
+                        })
+                })
+            })
+    }
+
+    pub(crate) fn restore_persisted(
+        &self,
+        saved: &std::collections::BTreeMap<String, PersistedManagerState>,
+    ) {
+        for (id, state) in saved {
+            let manager = self.find(id).expect("validated manager identity");
+            *manager.overrides.lock().expect("mutex poisoned") = state.overrides.clone();
+            *manager
+                .host_interface_overrides
+                .lock()
+                .expect("mutex poisoned") = state.host_interfaces.clone();
+        }
+    }
+
     pub(crate) fn new(config: &Config) -> Self {
         Self {
             managers: config
@@ -275,6 +257,23 @@ impl ManagerState {
 
     pub(crate) fn find(&self, manager_id: &str) -> Option<&SingleManagerState> {
         self.managers.iter().find(|c| c.id == manager_id)
+    }
+
+    pub(crate) fn reset_to_defaults(&self) {
+        for manager in &self.managers {
+            *manager.overrides.lock().expect("mutex poisoned") = json!({});
+            manager
+                .host_interface_overrides
+                .lock()
+                .expect("mutex poisoned")
+                .clear();
+            *manager.ntp.lock().expect("mutex poisoned") = NtpState::default();
+            // The configured simulator endpoint determines the factory IPMI default.
+            manager.ipmi_enabled.store(
+                manager.ipmi_port.lock().expect("mutex poisoned").is_some(),
+                atomic::Ordering::Relaxed,
+            );
+        }
     }
 
     pub fn set_ipmi_endpoint(&self, port: Option<u16>) {
@@ -349,13 +348,25 @@ impl SingleManagerState {
     fn network_protocol(&self) -> serde_json::Value {
         let resource = redfish::manager_network_protocol::manager_resource(self.id);
         let ntp = self.ntp.lock().expect("mutex poisoned");
-        redfish::manager_network_protocol::builder(&resource)
-            .ipmi(
-                self.ipmi_enabled.load(atomic::Ordering::Relaxed),
-                *self.ipmi_port.lock().expect("mutex poisoned"),
-            )
-            .ntp(ntp.protocol_enabled, &ntp.servers)
-            .build()
+        use super::schema::manager_network_protocol::{
+            ManagerNetworkProtocol, NtpProtocol, Protocol,
+        };
+        let port = *self.ipmi_port.lock().expect("mutex poisoned");
+        ManagerNetworkProtocol::new(
+            resource.odata_id.as_ref(),
+            resource.id.as_ref(),
+            resource.name.as_ref(),
+        )
+        .ipmi(Protocol {
+            port: port.map(|p| Some(i64::from(p))),
+            ..Protocol::new().protocol_enabled(self.ipmi_enabled.load(atomic::Ordering::Relaxed))
+        })
+        .ntp(
+            NtpProtocol::new()
+                .protocol_enabled(ntp.protocol_enabled)
+                .ntp_servers(ntp.servers.iter().map(String::as_str)),
+        )
+        .into_json()
     }
 
     fn set_ipmi_endpoint(&self, port: Option<u16>) {
@@ -439,46 +450,78 @@ async fn get_manager<C: Callbacks>(
         return http::not_found();
     };
 
-    builder(&resource(&manager_id))
-        .manager_type("BMC")
-        .network_protocol(redfish::manager_network_protocol::manager_resource(
-            &manager_id,
-        ))
-        .maybe_with(
-            ManagerBuilder::ethernet_interfaces,
-            &this
-                .config
-                .eth_interfaces
-                .as_ref()
-                .map(|_| redfish::ethernet_interface::manager_collection(&manager_id)),
+    use super::schema::manager::{Manager, ManagerType};
+    let resource = resource(&manager_id);
+    let config = &this.config;
+    let model = Manager {
+        ethernet_interfaces: config.eth_interfaces.as_ref().map(|_| {
+            redfish::ethernet_interface::manager_collection(&manager_id)
+                .odata_id
+                .into_owned()
+                .into()
+        }),
+        host_interfaces: config.host_interfaces.as_ref().map(|_| {
+            redfish::host_interface::manager_collection(&manager_id)
+                .odata_id
+                .into_owned()
+                .into()
+        }),
+        serial_interfaces: config.serial_interfaces.as_ref().map(|_| {
+            redfish::serial_interface::manager_collection(&manager_id)
+                .odata_id
+                .into_owned()
+                .into()
+        }),
+        firmware_version: config.firmware_version.map(|v| Some(v.to_string())),
+        ..Manager::new(
+            resource.odata_id.as_ref(),
+            resource.id.as_ref(),
+            resource.name.as_ref(),
         )
-        .maybe_with(
-            ManagerBuilder::host_interfaces,
-            &this
-                .config
-                .host_interfaces
-                .as_ref()
-                .map(|_| redfish::host_interface::manager_collection(&manager_id)),
-        )
-        .maybe_with(
-            ManagerBuilder::serial_interfaces,
-            &this
-                .config
-                .serial_interfaces
-                .as_ref()
-                .map(|_| redfish::serial_interface::manager_collection(&manager_id)),
-        )
-        .enable_reset_action()
-        .log_services(redfish::log_service::manager_collection(&manager_id))
-        .status(redfish::resource::Status::Ok)
-        .uuid("3347314f-c0c6-5080-3410-00354c4c4544")
-        .date_time(Utc::now())
-        .maybe_with(ManagerBuilder::oem, &this.config.oem)
-        .maybe_with(
-            ManagerBuilder::firmware_version,
-            &this.config.firmware_version,
-        )
-        .build()
+    }
+    .manager_type(ManagerType::Bmc)
+    .network_protocol(
+        redfish::manager_network_protocol::manager_resource(&manager_id)
+            .odata_id
+            .as_ref(),
+    )
+    .log_services(
+        redfish::log_service::manager_collection(&manager_id)
+            .odata_id
+            .as_ref(),
+    )
+    .status(redfish::resource::Status::Ok.into())
+    .uuid(
+        "3347314f-c0c6-5080-3410-00354c4c4544"
+            .parse()
+            .expect("fixture manager UUID"),
+    )
+    .date_time(Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string());
+    // Bound actions are not emitted by the server schema generator yet.
+    let mut document = model.into_json().patch(json!({
+        "Actions": {
+            "#Manager.Reset": {"target": reset_target(&manager_id)}
+        }
+    }));
+    if state
+        .callbacks
+        .as_ref()
+        .is_some_and(|callbacks| callbacks.supports_bmc_factory_reset())
+    {
+        document = document.patch(json!({"Actions": {
+            "#Manager.ResetToDefaults": {
+                "target": reset_defaults_target(&manager_id),
+                "ResetType@Redfish.AllowableValues": ["ResetAll"],
+                "ResetToDefaultsType@Redfish.AllowableValues": ["ResetAll"]
+            }
+        }}));
+    }
+    let document = if let Some(oem) = &config.oem {
+        document.patch(oem_patch(oem, &manager_id))
+    } else {
+        document
+    };
+    document
         .patch(this.overrides.lock().expect("mutex poisoned").clone())
         .into_ok_response()
 }
@@ -669,6 +712,68 @@ async fn post_reset_manager<C: Callbacks>(
         "BMC self-reset"
     );
     json!({}).into_ok_response()
+}
+
+#[derive(Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum ResetToDefaultsRequest {
+    Standard {
+        #[serde(rename = "ResetType")]
+        value: ResetAll,
+    },
+    Defaults {
+        #[serde(rename = "ResetToDefaultsType")]
+        value: ResetAll,
+    },
+}
+
+#[derive(Deserialize)]
+enum ResetAll {
+    ResetAll,
+}
+
+async fn post_reset_defaults<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+    request: Result<Json<ResetToDefaultsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if state.manager.find(&manager_id).is_none() {
+        return http::not_found();
+    }
+    let Ok(Json(request)) = request else {
+        return http::redfish_error(StatusCode::BAD_REQUEST, "invalid ResetAll request");
+    };
+    let ResetAll::ResetAll = match request {
+        ResetToDefaultsRequest::Standard { value } | ResetToDefaultsRequest::Defaults { value } => {
+            value
+        }
+    };
+    let Some(callbacks) = &state.callbacks else {
+        return http::redfish_error(StatusCode::BAD_REQUEST, "BMC reset backend is unavailable");
+    };
+    let update = state.factory_reset_update().await;
+    match callbacks
+        .device_effect(DeviceEffect::ResetBmcToDefaults(update))
+        .await
+    {
+        Ok(()) => {
+            state.record_log(redfish::log_service::LogEntryDraft::manager_resetting(
+                &resource(&manager_id).odata_id,
+                "Manager.ResetToDefaults",
+            ));
+            json!({}).into_ok_response()
+        }
+        Err(ActionError::BadRequest(error)) => {
+            http::redfish_error(StatusCode::BAD_REQUEST, &error.to_string())
+        }
+        Err(ActionError::Internal(error)) => {
+            tracing::error!(%error, "BMC factory reset failed");
+            http::redfish_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BMC factory reset failed",
+            )
+        }
+    }
 }
 
 async fn get_log_services() -> Response {

@@ -1716,3 +1716,22 @@ func QueueOptionsFrom(
 		return operation.ConflictStrategyReject, timeout
 	}
 }
+
+// TaskKindTo describes a task without its operation payload. Stored task types
+// without a known API kind map to Unspecified.
+func TaskKindTo(kind taskcommon.TaskType) pb.TaskKind {
+	switch kind {
+	case taskcommon.TaskTypePowerControl:
+		return pb.TaskKind_TASK_KIND_POWER_CONTROL
+	case taskcommon.TaskTypeFirmwareControl:
+		return pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL
+	case taskcommon.TaskTypeBringUp:
+		return pb.TaskKind_TASK_KIND_BRING_UP
+	case taskcommon.TaskTypeDecommission:
+		return pb.TaskKind_TASK_KIND_DECOMMISSION
+	case taskcommon.TaskTypeInjectExpectation:
+		return pb.TaskKind_TASK_KIND_INJECT_EXPECTATION
+	default:
+		return pb.TaskKind_TASK_KIND_UNSPECIFIED
+	}
+}

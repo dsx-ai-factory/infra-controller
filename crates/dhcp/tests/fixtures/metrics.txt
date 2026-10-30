@@ -1,3 +1,6 @@
 # HELP carbide_dhcp_certificate_expiration_time The certificate expiration time (epoch seconds)
 # TYPE carbide_dhcp_certificate_expiration_time gauge
 carbide_dhcp_certificate_expiration_time 1740173562
+# HELP carbide_dhcp_certificate_expiration_time_seconds The certificate expiration time (epoch seconds)
+# TYPE carbide_dhcp_certificate_expiration_time_seconds gauge
+carbide_dhcp_certificate_expiration_time_seconds 1740173562

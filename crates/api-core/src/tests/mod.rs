@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod astra;
 mod boot_interface_resolution;
 mod chassis_reset;
 mod client_resolution;
@@ -29,6 +30,7 @@ mod dpu_remediation;
 mod dpu_reprovisioning;
 mod expected_component_patch;
 mod expected_machine;
+mod expected_nvlink_domain;
 mod expected_rack;
 mod expected_rack_group;
 mod expected_switch;
@@ -84,10 +86,12 @@ mod rack_health;
 mod rack_state_controller;
 mod redfish_actions;
 mod resource_pool;
+mod resource_pool_inspection;
 mod site_explorer;
 mod site_prefix;
 mod sku;
 mod spdm;
+mod spx_multiplane;
 mod spx_partition;
 mod switch;
 mod tenant_identity_config;

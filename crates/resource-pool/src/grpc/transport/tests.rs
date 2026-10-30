@@ -384,7 +384,6 @@ mod native_roots {
             .call(
                 "Describe",
                 DescribeRequest {
-                    site_id: pool.site_id,
                     pool_alias: pool.logical_pool,
                 },
                 |mut client, request| {

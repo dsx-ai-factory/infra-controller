@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::error::Error as _;
 use std::net::IpAddr;
 
 use carbide_uuid::machine::{
@@ -22,7 +23,7 @@ use carbide_uuid::machine::{
 use carbide_uuid::rack::RackId;
 use common::api_fixtures::dpu::create_dpu_machine;
 use common::api_fixtures::{create_managed_host, create_test_env, site_explorer};
-use db::ObjectFilter;
+use db::{AnnotatedSqlxError, ObjectFilter};
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthReport, HealthReportApplyMode,
 };
@@ -37,6 +38,7 @@ use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{AssociateMachinesWithInstanceTypeRequest, FindInstanceTypeIdsRequest};
 
+use crate::errors::{CarbideError, CarbideErrorWithLocation};
 use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
 use crate::test_support::mac_address_pool::DPU_OOB_MAC_ADDRESS_POOL;
 use crate::tests::common;
@@ -45,6 +47,94 @@ use crate::tests::common::api_fixtures::{
     create_managed_host_multi_dpu, create_managed_host_with_config,
 };
 use crate::tests::sku::tests::FULL_SKU_DATA;
+
+#[crate::sqlx_test]
+async fn test_update_machine_metadata_preserves_snapshot_decode_error(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
+
+    // Corrupt persisted state so `load_machine` fails after acquiring its transaction.
+    let updated = sqlx::query("UPDATE machines SET controller_state = '{}'::jsonb WHERE id = $1")
+        .bind(dpu_machine_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+
+    let error = env
+        .api
+        .update_machine_metadata(tonic::Request::new(
+            rpc::forge::MachineMetadataUpdateRequest {
+                machine_id: Some(dpu_machine_id.into()),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "machine-with-invalid-state".to_string(),
+                    ..Default::default()
+                }),
+                if_version_match: None,
+            },
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
+    );
+    let source = error
+        .source()
+        .expect("status should retain its error source")
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .expect("status source should retain the CarbideError");
+    // `Machine::from_row` decodes the whole snapshot from column 0.
+    assert!(matches!(
+        &source.error,
+        CarbideError::DBError(AnnotatedSqlxError {
+            source: sqlx::Error::ColumnDecode { index, .. },
+            ..
+        }) if index == "0"
+    ));
+    assert_eq!(
+        error.metadata().get("nico-error-text").unwrap(),
+        error.message()
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_update_machine_metadata_preserves_not_found(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let missing_machine_id = MachineId::new(MachineIdSource::Tpm, [255; 32], MachineType::Dpu);
+
+    let error = env
+        .api
+        .update_machine_metadata(tonic::Request::new(
+            rpc::forge::MachineMetadataUpdateRequest {
+                machine_id: Some(missing_machine_id),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "missing-machine".to_string(),
+                    ..Default::default()
+                }),
+                if_version_match: None,
+            },
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(
+        error.message(),
+        format!("machine not found: {missing_machine_id}")
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-404"
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-text").unwrap(),
+        error.message()
+    );
+}
 
 #[crate::sqlx_test]
 async fn test_find_machine_by_id(pool: sqlx::PgPool) {

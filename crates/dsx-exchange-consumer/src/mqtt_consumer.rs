@@ -31,6 +31,11 @@ use crate::config::{MqttAuthMode, MqttConfig};
 use crate::messages::{LeakMetadata, ValueMessage};
 use crate::metrics::{DroppedMessageType, MessageDropped, MessageReceived};
 
+/// Topics of the BMS-published rack leak points. The patterns contain regex
+/// metacharacters, so mqttea uses them as written instead of as topic suffixes.
+const METADATA_TOPIC_PATTERN: &str = "/PUB/Metadata/Rack/(RackLeakDetect|RackLeakSensorFault)/";
+const VALUE_TOPIC_PATTERN: &str = "/PUB/Value/Rack/(RackLeakDetect|RackLeakSensorFault)/";
+
 /// Message types received from MQTT.
 #[derive(Debug, Clone)]
 pub enum MqttMessage {
@@ -80,15 +85,14 @@ pub async fn connect(
         .map_err(|e| DsxConsumerError::Mqtt(e.to_string()))?;
     client.register_metrics(meter, "dsx_exchange_consumer");
 
-    // Register message types with distinct suffix patterns.
-    // mqttea converts simple strings to suffix regex: "Metadata" -> "/Metadata$"
+    // Register message types with distinct topic patterns.
     client
-        .register_json_message::<LeakMetadata>("Metadata".to_string())
+        .register_json_message::<LeakMetadata>(METADATA_TOPIC_PATTERN.to_string())
         .await
         .map_err(|e| DsxConsumerError::Mqtt(e.to_string()))?;
 
     client
-        .register_json_message::<ValueMessage>("Value".to_string())
+        .register_json_message::<ValueMessage>(VALUE_TOPIC_PATTERN.to_string())
         .await
         .map_err(|e| DsxConsumerError::Mqtt(e.to_string()))?;
 
@@ -229,5 +233,49 @@ impl mqttea::auth::ClientCredentialsProvider for SecretBackedOAuth2Credentials {
             mqttea::ClientId::new(username),
             mqttea::ClientSecret::new(password),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mqttea::MqttRegistry;
+
+    use super::*;
+
+    #[test]
+    fn leak_topics_select_their_message_type() {
+        use carbide_test_support::value_scenarios;
+
+        let mut registry = MqttRegistry::new();
+        registry
+            .register_json_message::<LeakMetadata>(vec![METADATA_TOPIC_PATTERN.to_string()], None)
+            .unwrap();
+        registry
+            .register_json_message::<ValueMessage>(vec![VALUE_TOPIC_PATTERN.to_string()], None)
+            .unwrap();
+
+        value_scenarios!(
+            run = |topic: &str| {
+                registry
+                    .find_matching_type_for_topic(topic)
+                    .map(|info| info.type_name.rsplit("::").next().unwrap().to_string())
+            };
+            "BMS-published rack leak points are routed by their topic" {
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack02/leak"
+                    => Some("LeakMetadata".to_string()),
+                "BMS/v1/PUB/Metadata/Rack/RackLeakSensorFault/site/rack02/fault"
+                    => Some("LeakMetadata".to_string()),
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack02/leak"
+                    => Some("ValueMessage".to_string()),
+                "BMS/v1/PUB/Value/Rack/RackLeakSensorFault/site/rack02/fault"
+                    => Some("ValueMessage".to_string()),
+            }
+            "other points and integration-published values are ignored" {
+                "BMS/v1/PUB/Value/Rack/RackPower/site/rack02/power" => None,
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetectTray/site/rack02/tray" => None,
+                "BMS/v1/NICO/Value/Rack/RackLeakDetectTray/site/rack02/tray" => None,
+                "BMS/v1/PUB/Value/Sensor/LeakDetect/site/pod/leak" => None,
+            }
+        );
     }
 }

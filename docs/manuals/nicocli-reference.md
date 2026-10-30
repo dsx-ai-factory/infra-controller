@@ -6,7 +6,7 @@ The [Tenant Management](../configuration/tenant_management.md) guide uses this r
 
 ## Installation
 
-Building `nicocli` or `nico-mcp` requires Go 1.26.4 or newer, plus working
+Building `nicocli` or `nico-mcp` requires Go 1.27.3 or newer, plus working
 `git` and `make`. You also need write access to the selected install directory,
 and that directory must be on `$PATH` to invoke the installed binary by name.
 

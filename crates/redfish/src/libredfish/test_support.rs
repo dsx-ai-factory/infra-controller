@@ -69,6 +69,7 @@ struct RedfishSimState {
     next_power_state_error: Option<String>,
     /// Fail the next matching power action before changing the host's power.
     next_power_action_error: Option<(SystemPowerControl, String)>,
+    next_chassis_reset_error: Option<RedfishError>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
@@ -441,6 +442,11 @@ impl RedfishSim {
         self.state.lock().unwrap().next_power_action_error = Some((action, error.to_string()));
     }
 
+    /// Fail one chassis reset with the supplied error, recording the attempt.
+    pub fn fail_next_chassis_reset(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_chassis_reset_error = Some(error);
+    }
+
     /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller clock. Use a value larger than
     /// the time-sync threshold to simulate an out-of-sync BMC clock.
@@ -667,10 +673,22 @@ pub struct RedfishSimTimepoint {
 /// Platform-configuration calls recorded separately from power actions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimPlatformAction {
-    SetHostRshim { host: String },
-    SetHostPrivilegeLevel { host: String },
-    IsBiosSetup { host: String },
-    UefiSetup { dpu: bool },
+    SetHostRshim {
+        host: String,
+    },
+    SetIdracLockdown {
+        host: String,
+        enabled: EnabledDisabled,
+    },
+    SetHostPrivilegeLevel {
+        host: String,
+    },
+    IsBiosSetup {
+        host: String,
+    },
+    UefiSetup {
+        dpu: bool,
+    },
 }
 
 /// Owned form of the boot-interface reference observed by the Redfish
@@ -2085,6 +2103,9 @@ impl Redfish for RedfishSimClient {
                 chassis_id: chassis_id.to_string(),
                 reset_type,
             });
+            if let Some(error) = state.next_chassis_reset_error.take() {
+                return Err(error);
+            }
             Ok(())
         })
     }
@@ -2205,9 +2226,17 @@ impl Redfish for RedfishSimClient {
 
     fn set_idrac_lockdown<'a>(
         &'a self,
-        _enabled: EnabledDisabled,
+        enabled: EnabledDisabled,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let host = self._host.clone();
+            state.hosts.get_mut(&host).unwrap().lockdown = enabled;
+            state
+                .platform_actions
+                .push(RedfishSimPlatformAction::SetIdracLockdown { host, enabled });
+            Ok(())
+        })
     }
 
     fn get_boss_controller<'a>(

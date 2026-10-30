@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
@@ -34,12 +35,14 @@ func TestManageExpectedRackGroup_UpdateExpectedRackGroupsInDB(t *testing.T) {
 	manager := NewManageExpectedRackGroup(session, nil)
 
 	for _, tc := range []struct {
-		name      string
-		inventory *corev1.ExpectedRackGroupInventory
-		recent    bool
-		deleted   bool
-		wantErr   bool
-		wantType  cdbm.ExpectedRackGroupMemberType
+		name         string
+		inventory    *corev1.ExpectedRackGroupInventory
+		recent       bool
+		deleted      bool
+		wantErr      bool
+		wantType     cdbm.ExpectedRackGroupMemberType
+		storedLabels cdbm.Labels
+		check        func(t *testing.T, before, stored *cdbm.ExpectedRackGroup, updateIssued bool)
 	}{
 		{name: "missing snapshot", wantErr: true},
 		{name: "unspecified status preserves inventory", inventory: &corev1.ExpectedRackGroupInventory{}, wantErr: true},
@@ -51,13 +54,44 @@ func TestManageExpectedRackGroup_UpdateExpectedRackGroupsInDB(t *testing.T) {
 		{name: "final page deletes absent rows", inventory: &corev1.ExpectedRackGroupInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, InventoryPage: &corev1.InventoryPage{CurrentPage: 2, TotalPages: 2}}, deleted: true},
 		{name: "Core Switch is stored as REST NVSwitch", inventory: &corev1.ExpectedRackGroupInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, ExpectedRackGroups: []*corev1.ExpectedRackGroup{{Topology: "topology", Racks: []*corev1.ExpectedRackGroupRack{{RackId: &corev1.RackId{Id: "rack-01"}, Members: []*corev1.ExpectedRackGroupMember{{Type: "Switch", Manufacturer: "NVIDIA", Id: "device-01"}}}}}}}, wantType: cdbm.ExpectedRackGroupMemberTypeNVSwitch},
 		{name: "invalid member does not delete inventory", inventory: &corev1.ExpectedRackGroupInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, ExpectedRackGroups: []*corev1.ExpectedRackGroup{{Topology: "topology", Racks: []*corev1.ExpectedRackGroupRack{{RackId: &corev1.RackId{Id: "rack-01"}, Members: []*corev1.ExpectedRackGroupMember{{Type: "NVSwitch", Manufacturer: "NVIDIA", Id: "device-01"}}}}}}}, wantErr: true},
+		{
+			name:         "unchanged unlabeled group preserves update timestamp",
+			storedLabels: cdbm.Labels{},
+			inventory: &corev1.ExpectedRackGroupInventory{
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				ExpectedRackGroups: []*corev1.ExpectedRackGroup{{
+					Topology: "topology",
+					Metadata: &corev1.Metadata{Labels: []*corev1.Label{}},
+				}},
+			},
+			check: func(t *testing.T, before, stored *cdbm.ExpectedRackGroup, updateIssued bool) {
+				require.False(t, updateIssued, "unchanged inventory must not issue an UPDATE")
+				require.Equal(t, before, stored, "the row and its Updated timestamp must remain unchanged")
+			},
+		},
+		{
+			name:         "omitted inventory labels clear stored labels",
+			storedLabels: cdbm.Labels{"location": "original"},
+			inventory: &corev1.ExpectedRackGroupInventory{
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				ExpectedRackGroups: []*corev1.ExpectedRackGroup{{
+					Topology: "topology",
+					Metadata: &corev1.Metadata{},
+				}},
+			},
+			check: func(t *testing.T, before, stored *cdbm.ExpectedRackGroup, updateIssued bool) {
+				require.True(t, updateIssued, "removing stored labels must issue an UPDATE")
+				require.Equal(t, cdbm.Labels{}, stored.Labels)
+				require.True(t, stored.Updated.After(before.Updated))
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, group := range tc.inventory.GetExpectedRackGroups() {
 				group.RackGroupId = &corev1.RackGroupId{Id: tc.name}
 			}
 			row, err := dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{
-				ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: tc.name, Topology: "topology", CreatedBy: user.ID,
+				ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: tc.name, Topology: "topology", Labels: tc.storedLabels, CreatedBy: user.ID,
 			})
 			require.NoError(t, err)
 			if !tc.recent {
@@ -65,7 +99,30 @@ func TestManageExpectedRackGroup_UpdateExpectedRackGroupsInDB(t *testing.T) {
 					Set("updated = ?", time.Now().Add(-time.Hour)).Where("id = ?", row.ID).Exec(ctx)
 				require.NoError(t, err)
 			}
-			err = manager.UpdateExpectedRackGroupsInDB(ctx, site.ID, tc.inventory)
+			inventory := tc.inventory
+			var before *cdbm.ExpectedRackGroup
+			var updateHook *rackGroupWriteHook
+			if tc.check != nil {
+				before, err = dao.Get(ctx, nil, row.ID, nil, false)
+				require.NoError(t, err)
+				require.False(t, site.IsTimeWithinStaleInventoryThreshold(before.Updated))
+				require.Equal(t, tc.storedLabels, before.Labels)
+
+				// The receiving REST workflow's ProtoJSON converter omits empty
+				// repeated labels, leaving nil labels for the inventory comparison.
+				converter := ctemporal.DataConverter()
+				payload, err := converter.ToPayload(inventory)
+				require.NoError(t, err)
+				inventory = &corev1.ExpectedRackGroupInventory{}
+				require.NoError(t, converter.FromPayload(payload, inventory))
+				require.Len(t, inventory.GetExpectedRackGroups(), 1)
+				require.Nil(t, inventory.GetExpectedRackGroups()[0].Metadata.GetLabels())
+
+				// Hooks stay registered, so observe only this row's UPDATE.
+				updateHook = &rackGroupWriteHook{operation: "UPDATE", rowID: row.ID}
+				session.DB.AddQueryHook(updateHook)
+			}
+			err = manager.UpdateExpectedRackGroupsInDB(ctx, site.ID, inventory)
 			if tc.wantErr {
 				require.Error(t, err)
 			} else {
@@ -78,6 +135,9 @@ func TestManageExpectedRackGroup_UpdateExpectedRackGroupsInDB(t *testing.T) {
 				require.NoError(t, err)
 				if tc.wantType != "" {
 					require.Equal(t, []cdbm.ExpectedRackGroupMember{{Type: tc.wantType, Manufacturer: "NVIDIA", ID: "device-01"}}, stored.Racks[0].Members)
+				}
+				if tc.check != nil {
+					tc.check(t, before, stored, updateHook.fired)
 				}
 				require.NoError(t, dao.Delete(ctx, nil, row.ID))
 			}
@@ -157,14 +217,18 @@ func TestManageExpectedRackGroup_UpdateExpectedRackGroupsInDB(t *testing.T) {
 
 type rackGroupWriteHook struct {
 	operation string
+	rowID     uuid.UUID
 	before    func()
 	fired     bool
 }
 
 func (h *rackGroupWriteHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	if !h.fired && strings.HasPrefix(event.Query, h.operation) && strings.Contains(event.Query, "expected_rack_group") {
+	if !h.fired && strings.HasPrefix(event.Query, h.operation) && strings.Contains(event.Query, "expected_rack_group") &&
+		(h.rowID == uuid.Nil || strings.Contains(event.Query, h.rowID.String())) {
 		h.fired = true
-		h.before()
+		if h.before != nil {
+			h.before()
+		}
 	}
 	return ctx
 }

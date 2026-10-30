@@ -15,10 +15,12 @@
  * limitations under the License.
  */
 
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
 use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
 use nv_redfish::bmc_http::reqwest::Client as ReqwestClient;
@@ -29,7 +31,7 @@ use url::Url;
 
 use crate::HealthError;
 use crate::bmc::{
-    BmcClient, BmcLatencyInstrumentation, FixedCredentialProvider, bmc_latency_endpoint_labels,
+    BmcClient, BmcLatencyInstrumentation, CredentialProvider, bmc_latency_endpoint_labels,
 };
 use crate::config::ClusterEndpointSourceConfig;
 use crate::endpoint::{BmcAddr, BmcCredentials, BmcEndpoint, BoxFuture, EndpointSource};
@@ -129,11 +131,14 @@ async fn manager_rpc(
     })
 }
 
+/// Fetches the partition's BMC credentials. A response without them falls back
+/// to the configured defaults; a failed call is returned as an error so the
+/// caller can keep the credentials it fetched last.
 async fn fetch_manager_credentials(
     http: &HttpClient,
     json_rpc_url: &Url,
     cfg: &ClusterEndpointSourceConfig,
-) -> (String, Option<String>) {
+) -> Result<(String, Option<String>), HealthError> {
     // cmsh equivalent: partition use <partition> → bmcsettings → get username / get password
     // Password stored by the cluster manager daemon at partition level.
     let result = manager_rpc(
@@ -145,17 +150,7 @@ async fn fetch_manager_credentials(
     )
     .await;
 
-    let raw = match result {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                partition = %cfg.cluster_manager_partition,
-                "Failed to fetch cluster manager partition credentials; using config fallback"
-            );
-            return (cfg.default_username.clone(), cfg.default_password.clone());
-        }
-    };
+    let raw = result?;
 
     tracing::debug!("Raw cluster manager partition response received");
 
@@ -189,7 +184,7 @@ async fn fetch_manager_credentials(
             cfg.default_password.clone()
         });
 
-    (username, password)
+    Ok((username, password))
 }
 
 fn extract_manager_devices(
@@ -293,6 +288,51 @@ fn extract_manager_devices(
 
 // ── Source implementations ────────────────────────────────────────────────────
 
+/// Supplies the credentials the cluster inventory last listed for one BMC.
+///
+/// Discovery updates them on every pass. The BMC client asks again after an
+/// authentication failure, so running collectors pick up rotated credentials
+/// without a restart.
+struct InventoryCredentialProvider {
+    credentials: ArcSwap<BmcCredentials>,
+}
+
+impl InventoryCredentialProvider {
+    fn new(credentials: BmcCredentials) -> Self {
+        Self {
+            credentials: ArcSwap::from_pointee(credentials),
+        }
+    }
+
+    /// Installs `credentials` and reports whether they differ from the current ones.
+    fn update(&self, credentials: BmcCredentials) -> bool {
+        if **self.credentials.load() == credentials {
+            return false;
+        }
+        self.credentials.store(Arc::new(credentials));
+        true
+    }
+}
+
+impl CredentialProvider for InventoryCredentialProvider {
+    fn fetch_credentials<'a>(
+        &'a self,
+        _endpoint: &'a BmcAddr,
+    ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+        let credentials = (**self.credentials.load()).clone();
+        Box::pin(async move { Ok(credentials) })
+    }
+}
+
+/// A BMC client kept across discovery passes, so collectors that captured it
+/// see credential updates.
+struct CachedClient {
+    bmc: Arc<BmcClient>,
+    provider: Arc<InventoryCredentialProvider>,
+    /// The rack in the client's latency labels; a new rack needs a new client.
+    rack_id: Option<RackId>,
+}
+
 pub struct ClusterEndpointSource {
     cfg: ClusterEndpointSourceConfig,
     reqwest: ReqwestClient,
@@ -300,6 +340,14 @@ pub struct ClusterEndpointSource {
     cache_size: usize,
     bmc_request_concurrency: NonZeroUsize,
     bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+    /// Clients by BMC IP. The endpoint key derives from the IP, and the port
+    /// is fixed per source, so an address change is a new key with new collectors.
+    clients: Mutex<HashMap<IpAddr, CachedClient>>,
+    /// Inventory rows skipped for a repeated BMC IP in the last pass, so each
+    /// is reported once rather than on every pass.
+    duplicate_rows: Mutex<HashSet<(IpAddr, String)>>,
+    /// The partition credentials from the last successful cluster manager call.
+    manager_credentials: Mutex<Option<(String, Option<String>)>>,
 }
 
 impl ClusterEndpointSource {
@@ -335,65 +383,236 @@ impl ClusterEndpointSource {
             cache_size,
             bmc_request_concurrency,
             bmc_latency_metrics,
+            clients: Mutex::new(HashMap::new()),
+            duplicate_rows: Mutex::new(HashSet::new()),
+            manager_credentials: Mutex::new(None),
         }
     }
 
     async fn load_endpoints(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
         let nodes = if let Some(ref cluster_manager_url) = self.cfg.cluster_manager_url {
-            fetch_from_manager(&self.cfg, cluster_manager_url).await?
+            self.fetch_from_manager(cluster_manager_url).await?
         } else {
             read_from_file(&self.cfg)?
         };
-        let endpoints = build_endpoints(
-            nodes,
-            self.cfg.port,
-            &self.reqwest,
-            self.proxy_url.as_ref(),
-            self.cache_size,
-            self.bmc_request_concurrency,
-            self.bmc_latency_metrics.clone(),
-        );
+        let endpoints = self.build_endpoints(nodes);
         tracing::info!(endpoint_count = endpoints.len(), "Loaded cluster endpoints");
         Ok(endpoints)
     }
-}
 
-async fn fetch_from_manager(
-    cfg: &ClusterEndpointSourceConfig,
-    cluster_manager_url: &Url,
-) -> Result<Vec<ClusterNode>, HealthError> {
-    let http = build_http()?;
-    let json_rpc_url = cluster_manager_url
-        .join("/json/")
-        .map_err(|e| HealthError::GenericError(format!("Invalid cluster manager URL: {e}")))?;
+    async fn fetch_from_manager(
+        &self,
+        cluster_manager_url: &Url,
+    ) -> Result<Vec<ClusterNode>, HealthError> {
+        let cfg = &self.cfg;
+        let http = build_http()?;
+        let json_rpc_url = cluster_manager_url
+            .join("/json/")
+            .map_err(|e| HealthError::GenericError(format!("Invalid cluster manager URL: {e}")))?;
 
-    tracing::info!(url = %json_rpc_url, partition = %cfg.cluster_manager_partition, "Fetching cluster inventory from cluster manager");
+        tracing::info!(url = %json_rpc_url, partition = %cfg.cluster_manager_partition, "Fetching cluster inventory from cluster manager");
 
-    // Call 1: partition-level BMC credentials
-    let (username, password) = fetch_manager_credentials(&http, &json_rpc_url, cfg).await;
+        // Call 1: partition-level BMC credentials
+        let (username, password) = self.manager_credentials(&http, &json_rpc_url).await;
 
-    // Call 2: device inventory
-    let raw = manager_rpc(
-        &http,
-        &json_rpc_url,
-        "cmdevice",
-        MANAGER_DEVICE_CALL,
-        json!({"type": "PhysicalNode"}),
-    )
-    .await?;
+        // Call 2: device inventory
+        let raw = manager_rpc(
+            &http,
+            &json_rpc_url,
+            "cmdevice",
+            MANAGER_DEVICE_CALL,
+            json!({"type": "PhysicalNode"}),
+        )
+        .await?;
 
-    tracing::debug!(
-        response_keys = ?raw.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
-        response_is_array = raw.is_array(),
-        "Raw cluster manager device response received"
-    );
+        tracing::debug!(
+            response_keys = ?raw.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
+            response_is_array = raw.is_array(),
+            "Raw cluster manager device response received"
+        );
 
-    let nodes = extract_manager_devices(&raw, username, password)?;
-    tracing::info!(
-        loaded_node_count = nodes.len(),
-        "Cluster manager device fetch complete"
-    );
-    Ok(nodes)
+        let nodes = extract_manager_devices(&raw, username, password)?;
+        tracing::info!(
+            loaded_node_count = nodes.len(),
+            "Cluster manager device fetch complete"
+        );
+        Ok(nodes)
+    }
+
+    /// Returns the partition credentials. When the call fails, the credentials
+    /// from the last successful call are kept, so one failed call does not
+    /// swap every client onto the configured defaults and back.
+    async fn manager_credentials(
+        &self,
+        http: &HttpClient,
+        json_rpc_url: &Url,
+    ) -> (String, Option<String>) {
+        match fetch_manager_credentials(http, json_rpc_url, &self.cfg).await {
+            Ok(credentials) => {
+                *self
+                    .manager_credentials
+                    .lock()
+                    .expect("manager credentials mutex poisoned") = Some(credentials.clone());
+                credentials
+            }
+            Err(e) => {
+                let last = self
+                    .manager_credentials
+                    .lock()
+                    .expect("manager credentials mutex poisoned")
+                    .clone();
+                match last {
+                    Some(credentials) => {
+                        tracing::warn!(
+                            error = %e,
+                            partition = %self.cfg.cluster_manager_partition,
+                            "Failed to fetch cluster manager partition credentials; keeping the last fetched credentials"
+                        );
+                        credentials
+                    }
+                    None => {
+                        tracing::warn!(
+                            error = %e,
+                            partition = %self.cfg.cluster_manager_partition,
+                            "Failed to fetch cluster manager partition credentials; using config fallback"
+                        );
+                        (
+                            self.cfg.default_username.clone(),
+                            self.cfg.default_password.clone(),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Builds this pass's endpoints, reusing each BMC's client from earlier
+    /// passes and updating its credentials in place. A rack change replaces
+    /// the client, since its latency labels name the rack.
+    fn build_endpoints(&self, nodes: Vec<ClusterNode>) -> Vec<Arc<BmcEndpoint>> {
+        let mut endpoints = Vec::with_capacity(nodes.len());
+        let mut clients = self.clients.lock().expect("cluster client mutex poisoned");
+        // The endpoint key derives one-to-one from the BMC IP, so a repeated IP
+        // would map two inventory rows onto one set of collectors. Maps each IP
+        // to the row whose endpoint was built.
+        let mut built: HashMap<IpAddr, usize> = HashMap::with_capacity(nodes.len());
+        let mut duplicate_rows = HashSet::new();
+        let reported_duplicates = std::mem::take(
+            &mut *self
+                .duplicate_rows
+                .lock()
+                .expect("duplicate rows mutex poisoned"),
+        );
+
+        for (index, node) in nodes.iter().enumerate() {
+            if let Some(&first) = built.get(&node.bmc_ip) {
+                let row = (node.bmc_ip, node.hostname.clone());
+                if !reported_duplicates.contains(&row) {
+                    let first = &nodes[first];
+                    tracing::warn!(
+                        bmc_ip_address = %node.bmc_ip,
+                        hostname = %node.hostname,
+                        rack_id = node.rack.as_deref(),
+                        first_hostname = %first.hostname,
+                        first_rack_id = first.rack.as_deref(),
+                        "Skipping cluster inventory row with duplicate BMC IP; keeping the first row"
+                    );
+                }
+                duplicate_rows.insert(row);
+                continue;
+            }
+
+            let rack_id = node.rack.as_deref().map(RackId::new);
+            let credentials = BmcCredentials::UsernamePassword {
+                username: node.username.clone(),
+                password: node.password.clone(),
+            };
+
+            let mac = match node.bmc_ip {
+                IpAddr::V4(v4) => {
+                    // Retain the synthetic MAC already used in IPv4 logs and metric labels.
+                    let [o1, o2, o3, o4] = v4.octets();
+                    Some(MacAddress::new([0x02, 0x00, o1, o2, o3, o4]))
+                }
+                // IPv6 needs the full address; a synthetic MAC cannot distinguish all IPv6 BMCs.
+                IpAddr::V6(_) => None,
+            };
+
+            let addr = BmcAddr {
+                ip: node.bmc_ip,
+                port: self.cfg.port,
+                mac,
+            };
+
+            let bmc = match clients.get(&node.bmc_ip) {
+                Some(cached) if cached.rack_id == rack_id => {
+                    if cached.provider.update(credentials) {
+                        tracing::info!(
+                            hostname = %node.hostname,
+                            bmc_ip_address = %node.bmc_ip,
+                            "BMC credentials changed in cluster inventory; running collectors use them after their next authentication failure"
+                        );
+                    }
+                    cached.bmc.clone()
+                }
+                _ => {
+                    let bmc_latency_instrumentation =
+                        self.bmc_latency_metrics.clone().map(|metrics| {
+                            BmcLatencyInstrumentation::new(
+                                metrics,
+                                bmc_latency_endpoint_labels(None, rack_id.as_ref()),
+                            )
+                        });
+                    let provider = Arc::new(InventoryCredentialProvider::new(credentials));
+                    let bmc = match BmcClient::new(
+                        self.reqwest.clone(),
+                        addr.clone(),
+                        provider.clone(),
+                        self.proxy_url.clone(),
+                        self.cache_size,
+                        self.bmc_request_concurrency,
+                        bmc_latency_instrumentation,
+                    ) {
+                        Ok(c) => Arc::new(c),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = ?e,
+                                hostname = %node.hostname,
+                                rack_id = rack_id.as_ref().map(tracing::field::display),
+                                "Failed to construct BmcClient for cluster endpoint; skipping"
+                            );
+                            continue;
+                        }
+                    };
+                    clients.insert(
+                        node.bmc_ip,
+                        CachedClient {
+                            bmc: bmc.clone(),
+                            provider,
+                            rack_id: rack_id.clone(),
+                        },
+                    );
+                    bmc
+                }
+            };
+
+            endpoints.push(Arc::new(BmcEndpoint {
+                addr,
+                metadata: None,
+                rack_id,
+                labels: Default::default(),
+                bmc,
+            }));
+            built.insert(node.bmc_ip, index);
+        }
+
+        clients.retain(|ip, _| built.contains_key(ip));
+        *self
+            .duplicate_rows
+            .lock()
+            .expect("duplicate rows mutex poisoned") = duplicate_rows;
+        endpoints
+    }
 }
 
 fn read_from_file(cfg: &ClusterEndpointSourceConfig) -> Result<Vec<ClusterNode>, HealthError> {
@@ -417,78 +636,6 @@ fn read_from_file(cfg: &ClusterEndpointSourceConfig) -> Result<Vec<ClusterNode>,
             password: password.clone(),
         })
         .collect())
-}
-
-fn build_endpoints(
-    nodes: Vec<ClusterNode>,
-    port: Option<u16>,
-    reqwest: &ReqwestClient,
-    proxy_url: Option<&Url>,
-    cache_size: usize,
-    bmc_request_concurrency: NonZeroUsize,
-    bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
-) -> Vec<Arc<BmcEndpoint>> {
-    let mut endpoints = Vec::with_capacity(nodes.len());
-
-    for node in nodes {
-        let rack_id = node.rack.as_deref().map(RackId::new);
-
-        let mac = match node.bmc_ip {
-            IpAddr::V4(v4) => {
-                // Retain the synthetic MAC already used in IPv4 logs and metric labels.
-                let [o1, o2, o3, o4] = v4.octets();
-                Some(MacAddress::new([0x02, 0x00, o1, o2, o3, o4]))
-            }
-            // IPv6 needs the full address; a synthetic MAC cannot distinguish all IPv6 BMCs.
-            IpAddr::V6(_) => None,
-        };
-
-        let addr = BmcAddr {
-            ip: node.bmc_ip,
-            port,
-            mac,
-        };
-
-        let bmc_latency_instrumentation = bmc_latency_metrics.clone().map(|metrics| {
-            BmcLatencyInstrumentation::new(
-                metrics,
-                bmc_latency_endpoint_labels(None, rack_id.as_ref()),
-            )
-        });
-        let credentials = BmcCredentials::UsernamePassword {
-            username: node.username,
-            password: node.password,
-        };
-        let provider = Arc::new(FixedCredentialProvider::new(credentials));
-        let bmc = match BmcClient::new(
-            reqwest.clone(),
-            addr.clone(),
-            provider,
-            proxy_url.cloned(),
-            cache_size,
-            bmc_request_concurrency,
-            bmc_latency_instrumentation,
-        ) {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    hostname = %node.hostname,
-                    rack_id = rack_id.as_ref().map(tracing::field::display),
-                    "Failed to construct BmcClient for cluster endpoint; skipping"
-                );
-                continue;
-            }
-        };
-        endpoints.push(Arc::new(BmcEndpoint {
-            addr,
-            metadata: None,
-            rack_id,
-            labels: Default::default(),
-            bmc,
-        }));
-    }
-    endpoints
 }
 
 impl EndpointSource for ClusterEndpointSource {
@@ -587,5 +734,208 @@ mod tests {
             assert_eq!(username, "reader");
             assert_eq!(password.as_deref(), Some("test-password"));
         }
+    }
+
+    #[tokio::test]
+    async fn file_inventory_keeps_first_row_for_duplicate_bmc_ip() {
+        let inventory = tempfile::NamedTempFile::new().expect("create inventory file");
+        std::fs::write(
+            inventory.path(),
+            json!({
+                "default_credentials": {"username": "reader", "password": "test-password"},
+                "nodes": [
+                    {"hostname": "host-a", "bmc_ip": "10.2.3.4", "rack": "rack-a"},
+                    {"hostname": "host-b", "bmc_ip": "10.2.3.4", "rack": "rack-b"},
+                    {"hostname": "host-c", "bmc_ip": "10.2.3.5", "rack": "rack-b"},
+                ],
+            })
+            .to_string(),
+        )
+        .expect("write inventory file");
+        let source = ClusterEndpointSource::from_config(
+            ClusterEndpointSourceConfig {
+                inventory_path: inventory.path().to_path_buf(),
+                ..Default::default()
+            },
+            &reqwest(),
+            None,
+            10,
+            None,
+        );
+
+        let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
+        let rows: Vec<_> = endpoints
+            .iter()
+            .map(|endpoint| (endpoint.key(), endpoint.rack_id.clone()))
+            .collect();
+
+        assert_eq!(
+            rows,
+            [
+                ("02:00:0A:02:03:04".to_string(), Some(RackId::new("rack-a"))),
+                ("02:00:0A:02:03:05".to_string(), Some(RackId::new("rack-b"))),
+            ]
+        );
+    }
+
+    async fn inventory_password(endpoint: &BmcEndpoint) -> Option<String> {
+        let credentials = endpoint
+            .bmc()
+            .credential_provider()
+            .fetch_credentials(&endpoint.addr)
+            .await
+            .expect("inventory credentials");
+        let BmcCredentials::UsernamePassword { password, .. } = credentials else {
+            panic!("expected inventory username and password");
+        };
+        password
+    }
+
+    #[tokio::test]
+    async fn file_inventory_reuses_clients_and_updates_their_credentials() {
+        let inventory = tempfile::NamedTempFile::new().expect("create inventory file");
+        let write_inventory = |password: &str, nodes: serde_json::Value| {
+            std::fs::write(
+                inventory.path(),
+                json!({
+                    "default_credentials": {"username": "reader", "password": password},
+                    "nodes": nodes,
+                })
+                .to_string(),
+            )
+            .expect("write inventory file");
+        };
+        let in_rack =
+            |rack: &str| json!([{"hostname": "host-a", "bmc_ip": "10.2.3.4", "rack": rack}]);
+        let source = ClusterEndpointSource::from_config(
+            ClusterEndpointSourceConfig {
+                inventory_path: inventory.path().to_path_buf(),
+                ..Default::default()
+            },
+            &reqwest(),
+            None,
+            10,
+            None,
+        );
+        let load = || async {
+            let endpoints = source.fetch_bmc_hosts().await.expect("load inventory");
+            endpoints.into_iter().next()
+        };
+
+        write_inventory("old-secret", in_rack("rack-a"));
+        let first = load().await.expect("endpoint");
+        assert_eq!(
+            inventory_password(&first).await.as_deref(),
+            Some("old-secret")
+        );
+
+        // A rotated password reaches the client running collectors already hold.
+        write_inventory("new-secret", in_rack("rack-a"));
+        let rotated = load().await.expect("endpoint");
+        assert!(
+            Arc::ptr_eq(first.bmc(), rotated.bmc()),
+            "rotation keeps the client"
+        );
+        assert_eq!(
+            inventory_password(&first).await.as_deref(),
+            Some("new-secret")
+        );
+
+        // The client's latency labels name the rack, so a new rack needs a new client.
+        write_inventory("new-secret", in_rack("rack-b"));
+        let reracked = load().await.expect("endpoint");
+        assert!(
+            !Arc::ptr_eq(rotated.bmc(), reracked.bmc()),
+            "a rack change rebuilds the client"
+        );
+        assert_eq!(reracked.rack_id, Some(RackId::new("rack-b")));
+
+        // A BMC that leaves the inventory is forgotten; on return it gets a new client.
+        write_inventory("new-secret", json!([]));
+        assert!(load().await.is_none());
+        write_inventory("new-secret", in_rack("rack-b"));
+        let returned = load().await.expect("endpoint");
+        assert!(
+            !Arc::ptr_eq(reracked.bmc(), returned.bmc()),
+            "a pruned client is not reused"
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_manager_failure_keeps_the_last_fetched_credentials() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use axum::Json;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        let partition_fails = Arc::new(AtomicBool::new(true));
+        let fails = partition_fails.clone();
+        let app = axum::Router::new().route(
+            "/json/",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let fails = fails.load(Ordering::SeqCst);
+                async move {
+                    match body["service"].as_str() {
+                        Some("cmpart") if fails => StatusCode::BAD_GATEWAY.into_response(),
+                        Some("cmpart") => Json(json!({
+                            "bmcSettings": {"username": "reader", "password": "manager-secret"}
+                        }))
+                        .into_response(),
+                        _ => Json(json!([
+                            {"hostname": "host-a", "bmcIp": "10.2.3.4", "category": "rack-a"}
+                        ]))
+                        .into_response(),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let source = ClusterEndpointSource::from_config(
+            ClusterEndpointSourceConfig {
+                cluster_manager_url: Some(url),
+                default_username: "fallback".to_string(),
+                default_password: Some("fallback-secret".to_string()),
+                ..Default::default()
+            },
+            &reqwest(),
+            None,
+            10,
+            None,
+        );
+        let password = || async {
+            let endpoints: Vec<Arc<BmcEndpoint>> =
+                source.fetch_bmc_hosts().await.expect("load inventory");
+            inventory_password(&endpoints[0]).await
+        };
+
+        let steps: [(&str, bool, &str); 3] = [
+            (
+                "nothing fetched yet uses the configured fallback",
+                true,
+                "fallback-secret",
+            ),
+            (
+                "a successful call installs the partition credentials",
+                false,
+                "manager-secret",
+            ),
+            (
+                "a failed call keeps the last fetched credentials",
+                true,
+                "manager-secret",
+            ),
+        ];
+        for (scenario, fails, expected) in steps {
+            partition_fails.store(fails, Ordering::SeqCst);
+            assert_eq!(password().await.as_deref(), Some(expected), "{scenario}");
+        }
+        server.abort();
     }
 }

@@ -44,7 +44,7 @@ pub async fn test_build_versions(pool: sqlx::PgPool) -> Result<(), eyre::Error> 
 
     [[components.uefi.known_firmware]]
     version = "1.13.3"
-    url = "https://urm.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/BIOS_T3H20_WN64_1.13.2.EXE"
+    url = "https://artifactory.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/BIOS_T3H20_WN64_1.13.2.EXE"
     default = true
 
     [components.bmc]
@@ -52,7 +52,7 @@ pub async fn test_build_versions(pool: sqlx::PgPool) -> Result<(), eyre::Error> 
 
     [[components.bmc.known_firmware]]
     version = "7.10.30.00"
-    url = "https://urm.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/iDRAC-with-Lifecycle-Controller_Firmware_HV310_WN64_7.10.30.00_A00.EXE"
+    url = "https://artifactory.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/iDRAC-with-Lifecycle-Controller_Firmware_HV310_WN64_7.10.30.00_A00.EXE"
     default = true
 
     [components.cx7]
@@ -60,7 +60,7 @@ pub async fn test_build_versions(pool: sqlx::PgPool) -> Result<(), eyre::Error> 
 
     [[components.cx7.known_firmware]]
     version = "28.47.2682"
-    url = "https://urm.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/cx7.bin"
+    url = "https://artifactory.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/cx7.bin"
     default = true
         "#;
     config.add_test_override(src_cfg_str.to_string());
@@ -75,7 +75,7 @@ pub async fn test_build_versions(pool: sqlx::PgPool) -> Result<(), eyre::Error> 
 
     [[components.cec.known_firmware]]
     version = "8.10.30.00"
-    url = "https://urm.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/iDRAC-with-Lifecycle-Controller_Firmware_HV310_WN64_7.10.30.00_A00.EXE"
+    url = "https://artifactory.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/iDRAC-with-Lifecycle-Controller_Firmware_HV310_WN64_7.10.30.00_A00.EXE"
     default = true
         "#;
     config.add_test_override(src_cfg_str_part2.to_string());

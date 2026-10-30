@@ -18,7 +18,7 @@
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use lazy_static::lazy_static;
-use rpc::forge::{ForgeAgentControlResponse, MachineArchitecture};
+use rpc::forge::{ForgeAgentControlRequest, ForgeAgentControlResponse, MachineArchitecture};
 use tempfile::TempDir;
 
 use crate::api_client::ClientApiError;
@@ -62,7 +62,10 @@ pub(super) async fn forge_agent_control(
 ) -> Option<ForgeAgentControlResponse> {
     match app_context
         .forge_api_client
-        .forge_agent_control(machine_id)
+        .forge_agent_control(ForgeAgentControlRequest {
+            machine_id: Some(machine_id),
+            capabilities: Vec::new(),
+        })
         .await
     {
         Ok(response) => Some(response),

@@ -21,12 +21,13 @@ use std::sync::Arc;
 
 use futures::future::join_all;
 
-use super::context::{CollectorKind, DiscoveryLoopContext};
+use super::context::{CollectorKind, DiscoveryLoopContext, EndpointConnection};
 use crate::collectors::Collector;
 use crate::endpoint::BmcEndpoint;
 
 #[derive(Clone, Copy)]
 enum CollectorStopReason {
+    EndpointConnectionChanged,
     EndpointRemoved,
     MachineDomainChanged,
     PowerShelfIdChanged,
@@ -37,6 +38,7 @@ enum CollectorStopReason {
 impl std::fmt::Display for CollectorStopReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::EndpointConnectionChanged => "endpoint address, rack, or machine changed",
             Self::EndpointRemoved => "endpoint removed",
             Self::MachineDomainChanged => "machine NVLink domain changed",
             Self::PowerShelfIdChanged => "PowerShelf ID changed",
@@ -215,6 +217,54 @@ pub(super) async fn stop_stale_power_shelf_collectors(
     join_all(stale_collectors.into_iter().map(Collector::stop)).await;
 }
 
+/// Restarts collectors when an endpoint's address, rack, or machine changes.
+///
+/// Collectors keep the BMC client and rack captured at startup, and the
+/// endpoint key does not change with these values. For duplicate keys only the
+/// first endpoint is considered, matching collector spawn precedence. An
+/// endpoint returning after an absent pass establishes a new baseline.
+pub(super) async fn stop_stale_endpoint_connections(
+    ctx: &mut DiscoveryLoopContext,
+    endpoints: &[Arc<BmcEndpoint>],
+) {
+    let mut active_endpoint_keys = HashSet::with_capacity(endpoints.len());
+    let mut changed_endpoints = HashSet::new();
+
+    for endpoint in endpoints {
+        let key: Cow<'static, str> = Cow::Owned(endpoint.key());
+
+        if !active_endpoint_keys.insert(key.clone()) {
+            continue;
+        }
+
+        if ctx
+            .collectors
+            .observe_endpoint_connection(&key, EndpointConnection::of(endpoint))
+        {
+            changed_endpoints.insert(key);
+        }
+    }
+
+    ctx.collectors
+        .retain_endpoint_connections(&active_endpoint_keys);
+
+    let stale_collectors = CollectorKind::ALL
+        .into_iter()
+        .flat_map(|kind| {
+            take_collectors_for_keys(
+                ctx,
+                kind,
+                &changed_endpoints,
+                CollectorStopReason::EndpointConnectionChanged,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // CollectorRemoved unregisters the old label set before replacements
+    // register the new rack and connect with the new client.
+    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+}
+
 fn take_collectors_for_keys(
     ctx: &mut DiscoveryLoopContext,
     kind: CollectorKind,
@@ -334,14 +384,15 @@ mod tests {
     use std::sync::Arc;
 
     use carbide_uuid::power_shelf::PowerShelfId;
+    use carbide_uuid::rack::RackId;
 
     use super::*;
     use crate::collectors::Collector;
     use crate::config::Config;
-    use crate::endpoint::test_support::{mac, test_endpoint};
+    use crate::endpoint::test_support::{endpoint_with_creds, mac, test_endpoint};
     use crate::endpoint::{
-        EndpointMetadata, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
-        SwitchEndpointRole,
+        BmcAddr, BmcCredentials, EndpointMetadata, MachineData, PowerShelfData, SharedSystemUuid,
+        SwitchData, SwitchEndpointRole,
     };
     use crate::limiter::{NoopLimiter, RateLimiter};
     use crate::metrics::MetricsManager;
@@ -499,6 +550,149 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn connection_endpoint(
+        ip: &str,
+        port: Option<u16>,
+        password: &str,
+        rack: &str,
+    ) -> Arc<BmcEndpoint> {
+        Arc::new(endpoint_with_creds(
+            BmcAddr {
+                ip: ip.parse().expect("valid test IP"),
+                port,
+                mac: Some(mac("02:00:0A:00:00:01")),
+            },
+            BmcCredentials::UsernamePassword {
+                username: "reader".to_string(),
+                password: Some(password.to_string()),
+            },
+            None,
+            Some(RackId::new(rack)),
+        ))
+    }
+
+    /// The last connection in the steps below, as a machine endpoint.
+    fn machine_endpoint(machine_id: &str) -> Arc<BmcEndpoint> {
+        let mut endpoint =
+            (*connection_endpoint("10.0.0.2", Some(8443), "new", "qa-rack-rotated")).clone();
+        endpoint.metadata = Some(EndpointMetadata::Machine(MachineData {
+            machine_id: Some(machine_id.parse().expect("valid machine id")),
+            machine_serial: None,
+            system_uuid: SharedSystemUuid::default(),
+            slot_number: None,
+            tray_index: None,
+            nvlink_domain_uuid: None,
+            driver_version: None,
+        }));
+        Arc::new(endpoint)
+    }
+
+    #[tokio::test]
+    async fn endpoint_connection_changes_restart_collectors_for_same_endpoint_key() {
+        let mut ctx = context("endpoint_connection_changes_restart_collectors");
+        let steps = [
+            (
+                "first observation sets the baseline",
+                connection_endpoint("10.0.0.1", Some(443), "old", "qa-rack-file"),
+                true,
+            ),
+            (
+                "unchanged values with a freshly built client",
+                connection_endpoint("10.0.0.1", Some(443), "old", "qa-rack-file"),
+                true,
+            ),
+            (
+                // The running client refreshes credentials after a 401.
+                "rotated password keeps collectors",
+                connection_endpoint("10.0.0.1", Some(443), "new", "qa-rack-file"),
+                true,
+            ),
+            (
+                "rack reassigned",
+                connection_endpoint("10.0.0.1", Some(443), "new", "qa-rack-rotated"),
+                false,
+            ),
+            (
+                "BMC IP changed under the same MAC",
+                connection_endpoint("10.0.0.2", Some(443), "new", "qa-rack-rotated"),
+                false,
+            ),
+            (
+                "port changed",
+                connection_endpoint("10.0.0.2", Some(8443), "new", "qa-rack-rotated"),
+                false,
+            ),
+            (
+                "stable after the restart",
+                connection_endpoint("10.0.0.2", Some(8443), "new", "qa-rack-rotated"),
+                true,
+            ),
+            (
+                // The machine is in the client's latency labels.
+                "machine ID assigned",
+                machine_endpoint("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"),
+                false,
+            ),
+            (
+                "same machine ID",
+                machine_endpoint("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"),
+                true,
+            ),
+            (
+                "machine ID changed",
+                machine_endpoint("fm100htjsaledfasinabqqer70e2ua5ksqj4kfjii0v0a90vulps48c1h7g"),
+                false,
+            ),
+        ];
+
+        for (scenario, endpoint, retained) in steps {
+            let key = endpoint.key();
+            for kind in [CollectorKind::Sensor, CollectorKind::Logs] {
+                if !ctx.collectors.contains(kind, &key) {
+                    ctx.collectors
+                        .insert(kind, Cow::Owned(key.clone()), noop_collector());
+                }
+            }
+
+            stop_stale_endpoint_connections(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
+            for kind in [CollectorKind::Sensor, CollectorKind::Logs] {
+                assert_eq!(
+                    ctx.collectors.contains(kind, &key),
+                    retained,
+                    "{scenario}, collector {kind:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_connection_uses_first_duplicate_and_rebaselines_after_absence() {
+        let mut ctx = context("endpoint_connection_duplicates_and_absence");
+        let first = connection_endpoint("10.0.0.1", Some(443), "old", "rack-a");
+        let duplicate = connection_endpoint("10.0.0.1", Some(443), "other", "rack-b");
+        let key = first.key();
+
+        ctx.collectors.insert(
+            CollectorKind::Sensor,
+            Cow::Owned(key.clone()),
+            noop_collector(),
+        );
+
+        // A later row with the same key must not look like a change to the
+        // collector that spawned from the first row.
+        for _ in 0..2 {
+            stop_stale_endpoint_connections(&mut ctx, &[first.clone(), duplicate.clone()]).await;
+            assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
+        }
+
+        // An absent pass forgets the baseline, so the returning endpoint
+        // establishes a new one instead of restarting.
+        stop_stale_endpoint_connections(&mut ctx, &[]).await;
+        stop_stale_endpoint_connections(&mut ctx, std::slice::from_ref(&duplicate)).await;
+        assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
     }
 
     #[tokio::test]

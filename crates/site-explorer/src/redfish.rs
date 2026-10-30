@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_explorer::ProcessorExt;
-use carbide_network::deserialize_input_mac_to_address;
+use carbide_network::{deserialize_input_mac_to_address, is_locally_administered_mac};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::conv::{IntoModel, bmc_vendor};
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
@@ -48,6 +48,8 @@ use model::site_explorer::{
     UefiDevicePath, derive_hardware_class,
 };
 use regex::Regex;
+
+use crate::explored_endpoint_ext::{mac_to_u64, u64_to_mac};
 
 const NOT_FOUND: u16 = 404;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
@@ -523,6 +525,7 @@ impl RedfishClient {
         bmc_ip_address: SocketAddr,
         access: BmcAccess,
         boot_interface: Option<&BootInterfaceTarget>,
+        explore_drive_firmware: bool,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
         let service_root = nv_pool
@@ -545,7 +548,7 @@ impl RedfishClient {
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
             service_root,
-            &nv_bmc_explore_config(boot_interface),
+            &nv_bmc_explore_config(boot_interface, explore_drive_firmware),
         )
         .await
         .map_err(map_nv_redfish_explore_error)?;
@@ -926,7 +929,7 @@ async fn fetch_manager(client: &dyn Redfish) -> Result<Manager, RedfishError> {
         e.id.as_deref()
             .is_some_and(|id| id.eq_ignore_ascii_case("eth0"))
     }) && let Some(mac) = eth0.mac_address
-        && crate::is_locally_administered_mac(mac)
+        && is_locally_administered_mac(mac)
     {
         tracing::warn!(
             manager_id = %manager.id,
@@ -1639,8 +1642,8 @@ async fn get_base_mac_from_bf4_ndf0(client: &dyn Redfish) -> Option<MacAddress> 
             .and_then(serde_json::Value::as_str)
             && let Ok(parsed) = deserialize_input_mac_to_address(mac)
         {
-            let derived = crate::mac_to_u64(parsed).checked_sub(BF4_NDF0_TO_BASE_MAC_OFFSET)?;
-            return Some(crate::u64_to_mac(derived));
+            let derived = mac_to_u64(parsed).checked_sub(BF4_NDF0_TO_BASE_MAC_OFFSET)?;
+            return Some(u64_to_mac(derived));
         }
     }
     None
@@ -1719,6 +1722,7 @@ async fn fetch_service(client: &dyn Redfish) -> Result<Vec<Service>, RedfishErro
             description: value.description,
             version: value.version,
             release_date: value.release_date,
+            drive: None,
         };
 
         inventories.push(inventory);
@@ -1909,7 +1913,10 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
             if source.is_connect() {
                 EndpointExplorationError::ConnectionRefused { details }
             } else if source.is_timeout() {
-                EndpointExplorationError::ConnectionTimeout { details }
+                EndpointExplorationError::ConnectionTimeout {
+                    details,
+                    consecutive_count: 1,
+                }
             } else {
                 EndpointExplorationError::Unreachable {
                     details: Some(details),
@@ -1985,6 +1992,7 @@ fn nv_error_classifier(
 
 fn nv_bmc_explore_config(
     boot_interface: Option<&BootInterfaceTarget>,
+    explore_drive_firmware: bool,
 ) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
@@ -1993,6 +2001,7 @@ fn nv_bmc_explore_config(
         // but not for too long relative to the total exploration
         // time.
         retry_timeout: Duration::from_millis(1000),
+        explore_drive_firmware,
     }
 }
 
@@ -2023,7 +2032,10 @@ fn map_nv_redfish_explore_error(
                     if err.is_connect() {
                         EndpointExplorationError::ConnectionRefused { details }
                     } else if err.is_timeout() {
-                        EndpointExplorationError::ConnectionTimeout { details }
+                        EndpointExplorationError::ConnectionTimeout {
+                            details,
+                            consecutive_count: 1,
+                        }
                     } else {
                         EndpointExplorationError::Unreachable {
                             details: Some(details),
@@ -2437,6 +2449,7 @@ mod tests {
                 boot_interface_mac: None,
                 error_classifier: &|_| None,
                 retry_timeout: std::time::Duration::ZERO,
+                explore_drive_firmware: false,
             },
         )
         .await
@@ -2554,7 +2567,6 @@ mod tests {
         assert_eq!(adapter.port_mac_addresses, vec![mac_address]);
         assert_eq!(report.all_mac_addresses(), vec![mac_address]);
         assert_eq!(report.find_interface_id_for_mac(mac_address), None);
-        assert_eq!(report.complete_boot_interfaces().count(), 0);
     }
 
     #[tokio::test]
@@ -2714,7 +2726,7 @@ mod tests {
         };
 
         value_scenarios!(run = |target: Option<BootInterfaceTarget>| {
-            let config = nv_bmc_explore_config(target.as_ref());
+            let config = nv_bmc_explore_config(target.as_ref(), false);
             let mut status = MachineSetupStatus::default();
             record_evaluated_boot_interface(Some(&mut status), target.as_ref());
             (

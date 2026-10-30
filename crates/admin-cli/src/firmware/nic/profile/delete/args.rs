@@ -12,8 +12,8 @@ use model::nic_firmware::NicFirmwareProfileId;
     long_about = "\
 Delete a NIC firmware profile using its original observed --if-version-match \
 token. For an unknown profile, Core returns server status NOT_FOUND. A stale \
-version or any site, machine, or card selection referencing the profile returns \
-server status FAILED_PRECONDITION, including saved card selectors no longer in \
+version or any site, machine, card, or tenant selection referencing the profile \
+returns server status FAILED_PRECONDITION, including saved card selectors no longer in \
 inventory.
 
 The command preserves the server diagnostic, does not read a fresh version, and \

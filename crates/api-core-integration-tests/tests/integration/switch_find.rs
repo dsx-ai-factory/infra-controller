@@ -35,6 +35,30 @@ fn rpc_ip_address(address: IpAddr) -> rpc::forge::IpAddress {
     }
 }
 
+async fn replace_declared_nvos_macs(
+    txn: &mut sqlx::PgConnection,
+    bmc_mac: MacAddress,
+    macs: &[MacAddress],
+) -> Result<(), db::DatabaseError> {
+    let mut expected = db::expected_switch::find_by_bmc_mac_address(txn, bmc_mac)
+        .await?
+        .expect("seeded expected switch");
+    let retained_primary = expected
+        .primary_nvos_mac_address()
+        .filter(|mac| macs.contains(mac));
+    expected.nvos_interfaces = macs
+        .iter()
+        .enumerate()
+        .map(
+            |(index, mac_address)| model::expected_switch::ExpectedNvosInterface {
+                mac_address: *mac_address,
+                is_primary: retained_primary.map_or(index == 0, |primary| primary == *mac_address),
+            },
+        )
+        .collect();
+    db::expected_switch::update(txn, &expected).await
+}
+
 async fn create_discovered_switch(
     env: &TestHarness,
     seed: u8,
@@ -62,7 +86,7 @@ async fn add_declared_nvos_mac(
         .expect("seeded switch endpoint")
         .bmc_mac;
 
-    db::expected_switch::update_nvos_mac_addresses(txn.as_mut(), bmc_mac, &nvos_macs).await?;
+    replace_declared_nvos_macs(txn.as_mut(), bmc_mac, &nvos_macs).await?;
 
     txn.commit().await?;
     Ok(())
@@ -540,7 +564,7 @@ async fn test_find_switches_by_ids_returns_no_nvos_info_when_unresolved(
     let mut txn = env.db_txn().await;
     let rows = db::switch::find_switch_endpoints_by_ids(txn.as_mut(), &[switch_id]).await?;
     let bmc_mac = rows.first().expect("switch endpoint row").bmc_mac;
-    db::expected_switch::update_nvos_mac_addresses(&mut txn, bmc_mac, &[]).await?;
+    replace_declared_nvos_macs(&mut txn, bmc_mac, &[]).await?;
     txn.commit().await?;
 
     let response = env

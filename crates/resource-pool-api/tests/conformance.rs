@@ -81,6 +81,45 @@ async fn local_provider_satisfies_shared_contract() {
 }
 
 #[tokio::test]
+async fn describe_preserves_unicode_and_rejects_nul_aliases() {
+    let pool = PoolBinding {
+        authority_id: " authority Δ ".into(),
+        pool_id: " pool 池 ".into(),
+        logical_pool: " vpc-vni Δ ".into(),
+        ..pool()
+    };
+    let provider = LocalProvider::new(pool.clone(), ValueDomain::Integer, vec![], None)
+        .expect("create provider with opaque identifiers");
+    for (scenario, alias, expected) in [
+        ("exact Unicode and whitespace", " vpc-vni Δ ", None),
+        (
+            "no whitespace normalization",
+            "vpc-vni Δ",
+            Some(Code::NotFound),
+        ),
+        (
+            "NUL is invalid",
+            " vpc-vni Δ\0 ",
+            Some(Code::InvalidArgument),
+        ),
+    ] {
+        let result = provider
+            .describe(Request::new(DescribeRequest {
+                pool_alias: alias.into(),
+            }))
+            .await;
+        match expected {
+            Some(code) => assert_eq!(result.expect_err(scenario).code(), code, "{scenario}"),
+            None => {
+                let response = result.expect(scenario).into_inner();
+                assert_eq!(response.authority_id, pool.authority_id, "{scenario}");
+                assert_eq!(response.pool_id, pool.pool_id, "{scenario}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn unsupported_statistics_are_not_empty_inventory() {
     let pool = pool();
     let provider = LocalProvider::new(pool.clone(), ValueDomain::Integer, vec![1.into()], None)
@@ -96,7 +135,6 @@ async fn unsupported_statistics_are_not_empty_inventory() {
         .expect("register eligibility before requesting unsupported statistics");
     let description = provider
         .describe(Request::new(DescribeRequest {
-            site_id: pool.site_id.clone(),
             pool_alias: pool.logical_pool.clone(),
         }))
         .await
@@ -144,7 +182,6 @@ async fn generated_client_and_server_preserve_allocation_identity_and_policy() {
                     .expect("connect generated client");
                 let description = client
                     .describe(DescribeRequest {
-                        site_id: pool.site_id.clone(),
                         pool_alias: pool.logical_pool.clone(),
                     })
                     .await
@@ -298,11 +335,13 @@ async fn generated_client_and_server_preserve_allocation_identity_and_policy() {
         .expect("serve provider RPCs");
 }
 
+/// Bindings share inventory and its usage counts, while lookup stays limited
+/// to the binding that allocated the value.
 #[tokio::test]
-async fn sites_share_inventory_without_sharing_request_identity() {
+async fn bindings_share_inventory_with_distinct_request_ids() {
     let first_pool = pool();
     let second_pool = PoolBinding {
-        site_id: "second-site".into(),
+        binding_id: "second-binding".into(),
         ..first_pool.clone()
     };
     let provider = LocalProvider::new(
@@ -311,7 +350,7 @@ async fn sites_share_inventory_without_sharing_request_identity() {
         vec![1.into(), 2.into(), 3.into()],
         None,
     )
-    .expect("create inventory shared by two sites");
+    .expect("create inventory shared by two bindings");
     for pool in [&first_pool, &second_pool] {
         provider
             .define(Request::new(definition(
@@ -320,25 +359,25 @@ async fn sites_share_inventory_without_sharing_request_identity() {
                 vec![1.into(), 2.into(), 3.into()],
             )))
             .await
-            .expect("register site eligibility");
+            .expect("register binding eligibility");
     }
     let first = provider
         .allocate(Request::new(AllocateRequest {
-            operation: Some(operation(&first_pool, "same-request-id")),
+            operation: Some(operation(&first_pool, "first-request")),
             requested_value: None,
         }))
         .await
-        .expect("allocate for the first site")
+        .expect("allocate through the first binding")
         .into_inner()
         .allocation
         .expect("allocation response includes its assignment");
     let second = provider
         .allocate(Request::new(AllocateRequest {
-            operation: Some(operation(&second_pool, "same-request-id")),
+            operation: Some(operation(&second_pool, "second-request")),
             requested_value: None,
         }))
         .await
-        .expect("the second site's same request ID is independent")
+        .expect("allocate through the second binding with its own request ID")
         .into_inner()
         .allocation
         .expect("allocation response includes its assignment");
@@ -351,7 +390,7 @@ async fn sites_share_inventory_without_sharing_request_identity() {
                 allocation_id: first.allocation_id.clone(),
             }))
             .await
-            .expect_err("one site cannot look up another site's allocation")
+            .expect_err("one binding cannot look up another binding's allocation")
             .code(),
         Code::NotFound
     );
@@ -362,58 +401,12 @@ async fn sites_share_inventory_without_sharing_request_identity() {
                 eligibility_revision: "initial".into(),
             }))
             .await
-            .expect("count allocations from both sites")
+            .expect("count allocations from both bindings")
             .into_inner()
             .stats
             .expect("statistics response includes its counts");
         assert_eq!((stats.used, stats.free), (2, 1));
     }
-
-    let wrong_binding = OperationIdentity {
-        pool: Some(PoolBinding {
-            binding_id: "different-binding".into(),
-            ..first_pool.clone()
-        }),
-        request_id: "same-request-id".into(),
-    };
-    for (scenario, result) in [
-        (
-            "recover with a changed binding",
-            provider
-                .recover(Request::new(RecoverRequest {
-                    operation_identity: Some(wrong_binding.clone()),
-                }))
-                .await
-                .map(|_| ()),
-        ),
-        (
-            "cancel with a changed binding",
-            provider
-                .cancel(Request::new(CancelRequest {
-                    operation_identity: Some(wrong_binding),
-                }))
-                .await
-                .map(|_| ()),
-        ),
-    ] {
-        assert_eq!(result.expect_err(scenario).code(), Code::AlreadyExists);
-    }
-    assert_eq!(
-        provider
-            .recover(Request::new(RecoverRequest {
-                operation_identity: Some(OperationIdentity {
-                    pool: Some(first_pool),
-                    request_id: "same-request-id".into(),
-                }),
-            }))
-            .await
-            .expect("a rejected cancellation preserves the original allocation")
-            .into_inner()
-            .operation_status
-            .expect("recovery includes its status")
-            .state,
-        Some(State::Allocated(first))
-    );
 }
 
 #[tokio::test]
@@ -550,7 +543,6 @@ fn operation(pool: &PoolBinding, request_id: &str) -> AllocationOperation {
 
 fn pool() -> PoolBinding {
     PoolBinding {
-        site_id: "conformance-site".into(),
         authority_id: "conformance-provider".into(),
         pool_id: "provider-vnis".into(),
         binding_id: "vpc-binding".into(),

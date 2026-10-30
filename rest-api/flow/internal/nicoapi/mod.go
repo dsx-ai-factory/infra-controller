@@ -16,10 +16,14 @@ import (
 
 // Client allow us to have both a real implemenation and a mock implementation for unit tests which can be switched transparently
 type Client interface {
+	// GetComponentPowerDetails reads passive hardware, policy, and tracked actions
+	// through the shared Core connection, bounded by both caller and client timeouts.
+	GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error)
 	// Close releases the connection and certificate watcher after callers stop using the client.
 	Close() error
 	Version(ctx context.Context) (string, error)
 	GetMachines(ctx context.Context) ([]MachineDetail, error)
+	GetLeakingRackIds(ctx context.Context) ([]string, error)
 	GetLeakingMachineIds(ctx context.Context) ([]string, error)
 	GetLeakingSwitchIds(ctx context.Context) ([]string, error)
 	GetPowerStates(ctx context.Context, machineIds []string) (ret []MachinePowerState, err error)
@@ -273,6 +277,7 @@ type Client interface {
 	SetAdminPowerControlError(err error)
 	AddMachineInterface(iface MachineInterface)
 	AddExpectedSwitchInfo(info ExpectedSwitchInfo)
+	SetLeakingRackIds(ids []string)
 	SetLeakingMachineIds(ids []string)
 	SetLeakingSwitchIds([]string)
 	SetSwitchRackID(switchID, rackID string)

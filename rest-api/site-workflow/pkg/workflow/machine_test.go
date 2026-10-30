@@ -277,7 +277,7 @@ func (s *GetDpuMachinesTestSuite) Test_GetDpuMachines_Success() {
 	s.NoError(s.env.GetWorkflowError())
 
 	var result corev1.DpuMachineList
-	s.env.GetWorkflowResult(&result)
+	s.Require().NoError(s.env.GetWorkflowResult(&result))
 
 	s.Equal(len(expectedResult.Machines), len(result.Machines))
 	for i, dpuMachine := range result.Machines {

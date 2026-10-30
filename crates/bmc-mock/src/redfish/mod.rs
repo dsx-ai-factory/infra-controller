@@ -28,13 +28,13 @@
 //! module contains generic collection-building support.
 //!
 //! Follow the established pattern in the other Redfish modules for resource/collection
-//! helpers, builders, models, config/state, and route wiring. Inspect the closest existing
+//! helpers, generated models, config/state, and route wiring. Inspect the closest existing
 //! modules before adding a new entity type and reuse their conventions, subject to the
 //! architectural rules below. Vendor-specific extensions use the `oem/<vendor>` namespace.
 //!
 //! # Boundary with hardware profiles
 //!
-//! This module owns resource/collection URI construction, wire schemas and builders,
+//! This module owns resource/collection URI construction, wire schemas,
 //! request validation, response semantics, resource lookup, and state transitions.
 //! Hardware profiles supply concrete resource IDs, inventory, initial values, and supported
 //! capabilities through configs. Keep new code independent of `hw` types and `HardwareType`;
@@ -72,8 +72,11 @@
 //!
 //! # Adding a resource or stateful feature
 //!
-//! 1. Define resource/collection helpers and the wire builder/model in the owning resource
-//!    module. Reuse `Resource`, `Collection`, `Builder`, and JSON response helpers.
+//! 1. Define resource/collection helpers in the owning resource module and select its
+//!    generated response models in `build.rs`. Use the models from `schema` for standard
+//!    properties, including bundled OEM schemas; retain explicit JSON for missing OEM
+//!    schemas, firmware deviations, fault injection, or
+//!    shapes not supported by the generator (bound actions and expanded navigation).
 //! 2. Add the required fields to the owning config. For an optional feature, model support
 //!    explicitly, for example with `Option<FeatureConfig>`. Hardware profiles provide values.
 //! 3. Add mutable state only when needed. Construct it from the config and keep mutations
@@ -90,6 +93,12 @@
 //! patterns rather than assuming every neighboring implementation respects these rules.
 //! Existing hardware dependencies or vendor inference are exceptions to refactor separately,
 //! not precedents for new code. See `hw/mod.rs` for the platform-side extension template.
+
+// Generated schemas expose setters for every optional Redfish property.
+#[allow(dead_code, unreachable_pub, clippy::all)]
+pub(crate) mod schema {
+    include!(concat!(env!("OUT_DIR"), "/redfish_server.rs"));
+}
 
 pub(crate) mod account_service;
 pub(crate) mod assembly;
@@ -138,7 +147,8 @@ pub(crate) mod query_router;
 pub(super) use collection::Collection;
 use resource::Resource;
 
-trait Builder {
+/// Composition and serialization shared by generated response models.
+pub(crate) trait ModelExt: Sized {
     fn maybe_with<T, V>(self, f: fn(Self, &V) -> Self, v: &Option<T>) -> Self
     where
         T: AsRef<V>,
@@ -152,12 +162,12 @@ trait Builder {
         }
     }
 
-    fn add_str_field(self, name: &str, value: &str) -> Self
+    fn into_json(self) -> serde_json::Value
     where
-        Self: Sized,
+        Self: serde::Serialize,
     {
-        self.apply_patch(serde_json::json!({ name: value }))
+        serde_json::to_value(self).expect("generated Redfish model is serializable")
     }
-
-    fn apply_patch(self, patch: serde_json::Value) -> Self;
 }
+
+impl<T> ModelExt for T {}

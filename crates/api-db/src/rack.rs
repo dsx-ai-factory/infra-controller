@@ -30,6 +30,8 @@ use crate::{
 };
 
 #[cfg(test)]
+mod test_decode;
+#[cfg(test)]
 mod test_explicit_columns;
 #[cfg(test)]
 mod test_metadata;
@@ -176,7 +178,6 @@ async fn create_with_group(
     rack_group_id: Option<&carbide_uuid::rack::RackGroupId>,
 ) -> DatabaseResult<Rack> {
     let controller_state = String::from("{\"state\":\"created\"}");
-    let controller_state_outcome = String::from("{}");
     let default_metadata = Metadata::default();
     let src_metadata = expected_metadata.unwrap_or(&default_metadata);
     let name = match src_metadata.name.as_str() {
@@ -185,7 +186,7 @@ async fn create_with_group(
     };
     let version = ConfigVersion::initial();
     let query = "INSERT INTO racks(id, rack_profile_id, config, controller_state, controller_state_version, controller_state_outcome, name, description, labels, version, rack_group_id)
-            VALUES($1, $2, $3::json, $4::json, $5, $6::json, $7, $8, $9::jsonb, $10, $11)
+            VALUES($1, $2, $3::json, $4::json, $5, NULL, $6, $7, $8::jsonb, $9, $10)
             RETURNING id, rack_profile_id, rack_group_id, config, controller_state,
                       controller_state_version, controller_state_outcome, health_reports,
                       firmware_upgrade_job, nvos_update_job, created, updated, deleted,
@@ -196,7 +197,6 @@ async fn create_with_group(
         .bind(sqlx::types::Json(config))
         .bind(controller_state)
         .bind(version)
-        .bind(controller_state_outcome)
         .bind(name)
         .bind(&src_metadata.description)
         .bind(sqlx::types::Json(&src_metadata.labels))

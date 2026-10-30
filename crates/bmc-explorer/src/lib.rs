@@ -44,6 +44,7 @@
 mod chassis;
 mod component_integrity;
 mod computer_system;
+mod drives;
 mod error;
 pub mod hw;
 mod inventories;
@@ -60,6 +61,7 @@ use std::time::Duration;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
+use drives::ExploredDrives;
 pub use error::Error;
 use inventories::ExploredInventories;
 use itertools::Itertools;
@@ -101,6 +103,11 @@ pub struct Config<'a, B: Bmc> {
     pub boot_interface_mac: Option<MacAddress>,
     pub error_classifier: ErrorClassifier<'a, B>,
     pub retry_timeout: Duration,
+    /// Whether to read drive firmware versions from the primary system's
+    /// Storage subsystems and report each enabled drive with a usable model
+    /// and version as a `Drive_<Model>_<DriveId>` firmware inventory entry.
+    /// Costs one request per Storage subsystem and per drive.
+    pub explore_drive_firmware: bool,
 }
 
 pub fn is_bf4_product(product: Option<Product<&str>>) -> bool {
@@ -143,8 +150,14 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
         // of BlueField_ERoT. Because carbide doesn't need
         // BlueField_ERoT we just skip it.
         // BlueField-4: skip IRoT NIC (invalid STATIC UUID breaks parsing).
+        // GB200/GB300 host BMCs: the BMC's ERoT chassis intermittently
+        // times out the same way, and carbide doesn't need it either.
         lazy_fetch: if is_nvidia_vendor && is_bf4_product(root.product()) {
             Some(should_fetch_bf4_chassis_except_irot_nic)
+        } else if root.vendor() == Some(Vendor::new("NVIDIA"))
+            && root.product() == Some(Product::new("GB BMC"))
+        {
+            Some(|odata_id| odata_id.last_segment() != Some("ERoT_BMC_0"))
         } else {
             (root.vendor() == Some(Vendor::new("Nvidia"))
                 && root.product() == Some(Product::new("BlueField-3 DPU")))
@@ -233,19 +246,41 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     }
     let explored_system = &explored_systems[0];
 
-    let manager = root
+    let mut managers = root
         .managers()
         .await
         .map_err(Error::nv_redfish("managers"))?
         .ok_or_else(Error::bmc_not_provided("managers"))?
         .members()
         .await
-        .map_err(Error::nv_redfish("managers members"))?
-        .into_iter()
-        .next()
-        .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
+        .map_err(Error::nv_redfish("managers members"))?;
+
+    // Prefer the manager whose ManagerForServers links the chosen system; fall
+    // back to the first manager for BMCs that don't populate the link.
+    let manager = match managers.iter().position(|m| {
+        m.raw()
+            .links
+            .as_ref()
+            .and_then(|l| l.manager_for_servers.as_ref())
+            .is_some_and(|servers| {
+                servers
+                    .iter()
+                    .any(|s| *s.id() == explored_system.system.raw().odata_id)
+            })
+    }) {
+        Some(i) => managers.swap_remove(i),
+        None => managers
+            .into_iter()
+            .next()
+            .ok_or_else(Error::bmc_not_provided("at least one manager"))?,
+    };
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
+    let explored_drives = if config.explore_drive_firmware {
+        Some(ExploredDrives::explore(&explored_system.system).await)
+    } else {
+        None
+    };
     let linked_chassis_ids = explored_system.linked_chassis_ids();
     let has_system_mac_address = explored_system.has_usable_ethernet_mac_address();
     if should_use_network_adapter_port_fallback(
@@ -390,7 +425,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let manager = explored_manager.to_model()?;
-    let service = explored_inventories.to_model(hw_type);
+    let service = explored_inventories.to_model(hw_type, explored_drives.as_ref());
     let hardware_class = hardware_class(&root, &systems[0]);
     let chassis = explored_chassis.to_model();
     let component_integrities = explored_component_integrities.to_model();
@@ -481,7 +516,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
         managers: vec![explored_manager.to_model()?],
         systems: vec![system],
         chassis: explored_chassis.to_model(),
-        service: explored_inventories.to_model(Some(hw_type)),
+        service: explored_inventories.to_model(Some(hw_type), None),
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),

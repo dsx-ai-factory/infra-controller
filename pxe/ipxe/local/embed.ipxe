@@ -49,17 +49,28 @@ goto ${nico-after-network}
 :configure_ipv6
 # Without a configured network, return to firmware instead of retrying a fetch.
 ifconf -c ipv6 || exit 1
-# Core looks up HTTP clients by the DHCPv6 lease; SLAAC may add another address.
-isset ${netX.dhcpv6/ip6} || goto missing_ipv6_lease
-isset ${cwuri} || goto missing_boot_uri
+# Core must have registered the exact HTTP source address.
+# Prefer the lease: stateful allocation replaces Core's inferred SLAAC address.
+isset ${netX.dhcpv6/ip6} || goto configure_slaac
 set http-source6 ${netX.dhcpv6/ip6}%${netX/ifname}
+goto ipv6_ready
+
+:configure_slaac
+# Core can infer iPXE's EUI-64 address from a relayed Information-Request
+# on opted-in segments.
+# Use NDP settings explicitly; generic `ip6` can select a link-local address.
+isset ${netX.ndp/ip6} || goto missing_ipv6_address
+set http-source6 ${netX.ndp/ip6}%${netX/ifname}
+
+:ipv6_ready
+isset ${cwuri} || goto missing_boot_uri
 # The server named by `cwuri` must also serve `/api/v0/pxe/`. An empty base
 # reuses that URI's scheme, server, and port.
 clear nico-pxe-base
 goto ${nico-after-network}
 
-:missing_ipv6_lease
-echo NICo IPv6 boot requires a stateful DHCPv6 lease.
+:missing_ipv6_address
+echo NICo IPv6 boot requires a DHCPv6 lease or SLAAC address.
 exit 1
 
 :missing_boot_uri

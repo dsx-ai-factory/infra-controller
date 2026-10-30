@@ -1804,3 +1804,8 @@ func (e *managerExecutor) TerminateTask(
 	}
 	return e.terminateErr
 }
+
+// ListTaskContextForRack fails unexpected context reads in task-manager tests.
+func (s *managerTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	panic("unexpected task context read")
+}

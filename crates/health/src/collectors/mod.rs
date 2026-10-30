@@ -35,6 +35,8 @@ mod sensors;
 mod telemetry;
 
 pub use discovery::{EntityDiscoveryCollector, EntityDiscoveryCollectorConfig};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use entity_metrics::catalogue_samples;
 pub use entity_metrics::{MetricsCollector, MetricsCollectorConfig};
 pub use firmware::{FirmwareCollector, FirmwareCollectorConfig};
 pub use gpu_inventory::{GpuInventoryCollector, GpuInventoryCollectorConfig};
@@ -52,6 +54,8 @@ pub(crate) use nmxc_schema_override::{
 };
 pub(crate) use nmxt::NMXT_PORT;
 pub use nmxt::{NmxtCollector, NmxtCollectorConfig};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use nvue::gnmi::emit_catalogue_samples;
 pub(crate) use nvue::gnmi::subscriber::{GnmiRetainedCache, spawn_gnmi_collector};
 pub use nvue::rest::collector::{NvueRestCollector, NvueRestCollectorConfig};
 pub(crate) use reachability::{

@@ -16,6 +16,10 @@ IMG           ?= dpf-sim-controller:dev
 # simulator running (violating the never-two-writers rule).
 DPF_NAMESPACE ?= $(shell cat .deploy-namespace 2>/dev/null || echo dpf-operator-system)
 PHASE_DWELL   ?= 3s
+# true: OS Installing installs the managed BFB through the DPU BMC's Redfish and
+# waits for the task, as the real operator does. Needs the pod to reach the DPU
+# BMCs (see README). false: the phase only dwells.
+REDFISH_OS_INSTALL ?= false
 # Image platforms for docker-build. Simulation clusters in this repo are
 # amd64; override (e.g. PLATFORMS=linux/amd64,linux/arm64) for mixed fleets.
 PLATFORMS     ?= linux/amd64
@@ -32,6 +36,7 @@ RENDER_RBAC = sed -e 's|dpf-operator-system|$(DPF_NAMESPACE)|g' config/rbac/role
 RENDER_MGR  = sed -e 's|dpf-operator-system|$(DPF_NAMESPACE)|g' \
                   -e 's|image: dpf-sim-controller:dev|image: $(IMG)|' \
                   -e 's|--phase-dwell=3s|--phase-dwell=$(PHASE_DWELL)|' \
+                  -e 's|--redfish-os-install=false|--redfish-os-install=$(REDFISH_OS_INSTALL)|' \
                   config/manager/manager.yaml
 
 .PHONY: help
@@ -49,7 +54,7 @@ build: ## Build the binary
 
 .PHONY: run
 run: ## Run out-of-cluster against $KUBECONFIG
-	go run ./cmd --dpf-namespace=$(DPF_NAMESPACE) --phase-dwell=$(PHASE_DWELL)
+	go run ./cmd --dpf-namespace=$(DPF_NAMESPACE) --phase-dwell=$(PHASE_DWELL) --redfish-os-install=$(REDFISH_OS_INSTALL)
 
 .PHONY: test
 test: ## Run unit tests (phase walker, name derivation)

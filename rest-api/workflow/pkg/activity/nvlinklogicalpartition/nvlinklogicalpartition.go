@@ -36,7 +36,7 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 
 	stDAO := cdbm.NewSiteDAO(mnlp.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received NVLink Logical Partition inventory for unknown or deleted Site")

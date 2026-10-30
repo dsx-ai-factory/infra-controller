@@ -17,13 +17,10 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
-use crate::redfish::Builder;
+use super::schema::pcie_device::PcieDevice;
 use crate::{hw, redfish};
 
-const PCIE_DEVICE_TYPE: &str = "#PCIeDevice.v1_5_0.PCIeDevice";
+const PCIE_DEVICE_TYPE: &str = redfish::schema::pcie_device::PcieDevice::ODATA_TYPE;
 
 pub(crate) fn chassis_resource(chassis_id: &str, dev_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!("/redfish/v1/Chassis/{chassis_id}/PCIeDevices/{dev_id}");
@@ -45,24 +42,24 @@ pub(super) fn chassis_collection(chassis_id: &str) -> redfish::Collection<'stati
 }
 
 /// Generate resource bound to chassis.
-pub(crate) fn builder(resource: &redfish::Resource) -> PcieDeviceBuilder {
-    PcieDeviceBuilder {
-        id: Cow::Owned(resource.id.to_string()),
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(resource: &redfish::Resource) -> PcieDevice {
+    PcieDevice::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
-pub(crate) fn builder_from_nic(
-    resource: &redfish::Resource,
-    nic: &hw::nic::Nic,
-) -> PcieDeviceBuilder {
-    builder(resource)
-        .maybe_with(PcieDeviceBuilder::serial_number, &nic.serial_number)
-        .maybe_with(PcieDeviceBuilder::description, &nic.description)
-        .maybe_with(PcieDeviceBuilder::manufacturer, &nic.manufacturer)
-        .maybe_with(PcieDeviceBuilder::model, &nic.model)
-        .maybe_with(PcieDeviceBuilder::part_number, &nic.part_number)
-        .maybe_with(PcieDeviceBuilder::firmware_version, &nic.firmware_version)
+pub(crate) fn builder_from_nic(resource: &redfish::Resource, nic: &hw::nic::Nic) -> PcieDevice {
+    PcieDevice {
+        serial_number: nic.serial_number.as_ref().map(|v| Some(v.to_string())),
+        description: nic.description.as_ref().map(|v| Some(v.to_string())),
+        manufacturer: nic.manufacturer.as_ref().map(|v| Some(v.to_string())),
+        model: nic.model.as_ref().map(|v| Some(v.to_string())),
+        part_number: nic.part_number.as_ref().map(|v| Some(v.to_string())),
+        firmware_version: nic.firmware_version.as_ref().map(|v| Some(v.to_string())),
+        ..builder(resource)
+    }
 }
 
 pub(crate) struct PCIeDevice {
@@ -76,62 +73,11 @@ impl PCIeDevice {
     }
 }
 
-pub(crate) struct PcieDeviceBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-impl Builder for PcieDeviceBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            id: self.id,
-        }
-    }
-}
-
-impl PcieDeviceBuilder {
-    pub(crate) fn description(self, value: &str) -> Self {
-        self.add_str_field("Description", value)
-    }
-
-    pub(crate) fn manufacturer(self, value: &str) -> Self {
-        self.add_str_field("Manufacturer", value)
-    }
-
-    pub(crate) fn model(self, value: &str) -> Self {
-        self.add_str_field("Model", value)
-    }
-
-    pub(crate) fn part_number(self, value: &str) -> Self {
-        self.add_str_field("PartNumber", value)
-    }
-
-    pub(crate) fn serial_number(self, value: &str) -> Self {
-        self.add_str_field("SerialNumber", value)
-    }
-
-    /// Device identity that survives a chassis-slot swap.
-    ///
-    /// On NVIDIA GPUs this matches the NVML GPU UUID without its `GPU-` prefix.
-    pub(crate) fn uuid(self, value: &str) -> Self {
-        self.add_str_field("UUID", value)
-    }
-
-    fn firmware_version(self, value: &str) -> Self {
-        self.add_str_field("FirmwareVersion", value)
-    }
-
-    pub(crate) fn status(self, status: redfish::resource::Status) -> Self {
-        self.apply_patch(json!({
-            "Status": status.into_json()
-        }))
-    }
-
+impl PcieDevice {
     pub(crate) fn build(self) -> PCIeDevice {
         PCIeDevice {
-            id: self.id,
-            value: self.value,
+            id: Cow::Owned(self.id.clone()),
+            value: serde_json::to_value(self).expect("generated Redfish model is serializable"),
         }
     }
 }

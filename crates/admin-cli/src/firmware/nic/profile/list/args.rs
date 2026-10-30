@@ -20,8 +20,8 @@ return the unfiltered list.
 
 The CLI fetches details in bounded batches; profiles deleted during the \
 listing are omitted. A profile edited after ID enumeration can return details \
-that no longer match the hardware filter. Entries retain their registered \
-order. This is not an atomic catalog snapshot and does not select or update \
+that no longer match the hardware filter. Entries within each profile retain \
+their registered order. This is not an atomic catalog snapshot and does not select or update \
 firmware. If a returned definition cannot be decoded, the listing fails before \
 writing results.
 

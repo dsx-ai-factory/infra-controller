@@ -19,6 +19,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use carbide_nvlink_manager::config::{
+    DefaultNmxCCa, DefaultNmxCClientTls, DefaultNmxCTls, NvLinkConfig,
+};
 use eyre::WrapErr;
 use figment::providers::{Env, Format, Toml};
 use figment::value::{Dict, Map, Value};
@@ -396,9 +399,13 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Validate that admin-UI tool entries have unique names.
     config.validate_web_ui_sidebar_tools()?;
     config.validate_service_vpc_slots()?;
+    if let Some(fnn) = &config.fnn {
+        fnn.validate_route_targets()?;
+    }
     // Reject endpoints with embedded secrets before tracing the configuration.
     config.validate_resource_pool_backends()?;
     config.api_admission_control.validate()?;
+    config.validate_admin_lock_admission_permits()?;
     config
         .firmware_global
         .downloads
@@ -408,6 +415,10 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     if let Some(config) = &config.dsx_exchange_event_bus {
         config.periodic_state_republish.validate()?;
     }
+
+    config
+        .nvlink_config
+        .get_or_insert_with(NvLinkConfig::default);
 
     // Publish the configured tool list so the admin-UI sidebar and per-machine
     // "Logs" deep link can read it back via `crate::configured_tools`. The list
@@ -425,6 +436,10 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Publish the deployment-wide host naming policy so the DB layer can read it
     // wherever an interface is [re]named (same way we do it w/ `init_tools` above).
     db::host_naming::configure(config.host_naming_strategy);
+
+    // Publish the admin-lock admission permit count the same way; the DB
+    // layer gates the admin-segment lock waiters on it.
+    db::machine_interface::configure_admin_lock_admission(config.admin_lock_admission_permits);
 
     if let Some(manager_config) = &config.component_manager {
         component_manager::rms::validate_rms_backend_rack_profiles(
@@ -455,6 +470,51 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
 
     tracing::trace!(config = ?config.redacted(), "Carbide config");
     Ok((Arc::new(config), diagnostics))
+}
+
+/// Fills in NMX-C TLS settings the configuration leaves unset and logs the outcome.
+///
+/// Like [`log_vpc_peering_policy_deprecations`], the caller runs this after logging setup so the
+/// outcome reaches the production subscriber.
+pub fn apply_nmx_c_tls_defaults(config: &mut CarbideConfig) {
+    let initial_domain_name = config.initial_domain_name.clone();
+    let nvlink_config = config
+        .nvlink_config
+        .get_or_insert_with(NvLinkConfig::default);
+    let DefaultNmxCTls { client, ca } = nvlink_config.apply_default_nmx_c_tls(
+        Path::new(NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR),
+        Path::new(NvLinkConfig::DEFAULT_NMX_C_FALLBACK_CA_CERT),
+        initial_domain_name.as_deref(),
+    );
+    match client {
+        DefaultNmxCClientTls::Applied => tracing::info!(
+            tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            authority = ?nvlink_config.nmx_c_tls_authority,
+            "Using default client certificate for NMX-C connections"
+        ),
+        DefaultNmxCClientTls::CertificateMissing => tracing::warn!(
+            tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            "NMX-C connections have no TLS settings configured and no client certificate was \
+             found in tls_dir, so they will present no client certificate. Mount \
+             the certificate there (Helm nvSwitchTls.nicoClient.mountPath) or set the \
+             nvlink_config.nmx_c_tls_* keys"
+        ),
+        DefaultNmxCClientTls::NotNeeded => {}
+    }
+    match ca {
+        DefaultNmxCCa::Applied => tracing::info!(
+            ca_cert = ?nvlink_config.nmx_c_tls_ca_cert_path,
+            "Using default CA bundle for NMX-C connections"
+        ),
+        DefaultNmxCCa::Missing => tracing::warn!(
+            client_tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            fallback_ca_cert = NvLinkConfig::DEFAULT_NMX_C_FALLBACK_CA_CERT,
+            "NMX-C is reached over HTTPS but no CA bundle is configured and \
+             neither default exists; no NMX-C server certificate can be verified. Set \
+             nvlink_config.nmx_c_tls_ca_cert_path"
+        ),
+        DefaultNmxCCa::NotNeeded => {}
+    }
 }
 
 /// Logs deprecations that must be visible through the production subscriber.
@@ -551,6 +611,51 @@ request_timeout_seconds = 5"#
         })
     }
 
+    /// Verifies production configuration loading traverses both admin and named
+    /// profiles so invalid route targets cannot survive startup.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn route_targets_are_validated_during_startup_loading() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |(name, settings)| {
+                    // Parse each invalid profile through the same deferred loader used at startup.
+                    let path = format!("{name}.toml");
+                    jail.create_file(
+                        &path,
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    )
+                    .expect("write test configuration");
+                    parse_carbide_config_with_deferred_diagnostics(Path::new(&path), None)
+                        .map(drop)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "route-target startup validation" {
+                    // Admin profiles must not bypass semantic validation during startup.
+                    (
+                        "admin-profile",
+                        r#"[fnn.admin_vpc]
+enabled = true
+
+[fnn.admin_vpc.routing_profile]
+route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
+                    ) => FailsWith(
+                        "fnn.admin_vpc.routing_profile.route_target_imports[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Every named profile entry must be visited, including export targets.
+                    (
+                        "named-profile",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                }
+            );
+            Ok(())
+        })
+    }
+
     /// Preserves omission versus explicit emptiness through real TOML loading,
     /// so an operator can disable null routes without activating the fallback.
     #[test]
@@ -639,6 +744,45 @@ request_timeout_seconds = 5"#
                     && line.fields.get("config_source").map(String::as_str) == Some("config.toml")
                     && line.fields.get("replacement").map(String::as_str) == Some("exclusive")
             }));
+            Ok(())
+        })
+    }
+
+    /// Reports the NMX-C TLS default outcome through the subscriber installed after parsing,
+    /// so it is not lost before logging setup. Assumes the default NMX-C client certificate
+    /// mount does not exist on the test host.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nmx_c_tls_default_outcome_is_logged_after_logging_setup() {
+        figment::Jail::expect_with(|jail| {
+            let config_text = format!(
+                "{}\n[nvlink_config]\nenabled = true\n",
+                include_str!("test_data/min_config.toml")
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            // Match startup ordering: parse before installing the logging subscriber.
+            let stream = LogStream::new(16, 64 * 1024);
+            let mut logs = stream.subscribe();
+            let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
+            let mut config = Arc::unwrap_or_clone(
+                parse_carbide_config(Path::new("config.toml"), None)
+                    .expect("configuration with NVLink partitioning must load"),
+            );
+            tracing::subscriber::with_default(subscriber, || apply_nmx_c_tls_defaults(&mut config));
+
+            let warning = std::iter::from_fn(|| logs.try_recv().ok())
+                .find(|line| {
+                    line.message.starts_with(
+                        "NMX-C connections have no TLS settings configured and no client certificate",
+                    )
+                })
+                .expect("missing NMX-C client certificate warning");
+            assert_eq!(warning.level, "WARN");
+            assert_eq!(
+                warning.fields.get("tls_dir").map(String::as_str),
+                Some(NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR)
+            );
             Ok(())
         })
     }

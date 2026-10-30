@@ -1,0 +1,52 @@
+suite: switch client certificate generation
+templates:
+  - switch-client-certificate.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: is absent by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the proxy's switch client identity when enabled
+    set:
+      switchTls:
+        enabled: true
+        uris:
+          - spiffe://switch.local/nico-system/sa/nico-bmc-proxy-switch
+    asserts:
+      - equal:
+          path: metadata.name
+          value: nico-bmc-proxy-switch-client-certificate
+      - equal:
+          path: spec.secretName
+          value: nico-bmc-proxy-switch-client-certificate
+      - equal:
+          path: spec.usages
+          value:
+            - digital signature
+            - client auth
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://switch.local/nico-system/sa/nico-bmc-proxy-switch
+      - equal:
+          path: spec.privateKey
+          value:
+            algorithm: ECDSA
+            size: 384
+            rotationPolicy: Always
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: ClusterIssuer
+            name: vault-nico-issuer
+            group: cert-manager.io
+
+  - it: rejects a missing client URI SAN
+    set:
+      switchTls.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-bmc-proxy: switchTls.uris must contain at least one URI SAN"

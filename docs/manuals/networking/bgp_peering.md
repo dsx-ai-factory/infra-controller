@@ -2,11 +2,11 @@
 
 This page describes the BGP peering relationship that NICo supports between a tenant's host operating system and the DPU that fronts the host on the overlay network. The following topics are covered:
 
-* Intended use cases
-* How ownership is divided between the tenant and the platform
-* What operators must configure on the site to permit a tenant to use the feature
-* The discovery mechanism by which a tenant learns the peer ASN
-* An end-to-end example of BGP peering
+- Intended use cases
+- How ownership is divided between the tenant and the platform
+- What operators must configure on the site to permit a tenant to use the feature
+- The discovery mechanism by which a tenant learns the peer ASN
+- An end-to-end example of BGP peering
 
 This page is intended for operations engineers running a NICo-managed site, as well as platform engineers writing tenant runbooks. The peering session itself is owned by the tenant; this page describes the surface the platform exposes to that tenant and the configuration controls available to the site operator.
 
@@ -23,7 +23,7 @@ Both use cases require the platform to permit the announced prefix at the site a
 
 ## Architecture and Ownership
 
-```
+```text
    Tenant host OS                       DPU (BlueField)                  Fabric / Overlay
    ┌────────────────────┐              ┌─────────────────────┐
    │ BGP speaker        │   eBGP       │ HBN / NVUE          │   eBGP/iBGP   ┌─────────┐
@@ -47,7 +47,7 @@ The session uses the external Border Gateway Protocol (eBGP): The tenant ASN and
 
 Before a tenant can peer successfully, the operator must ensure the following are in place on the site.
 
-### 1. Tenant Host Autonomous Serial Number (ASN) Policy
+### 1. Tenant Host Autonomous System Number (ASN) Policy
 
 The site configuration controls whether tenants may choose any host-side ASN or must use a single common value.
 
@@ -91,37 +91,46 @@ Permitting a tenant to announce a prefix only causes the route to enter the VPC 
 
 Every DPU at the site is allocated its own unique ASN from a site-managed pool. There is *no single shared "DPU ASN"* that a tenant can hard-code: The peer ASN that a host can see depends on which DPU fronts that host, and two instances on different hosts will generally peer with different ASNs. Tenants must therefore look up the ASN dynamically, per host.
 
-The DPU BGP ASN is exposed to the tenant through the `cloud-init-compatible` Instance Metadata Service that runs on the DPU at the standard link-local address `169.254.169.254`.
+The DPU BGP ASN is exposed to the tenant through the `cloud-init-compatible` Instance Metadata Service on the DPU. Its default IPv4 endpoint is the link-local address `169.254.169.254`.
 
 A tenant retrieves the peer ASN with a plain HTTP GET:
 
-```
+```text
 GET http://169.254.169.254/latest/meta-data/asn
 ```
 
-The response body is the ASN as a decimal integer. There is no authentication on the metadata endpoint; access is controlled by the link-local route inside the instance.
+The response body is the ASN as a decimal integer. The metadata endpoint has
+no HTTP authentication and uses the local HBN metadata attachment. The examples
+on this page use the standalone IPv4 listener on port 80. For embedded port 7777,
+the optional IPv6 endpoint, and the request and reply path, refer to
+[NICo Metadata Service](../../dpu-management/dpu-lifecycle-management.md#nico-metadata-service).
 
 The value returned reflects the ASN assigned to the DPU that fronts the host. It is the peer ASN the tenant must configure into the BGP speaker *for that host*; tenants that operate fleets of hosts must query the endpoint on each host rather than assuming a single value.
 
-The tenant's own ASN is whatever the site policy permits (refer to the [Tenant Host ASN Policy](#1-tenant-host-asn-policy) section above for more details).
+The tenant's own ASN is whatever the site policy permits (refer to the [Tenant Host ASN Policy](#1-tenant-host-autonomous-system-number-asn-policy) section above for more details).
 
 ## Tenant Configuration Steps
 
 The following steps are performed by the tenant inside their host OS. NICo does not perform these steps; they are listed here so that operators and runbook authors have a complete picture of the end-to-end flow.
 
 1. **Install a BGP speaker.** Any standard BGP speaker is supported. Common choices include the following:
+
    - FRRouting (`frr`)
    - BIRD
    - ExaBGP
    - MetalLB (for Kubernetes service VIPs; runs in BGP mode)
 2. **Retrieve the peer ASN** from the metadata service:
+
+   ```bash
+   curl --noproxy '*' http://169.254.169.254/latest/meta-data/asn
    ```
-   curl http://169.254.169.254/latest/meta-data/asn
-   ```
+
 3. **Determine the peer IP address.** This is the host's existing default gateway (assigned via DHCP from the DPU tenant-facing interface). It can be discovered with the following command:
-   ```
+
+   ```bash
    ip route show default
    ```
+
 4. **Determine the tenant-side ASN.** This is either the tenant's own choice, or--if the site has set `common_tenant_host_asn`--the operator-provided value.
 5. **Configure the BGP speaker** with the peer IP, the peer ASN, and the local ASN. Configure the speaker to announce only the prefixes the tenant intends to advertise, and to either accept no inbound routes or to filter inbound routes according to the tenant's own policy. The DPU side will filter outbound advertisements against the `allowed_anycast_prefixes` list set for the VPC; any prefix outside that list will be silently dropped by the platform.
 6. **(Optional) Attach leak communities** to specific advertisements that should leak to the underlay (`65100:01`) or be reachable via the underlay instead of the overlay (`65100:02`). These communities take effect only when the VPC routing profile sets `tenant_leak_communities_accepted = true`; refer to the [Allowed Tenant Leak Communities](#3-allowed-tenant-leak-communities-optional) section for more details.
@@ -142,8 +151,8 @@ The following example shows a tenant using MetalLB in BGP mode to announce a Kub
 
 **Step 1 — Confirm the peer ASN on one node.**
 
-```
-$ curl -s http://169.254.169.254/latest/meta-data/asn
+```text
+$ curl --noproxy '*' -s http://169.254.169.254/latest/meta-data/asn
 65000
 ```
 
@@ -187,22 +196,23 @@ MetalLB allocates `203.0.113.10` to the service and advertises `203.0.113.10/32`
 
 Verify that the session is established and the prefix is being advertised. With FRRouting (FRR), the following commands are used:
 
-```
-$ vtysh -c "show bgp summary"
-$ vtysh -c "show bgp ipv4 unicast advertised-routes neighbor 10.0.0.1"
+```bash
+vtysh -c "show bgp summary"
+vtysh -c "show bgp ipv4 unicast neighbors 10.0.0.1 advertised-routes"
 ```
 
 Other speakers expose equivalent commands.
-
 
 ## Troubleshooting
 
 ### The BGP session does not establish
 
 1. Confirm TCP reachability to the DPU on port 179:
-   ```
+
+   ```bash
    nc -vz <default-gateway> 179
    ```
+
    If TCP/179 is not reachable, the DPU is not currently configured as a BGP responder for this host. Verify that the instance is fully provisioned (`READY` state) and that the VPC has been built with a routing profile that permits the feature.
 2. Confirm the peer ASN configured in the host speaker matches the value returned by `meta-data/asn`. An ASN mismatch will cause OPEN messages to be rejected.
 3. If the site sets `common_tenant_host_asn`, confirm that the tenant's local ASN matches that value exactly. If it does not, the OPEN will be rejected.

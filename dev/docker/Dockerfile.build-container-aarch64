@@ -72,6 +72,17 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
 	kea-dhcp6 -V
 
+# Debian's Kea 2.2.0-6 development package omits a header required by
+# lease_mgr_factory.h. Restore the upstream declaration without changing Kea.
+RUN if [ ! -f /usr/include/kea/dhcpsrv/cfg_globals.h ]; then \
+	test "${KEA_VERSION}" = "2.2.0-6" && \
+	curl -fsSL https://raw.githubusercontent.com/isc-projects/kea/becddc2abdfba6d2ae305768c5ea334d9dede0de/src/lib/dhcpsrv/cfg_globals.h -o /tmp/kea-cfg_globals.h && \
+	echo 'e536a71235493949d9fc07c1ec1ff69b82c9d215627ba4bd1bfd2e2e6ac5c50e  /tmp/kea-cfg_globals.h' | sha256sum -c - && \
+	install -m 0644 /tmp/kea-cfg_globals.h /usr/include/kea/dhcpsrv/cfg_globals.h && \
+	rm /tmp/kea-cfg_globals.h; \
+	fi && \
+	printf '#include <dhcpsrv/lease_mgr_factory.h>\n' | c++ -x c++ -fsyntax-only -I/usr/include/kea -
+
 # Keep the system linker for non-Rust builds such as iPXE, whose linker script
 # is not accepted by mold. Cargo uses this wrapper even outside the repository.
 RUN printf '#!/bin/sh\nexec clang -fuse-ld=mold "$@"\n' \
@@ -91,7 +102,7 @@ RUN curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.14.0/kind-linux-arm64  && chm
 RUN cd /tmp && curl -Lo ./grpcurl.tar.gz https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_arm64.tar.gz && tar xzf grpcurl.tar.gz && chmod +x ./grpcurl && mv grpcurl /usr/local/bin/ && rm LICENSE && rm grpcurl.tar.gz
 RUN cd /tmp && curl -Lo vault.zip https://releases.hashicorp.com/vault/1.14.1/vault_1.14.1_linux_arm64.zip && unzip vault.zip && chmod u+x vault && mv vault /usr/local/bin/ && rm vault.zip
 RUN cd /usr/local/bin && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl" && chmod +x /usr/local/bin/kubectl
-RUN export GO_VERSION="1.26.4" && \
+RUN export GO_VERSION="1.27.3" && \
 	export PLATFORM=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') && \
 	export TARFILE=go${GO_VERSION}.linux-${PLATFORM}.tar.gz && \
 	export URL=https://golang.org/dl/${TARFILE} && \

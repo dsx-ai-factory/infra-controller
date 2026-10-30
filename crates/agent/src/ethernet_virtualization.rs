@@ -253,30 +253,40 @@ impl NvueClientContext {
     }
 }
 
-/// Converts an RPC routing profile into the NVUE renderer model.
-impl From<&rpc::RoutingProfile> for nvue::RoutingProfile {
-    fn from(profile: &rpc::RoutingProfile) -> Self {
+/// Converts one concrete RPC route target while preserving legacy absent-VNI zero behavior.
+fn route_target_from_rpc(
+    target: &::rpc::common::RouteTarget,
+) -> eyre::Result<nvue::RouteTargetConfig> {
+    eyre::ensure!(
+        !target.vni_self,
+        "received unresolved route target with vni_self set"
+    );
+    Ok(nvue::RouteTargetConfig {
+        asn: target.asn,
+        vni: target.vni.unwrap_or_default(),
+    })
+}
+
+/// Converts a concrete RPC routing profile while rejecting Core-owned symbolic values.
+impl TryFrom<&rpc::RoutingProfile> for nvue::RoutingProfile {
+    type Error = eyre::Report;
+
+    fn try_from(profile: &rpc::RoutingProfile) -> Result<Self, Self::Error> {
         // Preserve the API-provided routing policy without applying template concerns here.
-        nvue::RoutingProfile {
+        Ok(nvue::RoutingProfile {
             leak_default_route_from_underlay: profile.leak_default_route_from_underlay,
             leak_tenant_host_routes_to_underlay: profile.leak_tenant_host_routes_to_underlay,
             tenant_leak_communities_accepted: profile.tenant_leak_communities_accepted,
             route_target_imports: profile
                 .route_target_imports
                 .iter()
-                .map(|rt| nvue::RouteTargetConfig {
-                    asn: rt.asn,
-                    vni: rt.vni,
-                })
-                .collect(),
+                .map(route_target_from_rpc)
+                .collect::<eyre::Result<_>>()?,
             route_targets_on_exports: profile
                 .route_targets_on_exports
                 .iter()
-                .map(|rt| nvue::RouteTargetConfig {
-                    asn: rt.asn,
-                    vni: rt.vni,
-                })
-                .collect(),
+                .map(route_target_from_rpc)
+                .collect::<eyre::Result<_>>()?,
             accepted_leaks_from_underlay: profile
                 .accepted_leaks_from_underlay
                 .iter()
@@ -287,7 +297,7 @@ impl From<&rpc::RoutingProfile> for nvue::RoutingProfile {
                 .iter()
                 .map(|p| p.prefix.to_owned())
                 .collect(),
-        }
+        })
     }
 }
 
@@ -485,6 +495,8 @@ fn admin_ipv6_router_advertisement(
 /// With `StartupFile` and `skip_post`, only save the desired file and return
 /// whether that file was replaced. Errors from saving or applying the desired
 /// configuration are returned to the caller.
+/// `fmds_ipv6_gateway` is resolved from the local agent configuration, not
+/// the Core response, so both startup-file and REST updates use the same peer.
 // The fetcher projects `addresses` into these compatibility fields before rendering.
 #[allow(deprecated)]
 pub(super) async fn update_nvue(
@@ -494,6 +506,7 @@ pub(super) async fn update_nvue(
     service_addrs: &ServiceAddresses,
     hbn_device_names: HBNDeviceNames,
     supplemental_config: Option<&str>,
+    fmds_ipv6_gateway: Option<ipnetwork::Ipv6Network>,
 ) -> eyre::Result<bool> {
     let hbn_version = match update_flavor {
         NvueUpdateFlavor::StartupFile { .. } => hbn::read_version().await?,
@@ -606,7 +619,8 @@ pub(super) async fn update_nvue(
                 routing_profile: admin_interface
                     .vpc_routing_profile
                     .as_ref()
-                    .map(nvue::RoutingProfile::from),
+                    .map(nvue::RoutingProfile::try_from)
+                    .transpose()?,
                 interface_routing_profile: admin_interface
                     .interface_routing_profile
                     .as_ref()
@@ -688,7 +702,8 @@ pub(super) async fn update_nvue(
                 routing_profile: net
                     .vpc_routing_profile
                     .as_ref()
-                    .map(nvue::RoutingProfile::from),
+                    .map(nvue::RoutingProfile::try_from)
+                    .transpose()?,
                 interface_routing_profile: net
                     .interface_routing_profile
                     .as_ref()
@@ -752,6 +767,7 @@ pub(super) async fn update_nvue(
         .collect::<Result<Vec<_>, _>>()
         .wrap_err("invalid route server IP")?;
     let conf = nvue::NvueConfig {
+        fmds_ipv6_gateway,
         is_fnn: false,
         is_dpu_os,
         fmds_gateway_vlan: if !is_dpu_os {
@@ -770,20 +786,16 @@ pub(super) async fn update_nvue(
         loopback_ip_v6,
         asn: nc.asn,
         datacenter_asn: nc.datacenter_asn,
-        common_internal_route_target: nc.common_internal_route_target.map(|rt| {
-            nvue::RouteTargetConfig {
-                asn: rt.asn,
-                vni: rt.vni,
-            }
-        }),
+        common_internal_route_target: nc
+            .common_internal_route_target
+            .as_ref()
+            .map(route_target_from_rpc)
+            .transpose()?,
         additional_route_target_imports: nc
             .additional_route_target_imports
             .iter()
-            .map(|rt| nvue::RouteTargetConfig {
-                asn: rt.asn,
-                vni: rt.vni,
-            })
-            .collect(),
+            .map(route_target_from_rpc)
+            .collect::<eyre::Result<_>>()?,
         dpu_hostname: hostname.hostname,
         dpu_search_domain: hostname.search_domain,
         hbn_version: Some(hbn_version),
@@ -820,7 +832,11 @@ pub(super) async fn update_nvue(
         ct_l3_vni: nc.vpc_vni,
         ct_vrf_loopback: "FNN".to_string(),
         l3_domains: vec![],
-        ct_routing_profile: nc.routing_profile.as_ref().map(nvue::RoutingProfile::from),
+        ct_routing_profile: nc
+            .routing_profile
+            .as_ref()
+            .map(nvue::RoutingProfile::try_from)
+            .transpose()?,
         bgp_leaf_session_password: nc.bgp_leaf_session_password.clone(),
     };
 
@@ -1161,8 +1177,9 @@ fn build_dhcp_server_config(
 ///
 /// Matching configuration and interfaces do not restart a running server, so
 /// this is safe to call on every tick. Returns `Ok(true)` after the control
-/// update succeeds. With no interfaces, the server stages the configuration
-/// without applying it; success does not guarantee every listener has bound.
+/// update succeeds. With no interfaces, file-only changes remain staged while a
+/// changed service replacement applies on remembered listeners; success does not
+/// guarantee every listener has bound.
 async fn update_dhcp_via_grpc(
     grpc_addr: &str,
     network_config: &rpc::ManagedHostNetworkConfigResponse,
@@ -2126,6 +2143,93 @@ mod tests {
     };
     use crate::{HBNDeviceNames, dhcp, nvue};
 
+    /// Verifies the agent preserves legacy zero while rejecting symbolic values
+    /// that only Core can resolve.
+    #[test]
+    fn route_target_conversion_handles_legacy_and_unresolved_values() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+
+        scenarios!(run = |target| {
+            route_target_from_rpc(&target).map_err(|error| error.to_string())
+        };
+            "agent compatibility" {
+                // Older Core versions can omit proto3 field 2 to represent zero.
+                rpc_common::RouteTarget {
+                    asn: 65_000,
+                    vni: None, // Exercise legacy omission rather than explicit zero.
+                    vni_self: false,
+                } => Yields(nvue::RouteTargetConfig {
+                    asn: 65_000,
+                    vni: 0,
+                }),
+
+                // VPC-derived values must never be guessed by the DPU agent.
+                rpc_common::RouteTarget {
+                    asn: 429_000_000,
+                    vni: None,
+                    vni_self: true, // Core must resolve this before agent delivery.
+                } => Fails,
+            }
+        );
+    }
+
+    /// Verifies unresolved Core-owned route targets stop `update_nvue` before
+    /// publication, preventing the DPU from guessing the missing VNI.
+    #[tokio::test]
+    async fn unresolved_route_target_stops_nvue_before_publication() -> eyre::Result<()> {
+        // Make only the response-level export target unresolved.
+        let mut network_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        let unresolved_target = network_config
+            .routing_profile
+            .as_mut()
+            .expect("fixture response-level routing profile")
+            .route_targets_on_exports
+            .first_mut()
+            .expect("fixture export route target");
+        // Remove the literal value so only the symbolic source remains.
+        unresolved_target.vni = None;
+        unresolved_target.vni_self = true;
+
+        // Precreate every destination directory so publication could succeed.
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+
+        // Render through the complete response-to-NVUE update path.
+        let error = super::update_nvue(
+            VpcVirtualizationType::Fnn,
+            NvueUpdateFlavor::StartupFile {
+                hbn_root,
+                skip_post: true,
+            },
+            &network_config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("unresolved route target must stop NVUE publication");
+
+        // Rejection must precede both configuration and ACL publication.
+        assert!(
+            format!("{error:#}").contains("received unresolved route target with vni_self set")
+        );
+        assert!(!hbn_root.join(nvue::PATH).exists());
+        assert!(!hbn_root.join(nvue::PATH_ACL).exists());
+        Ok(())
+    }
+
     /// Supplies stable service discovery results to NVUE tests so RDNSS and
     /// DHCPv6 can be compared against one agent-local source.
     fn test_service_addresses() -> ServiceAddresses {
@@ -2904,6 +3008,7 @@ esac
                     &test_service_addresses(),
                     HBNDeviceNames::hbn_23(),
                     None,
+                    None,
                 )
                 .await
             };
@@ -3060,6 +3165,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
         assert!(
@@ -3112,6 +3218,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
         assert!(
@@ -3163,6 +3270,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -3225,6 +3333,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
         assert!(
@@ -3282,6 +3391,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -3357,6 +3467,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
 
@@ -3426,6 +3537,7 @@ esac
                 &network_config,
                 &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
+                None,
                 None,
             )
             .await?
@@ -3527,6 +3639,8 @@ esac
     /// Verifies a realistic dual-stack admin response drives the existing SVI,
     /// explicit RA target, resolver changes, and complete IPv6 withdrawal.
     /// Host routes must be originated and withdrawn with that state so routed reachability follows it.
+    /// The local FMDS opt-in must also reach the rendered attachment and be
+    /// removable without changing the retained IPv4 peer.
     #[tokio::test]
     async fn stateful_admin_ipv6_reconciles_svi_ra_and_rdnss()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3548,6 +3662,14 @@ esac
         fs::create_dir_all(hbn_root.join("var/support"))?;
         fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
 
+        // Resolve the operator's existing address list before rendering HBN.
+        let agent_config_path = hbn_root.join("agent.toml");
+        fs::write(
+            &agent_config_path,
+            "[fmds-armos-networking.config]\naddresses = [\"169.254.169.254/30\", \"fd00:76b9::254/127\"]",
+        )?;
+        let agent_config =
+            carbide_host_support::agent_config::AgentConfig::load_from(&agent_config_path)?;
         // Render the populated response through the complete update path.
         assert!(
             super::update_nvue(
@@ -3560,6 +3682,7 @@ esac
                 &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
                 None,
+                agent_config.fmds_armos_networking.ipv6_gateway()?,
             )
             .await?
         );
@@ -3567,6 +3690,8 @@ esac
         let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
         let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
         let vlan = &set["interface"]["vlan123"];
+        assert!(set["interface"]["pf0dpu1_if"]["ip"]["address"]["fd00:76b9::255/127"].is_mapping());
+        assert!(set["interface"]["pf0dpu1_if"]["ip"]["address"]["169.254.169.253/30"].is_mapping());
         let snippet = set["system"]["config"]["snippet"]["frr.conf"]
             .as_str()
             .expect("admin RA should render an FRR snippet");
@@ -3697,6 +3822,7 @@ esac
                 &replacement_services,
                 HBNDeviceNames::hbn_23(),
                 None,
+                None,
             )
             .await?
         );
@@ -3704,6 +3830,15 @@ esac
         let replacement_docs: serde_yaml::Value = serde_yaml::from_str(&replacement)?;
         let replacement_set =
             &replacement_docs.as_sequence().expect("two YAML documents")[1]["set"];
+        // Omitted local opt-in removes only the IPv6 FMDS peer on the next render.
+        assert!(
+            replacement_set["interface"]["pf0dpu1_if"]["ip"]["address"]["fd00:76b9::255/127"]
+                .is_null()
+        );
+        assert!(
+            replacement_set["interface"]["pf0dpu1_if"]["ip"]["address"]["169.254.169.253/30"]
+                .is_mapping()
+        );
         let replacement_snippet = replacement_set["system"]["config"]["snippet"]["frr.conf"]
             .as_str()
             .expect("replacement admin RA should render an FRR snippet");
@@ -3777,6 +3912,7 @@ esac
                 &ipv4_only_services,
                 HBNDeviceNames::hbn_23(),
                 None,
+                None,
             )
             .await?
         );
@@ -3818,6 +3954,7 @@ esac
                 &network_config,
                 &ipv4_only_services,
                 HBNDeviceNames::hbn_23(),
+                None,
                 None,
             )
             .await?
@@ -3888,6 +4025,7 @@ esac
                 &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
                 None,
+                None,
             )
             .await
             .unwrap_err()
@@ -3928,6 +4066,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -3984,6 +4123,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -4043,6 +4183,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -4112,6 +4253,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
         assert!(
@@ -4169,6 +4311,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -4238,6 +4381,7 @@ esac
                 &network_config,
                 &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
+                None,
                 None,
             )
             .await?;
@@ -4363,11 +4507,13 @@ esac
                     }],
                     route_target_imports: vec![rpc_common::RouteTarget {
                         asn: 44444,
-                        vni: 55555,
+                        vni: Some(55555),
+                        vni_self: false,
                     }],
                     route_targets_on_exports: vec![rpc_common::RouteTarget {
                         asn: 77415,
-                        vni: 800,
+                        vni: Some(800),
+                        vni_self: false,
                     }],
                 }),
                 interface_routing_profile: None,
@@ -4566,11 +4712,13 @@ esac
                     }],
                     route_target_imports: vec![rpc_common::RouteTarget {
                         asn: 44444,
-                        vni: 55555,
+                        vni: Some(55555),
+                        vni_self: false,
                     }],
                     route_targets_on_exports: vec![rpc_common::RouteTarget {
                         asn: 77415,
-                        vni: 800,
+                        vni: Some(800),
+                        vni_self: false,
                     }],
                 }),
                 interface_routing_profile: None,
@@ -4608,11 +4756,13 @@ esac
             tenant_host_asn: Some(65100),
             common_internal_route_target: Some(rpc_common::RouteTarget {
                 asn: 11415,
-                vni: 200,
+                vni: Some(200),
+                vni_self: false,
             }),
             additional_route_target_imports: vec![rpc_common::RouteTarget {
                 asn: 11111,
-                vni: 22222,
+                vni: Some(22222),
+                vni_self: false,
             }],
 
             // This should be ignored because we've defined the routing profile on the "flat interface" config.
@@ -4632,11 +4782,13 @@ esac
                 }],
                 route_target_imports: vec![rpc_common::RouteTarget {
                     asn: 34444,
-                    vni: 85555,
+                    vni: Some(85555),
+                    vni_self: false,
                 }],
                 route_targets_on_exports: vec![rpc_common::RouteTarget {
                     asn: 67415,
-                    vni: 8000,
+                    vni: Some(8000),
+                    vni_self: false,
                 }],
             }),
 
@@ -4765,18 +4917,28 @@ esac
         Ok(())
     }
 
+    /// ETV must render valid YAML without FNN policy objects, so the shared
+    /// fixture cannot silently select the other virtualization template.
     #[test]
     fn test_nvue_is_yaml_etv() -> Result<(), Box<dyn std::error::Error>> {
         test_nvue_is_yaml_inner(false)
     }
 
+    /// FNN must parse its own template, including its underlay export policy;
+    /// parsing ETV output would not protect FNN template syntax.
     #[test]
     fn test_nvue_is_yaml_fnnv() -> Result<(), Box<dyn std::error::Error>> {
         test_nvue_is_yaml_inner(true)
     }
 
+    /// Render the requested virtualization mode and check a distinguishing
+    /// policy node, so YAML validity is proved for the selected template.
     fn test_nvue_is_yaml_inner(is_fnn: bool) -> Result<(), Box<dyn std::error::Error>> {
-        let vpc_virtualization_type = VpcVirtualizationType::EthernetVirtualizer;
+        let vpc_virtualization_type = if is_fnn {
+            VpcVirtualizationType::Fnn
+        } else {
+            VpcVirtualizationType::EthernetVirtualizer
+        };
 
         let network_security_groups = vec![nvue::NetworkSecurityGroup {
             id: "7777f270-dd02-11ef-80d2-9f8689fc7df7".to_string(),
@@ -4874,6 +5036,8 @@ esac
                 ip: "10.217.4.70".to_string(),
                 ipv6_vlan_config: None,
             }],
+            // Global and per-VPC targets each contribute a separate rendered
+            // entry, so use distinct values in this YAML syntax fixture.
             ct_routing_profile: Some(nvue::RoutingProfile {
                 tenant_leak_communities_accepted: false,
                 leak_default_route_from_underlay: false,
@@ -4882,11 +5046,11 @@ esac
                 allowed_anycast_prefixes: vec!["5.255.254.0/24".to_string()],
                 route_target_imports: vec![nvue::RouteTargetConfig {
                     asn: 44444,
-                    vni: 55555,
+                    vni: 55556,
                 }],
                 route_targets_on_exports: vec![nvue::RouteTargetConfig {
                     asn: 11415,
-                    vni: 200,
+                    vni: 201,
                 }],
             }),
 
@@ -4913,17 +5077,19 @@ esac
             network_security_groups,
             is_dpu_os: true,
             fmds_gateway_vlan: None,
+            fmds_ipv6_gateway: None,
         };
         let startup_yaml = nvue::build(conf)?;
 
-        const ERR_FILE: &str = "/tmp/test_nvue_startup.yaml";
         let yaml_obj: Vec<serde_yaml::Value> = serde_yaml::from_str(&startup_yaml)
-            .inspect_err(|_| {
-                let mut f = fs::File::create(ERR_FILE).unwrap();
-                f.write_all(startup_yaml.as_bytes()).unwrap();
-            })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("failed to parse rendered NVUE YAML:\n{startup_yaml}"))?;
         assert_eq!(yaml_obj.len(), 2); // 'header' and 'set'
+        assert_eq!(
+            yaml_obj[1]["set"]["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST"]
+                .is_mapping(),
+            is_fnn,
+            "the requested virtualization mode must select its own template"
+        );
         Ok(())
     }
 
@@ -5430,11 +5596,13 @@ esac
             datacenter_asn: 11414,
             common_internal_route_target: Some(rpc_common::RouteTarget {
                 asn: 11415,
-                vni: 200,
+                vni: Some(200),
+                vni_self: false,
             }),
             additional_route_target_imports: vec![rpc_common::RouteTarget {
                 asn: 11111,
-                vni: 22222,
+                vni: Some(22222),
+                vni_self: false,
             }],
 
             anycast_site_prefixes: vec!["5.255.255.0/24".to_string()],
@@ -5449,11 +5617,13 @@ esac
                 }],
                 route_target_imports: vec![rpc_common::RouteTarget {
                     asn: 44444,
-                    vni: 55555,
+                    vni: Some(55555),
+                    vni_self: false,
                 }],
                 route_targets_on_exports: vec![rpc_common::RouteTarget {
                     asn: 77415,
-                    vni: 800,
+                    vni: Some(800),
+                    vni_self: false,
                 }],
             }),
 

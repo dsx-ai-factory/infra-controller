@@ -182,7 +182,7 @@ HBN runs as a container on the DPU and manages network routing using [Cumulus Li
 
 DPU health reporting includes HBN status such as whether the container is running, BGP peering state, and configuration version.
 
-General reference: [DOCA HBN Service](https://docs.nvidia.com/doca/sdk/pdf/doca-hbn-service.pdf)
+General reference: [DOCA HBN Service](https://docs.nvidia.com/doca/sdk/doca-hbn-service-guide/index.html)
 
 ### FNN
 
@@ -368,7 +368,7 @@ Health information is stored as health report overrides on machine records. The 
 
 ### Core Deployment
 
-NICo Core commonly runs on a Kubernetes cluster, with three or five control plane nodes recommended. It runs as a set of microservices including API, DNS, DHCP, hardware monitoring, BMC console, and rack management services. Deployment is done through Kubernetes Kustomize manifests.
+NICo Core commonly runs on a Kubernetes cluster, with three or five control plane nodes recommended. It runs as a set of microservices including API, DNS, DHCP, hardware monitoring, BMC console, and rack management services. Deployment is done through Helm charts.
 
 ### REST Deployment
 
@@ -392,7 +392,7 @@ NICo Core is site-local and continues to manage hardware independently of the RE
 | DPU | Data Processing Unit | Central enforcement point for tenant isolation |
 | EVPN | Ethernet VPN | Control-plane technology used with VXLAN overlays |
 | FMDS | NICo Metadata Service | Metadata service for tenant workloads; legacy artifacts may expand it as NICo Metadata Service |
-| FNN | Full Next-generation Networking | VPC, subnet, and VXLAN management subsystem in Core |
+| FNN | Forge Native Networking | VPC, subnet, and VXLAN management subsystem in Core |
 | gRPC | Google Remote Procedure Call | RPC framework used between the Site Agent and NICo Core |
 | HBN | Host Based Networking | Software networking stack on the DPU for VXLAN and EVPN |
 | IMDS | Instance Metadata Service | Service that can issue identity and metadata to tenant processes |

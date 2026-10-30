@@ -106,6 +106,10 @@ pub(crate) struct SessionServiceState {
 }
 
 impl SessionServiceState {
+    pub(crate) fn clear(&self) {
+        self.sessions.lock().expect("mutex poisoned").clear();
+    }
+
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -234,6 +238,10 @@ async fn post_session<C: Callbacks>(
         return StatusCode::BAD_REQUEST.into_response();
     };
 
+    // Keep validation and token publication in the same generation as password
+    // changes and factory reset; an old login must not publish after reset clears.
+    // Login also waits for any in-flight backend password synchronization.
+    let _operation = state.account_service_state.lock_updates().await;
     if !state
         .account_service_state
         .is_authorized(&username, &password)

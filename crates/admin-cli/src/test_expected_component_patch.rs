@@ -245,11 +245,11 @@ async fn machine_flags_select_only_supplied_fields() {
                 id: Some(rpc_id()),
                 host_nics: vec![
                     forge::ExpectedInterface {
-                        mac_address: "00:11:22:33:44:66".to_string(),
+                        mac_address: Some("00:11:22:33:44:66".to_string()),
                         ..Default::default()
                     },
                     forge::ExpectedInterface {
-                        mac_address: "00:11:22:33:44:77".to_string(),
+                        mac_address: Some("00:11:22:33:44:77".to_string()),
                         role: Some(forge::ExpectedInterfaceRole::Unspecified as i32),
                         ip_allocation: Some(
                             forge::ExpectedInterfaceIpAllocation::Unspecified as i32,
@@ -480,9 +480,9 @@ async fn switch_nvos_mac_only_update_selects_only_the_supplied_addresses() {
             "update",
             "--bmc-mac-address",
             MAC,
-            "--nvos-mac-address",
+            "--nvos-interface",
             "00:11:22:33:44:66",
-            "--nvos-mac-address",
+            "--nvos-interface",
             "00:11:22:33:44:88",
         ],
         Code::Ok,
@@ -491,15 +491,21 @@ async fn switch_nvos_mac_only_update_selects_only_the_supplied_addresses() {
     result.expect("NVOS MAC addresses can be updated without credentials or a serial number");
     assert_methods(&requests, &["GetExpectedSwitch", "PatchExpectedSwitch"]);
     let request: forge::PatchExpectedSwitchRequest = requests[1].decode();
-    assert_paths(request.update_mask.unwrap().paths, &["nvos_mac_addresses"]);
+    assert_paths(request.update_mask.unwrap().paths, &["nvos_interfaces"]);
     assert_eq!(
         request.expected_switch,
         Some(forge::ExpectedSwitch {
             expected_switch_id: Some(rpc_id()),
             bmc_mac_address: MAC.to_string(),
-            nvos_mac_addresses: vec![
-                "00:11:22:33:44:66".to_string(),
-                "00:11:22:33:44:88".to_string(),
+            nvos_interfaces: vec![
+                forge::ExpectedNvosInterface {
+                    mac_address: "00:11:22:33:44:66".to_string(),
+                    is_primary: true,
+                },
+                forge::ExpectedNvosInterface {
+                    mac_address: "00:11:22:33:44:88".to_string(),
+                    is_primary: false,
+                },
             ],
             metadata: Some(forge::Metadata::default()),
             ..Default::default()
@@ -1343,7 +1349,10 @@ async fn mock_request(
                     nvos_password: Some("stored-nvos-password".to_string()),
                     switch_serial_number: "STORED-003".to_string(),
                     metadata: Some(stored_metadata()),
-                    nvos_mac_addresses: vec!["00:11:22:33:44:77".to_string()],
+                    nvos_interfaces: vec![forge::ExpectedNvosInterface {
+                        mac_address: "00:11:22:33:44:77".to_string(),
+                        is_primary: true,
+                    }],
                     ..Default::default()
                 }
                 .encode_to_vec(),
@@ -1384,7 +1393,7 @@ fn stored_machine() -> forge::ExpectedMachine {
         dpu_mode: Some(forge::DpuMode::NoDpu as i32),
         is_dpf_enabled: Some(true),
         host_nics: vec![forge::ExpectedInterface {
-            mac_address: "00:11:22:33:44:66".to_string(),
+            mac_address: Some("00:11:22:33:44:66".to_string()),
             ..Default::default()
         }],
         ..Default::default()

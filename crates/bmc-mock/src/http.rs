@@ -113,8 +113,6 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::routing::get;
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -146,49 +144,48 @@ mod tests {
             .route("/ok", get(|| async { "plain success" }))
             .layer(axum::middleware::from_fn(redfish_error_envelope));
         let envelope = |code: &str, message: &str| Some((code.to_owned(), message.to_owned()));
-        check_cases_async(
-            [
-                Case {
-                    scenario: "bodiless auth error gains an envelope and keeps headers",
-                    input: ("GET", "/bodiless"),
-                    expect: Yields((
-                        StatusCode::UNAUTHORIZED,
-                        true,
-                        envelope("Base.1.0.GeneralError", "Unauthorized"),
-                    )),
-                },
-                Case {
-                    scenario: "plain-text rejection keeps its diagnostic",
-                    input: ("GET", "/text"),
-                    expect: Yields((
-                        StatusCode::BAD_REQUEST,
-                        false,
-                        envelope("Base.1.0.GeneralError", "Invalid URL"),
-                    )),
-                },
-                Case {
-                    scenario: "parameterized JSON error is preserved",
-                    input: ("GET", "/json"),
-                    expect: Yields((
-                        StatusCode::BAD_REQUEST,
-                        false,
-                        envelope("Mock.SpecificFailure", "Useful diagnostic"),
-                    )),
-                },
-                Case {
-                    scenario: "HEAD error stays bodiless",
-                    input: ("HEAD", "/text"),
-                    expect: Yields((StatusCode::BAD_REQUEST, false, None)),
-                },
-                Case {
-                    scenario: "success is untouched",
-                    input: ("GET", "/ok"),
-                    expect: Yields((StatusCode::OK, false, None)),
-                },
-            ],
-            |(method, path)| {
+        for (scenario, (method, path), expected) in [
+            (
+                "bodiless auth error gains an envelope and keeps headers",
+                ("GET", "/bodiless"),
+                (
+                    StatusCode::UNAUTHORIZED,
+                    true,
+                    envelope("Base.1.0.GeneralError", "Unauthorized"),
+                ),
+            ),
+            (
+                "plain-text rejection keeps its diagnostic",
+                ("GET", "/text"),
+                (
+                    StatusCode::BAD_REQUEST,
+                    false,
+                    envelope("Base.1.0.GeneralError", "Invalid URL"),
+                ),
+            ),
+            (
+                "parameterized JSON error is preserved",
+                ("GET", "/json"),
+                (
+                    StatusCode::BAD_REQUEST,
+                    false,
+                    envelope("Mock.SpecificFailure", "Useful diagnostic"),
+                ),
+            ),
+            (
+                "HEAD error stays bodiless",
+                ("HEAD", "/text"),
+                (StatusCode::BAD_REQUEST, false, None),
+            ),
+            (
+                "success is untouched",
+                ("GET", "/ok"),
+                (StatusCode::OK, false, None),
+            ),
+        ] {
+            let actual = {
                 let router = router.clone();
-                async move {
+                {
                     let response = router
                         .oneshot(
                             axum::http::Request::builder()
@@ -219,10 +216,10 @@ mod tests {
                     if method == "HEAD" {
                         assert!(bytes.is_empty());
                     }
-                    Ok::<_, std::convert::Infallible>((status, authenticate, error))
+                    (status, authenticate, error)
                 }
-            },
-        )
-        .await;
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }

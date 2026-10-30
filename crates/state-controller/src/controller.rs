@@ -15,6 +15,9 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use ::db::DatabaseError;
 use ::db::work_lock_manager::WorkLock;
 use chrono::{DateTime, Utc};
@@ -32,6 +35,9 @@ pub use enqueuer::Enqueuer;
 
 pub mod periodic_enqueuer;
 pub mod processor;
+
+/// The latest complete set of object IDs read from the database by this controller replica.
+pub(super) type ObjectIdsFromDatabase<Id> = Arc<HashSet<Id>>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct ControllerIterationId(pub i64);
@@ -107,6 +113,22 @@ impl<IO: StateControllerIO> StateController<IO> {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn run_single_iteration(&mut self) {
         self.run_single_iteration_ext(true).await
+    }
+
+    /// Returns whether the latest successfully read database ID list contains
+    /// an object so integration tests can verify production wiring without
+    /// exposing processor internals.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn object_ids_from_database_contains_for_test(
+        &self,
+        object_id: &IO::ObjectId,
+    ) -> Option<bool> {
+        self.processor
+            .object_ids_from_database
+            .as_ref()?
+            .borrow()
+            .as_ref()
+            .map(|object_ids_from_database| object_ids_from_database.contains(object_id))
     }
 
     /// Enqueues state handling tasks for all objects and processes them

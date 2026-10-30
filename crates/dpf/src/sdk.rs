@@ -27,7 +27,7 @@ use std::time::Duration;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::core::ObjectMeta;
-use model::dpa_interface::DpaInterface;
+use model::expected_machine::{ExpectedInterface, ExpectedMachine};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -110,14 +110,14 @@ use crate::types::{
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterface,
     DetachedDpuServiceInterfaceDefinition, DpfDeletePreconditions, DpfInterceptBridging,
-    DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuMismatch, DpuNodeInfo, DpuNodeSummary,
-    DpuPhase, DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation,
-    DpuServiceInterfacePatch, DpuServiceInterfaceTemplateDefinition,
-    DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceSecurityObservation,
-    DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig,
-    MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
-    ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD, ServiceNADResourceType,
-    ServiceTemplateVersion,
+    DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuFailureObservation, DpuMismatch,
+    DpuNodeInfo, DpuNodeSummary, DpuPhase, DpuPhaseObservation, DpuServiceDaemonSetObservation,
+    DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
+    DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType, DpuServiceObservation,
+    DpuServiceSecurityObservation, DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME,
+    HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME,
+    PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD,
+    ServiceNADResourceType, ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -896,6 +896,7 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
         dhcp_acl_interfaces,
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
+        !config.partial_multiplane_disabled,
     )?;
     let name = template.unique_name(&config.flavor_name)?;
     template.metadata.name = Some(name.clone());
@@ -1022,6 +1023,7 @@ pub fn build_service_template(
     }
 }
 
+/// Builds a service configuration, gating upgrades on NodeEffect unless explicitly disabled.
 pub fn build_service_configuration(
     svc: &ServiceDefinition,
     namespace: &str,
@@ -1122,13 +1124,10 @@ pub fn build_service_configuration(
             deployment_service_name: svc.name.clone(),
             interfaces: interfaces.none_if_empty(),
             service_configuration,
-            // Treat a service update as disruptive so DPF creates a new revision
-            // and parks the DPU in the NodeEffect phase instead of restarting
-            // services underneath whatever is running. That phase is the gate
-            // carbide opens once it has confirmed the DPU is not still awaiting
-            // reprovisioning -- see the DPU service sync handler.
+            // NICo-owned services can update independently; other services wait
+            // for the DPU service sync handler to open the NodeEffect gate.
             upgrade_policy: DpuServiceConfigurationUpgradePolicy {
-                apply_node_effect: Some(true),
+                apply_node_effect: Some(svc.apply_node_effect.unwrap_or(true)),
             },
         },
     }
@@ -1240,10 +1239,13 @@ pub fn build_deployment(
             });
         }
 
-        all_switches.push(DpuDeploymentServiceChainsSwitches {
-            ports,
-            service_mtu: None,
-        });
+        // Preserve DPF's default for ordinary chains while fixed service-VPC patches carry their
+        // qualified jumbo MTU explicitly.
+        let service_mtu = match &iface.iface_type {
+            DpuServiceInterfaceTemplateType::Patch(patch) => patch.service_mtu,
+            _ => None,
+        };
+        all_switches.push(DpuDeploymentServiceChainsSwitches { ports, service_mtu });
     }
     if matches!(deployment_type, DpuDeploymentType::Bf4Astra) {
         all_switches.extend(build_astra_patch_service_chain_switches(interfaces));
@@ -1327,6 +1329,8 @@ pub fn build_deployment(
     }
 }
 
+// Pair each NIC's br-xplane patch with its Weave-managed brcx bridge patch on br-sfc.
+// DPF programs forwarding between their br-sfc endpoints using these interface resource names.
 fn build_astra_patch_service_chain_switches(
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
 ) -> Vec<DpuDeploymentServiceChainsSwitches> {
@@ -1337,8 +1341,9 @@ fn build_astra_patch_service_chain_switches(
     astra_xplane_group_ids()
         .iter()
         .filter_map(|group_id| {
-            let cx_interface = format!("p-brcx-{group_id}-to-br-sfc");
-            let xplane_interface = format!("p-br-xplane-{group_id}-to-br-sfc");
+            let cx_interface = format!("p-brcx-{}-to-br-sfc", group_id.to_ascii_lowercase());
+            let xplane_interface =
+                format!("p-br-xplane-{}-to-br-sfc", group_id.to_ascii_lowercase());
             (interface_names.contains(cx_interface.as_str())
                 && interface_names.contains(xplane_interface.as_str()))
             .then(|| DpuDeploymentServiceChainsSwitches {
@@ -1364,10 +1369,7 @@ fn build_astra_patch_service_chain_switches(
 }
 
 fn astra_xplane_group_ids() -> [&'static str; 8] {
-    [
-        "r0swpln0", "r1swpln0", "r0swpln1", "r1swpln1", "r2swpln0", "r3swpln0", "r2swpln1",
-        "r3swpln1",
-    ]
+    ["A56", "A53", "A43", "A46", "A6", "A3", "A13", "A16"]
 }
 
 /// Returns the Astra component that owns an OVS name reserved outside intercept topology.
@@ -1627,6 +1629,7 @@ pub fn build_effective_dpu_interfaces(
                 peer_bridge: interface.bridge.clone(),
                 peer_patch_name: interface.patch_port.clone(),
                 peer_external_ids: None,
+                service_mtu: None,
             }),
             pf_id: i64::from(identity.pf_id),
             vf_id: i64::from(identity.vf_id.unwrap_or_default()),
@@ -1710,24 +1713,28 @@ fn augment_astra_dpu_interfaces(
     Ok(interfaces)
 }
 
+// Define patch interfaces from br-sfc to each NIC's Weave-managed brcx bridge and from
+// br-sfc to br-xplane. build_astra_patch_service_chain_switches pairs these patch interfaces.
 fn build_astra_patch_dpu_interfaces_vec() -> Vec<DpuServiceInterfaceTemplateDefinition> {
     astra_xplane_group_ids()
         .into_iter()
         .flat_map(|group_id| {
+            // DPF patch-interface resource names require lowercase group IDs.
             [
                 DpuServiceInterfaceTemplateDefinition {
-                    name: format!("p-brcx-{group_id}-to-br-sfc"),
+                    name: format!("p-brcx-{}-to-br-sfc", group_id.to_ascii_lowercase()),
                     iface_type: DpuServiceInterfaceTemplateType::Patch(DpuServiceInterfacePatch {
                         peer_bridge: format!("brcx-{group_id}"),
                         peer_patch_name: String::new(),
                         peer_external_ids: None,
+                        service_mtu: None,
                     }),
                     pf_id: 0,
                     vf_id: 0,
                     chained_svc_if: None,
                 },
                 DpuServiceInterfaceTemplateDefinition {
-                    name: format!("p-br-xplane-{group_id}-to-br-sfc"),
+                    name: format!("p-br-xplane-{}-to-br-sfc", group_id.to_ascii_lowercase()),
                     iface_type: DpuServiceInterfaceTemplateType::Patch(DpuServiceInterfacePatch {
                         peer_bridge: "br-xplane".to_string(),
                         peer_patch_name: String::new(),
@@ -1736,6 +1743,7 @@ fn build_astra_patch_dpu_interfaces_vec() -> Vec<DpuServiceInterfaceTemplateDefi
                             ("xplane-group-id".to_string(), group_id.to_string()),
                             ("xplane-downlink".to_string(), "patch".to_string()),
                         ])),
+                        service_mtu: None,
                     }),
                     pf_id: 0,
                     vf_id: 0,
@@ -3321,19 +3329,31 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
 
     /// Register a new DPU device.
     ///
-    /// astra_config includes NICs and resolved rail/software-plane prefix lengths.
+    /// `astra_provisioning_inputs` pairs the expected-machine entry (host name and
+    /// CX9 interfaces) with the site-configured rail/software-plane route prefixes.
+    /// The expected-machine entry contains credentials and must not be logged or serialized.
     ///
     /// This operation is idempotent - if the device already exists, it will be
     /// skipped. This handles state machine retries gracefully.
     pub async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
-        astra_config: Option<(Vec<&DpaInterface>, AstraRoutePrefixes)>,
+        astra_provisioning_inputs: Option<(&ExpectedMachine, AstraRoutePrefixes)>,
     ) -> Result<(), DpfError> {
         let cr_name = dpu_device_cr_name(&info.device_id);
+        let expected_machine = astra_provisioning_inputs.map(|(machine, _)| machine);
+        let astra_underlay_inputs = astra_provisioning_inputs.map(|(machine, prefixes)| {
+            let nics = machine
+                .data
+                .interfaces
+                .iter()
+                .filter(|nic| nic.nic_type.as_deref() == Some("CX9"))
+                .collect::<Vec<_>>();
+            (nics, prefixes)
+        });
 
         // Values are supplied only on creation. In particular, do not require
-        // a complete Astra NIC snapshot when this is an idempotent retry for
+        // complete Astra NIC declarations when this is an idempotent retry for
         // an existing DPUDevice.
         if let Some(existing) =
             DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?
@@ -3345,7 +3365,7 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 )));
             }
             if existing.spec.values.is_none()
-                && let Some((astra_nics, route_prefixes)) = astra_config.as_ref()
+                && let Some((astra_nics, route_prefixes)) = astra_underlay_inputs.as_ref()
             {
                 let values = astra_underlay_configuration(&cr_name, astra_nics, *route_prefixes)?;
                 DpuDeviceRepository::patch(
@@ -3369,8 +3389,8 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             ));
         }
 
-        // Build values field from astra_nics configuration passed in.
-        let values = match astra_config {
+        // Build Astra values from the declared MAC addresses and fixed underlay IPs.
+        let mut values = match astra_underlay_inputs {
             Some((astra_nics, route_prefixes)) => Some(astra_underlay_configuration(
                 &cr_name,
                 &astra_nics,
@@ -3378,6 +3398,13 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             )?),
             None => None,
         };
+        let server_name = expected_machine.and_then(|machine| machine.data.server_name.as_deref());
+        if values.is_some() || server_name.is_some() {
+            values.get_or_insert_with(BTreeMap::new).insert(
+                "server_name".to_string(),
+                json!(server_name.unwrap_or_default()),
+            );
+        }
 
         tracing::info!(device_name = %cr_name, "Registering DPU device");
 
@@ -3449,42 +3476,85 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     }
 }
 
-/// Builds the Astra DPUDevice values from its eight ordered underlay NICs.
+/// Build one array entry per declared Astra interface, including ports without an IP.
 fn astra_underlay_configuration(
     device_name: &str,
-    astra_nics: &[&DpaInterface],
+    astra_nics: &[&ExpectedInterface],
     route_prefixes: AstraRoutePrefixes,
 ) -> Result<BTreeMap<String, serde_json::Value>, DpfError> {
-    let underlay_ip_macs = astra_nics
-        .iter()
-        .enumerate()
-        .map(|(index, nic)| {
-            let ip = match nic.underlay_ip {
-                Some(IpAddr::V4(ip)) => Ok(ip),
-                Some(IpAddr::V6(ip)) => Err(DpfError::ConfigError(format!(
+    let mut seen_ips = BTreeMap::new();
+    let mut seen_macs = BTreeSet::new();
+    let mut dpu_device_underlay_rows = Vec::with_capacity(astra_nics.len());
+    for (index, nic) in astra_nics.iter().enumerate() {
+        nic.validate_identity().map_err(|message| {
+            DpfError::ConfigError(format!("Astra underlay NIC {index}: {message}"))
+        })?;
+        if let Some(mac) = nic.mac_address
+            && !seen_macs.insert(mac)
+        {
+            return Err(DpfError::ConfigError(
+                "Astra underlay MACs must be unique".to_string(),
+            ));
+        }
+
+        // The four Cerebro lanes in a group share their bridge's IP and routes.
+        let cerebro_group = nic
+            .physical_ifname
+            .as_deref()
+            .and_then(|name| name.rsplit_once("-L"))
+            .filter(|(group, lane)| !group.is_empty() && matches!(*lane, "1" | "2" | "3" | "4"))
+            .map(|(group, _)| group);
+        let (ip, gateway, rail_route, sw_plane_route) = match nic.fixed_ip {
+            Some(IpAddr::V4(ip)) => {
+                if let Some(previous_group) = seen_ips.insert(ip, cerebro_group)
+                    && (cerebro_group.is_none() || previous_group != cerebro_group)
+                {
+                    return Err(DpfError::ConfigError(
+                        "Astra underlay IPs must be unique across bridge groups".to_string(),
+                    ));
+                }
+                let rail_network =
+                    underlay_route_network(ip, route_prefixes.rail_route_prefix_len)?;
+                let sw_plane_network =
+                    underlay_route_network(ip, route_prefixes.software_plane_route_prefix_len)?;
+                (
+                    format!("{ip}/31"),
+                    Ipv4Addr::from(u32::from(ip) ^ 1).to_string(),
+                    format!("{rail_network}/{}", route_prefixes.rail_route_prefix_len),
+                    format!(
+                        "{sw_plane_network}/{}",
+                        route_prefixes.software_plane_route_prefix_len
+                    ),
+                )
+            }
+            Some(IpAddr::V6(ip)) => {
+                return Err(DpfError::ConfigError(format!(
                     "Astra underlay NIC {index} has unsupported IPv6 address {ip}; expected IPv4"
-                ))),
-                None => Err(DpfError::ConfigError(format!(
-                    "Astra underlay NIC {index} has no underlay IP"
-                ))),
-            }?;
-            Ok((nic.mac_address.to_string(), ip))
-        })
-        .collect::<Result<Vec<_>, DpfError>>()?;
-    let values = astra_underlay_values_for_ip_macs(&underlay_ip_macs, route_prefixes)?;
-    let underlay_ip_mac_strings: Vec<String> = underlay_ip_macs
-        .iter()
-        .map(|(_, ip)| ip.to_string())
-        .collect();
+                )));
+            }
+            None => (String::new(), String::new(), String::new(), String::new()),
+        };
+        dpu_device_underlay_rows.push(json!({
+            "cerebro_ifname": nic.physical_ifname.as_deref().unwrap_or_default(),
+            "mac_address": nic.mac_address.map(|mac| mac.to_string()).unwrap_or_default(),
+            "ip": ip,
+            "rail_route": rail_route,
+            "sw_plane_route": sw_plane_route,
+            "logical_ifname": nic.logical_ifname.as_deref().unwrap_or_default(),
+            "gateway": gateway,
+        }));
+    }
     tracing::info!(
         device_name,
-        underlay_ip_macs = %underlay_ip_mac_strings.join(", "),
+        underlay_interface_count = dpu_device_underlay_rows.len(),
         rail_route_prefix_len = route_prefixes.rail_route_prefix_len,
         software_plane_route_prefix_len = route_prefixes.software_plane_route_prefix_len,
         "Set up Astra DPUDevice underlay values"
     );
-
-    Ok(values)
+    Ok(BTreeMap::from([(
+        "dpu_device_underlay_rows".to_string(),
+        json!(dpu_device_underlay_rows),
+    )]))
 }
 
 /// Calculate an IPv4 route network. SDK callers pass raw prefix lengths, so validate before shifting.
@@ -3500,97 +3570,6 @@ fn underlay_route_network(ip: Ipv4Addr, prefix_len: u8) -> Result<Ipv4Addr, DpfE
     Ok(Ipv4Addr::from(
         u32::from(ip) & u32::MAX.checked_shl(host_bits).unwrap_or(0),
     ))
-}
-
-/// Build the per-DPU values field for the DPU device object. This
-/// information is for consumption by the BF4 Astra `DPUFlavorTemplate`.
-/// Input order does not matter, the BF4 Astra template uses the MAC address
-/// to find the matching PCI device and bridge at runtime.
-/// For each input index `N`, `ip_N_val` as a `/31` address, `gw_N_val`
-/// `route1_N_val` (rail route), `route2_N_val` (software-plane route),
-/// and `mac_N_val` are added to the values field.
-fn astra_underlay_values_for_ip_macs(
-    underlay_ip_macs: &[(String, Ipv4Addr)],
-    route_prefixes: AstraRoutePrefixes,
-) -> Result<BTreeMap<String, serde_json::Value>, DpfError> {
-    // Astra has four rails and two switch planes. This documents the required set of slots; the
-    // input pair order is intentionally not tied to this array.
-    const RAIL_SWITCH_PLANES: [(u8, u8); 8] = [
-        (0, 0),
-        (1, 0),
-        (2, 0),
-        (3, 0),
-        (0, 1),
-        (1, 1),
-        (2, 1),
-        (3, 1),
-    ];
-
-    // Make sure that there are 8 MAC-IP pairs and they are all unique.
-    if underlay_ip_macs.len() != RAIL_SWITCH_PLANES.len() {
-        tracing::error!(
-            expected_underlay_ip_count = RAIL_SWITCH_PLANES.len(),
-            actual_underlay_ip_count = underlay_ip_macs.len(),
-            "Astra requires exactly eight underlay MAC/IP pairs"
-        );
-        return Err(DpfError::ConfigError(format!(
-            "Astra requires exactly {} underlay MAC/IP pairs, got {}",
-            RAIL_SWITCH_PLANES.len(),
-            underlay_ip_macs.len()
-        )));
-    }
-    let unique_underlay_ip_count = underlay_ip_macs
-        .iter()
-        .map(|(_, ip)| *ip)
-        .collect::<BTreeSet<_>>()
-        .len();
-    if unique_underlay_ip_count != underlay_ip_macs.len() {
-        tracing::error!(
-            underlay_ip_count = underlay_ip_macs.len(),
-            unique_underlay_ip_count,
-            "Astra underlay IPs must be unique"
-        );
-        return Err(DpfError::ConfigError(
-            "Astra underlay IPs must be unique".to_string(),
-        ));
-    }
-    let unique_underlay_mac_count = underlay_ip_macs
-        .iter()
-        .map(|(mac, _)| mac)
-        .collect::<BTreeSet<_>>()
-        .len();
-    if unique_underlay_mac_count != underlay_ip_macs.len() {
-        tracing::error!(
-            underlay_mac_count = underlay_ip_macs.len(),
-            unique_underlay_mac_count,
-            "Astra underlay MACs must be unique"
-        );
-        return Err(DpfError::ConfigError(
-            "Astra underlay MACs must be unique".to_string(),
-        ));
-    }
-
-    // Add ip_N_val, gw_N_val, route1_N_val, route2_N_val and mac_N_val
-    // to the values field, which will be added to the DPU device object.
-    // N goes from 0 to 7, one for each of the input ip-mac pairs.
-    let mut values = BTreeMap::new();
-    for (index, (mac, ip)) in underlay_ip_macs.iter().enumerate() {
-        let gateway = Ipv4Addr::from(u32::from(*ip) ^ 1);
-        values.insert(format!("ip_{index}_val"), json!(format!("{ip}/31")));
-        values.insert(format!("gw_{index}_val"), json!(gateway.to_string()));
-        for (route_number, prefix_len) in [
-            (1, route_prefixes.rail_route_prefix_len),
-            (2, route_prefixes.software_plane_route_prefix_len),
-        ] {
-            let network = underlay_route_network(*ip, prefix_len)?;
-            values.insert(
-                format!("route{route_number}_{index}_val"),
-                json!(format!("{network}/{prefix_len}")),
-            );
-        }
-        values.insert(format!("mac_{index}_val"), json!(mac.clone()));
-    }
-    Ok(values)
 }
 
 impl<R: DpuNodeRepository, L: ResourceLabeler> DpfSdk<R, L> {
@@ -3666,10 +3645,13 @@ impl<R: DpuNodeRepository, L: ResourceLabeler> DpfSdk<R, L> {
         }
     }
 
-    /// Check that a DPUNode's labels contain all entries from the current
-    /// labeler's `node_labels()`. Returns `false` when the node exists but
-    /// has stale labels (e.g. from a previous label version). Returns `true`
-    /// when the node does not exist yet.
+    /// `verify_node_labels` checks the node's labels against
+    /// `node_labels_for_deployment_type` for the requested deployment.
+    ///
+    /// Returns `false` if a required label is missing or differs. Additional
+    /// labels are ignored. Returns `true` when the node does not exist;
+    /// `DPUDevice` resources are not checked. Repository and labeler errors
+    /// are returned.
     pub async fn verify_node_labels(
         &self,
         node_name: &str,
@@ -3686,13 +3668,21 @@ impl<R: DpuNodeRepository, L: ResourceLabeler> DpfSdk<R, L> {
             .node_labels_for_deployment_type(deployment_type)?;
         let node_labels = node.metadata.labels.as_ref();
 
-        Ok(required_labels.iter().all(|(key, required_value)| {
-            node_labels.is_some_and(|labels| {
-                labels
-                    .get(key)
-                    .is_some_and(|node_value| node_value == required_value)
-            })
-        }))
+        for (key, required_value) in &required_labels {
+            let actual_value = node_labels.and_then(|labels| labels.get(key));
+            if actual_value != Some(required_value) {
+                tracing::debug!(
+                    node = %node_name,
+                    ?deployment_type,
+                    label = %key,
+                    expected = %required_value,
+                    actual = ?actual_value,
+                    "DPUNode label does not match deployment selector"
+                );
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Moves one DPUNode from its source DPUDeployment selector to its target
@@ -3819,35 +3809,89 @@ impl<R: DpuNodeRepository, L: ResourceLabeler> DpfSdk<R, L> {
     }
 }
 
+impl DpuPhaseObservation {
+    fn from_dpu(dpu: DPU, cr_name: &str) -> Result<Self, DpfError> {
+        // Kubernetes keeps the CR while DPF's finalizer cleans up, so
+        // `status.phase` can still be `Ready` or `Error` after deletion starts.
+        // Report `Deleting` so callers wait for removal instead of acting on
+        // that stale status.
+        if dpu.metadata.deletion_timestamp.is_some() {
+            return Ok(Self {
+                phase: DpuPhase::Deleting,
+                failure: None,
+            });
+        }
+        let Some(status) = dpu.status else {
+            return Err(DpfError::InvalidState(format!(
+                "DPU {cr_name} has no status"
+            )));
+        };
+        let phase = status
+            .phase
+            .clone()
+            .ok_or_else(|| DpfError::InvalidState(format!("DPU {cr_name} has no status phase")))?;
+        let phase = DpuPhase::from(phase);
+        let failure = (phase == DpuPhase::Error).then(|| DpuFailureObservation {
+            name: dpu.metadata.name,
+            namespace: dpu.metadata.namespace,
+            uid: dpu.metadata.uid,
+            resource_version: dpu.metadata.resource_version,
+            generation: dpu.metadata.generation,
+            deployment: dpu
+                .metadata
+                .labels
+                .and_then(|mut labels| labels.remove(DPU_OWNED_BY_DEPLOYMENT_LABEL)),
+            dpu_node_name: dpu.spec.dpu_node_name,
+            dpu_device_name: dpu.spec.dpu_device_name,
+            dpu_flavor: dpu.spec.dpu_flavor,
+            bfb: dpu.spec.bfb,
+            blue_field_software: dpu.spec.blue_field_software,
+            status,
+        });
+        Ok(Self { phase, failure })
+    }
+}
+
 impl<R: DpuRepository, L> DpfSdk<R, L> {
-    /// Get the DPU phase for a specific DPU.
+    /// Read only the phase from [`Self::get_dpu_phase_observation`].
     pub async fn get_dpu_phase(
         &self,
         dpu_device_name: &str,
         node_name: &str,
     ) -> Result<DpuPhase, DpfError> {
+        self.get_dpu_phase_observation(dpu_device_name, node_name)
+            .await
+            .map(|observation| observation.phase)
+    }
+
+    /// `get_dpu_phase_observation` reads a DPU phase and terminal failure
+    /// details from the same CR in the SDK namespace.
+    ///
+    /// `device_id` is the device identifier without the `device-` prefix.
+    /// `node_name` accepts a node ID or DPUNode CR name; one leading `node-`
+    /// prefix is stripped before constructing the DPU CR name. For example,
+    /// `("001", "node-host-001")` reads `node-host-001-device-001`.
+    ///
+    /// A deletion timestamp returns `Deleting` without failure details, even
+    /// when status is absent or still reports `Error`. Otherwise, only `Error`
+    /// includes failure details. A missing CR returns `NotFound`, and
+    /// a CR without a deletion timestamp requires both status and its phase,
+    /// otherwise it returns `InvalidState`.
+    /// Resource read errors are propagated; deployment ownership is not checked.
+    pub async fn get_dpu_phase_observation(
+        &self,
+        device_id: &str,
+        node_name: &str,
+    ) -> Result<DpuPhaseObservation, DpfError> {
         let dpf_id = node_id_from_dpu_node_cr_name(node_name);
-        let cr_name = dpu_cr_name(dpu_device_name, dpf_id);
+        let cr_name = dpu_cr_name(device_id, dpf_id);
         let dpu = DpuRepository::get(&*self.repo, &cr_name, &self.namespace).await?;
 
         let Some(dpu) = dpu else {
             return Err(DpfError::not_found("DPU", cr_name));
         };
 
-        // A DPU being torn down (e.g. right after reprovision deleted it) still reports
-        // its old status.phase (often Ready) until the operator's finalizer runs. Treat
-        // a set deletionTimestamp as authoritative so callers never act on the stale phase.
-        if dpu.metadata.deletion_timestamp.is_some() {
-            return Ok(DpuPhase::Deleting);
-        }
-
-        let Some(status) = dpu.status else {
-            return Err(DpfError::InvalidState(format!(
-                "DPU {cr_name} has no status"
-            )));
-        };
-
-        Ok(DpuPhase::from(status.phase))
+        DpuPhaseObservation::from_dpu(dpu, &cr_name)
     }
 
     /// Reprovision a DPU by deleting the DPU CR.
@@ -3873,19 +3917,60 @@ impl<R: DpuRepository, L> DpfSdk<R, L> {
 }
 
 impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L> {
-    /// Read every requested DPU phase only when one deployment owns the full set.
-    ///
-    /// A DPU that is not Ready may not report its installed BFB yet, so ownership
-    /// is sufficient until that phase. A Ready DPU must also match the flavor and
-    /// provisioning source declared by the deployment. `None` means at least one
-    /// requested DPU is missing, is being deleted, belongs to another deployment,
-    /// has no status yet, or does not match the Ready configuration.
+    /// Read only the phases from
+    /// [`Self::get_dpu_phase_observations_for_deployment_type`].
     pub async fn get_dpu_phases_for_deployment_type(
         &self,
         dpu_device_names: &[String],
         node_name: &str,
         deployment_type: DpuDeploymentType,
     ) -> Result<Option<BTreeMap<String, DpuPhase>>, DpfError> {
+        let observations = self
+            .get_dpu_phase_observations_for_deployment_type(
+                dpu_device_names,
+                node_name,
+                deployment_type,
+            )
+            .await?;
+        Ok(observations.map(|observations| {
+            observations
+                .into_iter()
+                .map(|(name, observation)| (name, observation.phase))
+                .collect()
+        }))
+    }
+
+    /// `get_dpu_phase_observations_for_deployment_type` reads phases and terminal
+    /// failure details only when one deployment owns every requested DPU.
+    ///
+    /// `device_ids` contains distinct device identifiers without the `device-`
+    /// prefix. `node_name` accepts a node ID or DPUNode CR name; one leading
+    /// `node-` prefix is stripped before constructing DPU CR names. Returned
+    /// map keys are the input device IDs, ordered lexicographically.
+    ///
+    /// Each DPU is read by name in the SDK namespace. Its phase and diagnostics
+    /// come from that same read.
+    /// A DPU that is not `Ready` may not report its installed BFB yet, so
+    /// ownership is sufficient until that phase. A `Ready` DPU must also match
+    /// the flavor and provisioning source declared by the deployment.
+    ///
+    /// `None` means the deployment has not reported `DPUSetsReconciled=True`
+    /// for its current generation, or a requested DPU is missing, is being
+    /// deleted, belongs to another deployment, or has no status or phase. Duplicate
+    /// device IDs also return `None`. No partial map is returned, including
+    /// when an observed DPU reports `Error`. Empty input returns an empty map
+    /// after deployment checks, without reading any DPUs.
+    ///
+    /// Returns `DpfError::InvalidState` if the deployment uses a
+    /// `DPUFlavorTemplate` or a `Ready` DPU's configuration differs or cannot
+    /// be compared. Errors from deployment lookup and resource reads are
+    /// propagated.
+    pub async fn get_dpu_phase_observations_for_deployment_type(
+        &self,
+        device_ids: &[String],
+        node_name: &str,
+        deployment_type: DpuDeploymentType,
+    ) -> Result<Option<BTreeMap<String, DpuPhaseObservation>>, DpfError> {
         let (deployment_name, deployment) = self.deployment_for_type(deployment_type).await?;
         if !dpu_deployment_is_ready(&deployment) {
             return Ok(None);
@@ -3898,19 +3983,16 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
         }
 
         let expected_owner = dpu_deployment_owner_label_value(&self.namespace, &deployment_name);
-        let owner_selector = format!("{DPU_OWNED_BY_DEPLOYMENT_LABEL}={expected_owner}");
         let dpf_id = node_id_from_dpu_node_cr_name(node_name);
-        let mut dpus_by_name =
-            DpuRepository::list(&*self.repo, &self.namespace, Some(&owner_selector))
-                .await?
-                .into_iter()
-                .filter_map(|dpu| Some((dpu.metadata.name.clone()?, dpu)))
-                .collect::<HashMap<_, _>>();
-        let mut phases = BTreeMap::new();
+        let mut observations = BTreeMap::new();
 
-        for dpu_device_name in dpu_device_names {
-            let cr_name = dpu_cr_name(dpu_device_name, dpf_id);
-            let Some(dpu) = dpus_by_name.remove(&cr_name) else {
+        for device_id in device_ids {
+            if observations.contains_key(device_id) {
+                return Ok(None);
+            }
+            let cr_name = dpu_cr_name(device_id, dpf_id);
+            let Some(dpu) = DpuRepository::get(&*self.repo, &cr_name, &self.namespace).await?
+            else {
                 return Ok(None);
             };
             let has_expected_owner = dpu
@@ -3926,7 +4008,10 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
             let Some(status) = dpu.status.as_ref() else {
                 return Ok(None);
             };
-            let phase = DpuPhase::from(status.phase.clone());
+            let Some(phase) = status.phase.clone() else {
+                return Ok(None);
+            };
+            let phase = DpuPhase::from(phase);
             if phase == DpuPhase::Ready {
                 match dpu_comparison(&self.namespace, &dpu, &deployment) {
                     DpuComparison::Match => {}
@@ -3943,10 +4028,13 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
                     }
                 }
             }
-            phases.insert(dpu_device_name.clone(), phase);
+            observations.insert(
+                device_id.clone(),
+                DpuPhaseObservation::from_dpu(dpu, &cr_name)?,
+            );
         }
 
-        Ok(Some(phases))
+        Ok(Some(observations))
     }
 
     /// Delete source deployment DPU CRs without deleting target replacements.
@@ -3969,15 +4057,11 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
         let target_owner =
             dpu_deployment_owner_label_value(&self.namespace, &target_deployment_name);
         let dpf_id = node_id_from_dpu_node_cr_name(node_name);
-        let mut dpus_by_name = DpuRepository::list(&*self.repo, &self.namespace, None)
-            .await?
-            .into_iter()
-            .filter_map(|dpu| Some((dpu.metadata.name.clone()?, dpu)))
-            .collect::<HashMap<_, _>>();
 
         for dpu_device_name in dpu_device_names {
             let cr_name = dpu_cr_name(dpu_device_name, dpf_id);
-            let Some(dpu) = dpus_by_name.remove(&cr_name) else {
+            let Some(dpu) = DpuRepository::get(&*self.repo, &cr_name, &self.namespace).await?
+            else {
                 continue;
             };
             let owner = dpu
@@ -4566,7 +4650,11 @@ impl<R: DpuNodeRepository + DpuDeviceRepository + DpuRepository, L> DpfSdk<R, L>
                     spec_dpu_flavor: Some(d.spec.dpu_flavor.clone()),
                     spec_dpu_device_name: d.spec.dpu_device_name.clone(),
                     spec_dpu_node_name: d.spec.dpu_node_name.clone(),
-                    status_phase: d.status.as_ref().map(|s| format!("{:?}", s.phase)),
+                    status_phase: d
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.phase.as_ref())
+                        .map(|phase| format!("{phase:?}")),
                     status_bfb_file: d.status.as_ref().and_then(|s| s.bfb_file.clone()),
                     status_conditions: d.status.as_ref().and_then(|s| s.conditions.clone()),
                     status_operational_conditions: d
@@ -4824,7 +4912,7 @@ impl<R: DpuRepository, L: ResourceLabeler> DpfSdk<R, L> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::future::Future;
     use std::sync::{Arc, RwLock};
 
@@ -5279,22 +5367,22 @@ mod tests {
                 "pf0vf13",
                 "p1",
                 "pf1hpf",
-                "p-brcx-r0swpln0-to-br-sfc",
-                "p-br-xplane-r0swpln0-to-br-sfc",
-                "p-brcx-r1swpln0-to-br-sfc",
-                "p-br-xplane-r1swpln0-to-br-sfc",
-                "p-brcx-r0swpln1-to-br-sfc",
-                "p-br-xplane-r0swpln1-to-br-sfc",
-                "p-brcx-r1swpln1-to-br-sfc",
-                "p-br-xplane-r1swpln1-to-br-sfc",
-                "p-brcx-r2swpln0-to-br-sfc",
-                "p-br-xplane-r2swpln0-to-br-sfc",
-                "p-brcx-r3swpln0-to-br-sfc",
-                "p-br-xplane-r3swpln0-to-br-sfc",
-                "p-brcx-r2swpln1-to-br-sfc",
-                "p-br-xplane-r2swpln1-to-br-sfc",
-                "p-brcx-r3swpln1-to-br-sfc",
-                "p-br-xplane-r3swpln1-to-br-sfc",
+                "p-brcx-a56-to-br-sfc",
+                "p-br-xplane-a56-to-br-sfc",
+                "p-brcx-a53-to-br-sfc",
+                "p-br-xplane-a53-to-br-sfc",
+                "p-brcx-a43-to-br-sfc",
+                "p-br-xplane-a43-to-br-sfc",
+                "p-brcx-a46-to-br-sfc",
+                "p-br-xplane-a46-to-br-sfc",
+                "p-brcx-a6-to-br-sfc",
+                "p-br-xplane-a6-to-br-sfc",
+                "p-brcx-a3-to-br-sfc",
+                "p-br-xplane-a3-to-br-sfc",
+                "p-brcx-a13-to-br-sfc",
+                "p-br-xplane-a13-to-br-sfc",
+                "p-brcx-a16-to-br-sfc",
+                "p-br-xplane-a16-to-br-sfc",
             ],
         );
         // Fourteen VFs plus four physical/PF entries and sixteen patches produce 34 interfaces;
@@ -5902,37 +5990,37 @@ mod tests {
             }
 
             "Astra rail bridge as a patch port" {
-                // OVS bridge and port names share a namespace, so a peer port cannot alias a rail.
-                ("br-host", "brcx-r0swpln0") => Some(
-                    "OVS name brcx-r0swpln0 for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with BF4 Astra rail bridge for r0swpln0".to_string()
+                // OVS bridge names keep their physical case, which intercept patch names reject.
+                ("br-host", "brcx-A56") => Some(
+                    "DPF intercept bridging patch port name \"brcx-A56\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "Weave DHCP bridge as a patch port" {
-                // The long Weave bridge cannot be an intercept bridge, but remains valid as a port.
-                ("br-host", "br-dhcp-r0swpln0") => Some(
-                    "OVS name br-dhcp-r0swpln0 for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with DOCA Weave DHCP bridge for r0swpln0".to_string()
+                // Weave DHCP names are already rejected by the lowercase intercept-name contract.
+                ("br-host", "br-dhcp-A56") => Some(
+                    "DPF intercept bridging patch port name \"br-dhcp-A56\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "Weave drop bridge as a patch port" {
-                // The separate drop bridge is owned by the same external Weave lifecycle.
-                ("br-host", "br-drop-r0swpln0") => Some(
-                    "OVS name br-drop-r0swpln0 for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with DOCA Weave drop bridge for r0swpln0".to_string()
+                // Weave drop names are already rejected by the lowercase intercept-name contract.
+                ("br-host", "br-drop-A56") => Some(
+                    "DPF intercept bridging patch port name \"br-drop-A56\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "DPF-generated rail peer port" {
-                // The rail-side autogenerated orientation occupies the global OVS namespace.
-                ("br-host", "p_brcxr0swpln0_to_brsfc_0123abcd") => Some(
-                    "OVS name p_brcxr0swpln0_to_brsfc_0123abcd for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with DPF-generated BF4 Astra rail patch port".to_string()
+                // The uppercase generated peer port fails syntax validation before ownership checks.
+                ("br-host", "p_brcxA56_to_brsfc_0123abcd") => Some(
+                    "DPF intercept bridging patch port name \"p_brcxA56_to_brsfc_0123abcd\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "DPF-generated rail local port" {
-                // A shorter peer name can make the topology's derived local name alias the other orientation.
-                ("br-host", "brcxr0swpln0_0123abcd") => Some(
-                    "OVS name p_brsfc_to_brcxr0swpln0_0123abcd for DPF-generated local patch port on DPF intercept-bridging interface c2pf3 conflicts with DPF-generated BF4 Astra rail patch port".to_string()
+                // This uppercase peer name is rejected before a local patch name is generated.
+                ("br-host", "brcxA56_0123abcd") => Some(
+                    "DPF intercept bridging patch port name \"brcxA56_0123abcd\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
@@ -6040,13 +6128,13 @@ mod tests {
             astra_resolved
                 .interfaces
                 .iter()
-                .any(|interface| interface.name == "p-brcx-r0swpln0-to-br-sfc")
+                .any(|interface| interface.name == "p-brcx-a56-to-br-sfc")
         );
         assert!(
             astra_resolved
                 .interfaces
                 .iter()
-                .any(|interface| interface.name == "p-br-xplane-r3swpln1-to-br-sfc")
+                .any(|interface| interface.name == "p-br-xplane-a16-to-br-sfc")
         );
 
         let bf4_config = InitDpfResourcesConfigBuilder::default()
@@ -6062,7 +6150,7 @@ mod tests {
     fn initialization_rejects_conflicting_astra_patch_interface() {
         let mut interfaces = build_dpu_interfaces_vec();
         interfaces.push(DpuServiceInterfaceTemplateDefinition {
-            name: "p-brcx-r0swpln0-to-br-sfc".to_string(),
+            name: "p-brcx-a56-to-br-sfc".to_string(),
             iface_type: DpuServiceInterfaceTemplateType::Physical,
             pf_id: 0,
             vf_id: 0,
@@ -6076,7 +6164,7 @@ mod tests {
         assert!(matches!(
             config.build(),
             Err(DpfError::ConfigError(message))
-                if message.contains("p-brcx-r0swpln0-to-br-sfc")
+                if message.contains("p-brcx-a56-to-br-sfc")
                     && message.contains("reserved")
         ));
     }
@@ -6147,14 +6235,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("Astra interface {name} must exist"))
         };
 
-        let cx = build_service_interface(by_name("p-brcx-r0swpln0-to-br-sfc"), TEST_NAMESPACE);
+        let cx = build_service_interface(by_name("p-brcx-a56-to-br-sfc"), TEST_NAMESPACE);
         let cx_patch = cx.spec.template.spec.template.spec.patch.as_ref().unwrap();
-        assert_eq!(cx_patch.peer_bridge, "brcx-r0swpln0");
+        assert_eq!(cx_patch.peer_bridge, "brcx-A56");
         assert!(cx_patch.peer_patch_name.is_none());
         assert!(cx_patch.peer_external_i_ds.is_none());
 
-        let xplane =
-            build_service_interface(by_name("p-br-xplane-r3swpln1-to-br-sfc"), TEST_NAMESPACE);
+        let xplane = build_service_interface(by_name("p-br-xplane-a16-to-br-sfc"), TEST_NAMESPACE);
         let xplane_patch = xplane
             .spec
             .template
@@ -6170,7 +6257,7 @@ mod tests {
             xplane_patch.peer_external_i_ds.as_ref(),
             Some(&BTreeMap::from([
                 ("xplane".to_string(), "true".to_string()),
-                ("xplane-group-id".to_string(), "r3swpln1".to_string()),
+                ("xplane-group-id".to_string(), "A16".to_string()),
                 ("xplane-downlink".to_string(), "patch".to_string()),
             ]))
         );
@@ -7346,126 +7433,233 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_dpu_device() {
-        let mock = SdkMock::new();
-        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
-            .build_without_resources()
-            .await
-            .unwrap();
+        for (scenario, astra, server_name) in [
+            ("generic", false, None),
+            ("Astra with server name", true, Some("server-01")),
+            ("Astra without server name", true, None),
+        ] {
+            let mock = SdkMock::new();
+            let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+                .build_without_resources()
+                .await
+                .unwrap();
+            let expected = ExpectedMachine {
+                id: None,
+                bmc_mac_address: "02:00:00:00:00:01".parse().unwrap(),
+                data: model::expected_machine::ExpectedMachineData {
+                    server_name: server_name.map(str::to_owned),
+                    interfaces: astra_declared_interfaces(),
+                    bmc_username: "fixture-user".to_string(),
+                    bmc_password: "fixture-password-must-not-leak".to_string(),
+                    ..Default::default()
+                },
+            };
+            let astra_provisioning_inputs = astra.then_some((
+                &expected,
+                AstraRoutePrefixes {
+                    rail_route_prefix_len: 16,
+                    software_plane_route_prefix_len: 13,
+                },
+            ));
+            sdk.register_dpu_device(test_dpu_device_info(), astra_provisioning_inputs)
+                .await
+                .unwrap();
 
-        let info = DpuDeviceInfo {
-            device_id: "dpu-001".to_string(),
-            dpu_bmc_ip: "10.0.0.10".parse().unwrap(),
-            host_bmc_ip: "10.0.0.1".parse().unwrap(),
-            serial_number: "SN123456".to_string(),
-            dpu_machine_id: "dpu-bbb".to_string(),
-            is_primary: true,
-        };
-
-        sdk.register_dpu_device(info, None).await.unwrap();
-
-        let devices = DpuDeviceRepository::list(&mock, TEST_NAMESPACE)
-            .await
-            .unwrap();
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].spec.serial_number, "SN123456");
-        assert!(matches!(
-            devices[0].spec.bmc_factory_reset_policy.as_ref(),
-            Some(DpuDeviceBmcFactoryResetPolicy::Never)
-        ));
+            let devices = DpuDeviceRepository::list(&mock, TEST_NAMESPACE)
+                .await
+                .unwrap();
+            assert_eq!(devices.len(), 1, "{scenario}");
+            assert_eq!(devices[0].spec.serial_number, "SN123456", "{scenario}");
+            assert!(matches!(
+                devices[0].spec.bmc_factory_reset_policy.as_ref(),
+                Some(DpuDeviceBmcFactoryResetPolicy::Never)
+            ));
+            if astra {
+                let values = devices[0].spec.values.as_ref().unwrap();
+                assert_eq!(
+                    values["server_name"],
+                    json!(server_name.unwrap_or_default())
+                );
+                assert_eq!(values.len(), 2);
+                assert!(values.contains_key("dpu_device_underlay_rows"));
+            } else {
+                assert!(devices[0].spec.values.is_none());
+            }
+            let serialized = serde_json::to_string(&devices[0]).unwrap();
+            assert!(!serialized.contains("fixture-user"));
+            assert!(!serialized.contains("fixture-password-must-not-leak"));
+        }
     }
 
-    #[test]
-    fn astra_underlay_values_require_unique_mac_and_ip() {
-        let underlay_ip_macs = [
-            ("dc:73:fc:21:f8:20", "100.96.0.212"),
-            ("dc:73:fc:21:f9:30", "100.97.0.214"),
-            ("dc:73:fc:21:f9:20", "100.98.0.216"),
-            ("dc:73:fc:21:f8:50", "100.99.0.218"),
-            ("dc:73:fc:21:f9:50", "100.104.0.220"),
-            ("dc:73:fc:21:f8:40", "100.105.0.222"),
-            ("dc:73:fc:21:f9:40", "100.106.0.224"),
-            ("dc:73:fc:21:f8:30", "100.107.0.226"),
-        ]
-        .map(|(mac, ip)| (mac.to_string(), ip.parse::<Ipv4Addr>().unwrap()));
-
-        let route_prefixes = AstraRoutePrefixes {
-            rail_route_prefix_len: 16,
-            software_plane_route_prefix_len: 13,
-        };
-        let values = astra_underlay_values_for_ip_macs(&underlay_ip_macs, route_prefixes).unwrap();
-        assert_eq!(values.len(), 40);
-        assert_eq!(values["mac_0_val"].as_str(), Some("dc:73:fc:21:f8:20"));
-        assert_eq!(values["ip_0_val"].as_str(), Some("100.96.0.212/31"));
-        assert_eq!(values["gw_0_val"].as_str(), Some("100.96.0.213"));
-        assert_eq!(values["route1_0_val"].as_str(), Some("100.96.0.0/16"));
-        assert_eq!(values["route2_0_val"].as_str(), Some("100.96.0.0/13"));
-        assert_eq!(values["mac_7_val"].as_str(), Some("dc:73:fc:21:f8:30"));
-        assert_eq!(values["ip_7_val"].as_str(), Some("100.107.0.226/31"));
-        assert_eq!(values["gw_7_val"].as_str(), Some("100.107.0.227"));
-        assert_eq!(values["route1_7_val"].as_str(), Some("100.107.0.0/16"));
-        assert_eq!(values["route2_7_val"].as_str(), Some("100.104.0.0/13"));
-        assert!(astra_underlay_values_for_ip_macs(&underlay_ip_macs[..7], route_prefixes).is_err());
-
-        let mut duplicate_ips = underlay_ip_macs.clone();
-        duplicate_ips[7].1 = duplicate_ips[0].1;
-        let error = astra_underlay_values_for_ip_macs(&duplicate_ips, route_prefixes).unwrap_err();
-        assert!(
-            matches!(error, DpfError::ConfigError(message) if message == "Astra underlay IPs must be unique")
-        );
-
-        let mut duplicate_macs = underlay_ip_macs;
-        duplicate_macs[7].0 = duplicate_macs[0].0.clone();
-        let error = astra_underlay_values_for_ip_macs(&duplicate_macs, route_prefixes).unwrap_err();
-        assert!(
-            matches!(error, DpfError::ConfigError(message) if message == "Astra underlay MACs must be unique")
-        );
-    }
-
-    #[test]
-    fn astra_underlay_values_use_configured_route_prefixes() {
-        let underlay_ip_macs: Vec<_> = (0..8)
-            .map(|index| {
-                (
-                    format!("00:00:00:00:00:{index:02x}"),
-                    Ipv4Addr::new(100, 107, 13, index),
-                )
+    fn astra_declared_interfaces() -> Vec<ExpectedInterface> {
+        (0..32)
+            .map(|index| ExpectedInterface {
+                // One addressed port per hardware-plane group; retain the other ports by name.
+                mac_address: (index % 4 == 0)
+                    .then(|| format!("00:00:00:00:00:{index:02x}").parse().unwrap()),
+                physical_ifname: Some(format!(
+                    "C{}-{}-L{}",
+                    index / 8 + 1,
+                    (index % 8) / 4 + 1,
+                    index % 4 + 1
+                )),
+                logical_ifname: Some(format!("eth_r{}_p{}", index / 8, index % 8)),
+                fixed_ip: (index % 4 == 0)
+                    .then(|| IpAddr::V4(Ipv4Addr::new(100, 96 + index as u8 / 4, 0, 212))),
+                nic_type: Some("CX9".to_string()),
+                ..Default::default()
             })
-            .collect();
-        let values = astra_underlay_values_for_ip_macs(
-            &underlay_ip_macs,
-            AstraRoutePrefixes {
-                rail_route_prefix_len: 20,
-                software_plane_route_prefix_len: 14,
-            },
-        )
-        .unwrap();
-        assert_eq!(values["route1_0_val"].as_str(), Some("100.107.0.0/20"));
-        assert_eq!(values["route2_0_val"].as_str(), Some("100.104.0.0/14"));
+            .collect()
     }
 
     #[test]
-    fn astra_dpu_device_values_exactly_match_flavor_template_references() {
-        let underlay_ip_macs = [
-            ("dc:73:fc:21:f8:20", "100.96.0.212"),
-            ("dc:73:fc:21:f9:30", "100.97.0.214"),
-            ("dc:73:fc:21:f9:20", "100.98.0.216"),
-            ("dc:73:fc:21:f8:50", "100.99.0.218"),
-            ("dc:73:fc:21:f9:50", "100.104.0.220"),
-            ("dc:73:fc:21:f8:40", "100.105.0.222"),
-            ("dc:73:fc:21:f9:40", "100.106.0.224"),
-            ("dc:73:fc:21:f8:30", "100.107.0.226"),
-        ]
-        .map(|(mac, ip)| (mac.to_string(), ip.parse::<Ipv4Addr>().unwrap()));
-        let values = astra_underlay_values_for_ip_macs(
-            &underlay_ip_macs,
+    fn astra_dpu_device_underlay_rows_retain_all_declared_ports() {
+        let nics = astra_declared_interfaces();
+        let values = astra_underlay_configuration(
+            "dpu-001",
+            &nics.iter().collect::<Vec<_>>(),
             AstraRoutePrefixes {
                 rail_route_prefix_len: 16,
                 software_plane_route_prefix_len: 13,
             },
         )
         .unwrap();
-        let value_keys: BTreeSet<_> = values.keys().cloned().collect();
+        assert_eq!(values.len(), 1);
+        let interfaces = values["dpu_device_underlay_rows"].as_array().unwrap();
+        assert_eq!(interfaces.len(), 32);
+        assert_eq!(
+            interfaces[0],
+            json!({
+                "cerebro_ifname": "C1-1-L1",
+                "mac_address": "00:00:00:00:00:00",
+                "ip": "100.96.0.212/31",
+                "rail_route": "100.96.0.0/16",
+                "sw_plane_route": "100.96.0.0/13",
+                "logical_ifname": "eth_r0_p0",
+                "gateway": "100.96.0.213",
+            })
+        );
+        assert_eq!(
+            interfaces[1],
+            json!({
+                "cerebro_ifname": "C1-1-L2",
+                "mac_address": "",
+                "ip": "",
+                "rail_route": "",
+                "sw_plane_route": "",
+                "logical_ifname": "eth_r0_p1",
+                "gateway": "",
+            })
+        );
+        assert_eq!(interfaces[31]["logical_ifname"], "eth_r3_p7");
+    }
 
+    #[test]
+    fn astra_dpu_device_underlay_rows_allow_shared_ip_within_cerebro_group() {
+        let mut nics = astra_declared_interfaces();
+        for group in nics.chunks_mut(4) {
+            let shared_ip = group[0].fixed_ip;
+            for nic in group {
+                nic.fixed_ip = shared_ip;
+                nic.mac_address = None;
+            }
+        }
+        let values = astra_underlay_configuration(
+            "dpu-001",
+            &nics.iter().collect::<Vec<_>>(),
+            AstraRoutePrefixes {
+                rail_route_prefix_len: 16,
+                software_plane_route_prefix_len: 13,
+            },
+        )
+        .unwrap();
+        let rows = values["dpu_device_underlay_rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 32);
+        for group in rows.chunks(4) {
+            assert!(!group[0]["ip"].as_str().unwrap().is_empty());
+            for row in group {
+                for key in ["ip", "gateway", "rail_route", "sw_plane_route"] {
+                    assert_eq!(row[key], group[0][key]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn astra_dpu_device_underlay_rows_reject_duplicate_mac_and_ip() {
+        use carbide_test_support::{Check, check_values};
+        check_values(
+            [
+                Check {
+                    scenario: "duplicate configured IP",
+                    input: true,
+                    expect: "Astra underlay IPs must be unique across bridge groups".to_string(),
+                },
+                Check {
+                    scenario: "duplicate supplied MAC",
+                    input: false,
+                    expect: "Astra underlay MACs must be unique".to_string(),
+                },
+            ],
+            |duplicate_ip| {
+                let mut nics = astra_declared_interfaces();
+                if duplicate_ip {
+                    nics[4].fixed_ip = nics[0].fixed_ip;
+                } else {
+                    nics[4].mac_address = nics[0].mac_address;
+                }
+                match astra_underlay_configuration(
+                    "dpu-001",
+                    &nics.iter().collect::<Vec<_>>(),
+                    AstraRoutePrefixes {
+                        rail_route_prefix_len: 16,
+                        software_plane_route_prefix_len: 13,
+                    },
+                )
+                .unwrap_err()
+                {
+                    DpfError::ConfigError(message) => message,
+                    other => panic!("expected config error, got {other}"),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn astra_underlay_values_use_configured_route_prefixes() {
+        let mut nics = astra_declared_interfaces();
+        nics[0].fixed_ip = Some(IpAddr::V4(Ipv4Addr::new(100, 107, 13, 2)));
+        let values = astra_underlay_configuration(
+            "dpu-001",
+            &nics.iter().collect::<Vec<_>>(),
+            AstraRoutePrefixes {
+                rail_route_prefix_len: 20,
+                software_plane_route_prefix_len: 14,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            values["dpu_device_underlay_rows"][0]["rail_route"],
+            "100.107.0.0/20"
+        );
+        assert_eq!(
+            values["dpu_device_underlay_rows"][0]["sw_plane_route"],
+            "100.104.0.0/14"
+        );
+    }
+
+    #[test]
+    fn astra_dpu_device_interface_fields_match_flavor_references() {
+        let nics = astra_declared_interfaces();
+        let values = astra_underlay_configuration(
+            "dpu-001",
+            &nics.iter().collect::<Vec<_>>(),
+            AstraRoutePrefixes {
+                rail_route_prefix_len: 16,
+                software_plane_route_prefix_len: 13,
+            },
+        )
+        .unwrap();
         let template = crate::flavor::flavor_bf4_astra(
             "astra-ns",
             &None,
@@ -7474,55 +7668,24 @@ mod tests {
             true,
         )
         .unwrap();
-        let reference_keys: BTreeSet<_> = template
-            .spec
-            .template
-            .split("{{ .")
-            .skip(1)
-            .map(|reference| {
-                reference
-                    .split_once(" }}")
-                    .expect("Astra template reference must be closed")
-                    .0
-                    .to_owned()
-            })
-            .collect();
-
-        assert_eq!(reference_keys, value_keys);
-
-        let mut rendered_template = template.spec.template;
-        for (key, value) in values {
-            rendered_template = rendered_template.replace(
-                &format!("{{{{ .{key} }}}}"),
-                value.as_str().expect("Astra value must be a string"),
-            );
-        }
-        let rendered: serde_yaml::Value = serde_yaml::from_str(&rendered_template).unwrap();
-        let xplane_script = rendered["spec"]["configFiles"]
-            .as_sequence()
-            .unwrap()
+        let body: serde_yaml::Value = serde_yaml::from_str(&template.spec.template).unwrap();
+        let spec: crate::crds::dpuflavors_generated::DpuFlavorSpec =
+            serde_yaml::from_value(body["spec"].clone()).unwrap();
+        let files = spec.config_files.unwrap();
+        let script = files
             .iter()
-            .find(|file| file["path"].as_str() == Some("/etc/mellanox/xplane-bridge.sh"))
-            .and_then(|file| file["raw"].as_str())
+            .find(|file| file.path == "/usr/local/sbin/configure-xplane-network.sh")
+            .and_then(|file| file.raw.as_deref())
             .unwrap();
-
-        assert!(xplane_script.contains("bridge_for_mac()"));
-        assert!(
-            xplane_script
-                .contains("/sys/bus/pci/devices/${pci}/net/${iface_val}/smart_nic/pf/config")
-        );
-        assert!(xplane_script.contains("grep -qiF \"$target_mac\" \"$config_path\""));
-
-        for (mac, ip) in underlay_ip_macs {
-            let octets = ip.octets();
-            let gateway = Ipv4Addr::from(u32::from(ip) ^ 1);
-            assert!(xplane_script.contains(&format!(
-                "\"{mac}|{ip}/31|{gateway}|{}.{}.0.0/16|{}.{}.0.0/13\"",
-                octets[0],
-                octets[1],
-                octets[0],
-                octets[1] & 0b1111_1000
-            )));
+        assert!(script.contains("{{- range .dpu_device_underlay_rows }}"));
+        assert!(script.contains("{{ .logical_ifname }}"));
+        // References inside the range must resolve against each array entry.
+        for reference in script.split("{{ .").skip(1) {
+            let field = reference.split_once(" }}").unwrap().0;
+            assert!(
+                values["dpu_device_underlay_rows"][0].get(field).is_some(),
+                "missing interface field {field}"
+            );
         }
     }
 
@@ -8052,7 +8215,9 @@ mod tests {
                 astra_enabled: None,
             },
             status: Some(DpuStatus {
-                phase: DpuStatusPhase::Ready,
+                phase: Some(DpuStatusPhase::Ready),
+                dpu_reconfig: None,
+                post_provisioning_dpu_config: None,
                 addresses: None,
                 bf_cfg_file: None,
                 bfb_file: None,
@@ -8150,6 +8315,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_dpu_phase_reports_deleting_when_terminating() {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::{Case, check_cases_async};
         use kube::core::ObjectMeta;
 
         use crate::crds::dpus_generated::{DpuSpec, DpuStatus, DpuStatusPhase};
@@ -8160,8 +8327,8 @@ mod tests {
             .await
             .unwrap();
 
-        // A DPU that has been deleted (reprovision) but whose finalizer has not yet
-        // run: it carries a deletionTimestamp while its status.phase is still Ready.
+        // Reprovisioning sets `deletionTimestamp` while the finalizer is still
+        // cleaning up. The old phase must not make this CR actionable again.
         let dpu_name = "node-dpu-001-device-dpu-001";
         let dpu = DPU {
             metadata: ObjectMeta {
@@ -8195,7 +8362,9 @@ mod tests {
                 astra_enabled: None,
             },
             status: Some(DpuStatus {
-                phase: DpuStatusPhase::Ready,
+                phase: Some(DpuStatusPhase::Error),
+                dpu_reconfig: None,
+                post_provisioning_dpu_config: None,
                 addresses: None,
                 bf_cfg_file: None,
                 bfb_file: None,
@@ -8223,17 +8392,43 @@ mod tests {
                 reboot_status: None,
             }),
         };
-        mock.dpus
-            .write()
-            .unwrap()
-            .insert(format!("{}/{}", TEST_NAMESPACE, dpu_name), dpu);
+        check_cases_async(
+            [
+                Case {
+                    scenario: "deletion overrides stale Ready status",
+                    input: DpuStatusPhase::Ready,
+                    expect: Yields((DpuPhase::Deleting, true, DpuPhase::Deleting)),
+                },
+                Case {
+                    scenario: "deletion overrides stale Error status",
+                    input: DpuStatusPhase::Error,
+                    expect: Yields((DpuPhase::Deleting, true, DpuPhase::Deleting)),
+                },
+            ],
+            |stale_phase| {
+                let mut dpu = dpu.clone();
+                let mock = &mock;
+                let sdk = &sdk;
+                async move {
+                    dpu.status.as_mut().expect("DPU status").phase = Some(stale_phase);
+                    mock.dpus
+                        .write()
+                        .unwrap()
+                        .insert(format!("{}/{}", TEST_NAMESPACE, dpu_name), dpu);
 
-        let phase = sdk.get_dpu_phase("dpu-001", "node-dpu-001").await.unwrap();
-        assert_eq!(
-            phase,
-            DpuPhase::Deleting,
-            "a DPU with a deletionTimestamp must report Deleting even though its stale status.phase is Ready"
-        );
+                    let observation = sdk
+                        .get_dpu_phase_observation("dpu-001", "node-dpu-001")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let phase = sdk
+                        .get_dpu_phase("dpu-001", "node-dpu-001")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((observation.phase, observation.failure.is_none(), phase))
+                }
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -8865,6 +9060,89 @@ mod tests {
         assert_eq!(observed.interfaces, service.interfaces);
     }
 
+    /// Verifies privileged opt-in survives while disabled SPIFFE and omitted DPF DaemonSet settings
+    /// stay absent because the platform chart owns its privileged CNI daemon manifest.
+    #[tokio::test]
+    async fn dpu_service_absent_spiffe_and_daemon_set_round_trip_through_repository() {
+        // Disable the two optional fields on a complete service; the helper supplies valid
+        // metadata and Helm settings needed to exercise repository creation.
+        let mut desired_service = test_dpu_service("detached-service");
+        desired_service.security.privileged = true;
+        desired_service.security.spiffe = false;
+        desired_service.service_daemon_set = None;
+        let mock = SdkMock::new();
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+            .build_without_resources()
+            .await
+            .unwrap();
+
+        // Create through DpfSdk and verify the repository response preserves both omissions.
+        let created_service = sdk.create_dpu_service(&desired_service).await.unwrap();
+        let created_security = created_service
+            .security
+            .as_ref()
+            .expect("created service must retain its security object");
+        assert_eq!(created_security.privileged, Some(true));
+        assert!(!created_security.spiffe);
+        assert!(created_service.service_daemon_set.is_none());
+
+        // Inspect the stored checked CR because both fields must be absent from Kubernetes JSON.
+        let stored_service = mock
+            .services
+            .read()
+            .unwrap()
+            .get(&SdkMock::ns_key(TEST_NAMESPACE, "detached-service"))
+            .cloned()
+            .expect("created service must be stored");
+        let stored_document = serde_json::to_value(stored_service).unwrap();
+        assert_eq!(
+            stored_document["spec"]["security"],
+            json!({"privileged": true})
+        );
+        assert!(stored_document["spec"].get("serviceDaemonSet").is_none());
+
+        // Reread through the public SDK operation to prove persistence preserves both omissions.
+        let persisted_service = sdk
+            .get_dpu_service("detached-service")
+            .await
+            .unwrap()
+            .expect("created service must be observable");
+        let persisted_security = persisted_service
+            .security
+            .as_ref()
+            .expect("persisted service must retain its security object");
+        assert_eq!(persisted_security.privileged, Some(true));
+        assert!(!persisted_security.spiffe);
+        assert!(persisted_service.service_daemon_set.is_none());
+    }
+
+    /// Verifies the serialized DPUService omits nodeSelector when no selector is
+    /// supplied, so DPF can deploy the baseline service to all DPU nodes.
+    #[test]
+    fn detached_dpu_service_omits_absent_node_selector_from_checked_cr_type() {
+        // Build a detached service with DaemonSet settings but no placement selector.
+        let mut service = test_dpu_service("baseline-extension-service");
+        service.service_daemon_set = Some(crate::types::DetachedServiceDaemonSet {
+            node_selector_labels: None,
+            labels: Some(BTreeMap::from([("app".to_owned(), "baseline".to_owned())])),
+            ..Default::default()
+        });
+
+        // Check the serialized DPUService omits both selectors so neither
+        // node selection nor cluster selection restricts deployment.
+        let resource = serde_json::to_value(dpu_service_to_resource(&service)).unwrap();
+        assert!(
+            resource
+                .pointer("/spec/serviceDaemonSet/nodeSelector")
+                .is_none()
+        );
+        assert!(resource.pointer("/spec/dpuClusterSelector").is_none());
+        assert_eq!(
+            resource.pointer("/spec/serviceDaemonSet/labels/app"),
+            Some(&json!("baseline"))
+        );
+    }
+
     /// Verifies detached DPUService create, observe, patch, and conditional delete preserve
     /// namespace, returned observations, and delete preconditions across `DpfSdk` and
     /// `DpuServiceRepository`.
@@ -9104,11 +9382,16 @@ mod tests {
             is_primary: true,
         };
         // An existing DPUDevice is left untouched, so a retry does not need a
-        // complete Astra NIC snapshot just to re-validate creation-only values.
+        // complete Astra NIC declarations just to re-validate creation-only values.
+        let expected = ExpectedMachine {
+            id: None,
+            bmc_mac_address: "02:00:00:00:00:01".parse().unwrap(),
+            data: Default::default(),
+        };
         sdk.register_dpu_device(
             info,
             Some((
-                vec![],
+                &expected,
                 AstraRoutePrefixes {
                     rail_route_prefix_len: 16,
                     software_plane_route_prefix_len: 13,

@@ -58,15 +58,15 @@ impl LenovoGB300Nvl<'_> {
                     id: bmc_manager_id,
                     eth_interfaces: Some(vec![
                         bmc_eth_builder("eth0")
-                            .mac_address(self.bmc_mac_address_eth0)
+                            .mac_address((self.bmc_mac_address_eth0).to_string())
                             .interface_enabled(true)
                             .build(),
                         bmc_eth_builder("eth1")
-                            .mac_address(self.bmc_mac_address_eth1)
+                            .mac_address((self.bmc_mac_address_eth1).to_string())
                             .interface_enabled(true)
                             .build(),
                         bmc_eth_builder("usb0")
-                            .mac_address(self.bmc_mac_address_usb0)
+                            .mac_address((self.bmc_mac_address_usb0).to_string())
                             .interface_enabled(true)
                             .build(),
                     ]),
@@ -87,7 +87,7 @@ impl LenovoGB300Nvl<'_> {
                         redfish::ethernet_interface::builder(
                             &redfish::ethernet_interface::manager_resource("HGX_BMC_0", "usb0"),
                         )
-                        .mac_address(self.hgx_bmc_mac_address_usb0)
+                        .mac_address((self.hgx_bmc_mac_address_usb0).to_string())
                         .interface_enabled(true)
                         .build(),
                     ]),
@@ -111,13 +111,10 @@ impl LenovoGB300Nvl<'_> {
         // TODO: It is PXE but apparently if enable HTTP in bios HTTP
         // (Uefi) boot options will show up here...
         let boot_options = std::iter::once(
-            redfish::boot_option::builder(
-                &redfish::boot_option::resource(system_id, "0002"),
-                BootOptionKind::Disk,
-            )
-            .boot_option_reference("Boot0002")
-            .display_name("ubuntu")
-            .build(),
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, "0002"))
+                .boot_option_reference("Boot0002")
+                .display_name("ubuntu")
+                .build(BootOptionKind::Disk),
         )
         .chain(
             [&self.embedded_1g_nic.ethernet_nic(), &self.dpu.host_nic()]
@@ -127,22 +124,19 @@ impl LenovoGB300Nvl<'_> {
                     let id = format!("{:04X}", n + 3); // Starting with 0003
                     // TODO should be taken from NIC:
                     let pci_path = "PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)";
-                    redfish::boot_option::builder(
-                        &redfish::boot_option::resource(system_id, &id),
-                        BootOptionKind::Network,
-                    )
-                    .boot_option_reference(&format!("Boot{id}"))
-                    // Real "Description": "DisplayName": "[Slot16]UEFI: PXE IPv4 Nvidia Network Adapter - 90:E3:17:95:01:DE",
-                    .display_name(&format!(
-                        "[SlotFFFF]: HTTP IPv4 Some Network Adapter - {}",
-                        nic.mac_address
-                    ))
-                    .uefi_device_path(&format!(
-                        "{pci_path}/MAC({},0x1)\
+                    redfish::boot_option::builder(&redfish::boot_option::resource(system_id, &id))
+                        .boot_option_reference(format!("Boot{id}"))
+                        // Real "Description": "DisplayName": "[Slot16]UEFI: PXE IPv4 Nvidia Network Adapter - 90:E3:17:95:01:DE",
+                        .display_name(format!(
+                            "[SlotFFFF]: HTTP IPv4 Some Network Adapter - {}",
+                            nic.mac_address
+                        ))
+                        .uefi_device_path(format!(
+                            "{pci_path}/MAC({},0x1)\
                              /IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()",
-                        nic.mac_address.to_string().replace(":", "")
-                    ))
-                    .build()
+                            nic.mac_address.to_string().replace(":", "")
+                        ))
+                        .build(BootOptionKind::Network)
                 }),
         )
         .collect::<Vec<_>>();
@@ -156,7 +150,7 @@ impl LenovoGB300Nvl<'_> {
                     system_id,
                     &format!("EthernetInterface{index}"),
                 ))
-                .mac_address(nic.mac_address)
+                .mac_address((nic.mac_address).to_string())
                 .interface_enabled(false)
                 .build()
             })
@@ -220,7 +214,7 @@ impl LenovoGB300Nvl<'_> {
             let nic = bf3.host_nic();
             redfish::chassis::SingleChassisConfig {
                 id: chassis_id.into(),
-                chassis_type: "Component".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::Component,
                 manufacturer: Some("Nvidia".into()),
                 part_number: nic.part_number.map(|v| format!("{v}           ",).into()),
                 model: Some("BlueField-3 SmartNIC Main Card".into()),
@@ -244,7 +238,7 @@ impl LenovoGB300Nvl<'_> {
                 })
                 .chain(std::iter::once(redfish::chassis::SingleChassisConfig {
                     id: "Chassis_0".into(),
-                    chassis_type: "RackMount".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                     manufacturer: Some("Lenovo".into()),
                     part_number: Some("SC57C26750".into()),
                     model: Some(" ".into()),
@@ -292,7 +286,7 @@ impl LenovoGB300Nvl<'_> {
                     redfish::software_inventory::builder(
                         &redfish::software_inventory::firmware_inventory_resource(id),
                     )
-                    .version(version)
+                    .version(*version)
                     .build()
                 })
                 .collect(),
@@ -308,51 +302,49 @@ fn base_bios(system_id: &str) -> serde_json::Value {
     // GB300 mock is intentionally in a non-compliant initial state
     // for setup-status testing. These values are scrabbed from real
     // hardware.
-    redfish::bios::builder(&redfish::bios::resource(system_id))
-        .attributes(json!({
-            // NOTE: No VMXEN attribute in this registry/dump.
-            // This platform appears to be Grace-based, so an Intel VMX knob
-            // is not present.
+    redfish::bios::builder(&redfish::bios::resource(system_id)).with_attributes(json!({
+        // NOTE: No VMXEN attribute in this registry/dump.
+        // This platform appears to be Grace-based, so an Intel VMX knob
+        // is not present.
 
-            // "If system has SR-IOV capable PCIe Devices, this option Enables
-            // or Disables Single Root IO Virtualization Support."
-            "PCIS007": "PCIS007Enabled",
+        // "If system has SR-IOV capable PCIe Devices, this option Enables
+        // or Disables Single Root IO Virtualization Support."
+        "PCIS007": "PCIS007Enabled",
 
-            // "Set PXE Retry Count(0~50), Set 50 means always retry"
-            "LEM0001": 0,
+        // "Set PXE Retry Count(0~50), Set 50 means always retry"
+        "LEM0001": 0,
 
-            // "Enable/Disable UEFI Network Stack"
-            "NWSK000": "NWSK000Enabled",
+        // "Enable/Disable UEFI Network Stack"
+        "NWSK000": "NWSK000Enabled",
 
-            // "Enable/Disable IPv4 PXE boot support. If disabled, IPv4 PXE
-            // boot support will not be available."
-            "NWSK001": "NWSK001Enabled",
+        // "Enable/Disable IPv4 PXE boot support. If disabled, IPv4 PXE
+        // boot support will not be available."
+        "NWSK001": "NWSK001Enabled",
 
-            // "Enable/Disable IPv4 HTTP boot support. If disabled, IPv4 HTTP
-            // boot support will not be available."
-            "NWSK006": "NWSK006Disabled",
+        // "Enable/Disable IPv4 HTTP boot support. If disabled, IPv4 HTTP
+        // boot support will not be available."
+        "NWSK006": "NWSK006Disabled",
 
-            // "Enable/Disable IPv6 PXE boot support. If disabled, IPv6 PXE
-            // boot support will not be available."
-            "NWSK002": "NWSK002Enabled",
+        // "Enable/Disable IPv6 PXE boot support. If disabled, IPv6 PXE
+        // boot support will not be available."
+        "NWSK002": "NWSK002Enabled",
 
-            // "Enable/Disable IPv6 HTTP boot support. If disabled, IPv6 HTTP
-            // boot support will not be available."
-            "NWSK007": "NWSK007Disabled",
+        // "Enable/Disable IPv6 HTTP boot support. If disabled, IPv6 HTTP
+        // boot support will not be available."
+        "NWSK007": "NWSK007Disabled",
 
-            // NOTE: No FBO001 ("Boot Mode Select") attribute in this registry.
-            // Closest related attributes are boot-order entries (FBO101..,
-            // FBO201.., FBO742, FBO760..765) and SETUP006, but none is a
-            // direct UEFI/Legacy boot mode selector.
+        // NOTE: No FBO001 ("Boot Mode Select") attribute in this registry.
+        // Closest related attributes are boot-order entries (FBO101..,
+        // FBO201.., FBO742, FBO760..765) and SETUP006, but none is a
+        // direct UEFI/Legacy boot mode selector.
 
-            // "Set Boot Retry Counts(0~50), Set 50 means Endless Boot"
-            // NOTE: This is the closest replacement for synthetic
-            // "EndlessBoot" from lenovo_ami.rs. Value 50 means endless boot.
-            // Real dump currently reports 0.
-            "LEM0003": 0,
+        // "Set Boot Retry Counts(0~50), Set 50 means Endless Boot"
+        // NOTE: This is the closest replacement for synthetic
+        // "EndlessBoot" from lenovo_ami.rs. Value 50 means endless boot.
+        // Real dump currently reports 0.
+        "LEM0003": 0,
 
-            // "USB Support"
-            "USB000": "USB000Enabled",
-        }))
-        .build()
+        // "USB Support"
+        "USB000": "USB000Enabled",
+    }))
 }

@@ -14,12 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+pub mod allocation;
 pub mod binding;
+pub mod registration;
+pub mod remote;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
 use config_version::ConfigVersion;
@@ -31,16 +34,15 @@ use model::resource_pool::common::{
 };
 use model::resource_pool::define::{ResourcePoolDef, ResourcePoolType};
 use model::resource_pool::{
-    OwnerType, ResourcePool, ResourcePoolEntry, ResourcePoolEntryState, ResourcePoolError,
-    ResourcePoolSnapshot, ResourcePoolStats, ValueType,
+    OwnerType, ResourcePool, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolEntry,
+    ResourcePoolEntryState, ResourcePoolError, ResourcePoolSnapshot, ResourcePoolStats, ValueType,
 };
 use sqlx::{PgConnection, Postgres};
-use tokio::sync::oneshot;
 
 use super::BIND_LIMIT;
 use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
-use crate::{ConditionalWrite, DatabaseError};
+use crate::{ConditionalWrite, DatabaseError, Transaction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 pub(crate) enum ResourcePoolOperation {
@@ -51,6 +53,7 @@ pub(crate) enum ResourcePoolOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 pub(crate) enum ResourcePoolFailure {
     Exhausted,
+    Configuration,
     RequestedValueUnavailable,
     Parse,
     Database,
@@ -270,9 +273,17 @@ where
 }
 
 /// `allocate` reserves a value from the automatic or explicit assignment partition.
+/// Returns [`ResourcePoolError::MissingAllocationRange`] when the selected
+/// partition has no configured values, or [`ResourcePoolError::Empty`] when
+/// all of its configured values are allocated.
+///
 /// An omitted `requested_value` requires `auto_assign=true`; an exact request
 /// requires `auto_assign=false`. Use [`allocate_exact`] when an exact request
 /// may claim a free value from either partition.
+///
+/// The allocation statement also inserts the shared [`allocation`] record,
+/// including on an autocommit connection. If that record cannot be written, the
+/// inventory write rolls back too.
 pub async fn allocate<T>(
     value: &ResourcePool<T>,
     txn: &mut PgConnection,
@@ -288,7 +299,7 @@ where
 
     let query = "
 WITH allocate AS (
- SELECT id, value FROM resource_pool
+ SELECT id FROM resource_pool
     WHERE
         name = $1
         AND state = $2
@@ -299,13 +310,24 @@ WITH allocate AS (
     ORDER BY random()
     LIMIT 1
     FOR UPDATE SKIP LOCKED
+), allocated AS (
+    UPDATE resource_pool SET
+        state=$3,
+        allocated=NOW()
+    FROM allocate
+    WHERE resource_pool.id = allocate.id
+    RETURNING resource_pool.id, resource_pool.name, resource_pool.value,
+        resource_pool.value_type, resource_pool.state, resource_pool.auto_assign,
+        resource_pool.allocated
 )
-UPDATE resource_pool SET
-    state=$3,
-    allocated=NOW()
-FROM allocate
-WHERE resource_pool.id = allocate.id
-RETURNING allocate.value
+INSERT INTO resource_pool_allocations (
+    pool_name, owner_type, owner_id, state, integrated_resource_id,
+    value, value_type, auto_assign, allocated_at
+)
+SELECT name, state->>'owner_type', state->>'owner', 'attached', id,
+    value, value_type, auto_assign, allocated
+FROM allocated
+RETURNING value
 ";
     let free_state = ResourcePoolEntryState::Free;
     let allocated_state = ResourcePoolEntryState::Allocated {
@@ -327,8 +349,7 @@ RETURNING allocate.value
 
     // A successful allocation is a single round-trip. The pool-state accounting
     // (`stats`) is consulted only when the allocation statement returns no row,
-    // so it never burdens the common success path — while the error it produces
-    // is exactly what an up-front pre-scan would have returned.
+    // so it never burdens the common success path.
     //
     // Concurrency note: the accounting now reads pool state at failure time
     // rather than before the allocation attempt, so a caller losing a race
@@ -341,20 +362,24 @@ RETURNING allocate.value
         Ok(row) => row,
         Err(sqlx::Error::RowNotFound) => {
             let stats = stats(&mut *txn, value.name()).await?;
-            let free = if auto_assign {
-                stats.auto_assign_free
+            let (free, used) = if auto_assign {
+                (stats.auto_assign_free, stats.auto_assign_used)
             } else {
-                stats.non_auto_assign_free
+                (stats.non_auto_assign_free, stats.non_auto_assign_used)
             };
             if free == 0 {
-                // The relevant partition of the pool is exhausted.
-                return Err(ResourcePoolError::Empty.into());
+                if used != 0 {
+                    return Err(ResourcePoolError::Empty.into());
+                }
+                return Err(ResourcePoolError::MissingAllocationRange {
+                    pool_name: value.name().to_string(),
+                    auto_assign,
+                }
+                .into());
             }
             if !auto_assign {
-                // A specific value was requested and the pool has free
-                // non-auto-assign entries, but this value is not one of them:
-                // it was either already allocated or it is not a value that is
-                // allowed to be explicitly requested.
+                // The value is already allocated or cannot be explicitly
+                // requested, even though other explicit values remain free.
                 return Err(DatabaseError::FailedPrecondition(format!(
                     "`{}` not an available value for resource-pool `{}`",
                     req.unwrap_or_default(),
@@ -384,7 +409,8 @@ RETURNING allocate.value
 /// `allocate_exact` reserves a specific free value from either assignment partition.
 ///
 /// Unlike [`allocate`], this accepts and preserves either `auto_assign` setting.
-/// It records the owner and allocation time, then returns the requested value.
+/// It atomically records the owner, allocation time, and shared [`allocation`]
+/// record, then returns the requested value.
 /// Missing or allocated values return [`DatabaseError::FailedPrecondition`],
 /// including values already reserved by the same owner. Callers must handle
 /// retained allocations separately. The claim participates in the supplied
@@ -405,8 +431,18 @@ where
         owner: owner_id.to_string(),
         owner_type: owner_type.to_string(),
     };
-    let query = "UPDATE resource_pool SET state = $1, allocated = NOW()
-        WHERE name = $2 AND value = $3 AND state = $4";
+    let query = "WITH allocated AS (
+        UPDATE resource_pool SET state = $1, allocated = NOW()
+        WHERE name = $2 AND value = $3 AND state = $4
+        RETURNING id, name, value, value_type, state, auto_assign, allocated
+    )
+    INSERT INTO resource_pool_allocations (
+        pool_name, owner_type, owner_id, state, integrated_resource_id,
+        value, value_type, auto_assign, allocated_at
+    )
+    SELECT name, state->>'owner_type', state->>'owner', 'attached', id,
+        value, value_type, auto_assign, allocated
+    FROM allocated";
     let result = sqlx::query(query)
         .bind(sqlx::types::Json(&allocated_state))
         .bind(pool.name())
@@ -514,6 +550,10 @@ pub struct ResourcePoolAllocationNotOwned;
 /// changing the pool. Cleanup callers may accept that as already released;
 /// callers requiring an existing reservation must handle the rejection.
 ///
+/// Inventory and its shared [`allocation`] record change atomically, including
+/// on an autocommit connection. An existing caller transaction uses a savepoint
+/// and still requires the caller to commit its outer transaction.
+///
 /// Ownership is not an allocation generation. Callers must separately prevent
 /// an old cleanup from reaching a new allocation for the same owner.
 pub async fn release<T>(
@@ -532,38 +572,63 @@ where
         owner: owner_id.to_string(),
         owner_type: owner_type.to_string(),
     };
+    let result = release_inner(txn, &pool.name, &value, expected_state).await;
+    result.inspect_err(|error| {
+        let event_error = match error {
+            DatabaseError::Sqlx(error) => error.source.to_string(),
+            _ => error.to_string(),
+        };
+        emit(ResourcePoolReleaseFailed {
+            operation: ResourcePoolOperation::Release,
+            failure: ResourcePoolFailure::Database,
+            failure_policy: ResourcePoolFailurePolicy::Required,
+            allocation_mode: ResourcePoolAllocationMode::NotApplicable,
+            value_type: pool.value_type.into(),
+            error: event_error,
+            pool: pool.name.clone(),
+            value,
+        });
+    })
+}
+
+async fn release_inner(
+    txn: &mut PgConnection,
+    pool_name: &str,
+    value: &str,
+    expected_state: ResourcePoolEntryState,
+) -> Result<ConditionalWrite<(), ResourcePoolAllocationNotOwned>, DatabaseError> {
     let query = "
 UPDATE resource_pool SET
   allocated = NULL,
   state = $1
 WHERE name = $2 AND value = $3 AND state = $4
+RETURNING id
 ";
-    let result = sqlx::query(query)
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+    let resource_id = sqlx::query_scalar::<_, i64>(query)
         .bind(sqlx::types::Json(ResourcePoolEntryState::Free))
-        .bind(&pool.name)
-        .bind(&value)
+        .bind(pool_name)
+        .bind(value)
         .bind(sqlx::types::Json(expected_state))
-        .execute(txn)
+        .fetch_optional(inner_txn.as_pgconn())
         .await
-        .map_err(|source| {
-            let event_error = source.to_string();
-            let error = DatabaseError::query(query, source);
-            emit(ResourcePoolReleaseFailed {
-                operation: ResourcePoolOperation::Release,
-                failure: ResourcePoolFailure::Database,
-                failure_policy: ResourcePoolFailurePolicy::Required,
-                allocation_mode: ResourcePoolAllocationMode::NotApplicable,
-                value_type: pool.value_type.into(),
-                error: event_error,
-                pool: pool.name.clone(),
-                value,
-            });
-            error
-        })?;
-    if result.rows_affected() == 0 {
-        return Ok(ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned));
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if let Some(resource_id) = resource_id {
+        // Take a fresh snapshot after the inventory lock: a same-owner
+        // reallocation may have inserted a new record while UPDATE waited.
+        let query = "DELETE FROM resource_pool_allocations
+                WHERE integrated_resource_id = $1";
+        sqlx::query(query)
+            .bind(resource_id)
+            .execute(inner_txn.as_pgconn())
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
     }
-    Ok(ConditionalWrite::Applied(()))
+    inner_txn.commit().await?;
+    Ok(match resource_id {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned),
+    })
 }
 
 pub async fn stats<'c, E>(executor: E, name: &str) -> Result<ResourcePoolStats, DatabaseError>
@@ -656,6 +721,9 @@ pub async fn all_stored_defs(
         .collect())
 }
 
+/// `all` returns local inventory bounds and counts, ordered by pool name.
+/// Pools do not need a saved backend binding to appear here. Address bounds
+/// omit the host prefix length; delegated IPv6 prefixes retain theirs.
 pub async fn all(txn: &mut PgConnection) -> Result<Vec<ResourcePoolSnapshot>, DatabaseError> {
     let mut out = Vec::with_capacity(4);
 
@@ -680,6 +748,8 @@ pub async fn all(txn: &mut PgConnection) -> Result<Vec<ResourcePoolSnapshot>, Da
                 FROM resource_pool WHERE value_type = 'integer' GROUP BY name
             ) snapshot";
 
+    // IPv4 and IPv6 addresses can share a pool, so group by name rather than
+    // value type. Prefix pools keep their length in the displayed bounds.
     let query_ip_address = "
             SELECT
                 name,
@@ -693,12 +763,18 @@ pub async fn all(txn: &mut PgConnection) -> Result<Vec<ResourcePoolSnapshot>, Da
                 (auto_assign_free + non_auto_assign_free) AS free
             FROM
             (
-                SELECT name, host(min(value::inet)) AS min, host(max(value::inet)) AS max,
+                SELECT name,
+                    CASE WHEN bool_and(value_type = 'ipv6prefix')
+                        THEN min(value::inet)::text
+                        ELSE host(min(value::inet)) END AS min,
+                    CASE WHEN bool_and(value_type = 'ipv6prefix')
+                        THEN max(value::inet)::text
+                        ELSE host(max(value::inet)) END AS max,
                     count(*) FILTER (WHERE state = '{\"state\": \"free\"}' AND auto_assign) AS auto_assign_free,
                     count(*) FILTER (WHERE state != '{\"state\": \"free\"}' AND auto_assign) AS auto_assign_used,
                     count(*) FILTER (WHERE state = '{\"state\": \"free\"}' AND NOT auto_assign) AS non_auto_assign_free,
                     count(*) FILTER (WHERE state != '{\"state\": \"free\"}' AND NOT auto_assign) AS non_auto_assign_used
-                FROM resource_pool WHERE value_type IN ('ipv4', 'ipv6') GROUP BY name
+                FROM resource_pool WHERE value_type IN ('ipv4', 'ipv6', 'ipv6prefix') GROUP BY name
             ) snapshot";
 
     for query in [query_int, query_ip_address] {
@@ -752,6 +828,9 @@ pub(crate) fn classify_resource_pool_failure(
         ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::Empty) => {
             ResourcePoolFailure::Exhausted
         }
+        ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::MissingAllocationRange {
+            ..
+        }) => ResourcePoolFailure::Configuration,
         ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::Parse { .. }) => {
             ResourcePoolFailure::Parse
         }
@@ -760,10 +839,12 @@ pub(crate) fn classify_resource_pool_failure(
 }
 
 fn classify_database_failure(error: &DatabaseError) -> ResourcePoolFailure {
-    if matches!(error, DatabaseError::FailedPrecondition(_)) {
-        ResourcePoolFailure::RequestedValueUnavailable
-    } else {
-        ResourcePoolFailure::Database
+    match error {
+        DatabaseError::ResourcePoolError(ResourcePoolError::MissingAllocationRange { .. }) => {
+            ResourcePoolFailure::Configuration
+        }
+        DatabaseError::FailedPrecondition(_) => ResourcePoolFailure::RequestedValueUnavailable,
+        _ => ResourcePoolFailure::Database,
     }
 }
 
@@ -863,7 +944,8 @@ fn emit_classified_allocation_failure(
             owner_id: owner_id.to_string(),
             pool: diagnostic_pool.to_string(),
         }),
-        ResourcePoolFailure::RequestedValueUnavailable
+        ResourcePoolFailure::Configuration
+        | ResourcePoolFailure::RequestedValueUnavailable
         | ResourcePoolFailure::Parse
         | ResourcePoolFailure::Database => {
             emit(ResourcePoolAllocationFailed {
@@ -944,13 +1026,12 @@ pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, D
 }
 
 /// Reconcile declared pool definitions against what was previously seeded.
-/// Each declared pool is classified independently by its `(snapshot, pool)`
-/// state.
+/// Each declared pool is classified by its saved snapshot and whether it has
+/// inventory rows or a remote gRPC binding. Either makes the pool present below.
 ///
-///   1. **New** (no snapshot, pool absent from `resource_pool`): seed
-///      and snapshot.
+///   1. **New** (no snapshot, pool absent): seed and snapshot.
 ///   2. **Backfill** (no snapshot, pool present): record the snapshot only.
-///   3. **In sync** (snapshot matches declaration): no-op.
+///   3. **In sync** (snapshot matches declaration, pool present): no-op.
 ///   4. **Drift** (snapshot differs from declaration, pool present): warn
 ///      and leave both in place. Operator must reconcile by hand.
 ///   5. **Anomaly** (snapshot present, pool absent): error-log and skip.
@@ -960,16 +1041,25 @@ pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, D
 /// Pools that appear in the snapshot table but are no longer declared
 /// ("dropped" from `InitialObjectsConfig.pools`) are warned about, but
 /// not removed.
+/// Remote pools save the same seed snapshot and drift diagnostics without
+/// creating local inventory; provider registration uses that saved seed later.
 pub async fn reconcile_pool_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, ResourcePoolDef>,
 ) -> Result<(), DefineResourcePoolError> {
     let stored = all_stored_defs(&mut *txn).await?;
+    let remote_pools: HashSet<_> = binding::all(&mut *txn)
+        .await?
+        .into_iter()
+        .filter(|pool| pool.backend_kind == ResourcePoolBackendKind::Grpc)
+        .map(|pool| pool.pool_name)
+        .collect();
 
     for (name, def) in declared {
-        let pool_exists = pool_has_rows(&mut *txn, name).await?;
-        match (stored.get(name), pool_exists) {
-            // Snapshot exists but pool is missing from resource_pool.
+        let has_inventory_or_remote_binding =
+            remote_pools.contains(name) || pool_has_rows(&mut *txn, name).await?;
+        match (stored.get(name), has_inventory_or_remote_binding) {
+            // Snapshot exists but neither inventory nor a remote binding remains.
             // Anomaly: e.g., partial DB restore. Don't auto-heal — operator
             // must reconcile by hand.
             (Some(stored_def), false) => {
@@ -992,15 +1082,11 @@ pub async fn reconcile_pool_defs(
                     declared: Some(format!("{def:?}")),
                 });
             }
-            // Pool exists in resource_pool but has no snapshot yet.
-            // Pre-migration deployment, or a pool re-added after a snapshot
-            // was manually deleted. Record the snapshot only.
+            // Remote pools have no local inventory to populate. Existing
+            // Integrated rows also need only their missing seed snapshot.
             (None, true) => {
                 insert_pool_def(txn, name, def).await?;
-                tracing::info!(
-                    pool_name = name,
-                    "Backfilled pool definition snapshot for pre-existing pool"
-                );
+                tracing::info!(pool_name = name, "Recorded Resource Pool seed definition");
             }
             // New — seed and snapshot.
             (None, false) => {
@@ -1447,15 +1533,13 @@ fn expand_int_range(start_s: &str, end_s: &str) -> Result<Vec<i64>, eyre::Report
     Ok((start..end).collect())
 }
 
-/// How often to update the resource pool metrics
-const METRICS_RESOURCEPOOL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
+/// Build shared pool handles after checking mandatory pool readiness. Integrated
+/// or unbound pools need free local values; remote pools need an accepted definition.
 pub async fn create_common_pools(
     db: sqlx::PgPool,
     ib_fabric_ids: HashSet<String>,
 ) -> eyre::Result<Arc<CommonPools>> {
     let mut pool_names = Vec::new();
-    let mut optional_pool_names = Vec::new();
 
     let pool_loopback_ip: Arc<ResourcePool<IpAddr>> =
         Arc::new(ResourcePool::new(LOOPBACK_IP.to_string(), ValueType::Ipv4));
@@ -1464,7 +1548,6 @@ pub async fn create_common_pools(
         LOOPBACK_IP_V6.to_string(),
         ValueType::Ipv6,
     ));
-    optional_pool_names.push(pool_loopback_ip_v6.name().to_string());
     let pool_vlan_id: Arc<ResourcePool<i16>> =
         Arc::new(ResourcePool::new(VLANID.to_string(), ValueType::Integer));
     pool_names.push(pool_vlan_id.name().to_string());
@@ -1476,33 +1559,51 @@ pub async fn create_common_pools(
     pool_names.push(pool_vpc_vni.name().to_string());
     let pool_fnn_asn: Arc<ResourcePool<u32>> =
         Arc::new(ResourcePool::new(FNN_ASN.to_string(), ValueType::Integer));
-    optional_pool_names.push(pool_fnn_asn.name().to_string());
 
     let pool_dpa_vni: Arc<ResourcePool<i32>> =
         Arc::new(ResourcePool::new(DPA_VNI.to_string(), ValueType::Integer));
-    optional_pool_names.push(pool_dpa_vni.name().to_string());
 
     let pool_vpc_dpu_loopback_ip: Arc<ResourcePool<IpAddr>> = Arc::new(ResourcePool::new(
         VPC_DPU_LOOPBACK.to_string(),
         ValueType::Ipv4,
     ));
-    //  TODO: This should be removed from optional once FNN become mandatory.
-    optional_pool_names.push(pool_vpc_dpu_loopback_ip.name().to_string());
 
     let pool_external_vpc_vni: Arc<ResourcePool<i32>> = Arc::new(ResourcePool::new(
         EXTERNAL_VPC_VNI.to_string(),
         ValueType::Integer,
     ));
-    optional_pool_names.push(pool_external_vpc_vni.name().to_string());
 
-    // We can't run if any of the mandatory pools are missing
+    // Mandatory pools need local capacity when Integrated or unbound, and an
+    // accepted provider definition when remote.
     for name in &pool_names {
-        if stats(&db, name).await?.free == 0 {
-            eyre::bail!("resource pool '{name}' missing or full. edit config file and restart");
+        match binding::load(&db, name).await? {
+            Some(ResourcePoolBinding {
+                backend_kind: ResourcePoolBackendKind::Grpc,
+                binding_id,
+                ..
+            }) => {
+                // Local inventory cannot establish remote readiness. Provider
+                // capacity is checked when allocating.
+                if registration::latest_accepted(&db, binding_id)
+                    .await?
+                    .is_none()
+                {
+                    eyre::bail!("remote resource pool '{name}' has no accepted definition");
+                }
+            }
+            None
+            | Some(ResourcePoolBinding {
+                backend_kind: ResourcePoolBackendKind::Integrated,
+                ..
+            }) => {
+                if stats(&db, name).await?.free == 0 {
+                    eyre::bail!(
+                        "resource pool '{name}' missing or full. edit config file and restart"
+                    );
+                }
+            }
         }
     }
-
-    pool_names.extend(optional_pool_names);
 
     // It's ok for IB partition pools to be missing or full - as long as nobody tries to use partitions
     let pkey_pools: Arc<HashMap<String, ResourcePool<u16>>> = Arc::new(
@@ -1519,34 +1620,6 @@ pub async fn create_common_pools(
             })
             .collect(),
     );
-    pool_names.extend(pkey_pools.values().map(|pool| pool.name().to_string()));
-
-    // Gather resource pool stats. A different thread sends them to Prometheus.
-    let (stop_sender, mut stop_receiver) = oneshot::channel();
-    let pool_stats: Arc<Mutex<HashMap<String, ResourcePoolStats>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let pool_stats_bg = pool_stats.clone();
-    tokio::task::Builder::new()
-        .name("resource_pool metrics")
-        .spawn(async move {
-            loop {
-                let mut next_stats = HashMap::with_capacity(pool_names.len());
-                for name in &pool_names {
-                    if let Ok(st) = stats(&db, name).await {
-                        next_stats.insert(name.to_string(), st);
-                    }
-                }
-                *pool_stats_bg.lock().unwrap() = next_stats;
-
-                tokio::select! {
-                    _ = tokio::time::sleep(METRICS_RESOURCEPOOL_INTERVAL) => {},
-                    _ = &mut stop_receiver => {
-                        tracing::info!("CommonPool metrics stop was requested");
-                        return;
-                    }
-                }
-            }
-        })?;
 
     Ok(Arc::new(CommonPools {
         ethernet: EthernetPools {
@@ -1561,13 +1634,12 @@ pub async fn create_common_pools(
             pool_vpc_dpu_loopback_ip,
         },
         infiniband: IbPools { pkey_pools },
-        pool_stats,
-        _stop_sender: stop_sender,
     }))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
     use std::str::FromStr;
 
     use carbide_instrument::MetricKind;
@@ -1951,6 +2023,14 @@ mod tests {
         .bind(value.to_string())
         .fetch_one(new_owner.as_mut())
         .await?;
+        let allocation = allocation::list(
+            new_owner.as_mut(),
+            resource_pool.name(),
+            None,
+            NonZeroU16::new(1).unwrap(),
+        )
+        .await?
+        .remove(0);
 
         let new_owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *new_owner)
@@ -1997,6 +2077,12 @@ mod tests {
             result?,
             ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
         );
+        assert_eq!(
+            allocation::load(&pool, allocation.allocation_id)
+                .await?
+                .as_ref(),
+            Some(&allocation)
+        );
 
         let mut txn = pool.begin().await?;
         assert_eq!(
@@ -2004,6 +2090,10 @@ mod tests {
             ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
         );
         txn.commit().await?;
+        assert_eq!(
+            allocation::load(&pool, allocation.allocation_id).await?,
+            Some(allocation)
+        );
         let entry = find_value(&pool, &value.to_string()).await?.remove(0);
         assert_eq!(
             entry.state.0,
@@ -2357,67 +2447,109 @@ mod tests {
         Ok(())
     }
 
-    /// Requesting a specific value that the pool cannot hand out — while the
-    /// pool still has free non-auto-assign entries — must map to
-    /// `FailedPrecondition`, distinct from the `Empty` (exhausted) case. The
-    /// pool is seeded non-empty on purpose so the asserted status code is what
-    /// callers observe regardless of the pre-scan being present or deferred.
+    /// Missing assignment modes remain distinct from unavailable requested values.
     #[crate::sqlx_test]
-    async fn allocate_requested_value_unavailable_is_failed_precondition(
+    async fn allocate_distinguishes_missing_ranges_from_unavailable_values(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        for (scenario, auto_assign, requested_value, missing_auto_assign) in [
+            ("value outside explicit range", false, Some(99), None),
+            ("value in automatic-only pool", true, Some(10), Some(false)),
+            (
+                "automatic allocation in explicit-only pool",
+                false,
+                None,
+                Some(true),
+            ),
+        ] {
+            let mut txn = pool.begin().await?;
+            define(
+                &mut txn,
+                "test-requested-unavail-pool",
+                &ResourcePoolDef {
+                    prefix: None,
+                    ranges: vec![Range {
+                        start: 10.to_string(),
+                        end: 13.to_string(),
+                        auto_assign,
+                    }],
+                    pool_type: ResourcePoolType::Integer,
+                    delegate_prefix_len: None,
+                },
+            )
+            .await?;
 
-        // A pool of non-auto-assign values 10, 11, 12 — so it has free
-        // non-auto-assign entries, but no auto-assign entries.
-        define(
-            &mut txn,
-            "test-requested-unavail-pool",
-            &ResourcePoolDef {
-                prefix: None,
-                ranges: vec![Range {
-                    start: 10.to_string(),
-                    end: 13.to_string(),
-                    auto_assign: false,
-                }],
-                pool_type: ResourcePoolType::Integer,
-                delegate_prefix_len: None,
-            },
-        )
-        .await
-        .unwrap();
+            let pool_handle = ResourcePool::<i64>::new(
+                "test-requested-unavail-pool".to_string(),
+                ValueType::Integer,
+            );
+            let err = allocate(
+                &pool_handle,
+                &mut txn,
+                OwnerType::Machine,
+                "owner",
+                requested_value,
+            )
+            .await
+            .expect_err("requesting an unavailable value must error");
 
-        let pool_handle = ResourcePool::<i64>::new(
-            "test-requested-unavail-pool".to_string(),
-            ValueType::Integer,
-        );
-
-        // 99 is not in the pool, so the request cannot be satisfied even though
-        // the pool is not exhausted (free non-auto-assign entries remain).
-        let err = allocate(
-            &pool_handle,
-            &mut txn,
-            OwnerType::Machine,
-            "owner",
-            Some(99),
-        )
-        .await
-        .expect_err("requesting an unavailable value must error");
-
-        match err {
-            ResourcePoolDatabaseError::Database(boxed) => {
-                assert!(
-                    matches!(*boxed, DatabaseError::FailedPrecondition(_)),
-                    "expected FailedPrecondition, got {boxed:?}"
-                );
+            match missing_auto_assign {
+                Some(expected_auto_assign) => {
+                    assert!(
+                        matches!(
+                            &err,
+                            ResourcePoolDatabaseError::ResourcePool(
+                                ResourcePoolError::MissingAllocationRange { pool_name, auto_assign }
+                            ) if pool_name == pool_handle.name() && *auto_assign == expected_auto_assign
+                        ),
+                        "{scenario}: expected missing range, got {err:?}"
+                    );
+                    assert!(!is_requested_value_unavailable(&err), "{scenario}");
+                }
+                None => {
+                    assert!(is_requested_value_unavailable(&err), "{scenario}: {err:?}");
+                }
             }
-            other => panic!("expected FailedPrecondition, got {other:?}"),
-        }
+            let status = tonic::Status::from(DatabaseError::from(err));
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{scenario}");
 
-        txn.rollback().await?;
+            txn.rollback().await?;
+        }
         Ok(())
+    }
+
+    #[test]
+    fn missing_range_classification_survives_database_wrapping() {
+        let missing_range = || ResourcePoolError::MissingAllocationRange {
+            pool_name: "test-pool".to_string(),
+            auto_assign: true,
+        };
+        for (scenario, error) in [
+            (
+                "pool error",
+                ResourcePoolDatabaseError::from(missing_range()),
+            ),
+            (
+                "database wrapper",
+                ResourcePoolDatabaseError::from(DatabaseError::from(missing_range())),
+            ),
+        ] {
+            assert_eq!(
+                classify_resource_pool_failure(&error),
+                ResourcePoolFailure::Configuration,
+                "{scenario}"
+            );
+            assert!(!is_requested_value_unavailable(&error), "{scenario}");
+            let status = tonic::Status::from(DatabaseError::from(error));
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{scenario}");
+            assert_eq!(
+                status.message(),
+                "resource-pool `test-pool` has no automatic allocation range",
+                "{scenario}"
+            );
+        }
     }
 
     /// Requesting a specific value from an EXHAUSTED non-auto-assign pool must
@@ -2944,6 +3076,197 @@ mod tests {
         Ok(())
     }
 
+    /// Readiness follows the saved backend: local rows cannot replace remote
+    /// acceptance, while Integrated and unbound pools still need free values.
+    #[crate::sqlx_test]
+    async fn common_pool_readiness_uses_the_saved_backend(pool: sqlx::PgPool) -> eyre::Result<()> {
+        use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
+        use model::resource_pool::registration::ResourcePoolRegistration;
+        use model::resource_pool::{ResourcePoolSelection, ResourcePoolValueDomain};
+
+        let loopback = ResourcePool::<IpAddr>::new(LOOPBACK_IP.to_owned(), ValueType::Ipv4);
+        let vlan = ResourcePool::<i16>::new(VLANID.to_owned(), ValueType::Integer);
+        let vni = ResourcePool::<i32>::new(VNI.to_owned(), ValueType::Integer);
+        let mut txn = pool.begin().await?;
+        populate(&loopback, &mut txn, vec!["192.0.2.1".parse()?], true).await?;
+        for (name, value) in [(VNI, 42), (VPC_VNI, 43)] {
+            let resource_pool = ResourcePool::<i32>::new(name.to_owned(), ValueType::Integer);
+            populate(&resource_pool, &mut txn, vec![value], true).await?;
+        }
+        binding::bind_or_verify(
+            &mut txn,
+            &ResourcePoolSelection {
+                pool_name: VNI.to_owned(),
+                value_domain: ResourcePoolValueDomain::Integer,
+                backend_name: None,
+                backend_kind: ResourcePoolBackendKind::Integrated,
+                authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
+                remote_pool: VNI.to_owned(),
+            },
+        )
+        .await?;
+        let remote = binding::bind_or_verify(
+            &mut txn,
+            &ResourcePoolSelection {
+                pool_name: VLANID.to_owned(),
+                value_domain: ResourcePoolValueDomain::Integer,
+                backend_name: Some("provider".to_owned()),
+                backend_kind: ResourcePoolBackendKind::Grpc,
+                authority_id: "test-authority".to_owned(),
+                remote_pool: "tenant-vlans".to_owned(),
+            },
+        )
+        .await?;
+        // Leftover local capacity must not make this remote binding ready.
+        populate(&vlan, &mut txn, vec![44], true).await?;
+        txn.commit().await?;
+        assert_eq!(stats(&pool, VLANID).await?.free, 1);
+        let with_local_vlan = resource_pool_inventory(&pool).await?;
+
+        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+            panic!("a remote mandatory pool needs an accepted definition");
+        };
+        assert_eq!(
+            error.to_string(),
+            "remote resource pool 'vlan-id' has no accepted definition"
+        );
+        assert_eq!(resource_pool_inventory(&pool).await?, with_local_vlan);
+
+        let mut txn = pool.begin().await?;
+        registration::lock_binding(&mut txn, remote.binding_id).await?;
+        registration::insert(
+            &mut txn,
+            &ResourcePoolRegistration {
+                binding_id: remote.binding_id,
+                revision: 1,
+                // Request decoding belongs to registration's caller. This DB
+                // test exercises only the persisted acceptance decision.
+                request: vec![1, 2, 3],
+                accepted: false,
+            },
+        )
+        .await?;
+        txn.commit().await?;
+
+        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+            panic!("a pending definition does not make a remote pool ready");
+        };
+        assert_eq!(
+            error.to_string(),
+            "remote resource pool 'vlan-id' has no accepted definition"
+        );
+        assert_eq!(resource_pool_inventory(&pool).await?, with_local_vlan);
+
+        // A pending successor must not hide the accepted revision, and remote
+        // readiness must not depend on any remaining local values.
+        let mut txn = pool.begin().await?;
+        registration::lock_binding(&mut txn, remote.binding_id).await?;
+        registration::acknowledge(&mut txn, remote.binding_id, 1).await?;
+        registration::insert(
+            &mut txn,
+            &ResourcePoolRegistration {
+                binding_id: remote.binding_id,
+                revision: 2,
+                request: vec![4, 5, 6],
+                accepted: false,
+            },
+        )
+        .await?;
+        sqlx::query("DELETE FROM resource_pool WHERE name = $1")
+            .bind(VLANID)
+            .execute(txn.as_mut())
+            .await?;
+        txn.commit().await?;
+        let without_local_vlan = resource_pool_inventory(&pool).await?;
+        create_common_pools(pool.clone(), HashSet::new()).await?;
+        assert_eq!(resource_pool_inventory(&pool).await?, without_local_vlan);
+        let remote_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_pool WHERE name = $1")
+                .bind(VLANID)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(remote_rows, 0);
+
+        // Acceptance does not bypass the retained Integrated capacity check.
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            allocate(&vni, &mut txn, OwnerType::Machine, "owner", None).await?,
+            42
+        );
+        txn.commit().await?;
+        let bound_exhausted_inventory = resource_pool_inventory(&pool).await?;
+        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+            panic!("an exhausted Integrated mandatory pool must fail readiness");
+        };
+        assert_eq!(
+            error.to_string(),
+            "resource pool 'vni' missing or full. edit config file and restart"
+        );
+        assert_eq!(
+            resource_pool_inventory(&pool).await?,
+            bound_exhausted_inventory
+        );
+        let allocation = find_value(&pool, "42").await?.remove(0);
+        assert_eq!(
+            allocation.state.0,
+            ResourcePoolEntryState::Allocated {
+                owner: "owner".to_owned(),
+                owner_type: OwnerType::Machine.to_string(),
+            }
+        );
+        assert!(allocation.allocated.is_some());
+
+        // Loopback is checked before VNI. Its exact diagnostic distinguishes
+        // the unbound capacity check from the bound pool's existing failure.
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            allocate(
+                &loopback,
+                &mut txn,
+                OwnerType::Machine,
+                "unbound-owner",
+                None
+            )
+            .await?,
+            "192.0.2.1".parse::<IpAddr>()?
+        );
+        txn.commit().await?;
+        assert_eq!(binding::load(&pool, LOOPBACK_IP).await?, None);
+        let unbound_exhausted_inventory = resource_pool_inventory(&pool).await?;
+        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+            panic!("an exhausted unbound mandatory pool must fail readiness");
+        };
+        assert_eq!(
+            error.to_string(),
+            "resource pool 'lo-ip' missing or full. edit config file and restart"
+        );
+        assert_eq!(
+            resource_pool_inventory(&pool).await?,
+            unbound_exhausted_inventory
+        );
+        Ok(())
+    }
+
+    /// Read complete inventory rows so ownership and timestamp changes remain observable.
+    async fn resource_pool_inventory(
+        pool: &sqlx::PgPool,
+    ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+        sqlx::query_scalar("SELECT to_jsonb(resource_pool) FROM resource_pool ORDER BY name, value")
+            .fetch_all(pool)
+            .await
+    }
+
+    /// Include `seeded_at` so replacing an unchanged seed definition is observable.
+    async fn resource_pool_seed_snapshots(
+        pool: &sqlx::PgPool,
+    ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT to_jsonb(resource_pool_def) FROM resource_pool_def ORDER BY name",
+        )
+        .fetch_all(pool)
+        .await
+    }
+
     // the pool has never been seeded. `reconcile_pool_defs`
     // should run `define` *and* record the snapshot.
     #[crate::sqlx_test]
@@ -3033,6 +3356,71 @@ mod tests {
         Ok(())
     }
 
+    /// A failed binding read propagates its query error. After caller rollback,
+    /// committed inventory and seed snapshots remain unchanged.
+    #[crate::sqlx_test]
+    async fn reconcile_pool_defs_binding_read_failure_preserves_inventory(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::resource_pool::Range;
+
+        let original = ResourcePoolDef {
+            prefix: None,
+            ranges: vec![Range {
+                start: "600".to_owned(),
+                end: "605".to_owned(),
+                auto_assign: true,
+            }],
+            pool_type: ResourcePoolType::Integer,
+            delegate_prefix_len: None,
+        };
+        let mut txn = pool.begin().await?;
+        define(&mut txn, "existing", &original).await?;
+        insert_pool_def(&mut txn, "existing", &original).await?;
+        txn.commit().await?;
+        let inventory_before = resource_pool_inventory(&pool).await?;
+        let snapshots_before = resource_pool_seed_snapshots(&pool).await?;
+
+        // This test owns its database. Renaming the table fails the real binding
+        // query while leaving snapshots and inventory available for inspection.
+        sqlx::query(
+            "ALTER TABLE resource_pool_binding RENAME TO unavailable_resource_pool_binding",
+        )
+        .execute(&pool)
+        .await?;
+        let declared = HashMap::from([
+            ("existing".to_owned(), original.clone()),
+            ("prospective".to_owned(), original),
+        ]);
+        let mut txn = pool.begin().await?;
+        let error = reconcile_pool_defs(&mut txn, &declared)
+            .await
+            .expect_err("a failed binding read must fail reconciliation");
+        let DefineResourcePoolError::DatabaseError(DatabaseError::Sqlx(query_error)) = &error
+        else {
+            panic!("expected a binding query failure, got {error:?}");
+        };
+        assert!(
+            query_error
+                .to_string()
+                .contains("SELECT * FROM resource_pool_binding ORDER BY pool_name")
+        );
+        assert_eq!(
+            query_error
+                .source
+                .as_database_error()
+                .expect("undefined table is a database error")
+                .code()
+                .as_deref(),
+            Some("42P01")
+        );
+        txn.rollback().await?;
+
+        assert_eq!(resource_pool_inventory(&pool).await?, inventory_before);
+        assert_eq!(resource_pool_seed_snapshots(&pool).await?, snapshots_before);
+        Ok(())
+    }
+
     // snapshot exists and matches the declared def. Reconcile
     // should be a silent no-op.
     #[crate::sqlx_test]
@@ -3055,20 +3443,26 @@ mod tests {
 
         define(&mut txn, "stable", &def).await?;
         insert_pool_def(&mut txn, "stable", &def).await?;
+        txn.commit().await?;
+        let inventory_before = resource_pool_inventory(&pool).await?;
+        let snapshots_before = resource_pool_seed_snapshots(&pool).await?;
 
         let declared: HashMap<String, ResourcePoolDef> =
             [("stable".to_string(), def.clone())].into_iter().collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        let mut txn = pool.begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        result?;
+        txn.commit().await?;
 
-        let stored = stored_def(txn.as_mut(), "stable").await?;
-        assert_eq!(
-            stored.as_ref(),
-            Some(&def),
-            "snapshot must remain unchanged"
+        assert_eq!(resource_pool_seed_snapshots(&pool).await?, snapshots_before);
+        assert_eq!(resource_pool_inventory(&pool).await?, inventory_before);
+        assert!(
+            logs.iter().all(|log| {
+                log.field("name") != Some("stable") && log.field("pool_name") != Some("stable")
+            }),
+            "an unchanged pool must not produce reseed or drift diagnostics"
         );
-
-        txn.rollback().await?;
         Ok(())
     }
 
@@ -3105,22 +3499,32 @@ mod tests {
 
         define(&mut txn, "drifty", &original).await?;
         insert_pool_def(&mut txn, "drifty", &original).await?;
+        txn.commit().await?;
+        let inventory_before = resource_pool_inventory(&pool).await?;
+        let snapshots_before = resource_pool_seed_snapshots(&pool).await?;
 
         let declared: HashMap<String, ResourcePoolDef> = [("drifty".to_string(), drifted.clone())]
             .into_iter()
             .collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        let mut txn = pool.begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        result?;
+        txn.commit().await?;
 
-        // The stored snapshot must still reflect the original
-        let stored = stored_def(txn.as_mut(), "drifty").await?;
-        assert_eq!(
-            stored.as_ref(),
-            Some(&original),
-            "drift path must not overwrite the snapshot"
-        );
-
-        txn.rollback().await?;
+        assert_eq!(resource_pool_seed_snapshots(&pool).await?, snapshots_before);
+        assert_eq!(resource_pool_inventory(&pool).await?, inventory_before);
+        let drift_logs: Vec<_> = logs
+            .iter()
+            .filter(|log| {
+                log.metadata_name == "config_definition_drifted"
+                    && log.field("name") == Some("drifty")
+            })
+            .collect();
+        assert_eq!(drift_logs.len(), 1);
+        assert_eq!(drift_logs[0].level, tracing::Level::WARN);
+        assert_eq!(drift_logs[0].field("resource_kind"), Some("resource_pool"));
+        assert_eq!(drift_logs[0].field("drift_kind"), Some("changed"));
         Ok(())
     }
 
@@ -3147,31 +3551,29 @@ mod tests {
         // Pre-seed only the snapshot — skip define() so the pool has no
         // rows in resource_pool.
         insert_pool_def(&mut txn, "orphaned-snapshot", &def).await?;
+        txn.commit().await?;
+        let snapshots_before = resource_pool_seed_snapshots(&pool).await?;
 
         let declared: HashMap<String, ResourcePoolDef> =
             [("orphaned-snapshot".to_string(), def.clone())]
                 .into_iter()
                 .collect();
 
-        // Reconcile must succeed (warn-only), not error.
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        // Reconciliation succeeds but leaves an error diagnostic for the operator.
+        let mut txn = pool.begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        result?;
+        txn.commit().await?;
 
-        // The snapshot is unchanged.
-        let stored = stored_def(txn.as_mut(), "orphaned-snapshot").await?;
-        assert_eq!(
-            stored.as_ref(),
-            Some(&def),
-            "anomaly path must not modify the snapshot"
-        );
-
-        // The pool was NOT seeded by reconcile.
-        let pool_rows = all(txn.as_mut()).await?;
-        assert!(
-            !pool_rows.iter().any(|s| s.name == "orphaned-snapshot"),
-            "anomaly path must not auto-seed the missing pool"
-        );
-
-        txn.rollback().await?;
+        assert_eq!(resource_pool_seed_snapshots(&pool).await?, snapshots_before);
+        assert!(resource_pool_inventory(&pool).await?.is_empty());
+        let anomaly_logs: Vec<_> = logs
+            .iter()
+            .filter(|log| log.field("pool_name") == Some("orphaned-snapshot"))
+            .collect();
+        assert_eq!(anomaly_logs.len(), 1);
+        assert_eq!(anomaly_logs[0].level, tracing::Level::ERROR);
+        assert!(anomaly_logs[0].message.contains("manual recovery required"));
         Ok(())
     }
 }

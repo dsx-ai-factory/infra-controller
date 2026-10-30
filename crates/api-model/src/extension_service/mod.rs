@@ -143,6 +143,28 @@ pub enum DpuTarget {
     All,
 }
 
+/// Controls whether the service deploys at creation or through instance attachment.
+/// This choice cannot change after creation because it determines which DPUs run the service.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum ExtensionServiceDeploymentType {
+    /// The service deploys to selected DPUs when attached to an instance.
+    #[default]
+    DemandDriven,
+    /// Creation requests deployment to all DPUs managed by DPF, without instance attachment.
+    Baseline,
+}
+
+impl std::fmt::Display for ExtensionServiceDeploymentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DemandDriven => write!(f, "demand_driven"),
+            Self::Baseline => write!(f, "baseline"),
+        }
+    }
+}
+
 impl DpuTarget {
     /// Resolves a deterministic target set, rejecting incomplete primary inventory.
     pub fn resolve(
@@ -177,13 +199,23 @@ impl DpuTarget {
 fn read_dpu_target(
     row: &PgRow,
     service_type: &ExtensionServiceType,
+    deployment_type: ExtensionServiceDeploymentType,
 ) -> Result<Option<DpuTarget>, sqlx::Error> {
     let target = row.try_get("dpu_target")?;
-    match (service_type, target) {
-        (ExtensionServiceType::DpfHelmChart, Some(_))
-        | (ExtensionServiceType::KubernetesPod, None) => Ok(target),
+    match (service_type, deployment_type, target) {
+        (
+            ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
+            Some(_),
+        )
+        | (ExtensionServiceType::DpfHelmChart, ExtensionServiceDeploymentType::Baseline, None)
+        | (
+            ExtensionServiceType::KubernetesPod,
+            ExtensionServiceDeploymentType::DemandDriven,
+            None,
+        ) => Ok(target),
         _ => Err(sqlx::Error::Protocol(
-            "inconsistent extension service DPU target; resolve registration migration".into(),
+            "inconsistent extension service type, deployment type, or DPU target".into(),
         )),
     }
 }
@@ -192,7 +224,11 @@ fn read_dpu_target(
 pub struct ExtensionService {
     pub id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
-    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    /// Whether the service deploys at creation or through instance attachment; immutable
+    #[serde(default)]
+    pub deployment_type: ExtensionServiceDeploymentType,
+    /// Which DPUs on an instance's host run a demand-driven Helm service; immutable.
+    /// Absent for baseline services, which deploy to all DPUs, and Kubernetes Pod services.
     pub dpu_target: Option<DpuTarget>,
     pub name: String,
     pub tenant_organization_id: TenantOrganizationId,
@@ -248,11 +284,13 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
             row.try_get("controller_state_outcome")?;
 
-        let dpu_target = read_dpu_target(row, &service_type)?;
+        let deployment_type: ExtensionServiceDeploymentType = row.try_get("deployment_type")?;
+        let dpu_target = read_dpu_target(row, &service_type, deployment_type)?;
 
         Ok(ExtensionService {
             id: row.try_get("id")?,
             service_type,
+            deployment_type,
             dpu_target,
             name: row.try_get("name")?,
             tenant_organization_id: tenant_organization_id
@@ -315,12 +353,18 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionServiceVersionInfo {
 pub struct ExtensionServiceSnapshot {
     pub service_id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
-    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    /// Whether the service deploys at creation or through instance attachment; cannot be changed.
+    #[serde(default)]
+    pub deployment_type: ExtensionServiceDeploymentType,
+    /// Which DPUs on an instance's host run a demand-driven Helm service; cannot be changed.
+    /// Absent for baseline services, which deploy to all DPUs, and Kubernetes Pod services.
     pub dpu_target: Option<DpuTarget>,
     pub service_name: String,
     pub tenant_organization_id: TenantOrganizationId,
     pub version_ctr: i32,
     pub latest_version: Option<ExtensionServiceVersionInfo>,
+    /// Complete non-deleted inventory, ordered by version number and then
+    /// creation time, both descending.
     pub active_versions: Vec<ConfigVersion>,
     pub description: String,
     /// Service-facing interface requirements in ordinal order.
@@ -335,13 +379,15 @@ pub struct ExtensionServiceSnapshot {
 }
 
 impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
+    /// Returns [`sqlx::Error::ColumnDecode`] naming `active_versions` when any
+    /// entry is malformed, rather than returning a partial list.
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
         let service_id: ExtensionServiceId = row.try_get("service_id")?;
         let service_type_str: String = row.try_get("service_type")?;
         let service_type = service_type_str
             .parse::<ExtensionServiceType>()
             .map_err(|e| sqlx::Error::ColumnDecode {
-                index: "type".to_string(),
+                index: "service_type".to_string(),
                 source: Box::new(e),
             })?;
         let service_name: String = row.try_get("service_name")?;
@@ -368,8 +414,12 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
         let active_versions_str: Vec<String> = row.try_get("active_versions")?;
         let active_versions: Vec<ConfigVersion> = active_versions_str
             .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+            .map(|s| s.parse())
+            .collect::<Result<_, _>>()
+            .map_err(|e| sqlx::Error::ColumnDecode {
+                index: "active_versions".to_string(),
+                source: Box::new(e),
+            })?;
 
         let latest_version = row.try_get("latest_version")?;
         let latest_data = row.try_get("latest_data")?;
@@ -402,11 +452,13 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             .map(|state| state.0)
             .ok_or_else(|| sqlx::Error::ColumnNotFound("controller_state".to_string()))?;
 
-        let dpu_target = read_dpu_target(row, &service_type)?;
+        let deployment_type: ExtensionServiceDeploymentType = row.try_get("deployment_type")?;
+        let dpu_target = read_dpu_target(row, &service_type, deployment_type)?;
 
         Ok(ExtensionServiceSnapshot {
             service_id,
             service_type,
+            deployment_type,
             dpu_target,
             service_name,
             tenant_organization_id,
@@ -720,6 +772,31 @@ mod tests {
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn snapshot_service_type_error_identifies_column(pool: sqlx::PgPool) {
+        // Use a projected row because the table constraint rejects unknown service types.
+        let row = sqlx::query(
+            "SELECT
+                $1::uuid AS service_id,
+                'virtual_machine'::text AS service_type",
+        )
+        .bind(ExtensionServiceId::new())
+        .fetch_one(&pool)
+        .await
+        .expect("fetch snapshot row with an invalid service type");
+
+        let error = ExtensionServiceSnapshot::from_row(&row)
+            .expect_err("an unknown service type must fail decoding");
+        let sqlx::Error::ColumnDecode { index, source } = error else {
+            panic!("expected ColumnDecode, got {error:?}");
+        };
+        assert_eq!(index, "service_type");
+        assert!(
+            source.is::<InvalidExtensionServiceTypeError>(),
+            "{source:?}"
+        );
+    }
 
     // ExtensionServiceType parses case-insensitively from its wire form, and an
     // unknown string is rejected.

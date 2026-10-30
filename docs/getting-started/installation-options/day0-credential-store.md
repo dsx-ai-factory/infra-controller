@@ -9,7 +9,7 @@ Vault remains installed either way. It issues certificates through the `vault-ni
 ## Prerequisites
 
 - The prerequisite stack from the [Reference Installation](reference-install.md), including Postgres and Vault.
-- A decision on the key encryption key (KEK) provider. This page uses the Integrated provider, which holds the key in a Kubernetes Secret and is production-supported only under the conditions in [Secrets Storage](../../configuration/secrets-storage.md). The Transit provider keeps the KEK in Vault; its setup is described on that page.
+- A decision on the key encryption key (KEK) provider. This page uses the Integrated provider, which holds the key in a Kubernetes Secret and is production-supported only under the conditions in [Secrets Storage](../../configuration/secrets-storage.md). The Transit provider keeps the KEK in Vault; its setup is described on that page. A Vault/OpenBao Transit or [KMIP](../../configuration/kmip-kek-provider.md) provider keeps KEK material out of the NICo process; it is outside the cluster only when that server is deployed externally, which the reference installation's in-cluster Vault is not.
 - `nico-api` not yet deployed, or deployed without any credentials stored. A site that already holds credentials in Vault follows the migration walk in Secrets Storage instead.
 
 ---
@@ -50,7 +50,7 @@ nico-api:
           key: site-kek-1
 ```
 
-The variable name is your choice; the `env` locator in the next step must match it. The chart has no value for mounting the key as a file.
+The variable name is your choice; the `env` locator in the next step must match it. The chart can also mount the key as a file through its `extraVolumes` and `extraVolumeMounts` values; [Secrets Storage](../../configuration/secrets-storage.md) describes that form.
 
 ## Add [secrets] to the Site Config
 

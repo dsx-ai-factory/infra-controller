@@ -23,6 +23,7 @@ The chart is designed for production environments where NICo manages the full li
 | 9  | **nico-pxe** | PXE boot server (HTTP-based) for OS provisioning workflows. |
 | 10 | **nico-ssh-console-rs** | SSH console proxy for remote access to managed machine BMCs and consoles. |
 | 11 | **unbound** | Recursive DNS resolver. Optional — used to serve the DPU compatibility `.forge` zone when no external DNS does. Disabled by default. |
+| 12 | **nico-postgres-exporter** | Optional PostgreSQL debugging exporter and separate Grafana dashboard. Disabled by default; uses an existing database and credentials Secret. |
 
 ## Prerequisites
 
@@ -78,10 +79,11 @@ Top-level `global:` values are automatically passed to all subcharts.
 
 `nico-api.nvSwitchTls` can ask cert-manager to issue NICo's dedicated NMX-C
 client identity and, optionally, the NVSwitch server identity. Both leaves
-use the existing `nvSwitchTls.issuerRef`, which defaults to
-`vault-nico-issuer`. NMX-C/NVUE must trust the CA behind that issuer when NICo
-connects, and NICo must use an independently managed CA bundle that validates
-the server certificate presented by the switch.
+use `nvSwitchTls.issuerRef`, or `global.certificate.issuerRef` when it is
+empty, which defaults to `vault-nico-issuer`. NMX-C/NVUE must trust the CA
+behind that issuer when NICo connects, and NICo must use an independently
+managed CA bundle that validates the server certificate presented by the
+switch.
 
 The profiles are deliberately fixed to the capabilities each peer needs:
 
@@ -94,10 +96,33 @@ The profiles are deliberately fixed to the capabilities each peer needs:
   nico-api. A switch installer or operator must copy the certificate, private
   key, and CA to NMX-C/NVUE and bind them there.
 
-Both profiles are off by default. Enable `switchServer` only when this Helm
-release should own the server artifact. Configure `dnsNames` or `ipAddresses`,
-as appropriate, with a SAN that exactly matches `nmx_c_tls_authority` in the
-NICo site configuration.
+`nicoClient` is on by default. When `nicoClient.uris` is empty, its URI SAN is
+`spiffe://<global.spiffe.trustDomain>/<release namespace>/sa/nico-nmxc`, for
+example `spiffe://nico.local/nico-system/sa/nico-nmxc`.
+
+NVLink partitioning is off by default. Set `nico-api.nvlink.enabled` to render
+`nvlink_config.enabled` into the base configuration; a value in the site
+configuration takes precedence. On a rack with running instances, enabling it
+removes the NMX-C default partition on the first monitor pass.
+
+When `nvlink_config.enabled` or
+`nvlink_config.nmx_c_certificate_rotation.enabled` is `true`, nico-api fills
+in unset NMX-C TLS settings at startup:
+
+- If the site configuration sets none of the four `nvlink_config.nmx_c_tls_*`
+  keys and `mountPath` keeps its default, nico-api uses this certificate for
+  NMX-C mTLS, with `initial_domain_name` as the TLS authority.
+- If `nvlink_config.nmx_c_tls_ca_cert_path` is unset and NMX-C is reached over
+  HTTPS, nico-api uses `ca.crt` from the client Secret, or else
+  `/var/run/secrets/nico-roots/ca.crt`, as the CA bundle. NMX-C is reached
+  over plain HTTP, with no CA, when `allow_insecure = true` and no client
+  certificate and key are set.
+
+`switchServer` is off by default. Enable it only when this Helm release should
+own the server artifact. Configure `dnsNames` or `ipAddresses`, as
+appropriate, with a SAN that exactly matches `nmx_c_tls_authority`. When the
+site configuration sets none of the `nmx_c_tls_*` keys, that authority is
+`initial_domain_name`.
 
 ```yaml
 nico-api:
@@ -137,6 +162,10 @@ deployment mechanism.
 The configured issuer and any cert-manager approver policy must allow both
 requested URI/DNS identities, durations, key profile, and usages. Creating the
 Kubernetes Secret does not install or bind the server identity on a switch.
+
+`nico-bmc-proxy.switchTls` issues the proxy its own client certificate the same
+way, for switches whose NVUE REST API requires one, and points the proxy at it.
+See the [nico-bmc-proxy chart README](charts/nico-bmc-proxy/README.md#switch-client-tls).
 
 ### Grafana Dashboards
 
@@ -224,17 +253,38 @@ nico-ntp:
   enabled: true        # chrony NTP servers (required for DPU pre-ingestion)
 unbound:
   enabled: false       # Recursive DNS resolver (disabled by default)
+nico-postgres-exporter:
+  enabled: false       # PostgreSQL debugging exporter and dashboard (disabled by default)
 nico-machine-a-tron:
   enabled: false       # Mock machine simulator for dev/test (disabled by default)
 ```
 
+### PostgreSQL debugging dashboard
+
+The optional `nico-postgres-exporter` dependency installs the exporter and a
+separate PostgreSQL-folder dashboard ConfigMap. It does not install Grafana or
+PostgreSQL. Enable it explicitly and configure its own image, existing database
+credentials Secret, and optional ServiceMonitor. An existing Grafana can discover
+its ConfigMap through a configured sidecar, or operators can import the packaged
+JSON manually. Dashboard-only installation is also supported. See the
+[subchart README](charts/nico-postgres-exporter/README.md) for values and examples.
+
 ### Image Configuration
 
-The `global.image.repository` and `global.image.tag` values **must** be set -- they default to empty strings. Most subcharts use the global image reference. The following subcharts use their own separate image references and do **not** inherit `global.image`:
+The `global.image.repository` and `global.image.tag` values **must** be set --
+they default to empty strings. Most subcharts use the global image reference.
+Build images from the same repository revision that supplies the Helm chart and
+setup script used to deploy them. Image tags may use your own naming convention,
+but deploying a chart with images built from another repository revision is
+unsupported.
+
+The following subcharts use their own separate image references and do **not**
+inherit `global.image`:
 
 | Subchart | Image Parameter | Default |
 |----------|----------------|---------|
 | `nico-ssh-console-rs` (log collector) | `nico-ssh-console-rs.lokiLogCollector.image.repository` / `.tag` | `""` — sidecar disabled by default (`lokiLogCollector.enabled: false`); reference image: `ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.81.0` |
+| `nico-postgres-exporter` | `nico-postgres-exporter.image.repository` / `.tag` | `""` (required when its exporter is enabled) |
 | `unbound` | `unbound.image.repository` / `.tag` | `""` (must be set) |
 | `unbound` (exporter) | `unbound.exporterImage.repository` / `.tag` | `""` (must be set) |
 
@@ -419,6 +469,7 @@ set `alternatePort: 0` to work around it.
 | nico-ntp | StatefulSet | 123/UDP | No | -- |
 | nico-pxe | Deployment | 8080 | Yes | ServiceMonitor |
 | nico-ssh-console-rs | Deployment | 22, 9009 (metrics) | Yes | ServiceMonitor |
+| nico-postgres-exporter | Deployment (optional) | 9090 (metrics) | Optional database CA mount | Optional ServiceMonitor |
 | unbound | Deployment | 53 | No | ServiceMonitor |
 
 ### Service Dependencies
@@ -446,6 +497,7 @@ For reference configurations, see:
 - [`examples/values-minimal.yaml`](./examples/values-minimal.yaml) -- Minimal deployment with only the core services
 - [`examples/values-full.yaml`](./examples/values-full.yaml) -- Full deployment with all services and production settings
 - [`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml) -- Overlay that fits the external Services into eight LoadBalancer IPs
+- [`examples/nico-api-site-config.toml`](./examples/nico-api-site-config.toml) -- Annotated `nico-api` site configuration for `siteConfig.nicoApiSiteConfig`
 
 ## Migrating from Kustomize
 
@@ -522,6 +574,7 @@ nico-api:
 
 nico-bmc-proxy:
   nameOverride: carbide-bmc-proxy
+  apiServiceName: carbide-api
   certificate:
     identityNamespace: forge-system
   auth:
@@ -579,8 +632,9 @@ This is also available as a ready-to-use overlay at
   `spiffe://forge.local/forge-system/sa/carbide-api`).
 - `auth.namespace: forge-system` — tells `nico-api` to accept SPIFFE IDs whose path contains
   `/forge-system/`, which is what pre-2.0.0 client certificates present.
-- `apiServiceName: carbide-api` — tells `nico-pxe`, `nico-dhcp`, `nico-dns`, and
-  `nico-ssh-console-rs` to dial `carbide-api` (the name the Service has after `nameOverride`),
+- `apiServiceName: carbide-api` — tells `nico-pxe`, `nico-dhcp`, `nico-dns`,
+  `nico-ssh-console-rs`, and `nico-bmc-proxy` to dial `carbide-api` (the name the Service has
+  after `nameOverride`),
   rather than the new default `nico-api`. Without this, those services build a URL pointing at
   a Service that does not exist.
 
@@ -601,6 +655,7 @@ helm unittest helm --with-subchart
 helm unittest helm/charts/nico-machine-a-tron
 helm unittest helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
 helm unittest helm/charts/unbound
+helm unittest helm/charts/nico-postgres-exporter
 
 # nico-flow is a standalone chart (not an umbrella dependency) - test it separately too
 helm unittest helm/nico-flow
@@ -611,8 +666,8 @@ Test files live in `tests/` directories within each chart. CI runs these tests a
 ### PXE runtime regression (manual developer test)
 
 Run this regression after changing PXE packaging, artifact init containers, or
-chart serving paths. CI runs Helm unit tests and the PXE Kustomize render check;
-it does not run this kind-based HTTP test. The developer supplies the locally
+chart serving paths. CI runs Helm unit tests but does not run this kind-based
+HTTP test. The developer supplies the locally
 built PXE image and invokes the command below.
 
 The PXE runtime regression requires Docker, kind, kubectl, Helm, curl, jq, and a
@@ -623,9 +678,8 @@ serving as UID 10001 for `0600` artifacts copied with legacy commands and for
 artifacts bundled in the image. A later custom init creates a `0700` tree owned
 by another UID; the permissions init must preserve that owner while granting
 group 10001 access using only `CHOWN`, `FOWNER`, and `DAC_OVERRIDE`, with privilege
-escalation disabled. The test includes a custom serving path and exercises the
-Kustomize artifact-copy component without the optional legacy ConfigMap. It does
-not provision a host or call Core.
+escalation disabled. The test includes a custom serving path. It does not
+provision a host or call Core.
 
 ```bash
 PXE_TEST_IMAGE=nico-pxe:<local-tag> bash helm/tests/runtime/test-pxe-boot-artifacts.sh

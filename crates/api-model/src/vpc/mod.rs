@@ -33,7 +33,9 @@ use carbide_uuid::vpc::VpcId;
 use carbide_uuid::vpc_peering::VpcPeeringId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
-pub use routing_profile::{PrefixFilterPolicyEntry, RouteTargetConfig, VpcRoutingProfileOverrides};
+pub use routing_profile::{
+    PrefixFilterPolicyEntry, RouteTargetConfig, RouteTargetConfigError, VpcRoutingProfileOverrides,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};

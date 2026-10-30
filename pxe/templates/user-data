@@ -30,6 +30,7 @@ ilog "=== Prepare directory structure and move Forge and DOCA files"
 local forge_path="/mnt/opt/forge"
 local artifacts=(
   /forge-scout
+  /mlx-firmware-supervisor
   /forge-dpu.deb
   {% if bootstrap_ca_source == "embedded" %}
   /embedded_forge_root.pem
@@ -43,6 +44,10 @@ for artifact in "${artifacts[@]}"; do
   mv -v "$artifact" "${forge_path}" | while read -r log_line; do ilog "mv: $log_line"; done
 done
 chmod a+x "${forge_path}/forge-scout"
+# Older BFBs receive this PXE installer but have no firmware supervisor.
+if [ -e "${forge_path}/mlx-firmware-supervisor" ]; then
+  chmod a+x "${forge_path}/mlx-firmware-supervisor"
+fi
 
 local forge_path_debs="${forge_path}/debs"
 ilog "=== Moving deb files to $forge_path_debs"

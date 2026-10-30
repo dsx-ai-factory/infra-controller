@@ -40,7 +40,7 @@
 //!   bridge: br-svc-N
 //!   resourceType: sf
 //!   ipam: false
-//!   serviceMTU: 1500
+//!   serviceMTU: 9000
 //!
 //! DPUServiceInterface/service-vpc-slot-N
 //!   label: interface=service-vpc-slot-N
@@ -49,9 +49,11 @@
 //!   peerPatchName: svc-slot-N
 //!
 //! DPUDeployment/<provisioning deployment>
-//!   serviceChains.switches[N].ports:
-//!     - service: doca-hbn/iface_svc_N
-//!     - serviceInterface: interface=service-vpc-slot-N
+//!   serviceChains.switches[N]:
+//!     serviceMTU: 9000
+//!     ports:
+//!       - service: doca-hbn/iface_svc_N
+//!       - serviceInterface: interface=service-vpc-slot-N
 //! ```
 //!
 //! DPF materializes that desired state on each selected DPU. `br-sfc` is DPF's
@@ -90,7 +92,7 @@ use crate::types::{
 pub(crate) const MAX_HBN_SERVICE_INTERFACES: usize = 32;
 
 /// MTU shared by fixed service-VPC listeners and their service-pod attachment networks.
-pub const SERVICE_VPC_MTU: i64 = 1500;
+pub const SERVICE_VPC_MTU: i64 = 9000;
 
 /// A validated collection of NICo-managed service-VPC slots.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -367,6 +369,7 @@ impl ServiceVpcSlot {
                 peer_bridge: self.bridge_name(),
                 peer_patch_name: self.peer_patch_name(),
                 peer_external_ids: None,
+                service_mtu: Some(SERVICE_VPC_MTU),
             }),
             pf_id: 0,
             vf_id: 0,
@@ -527,7 +530,7 @@ mod tests {
             }),
             // A different listener MTU would disagree with the qualified service-pod attachment.
             ("wrong MTU", |service| {
-                service.service_nads[0].mtu = Some(9000)
+                service.service_nads[0].mtu = Some(1500)
             }),
         ];
 
@@ -586,7 +589,7 @@ mod tests {
                         ..ServiceDefinition::new("other", "repo", "chart", "1")
                     })
                 },
-                "service-VPC slot d_iface_svc_0 requires exactly one DHCP interface and an IPAM-disabled SF NAD on its bridge with MTU 1500",
+                "service-VPC slot d_iface_svc_0 requires exactly one DHCP interface and an IPAM-disabled SF NAD on its bridge with MTU 9000",
             ),
         ];
 
@@ -625,6 +628,8 @@ mod tests {
     }
 
     /// Verifies reserved slot identities cannot be reused by existing interfaces or host-facing chains.
+    /// Rejecting every generated name prevents a slot from binding to an unrelated DPF interface
+    /// or OVS endpoint.
     #[test]
     fn rejects_every_generated_name_collision() {
         let slots = ServiceVpcSlots::new(1).unwrap();
@@ -679,7 +684,7 @@ mod tests {
             );
         }
 
-        for (bridge, patch_port) in [
+        for (existing_peer_bridge, existing_peer_patch_name) in [
             // The generated br-sfc patch endpoint cannot reuse another patch's peer name.
             ("br-pf3", "p_brsfc_to_svc-slot-0"),
             // The slot's peer patch cannot also be an existing bridge.
@@ -687,12 +692,16 @@ mod tests {
             // The new slot bridge cannot reuse an existing patch port name.
             ("br-pf3", "br-svc-0"),
         ] {
+            // The peer names select the collision; the remaining fields complete a valid Patch.
             let mut interfaces = vec![DpuServiceInterfaceTemplateDefinition {
                 name: "existing".to_string(),
                 iface_type: DpuServiceInterfaceTemplateType::Patch(DpuServiceInterfacePatch {
-                    peer_bridge: bridge.to_string(),
-                    peer_patch_name: patch_port.to_string(),
+                    // Reuse this bridge when the scenario targets peer-bridge identity.
+                    peer_bridge: existing_peer_bridge.to_string(),
+                    // Reuse this endpoint when the scenario targets peer-patch identity.
+                    peer_patch_name: existing_peer_patch_name.to_string(),
                     peer_external_ids: None,
+                    service_mtu: None,
                 }),
                 pf_id: 0,
                 vf_id: 0,
@@ -710,7 +719,7 @@ mod tests {
                 .expect_err("reserved OVS names must reject an existing patch");
             assert!(
                 error.to_string().contains("conflicts with reserved"),
-                "bridge {bridge}, patch {patch_port}: {error}"
+                "bridge {existing_peer_bridge}, patch {existing_peer_patch_name}: {error}"
             );
         }
     }

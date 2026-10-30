@@ -1,0 +1,85 @@
+suite: FMDS networking opt-in
+templates:
+  - configmap.yaml
+  - daemonset.yaml
+tests:
+  # Omission preserves the agent's IPv4-only default without introducing a config file.
+  - it: leaves omitted networking addresses to the agent default
+    template: configmap.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # Explicit empty and omitted lists differ in the agent config contract.
+  - it: writes an explicitly empty address list
+    template: configmap.yaml
+    set:
+      fmds.networkingAddresses: []
+    asserts:
+      - equal:
+          path: data["config.toml"]
+          value: |
+            [fmds-armos-networking.config]
+            addresses = []
+
+  # Serialize the complete list; container-mode HBN projection only uses the endpoint.
+  - it: writes the complete supplied list for both families
+    template: configmap.yaml
+    set:
+      fmds.networkingAddresses: ["192.0.2.10/30", "fd00:76b9::254/127"]
+    asserts:
+      - equal:
+          path: data["config.toml"]
+          value: |
+            [fmds-armos-networking.config]
+            addresses = ["192.0.2.10/30","fd00:76b9::254/127"]
+
+  # Networking alone must enable the same mount and argument as other config sections.
+  - it: makes the rendered configuration available to the running agent
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      fmds.networkingAddresses: ["169.254.169.254/30", "fd00:76b9::254/127"]
+      serviceDaemonSet:
+        annotations:
+          checksum/machine-identity-config: user-value
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args[0]
+          value: --config-path=/etc/forge/config.toml
+      - equal:
+          path: spec.template.spec.containers[0].args[1]
+          value: run
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: agent-config
+            mountPath: /etc/forge/config.toml
+            subPath: config.toml
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: agent-config
+            configMap:
+              name: RELEASE-NAME-config
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/machine-identity-config"]
+          pattern: "^[a-f0-9]{64}$"
+
+  # Both settings share one config file; a second section must not overwrite networking.
+  - it: combines networking and machine identity settings
+    template: configmap.yaml
+    set:
+      fmds.networkingAddresses: ["169.254.169.254/30", "fd00:76b9::254/127"]
+      fmds.sign_proxy_url: http://identity.example:8080
+    asserts:
+      - equal:
+          path: data["config.toml"]
+          value: |
+            [fmds-armos-networking.config]
+            addresses = ["169.254.169.254/30","fd00:76b9::254/127"]
+            [machine-identity]
+            sign-proxy-url = "http://identity.example:8080"

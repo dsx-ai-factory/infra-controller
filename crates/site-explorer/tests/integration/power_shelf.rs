@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use carbide_instrument::testing::capture_logs_async;
+use carbide_site_explorer::PowerShelfCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::prelude::*;
 use config_version::ConfigVersion;
@@ -361,10 +362,14 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
     .await?;
     txn.commit().await?;
 
-    let explorer = env.test_site_explorer(SiteExplorerConfig {
-        create_power_shelves: Arc::new(true.into()),
-        ..Default::default()
-    });
+    let power_shelf_creator = PowerShelfCreator::new(
+        env.pool.clone(),
+        (&SiteExplorerConfig {
+            create_power_shelves: Arc::new(true.into()),
+            ..Default::default()
+        })
+            .into(),
+    );
 
     let explored_endpoint = ExploredEndpoint {
         address: bmc_ip,
@@ -403,7 +408,7 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         rack_id: None,
         bmc_retain_credentials: None,
     };
-    let (created, logs) = capture_logs_async(explorer.create_power_shelf(
+    let (created, logs) = capture_logs_async(power_shelf_creator.create_power_shelf(
         explored_endpoint.clone(),
         &expected_first,
         &env.pool,
@@ -436,7 +441,7 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         },
         ..expected_first
     };
-    let (created, logs) = capture_logs_async(explorer.create_power_shelf(
+    let (created, logs) = capture_logs_async(power_shelf_creator.create_power_shelf(
         explored_endpoint,
         &expected_second,
         &env.pool,
@@ -968,11 +973,11 @@ async fn test_power_shelf_state_history_error_handling(
         ..Default::default()
     };
 
-    let explorer = env.test_site_explorer(explorer_config);
+    let power_shelf_creator = PowerShelfCreator::new(env.pool.clone(), (&explorer_config).into());
 
-    // Create the power shelf using site explorer
+    // Create the power shelf using the power shelf creator
     assert!(
-        explorer
+        power_shelf_creator
             .create_power_shelf(explored_endpoint.clone(), &expected_power_shelf, &env.pool,)
             .await?
     );

@@ -335,14 +335,107 @@ API POST /v2/org/{org}/nico/expected-rack-group added the new required request p
 API PUT /v2/org/{org}/nico/expected-rack-group added the new required request property `expectedRackGroups/items/protocol`
 API PUT /v2/org/{org}/nico/expected-rack-group/all added the new required request property `expectedRackGroups/items/protocol`
 
+# Expected switches require operator-declared NVOS ports; discovery no longer fills them.
+# Compatibility exception and migration: fern/changelog/2026-10-19.mdx.
+API POST /v2/org/{org}/nico/expected-switch added the new required request property `nvosInterfaces`
+API PUT /v2/org/{org}/nico/expected-switch/all added the new required request property `expectedSwitches/items/nvosInterfaces`
+
 API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/deployInCluster`
 API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/deployInCluster`
 API POST /v2/org/{org}/nico/dpu-extension-service added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`
 API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added the new required request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceID`
 
+API GET /v2/org/{org}/nico/expected-machine the response property `items/interfaces/items/macAddress` became nullable for the status `200`
+API GET /v2/org/{org}/nico/expected-machine the response property `items/interfaces/items/macAddress` became optional for the status `200`
+API POST /v2/org/{org}/nico/expected-machine the response property `interfaces/items/macAddress` became nullable for the status `201`
+API POST /v2/org/{org}/nico/expected-machine the response property `interfaces/items/macAddress` became optional for the status `201`
+API PUT /v2/org/{org}/nico/expected-machine/all the response property `items/interfaces/items/macAddress` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/expected-machine/all the response property `items/interfaces/items/macAddress` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became optional for the status `200`
+API POST /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became nullable for the status `201`
+API POST /v2/org/{org}/nico/expected-machine/batch the response property `items/interfaces/items/macAddress` became optional for the status `201`
+API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became nullable for the status `200`
+API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `interfaces/items/macAddress` became optional for the status `200`
+
 # SSH Keys have no status field; these orderings were advertised but always rejected.
 GET /v2/org/{org}/nico/sshkey removed the enum value `STATUS_ASC` from the `query` request parameter `orderBy`
 GET /v2/org/{org}/nico/sshkey removed the enum value `STATUS_DESC` from the `query` request parameter `orderBy`
+
+# Site responses already return null for unset location/contact and unpopulated stats.
+# Accept this contract correction for Site responses, including embedded Sites.
+API GET /v2/org/{org}/nico/expected-rack-group the response property `items/site/oneOf[subschema #1: Site]/gpuStats` became nullable for the status `200`
+API GET /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteContact, subschema #2` to the `items/site/oneOf[subschema #1: Site]/contact` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteLocation, subschema #2` to the `items/site/oneOf[subschema #1: Site]/location` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteMachineStats, subschema #2` to the `items/site/oneOf[subschema #1: Site]/machineStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/expected-rack-group the `items/site/oneOf[subschema #1: Site]/contact` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/expected-rack-group the `items/site/oneOf[subschema #1: Site]/location` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/expected-rack-group the `items/site/oneOf[subschema #1: Site]/machineStats` response's property `type` changed from `object` to `any` for status `200`
+API POST /v2/org/{org}/nico/expected-rack-group the response property `site/oneOf[subschema #1: Site]/gpuStats` became nullable for the status `201`
+API POST /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteContact, subschema #2` to the `site/oneOf[subschema #1: Site]/contact` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteLocation, subschema #2` to the `site/oneOf[subschema #1: Site]/location` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteMachineStats, subschema #2` to the `site/oneOf[subschema #1: Site]/machineStats` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/expected-rack-group the `site/oneOf[subschema #1: Site]/contact` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/expected-rack-group the `site/oneOf[subschema #1: Site]/location` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/expected-rack-group the `site/oneOf[subschema #1: Site]/machineStats` response's property `type` changed from `object` to `any` for status `201`
+API PUT /v2/org/{org}/nico/expected-rack-group the response property `items/site/oneOf[subschema #1: Site]/gpuStats` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteContact, subschema #2` to the `items/site/oneOf[subschema #1: Site]/contact` response property `oneOf` list for the response status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteLocation, subschema #2` to the `items/site/oneOf[subschema #1: Site]/location` response property `oneOf` list for the response status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group added `#/components/schemas/SiteMachineStats, subschema #2` to the `items/site/oneOf[subschema #1: Site]/machineStats` response property `oneOf` list for the response status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group the `items/site/oneOf[subschema #1: Site]/contact` response's property `type` changed from `object` to `any` for status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group the `items/site/oneOf[subschema #1: Site]/location` response's property `type` changed from `object` to `any` for status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group the `items/site/oneOf[subschema #1: Site]/machineStats` response's property `type` changed from `object` to `any` for status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group/all the response property `items/site/oneOf[subschema #1: Site]/gpuStats` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group/all added `#/components/schemas/SiteContact, subschema #2` to the `items/site/oneOf[subschema #1: Site]/contact` response property `oneOf` list for the response status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group/all added `#/components/schemas/SiteLocation, subschema #2` to the `items/site/oneOf[subschema #1: Site]/location` response property `oneOf` list for the response status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group/all added `#/components/schemas/SiteMachineStats, subschema #2` to the `items/site/oneOf[subschema #1: Site]/machineStats` response property `oneOf` list for the response status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group/all the `items/site/oneOf[subschema #1: Site]/contact` response's property `type` changed from `object` to `any` for status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group/all the `items/site/oneOf[subschema #1: Site]/location` response's property `type` changed from `object` to `any` for status `200`
+API PUT /v2/org/{org}/nico/expected-rack-group/all the `items/site/oneOf[subschema #1: Site]/machineStats` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/expected-rack-group/{id} the response property `site/oneOf[subschema #1: Site]/gpuStats` became nullable for the status `200`
+API GET /v2/org/{org}/nico/expected-rack-group/{id} added `#/components/schemas/SiteContact, subschema #2` to the `site/oneOf[subschema #1: Site]/contact` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/expected-rack-group/{id} added `#/components/schemas/SiteLocation, subschema #2` to the `site/oneOf[subschema #1: Site]/location` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/expected-rack-group/{id} added `#/components/schemas/SiteMachineStats, subschema #2` to the `site/oneOf[subschema #1: Site]/machineStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/expected-rack-group/{id} the `site/oneOf[subschema #1: Site]/contact` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/expected-rack-group/{id} the `site/oneOf[subschema #1: Site]/location` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/expected-rack-group/{id} the `site/oneOf[subschema #1: Site]/machineStats` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} the response property `site/oneOf[subschema #1: Site]/gpuStats` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added `#/components/schemas/SiteContact, subschema #2` to the `site/oneOf[subschema #1: Site]/contact` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added `#/components/schemas/SiteLocation, subschema #2` to the `site/oneOf[subschema #1: Site]/location` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} added `#/components/schemas/SiteMachineStats, subschema #2` to the `site/oneOf[subschema #1: Site]/machineStats` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} the `site/oneOf[subschema #1: Site]/contact` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} the `site/oneOf[subschema #1: Site]/location` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} the `site/oneOf[subschema #1: Site]/machineStats` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/site the response property `items/gpuStats` became nullable for the status `200`
+API GET /v2/org/{org}/nico/site added `#/components/schemas/SiteContact, subschema #2` to the `items/contact` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/site added `#/components/schemas/SiteLocation, subschema #2` to the `items/location` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/site added `#/components/schemas/SiteMachineStats, subschema #2` to the `items/machineStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/site the `items/contact` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/site the `items/location` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/site the `items/machineStats` response's property `type` changed from `object` to `any` for status `200`
+API POST /v2/org/{org}/nico/site the response property `gpuStats` became nullable for the status `201`
+API POST /v2/org/{org}/nico/site added `#/components/schemas/SiteContact, subschema #2` to the `contact` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/site added `#/components/schemas/SiteLocation, subschema #2` to the `location` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/site added `#/components/schemas/SiteMachineStats, subschema #2` to the `machineStats` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/site the `contact` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/site the `location` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/site the `machineStats` response's property `type` changed from `object` to `any` for status `201`
+API GET /v2/org/{org}/nico/site/{siteId} the response property `gpuStats` became nullable for the status `200`
+API GET /v2/org/{org}/nico/site/{siteId} added `#/components/schemas/SiteContact, subschema #2` to the `contact` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/site/{siteId} added `#/components/schemas/SiteLocation, subschema #2` to the `location` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/site/{siteId} added `#/components/schemas/SiteMachineStats, subschema #2` to the `machineStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/site/{siteId} the `contact` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/site/{siteId} the `location` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/site/{siteId} the `machineStats` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/site/{siteId} the response property `gpuStats` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/site/{siteId} added `#/components/schemas/SiteContact, subschema #2` to the `contact` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/site/{siteId} added `#/components/schemas/SiteLocation, subschema #2` to the `location` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/site/{siteId} added `#/components/schemas/SiteMachineStats, subschema #2` to the `machineStats` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/site/{siteId} the `contact` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/site/{siteId} the `location` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/site/{siteId} the `machineStats` response's property `type` changed from `object` to `any` for status `200`
 
 # Provider contract corrections reflect existing null responses and request validation.
 # Populated nullable objects still validate against their referenced schemas.
@@ -366,3 +459,95 @@ API PATCH /v2/org/{org}/nico/vpc/{vpcId} added `#/components/schemas/NetworkSecu
 API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+
+# Instance deletion maps categories to Core IssueCategory, which defines only Hardware, Network, Performance,
+# and Other. Its validator requires a non-empty summary; online repair requires non-empty summary and details.
+DELETE /v2/org/{org}/nico/instance/{instanceId} the request property `machineHealthIssue/summary` became not nullable
+DELETE /v2/org/{org}/nico/instance/{instanceId} removed the enum value `Software` of the request property `machineHealthIssue/category`
+DELETE /v2/org/{org}/nico/instance/{instanceId} removed the enum value `Storage` of the request property `machineHealthIssue/category`
+DELETE /v2/org/{org}/nico/instance/{instanceId} the `machineHealthIssue/summary` request property's minLength was increased from `0` to `1`
+PATCH /v2/org/{org}/nico/machine/{machineId} the request property `healthIssue/details` became not nullable
+PATCH /v2/org/{org}/nico/machine/{machineId} the request property `healthIssue/summary` became not nullable
+PATCH /v2/org/{org}/nico/machine/{machineId} the `healthIssue/details` request property's minLength was increased from `0` to `1`
+PATCH /v2/org/{org}/nico/machine/{machineId} the `healthIssue/summary` request property's minLength was increased from `0` to `1`
+
+# availablePrefixes holds CIDR prefix strings from IPAM, never UUIDs.
+GET /v2/org/{org}/nico/ipblock the `items/usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+POST /v2/org/{org}/nico/ipblock the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `201`
+GET /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the `items/usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/subnet the `items/usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+POST /v2/org/{org}/nico/subnet the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `201`
+GET /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+PATCH /v2/org/{org}/nico/subnet/{subnetId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+GET /v2/org/{org}/nico/vpc-prefix the `items/usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+POST /v2/org/{org}/nico/vpc-prefix the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `201`
+GET /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+PATCH /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the `usageStats/availablePrefixes` response's property `format` changed from `uuid` to `none` for status `200`
+
+# The server accepts exactly Basic or Bearer for image and iPXE artifact auth; the enum documents the validator.
+POST /v2/org/{org}/nico/operating-system request property `imageAuthType` was restricted to a list of enum values
+POST /v2/org/{org}/nico/operating-system request property `ipxeTemplateArtifacts/items/authType` was restricted to a list of enum values
+PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} request property `imageAuthType` was restricted to a list of enum values
+PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} request property `ipxeTemplateArtifacts/items/authType` was restricted to a list of enum values
+
+# SkuComponents.tpm is a single object on the wire (Go *APISkuTpm, no omitempty): the array declaration never
+# matched a response, and a SKU without a TPM serializes it as null, so the schema now allows SkuTpm or null.
+GET /v2/org/{org}/nico/expected-machine added `#/components/schemas/SkuTpm, subschema #2` to the `items/sku/components/tpm` response property `oneOf` list for the response status `200`
+GET /v2/org/{org}/nico/expected-machine the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} added `#/components/schemas/SkuTpm, subschema #2` to the `sku/components/tpm` response property `oneOf` list for the response status `200`
+GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+GET /v2/org/{org}/nico/sku added `#/components/schemas/SkuTpm, subschema #2` to the `items/components/tpm` response property `oneOf` list for the response status `200`
+GET /v2/org/{org}/nico/sku the `items/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+GET /v2/org/{org}/nico/sku/{skuId} added `#/components/schemas/SkuTpm, subschema #2` to the `components/tpm` response property `oneOf` list for the response status `200`
+GET /v2/org/{org}/nico/sku/{skuId} the `components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+PATCH /v2/org/{org}/nico/expected-machine/batch added `#/components/schemas/SkuTpm, subschema #2` to the `items/sku/components/tpm` response property `oneOf` list for the response status `200`
+PATCH /v2/org/{org}/nico/expected-machine/batch the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} added `#/components/schemas/SkuTpm, subschema #2` to the `sku/components/tpm` response property `oneOf` list for the response status `200`
+PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+PATCH /v2/org/{org}/nico/sku/{skuId} added `#/components/schemas/SkuTpm, subschema #2` to the `components/tpm` response property `oneOf` list for the response status `200`
+PATCH /v2/org/{org}/nico/sku/{skuId} the `components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+POST /v2/org/{org}/nico/expected-machine added `#/components/schemas/SkuTpm, subschema #2` to the `sku/components/tpm` response property `oneOf` list for the response status `201`
+POST /v2/org/{org}/nico/expected-machine the `sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `201`
+POST /v2/org/{org}/nico/expected-machine/batch added `#/components/schemas/SkuTpm, subschema #2` to the `items/sku/components/tpm` response property `oneOf` list for the response status `201`
+POST /v2/org/{org}/nico/expected-machine/batch the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `201`
+POST /v2/org/{org}/nico/sku added `#/components/schemas/SkuTpm, subschema #2` to the `components/tpm` response property `oneOf` list for the response status `201`
+POST /v2/org/{org}/nico/sku the `components/tpm` response's property `type` changed from `array<object>` to `any` for status `201`
+PUT /v2/org/{org}/nico/expected-machine/all added `#/components/schemas/SkuTpm, subschema #2` to the `items/sku/components/tpm` response property `oneOf` list for the response status `200`
+PUT /v2/org/{org}/nico/expected-machine/all the `items/sku/components/tpm` response's property `type` changed from `array<object>` to `any` for status `200`
+
+# Machine metadata now renders unavailable DMI and BMC data as null instead of
+# omitting those response fields. oasdiff v1.21 reports oneOf/type deltas; older
+# versions report response-property-became-nullable for the same wire contract.
+API GET /v2/org/{org}/nico/machine added `#/components/schemas/MachineBMCInfo, subschema #2` to the `items/metadata/bmcInfo` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine added `#/components/schemas/MachineDMIData, subschema #2` to the `items/metadata/dmiData` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine the `items/metadata/bmcInfo` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/metadata/dmiData` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineBMCInfo, subschema #2` to the `metadata/bmcInfo` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineDMIData, subschema #2` to the `metadata/dmiData` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `metadata/dmiData` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineBMCInfo, subschema #2` to the `metadata/bmcInfo` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineDMIData, subschema #2` to the `metadata/dmiData` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `metadata/dmiData` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/bmcInfo` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/dmiData` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/bmcInfo` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/dmiData` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/bmcInfo` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/dmiData` became nullable for the status `200`
+
+# Instance propagation details can be absent; allow the existing null responses.
+# Match the reports emitted by CI's pinned oasdiff v1.21.0.
+API GET /v2/org/{org}/nico/instance added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `items/networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/instance the `items/networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+API POST /v2/org/{org}/nico/instance added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/instance the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/instance/batch added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `items/networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/instance/batch the `items/networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `201`
+API GET /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/NetworkSecurityGroupPropagationDetails, subschema #2` to the `networkSecurityGroupPropagationDetails` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the `networkSecurityGroupPropagationDetails` response's property `type` changed from `object` to `any` for status `200`

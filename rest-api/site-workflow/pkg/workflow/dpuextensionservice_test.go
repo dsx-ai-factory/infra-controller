@@ -110,7 +110,7 @@ func (s *CreateDpuExtensionServiceTestSuite) Test_CreateDpuExtensionService_Succ
 	s.NoError(s.env.GetWorkflowError())
 
 	var result *corev1.DpuExtensionService
-	s.env.GetWorkflowResult(&result)
+	s.Require().NoError(s.env.GetWorkflowResult(&result))
 
 	s.Equal(result.ServiceId, *request.ServiceId)
 	s.Equal(result.ServiceName, request.ServiceName)
@@ -183,7 +183,7 @@ func (s *UpdateDpuExtensionServiceTestSuite) Test_UpdateDpuExtensionService_Succ
 	s.NoError(s.env.GetWorkflowError())
 
 	var result *corev1.DpuExtensionService
-	s.env.GetWorkflowResult(&result)
+	s.Require().NoError(s.env.GetWorkflowResult(&result))
 
 	s.Equal(result.ServiceId, request.ServiceId)
 	s.Equal(result.ServiceName, *request.ServiceName)
@@ -313,7 +313,7 @@ func (s *GetDpuExtensionServiceVersionsInfoTestSuite) Test_GetDpuExtensionServic
 	s.NoError(s.env.GetWorkflowError())
 
 	var result *corev1.DpuExtensionServiceVersionInfoList
-	s.env.GetWorkflowResult(&result)
+	s.Require().NoError(s.env.GetWorkflowResult(&result))
 
 	s.Equal(1, len(result.VersionInfos))
 	s.Equal(versionInfo.Version, result.VersionInfos[0].Version)

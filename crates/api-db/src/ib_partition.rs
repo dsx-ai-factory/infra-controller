@@ -618,20 +618,28 @@ mod tests {
                     let partition =
                         create_reserved_partition(&mut txn, &pkey_pool, "original", pkey).await;
                     match reservation {
-                        Some(state) => {
-                            sqlx::query("UPDATE resource_pool SET state = $1, allocated = NULL WHERE name = $2 AND value = '42'")
-                                .bind(sqlx::types::Json(state))
-                                .bind(pkey_pool.name())
-                                .execute(&mut *txn)
+                        Some(_) => {
+                            assert_eq!(
+                                crate::resource_pool::release(
+                                    &pkey_pool,
+                                    &mut txn,
+                                    pkey.into(),
+                                    OwnerType::IBPartition,
+                                    "original",
+                                )
                                 .await
-                                .unwrap();
+                                .unwrap(),
+                                ConditionalWrite::Applied(())
+                            );
                         }
                         None => {
-                            sqlx::query("DELETE FROM resource_pool WHERE name = $1 AND value = '42'")
-                                .bind(pkey_pool.name())
-                                .execute(&mut *txn)
-                                .await
-                                .unwrap();
+                            sqlx::query(
+                                "DELETE FROM resource_pool WHERE name = $1 AND value = '42'",
+                            )
+                            .bind(pkey_pool.name())
+                            .execute(&mut *txn)
+                            .await
+                            .unwrap();
                         }
                     }
                     txn.commit().await.unwrap();
@@ -644,7 +652,10 @@ mod tests {
                         .map_err(|error| error.to_string())?;
                     assert_eq!(result, ConditionalWrite::Applied(partition.id));
                     txn.commit().await.unwrap();
-                    assert_eq!(persisted_cleanup_records(&pool).await, (partitions, allocations));
+                    assert_eq!(
+                        persisted_cleanup_records(&pool).await,
+                        (partitions, allocations)
+                    );
                     Ok::<(), String>(())
                 }
             },

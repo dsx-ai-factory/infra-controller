@@ -16,24 +16,33 @@
  */
 
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineType};
-use model::host_machine_update::HostMachineUpdate;
+use chrono::{DateTime, Utc};
+use const_format::concatcp;
+use model::host_machine_update::{HostMachineUpdate, HostUpdateGateRow};
 use model::machine::HostReprovisionRequest;
 use sqlx::PgConnection;
 
 use super::DatabaseError;
+use crate::desired_firmware::DesiredFirmwareRow;
 
-pub async fn find_upgrade_needed(
-    txn: &mut PgConnection,
-    global_enabled: bool,
-    ready_only: bool,
-) -> Result<Vec<HostMachineUpdate>, DatabaseError> {
-    let host_prefix = MachineType::Host.id_prefix();
+// The host firmware upgrade predicates. find_upgrade_needed requires all of
+// them, find_update_gates reports each one, so both read the same text.
+const PRED_HOST: &str = "starts_with(machines.id, $2)";
+const PRED_STATE: &str = "($3 OR machines.controller_state->>'state' = 'ready')";
+const PRED_NO_REQ: &str = "machines.host_reprovisioning_requested IS NULL";
+const PRED_VERSIONS: &str =
+    "desired_firmware.versions->>'Versions' != explored_endpoints.exploration_report->>'Versions'";
+const PRED_AUTO: &str =
+    "(machines.firmware_autoupdate = TRUE OR ($4 AND machines.firmware_autoupdate IS NULL))";
+const PRED_WINDOW: &str = "(desired_firmware.explicit_update_start_needed = false OR ($1 > machines.firmware_update_time_window_start AND $1 < machines.firmware_update_time_window_end))";
+const JOIN_DESIRED: &str = "explored_endpoints.exploration_report->>'Vendor' = desired_firmware.vendor AND explored_endpoints.exploration_report->>'Model' = desired_firmware.model";
 
-    // Both desired_firmware.versions and explored_endpoints.exploration_report->>'Versions' are sorted, and will have their keys
-    // defined based on the firmware config.  If a new key (component type) is added to the configuration, we would initally flag
-    // everything, but nothing would happen to them and the next time site explorer runs on those hosts they will be made to match.
-    // The ORDER BY causes us to choose unassigned machines before assigned machines.
-    let query = r#"select machines.id, explored_endpoints.exploration_report->>'Vendor', explored_endpoints.exploration_report->>'Model'
+// Both desired_firmware.versions and explored_endpoints.exploration_report->>'Versions' are sorted, and will have their keys
+// defined based on the firmware config.  If a new key (component type) is added to the configuration, we would initally flag
+// everything, but nothing would happen to them and the next time site explorer runs on those hosts they will be made to match.
+// The ORDER BY causes us to choose unassigned machines before assigned machines.
+const FIND_UPGRADE_NEEDED: &str = concatcp!(
+    r#"select machines.id, explored_endpoints.exploration_report->>'Vendor', explored_endpoints.exploration_report->>'Model'
         FROM explored_endpoints
         INNER JOIN machine_interface_addresses
             ON explored_endpoints.address = machine_interface_addresses.address
@@ -43,16 +52,39 @@ pub async fn find_upgrade_needed(
         INNER JOIN machines
             ON machine_interfaces.machine_id = machines.id
         INNER JOIN desired_firmware
-            ON explored_endpoints.exploration_report->>'Vendor' = desired_firmware.vendor AND explored_endpoints.exploration_report->>'Model' = desired_firmware.model
-        WHERE starts_with(machines.id, $2)
-            AND ($3 OR machines.controller_state->>'state' = 'ready')
-            AND machines.host_reprovisioning_requested IS NULL
-            AND desired_firmware.versions->>'Versions' != explored_endpoints.exploration_report->>'Versions'
-            AND (machines.firmware_autoupdate = TRUE OR ($4 AND machines.firmware_autoupdate IS NULL))
-            AND (desired_firmware.explicit_update_start_needed = false OR ($1 > machines.firmware_update_time_window_start AND $1 < machines.firmware_update_time_window_end))
+            ON "#,
+    JOIN_DESIRED,
+    "
+        WHERE ",
+    PRED_HOST,
+    "
+            AND ",
+    PRED_STATE,
+    "
+            AND ",
+    PRED_NO_REQ,
+    "
+            AND ",
+    PRED_VERSIONS,
+    "
+            AND ",
+    PRED_AUTO,
+    "
+            AND ",
+    PRED_WINDOW,
+    "
         ORDER BY machines.controller_state->>'state' != 'ready'
-        ;"#;
-    sqlx::query_as(query)
+        ;"
+);
+
+pub async fn find_upgrade_needed(
+    txn: &mut PgConnection,
+    global_enabled: bool,
+    ready_only: bool,
+) -> Result<Vec<HostMachineUpdate>, DatabaseError> {
+    let host_prefix = MachineType::Host.id_prefix();
+
+    sqlx::query_as(FIND_UPGRADE_NEEDED)
         .bind(chrono::Utc::now())
         .bind(host_prefix)
         .bind(!ready_only)
@@ -60,6 +92,78 @@ pub async fn find_upgrade_needed(
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::new("find_outdated_hosts", e))
+}
+
+/// Evaluates each find_upgrade_needed predicate for `host_ids`, one row per
+/// BMC address (or one row without an address), against `desired` instead of
+/// the desired_firmware table. The CTE shadows the table name, so the predicate
+/// text is shared and the table is never read. A row passes the manager query
+/// exactly when every predicate is true.
+pub async fn find_update_gates(
+    txn: &mut PgConnection,
+    now: DateTime<Utc>,
+    global_enabled: bool,
+    ready_only: bool,
+    desired: &[DesiredFirmwareRow],
+    host_ids: &[HostMachineId],
+) -> Result<Vec<HostUpdateGateRow>, DatabaseError> {
+    const QUERY: &str = concatcp!(
+        "WITH desired_firmware AS (
+            SELECT * FROM jsonb_to_recordset($6)
+            AS d(vendor text, model text, versions jsonb, explicit_update_start_needed boolean)
+        )
+        SELECT machines.id AS host_id,
+            machine_interface_addresses.address AS bmc_address,
+            explored_endpoints.version AS report_version,
+            explored_endpoints.waiting_for_explorer_refresh,
+            explored_endpoints.exploration_report->>'Vendor' AS report_vendor,
+            explored_endpoints.exploration_report->>'Model' AS report_model,
+            NULLIF(explored_endpoints.exploration_report->'Versions', 'null'::jsonb) AS report_versions,
+            NULLIF(explored_endpoints.exploration_report->'LastExplorationError', 'null'::jsonb) AS report_error,
+            desired_firmware.vendor IS NOT NULL AS has_target,
+            ",
+        PRED_HOST,
+        " AS stable_host,
+            ",
+        PRED_VERSIONS,
+        " AS versions_differ,
+            COALESCE(",
+        PRED_NO_REQ,
+        ", false) AS no_open_request,
+            COALESCE(",
+        PRED_STATE,
+        ", false) AS state_ok,
+            COALESCE(",
+        PRED_AUTO,
+        ", false) AS autoupdate_on,
+            COALESCE(",
+        PRED_WINDOW,
+        ", false) AS window_ok
+        FROM machines
+        LEFT JOIN machine_interfaces
+            ON machine_interfaces.machine_id = machines.id
+            AND machine_interfaces.interface_type = 'Bmc'
+        LEFT JOIN machine_interface_addresses
+            ON machine_interface_addresses.interface_id = machine_interfaces.id
+        LEFT JOIN explored_endpoints
+            ON explored_endpoints.address = machine_interface_addresses.address
+        LEFT JOIN desired_firmware
+            ON ",
+        JOIN_DESIRED,
+        "
+        WHERE machines.id = ANY($5)"
+    );
+
+    sqlx::query_as(QUERY)
+        .bind(now)
+        .bind(MachineType::Host.id_prefix())
+        .bind(!ready_only)
+        .bind(global_enabled)
+        .bind(host_ids)
+        .bind(sqlx::types::Json(desired))
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("find_update_gates", e))
 }
 
 pub async fn find_upgrade_in_progress(
@@ -192,4 +296,39 @@ pub async fn clear_manual_firmware_upgrade_completed(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// find_upgrade_needed as written before its predicates were shared.
+    const ORIGINAL_FIND_UPGRADE_NEEDED: &str = r#"select machines.id, explored_endpoints.exploration_report->>'Vendor', explored_endpoints.exploration_report->>'Model'
+        FROM explored_endpoints
+        INNER JOIN machine_interface_addresses
+            ON explored_endpoints.address = machine_interface_addresses.address
+        INNER JOIN machine_interfaces
+            ON machine_interface_addresses.interface_id = machine_interfaces.id
+            AND machine_interfaces.interface_type = 'Bmc'
+        INNER JOIN machines
+            ON machine_interfaces.machine_id = machines.id
+        INNER JOIN desired_firmware
+            ON explored_endpoints.exploration_report->>'Vendor' = desired_firmware.vendor AND explored_endpoints.exploration_report->>'Model' = desired_firmware.model
+        WHERE starts_with(machines.id, $2)
+            AND ($3 OR machines.controller_state->>'state' = 'ready')
+            AND machines.host_reprovisioning_requested IS NULL
+            AND desired_firmware.versions->>'Versions' != explored_endpoints.exploration_report->>'Versions'
+            AND (machines.firmware_autoupdate = TRUE OR ($4 AND machines.firmware_autoupdate IS NULL))
+            AND (desired_firmware.explicit_update_start_needed = false OR ($1 > machines.firmware_update_time_window_start AND $1 < machines.firmware_update_time_window_end))
+        ORDER BY machines.controller_state->>'state' != 'ready'
+        ;"#;
+
+    #[test]
+    fn find_upgrade_needed_sql_text_unchanged() {
+        let normalized = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            normalized(FIND_UPGRADE_NEEDED),
+            normalized(ORIGINAL_FIND_UPGRADE_NEEDED)
+        );
+    }
 }

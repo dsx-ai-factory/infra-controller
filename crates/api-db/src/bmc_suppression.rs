@@ -85,6 +85,36 @@ pub async fn find_many(
         .map_err(|e| DatabaseError::query(&query, e))
 }
 
+/// Returns all suppression sources for a BMC in the selected subsystem.
+pub async fn find_for_bmc(
+    db: impl DbReader<'_>,
+    bmc_mac_address: MacAddress,
+    subsystem: BmcSuppressionSubsystem,
+) -> DatabaseResult<Vec<BmcSuppressionSource>> {
+    const QUERY: &str =
+        "SELECT source FROM bmc_suppressions WHERE bmc_mac_address = $1 AND subsystem = $2";
+    sqlx::query_scalar(QUERY)
+        .bind(bmc_mac_address)
+        .bind(subsystem)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
+/// Returns endpoint IPs paused by DPF provisioning, using their BMC interface identity.
+pub async fn dpf_suppressed_ips(db: impl DbReader<'_>) -> DatabaseResult<Vec<std::net::IpAddr>> {
+    const QUERY: &str = "SELECT DISTINCT mia.address FROM bmc_suppressions s
+        JOIN machine_interfaces mi ON mi.mac_address = s.bmc_mac_address
+        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+        WHERE s.subsystem = $1 AND s.source = $2";
+    sqlx::query_scalar(QUERY)
+        .bind(BmcSuppressionSubsystem::SiteExplorer)
+        .bind(BmcSuppressionSource::DpfProvisioning)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
 /// Returns an active suppression request for this source, if one exists.
 pub async fn find(
     db: impl DbReader<'_>,
@@ -1013,6 +1043,54 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+    #[crate::sqlx_test]
+    async fn dpf_source_migration_preserves_existing_suppressions(pool: sqlx::PgPool) {
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::raw_sql(
+            "ALTER TABLE bmc_suppressions DROP CONSTRAINT bmc_suppressions_source_check;
+            ALTER TABLE bmc_suppressions ADD CONSTRAINT bmc_suppressions_source_check
+            CHECK (source IN ('decommissioning', 'bmc_credential_rotation', 'factory_reset_bmc'));",
+        )
+        .execute(conn.as_mut())
+        .await
+        .unwrap();
+        for (last, source) in [
+            (1, DECOMMISSIONING),
+            (2, ROTATION),
+            (3, BmcSuppressionSource::FactoryResetBmc),
+        ] {
+            let mut input = upsert_input(last, SITE_EXPLORER, "active workflow");
+            input.source = source;
+            upsert(conn.as_mut(), &input).await.unwrap();
+        }
+        let before = find_all_by_subsystem(conn.as_mut(), SITE_EXPLORER)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261019084224_dpf_provisioning_suppression.sql"
+        ))
+        .execute(conn.as_mut())
+        .await
+        .unwrap();
+        assert_eq!(
+            find_all_by_subsystem(conn.as_mut(), SITE_EXPLORER)
+                .await
+                .unwrap(),
+            before
+        );
+        let mut input = upsert_input(4, SITE_EXPLORER, "DPF provisioning");
+        input.source = BmcSuppressionSource::DpfProvisioning;
+        upsert(conn.as_mut(), &input).await.unwrap();
+        super::delete(conn.as_mut(), mac(4), SITE_EXPLORER, input.source)
+            .await
+            .unwrap();
+        assert_eq!(
+            find_all_by_subsystem(conn.as_mut(), SITE_EXPLORER)
+                .await
+                .unwrap(),
+            before
         );
     }
 }

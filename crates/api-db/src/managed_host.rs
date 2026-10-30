@@ -34,6 +34,9 @@ use sqlx::PgConnection;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, queries};
 
+#[cfg(test)]
+mod tests;
+
 /// Loads a ManagedHost snapshot from the database
 pub async fn load_snapshot<DB>(
     txn: &mut DB,
@@ -202,7 +205,7 @@ where
 
     // Now that we've built the snapshots for all hosts that have been somehow referenced
     // in the query, go back and fulfill the original request
-    let result = [
+    let [dpu_pairs, host_pairs] = [
         // First loop is for requested DPUs
         // Since their snapshot might also have been queried for a host in the same query,
         // we have to clone from snapshots_by_host_id
@@ -226,10 +229,11 @@ where
                     .map(|snapshot| Ok((host_id.to_machine_id().try_into()?, snapshot)))
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?,
-    ]
-    .concat()
-    .into_iter()
-    .collect::<HashMap<_, _>>();
+    ];
+    let result = dpu_pairs
+        .into_iter()
+        .chain(host_pairs)
+        .collect::<HashMap<_, _>>();
 
     Ok(result)
 }
@@ -240,16 +244,19 @@ pub async fn load_by_instance_ids(
     instance_ids: &[InstanceId],
     load_snapshot_options: LoadSnapshotOptions,
 ) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
+    // Keep `ARRAY`: PostgreSQL resolves the requested instances to host IDs once,
+    // then filters the machine scan before building snapshots. An outer instance
+    // join can build snapshots for unrelated machines before filtering them out.
     let query = format!(
         r#"SELECT m.* FROM ({}) m
-        INNER JOIN instances i ON i.machine_id = m.id
-        WHERE i.id = ANY(
+        WHERE m.id = ANY(ARRAY(
+            SELECT i.machine_id FROM instances i WHERE i.id = ANY(
     "#,
         managed_host_snapshots_query(&load_snapshot_options)
     );
     let result: Vec<ManagedHostStateSnapshot> = sqlx::QueryBuilder::new(query)
         .push_bind(instance_ids)
-        .push(")")
+        .push(")))")
         .build_query_as()
         .fetch_all(txn)
         .await

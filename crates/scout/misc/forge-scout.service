@@ -5,6 +5,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+Environment=MLX_FIRMWARE_SUPERVISOR_LAUNCH=systemd-scope
 EnvironmentFile=-/opt/forge/forge-scout.env
 ExecStartPre=/opt/forge/forge-scout-pre.sh 
 User=root

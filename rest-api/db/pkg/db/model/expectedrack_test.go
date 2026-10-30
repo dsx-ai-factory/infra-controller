@@ -144,30 +144,52 @@ func TestExpectedRackDAO_UpdateMultiple(t *testing.T) {
 	site := TestBuildSite(t, session, provider, "group-site", user)
 	dao := NewExpectedRackDAO(session)
 	for _, tc := range []struct {
-		name  string
-		group *string
+		name      string
+		update    ExpectedRackUpdateInput
+		wantError string
 	}{
-		{name: "supplied", group: new("new-group")},
+		{name: "supplied", update: ExpectedRackUpdateInput{RackGroupID: new("new-group")}},
 		{name: "omitted"},
+		{
+			name:      "mixed name presence",
+			update:    ExpectedRackUpdateInput{Name: new(""), RackGroupID: new("new-group")},
+			wantError: "name must be supplied for every expected rack update or omitted from every update",
+		},
+		{
+			name:      "mixed description presence",
+			update:    ExpectedRackUpdateInput{Description: new(""), RackGroupID: new("new-group")},
+			wantError: "description must be supplied for every expected rack update or omitted from every update",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ids := []uuid.UUID{uuid.New(), uuid.New()}
-			_, err := dao.CreateMultiple(ctx, nil, []ExpectedRackCreateInput{
-				{ExpectedRackID: ids[0], SiteID: site.ID, RackID: tc.name + "-a", RackProfileID: "profile", RackGroupID: new("old-group"), CreatedBy: user.ID},
-				{ExpectedRackID: ids[1], SiteID: site.ID, RackID: tc.name + "-b", RackProfileID: "profile", RackGroupID: new("preserve-group"), CreatedBy: user.ID},
+			before, err := dao.CreateMultiple(ctx, nil, []ExpectedRackCreateInput{
+				{ExpectedRackID: ids[0], SiteID: site.ID, RackID: tc.name + "-a", RackProfileID: "profile", RackGroupID: new("old-group"), Name: "first-name", Description: "first-description", CreatedBy: user.ID},
+				{ExpectedRackID: ids[1], SiteID: site.ID, RackID: tc.name + "-b", RackProfileID: "profile", RackGroupID: new("preserve-group"), Name: "second-name", Description: "second-description", CreatedBy: user.ID},
 			})
 			if !assert.NoError(t, err) {
 				return
 			}
+			update := tc.update
+			update.ExpectedRackID = ids[0]
 			rows, err := dao.UpdateMultiple(ctx, nil, []ExpectedRackUpdateInput{
-				{ExpectedRackID: ids[0], RackGroupID: tc.group}, {ExpectedRackID: ids[1]},
+				update, {ExpectedRackID: ids[1]},
 			})
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				for _, original := range before {
+					stored, err := dao.Get(ctx, nil, original.ID, nil, false)
+					require.NoError(t, err)
+					assert.Equal(t, original, *stored)
+				}
+				return
+			}
 			if !assert.NoError(t, err) || !assert.Len(t, rows, 2) {
 				return
 			}
 			want := "old-group"
-			if tc.group != nil {
-				want = *tc.group
+			if tc.update.RackGroupID != nil {
+				want = *tc.update.RackGroupID
 			}
 			assert.Equal(t, &want, rows[0].RackGroupID)
 			assert.Equal(t, new("preserve-group"), rows[1].RackGroupID)
@@ -682,7 +704,25 @@ func TestExpectedRackDAO_Update(t *testing.T) {
 		input              ExpectedRackUpdateInput
 		expectedError      bool
 		verifyChildSpanner bool
+		check              func(*testing.T, *ExpectedRack)
 	}{
+		{
+			desc: "Clear Name and Description while preserving RackID, profile, and labels",
+			input: ExpectedRackUpdateInput{
+				ExpectedRackID: erExp[0].ID,
+				Name:           cutil.GetPtr(""),
+				Description:    cutil.GetPtr(""),
+			},
+			check: func(t *testing.T, before *ExpectedRack) {
+				persisted, err := erd.Get(ctx, nil, erExp[0].ID, nil, false)
+				require.NoError(t, err)
+				assert.Empty(t, persisted.Name)
+				assert.Empty(t, persisted.Description)
+				assert.Equal(t, before.RackID, persisted.RackID)
+				assert.Equal(t, before.RackProfileID, persisted.RackProfileID)
+				assert.Equal(t, before.Labels, persisted.Labels)
+			},
+		},
 		{
 			desc: "Update RackProfileID",
 			input: ExpectedRackUpdateInput{
@@ -743,14 +783,16 @@ func TestExpectedRackDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			before, err := erd.Get(ctx, nil, tc.input.ExpectedRackID, nil, false)
+			require.NoError(t, err)
 			got, err := erd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if err != nil {
 				t.Logf("%s", err.Error())
 			}
 			if !tc.expectedError {
-				assert.Nil(t, err)
-				assert.NotNil(t, got)
+				require.NoError(t, err)
+				require.NotNil(t, got)
 				if tc.input.RackID != nil {
 					assert.Equal(t, *tc.input.RackID, got.RackID)
 				}
@@ -770,6 +812,9 @@ func TestExpectedRackDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
+				}
+				if tc.check != nil {
+					tc.check(t, before)
 				}
 			}
 		})

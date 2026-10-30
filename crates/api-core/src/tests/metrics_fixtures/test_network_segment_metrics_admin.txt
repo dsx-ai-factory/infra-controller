@@ -1,6 +1,9 @@
 # HELP carbide_available_ips_count Number of available IPs per network segment
 # TYPE carbide_available_ips_count gauge
 carbide_available_ips_count{fresh="true",name="TEST_SEGMENT",prefix="192.0.2.0/24",type="admin"} 253
+# HELP carbide_machines_count Number of carbide_machines in the system
+# TYPE carbide_machines_count gauge
+carbide_machines_count{fresh="true"} 1
 # HELP carbide_machines_enqueuer_iteration_latency_milliseconds The overall time it took to enqueue state handling tasks for all carbide_machines in the system
 # TYPE carbide_machines_enqueuer_iteration_latency_milliseconds histogram
 carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="0"} 0
@@ -129,7 +132,7 @@ carbide_machines_time_in_state_seconds_count{next_state="deleting",next_substate
 # HELP carbide_machines_total Number of carbide_machines in the system
 # TYPE carbide_machines_total gauge
 carbide_machines_total{fresh="true"} 1
-# HELP carbide_machines_with_state_handling_errors_per_state Number of state-handling errors for carbide_machines in a given state
+# HELP carbide_machines_with_state_handling_errors_per_state Number of carbide_machines whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error
 # TYPE carbide_machines_with_state_handling_errors_per_state gauge
 carbide_machines_with_state_handling_errors_per_state{error="any",fresh="true",state="deleting",substate="drainallocatedips"} 0
 # HELP carbide_nvlink_partition_monitor_nmxc_changes_applied_total Number of changes requested to NMX-C

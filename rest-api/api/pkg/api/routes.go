@@ -799,6 +799,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewResetMachineChassisHandler(dbSession, scp),
 		},
 		{
+			Path:    apiPathPrefix + "/machine/:id/spectrumx-multiplane",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetMachineSpectrumXMultiplaneHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/spectrumx-multiplane",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateMachineSpectrumXMultiplaneHandler(dbSession, scp),
+		},
+		{
 			Path:    apiPathPrefix + "/machine/:id/health-report",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllMachineHealthReportHandler(dbSession, scp, cfg),

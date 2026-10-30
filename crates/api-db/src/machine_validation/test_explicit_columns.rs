@@ -130,6 +130,14 @@ async fn exercise_run_queries(
     );
     expected.last_heartbeat_at = Some(heartbeat);
 
+    let current_on_demand = find_active_on_demand_machine_validation_by_id_and_machine_id(
+        txn.as_mut(),
+        &expected.id,
+        &machine_id,
+    )
+    .await?;
+    assert_run(&current_on_demand, &expected);
+
     let active = find_active(txn.as_mut()).await?;
     assert_eq!(active.len(), 1);
     assert_run(&active[0], &expected);
@@ -256,7 +264,7 @@ async fn exercise_config_queries(
     assert_eq!(expected.description, description);
     assert_eq!(expected.config, config);
     assert_eq!(expected.version.version_nr(), 1);
-    let configs = machine_validation_config::find_configs(txn.as_mut()).await?;
+    let configs = machine_validation_config::find_configs(txn.as_mut(), &[]).await?;
     assert_eq!(configs.len(), 1);
     assert_eq!(
         serde_json::to_value(&configs[0])?,
@@ -268,7 +276,7 @@ async fn exercise_config_queries(
         serde_json::to_value(&expected)?
     );
     assert!(
-        machine_validation_config::find_configs(txn.as_mut())
+        machine_validation_config::find_configs(txn.as_mut(), &[])
             .await?
             .is_empty()
     );

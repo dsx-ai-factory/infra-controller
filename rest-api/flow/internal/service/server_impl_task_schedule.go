@@ -41,21 +41,36 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 	// Input validation.
 	sched := req.GetSchedule()
 	if sched == nil {
-		return nil, errors.New("schedule config is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule config is required")
 	}
 
 	if sched.GetName() == "" {
-		return nil, errors.New("schedule.name is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule.name is required")
 	}
 
 	spec := sched.GetSpec()
 	if spec == nil ||
 		spec.GetType() == pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_UNSPECIFIED {
-		return nil, errors.New("schedule.spec.type is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule.spec.type is required")
 	}
 
 	if spec.GetSpec() == "" {
-		return nil, errors.New("schedule.spec.spec is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule.spec.spec is required")
+	}
+
+	// Validate the schedule before resolving the operation or its target scope.
+	// This also computes the value that will be persisted as next_run_at.
+	specType := protoSpecTypeToModel(spec.GetType())
+	tz := spec.GetTimezone()
+	if tz == "" && specType == dbmodel.SpecTypeCron {
+		tz = "UTC"
+	}
+
+	nextRunAt, err := taskschedule.ComputeFirstRunAt(
+		specType, spec.GetSpec(), tz,
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "schedule.spec is invalid: %v", err)
 	}
 
 	// Extract operation info and target_spec from the ScheduledOperation.
@@ -91,7 +106,10 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 	}
 
 	if len(scopes) == 0 {
-		return nil, errors.New("target_spec resolved to no rack scopes; at least one rack target is required") //nolint:lll
+		return nil, status.Error(
+			codes.InvalidArgument,
+			"target_spec resolved to no rack scopes; at least one rack target is required",
+		)
 	}
 
 	// The overlap policy drives the conflict strategy stored in the template:
@@ -121,21 +139,6 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build operation template: %w", err)
-	}
-
-	// Determine spec type and timezone.
-	specType := protoSpecTypeToModel(spec.GetType())
-	tz := spec.GetTimezone()
-	if tz == "" && specType == dbmodel.SpecTypeCron {
-		tz = "UTC"
-	}
-
-	// Compute next_run_at.
-	nextRunAt, err := taskschedule.ComputeFirstRunAt(
-		specType, spec.GetSpec(), tz,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("compute next_run_at: %w", err)
 	}
 
 	row := &dbmodel.TaskSchedule{

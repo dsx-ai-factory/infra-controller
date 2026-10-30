@@ -64,3 +64,14 @@ func (t PowerTaskDetails) RelevanceFor(
 
 	return PowerTaskUnrelated
 }
+
+// TaskContextMetadata contains only the fields needed to describe nearby work
+// and apply the rack conflict policy. Operation payloads and reports are absent.
+type TaskContextMetadata struct {
+	ID         uuid.UUID
+	RackID     uuid.UUID
+	Type       taskcommon.TaskType
+	Attributes taskcommon.TaskAttributes
+	Status     taskcommon.TaskStatus
+	CreatedAt  time.Time
+}

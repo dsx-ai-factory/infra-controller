@@ -238,7 +238,7 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 			}
 
 			// Refresh Site object
-			refreshedSite, serr := stDAO.GetByID(ctx, tx, st.ID, nil, false)
+			refreshedSite, serr := stDAO.GetByID(ctx, tx, st.ID, nil, false, false)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error retrieving Site from DB")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to refresh Site data with registration token, error communicating with data store", nil)
@@ -355,7 +355,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	}
 
 	// Check that Site exists
-	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Site DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site to update", nil)
@@ -502,7 +502,6 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 				siteUpdateInput.Config = &cdbm.SiteConfigUpdateInput{
 					NativeNetworking:          apiRequest.Capabilities.NativeNetworking,
 					NetworkSecurityGroup:      apiRequest.Capabilities.NetworkSecurityGroup,
-					NVLinkPartition:           apiRequest.Capabilities.NVLinkPartition,
 					Flow:                      apiRequest.Capabilities.Flow,
 					ImageBasedOperatingSystem: apiRequest.Capabilities.ImageBasedOperatingSystem,
 					DPSPowerManagement:        apiRequest.Capabilities.DPSPowerManagement,
@@ -615,7 +614,7 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gsh.dbSession)
 
-	st, err := stDAO.GetByID(ctx, nil, stID, qIncludeRelations, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, qIncludeRelations, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Site with specified ID", nil)
@@ -914,8 +913,13 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 	apiSites := []model.APISite{}
 	for _, site := range sites {
 		apiSite := model.NewAPISite(site, ssdMap[site.ID.String()], tsMap[site.ID])
-		// Attach machine stats for the site if they exist.
-		apiSite.MachineStats = machineStats[site.ID]
+		// Requested stats are populated even when the Site has nothing to count.
+		if includeMachineStats {
+			apiSite.MachineStats = machineStats[site.ID]
+			if apiSite.MachineStats == nil {
+				apiSite.MachineStats = model.NewAPISiteMachineStats()
+			}
+		}
 		// Attach GPU stats when requested. Sites with no GPUs get an empty
 		// array (not null), matching the single-site GPU stats endpoint.
 		if includeGpuStats {
@@ -1033,7 +1037,7 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(dsh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Site from DB by ID")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site with ID in URL", nil)
@@ -1157,7 +1161,7 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gssdh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Site with specified ID", nil)

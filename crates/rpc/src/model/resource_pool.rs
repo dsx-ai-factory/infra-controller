@@ -15,9 +15,22 @@
  * limitations under the License.
  */
 
-use model::resource_pool::ResourcePoolSnapshot;
+use model::resource_pool::{ResourcePoolSnapshot, ResourcePoolStats};
 
 use crate as rpc;
+
+impl From<ResourcePoolStats> for rpc::forge::ResourcePoolStats {
+    fn from(stats: ResourcePoolStats) -> Self {
+        Self {
+            used: stats.used as u64,
+            free: stats.free as u64,
+            auto_assign_used: stats.auto_assign_used as u64,
+            auto_assign_free: stats.auto_assign_free as u64,
+            non_auto_assign_used: stats.non_auto_assign_used as u64,
+            non_auto_assign_free: stats.non_auto_assign_free as u64,
+        }
+    }
+}
 
 impl From<ResourcePoolSnapshot> for rpc::forge::ResourcePool {
     fn from(rp: ResourcePoolSnapshot) -> Self {

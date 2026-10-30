@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use carbide_instrument::emit;
 use carbide_utils::redfish::{
     format_forwarded_host_parameter, log_redfish_http_error, redact_redfish_response_body,
     redfish_basic_authorization_context,
@@ -38,7 +39,7 @@ use nv_redfish::core::query::{ExpandQuery, FilterQuery};
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
-    SessionCreateResponse, StreamEvent,
+    Repair, RepairError, SessionCreateResponse, StreamEvent,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -102,6 +103,42 @@ enum CircuitState {
         deadline: Instant,
         backoff: Duration,
     },
+}
+
+/// A BMC's connection circuit opened after a connect-level failure.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_connection_circuit_opened",
+    metric_name = "carbide_health_bmc_connection_circuit_opened_total",
+    component = "nico-hardware-health",
+    log = warn,
+    metric = counter,
+    message = "BMC connect failure; opening connection circuit to stop request flood",
+    describe = "Number of times a BMC connection circuit opened after a connect-level failure."
+)]
+struct ConnectionCircuitOpened {
+    #[context]
+    bmc_ip: std::net::IpAddr,
+    #[context]
+    backoff_seconds: u64,
+    #[context]
+    error: String,
+}
+
+/// A BMC's connection circuit closed because the BMC answered again.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_connection_circuit_closed",
+    metric_name = "carbide_health_bmc_connection_circuit_closed_total",
+    component = "nico-hardware-health",
+    log = info,
+    metric = counter,
+    message = "BMC is reachable again; closing connection circuit",
+    describe = "Number of times a BMC connection circuit closed because the BMC answered again."
+)]
+struct ConnectionCircuitClosed {
+    #[context]
+    bmc_ip: std::net::IpAddr,
 }
 
 /// What a batch-oriented collector should do this iteration, derived from the
@@ -202,7 +239,7 @@ struct BmcIdentity {
     model: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct BmcLatencyEndpointLabels {
     pub(crate) machine_id: Option<String>,
     pub(crate) rack_id: Option<String>,
@@ -363,6 +400,19 @@ impl BmcClient {
         result: Result<T, HealthError>,
     ) -> Result<T, HealthError> {
         if let Err(error) = &result
+            && let Some(error) = bmc_source_error(error)
+        {
+            log_bmc_error(operation, error);
+        }
+        result
+    }
+
+    fn finish_repaired<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, RepairError<HealthError>>,
+    ) -> Result<T, RepairError<HealthError>> {
+        if let Err(RepairError::Transport(error)) = &result
             && let Some(error) = bmc_source_error(error)
         {
             log_bmc_error(operation, error);
@@ -583,6 +633,46 @@ impl BmcClient {
             })
     }
 
+    /// [`Self::read_with_auth_retry`] for a repaired read, which fails with a
+    /// [`RepairError`] rather than a [`HealthError`].
+    ///
+    /// A document that does not deserialize is not an authentication failure,
+    /// so it passes through the retry as a BMC error and is handed back as the
+    /// [`RepairError::Decode`] it was.
+    async fn read_repaired_with_auth_retry<T, E, Op, Fut>(
+        &self,
+        op: Op,
+    ) -> Result<T, RepairError<HealthError>>
+    where
+        HealthError: From<E>,
+        Op: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, RepairError<E>>>,
+    {
+        let decode_error = StdMutex::new(None);
+        let result = self
+            .read_with_auth_retry(|| async {
+                match op().await {
+                    Ok(value) => Ok(value),
+                    Err(RepairError::Transport(error)) => Err(HealthError::from(error)),
+                    Err(RepairError::Decode(error)) => {
+                        let message = error.to_string();
+                        *decode_error.lock().expect("decode error mutex poisoned") = Some(error);
+                        Err(HealthError::BmcError(message.into()))
+                    }
+                }
+            })
+            .await;
+        result.map_err(|error| {
+            match decode_error
+                .into_inner()
+                .expect("decode error mutex poisoned")
+            {
+                Some(decode) => RepairError::Decode(decode),
+                None => RepairError::Transport(error),
+            }
+        })
+    }
+
     /// Whether `generation` was already proven wrong by a replay that ran with
     /// freshly fetched credentials and was refused anyway.
     ///
@@ -705,7 +795,9 @@ impl BmcClient {
         }
         let mut state = self.circuit.lock().expect("circuit mutex poisoned");
         if !matches!(*state, CircuitState::Closed) {
-            tracing::info!(endpoint = ?self.addr, "BMC is reachable again; closing connection circuit");
+            emit(ConnectionCircuitClosed {
+                bmc_ip: self.addr.ip,
+            });
             *state = CircuitState::Closed;
         }
         // Clear the hint while still holding the lock so it can never lag the
@@ -723,12 +815,11 @@ impl BmcClient {
                     until: Instant::now() + CIRCUIT_INITIAL_BACKOFF,
                     backoff: CIRCUIT_INITIAL_BACKOFF,
                 };
-                tracing::warn!(
-                    endpoint = ?self.addr,
-                    backoff_seconds = CIRCUIT_INITIAL_BACKOFF.as_secs(),
-                    error = ?error,
-                    "BMC connect failure; opening connection circuit to stop request flood"
-                );
+                emit(ConnectionCircuitOpened {
+                    bmc_ip: self.addr.ip,
+                    backoff_seconds: CIRCUIT_INITIAL_BACKOFF.as_secs(),
+                    error: error.to_string(),
+                });
             }
             CircuitState::Probing { backoff, .. } => {
                 // The half-open probe failed: keep the circuit open and back off
@@ -785,10 +876,7 @@ impl BmcClient {
     }
 
     fn circuit_open_error(&self) -> HealthError {
-        HealthError::GenericError(format!(
-            "BMC {} is unreachable; request skipped while the connection circuit breaker is open",
-            self.addr.ip
-        ))
+        HealthError::BmcCircuitOpen(self.addr.ip)
     }
 
     /// Seed the circuit state and its fast-path hint coherently. Tests use this
@@ -928,7 +1016,7 @@ fn redact_request_credential<T>(
         NvBmcCredentials::Token { token } if !token.is_empty() => {
             vec![token.clone()]
         }
-        NvBmcCredentials::Token { .. } => Vec::new(),
+        NvBmcCredentials::Token { .. } | NvBmcCredentials::Anonymous => Vec::new(),
     };
 
     if sensitive_values.is_empty() {
@@ -1009,6 +1097,7 @@ impl HttpClient for InstrumentedHttpClient {
         credentials: &nv_redfish::bmc_http::BmcCredentials,
         etag: Option<ODataETag>,
         custom_headers: &HeaderMap,
+        repair: &impl Repair,
     ) -> Result<T, Self::Error>
     where
         T: DeserializeOwned + Send + Sync,
@@ -1018,7 +1107,7 @@ impl HttpClient for InstrumentedHttpClient {
         let started = Instant::now();
         let result = self
             .inner
-            .get::<T>(url, credentials, etag, custom_headers)
+            .get::<T>(url, credentials, etag, custom_headers, repair)
             .await;
         let external_duration = started.elapsed();
 
@@ -1380,6 +1469,51 @@ impl Bmc for BmcClient {
         self.finish("get", result)
     }
 
+    async fn get_repaired<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self
+            .read_repaired_with_auth_retry(|| async move {
+                let result = self.inner.get_repaired::<T>(id, repair).await;
+                if let Ok(value) = &result {
+                    self.note_bmc_identity_from(value.as_ref());
+                }
+                result
+            })
+            .await;
+        self.finish_repaired("get", result)
+    }
+
+    async fn expand_repaired<T: Expandable>(
+        &self,
+        id: &ODataId,
+        query: ExpandQuery,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self
+            .read_repaired_with_auth_retry(|| async {
+                self.inner.expand_repaired(id, query.clone(), repair).await
+            })
+            .await;
+        self.finish_repaired("expand", result)
+    }
+
+    async fn filter_repaired<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        query: FilterQuery,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self
+            .read_repaired_with_auth_retry(|| async {
+                self.inner.filter_repaired(id, query.clone(), repair).await
+            })
+            .await;
+        self.finish_repaired("filter", result)
+    }
+
     async fn poll<R: Send + Sync + for<'de> Deserialize<'de>>(
         &self,
         id: &ODataId,
@@ -1642,17 +1776,19 @@ fn is_auth_bmc_error(error: &BmcError) -> bool {
 }
 
 /// Whether an error represents the BMC being unreachable at the transport layer
-/// (TCP connect refused/timed out, or a request that timed out) — as opposed to
-/// the BMC answering with an error. Only these trip the connection circuit
-/// breaker; an HTTP 404 or a decode error means the BMC is alive and talking.
+/// (TCP connect refused/timed out, a request that timed out, or one skipped
+/// while the circuit is open) — as opposed to the BMC answering with an error.
+/// Only these trip the connection circuit breaker; an HTTP 404 or a decode
+/// error means the BMC is alive and talking.
 pub(crate) fn is_connection_error(error: &HealthError) -> bool {
     match error {
         HealthError::BmcError(inner) => is_connection_bmc_source_error(inner.as_ref()),
+        HealthError::BmcCircuitOpen(_) => true,
         _ => false,
     }
 }
 
-fn is_connection_bmc_source_error(error: &(dyn std::error::Error + 'static)) -> bool {
+pub(crate) fn is_connection_bmc_source_error(error: &(dyn std::error::Error + 'static)) -> bool {
     error
         .downcast_ref::<BmcError>()
         .is_some_and(is_connection_bmc_error)
@@ -2112,14 +2248,36 @@ mod tests {
         client.trip_circuit(&dummy_error());
         assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
         assert!(
-            client.check_circuit().is_err(),
-            "open circuit must fast-fail"
+            client
+                .check_circuit()
+                .is_err_and(|error| is_connection_error(&error)),
+            "open circuit must fast-fail with a connection error"
         );
 
         // A success closes it again.
         client.note_reachable();
         assert_eq!(client.collector_sweep(), CollectorSweep::Full);
         assert!(client.check_circuit().is_ok());
+    }
+
+    #[test]
+    fn circuit_open_and_close_are_emitted_once_per_transition() {
+        let client = test_client();
+        let logs = capture_logs(|| {
+            client.trip_circuit(&dummy_error());
+            client.trip_circuit(&dummy_error());
+            client.note_reachable();
+        });
+
+        let messages: Vec<&str> = logs.iter().map(|log| log.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "BMC connect failure; opening connection circuit to stop request flood",
+                "BMC is reachable again; closing connection circuit",
+            ],
+            "a failure while the circuit is already open is not another trip"
+        );
     }
 
     #[tokio::test]
@@ -3740,6 +3898,76 @@ mod tests {
         ];
 
         check_values(cases, |error| error.error_class());
+    }
+
+    #[tokio::test]
+    async fn static_file_rotation_replays_after_authentication_failure() {
+        use base64::Engine;
+
+        use crate::static_credentials::test_support::{
+            provider_for_credentials_file, wait_for_password, write_credentials,
+        };
+
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        let captured = recorded.clone();
+        let router = axum::Router::new().route(
+            "/redfish/v1",
+            axum::routing::get(move |headers: HeaderMap| {
+                let captured = captured.clone();
+                async move {
+                    let mut captured = captured.lock().unwrap();
+                    captured.push(headers[header::AUTHORIZATION].to_str().unwrap().to_owned());
+                    let status = if captured.len() == 2 {
+                        axum::http::StatusCode::UNAUTHORIZED
+                    } else {
+                        axum::http::StatusCode::OK
+                    };
+                    (
+                        status,
+                        axum::Json(serde_json::json!({"@odata.id": "/redfish/v1"})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let password = dir.path().join("password");
+        write_credentials(&password, "first");
+        let addr = test_addr();
+        let provider = provider_for_credentials_file(addr.clone(), password.clone()).await;
+        let client = test_bmc(
+            reqwest(),
+            addr.clone(),
+            provider.clone(),
+            Some(base_url),
+            0,
+            None,
+        )
+        .unwrap();
+        client
+            .get::<TestEntity>(&ODataId::service_root())
+            .await
+            .unwrap();
+        write_credentials(&password, "second");
+        wait_for_password(&*provider, &addr, "second").await;
+        client
+            .get::<TestEntity>(&ODataId::service_root())
+            .await
+            .unwrap();
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            ["admin:first", "admin:first", "admin:second"].map(|value| {
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(value)
+                )
+            })
+        );
+        server.abort();
     }
 
     #[tokio::test]

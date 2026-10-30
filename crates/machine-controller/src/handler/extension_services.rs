@@ -459,37 +459,63 @@ fn dpf_helm_chart_placement_label_changes(
         .collect()
 }
 
+/// Removes endpoint-free terminated attachments and reports whether the Instance configuration
+/// changed, allowing callers to commit only real cleanup writes.
 pub(super) async fn cleanup_terminated_extension_services(
     instance: &InstanceSnapshot,
     extension_services_status: &mut InstanceExtensionServicesStatus,
     txn: &mut PgConnection,
-) -> Result<(), StateHandlerError> {
+) -> Result<bool, StateHandlerError> {
     if extension_services_status.configs_synced != SyncState::Synced {
-        return Ok(());
+        return Ok(false);
     }
 
     let terminated_service_keys = extension_services_status.get_terminated_service_keys();
     if terminated_service_keys.is_empty() {
-        return Ok(());
+        return Ok(false);
+    }
+
+    // Generic DPF placement termination does not prove that the service's
+    // network child, HBN state, and DHCP state have all been removed.
+    // TODO(#6133): Reclaim the attachment and endpoint together after observed
+    // service-network cleanup has been persisted.
+    let retained_attachment_ids = instance
+        .config
+        .network
+        .service_interfaces
+        .iter()
+        .map(|service_interface| service_interface.attachment_id)
+        .collect::<HashSet<_>>();
+    let reclaimable_service_keys = terminated_service_keys
+        .into_iter()
+        .filter(|(service_id, version)| {
+            !instance
+                .config
+                .extension_services
+                .service_configs
+                .iter()
+                .any(|service| {
+                    service.service_id == *service_id
+                        && service.version == *version
+                        && service
+                            .id
+                            .is_some_and(|id| retained_attachment_ids.contains(&id))
+                })
+        })
+        .collect_vec();
+    if reclaimable_service_keys.is_empty() {
+        return Ok(false);
     }
 
     tracing::info!(
         instance_id = %instance.id,
-        terminated_extension_services = ?terminated_service_keys,
+        terminated_extension_services = ?reclaimable_service_keys,
         "Cleaning up fully terminated extension services from instance config"
     );
-    let terminated_attachment_ids: HashSet<_> = instance
-        .config
-        .extension_services
-        .service_configs
-        .iter()
-        .filter(|service| terminated_service_keys.contains(&(service.service_id, service.version)))
-        .filter_map(|service| service.id)
-        .collect();
     let new_config = instance
         .config
         .extension_services
-        .remove_terminated_services(&terminated_service_keys);
+        .remove_terminated_services(&reclaimable_service_keys);
 
     db::instance::update_extension_services_config(
         txn,
@@ -502,31 +528,10 @@ pub(super) async fn cleanup_terminated_extension_services(
     .await?
     .check_applied()?;
 
-    // Service-interface records belong to an attachment. Remove them in the
-    // same transaction so the next snapshot never sees dangling ownership.
-    if !terminated_attachment_ids.is_empty() {
-        let mut network_config = instance.config.network.clone();
-        network_config
-            .service_interfaces
-            .retain(|service_interface| {
-                !terminated_attachment_ids.contains(&service_interface.attachment_id)
-            });
-        if network_config != instance.config.network {
-            db::instance::update_network_config(
-                txn,
-                instance.id,
-                instance.network_config_version,
-                &network_config,
-                false,
-            )
-            .await?;
-        }
-    }
-
     extension_services_status
         .extension_services
-        .retain(|svc| !terminated_service_keys.contains(&(svc.service_id, svc.version)));
-    Ok(())
+        .retain(|svc| !reclaimable_service_keys.contains(&(svc.service_id, svc.version)));
+    Ok(true)
 }
 
 #[cfg(test)]

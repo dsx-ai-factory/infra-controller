@@ -144,16 +144,23 @@ func (Managers *Manager) Init() {
 	prometheus.MustRegister(versionGauge)
 	// set the value once, since it does not change
 	versionGauge.WithLabelValues(metadata.Version, metadata.BuildTime).Set(1)
-	// register health status metric
+	health := func() float64 {
+		return float64(computils.SiteHealth(ManagerAccess.Data.EB))
+	}
 	prometheus.MustRegister(
+		// Keep `health_status` as a counter for compatibility. Health can
+		// decrease, so new consumers should use the `health` gauge.
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
 			Name:      "health_status",
 			Help:      "health status of the Site Agent",
-		},
-			func() float64 {
-				return float64(computils.SiteHealth(ManagerAccess.Data.EB))
-			}))
+		}, health),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+			Name:      "health",
+			Help:      "Current aggregate health of the Site Agent: 0 unhealthy, 1 healthy",
+		}, health),
+	)
 
 	Managers.Orchestrator().Init()
 	Managers.Site().Init()

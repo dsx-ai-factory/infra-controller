@@ -120,34 +120,7 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to Site specified in request data", nil)
 	}
 
-	// A Tenant cannot have two SpectrumX Partitions with the same name on one Site.
-	// TODO consider doing this with an advisory lock for correctness
 	sxpDAO := cdbm.NewSpectrumXPartitionDAO(csxph.dbSession)
-	existing, tot, err := sxpDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.SpectrumXPartitionFilterInput{
-			Names:     []string{apiRequest.Name},
-			SiteIDs:   []uuid.UUID{site.ID},
-			TenantIDs: []uuid.UUID{orgTenant.ID},
-		},
-		paginator.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of tenant SpectrumX Partition")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create SpectrumX Partition due to DB error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("tenantId", orgTenant.ID.String()).Str("name", apiRequest.Name).Msg("SpectrumX Partition with same name already exists for Tenant")
-		// The count and the row scan are separate queries, so a concurrent delete between
-		// them can report a match with no row to name.
-		var conflictData validation.Errors
-		if len(existing) > 0 {
-			conflictData = validation.Errors{"id": errors.New(existing[0].ID.String())}
-		}
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Another SpectrumX Partition with specified name already exists for Tenant", conflictData)
-	}
 
 	stc, derr := csxph.scp.GetClientByID(site.ID)
 	if derr != nil {
@@ -161,6 +134,49 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 	var ssd *cdbm.StatusDetail
 
 	err = cdb.WithTx(ctx, csxph.dbSession, func(tx *cdb.Tx) error {
+		// Acquire a lock so that another concurrent request with the same name cannot succeed.
+		lockKey := fmt.Sprintf("spectrumx-partition-create:%s:%s:%s", orgTenant.ID, site.ID, apiRequest.Name)
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+		if derr != nil {
+			if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+				logger.Warn().
+					Err(derr).
+					Str("tenantId", orgTenant.ID.String()).
+					Str("siteId", site.ID.String()).
+					Str("name", apiRequest.Name).
+					Msg("concurrent SpectrumX Partition create detected")
+				return cutil.NewAPIError(http.StatusConflict, "Creation of a SpectrumX Partition with specified name is already in progress in another request", nil)
+			}
+			logger.Error().Err(derr).Msg("unable to acquire advisory lock for SpectrumX Partition creation")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Partition due to DB error", nil)
+		}
+
+		existing, tot, derr := sxpDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.SpectrumXPartitionFilterInput{
+				Names:     []string{apiRequest.Name},
+				SiteIDs:   []uuid.UUID{site.ID},
+				TenantIDs: []uuid.UUID{orgTenant.ID},
+			},
+			paginator.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for name uniqueness of tenant SpectrumX Partition")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Partition due to DB error", nil)
+		}
+		if tot > 0 {
+			logger.Warn().Str("tenantId", orgTenant.ID.String()).Str("name", apiRequest.Name).Msg("SpectrumX Partition with same name already exists for Tenant")
+			// The count and the row scan are separate queries, so a concurrent
+			// delete between them can report a match with no row to name.
+			var conflictData validation.Errors
+			if len(existing) > 0 {
+				conflictData = validation.Errors{"id": errors.New(existing[0].ID.String())}
+			}
+			return cutil.NewAPIError(http.StatusConflict, "Another SpectrumX Partition with specified name already exists for Tenant", conflictData)
+		}
+
 		sxp, derr := sxpDAO.Create(
 			ctx,
 			tx,
@@ -513,7 +529,8 @@ func NewDeleteSpectrumXPartitionHandler(dbSession *cdb.Session, scp *sc.ClientPo
 
 // Handle godoc
 // @Summary Delete a SpectrumXPartition
-// @Description Delete a SpectrumXPartition
+// @Description Delete a SpectrumXPartition. Returns 400 while the API lists an attached Instance and 412 when the Site reports remaining attachments, including on terminating Instances.
+// @Description A rejected deletion leaves the Partition and its status history unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
 // @Tags SpectrumXPartition
 // @Accept json
 // @Produce json

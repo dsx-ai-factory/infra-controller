@@ -14,7 +14,6 @@ import (
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 
-	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -126,37 +125,6 @@ func (s *Service) certOption() (grpc.ServerOption, error) {
 	}
 	log.Printf("Using certificates from %s (mTLS enabled)", certDir)
 	return grpc.Creds(credentials.NewTLS(tlsConfig)), nil
-}
-
-// logrusInterceptorLogger adapts logrus to the go-grpc-middleware logging.Logger interface.
-func logrusInterceptorLogger() logging.Logger {
-	return logging.LoggerFunc(func(ctx context.Context, lvl logging.Level, msg string, fields ...any) {
-		entry := log.WithContext(ctx)
-
-		// Convert fields slice to logrus.Fields
-		if len(fields) > 0 {
-			logrusFields := make(log.Fields)
-			for i := 0; i+1 < len(fields); i += 2 {
-				if key, ok := fields[i].(string); ok {
-					logrusFields[key] = fields[i+1]
-				}
-			}
-			entry = entry.WithFields(logrusFields)
-		}
-
-		switch lvl {
-		case logging.LevelDebug:
-			entry.Debug(msg)
-		case logging.LevelInfo:
-			entry.Info(msg)
-		case logging.LevelWarn:
-			entry.Warn(msg)
-		case logging.LevelError:
-			entry.Error(msg)
-		default:
-			entry.Info(msg)
-		}
-	})
 }
 
 // loggingUnaryInterceptor returns a gRPC unary interceptor that logs request and response payloads.

@@ -181,8 +181,8 @@ func TestAllocationHandler_Create(t *testing.T) {
 	ipb4 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site4, ip2, &tenant3.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "196.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	ipb5 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site5, ip2, &tenant4.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "194.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 
-	// Matching the provider and site is not enough. A record with SitePrefixID
-	// set belongs to SitePrefix and cannot be the parent of an Allocation.
+	// Matching the provider and site is not enough. A tenant-managed block
+	// cannot be the parent of an Allocation.
 	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.169.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 
 	ipbFG := testIPBlockBuildIPBlock(t, dbSession, "testipbFG", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.170.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
@@ -2097,6 +2097,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	ipb := common.TestBuildIPBlock(t, dbSession, "test-ip-block", site, &tenant1.ID, cdbm.IPBlockRoutingTypePublic, "192.168.1.0", 24, cdbm.IPBlockProtocolVersionV4, ipu)
 
 	parentPref, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb.Prefix, ipb.PrefixLength, ipb.RoutingType, ipb.InfrastructureProviderID.String(), ipb.SiteID.String())
+	require.NoError(t, err)
 	assert.NotNil(t, parentPref)
 
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 2}

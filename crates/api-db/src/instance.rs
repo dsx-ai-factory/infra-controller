@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{HostMachineId, MachineId};
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::nvlink::NvLinkLogicalPartitionId;
 use carbide_uuid::vpc::VpcId;
@@ -45,6 +45,8 @@ use crate::{
     BIND_LIMIT, ColumnInfo, ConditionalWrite, DatabaseError, DatabaseResult,
     FilterableQueryBuilder, ObjectColumnFilter, instance_address,
 };
+
+pub mod nic_firmware;
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;
@@ -96,16 +98,16 @@ pub async fn count_ids(
         .map_err(|e| DatabaseError::new("instance::count_ids", e))
 }
 
-/// Adds the rows for every configuration that can still own network resources
-/// for an instance. The current value is in `network_config`; both configurations
-/// in `update_network_config_request` can still own resources until the update
-/// releases the old ones.
+/// Adds the rows for every host configuration that can still own network
+/// resources for an instance. The current value is in `network_config`; both
+/// configurations in `update_network_config_request` can still own host
+/// resources until the update releases the old ones.
 ///
 /// A SLAAC interface can retain a prefix without creating a row in
 /// `instance_addresses`, so searches and deletion checks cannot use address
 /// rows as their only source. Callers must name the outer table `instances`
 /// because this expression refers to it directly.
-fn push_network_config_rows(builder: &mut sqlx::QueryBuilder<sqlx::Postgres>) {
+fn push_host_network_config_rows(builder: &mut sqlx::QueryBuilder<sqlx::Postgres>) {
     builder.push(
         "jsonb_array_elements(jsonb_build_array(
             instances.network_config,
@@ -122,18 +124,18 @@ pub(super) fn push_network_segment_reference_exists(
     segment_id: NetworkSegmentId,
 ) {
     builder.push(
-        "EXISTS (
+        "(
+        EXISTS (
             SELECT 1
             FROM ",
     );
-    push_network_config_rows(builder);
+    push_host_network_config_rows(builder);
     builder.push(
         "
             WHERE EXISTS (
                 SELECT 1
                 FROM jsonb_array_elements(
                     COALESCE(configs.config->'interfaces', '[]'::jsonb)
-                    || COALESCE(configs.config->'service_interfaces', '[]'::jsonb)
                 ) AS interfaces(interface)
                 WHERE (interfaces.interface->>'network_segment_id')::uuid = ",
     );
@@ -141,7 +143,19 @@ pub(super) fn push_network_segment_reference_exists(
     builder.push(
         "
             )
-        )",
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+                COALESCE(instances.network_config->'service_interfaces', '[]'::jsonb)
+            ) AS service_interfaces(service_interface)
+            WHERE (service_interfaces.service_interface->>'network_segment_id')::uuid = ",
+    );
+    builder.push_bind(segment_id);
+    builder.push(
+        "
+        )
+    )",
     );
 }
 
@@ -165,14 +179,13 @@ fn push_network_config_vpc_reference_exists(
                 SELECT 1
                 FROM ",
     );
-    push_network_config_rows(builder);
+    push_host_network_config_rows(builder);
     builder.push(
         "
                 WHERE EXISTS (
                     SELECT 1
                     FROM jsonb_array_elements(
                         COALESCE(configs.config->'interfaces', '[]'::jsonb)
-                        || COALESCE(configs.config->'service_interfaces', '[]'::jsonb)
                     ) AS interfaces(interface)
                     WHERE (interfaces.interface->>'vpc_id')::uuid = target.vpc_id
                     OR EXISTS (
@@ -183,6 +196,20 @@ fn push_network_config_vpc_reference_exists(
                     )
                 )
                 OR (configs.config #>> '{auto_config,vpc_id}')::uuid = target.vpc_id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                    COALESCE(instances.network_config->'service_interfaces', '[]'::jsonb)
+                ) AS service_interfaces(service_interface)
+                WHERE (service_interfaces.service_interface->>'vpc_id')::uuid = target.vpc_id
+                OR EXISTS (
+                    SELECT 1
+                    FROM network_segments
+                    WHERE id =
+                        (service_interfaces.service_interface->>'network_segment_id')::uuid
+                      AND vpc_id = target.vpc_id
+                )
             )
         )",
     );
@@ -544,6 +571,39 @@ pub async fn find_by_machine_ids(
     resolve_snapshots_from_json_rows(&mut *txn, rows).await
 }
 
+/// Returns the current DPU/VPC memberships owned by service-interface records.
+///
+/// Current endpoint records, including terminating tombstones, are the durable
+/// release authority. Historical service collections in a pending host-network
+/// update are excluded because they cannot establish current service ownership.
+pub async fn find_service_vpc_memberships(
+    txn: impl DbReader<'_>,
+    instance_id: InstanceId,
+) -> Result<Vec<(DpuMachineId, VpcId)>, DatabaseError> {
+    let query = "SELECT DISTINCT
+            service_interface->>'dpu_id' AS dpu_id,
+            (service_interface->>'vpc_id')::uuid AS vpc_id
+        FROM instances
+        CROSS JOIN LATERAL jsonb_array_elements(
+            COALESCE(network_config->'service_interfaces', '[]'::jsonb)
+        ) AS service_interfaces(service_interface)
+        WHERE id = $1
+        ORDER BY dpu_id, vpc_id";
+    sqlx::query_as(query)
+        .bind(instance_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Finds every instance retaining an attachment to the selected service.
+///
+/// Optional version selection supports legacy KubernetesPod attachments and
+/// will be removed when attachment versions are retired; DPF Helm chart and
+/// service VPC attachments use only V1.
+///
+/// Soft-deleted instances remain results because their attachment cleanup is
+/// still outstanding until physical instance deletion completes.
 pub async fn find_by_extension_service(
     txn: &mut PgConnection,
     service_id: ExtensionServiceId,
@@ -551,7 +611,7 @@ pub async fn find_by_extension_service(
 ) -> Result<Vec<InstanceSnapshot>, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new(
         r#"SELECT row_to_json(i.*) FROM instances i
-            WHERE i.deleted IS NULL AND EXISTS (
+            WHERE EXISTS (
                 SELECT 1
                 FROM jsonb_array_elements(i.extension_services_config->'service_configs') AS es_config(cfg)
                 WHERE cfg->>'service_id' =
@@ -595,8 +655,8 @@ pub async fn any_instance_referencing_nvlink_logical_partition(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// Counts instances whose current or pending network configuration references
-/// `segment_id` through an interface.
+/// Counts instances whose current service endpoints or current/pending host
+/// configuration reference `segment_id`.
 ///
 /// Both configurations in a pending update can still own resources until the
 /// update completes. Instances with a deletion timestamp remain owners until
@@ -619,9 +679,8 @@ pub async fn count_network_segment_references(
     Ok(reference_count.max(0) as usize)
 }
 
-/// Counts instances whose current or pending network configuration refers to
-/// `vpc_id` through an interface, its network segment, or an automatic
-/// configuration request.
+/// Counts instances whose current service endpoints or current/pending host
+/// configuration refer to `vpc_id`.
 pub async fn count_vpc_references(
     txn: &mut PgConnection,
     vpc_id: &VpcId,
@@ -1515,7 +1574,47 @@ pub async fn batch_update_spx_config(
     Ok(())
 }
 
+/// Deletes an instance and all normalized address allocations it owns.
+///
+/// Address rows are locked before the instance row to preserve the allocation
+/// lock order. Callers must not enter while holding the instance lock. Current
+/// service-VPC memberships return [`DatabaseError::FailedPrecondition`] without
+/// deleting either the instance or its addresses.
 pub async fn delete(instance_id: InstanceId, txn: &mut PgConnection) -> DatabaseResult<()> {
+    delete_instance_records(instance_id, txn, true).await
+}
+
+/// Deletes an Instance and its normalized addresses despite retained service memberships after
+/// the caller obtains explicit administrative consent to orphan DPF state.
+///
+/// Address rows remain locked before the Instance row so allocation and deletion preserve the
+/// established lock order.
+pub async fn force_delete(instance_id: InstanceId, txn: &mut PgConnection) -> DatabaseResult<()> {
+    delete_instance_records(instance_id, txn, false).await
+}
+
+/// Locks normalized address rows before the Instance row and deletes those address rows plus the
+/// Instance row while optionally rejecting retained service memberships to preserve serialization.
+async fn delete_instance_records(
+    instance_id: InstanceId,
+    txn: &mut PgConnection,
+    require_empty_service_memberships: bool,
+) -> DatabaseResult<()> {
+    // Preserve the address-before-instance lock order used by allocation and
+    // partial host cleanup, then prevent endpoint creation while checking.
+    instance_address::lock_addresses_for_instance(&mut *txn, instance_id).await?;
+    let _locked_instance = find_by_id_for_update(&mut *txn, instance_id).await?;
+
+    if require_empty_service_memberships {
+        let service_memberships = find_service_vpc_memberships(&mut *txn, instance_id).await?;
+        if !service_memberships.is_empty() {
+            return Err(DatabaseError::FailedPrecondition(format!(
+                "instance {instance_id} cannot be deleted while {} service VPC memberships remain",
+                service_memberships.len(),
+            )));
+        }
+    }
+
     instance_address::delete(&mut *txn, instance_id).await?;
 
     let query = "DELETE FROM instances where id=$1::uuid RETURNING id";
@@ -1527,11 +1626,13 @@ pub async fn delete(instance_id: InstanceId, txn: &mut PgConnection) -> Database
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Marks an instance for release and clears only its `nic_firmware_snapshot`
+/// selection context. This does not delete a firmware operation or its recovery state.
 pub async fn mark_as_deleted(
     instance_id: InstanceId,
     txn: &mut PgConnection,
 ) -> DatabaseResult<()> {
-    let query = "UPDATE instances SET deleted=NOW() WHERE id=$1::uuid RETURNING id";
+    let query = "UPDATE instances SET deleted=NOW(), nic_firmware_snapshot=NULL WHERE id=$1::uuid RETURNING id";
 
     let _id = sqlx::query_as::<_, InstanceId>(query)
         .bind(instance_id)
@@ -1543,9 +1644,20 @@ pub async fn mark_as_deleted(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::net::IpAddr;
+
     use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use carbide_uuid::network::NetworkPrefixId;
+    use carbide_uuid::vpc::VpcPrefixId;
+    use mac_address::MacAddress;
+    use model::extension_service::DpuTarget;
+    use model::instance::config::extension_services::InstanceExtensionServiceConfig;
+    use model::instance::config::network::InstanceServiceInterfaceConfig;
+    use model::network_segment::NetworkSegmentSearchConfig;
 
     use super::*;
+    use crate::test_support::postgres::wait_for_blocked_query;
 
     const INSTANCE_IPXE_SCRIPT: &str = "#!ipxe boot-from-instance-columns";
 
@@ -2173,24 +2285,714 @@ mod tests {
         );
     }
 
-    /// Service-interface records keep their VPC and segment alive even when no
-    /// tenant interface uses them, because deleting either resource would leave
-    /// the DPU-side service link pointing at missing network state.
+    /// Verifies current endpoints owned by active and terminating attachments
+    /// retain VPC and segment resources through soft deletion, while pending
+    /// host-update service arrays cannot retain those resources after current
+    /// endpoints disappear.
     #[crate::sqlx_test]
     async fn network_reference_counts_include_service_interfaces(pool: sqlx::PgPool) {
+        // Give both current owners and the historical pending fixture distinct
+        // resource IDs so a partial or broad union cannot satisfy the assertions.
         let mut txn = pool.begin().await.unwrap();
         let instance_id = seed_instance(&mut txn, 0x48, None).await;
+        let active_segment_id = NetworkSegmentId::new();
+        let active_vpc_id = VpcId::new();
+        let terminating_segment_id = NetworkSegmentId::new();
+        let terminating_vpc_id = VpcId::new();
+        let pending_segment_id = NetworkSegmentId::new();
+        let pending_vpc_id = VpcId::new();
+        let active_dpu_id: DpuMachineId = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x48; 32],
+            MachineType::Dpu,
+        )
+        .try_into()
+        .unwrap();
+        let terminating_dpu_id: DpuMachineId = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x49; 32],
+            MachineType::Dpu,
+        )
+        .try_into()
+        .unwrap();
+        let active_attachment_id = uuid::Uuid::new_v4();
+        let terminating_attachment_id = uuid::Uuid::new_v4();
+        let attachments = InstanceExtensionServicesConfig {
+            service_configs: vec![
+                // Active attachment proves removal state is not required for ownership.
+                InstanceExtensionServiceConfig {
+                    id: Some(active_attachment_id),
+                    service_id: ExtensionServiceId::new(),
+                    version: ConfigVersion::initial(),
+                    dpu_target: Some(DpuTarget::All),
+                    removed: None,
+                },
+                // Terminating attachment proves cleanup retains ownership until endpoints vanish.
+                InstanceExtensionServiceConfig {
+                    id: Some(terminating_attachment_id),
+                    service_id: ExtensionServiceId::new(),
+                    version: ConfigVersion::initial(),
+                    dpu_target: Some(DpuTarget::All),
+                    removed: Some(Utc::now()),
+                },
+            ],
+        };
+
+        // Current state owns active and terminating memberships. Both pending
+        // halves carry a third historical membership that is never authoritative.
+        sqlx::query(
+            "UPDATE instances SET extension_services_config = $2, \
+                 network_config = jsonb_build_object( \
+                 'interfaces', jsonb_build_array(), \
+                 'service_interfaces', jsonb_build_array( \
+                     jsonb_build_object( \
+                         'attachment_id', $3::text, 'network_segment_id', $4::text, \
+                         'vpc_id', $5::text, 'dpu_id', $6::text), \
+                     jsonb_build_object( \
+                         'attachment_id', $7::text, 'network_segment_id', $8::text, \
+                         'vpc_id', $9::text, 'dpu_id', $10::text))), \
+                 update_network_config_request = jsonb_build_object( \
+                     'old_config', jsonb_build_object( \
+                         'interfaces', jsonb_build_array(), \
+                         'service_interfaces', jsonb_build_array(jsonb_build_object( \
+                             'network_segment_id', $11::text, 'vpc_id', $12::text, \
+                             'dpu_id', $6::text))), \
+                     'new_config', jsonb_build_object( \
+                         'interfaces', jsonb_build_array(), \
+                         'service_interfaces', jsonb_build_array(jsonb_build_object( \
+                             'network_segment_id', $11::text, 'vpc_id', $12::text, \
+                             'dpu_id', $6::text))) \
+                 ) \
+             WHERE id = $1",
+        )
+        .bind(instance_id)
+        .bind(Json(&attachments))
+        .bind(active_attachment_id)
+        .bind(active_segment_id)
+        .bind(active_vpc_id)
+        .bind(active_dpu_id)
+        .bind(terminating_attachment_id)
+        .bind(terminating_segment_id)
+        .bind(terminating_vpc_id)
+        .bind(terminating_dpu_id)
+        .bind(pending_segment_id)
+        .bind(pending_vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+
+        // `find_service_vpc_memberships`, `count_network_segment_references`, and
+        // `count_vpc_references` include both attachment lifecycles while
+        // excluding historical pending endpoint arrays.
+        assert_eq!(
+            find_service_vpc_memberships(txn.as_mut(), instance_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                (active_dpu_id, active_vpc_id),
+                (terminating_dpu_id, terminating_vpc_id),
+            ]),
+        );
+        for (segment_id, vpc_id) in [
+            // An active endpoint retains both resources without any removal marker.
+            (active_segment_id, active_vpc_id),
+            // A terminating endpoint retains both resources until endpoint cleanup.
+            (terminating_segment_id, terminating_vpc_id),
+        ] {
+            assert_eq!(
+                count_network_segment_references(txn.as_mut(), &segment_id)
+                    .await
+                    .unwrap(),
+                1,
+            );
+            assert_eq!(
+                count_vpc_references(txn.as_mut(), &vpc_id).await.unwrap(),
+                1,
+            );
+        }
+        assert_eq!(
+            count_network_segment_references(txn.as_mut(), &pending_segment_id)
+                .await
+                .unwrap(),
+            0,
+        );
+        assert_eq!(
+            count_vpc_references(txn.as_mut(), &pending_vpc_id)
+                .await
+                .unwrap(),
+            0,
+        );
+
+        // Soft deletion retains both active and terminating endpoint owners.
+        mark_as_deleted(instance_id, txn.as_mut()).await.unwrap();
+        assert_eq!(
+            find_service_vpc_memberships(txn.as_mut(), instance_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                (active_dpu_id, active_vpc_id),
+                (terminating_dpu_id, terminating_vpc_id),
+            ]),
+        );
+        for (segment_id, vpc_id) in [
+            // Soft deletion does not release an active endpoint's ownership.
+            (active_segment_id, active_vpc_id),
+            // Soft deletion also preserves a terminating endpoint's cleanup ownership.
+            (terminating_segment_id, terminating_vpc_id),
+        ] {
+            assert_eq!(
+                count_network_segment_references(txn.as_mut(), &segment_id)
+                    .await
+                    .unwrap(),
+                1,
+            );
+            assert_eq!(
+                count_vpc_references(txn.as_mut(), &vpc_id).await.unwrap(),
+                1,
+            );
+        }
+
+        // Clearing current endpoints releases every service reference even
+        // though both pending configurations still contain historical arrays.
+        sqlx::query(
+            "UPDATE instances SET network_config = \
+                 jsonb_set(network_config, '{service_interfaces}', '[]'::jsonb, true) \
+             WHERE id = $1",
+        )
+        .bind(instance_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        assert!(
+            find_service_vpc_memberships(txn.as_mut(), instance_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for (segment_id, vpc_id) in [
+            // Clearing current endpoints releases the former active owner.
+            (active_segment_id, active_vpc_id),
+            // Clearing current endpoints releases the former terminating owner.
+            (terminating_segment_id, terminating_vpc_id),
+            // Historical pending arrays never establish ownership independently.
+            (pending_segment_id, pending_vpc_id),
+        ] {
+            assert_eq!(
+                count_network_segment_references(txn.as_mut(), &segment_id)
+                    .await
+                    .unwrap(),
+                0,
+            );
+            assert_eq!(
+                count_vpc_references(txn.as_mut(), &vpc_id).await.unwrap(),
+                0,
+            );
+        }
+    }
+
+    /// Verifies current service endpoints and later normalized address rows each
+    /// block VPC deletion, segment marking, and final segment deletion to prevent
+    /// orphaned service addresses during staged cleanup.
+    #[crate::sqlx_test]
+    async fn service_endpoint_and_normalized_address_guard_network_deletion(pool: sqlx::PgPool) {
+        // Build the late-cleanup state in which the service endpoint is the
+        // target VPC and segment's only remaining owner.
+        let mut txn = pool.begin().await.unwrap();
+        let instance_id = seed_instance(txn.as_mut(), 0x4c, None).await;
         let segment_id = NetworkSegmentId::new();
         let vpc_id = VpcId::new();
+        let attachment_id = uuid::Uuid::new_v4();
+        let dpu_id: DpuMachineId = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x4c; 32],
+            MachineType::Dpu,
+        )
+        .try_into()
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, organization_id, version) \
+             VALUES ($1, 'service-boundary-vpc', 'service-boundary', 'V1-T0')",
+        )
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, version, vpc_id) \
+             VALUES ($1, 'service-boundary-segment', 'V1-T0', $2)",
+        )
+        .bind(segment_id)
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
 
-        // The service-interface array is the only place these resources are
-        // referenced, which isolates the deletion guard behavior under test.
+        // The attachment and resource IDs drive ownership. The remaining
+        // endpoint fields provide a valid fixed-slot record for snapshot loading.
+        let endpoint = InstanceServiceInterfaceConfig {
+            attachment_id, // Connects the endpoint to its terminating attachment.
+            interface_ordinal: 0,
+            dpu_id,
+            slot_index: 0,
+            vpc_id, // Drives the VPC deletion guard.
+            vpc_prefix_id: VpcPrefixId::new(),
+            network_segment_id: segment_id, // Drives both segment deletion guards.
+            network_prefix_id: NetworkPrefixId::new(),
+            link_prefix: "192.0.2.0/31".parse().unwrap(),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        };
+        let attachments = InstanceExtensionServicesConfig {
+            service_configs: vec![InstanceExtensionServiceConfig {
+                id: Some(attachment_id),
+                service_id: ExtensionServiceId::new(),
+                version: ConfigVersion::initial(),
+                dpu_target: Some(DpuTarget::All),
+                removed: Some(Utc::now()),
+            }],
+        };
+        let mut network = InstanceNetworkConfig::default();
+        network.service_interfaces.push(endpoint.clone());
+        sqlx::query(
+            "UPDATE instances \
+             SET extension_services_config=$2, network_config=$3 \
+             WHERE id=$1",
+        )
+        .bind(instance_id)
+        .bind(Json(&attachments))
+        .bind(Json(&network))
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+
+        // Reload config and count normalized occupancy to prove no host
+        // interface or address masks the persisted service-only ownership.
+        let persisted = find_by_id(txn.as_mut(), instance_id)
+            .await
+            .unwrap()
+            .expect("service endpoint owner must remain persisted");
+        assert!(persisted.config.network.interfaces.is_empty());
+        assert_eq!(persisted.config.network.service_interfaces, vec![endpoint],);
+        assert_eq!(
+            crate::instance_address::count_by_segment_id(txn.as_mut(), &segment_id)
+                .await
+                .unwrap(),
+            0,
+        );
+        let segment = crate::network_segment::find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(crate::network_segment::IdColumn, &segment_id),
+            NetworkSegmentSearchConfig::default(),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .expect("target segment must remain persisted");
+
+        // Exercise VPC deletion, segment marking, and final segment deletion
+        // while the service endpoint is the only persisted owner.
+        let vpc_error = crate::vpc::try_delete(txn.as_mut(), vpc_id)
+            .await
+            .expect_err("service endpoint must retain its VPC");
+        assert!(matches!(
+            vpc_error,
+            DatabaseError::FailedPrecondition(message)
+                if message.contains("1 instance network configurations still reference it")
+        ));
+        let mark_error = crate::network_segment::mark_as_deleted(&segment, txn.as_mut())
+            .await
+            .expect_err("service endpoint must prevent segment marking");
+        assert!(matches!(
+            mark_error,
+            DatabaseError::NetworkSegmentDelete(message)
+                if message.contains("referencing instance count: 1")
+        ));
+        let final_delete_error = crate::network_segment::final_delete(segment_id, &mut txn)
+            .await
+            .expect_err("service endpoint must prevent physical segment deletion");
+        assert!(matches!(
+            final_delete_error,
+            DatabaseError::NetworkSegmentDelete(message)
+                if message.contains("allocations still reference it")
+        ));
+
+        // Model endpoint cleanup occurring before its normalized allocation is
+        // released, which must transfer ownership to the normalized fallback.
+        let service_address: IpAddr = "192.0.2.1".parse().unwrap();
+        sqlx::query(
+            "INSERT INTO instance_addresses \
+                (instance_id, address, prefix, segment_id, vpc_id) \
+             VALUES ($1, $2, '192.0.2.0/31'::cidr, $3, $4)",
+        )
+        .bind(instance_id)
+        .bind(service_address)
+        .bind(segment_id)
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE instances SET network_config = \
+                 jsonb_set(network_config, '{service_interfaces}', '[]'::jsonb, true) \
+             WHERE id=$1",
+        )
+        .bind(instance_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        let persisted = find_by_id(txn.as_mut(), instance_id)
+            .await
+            .unwrap()
+            .expect("normalized address owner must remain persisted");
+        assert!(persisted.config.network.service_interfaces.is_empty());
+
+        // Recheck VPC deletion, segment marking, and final segment deletion so
+        // the normalized allocation retains both resources after endpoint cleanup.
+        let vpc_error = crate::vpc::try_delete(txn.as_mut(), vpc_id)
+            .await
+            .expect_err("normalized address must retain its VPC");
+        assert!(matches!(
+            vpc_error,
+            DatabaseError::FailedPrecondition(message)
+                if message.contains("1 instance addresses still reference it")
+        ));
+        let mark_error = crate::network_segment::mark_as_deleted(&segment, txn.as_mut())
+            .await
+            .expect_err("normalized address must prevent segment marking");
+        assert!(matches!(
+            mark_error,
+            DatabaseError::NetworkSegmentDelete(message)
+                if message.contains("addresses on the segment are allocated to instances")
+        ));
+        let final_delete_error = crate::network_segment::final_delete(segment_id, &mut txn)
+            .await
+            .expect_err("normalized address must prevent physical segment deletion");
+        assert!(matches!(
+            final_delete_error,
+            DatabaseError::NetworkSegmentDelete(message)
+                if message.contains("allocations still reference it")
+        ));
+
+        // Releasing the final normalized owner makes physical deletion safe.
+        crate::instance_address::delete_addresses_for_instance(
+            txn.as_mut(),
+            instance_id,
+            &[(segment_id, service_address)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::network_segment::final_delete(segment_id, &mut txn)
+                .await
+                .unwrap(),
+            segment_id,
+        );
+
+        // Roll back the complete fixture so this proof leaves no persisted state.
+        txn.rollback().await.unwrap();
+    }
+
+    /// Proves endpoint creation and whole-instance deletion serialize on the
+    /// production address-allocation table lock and then the Instance row, so
+    /// whichever transaction wins determines whether the endpoint/address pair
+    /// or the physical deletion is retained.
+    #[crate::sqlx_test]
+    async fn delete_serializes_with_service_endpoint_writers(pool: sqlx::PgPool) {
+        // Seed an endpoint-capable instance for the writer-first transaction.
+        let mut setup = pool.begin().await.unwrap();
+        let writer_wins_id = seed_instance(&mut setup, 0x4b, None).await;
+        let writer_wins_segment = NetworkSegmentId::new();
+        let writer_wins_vpc = VpcId::new();
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, version) \
+             VALUES ($1, 'writer-wins-vpc', 'V1-T0')",
+        )
+        .bind(writer_wins_vpc)
+        .execute(setup.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, version, vpc_id) \
+             VALUES ($1, 'writer-wins-segment', 'V1-T0', $2)",
+        )
+        .bind(writer_wins_segment)
+        .bind(writer_wins_vpc)
+        .execute(setup.as_mut())
+        .await
+        .unwrap();
+        let writer_wins_attachment = uuid::Uuid::new_v4();
+        let writer_wins_services = InstanceExtensionServicesConfig {
+            service_configs: vec![InstanceExtensionServiceConfig {
+                id: Some(writer_wins_attachment),
+                service_id: ExtensionServiceId::new(),
+                version: ConfigVersion::initial(),
+                dpu_target: Some(DpuTarget::All),
+                removed: None,
+            }],
+        };
+        sqlx::query("UPDATE instances SET extension_services_config = $1 WHERE id = $2")
+            .bind(Json(&writer_wins_services))
+            .bind(writer_wins_id)
+            .execute(setup.as_mut())
+            .await
+            .unwrap();
+        setup.commit().await.unwrap();
+
+        // Commit an endpoint and its normalized address while deletion waits
+        // on the allocation-table lock held by the same writer transaction.
+        let baseline = find_by_id(&pool, writer_wins_id).await.unwrap().unwrap();
+        let writer_wins_dpu: DpuMachineId = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x4b; 32],
+            MachineType::Dpu,
+        )
+        .try_into()
+        .unwrap();
+
+        // Membership and attachment identity drive the deletion guard. The
+        // remaining fields make the row a valid fixed-slot endpoint.
+        let writer_wins_endpoint = InstanceServiceInterfaceConfig {
+            attachment_id: writer_wins_attachment, // Connects this endpoint to its live owner.
+            interface_ordinal: 0,
+            dpu_id: writer_wins_dpu, // Selects the retained DPU/VPC membership.
+            slot_index: 0,
+            vpc_id: writer_wins_vpc, // Selects the retained DPU/VPC membership.
+            vpc_prefix_id: VpcPrefixId::new(),
+            network_segment_id: writer_wins_segment, // Joins the normalized allocation below.
+            network_prefix_id: NetworkPrefixId::new(),
+            link_prefix: "192.0.2.0/31".parse().unwrap(),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 0x4b]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        };
+        let mut writer_network = baseline.config.network;
+        writer_network
+            .service_interfaces
+            .push(writer_wins_endpoint.clone());
+        let mut writer = pool.begin().await.unwrap();
+        instance_address::lock_table_for_allocation(writer.as_mut())
+            .await
+            .unwrap();
+        update_network_config(
+            writer.as_mut(),
+            writer_wins_id,
+            baseline.network_config_version,
+            &writer_network,
+            false,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO instance_addresses \
+                (instance_id, address, prefix, segment_id, vpc_id) \
+             VALUES ($1, '192.0.2.1'::inet, '192.0.2.0/31'::cidr, $2, $3)",
+        )
+        .bind(writer_wins_id)
+        .bind(writer_wins_segment)
+        .bind(writer_wins_vpc)
+        .execute(writer.as_mut())
+        .await
+        .unwrap();
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(writer.as_mut())
+            .await
+            .unwrap();
+        let blocked_delete = async {
+            let mut txn = pool.begin().await.unwrap();
+            let error = delete(writer_wins_id, txn.as_mut())
+                .await
+                .expect_err("committed endpoint must defeat deletion");
+            txn.rollback().await.unwrap();
+            error
+        };
+        let release_writer = async {
+            wait_for_blocked_query(&pool, writer_pid, "FROM instance_addresses").await;
+            writer.commit().await.unwrap();
+        };
+        let (error, ()) = tokio::join!(blocked_delete, release_writer);
+        assert!(matches!(error, DatabaseError::FailedPrecondition(_)));
+
+        // Fresh reads prove the winning writer retained both durable owners.
+        let retained = find_by_id(&pool, writer_wins_id)
+            .await
+            .unwrap()
+            .expect("writer-winning instance remains");
+        assert_eq!(
+            retained.config.network.service_interfaces,
+            vec![writer_wins_endpoint]
+        );
+        let mut readback = pool.begin().await.unwrap();
+        let retained_addresses = instance_address::find_all_by_instance_id_and_segment_id(
+            readback.as_mut(),
+            &writer_wins_id,
+            &writer_wins_segment,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retained_addresses.len(), 1);
+        assert_eq!(
+            (
+                retained_addresses[0].address,
+                retained_addresses[0].prefix,
+                retained_addresses[0].segment_id,
+                retained_addresses[0].vpc_id,
+            ),
+            (
+                "192.0.2.1".parse().unwrap(),
+                "192.0.2.0/31".parse().unwrap(),
+                writer_wins_segment,
+                writer_wins_vpc,
+            )
+        );
+        readback.rollback().await.unwrap();
+
+        // Delete a second instance inside an uncommitted transaction, then
+        // prove a stale endpoint writer wakes only after deletion commits.
+        let mut setup = pool.begin().await.unwrap();
+        let delete_wins_id = seed_instance(&mut setup, 0x4c, None).await;
+        setup.commit().await.unwrap();
+        let delete_wins_baseline = find_by_id(&pool, delete_wins_id).await.unwrap().unwrap();
+        let mut stale_network = delete_wins_baseline.config.network;
+        // Adding a service interface is the stale mutation under test. Its
+        // generated identities make it a distinct valid endpoint, while the
+        // remaining fields provide only the complete stored representation.
+        stale_network
+            .service_interfaces
+            .push(InstanceServiceInterfaceConfig {
+                attachment_id: uuid::Uuid::new_v4(), // Distinguishes this attempted endpoint write.
+                interface_ordinal: 0,
+                dpu_id: writer_wins_dpu,
+                slot_index: 0,
+                vpc_id: VpcId::new(),
+                vpc_prefix_id: VpcPrefixId::new(),
+                network_segment_id: NetworkSegmentId::new(),
+                network_prefix_id: NetworkPrefixId::new(),
+                link_prefix: "198.51.100.0/31".parse().unwrap(),
+                mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 0x4c]),
+                internal_uuid: uuid::Uuid::new_v4(),
+            });
+        let mut deletion = pool.begin().await.unwrap();
+        delete(delete_wins_id, deletion.as_mut()).await.unwrap();
+        let deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(deletion.as_mut())
+            .await
+            .unwrap();
+        let blocked_writer = async {
+            let mut txn = pool.begin().await.unwrap();
+            instance_address::lock_table_for_allocation(txn.as_mut())
+                .await
+                .unwrap();
+            let error = update_network_config(
+                txn.as_mut(),
+                delete_wins_id,
+                delete_wins_baseline.network_config_version,
+                &stale_network,
+                false,
+            )
+            .await
+            .expect_err("writer must not resurrect a deleted instance");
+            txn.rollback().await.unwrap();
+            error
+        };
+        let release_deletion = async {
+            wait_for_blocked_query(&pool, deletion_pid, "LOCK TABLE instance_addresses").await;
+            deletion.commit().await.unwrap();
+        };
+        let (error, ()) = tokio::join!(blocked_writer, release_deletion);
+        assert!(matches!(error, DatabaseError::FailedPrecondition(_)));
+        assert!(find_by_id(&pool, delete_wins_id).await.unwrap().is_none());
+    }
+
+    /// Whole-instance deletion retains the instance and its normalized
+    /// allocations while a service endpoint exists, because only observed
+    /// service cleanup may authorize their final removal.
+    #[crate::sqlx_test]
+    async fn delete_retains_service_owned_resources_until_endpoint_removal(pool: sqlx::PgPool) {
+        // Build the guarded instance graph plus an unrelated owner whose address
+        // must survive the endpoint-rejected deletion and later successful deletion.
+        let mut txn = pool.begin().await.unwrap();
+        let instance_id = seed_instance(&mut txn, 0x4a, None).await;
+        let segment_id = NetworkSegmentId::new();
+        let vpc_id = VpcId::new();
+        let unrelated_instance_id = seed_instance(&mut txn, 0x4b, None).await;
+        let unrelated_segment_id = NetworkSegmentId::new();
+        let unrelated_vpc_id = VpcId::new();
+        let dpu_id: DpuMachineId = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x4a; 32],
+            MachineType::Dpu,
+        )
+        .try_into()
+        .unwrap();
+
+        // Seed the normalized allocation and its current endpoint owner.
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, version) \
+             VALUES ($1, 'service-delete-guard-vpc', 'V1-T0')",
+        )
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, version) \
+             VALUES ($1, 'unrelated-delete-guard-vpc', 'V1-T0')",
+        )
+        .bind(unrelated_vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, version, vpc_id) \
+             VALUES ($1, 'service-delete-guard-segment', 'V1-T0', $2)",
+        )
+        .bind(segment_id)
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, version, vpc_id) \
+             VALUES ($1, 'unrelated-delete-guard-segment', 'V1-T0', $2)",
+        )
+        .bind(unrelated_segment_id)
+        .bind(unrelated_vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
         sqlx::query(
             "UPDATE instances SET network_config = jsonb_build_object( \
                  'interfaces', jsonb_build_array(), \
                  'service_interfaces', jsonb_build_array(jsonb_build_object( \
-                     'network_segment_id', $2::text, 'vpc_id', $3::text))) \
+                     'network_segment_id', $2::text, 'vpc_id', $3::text, \
+                     'dpu_id', $4::text))) \
              WHERE id = $1",
+        )
+        .bind(instance_id)
+        .bind(segment_id)
+        .bind(vpc_id)
+        .bind(dpu_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO instance_addresses \
+                (instance_id, address, prefix, segment_id, vpc_id) \
+             VALUES ($1, '198.51.100.1'::inet, '198.51.100.0/31'::cidr, $2, $3)",
+        )
+        .bind(unrelated_instance_id)
+        .bind(unrelated_segment_id)
+        .bind(unrelated_vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO instance_addresses \
+                (instance_id, address, prefix, segment_id, vpc_id) \
+             VALUES ($1, '192.0.2.1'::inet, '192.0.2.0/31'::cidr, $2, $3)",
         )
         .bind(instance_id)
         .bind(segment_id)
@@ -2199,17 +3001,131 @@ mod tests {
         .await
         .unwrap();
 
-        // Both guards must see the hidden service link rather than allowing a
-        // resource deletion that would corrupt the instance snapshot.
-        assert_eq!(
-            count_network_segment_references(txn.as_mut(), &segment_id)
+        // The failed deletion must leave both durable owners unchanged.
+        let error = delete(instance_id, txn.as_mut())
+            .await
+            .expect_err("service endpoint must block whole-instance deletion");
+        assert!(matches!(error, DatabaseError::FailedPrecondition(_)));
+        let instance_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instances WHERE id=$1)")
+                .bind(instance_id)
+                .fetch_one(txn.as_mut())
                 .await
-                .unwrap(),
-            1,
-        );
+                .unwrap();
+        assert!(instance_exists);
+        let retained_addresses = crate::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance_id,
+            &segment_id,
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            count_vpc_references(txn.as_mut(), &vpc_id).await.unwrap(),
-            1,
+            retained_addresses
+                .iter()
+                .map(|address| (
+                    address.instance_id,
+                    address.address,
+                    address.prefix,
+                    address.segment_id,
+                    address.vpc_id,
+                ))
+                .collect::<Vec<_>>(),
+            vec![(
+                instance_id,
+                "192.0.2.1".parse().unwrap(),
+                "192.0.2.0/31".parse().unwrap(),
+                segment_id,
+                vpc_id,
+            )]
+        );
+        let unrelated_addresses = crate::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &unrelated_instance_id,
+            &unrelated_segment_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            unrelated_addresses
+                .iter()
+                .map(|address| (
+                    address.instance_id,
+                    address.address,
+                    address.prefix,
+                    address.segment_id,
+                    address.vpc_id,
+                ))
+                .collect::<Vec<_>>(),
+            vec![(
+                unrelated_instance_id,
+                "198.51.100.1".parse().unwrap(),
+                "198.51.100.0/31".parse().unwrap(),
+                unrelated_segment_id,
+                unrelated_vpc_id,
+            )]
+        );
+
+        // Allow `db::instance::delete` to remove the instance and its remaining
+        // normalized allocation once the endpoint is absent.
+        sqlx::query(
+            "UPDATE instances SET network_config = \
+                 jsonb_set(network_config, '{service_interfaces}', '[]'::jsonb, true) \
+             WHERE id = $1",
+        )
+        .bind(instance_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        delete(instance_id, txn.as_mut()).await.unwrap();
+        let instance_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instances WHERE id=$1)")
+                .bind(instance_id)
+                .fetch_one(txn.as_mut())
+                .await
+                .unwrap();
+        assert!(!instance_exists);
+        assert!(
+            crate::instance_address::find_all_by_instance_id_and_segment_id(
+                txn.as_mut(),
+                &instance_id,
+                &segment_id,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            find_by_id(txn.as_mut(), unrelated_instance_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let unrelated_addresses = crate::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &unrelated_instance_id,
+            &unrelated_segment_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            unrelated_addresses
+                .iter()
+                .map(|address| (
+                    address.instance_id,
+                    address.address,
+                    address.prefix,
+                    address.segment_id,
+                    address.vpc_id,
+                ))
+                .collect::<Vec<_>>(),
+            vec![(
+                unrelated_instance_id,
+                "198.51.100.1".parse().unwrap(),
+                "198.51.100.0/31".parse().unwrap(),
+                unrelated_segment_id,
+                unrelated_vpc_id,
+            )]
         );
     }
 

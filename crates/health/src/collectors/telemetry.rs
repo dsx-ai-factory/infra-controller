@@ -318,6 +318,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
 
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key,
                     name: METRIC_NAME.to_string(),
                     metric_type: metric_type_from_id(&metric_id),

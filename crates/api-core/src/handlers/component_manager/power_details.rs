@@ -641,6 +641,7 @@ fn backend_error_category(error: &ComponentManagerError) -> &'static str {
         ComponentManagerError::Unsupported(_) => "unsupported",
         ComponentManagerError::RejectedBeforeDispatch(_) => "rejected_before_dispatch",
         ComponentManagerError::OperationOutcomeUnknown(_) => "operation_outcome_unknown",
+        ComponentManagerError::SwitchCertificateSubmission { .. } => "operation_outcome_unknown",
         ComponentManagerError::Internal(_) => "internal",
         ComponentManagerError::Transport(_) => "transport",
         ComponentManagerError::Status(_) => "grpc_status",
@@ -676,6 +677,7 @@ fn failed_observation(
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::testing::capture_logs;
     use carbide_test_support::Outcome::{FailsWith, Yields};
     use carbide_test_support::{Case, Check, check_cases, check_values};
     use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
@@ -799,11 +801,14 @@ mod tests {
     }
 
     /// Only one matching observation may become actual state with a receipt
-    /// time from this conversion. Malformed or failed evidence must select the
-    /// error outcome without leaking backend payloads.
+    /// time from this conversion. Malformed or failed evidence must return an
+    /// error without leaking backend payloads in responses or diagnostics.
+    /// Failure logs must still identify the source and requested management MAC.
     #[test]
     fn observations_preserve_unknown_and_reject_missing_or_mismatched_evidence() {
         use self::rpc::ComponentPowerErrorCode as ErrorCode;
+
+        const PRIVATE_PAYLOAD: &str = "private payload";
 
         let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
         let single = |mac_address, power_state| {
@@ -813,10 +818,9 @@ mod tests {
             }])
         };
 
-        // Cover wire states absent from the public acceptance fixtures here;
-        // rejected evidence shares the same projection and redaction contract.
-        check_values(
-            [
+        // Cover wire states absent from the public acceptance fixtures here.
+        let logs = capture_logs(|| {
+            let cases = [
                 Check {
                     scenario: "explicit unknown",
                     input: single(mac, Ok(Some(PowerState::Unknown))),
@@ -844,7 +848,7 @@ mod tests {
                 },
                 Check {
                     scenario: "per-target failure hides private payload",
-                    input: single(mac, Err("private payload".into())),
+                    input: single(mac, Err(PRIVATE_PAYLOAD.into())),
                     expect: Err(ErrorCode::ReadFailed),
                 },
                 Check {
@@ -856,13 +860,23 @@ mod tests {
                     expect: Err(ErrorCode::ReadFailed),
                 },
                 Check {
+                    // Malformed responses can contain errors as well as states;
+                    // logging the rejected result would expose its private text.
+                    scenario: "wrong identity with private failure text",
+                    input: single(
+                        MacAddress::new([6, 5, 4, 3, 2, 1]),
+                        Err(PRIVATE_PAYLOAD.into()),
+                    ),
+                    expect: Err(ErrorCode::ReadFailed),
+                },
+                Check {
                     scenario: "whole-call unsupported hides private payload",
-                    input: Err(ComponentManagerError::Unsupported("private payload".into())),
+                    input: Err(ComponentManagerError::Unsupported(PRIVATE_PAYLOAD.into())),
                     expect: Err(ErrorCode::Unsupported),
                 },
                 Check {
                     scenario: "whole-call failure hides private payload",
-                    input: Err(ComponentManagerError::Internal("private payload".into())),
+                    input: Err(ComponentManagerError::Internal(PRIVATE_PAYLOAD.into())),
                     expect: Err(ErrorCode::ReadFailed),
                 },
                 Check {
@@ -881,8 +895,8 @@ mod tests {
                     ]),
                     expect: Err(ErrorCode::ReadFailed),
                 },
-            ],
-            |result| {
+            ];
+            check_values(cases, |result| {
                 // The receipt timestamp must describe this conversion, not a
                 // default timestamp or a value cached by the backend.
                 let before = chrono::Utc::now();
@@ -890,7 +904,7 @@ mod tests {
                 let after = chrono::Utc::now();
 
                 assert_eq!(actual.source, Some(rpc::ComponentPowerSource::Rms as i32));
-                assert!(!format!("{actual:?}").contains("private payload"));
+                assert!(!format!("{actual:?}").contains(PRIVATE_PAYLOAD));
                 match actual.outcome.expect("every observation has an outcome") {
                     PowerOutcome::State(state) => {
                         let observed_at: chrono::DateTime<chrono::Utc> = actual
@@ -906,7 +920,74 @@ mod tests {
                         Err(ErrorCode::try_from(error.code).unwrap())
                     }
                 }
-            },
-        );
+            });
+        });
+
+        // Silence would also hide private text, so require the existing backend
+        // failure and malformed-response diagnostics before checking for leaks.
+        let expected_mac = mac.to_string();
+        for (category, level, message) in [
+            // An unsupported reader is a capability gap, not an operational warning.
+            (
+                "unsupported",
+                tracing::Level::DEBUG,
+                "passive power read is unsupported",
+            ),
+            // Whole-call failures must keep enough context to identify the backend.
+            (
+                "internal",
+                tracing::Level::WARN,
+                "component power read failed",
+            ),
+            // A failed target must still be diagnosable after discarding its text.
+            (
+                "per_target_failure",
+                tracing::Level::WARN,
+                "backend reported a component power read failure",
+            ),
+        ] {
+            let log = logs
+                .iter()
+                .find(|log| log.field("error_category") == Some(category))
+                .unwrap_or_else(|| panic!("missing {category} diagnostic"));
+            assert_eq!(log.level, level, "{category}");
+            assert_eq!(log.message, message, "{category}");
+            assert_eq!(log.field("source"), Some("Rms"));
+            assert_eq!(
+                log.field("management_mac_address"),
+                Some(expected_mac.as_str())
+            );
+            if category == "per_target_failure" {
+                assert_eq!(log.field("result_count"), Some("1"));
+            }
+        }
+
+        // Both a wrong MAC and duplicate results must retain the requested MAC
+        // and rejected result count without logging the results themselves.
+        for result_count in ["1", "2"] {
+            let log = logs
+                .iter()
+                .find(|log| {
+                    log.message
+                        == "component power results do not match the requested identity and count"
+                        && log.field("result_count") == Some(result_count)
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing mismatch diagnostic for {result_count} results")
+                });
+            assert_eq!(log.level, tracing::Level::WARN);
+            assert_eq!(log.field("source"), Some("Rms"));
+            assert_eq!(
+                log.field("management_mac_address"),
+                Some(expected_mac.as_str())
+            );
+        }
+
+        assert!(logs.iter().all(|log| {
+            !log.message.contains(PRIVATE_PAYLOAD)
+                && log.fields.iter().all(|(name, value)| {
+                    !name.contains(PRIVATE_PAYLOAD) && !value.contains(PRIVATE_PAYLOAD)
+                })
+        }));
     }
 }
