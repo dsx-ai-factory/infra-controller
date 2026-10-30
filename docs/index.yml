@@ -407,6 +407,12 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - section: Routing Profile CLI Reference
+              contents:
+                - link: Routing Profile Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile.md
+                - link: Show Routing Profiles
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile-show.md
             - section: NIC Firmware CLI Reference
               contents:
                 - link: NIC Firmware Overview

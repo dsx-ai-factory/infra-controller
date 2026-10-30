@@ -189,6 +189,14 @@ nico-admin-cli tenant update example-org -p MAINTENANCE
 
 The `-p` flag accepts any string. The supplied value must exactly match a key defined in `fnn.routing_profiles` in the API server configuration. The API validates the name and returns `NOT_FOUND` if the profile does not exist in the configuration.
 
+As an alternative to checking the site configuration file, use the gRPC admin-cli to view the configured routing profiles and their names:
+
+```bash
+nico-admin-cli routing-profile show
+```
+
+Use one of the returned names as the `-p` value.
+
 This is the recommended workflow for changing a tenant's routing profile using the admin-cli:
 
 1. Review the current tenant record:

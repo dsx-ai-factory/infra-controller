@@ -53,6 +53,7 @@ network:
   - network-device
   - network-security-group
   - route-server
+  - routing-profile
   - domain
   - ip
   - ib-partition
