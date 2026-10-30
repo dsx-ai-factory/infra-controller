@@ -261,7 +261,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_health_otlp_ingress_records_total</td><td>counter</td><td>Number of log records or metric samples accepted into OTLP queues, including replacements and insertions that evict an older entry, by target and signal.</td></tr>
 <tr><td>carbide_health_otlp_queue_depth</td><td>gauge</td><td>Number of entries waiting in an OTLP queue, by target and signal.</td></tr>
 <tr><td>carbide_health_otlp_queue_dropped_total</td><td>counter</td><td>Number of OTLP queue entries dropped because a per-target queue reached capacity, by target and signal.</td></tr>
-<tr><td>carbide_health_redfish_sse_capacity_exhausted_total</td><td>counter</td><td>Number of SSE subscription cap warnings, at most one per BMC per 30 minutes.</td></tr>
+<tr><td>carbide_health_redfish_sse_capacity_exhausted_total</td><td>counter</td><td>Number of SSE subscription cap warnings, rate limited to one per BMC per 30 minutes while the cap persists.</td></tr>
 <tr><td>carbide_health_redfish_sse_event_record_resolution_failures_total</td><td>counter</td><td>Number of Redfish SSE event records dropped after a referenced record could not be resolved, by failure reason.</td></tr>
 <tr><td>carbide_health_redfish_sse_subscription_close_total</td><td>counter</td><td>Number of Redfish SSE streams closed, by what happened to the EventDestination each opened.</td></tr>
 <tr><td>carbide_health_redfish_sse_subscriptions_reaped_total</td><td>counter</td><td>Number of SSE EventDestinations the reap_on_cap sweep tried to delete on BMCs at their SSE subscription cap, by outcome.</td></tr>
