@@ -894,7 +894,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}{
 		{
 			name: "machine", path: "/v2/org/test-org/nico/expected-machine/all",
-			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","bmcRetainCredentials":true,"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty","interfaces":[]}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
+			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","retainBmcCredentials":true,"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty","interfaces":[]}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
 			handle:  NewReplaceAllExpectedMachinesHandler(dbSession, pool, cfg).Handle,
 			method:  corev1.Forge_ReplaceAllExpectedMachines_FullMethodName,
 			secrets: []string{"machine-user", "machine-pass"},
