@@ -4,7 +4,7 @@ This page covers the hardware requirements for both the NICo site controller and
 
 ## Site Controller
 
-The site controller runs the NICo control plane on a Kubernetes cluster. A minimum of 3 nodes is required for high availability. For large GB200-class sites, plan 5 nodes or nodes with more cores than the minimum below. As a reference point, 3 nodes with 96 cores and 251 GiB of allocatable memory each ingested a 250-rack site. In the runs at machine state controller concurrency 80 to 140 the busiest node peaked at 54 cores. One node reached 62 GiB in the 20-hour run at the default concurrency. That site had 4,500 managed hosts with 9,000 data processing units (DPUs), 2,250 NVLink switches, and 2,000 power shelves. At that scale the 512 GiB memory recommendation is growth headroom. Refer to [Large Site Sizing and Settings](../../development/large-site-sizing-and-settings.md) for the measurements and the ingestion settings that go with them.
+The site controller runs the NICo control plane on a Kubernetes cluster. A minimum of 3 nodes is required for high availability. For large GB200-class sites, plan 5 nodes or nodes with more cores than the minimum below. Refer to [Sizing and Scale Guidance](../sizing-and-scale.md) for the versioned scale table, the measured site controller load at each fleet size, and the ingestion settings that go with it.
 
 | Component | Requirement |
 |---|---|
@@ -24,7 +24,7 @@ The site controller runs the NICo control plane on a Kubernetes cluster. A minim
 
 ### DPUs on Site Controller
 
-DPUs are generally preferred in nodes hosting the NICo control plane components, but not strictly required. DPUs in these nodes are, however, the configuration that NICo QA regularly tests. If your site controller nodes are equipped with Bluefield-3 DPUs, ensure the following requirements are met:
+Data processing units (DPUs) are generally preferred in nodes hosting the NICo control plane components, but not strictly required. DPUs in these nodes are, however, the configuration that NICo QA regularly tests. If your site controller nodes are equipped with Bluefield-3 DPUs, ensure the following requirements are met:
 
 - You have the correct DPU power cable from the server vendor.
 - The Bluefield-3's operating mode is DPU mode.

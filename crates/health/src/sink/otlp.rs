@@ -1710,32 +1710,34 @@ mod tests {
             )
             .await;
 
-            let logs = collector.logs.lock().unwrap();
-            assert_eq!(logs.len(), 2);
-            assert_eq!(logs[1], logs[0], "retried logs export");
+            {
+                let logs = collector.logs.lock().unwrap();
+                assert_eq!(logs.len(), 2);
+                assert_eq!(logs[1], logs[0], "retried logs export");
 
-            let metrics = collector.metrics.lock().unwrap();
-            assert_eq!(metrics.len(), 2);
-            assert_eq!(metrics[1], metrics[0], "retried metrics export");
+                let metrics = collector.metrics.lock().unwrap();
+                assert_eq!(metrics.len(), 2);
+                assert_eq!(metrics[1], metrics[0], "retried metrics export");
 
-            let counter = metrics[0]
-                .resource_metrics
-                .iter()
-                .flat_map(|resource| &resource.scope_metrics)
-                .flat_map(|scope| &scope.metrics)
-                .find(|metric| metric.name.ends_with("_total"))
-                .expect("counter alias in the retried request");
-            let Some(crate::otlp::metrics::metric::Data::Sum(sum)) = &counter.data else {
-                panic!("counter alias must be a Sum");
-            };
+                let counter = metrics[0]
+                    .resource_metrics
+                    .iter()
+                    .flat_map(|resource| &resource.scope_metrics)
+                    .flat_map(|scope| &scope.metrics)
+                    .find(|metric| metric.name.ends_with("_total"))
+                    .expect("counter alias in the retried request");
+                let Some(crate::otlp::metrics::metric::Data::Sum(sum)) = &counter.data else {
+                    panic!("counter alias must be a Sum");
+                };
 
-            assert_eq!(sum.data_points[0].start_time_unix_nano, 1_000_000_000);
-            assert_eq!(
-                sum.data_points[0].value,
-                Some(crate::otlp::metrics::number_data_point::Value::AsDouble(
-                    42.0
-                )),
-            );
+                assert_eq!(sum.data_points[0].start_time_unix_nano, 1_000_000_000);
+                assert_eq!(
+                    sum.data_points[0].value,
+                    Some(crate::otlp::metrics::number_data_point::Value::AsDouble(
+                        42.0
+                    )),
+                );
+            }
 
             for signal in ["logs", "metrics"] {
                 assert_eq!(
@@ -1747,7 +1749,143 @@ mod tests {
                     "{signal} ingress counts observations before compatibility aliases",
                 );
             }
+
+            if partial_rejections.is_none() {
+                use crate::otlp::common::any_value::Value::StringValue;
+
+                let CollectorEvent::Log(mut record) = log_event("OpenBMC.0.1.Repeated", "[]")
+                else {
+                    unreachable!("log_event always returns a log event");
+                };
+                // The full batch above reset the flush interval. Let each log
+                // leave the queue so both reach staging separately with the same key.
+                for body in ["first occurrence", "second occurrence"] {
+                    record.body = body.to_string();
+                    sink.handle_event(&context, &CollectorEvent::Log(record.clone()));
+                    wait_until(|| sink.queue.len() == 0, "log reaches staging").await;
+                }
+                wait_until(
+                    || {
+                        capture.counter_delta(
+                            "carbide_health_otlp_egress_records_total",
+                            &[("target", &endpoint), ("signal", "logs")],
+                        ) == 4.0
+                    },
+                    "both log records are exported",
+                )
+                .await;
+
+                let logs = collector.logs.lock().unwrap();
+                assert_eq!(logs.len(), 3);
+                let bodies = logs[2]
+                    .resource_logs
+                    .iter()
+                    .flat_map(|resource| &resource.scope_logs)
+                    .flat_map(|scope| &scope.log_records)
+                    .map(
+                        |record| match record.body.as_ref().and_then(|body| body.value.as_ref()) {
+                            Some(StringValue(body)) => body.as_str(),
+                            _ => panic!("test expects string log bodies"),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                assert_eq!(bodies, ["first occurrence", "second occurrence"]);
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn metrics_drain_replaces_staged_readings_after_an_export() {
+        use crate::otlp::metrics::metric;
+        use crate::otlp::metrics::number_data_point::Value::AsDouble;
+
+        let capture = MetricsCapture::start();
+        let collector = Arc::new(FlakyCollector::default());
+        let endpoint = serve_collector(
+            tonic::transport::Server::builder()
+                .add_service(MetricsServiceServer::from_arc(collector.clone())),
+        )
+        .await;
+        let mut sink = bounded_test_sink(3);
+        sink.target = ConfiguredOtlpTarget(endpoint.clone());
+        let drain = OtlpMetricsDrainTask::new(
+            sink.metrics_queue.clone(),
+            OtlpTargetConfig {
+                endpoint: endpoint.clone(),
+                batch_size: 2,
+                queue_capacity: 3,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                max_concurrent_exports: 1,
+                flush_interval: Duration::from_secs(3600),
+                include_diagnostics: false,
+                include_alert_details: false,
+                tls: None,
+            },
+            "staging".to_string(),
+        )
+        .run();
+        tokio::pin!(drain);
+
+        let context = test_context();
+        let first = metric_event();
+        let other = metric_event_with_name("fan", "other", "gauge", "rpm");
+        let mut replacement = first.clone();
+        let CollectorEvent::Metric(sample) = &mut replacement else {
+            panic!("metric fixture must contain a metric");
+        };
+        sample.value = 7.0;
+
+        // The full priming export resets the interval. Its first attempt returns
+        // `UNAVAILABLE`, so wait for the retry before reusing a key in a partial
+        // batch. The replacement and unrelated series then fill that batch.
+        for (phase, events, exported) in [
+            ("priming export", vec![first.clone(), other.clone()], 2.0),
+            ("partial staging", vec![first], 2.0),
+            ("replacement export", vec![replacement, other], 4.0),
+        ] {
+            for event in events {
+                sink.handle_event(&context, &event);
+            }
+            tokio::select! {
+                () = &mut drain => panic!("drain must keep running"),
+                () = wait_until(
+                    || sink.metrics_queue.len() == 0 && capture.counter_delta(
+                        "carbide_health_otlp_egress_records_total",
+                        &[("target", &endpoint), ("signal", "metrics")],
+                    ) == exported,
+                    phase,
+                ) => {}
+            }
+        }
+
+        let requests = collector.metrics.lock().unwrap();
+        assert_eq!(requests.len(), 3, "priming attempt, retry, and next batch");
+        let points = requests[2]
+            .resource_metrics
+            .iter()
+            .flat_map(|resource| &resource.scope_metrics)
+            .flat_map(|scope| &scope.metrics)
+            .map(|metric| {
+                let Some(metric::Data::Gauge(gauge)) = &metric.data else {
+                    panic!("test expects gauge points");
+                };
+                (
+                    metric.name.as_str(),
+                    gauge
+                        .data_points
+                        .iter()
+                        .map(|point| point.value)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            points,
+            vec![
+                ("staging_temp_gauge_celsius", vec![Some(AsDouble(7.0))]),
+                ("staging_fan_gauge_rpm", vec![Some(AsDouble(42.0))]),
+            ]
+        );
     }
 
     /// Holds each metrics export until the gate hands out a permit, and

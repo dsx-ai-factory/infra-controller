@@ -10,10 +10,12 @@ This directory contains multi-stage Dockerfiles optimized for production deploym
 ## Features
 
 ### Multi-Stage Builds
-- **Build Stage**: `golang:1.26.4` - Full Go toolchain for compilation
+
+- **Build Stage**: `golang:1.27.3` - Full Go toolchain for compilation
 - **Runtime Stage**: `nvcr.io/nvidia/distroless/go:v4.0.8` - Minimal distroless runtime environment
 
 ### Optimizations
+
 - Static compilation with CGO disabled
 - Strip debug symbols (`-w -s` flags)
 - Minimal distroless base image for reduced attack surface
@@ -21,12 +23,14 @@ This directory contains multi-stage Dockerfiles optimized for production deploym
 - Proper signal handling
 
 ### Security Improvements
+
 - Non-root user (`nvs` from distroless)
 - Minimal distroless image with no shell or package manager
 - CA certificates included
 - Timezone data for proper logging
 
 ## Available Images
+
 1. **Dockerfile.nico-rest-api** - REST API server
 2. **Dockerfile.nico-rest-db** - Database Migrations
 3. **Dockerfile.nico-rest-workflow** - Workflow Service

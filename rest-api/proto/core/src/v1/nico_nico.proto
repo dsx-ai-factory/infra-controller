@@ -967,6 +967,18 @@ service Forge {
   rpc GetAllSkuIds(google.protobuf.Empty) returns (SkuIdList);
   rpc FindSkusByIds(SkusByIdsRequest) returns (SkuList);
   rpc UpdateSkuMetadata(SkuUpdateMetadataRequest) returns (google.protobuf.Empty);
+  // Replace the components and metadata of an existing SKU.
+  // Omitting `components` replaces the stored definition with empty values.
+  // Input `components.ethernet_devices` values are ignored; the response list
+  // is empty.
+  // Omitted description becomes empty; omitted device_type becomes unset.
+  // Preserves creation time and machine assignments, requests SKU verification,
+  // and returns the stored SKU with its associated machine IDs.
+  // The schema_version must equal the current SKU schema version. An empty ID,
+  // unsupported schema version, invalid storage constraints, or components
+  // matching another SKU return INVALID_ARGUMENT before absence is checked.
+  // A valid replacement that does not match another SKU returns NOT_FOUND
+  // when its target ID is absent. Other database failures return INTERNAL.
   rpc ReplaceSku(Sku) returns (Sku);
   // Replace the complete component definition, preserving omitted metadata.
   // Requests SKU verification and returns the replaced SKU with its associated machine IDs.
@@ -2068,6 +2080,9 @@ message RuntimeConfig {
   // Effective nvlink_config.enabled, whether NVLink partitioning is enabled.
   // Older Core versions omit this field.
   optional bool nvlink_partitioning_enabled = 62;
+  // The machine update policy as the machine update manager applies it.
+  // Older Core versions omit this field.
+  optional MachineUpdatePolicy machine_update_policy = 63;
 }
 
 message EchoRequest {
@@ -12637,4 +12652,20 @@ message ReplaceSkuComponentsRequest {
   // Omission preserves the stored device type; an empty string sets it to empty.
   // This operation does not clear the database value to NULL.
   optional string device_type = 5;
+}
+
+// Machine update manager settings, including the effective interval and configured caps.
+message MachineUpdatePolicy {
+  // Seconds between manager passes. 300 when not configured, an explicit 0 stays 0.
+  uint64 effective_run_interval_seconds = 1;
+  // firmware_global.requires_manual_upgrade.
+  bool requires_manual_upgrade = 2;
+  // Site-wide configured caps on concurrent updates. Unset differs from 0.
+  // With both caps unset, the manager starts no new updates.
+  // Without a percentage cap, the absolute cap is used without a health adjustment.
+  // With a percentage cap, no hosts or a percentage of 0 or less gives 0.
+  // Otherwise, round that share of hosts up and subtract unhealthy hosts, flooring at 0.
+  // Also apply the absolute cap when it is nonnegative. An absolute cap of 0 gives 0.
+  optional int32 max_concurrent_updates_absolute = 3;
+  optional int32 max_concurrent_updates_percent = 4;
 }

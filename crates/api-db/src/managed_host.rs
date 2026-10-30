@@ -244,16 +244,19 @@ pub async fn load_by_instance_ids(
     instance_ids: &[InstanceId],
     load_snapshot_options: LoadSnapshotOptions,
 ) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
+    // Keep `ARRAY`: PostgreSQL resolves the requested instances to host IDs once,
+    // then filters the machine scan before building snapshots. An outer instance
+    // join can build snapshots for unrelated machines before filtering them out.
     let query = format!(
         r#"SELECT m.* FROM ({}) m
-        INNER JOIN instances i ON i.machine_id = m.id
-        WHERE i.id = ANY(
+        WHERE m.id = ANY(ARRAY(
+            SELECT i.machine_id FROM instances i WHERE i.id = ANY(
     "#,
         managed_host_snapshots_query(&load_snapshot_options)
     );
     let result: Vec<ManagedHostStateSnapshot> = sqlx::QueryBuilder::new(query)
         .push_bind(instance_ids)
-        .push(")")
+        .push(")))")
         .build_query_as()
         .fetch_all(txn)
         .await

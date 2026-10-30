@@ -7,13 +7,13 @@
 //! lets the provider acknowledge that same definition instead of creating a new
 //! revision. Accepted requests stay available for allocations using older revisions.
 //! Integrated pools keep their existing resource rows and do not use this store.
-//! Wiring for startup and pool growth follows in
-//! [#7140](https://github.com/dsx-ai-factory/infra-controller/issues/7140).
+//! API startup resumes the saved registration or defines a new pool from its
+//! original seed snapshot. Editing seed configuration does not request growth.
 //!
 //! Provider errors leave the request pending, including a rejected definition.
 //! Resolve the provider's reported problem before retrying; submitting different
-//! input cannot replace that request. Operator recovery for rejected definitions
-//! must be settled in #7140 before enabling remote pools in production.
+//! input cannot replace that request. The provider API README describes recovery
+//! and the production activation boundary.
 
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use db::resource_pool::{binding as bindings, registration as storage};
 use model::resource_pool::registration::ResourcePoolRegistration;
 use model::resource_pool::{ResourcePoolBackendKind, ResourcePoolBinding};
 use prost::Message;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError, MAX_MESSAGE_BYTES};
 use crate::transaction::database_transaction;
@@ -192,8 +192,8 @@ pub async fn resume(
 /// Missing and pending revisions return `None`; accepted older revisions remain
 /// available after growth. Reading a revision does not make it current.
 /// The lookup has a 30-second budget, including acquiring a database connection.
-/// Production callers will select allocation eligibility through this lookup in
-/// [#7140](https://github.com/dsx-ai-factory/infra-controller/issues/7140).
+/// Allocation preparation reads the definition through the crate's transaction helper,
+/// in the transaction that saves its request.
 pub async fn accepted(
     database: &PgPool,
     binding: &ResourcePoolBinding,
@@ -202,12 +202,9 @@ pub async fn accepted(
     tokio::time::timeout(REGISTRATION_TIMEOUT, async {
         check_binding(binding)?;
         let mut txn = database_transaction(database).await?;
-        let stored = storage::load(txn.as_pgconn(), binding.binding_id, revision).await?;
+        let accepted = accepted_in_transaction(txn.as_pgconn(), binding, Some(revision)).await?;
         txn.commit().await?;
-        stored
-            .filter(|stored| stored.accepted)
-            .map(|stored| decode(&stored, binding))
-            .transpose()
+        Ok(accepted)
     })
     .await
     .map_err(|_| RegistrationError::DeadlineExceeded)?
@@ -226,12 +223,38 @@ pub async fn latest_accepted(
     tokio::time::timeout(REGISTRATION_TIMEOUT, async {
         check_binding(binding)?;
         let mut txn = database_transaction(database).await?;
-        let stored = storage::latest_accepted(txn.as_pgconn(), binding.binding_id).await?;
+        let accepted = accepted_in_transaction(txn.as_pgconn(), binding, None).await?;
         txn.commit().await?;
-        stored.map(|stored| decode(&stored, binding)).transpose()
+        Ok(accepted)
     })
     .await
     .map_err(|_| RegistrationError::DeadlineExceeded)?
+}
+
+/// `accepted_in_transaction` reads an acknowledged definition using the caller's
+/// connection. `Some(revision)` selects that exact revision; `None` selects the
+/// newest accepted revision. Missing or pending revisions return `None`, and
+/// invalid saved requests fail the same validation as [`accepted`].
+///
+/// Allocation preparation already holds a transaction. Reuse it so the request
+/// and its accepted revision are saved together without acquiring a second
+/// connection from the same pool.
+/// This helper does not acquire a connection, commit, or contact the provider.
+/// The caller owns transaction timeouts and completion.
+pub(crate) async fn accepted_in_transaction(
+    txn: &mut PgConnection,
+    binding: &ResourcePoolBinding,
+    revision: Option<i64>,
+) -> Result<Option<v1::DefineRequest>, RegistrationError> {
+    check_binding(binding)?;
+    let stored = match revision {
+        Some(revision) => storage::load(txn, binding.binding_id, revision).await?,
+        None => storage::latest_accepted(txn, binding.binding_id).await?,
+    };
+    stored
+        .filter(|stored| stored.accepted)
+        .map(|stored| decode(&stored, binding))
+        .transpose()
 }
 
 /// `PreparedRegistration` distinguishes a saved retry from a request to insert.

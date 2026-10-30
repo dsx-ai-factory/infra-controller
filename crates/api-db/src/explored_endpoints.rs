@@ -1328,6 +1328,7 @@ mod tests {
 
         let timeout = EndpointExplorationError::ConnectionTimeout {
             details: "deadline exceeded".to_string(),
+            consecutive_count: 1,
         };
         let latency = std::time::Duration::from_secs(2);
         assert_eq!(

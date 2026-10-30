@@ -246,7 +246,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for TenantOrganizationId {
 /// Database row for tenant_identity_config table.
 /// Persisted identity config with signing keys and token delegation.
 #[derive(Debug, sqlx::FromRow, carbide_macros::DbTable)]
-#[db_table(name = "tenant_identity_config")]
+#[db_table(name = "tenant_identity_config", alias = "tic")]
 pub struct TenantIdentityConfig {
     pub organization_id: TenantOrganizationId,
     pub issuer: Issuer,

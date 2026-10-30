@@ -150,6 +150,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_hw_metric_current_indeterminate_uncorrectable_errors_count_total</td><td>counter</td><td>Number of indeterminate uncorrectable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_current_uncorrectable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_current_uncorrectable_ecc_errors_count_total</td><td>counter</td><td>Number of uncorrectable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_energy_kilowatt_hours</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_energy_kilowatt_hours_total</td><td>counter</td><td>Number of kilowatt-hours consumed by the power supply since the last sensor reset, by powersupply_id, chassis_id, and optional model</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_lifetime_correctable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_lifetime_correctable_ecc_errors_count_total</td><td>counter</td><td>Number of correctable ECC errors over the lifetime of the memory, by memory_id and system_id</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_correctable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
@@ -158,6 +160,24 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_uncorrectable_errors_count_total</td><td>counter</td><td>Number of indeterminate uncorrectable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_lifetime_uncorrectable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_lifetime_uncorrectable_ecc_errors_count_total</td><td>counter</td><td>Number of uncorrectable ECC errors over the lifetime of the memory, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_accumulated_gpu_context_utilization_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_accumulated_gpu_context_utilization_seconds_total</td><td>counter</td><td>Number of seconds of GPU context utilization accumulated with the driver loaded, by processor_id and system_id; resets on SBR, fundamental reset, or ClearAccumulatedUtilizationCounters and wraps after approximately 49 days of activity</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_accumulated_sm_utilization_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_accumulated_sm_utilization_seconds_total</td><td>counter</td><td>Number of seconds of SM utilization accumulated with the driver loaded, by processor_id and system_id; resets on SBR, fundamental reset, or ClearAccumulatedUtilizationCounters and wraps after approximately 49 days of activity</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_correctable_row_remapping_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_correctable_row_remapping_count_total</td><td>counter</td><td>Number of memory row remappings due to correctable errors reported by the NVIDIA device, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_global_software_violation_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_global_software_violation_throttle_seconds_total</td><td>counter</td><td>Number of seconds the NVIDIA processor has throttled due to global software violation since reset, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_hardware_violation_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_hardware_violation_throttle_seconds_total</td><td>counter</td><td>Number of seconds the NVIDIA processor has throttled due to hardware violation since reset, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_pcie_rx_bytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_pcie_rx_bytes_total</td><td>counter</td><td>Number of bytes received by the NVIDIA processor PCIe receiver, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_pcie_tx_bytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_pcie_tx_bytes_total</td><td>counter</td><td>Number of bytes sent by the NVIDIA processor PCIe transmitter, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_power_brake_assertion_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_power_brake_assertion_seconds_total</td><td>counter</td><td>Number of seconds the NVIDIA processor power brake has been asserted since reset, by processor_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_uncorrectable_row_remapping_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_nvidia_uncorrectable_row_remapping_count_total</td><td>counter</td><td>Number of memory row remappings due to uncorrectable errors reported by the NVIDIA device, by memory_id and system_id</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_bad_dllp_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_bad_dllp_count_total</td><td>counter</td><td>Number of bad PCIe data link layer packets issued on the PCIe link by the receiver</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_bad_tlp_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
@@ -184,6 +204,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count_total</td><td>counter</td><td>Number of unsupported PCIe requests received by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds_total</td><td>counter</td><td>Number of seconds the processor has throttled due to a power limit since reset</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_on_hours_hours</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_on_hours_hours_total</td><td>counter</td><td>Number of power-on hours over the lifetime of the drive, by drive_id, storage_id, system_id, and optional model</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_read_io_kibibytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_read_io_kibibytes_total</td><td>counter</td><td>Number of kibibytes read from the drive since the last reset or wrap, by drive_id, storage_id, and system_id</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
@@ -232,6 +254,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_vl15_dropped_count_total</td><td>counter</td><td>Number of VL15 packets dropped by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_rack_nvlink_domain_info</td><td>gauge</td><td>Authoritative NICo rack-to-NVLink-domain assignments for current rack-ingestion sessions</td></tr>
 <tr><td>carbide_hardware_health_rack_session_start_time_seconds</td><td>gauge</td><td>NICo rack creation time in Unix seconds, labeled by its ingestion session</td></tr>
+<tr><td>carbide_health_bmc_connection_circuit_closed_total</td><td>counter</td><td>Number of times a BMC connection circuit closed because the BMC answered again.</td></tr>
+<tr><td>carbide_health_bmc_connection_circuit_opened_total</td><td>counter</td><td>Number of times a BMC connection circuit opened after a connect-level failure.</td></tr>
 <tr><td>carbide_health_otlp_egress_records_total</td><td>counter</td><td>Number of OTLP log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections, by target and signal.</td></tr>
 <tr><td>carbide_health_otlp_export_failures_total</td><td>counter</td><td>Number of OTLP export batches dropped after a send failure, by signal and gRPC status code.</td></tr>
 <tr><td>carbide_health_otlp_ingress_records_total</td><td>counter</td><td>Number of log records or metric samples accepted into OTLP queues, including replacements and insertions that evict an older entry, by target and signal.</td></tr>

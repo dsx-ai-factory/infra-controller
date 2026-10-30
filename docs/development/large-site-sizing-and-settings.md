@@ -9,7 +9,11 @@ which asked for site controller sizing guidance for large sites, and
 which asked for cluster sizing for large simulated fleets. This page is a
 companion to
 [Scaling NICo with Machine-a-Tron](machine-a-tron-scale-testing.md), which
-describes the simulator setup.
+describes the simulator setup. The versioned scale table, the status and
+validation method of every published figure, and the site controller sizing
+guidance per fleet size are on
+[Sizing and Scale Guidance](../getting-started/sizing-and-scale.md). This page
+is the detailed record of the 250-rack measurement and the settings it needed.
 
 ## What Was Measured
 
@@ -23,16 +27,22 @@ nodes as NICo. The runs covered ingestion only: discovery, preingestion, machine
 creation, and the machine state controller up to `ready`. Provisioning, firmware
 updates, and tenant workflows were not exercised. Storage input/output
 operations per second (IOPS) were not measured, and no node failed during a run.
-Hours are counted from fleet-up, the point at which every simulated BMC endpoint
-is deployed and reachable. The fleet-up burst is the elevated kube-apiserver
-load in the first 2 to 3 hours after that point.
+Times count from fleet-up, the point at which every simulator pod is Ready, the
+protocol gateway answers, and the controller has published every pod's
+Services, so every simulated BMC address is reachable. It is the same gate as
+[fleet-up](machine-a-tron-scale-testing.md#10000-host-simulated-fleet) on the
+10,000-host page. The fleet-up burst is the elevated kube-apiserver load in the
+first 2 to 3 hours after that point.
 
 ## Site Controller Sizing
 
-The three nodes had 96 cores and 251 GiB of allocatable memory each. They
-carried NICo, its Postgres, and the simulator. The figures below are from the
-runs at controller concurrency 80 to 140, the measured range around the
-recommended 80 to 120.
+The three nodes are baseline nodes: two Intel Xeon Gold 6442Y sockets of 24
+cores each with Hyper-Threading on, 96 logical CPUs as Kubernetes counts them,
+and eight 32 GiB DIMMs, 251 GiB of allocatable memory each. The core figures
+on this page are logical CPUs. They carried NICo, its Postgres, and the
+simulator. The
+figures below are from the runs at controller concurrency 80 to 140, the
+measured range around the recommended 80 to 120.
 
 | Resource | Highest per-node peak | Highest per-node 95th percentile (p95) over the run |
 |---|---|---|
@@ -57,23 +67,26 @@ Server (IPVS) at 2 to 3 cores per node. During the fleet-up burst it was
 kube-apiserver, at up to 39 cores on the busiest node at its peak sample,
 measured at controller concurrency 140.
 
-Memory fits the 256 GiB minimum node with room to spare. The highest reading was
-62 GiB on one node, during the two-sample Postgres spike late in the 20-hour run
-at the default concurrency. That run is outside the table's range. These runs do
-not show the CPU headroom of a node with two 24-core CPUs (48 cores). At
-controller concurrency 80 to 140 the highest per-node 95th percentile was 31 to
-50 cores and the highest per-node peak was 38 to 54 cores. At the busiest
-samples kube-apiserver was anywhere from a small share to three quarters of
-that, and the rest was Postgres, nico-api, hardware-health, and kube-proxy. For
-a site of this size, plan nodes with more cores than the 48-core minimum, or 5
-nodes. The measurements cover three 96-core nodes only, so validate the sizing
-for each deployment. The 512 GiB memory recommendation is growth headroom. Give
-Postgres a 16-core limit: at its 8-core default it was throttled in 88 percent
-of Completely Fair Scheduler (CFS) periods. Its memory needed no raise: the
-54-hour run completed at the 16 GiB default, and the 32 GiB of the later runs
-was headroom. The sizing table in `helm-prereqs/values.yaml` stays the memory
-guidance. Give nico-api 8 cores: it used 5 to 6 of them at controller
-concurrency 80 and above.
+Memory fits the 256 GiB minimum node with room to spare. The highest reading
+was 62 GiB on one node, during the two-sample Postgres spike late in the
+20-hour run at the default concurrency. That run is outside the table's range.
+These runs show the CPU headroom of a baseline node with two 24-core
+sockets and Hyper-Threading. At controller concurrency 80 to
+140 the highest per-node 95th percentile was 31 to 50 logical CPUs and the
+highest per-node peak was 38 to 54 of the 96. At the busiest samples
+kube-apiserver was anywhere from a small share to three quarters of that, and
+the rest was Postgres, nico-api, hardware-health, and kube-proxy. Three
+baseline nodes carried a site of this size with CPU headroom, and up to 39 of
+the peak logical CPUs were kube-apiserver load that a production site does not
+carry. The hardware prerequisites still recommend 5 nodes, or nodes with more
+logical CPUs, for larger GB200-class sites. The measurements cover three nodes
+of 96 logical CPUs only, so validate the sizing for each deployment. The 512
+GiB memory recommendation is growth headroom. Give Postgres a 16-core limit: at
+its 8-core default it was throttled in 88 percent of Completely Fair Scheduler
+(CFS) periods. Its memory needed no raise: the 54-hour run completed at the 16
+GiB default, and the 32 GiB of the later runs was headroom. The sizing table in
+`helm-prereqs/values.yaml` stays the memory guidance. Give nico-api 8 cores: it
+used 5 to 6 of them at controller concurrency 80 and above.
 
 ## Time to Ready Is a Concurrency Setting
 

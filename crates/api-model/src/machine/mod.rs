@@ -18,6 +18,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::LazyLock;
 
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::machine::{
@@ -61,6 +62,10 @@ use crate::machine_interface_address::InterfaceAssociationType;
 use crate::network_segment::NetworkSegmentType;
 use crate::predicted_machine_interface::PredictedMachineInterface;
 use crate::state_history::StateHistoryRecord;
+
+// Rack-scoped probes excluded from host health aggregation.
+static RACK_ONLY_PROBES: LazyLock<[health_report::HealthProbeId; 1]> =
+    LazyLock::new(|| [health_report::HealthProbeId::missing_rack_component()]);
 
 pub mod slas;
 
@@ -257,6 +262,22 @@ pub enum NotAllocatableReason {
     MaintenanceMode,
     #[error("A health alert prevents the machine from being allocated: {0:?}")]
     HealthAlert(Box<health_report::HealthProbeAlert>),
+}
+
+impl NotAllocatableReason {
+    /// The stable snake_case code reported by the API.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidState(_) => "invalid_state",
+            Self::PendingInstanceCreation => "pending_instance_creation",
+            Self::PendingDecommission => "pending_decommission",
+            Self::PendingBootConfiguration => "pending_boot_configuration",
+            Self::DpuReprovisioningStarted => "dpu_reprovisioning_started",
+            Self::NoDpuSnapshots => "no_dpu_snapshots",
+            Self::MaintenanceMode => "maintenance_mode",
+            Self::HealthAlert(_) => "health_alert",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -505,6 +526,11 @@ impl ManagedHostStateSnapshot {
     /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
     /// - no started DPU reprovision request, even when `allow_unhealthy` is true
+    ///
+    /// `FindHostStatesByIds` also runs this on a compact snapshot that blanks
+    /// host topology, interface addresses and vendors, DPU interfaces,
+    /// topology and BMC info, NIC firmware, power options and SKU device type.
+    /// A new input from those parts must be loaded by the compact query too.
     pub fn is_usable_as_instance(&self, allow_unhealthy: bool) -> Result<(), NotAllocatableReason> {
         // TODO: allow other states than Ready when allow_unhealthy=true. Will require changes to state machine (see Matthias).
         if !matches!(self.managed_state, ManagedHostState::Ready) {
@@ -572,6 +598,11 @@ impl ManagedHostStateSnapshot {
 
     /// Derives the aggregate health of the Managed Host based on individual
     /// health reports
+    ///
+    /// Rack component inventory shortages remain rack-scoped; other rack alerts
+    /// are included unless a host replacement report takes precedence.
+    ///
+    /// Also runs on the compact snapshot, see [`Self::is_usable_as_instance`].
     pub fn derive_aggregate_health(&mut self, host_health_config: HostHealthConfig) {
         let source = "aggregate-host-health".to_string();
         let observed_at = Some(chrono::Utc::now());
@@ -676,11 +707,18 @@ impl ManagedHostStateSnapshot {
         }
 
         if let Some(rack_overrides) = &self.rack_health_overrides {
-            if let Some(rack_replace) = &rack_overrides.replace {
-                output.merge(rack_replace);
-            }
-            for rack_merge in rack_overrides.merges.values() {
-                output.merge(rack_merge);
+            for report in rack_overrides
+                .replace
+                .iter()
+                .chain(rack_overrides.merges.values())
+            {
+                // Inventory shortages are actionable at the rack, not on each host.
+                // Filter before merging so host-owned alerts remain untouched.
+                let mut report = report.clone();
+                report
+                    .alerts
+                    .retain(|alert| !RACK_ONLY_PROBES.contains(&alert.id));
+                output.merge(&report);
             }
         }
 
@@ -772,37 +810,8 @@ impl ManagedHostStateSnapshot {
             })
             .collect();
 
-        self.dpu_snapshots.sort_by(|lhs, rhs| {
-            let Some(lhs_dpu_mac) = lhs
-                .status
-                .hardware_info
-                .as_ref()
-                .and_then(|hi| hi.dpu_info.as_ref())
-                .and_then(|di| di.factory_mac_address.parse().ok())
-            else {
-                return Ordering::Greater;
-            };
-
-            let Some(rhs_dpu_mac) = rhs
-                .status
-                .hardware_info
-                .as_ref()
-                .and_then(|hi| hi.dpu_info.as_ref())
-                .and_then(|di| di.factory_mac_address.parse().ok())
-            else {
-                return Ordering::Less;
-            };
-
-            let lhs_pci_slot = mac_pci_map.get(&lhs_dpu_mac).unwrap_or(&None);
-            let rhs_pci_slot = mac_pci_map.get(&rhs_dpu_mac).unwrap_or(&None);
-
-            match (lhs_pci_slot, rhs_pci_slot) {
-                (Some(lhs_pci_slot), Some(rhs_pci_slot)) => lhs_pci_slot.cmp(rhs_pci_slot),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            }
-        });
+        self.dpu_snapshots
+            .sort_by(|lhs, rhs| compare_dpus(lhs, rhs, &mac_pci_map));
 
         let primary_interface = self
             .host_snapshot
@@ -841,6 +850,27 @@ impl ManagedHostStateSnapshot {
 
         Ok(())
     }
+}
+
+/// Orders DPUs by the host PCI slot of their factory MAC. DPUs without a slot
+/// come next, then DPUs without a factory MAC. The order is total, so sorting
+/// stays valid when hardware info is not loaded.
+fn compare_dpus(
+    lhs: &DpuMachine,
+    rhs: &DpuMachine,
+    mac_pci: &HashMap<MacAddress, Option<&str>>,
+) -> Ordering {
+    let sort_key = |dpu: &DpuMachine| {
+        let mac: Option<MacAddress> = dpu
+            .status
+            .hardware_info
+            .as_ref()
+            .and_then(|hi| hi.dpu_info.as_ref())
+            .and_then(|di| di.factory_mac_address.parse().ok());
+        let slot = mac.and_then(|mac| mac_pci.get(&mac).copied().flatten());
+        (mac.is_none(), slot.is_none(), slot)
+    };
+    sort_key(lhs).cmp(&sort_key(rhs))
 }
 
 /// Represents the last_reboot_requested data
@@ -3978,7 +4008,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::machine_snapshot::{
-        dpu_machine, host_machine, managed_host_state_snapshot,
+        dpu_machine, dpu_machine_id, host_machine, managed_host_state_snapshot,
     };
 
     #[derive(Clone, Copy)]
@@ -4488,6 +4518,109 @@ mod tests {
                     FailsWith(NotAllocatableReason::DpuReprovisioningStarted),
             }
         );
+    }
+
+    #[test]
+    fn not_allocatable_reason_codes_are_stable_and_unique() {
+        let alert = alert_with_classifications(vec![]);
+        let codes = [
+            NotAllocatableReason::InvalidState(Box::new(ManagedHostState::Ready)),
+            NotAllocatableReason::PendingInstanceCreation,
+            NotAllocatableReason::PendingDecommission,
+            NotAllocatableReason::PendingBootConfiguration,
+            NotAllocatableReason::DpuReprovisioningStarted,
+            NotAllocatableReason::NoDpuSnapshots,
+            NotAllocatableReason::MaintenanceMode,
+            NotAllocatableReason::HealthAlert(Box::new(alert)),
+        ]
+        .map(|reason| reason.code());
+
+        assert_eq!(
+            codes,
+            [
+                "invalid_state",
+                "pending_instance_creation",
+                "pending_decommission",
+                "pending_boot_configuration",
+                "dpu_reprovisioning_started",
+                "no_dpu_snapshots",
+                "maintenance_mode",
+                "health_alert",
+            ]
+        );
+        assert_eq!(HashSet::from(codes).len(), codes.len());
+    }
+
+    /// A fixture DPU reporting `factory_mac`, or without hardware info.
+    fn dpu_with_factory_mac(index: u8, factory_mac: Option<MacAddress>) -> DpuMachine {
+        let mut dpu = dpu_machine(index);
+        match factory_mac {
+            Some(mac) => {
+                dpu.status
+                    .hardware_info
+                    .as_mut()
+                    .and_then(|hi| hi.dpu_info.as_mut())
+                    .expect("fixture DPU has DPU info")
+                    .factory_mac_address = mac.to_string()
+            }
+            None => dpu.status.hardware_info = None,
+        }
+        dpu
+    }
+
+    #[test]
+    fn dpu_comparator_is_antisymmetric() {
+        let [slot_1, slot_2, no_slot, unknown] =
+            [1, 2, 3, 4].map(|i| MacAddress::new([0x0a, 0, 0, 0, 0x02, i]));
+        let mac_pci = HashMap::from([(slot_1, Some("1")), (slot_2, Some("2")), (no_slot, None)]);
+
+        value_scenarios!(
+            run = |(lhs, rhs)| {
+                let (lhs, rhs) = (dpu_with_factory_mac(0, lhs), dpu_with_factory_mac(1, rhs));
+                let ordering = compare_dpus(&lhs, &rhs, &mac_pci);
+                assert_eq!(ordering, compare_dpus(&rhs, &lhs, &mac_pci).reverse());
+                ordering
+            };
+            "DPUs without a factory MAC are equal" {
+                (None, None) => Ordering::Equal,
+            }
+            "a DPU without a factory MAC sorts last" {
+                (None, Some(slot_1)) => Ordering::Greater,
+                (None, Some(no_slot)) => Ordering::Greater,
+            }
+            "slotted DPUs sort by slot, then DPUs without a slot" {
+                (Some(slot_1), Some(slot_2)) => Ordering::Less,
+                (Some(slot_2), Some(no_slot)) => Ordering::Less,
+                (Some(no_slot), Some(unknown)) => Ordering::Equal,
+            }
+        );
+    }
+
+    #[test]
+    fn dpu_sort_keeps_pci_order_and_promotes_primary() {
+        let mut snapshot = managed_host_state_snapshot();
+        // Host NIC `i` sits in PCI slot `i`. The primary interface is attached to DPU 0.
+        let nic_macs: Vec<_> = snapshot
+            .host_snapshot
+            .status
+            .hardware_info
+            .as_ref()
+            .unwrap()
+            .network_interfaces
+            .iter()
+            .map(|nic| nic.mac_address)
+            .collect();
+        snapshot.dpu_snapshots = vec![
+            dpu_with_factory_mac(3, None),
+            dpu_with_factory_mac(0, Some(nic_macs[2])),
+            dpu_with_factory_mac(1, Some(nic_macs[1])),
+            dpu_with_factory_mac(2, Some(nic_macs[0])),
+        ];
+
+        snapshot.sort_dpu_snapshots().unwrap();
+
+        let order: Vec<_> = snapshot.dpu_snapshots.iter().map(|dpu| dpu.id).collect();
+        assert_eq!(order, [0, 2, 1, 3].map(dpu_machine_id));
     }
 
     #[test]
@@ -5213,6 +5346,60 @@ mod tests {
                 )),
             }
         );
+    }
+
+    #[test]
+    fn rack_component_shortages_are_not_host_health() {
+        use health_report::{
+            HealthAlertClassification, HealthProbeId, HealthProbeSuccess, HealthReportApplyMode,
+        };
+
+        for mode in [HealthReportApplyMode::Merge, HealthReportApplyMode::Replace] {
+            let mut host = managed_host_state_snapshot();
+            host.host_snapshot.health_reports = HealthReportSources::default();
+            let missing = health_report::HealthProbeAlert {
+                id: HealthProbeId::missing_rack_component(),
+                target: Some("switch".to_string()),
+                ..alert_with_classifications(vec![HealthAlertClassification::hardware()])
+            };
+            let other = health_report::HealthProbeAlert {
+                id: "RackLeak".parse().unwrap(),
+                ..alert_with_classifications(vec![HealthAlertClassification::prevent_allocations()])
+            };
+            let mut report = health_report_with_alerts(vec![missing.clone(), other.clone()]);
+            report.successes.push(HealthProbeSuccess {
+                id: "RackProbe".parse().unwrap(),
+                target: None,
+            });
+            let mut sources = HealthReportSources::default();
+            match mode {
+                HealthReportApplyMode::Merge => {
+                    sources.merges.insert(report.source.clone(), report.clone());
+                }
+                HealthReportApplyMode::Replace => sources.replace = Some(report.clone()),
+            }
+            host.rack_health_overrides = Some(sources.clone());
+            // A snapshot produced by the previous implementation already has this alert.
+            host.aggregate_health = report.clone();
+            host.derive_aggregate_health(HostHealthConfig::default());
+            assert!(!host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+            assert!(host.aggregate_health.alerts.contains(&other), "{mode:?}");
+            assert!(
+                host.aggregate_health
+                    .successes
+                    .contains(&report.successes[0])
+            );
+            assert_eq!(host.rack_health_overrides, Some(sources));
+
+            // Filtering rack data must not remove an identically named host-owned alert.
+            let host_report = health_report_with_alerts(vec![missing.clone()]);
+            host.host_snapshot
+                .health_reports
+                .merges
+                .insert(host_report.source.clone(), host_report);
+            host.derive_aggregate_health(HostHealthConfig::default());
+            assert!(host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+        }
     }
 
     fn alert_with_classifications(

@@ -21,10 +21,9 @@ use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
-use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_libmlx_model::device::identity::MlxDeviceSelectorError;
 use carbide_libmlx_model::firmware::FirmwareSpec;
 use config_version::ConfigVersion;
-use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -226,86 +225,13 @@ pub struct NicFirmwareSiteSelection {
 }
 
 /// `NicFirmwareCardSelector` identifies a device in a stored MLX observation.
-/// It does not establish a physical card, reset boundary or flash eligibility.
-/// Its externally tagged JSON is persisted as the selector identity. Changing
-/// serialized tags or value encoding requires migrating stored selectors.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NicFirmwareCardSelector {
-    /// Exact reported base MAC, which must be nonzero and unicast.
-    #[serde(rename = "BaseMac")]
-    Mac(MacAddress),
-    /// Exact reported base GUID, preserved as an opaque string. Requires 1–256
-    /// UTF-8 bytes without surrounding whitespace or controls; `--` and `N/A`
-    /// are absence placeholders and cannot select a device.
-    #[serde(rename = "BaseGuid")]
-    Guid(String),
-}
+/// Matching stored inventory does not establish live card identity, a reset
+/// boundary, or flash eligibility. The shared type preserves the stored JSON.
+pub use carbide_libmlx_model::device::identity::MlxDeviceSelector as NicFirmwareCardSelector;
 
-impl fmt::Display for NicFirmwareCardSelector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Mac(mac_address) => write!(f, "base MAC {mac_address}"),
-            Self::Guid(guid) => write!(f, "base GUID {guid}"),
-        }
-    }
-}
-
-impl NicFirmwareCardSelector {
-    /// `validate` rejects unusable identities without changing valid values.
-    pub fn validate(self) -> Result<Self, ConfigValidationError> {
-        match &self {
-            Self::Mac(mac_address) => {
-                let bytes = mac_address.bytes();
-                if bytes == [0; 6] || bytes[0] & 1 != 0 {
-                    return Err(ConfigValidationError::InvalidValue(
-                        "card selector base MAC must be nonzero and unicast".into(),
-                    ));
-                }
-            }
-            Self::Guid(guid) => {
-                if guid.is_empty()
-                    || guid.len() > 256
-                    || guid.trim() != guid.as_str()
-                    || guid.chars().any(char::is_control)
-                    || matches!(guid.as_str(), "--" | "N/A")
-                {
-                    return Err(ConfigValidationError::InvalidValue(
-                        "card selector base GUID must contain 1-256 UTF-8 bytes without surrounding whitespace or control characters, and cannot be -- or N/A".into(),
-                    ));
-                }
-            }
-        }
-        Ok(self)
-    }
-
-    /// `matches` compares the selected identity literally with a device report.
-    /// Missing identity fields do not match; GUID case and formatting matter.
-    pub fn matches(&self, device: &MlxDeviceInfo) -> bool {
-        match self {
-            Self::Mac(mac_address) => device.base_mac.as_ref() == Some(mac_address),
-            Self::Guid(guid) => device.base_guid.as_ref() == Some(guid),
-        }
-    }
-
-    /// `device_index` returns the sole matching device's index in report order.
-    /// No match or multiple matches return a validation error, so callers cannot
-    /// silently select the first device when an identity is ambiguous.
-    pub fn device_index(&self, devices: &[MlxDeviceInfo]) -> Result<usize, ConfigValidationError> {
-        let mut matches = devices
-            .iter()
-            .enumerate()
-            .filter(|(_, device)| self.matches(device));
-        let Some((index, _)) = matches.next() else {
-            return Err(ConfigValidationError::InvalidValue(format!(
-                "card selector {self} does not match any observed device"
-            )));
-        };
-        if matches.next().is_some() {
-            return Err(ConfigValidationError::InvalidValue(format!(
-                "card selector {self} is ambiguous: matches multiple observed devices"
-            )));
-        }
-        Ok(index)
+impl From<MlxDeviceSelectorError> for ConfigValidationError {
+    fn from(error: MlxDeviceSelectorError) -> Self {
+        Self::InvalidValue(error.to_string())
     }
 }
 

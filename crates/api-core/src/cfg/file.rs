@@ -487,6 +487,7 @@ pub struct CarbideConfig {
     pub max_concurrent_machine_updates: Option<i32>,
 
     /// The interval at which the machine update manager checks for machine updates in seconds.
+    /// Unset means [`DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS`].
     pub machine_update_run_interval: Option<u64>,
 
     /// How long a retained boot interface pair (see the
@@ -3800,6 +3801,12 @@ impl CarbideConfig {
         }
     }
 
+    /// Seconds between machine update manager passes, as the manager applies it.
+    pub fn machine_update_run_interval_secs(&self) -> u64 {
+        self.machine_update_run_interval
+            .unwrap_or(DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS)
+    }
+
     pub fn is_ewethers_enabled(&self) -> bool {
         let Some(conf) = &self.ewethers_config else {
             return false;
@@ -4723,6 +4730,9 @@ pub struct MachineUpdater {
     pub max_concurrent_machine_updates_percent: Option<i32>,
 }
 
+/// Seconds between machine update manager passes when `machine_update_run_interval` is unset.
+pub const DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS: u64 = 300;
+
 pub fn default_max_find_by_ids() -> u32 {
     100
 }
@@ -4864,6 +4874,16 @@ impl From<VpcIsolationBehaviorType> for rpc::forge::VpcIsolationBehaviorType {
 #[allow(deprecated)] // nvue_enabled proto field is deprecated but still set for backwards compat
 impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
     fn from(value: CarbideConfig) -> Self {
+        let machine_update_policy = Some(rpc::forge::MachineUpdatePolicy {
+            effective_run_interval_seconds: value.machine_update_run_interval_secs(),
+            requires_manual_upgrade: value.firmware_global.requires_manual_upgrade,
+            max_concurrent_updates_absolute: value
+                .machine_updater
+                .max_concurrent_machine_updates_absolute,
+            max_concurrent_updates_percent: value
+                .machine_updater
+                .max_concurrent_machine_updates_percent,
+        });
         let site_fabric_null_routes = Some(rpc::common::StringList {
             items: value
                 .effective_site_fabric_null_routes()
@@ -5019,6 +5039,7 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                     .as_ref()
                     .map_or(NvLinkConfig::default().enabled, |config| config.enabled),
             ),
+            machine_update_policy,
         }
     }
 }
@@ -7787,6 +7808,44 @@ path = "credentials.yaml"
                 None => Some(NvLinkConfig::default().enabled),
                 Some(false) => Some(false),
                 Some(true) => Some(true),
+            }
+        );
+    }
+
+    /// Version reports the update policy the manager applies, and keeps caps
+    /// absent when they are not configured.
+    #[test]
+    fn machine_update_policy_reports_effective_values() {
+        value_scenarios!(
+            run = |(interval, manual, absolute, percent)| {
+                let mut config = crate::test_support::default_config::get();
+                config.machine_update_run_interval = interval;
+                config.firmware_global.requires_manual_upgrade = manual;
+                config.machine_updater.max_concurrent_machine_updates_absolute = absolute;
+                config.machine_updater.max_concurrent_machine_updates_percent = percent;
+                let runtime_config: rpc::forge::RuntimeConfig = config.into();
+                runtime_config.machine_update_policy.map(|policy| {
+                    (
+                        policy.effective_run_interval_seconds,
+                        policy.requires_manual_upgrade,
+                        policy.max_concurrent_updates_absolute,
+                        policy.max_concurrent_updates_percent,
+                    )
+                })
+            };
+            "run interval" {
+                (None, false, None, None) => Some((300, false, None, None)),
+                (Some(60), false, None, None) => Some((60, false, None, None)),
+                (Some(0), false, None, None) => Some((0, false, None, None)),
+            }
+            "manual upgrade" {
+                (None, true, None, None) => Some((300, true, None, None)),
+            }
+            "caps" {
+                (None, false, Some(5), None) => Some((300, false, Some(5), None)),
+                (None, false, None, Some(20)) => Some((300, false, None, Some(20))),
+                (None, false, Some(5), Some(20)) => Some((300, false, Some(5), Some(20))),
+                (None, false, Some(0), None) => Some((300, false, Some(0), None)),
             }
         );
     }

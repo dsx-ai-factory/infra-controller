@@ -48,6 +48,8 @@ navigation:
               path: getting-started/prerequisites/software.md
             - page: BMC and Out-of-Band Setup
               path: getting-started/prerequisites/bmc-oob-setup.md
+        - page: Sizing and Scale Guidance
+          path: getting-started/sizing-and-scale.md
         - page: Building NICo Containers
           path: manuals/building_nico_containers.md
           slug: building-nico-containers

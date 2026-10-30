@@ -343,8 +343,10 @@ impl TierCounts {
 /// without a successful report is a refresh wait only for its first few
 /// failed probes and only when its interface MAC is in `expected_bmc_macs`,
 /// the BMC MACs of the expected machines, switches and power shelves; an
-/// undeclared one, or one that keeps failing, stays routine. Each tier gets its
-/// share of the budget (the `*_SHARE_PERCENT` constants) oldest first:
+/// undeclared one, or one that keeps failing, stays routine. A BMC whose
+/// timeouts have not yet reached `timeouts_before_prevent_allocations` is a
+/// refresh wait too. Each tier gets its share of the budget (the
+/// `*_SHARE_PERCENT` constants) oldest first:
 /// unexplored endpoints by interface creation, the other two by report time.
 /// Slots a tier cannot fill go to the other tiers in the same order,
 /// unexplored first, so no slot stays unused while any tier has candidates.
@@ -357,13 +359,17 @@ fn plan_explorations<'a>(
     mut unexplored: Vec<(IpAddr, &'a MachineInterfaceSnapshot)>,
     budget: usize,
     expected_bmc_macs: &HashSet<MacAddress>,
+    timeouts_before_prevent_allocations: u32,
 ) -> ExplorationPlan<'a> {
     let mut priority = Vec::new();
     let mut refresh_waits = Vec::new();
     let mut routine = Vec::new();
     for candidate in candidates {
         let (_, iface, endpoint) = candidate;
-        match endpoint.exploration_tier(expected_bmc_macs.contains(&iface.mac_address)) {
+        match endpoint.exploration_tier(
+            expected_bmc_macs.contains(&iface.mac_address),
+            timeouts_before_prevent_allocations,
+        ) {
             ExplorationTier::Priority => priority.push(candidate),
             ExplorationTier::RefreshWait => refresh_waits.push(candidate),
             ExplorationTier::Routine => routine.push(candidate),
@@ -963,6 +969,16 @@ impl SiteExplorer {
                 // endpoint information available. There might even be an ingested
                 // Machine that corresponds to that endpoint.
 
+                let transient_timeout = match e {
+                    EndpointExplorationError::ConnectionTimeout {
+                        consecutive_count, ..
+                    } => {
+                        *consecutive_count
+                            < self.config.exploration_timeouts_before_prevent_allocations
+                    }
+                    _ => false,
+                };
+
                 // The target allows to distinguish multiple DPUs which might
                 // exhibit different alerts
                 new_health_report
@@ -973,9 +989,11 @@ impl SiteExplorer {
                         in_alert_since: None,
                         message: format!("Endpoint exploration failed: {e}"),
                         tenant_message: None,
-                        classifications: vec![
-                            health_report::HealthAlertClassification::prevent_allocations(),
-                        ],
+                        classifications: if transient_timeout {
+                            vec![]
+                        } else {
+                            vec![health_report::HealthAlertClassification::prevent_allocations()]
+                        },
                     });
             }
 
@@ -2166,6 +2184,7 @@ impl SiteExplorer {
             unexplored_endpoints,
             self.config.explorations_per_run as usize,
             &expected_bmc_macs,
+            self.config.exploration_timeouts_before_prevent_allocations,
         );
         for (kind, count) in plan.counts() {
             metrics.record_update_explored_endpoints_count(kind, count);
@@ -4712,6 +4731,7 @@ mod tests {
                     .collect(),
                 case.budget,
                 &HashSet::new(),
+                1,
             );
             let ips = |list: &[&str]| -> Vec<IpAddr> {
                 list.iter().map(|a| a.parse().unwrap()).collect()
@@ -4811,6 +4831,7 @@ mod tests {
             Vec::new(),
             3,
             &expected,
+            1,
         );
 
         let ips =
@@ -4929,6 +4950,7 @@ mod tests {
                     .collect(),
                 10,
                 &expected,
+                1,
             );
             assert_eq!(
                 plan.unexplored.len(),

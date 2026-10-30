@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,18 +412,52 @@ func Test_Audit(t *testing.T) {
 
 	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/wdksahew1rqv/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), nil)
-	srv.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	// check if the audit log entry was created
-	aeDAO := cdbm.NewAuditEntryDAO(dbSession)
-	entries, count, err := aeDAO.GetAll(context.Background(), nil, cdbm.AuditEntryFilterInput{OrgName: cutil.GetPtr("wdksahew1rqv")}, paginator.PageInput{})
-	assert.NoError(t, err)
-	assert.Len(t, entries, 1)
-	assert.Equal(t, count, 1)
-	assert.Equal(t, entries[0].OrgName, "wdksahew1rqv")
-	assert.Equal(t, entries[0].StatusCode, 401)
+	// Larger than the 5 MiB Echo captures by default, within the API body limit.
+	largeName := strings.Repeat("a", 6<<20)
+
+	tests := []struct {
+		name    string
+		orgName string
+		body    []byte
+		check   func(t *testing.T, body map[string]interface{})
+	}{
+		{
+			name:    "records an unauthorized request without a body",
+			orgName: "wdksahew1rqv",
+			check: func(t *testing.T, body map[string]interface{}) {
+				assert.Empty(t, body)
+			},
+		},
+		{
+			name:    "records a valid body larger than the Echo default capture in full",
+			orgName: "auditlargebody",
+			body:    []byte(`{"name":"` + largeName + `"}`),
+			check: func(t *testing.T, body map[string]interface{}) {
+				assert.NotContains(t, body, "jsonParseFailed")
+				name, ok := body["name"].(string)
+				require.True(t, ok)
+				assert.Equal(t, len(largeName), len(name))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/%s/%s/site", cfg.GetAPIRouteVersion(), tt.orgName, cfg.GetAPIName()), bytes.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			srv.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+			aeDAO := cdbm.NewAuditEntryDAO(dbSession)
+			entries, count, err := aeDAO.GetAll(context.Background(), nil, cdbm.AuditEntryFilterInput{OrgName: cutil.GetPtr(tt.orgName)}, paginator.PageInput{})
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			assert.Equal(t, 1, count)
+			assert.Equal(t, tt.orgName, entries[0].OrgName)
+			assert.Equal(t, http.StatusUnauthorized, entries[0].StatusCode)
+			tt.check(t, entries[0].Body)
+		})
+	}
 }
 
 func Test_BodyLimit(t *testing.T) {
@@ -437,19 +473,43 @@ func Test_BodyLimit(t *testing.T) {
 
 	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 
-	oversizedBody := make([]byte, 11<<20) // 11 MiB, exceeds the 10 MiB limit
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), bytes.NewReader(oversizedBody))
-	req.Header.Set("Content-Type", "application/json")
-	srv.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
-
-	normalBody := []byte(`{"name":"test"}`)
-	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), bytes.NewReader(normalBody))
-	req2.Header.Set("Content-Type", "application/json")
-	srv.ServeHTTP(rec2, req2)
-	assert.NotEqual(t, http.StatusRequestEntityTooLarge, rec2.Code)
+	// io.MultiReader hides the body length, so httptest sends it without
+	// Content-Length, as a chunked request would arrive.
+	tests := []struct {
+		name       string
+		body       io.Reader
+		wantStatus int
+	}{
+		{
+			name:       "rejects a sized body over the limit",
+			body:       bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes+1)),
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:       "accepts a small sized body",
+			body:       bytes.NewReader([]byte(`{"name":"test"}`)),
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "rejects a chunked body over the limit",
+			body:       io.MultiReader(bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes+1))),
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:       "accepts a chunked body at the limit",
+			body:       io.MultiReader(bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes))),
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), tt.body)
+			req.Header.Set("Content-Type", "application/json")
+			srv.ServeHTTP(rec, req)
+			assert.Equal(t, tt.wantStatus, rec.Code)
+		})
+	}
 }
 
 func Test_NotFoundHandler(t *testing.T) {

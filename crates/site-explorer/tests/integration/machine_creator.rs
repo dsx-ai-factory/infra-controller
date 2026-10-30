@@ -56,6 +56,11 @@ use super::machine_fixtures::{
     machine_creator_with_info_provider,
 };
 
+// Serializes tests that drain `admin_lock_admission` permits with tests that
+// wait for several creations behind a database gate. Each can retain permits
+// the other needs until `wait_for_blocked_queries` times out.
+static ADMIN_LOCK_ADMISSION_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn assert_no_machines_created(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let machines = db::machine::find(
         pool,
@@ -936,6 +941,7 @@ async fn test_explored_host_admin_address_pass_waits_for_admission(
 ) -> Result<(), Box<dyn std::error::Error>> {
     const NUM_DPUS: usize = 2;
 
+    let _admission_test_guard = ADMIN_LOCK_ADMISSION_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let hosts = [ManagedHostConfig::default().with_dpu_count(NUM_DPUS)];
     let (explorer, fixtures) = ingest_hosts_then_disable_creation(&env, &hosts).await?;
@@ -1237,6 +1243,7 @@ async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concu
     const CONCURRENCY: usize = 3;
     const SHARED_LOCK_REQUEST: &str = "pg_advisory_xact_lock_shared(";
 
+    let _admission_test_guard = ADMIN_LOCK_ADMISSION_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     // Mirrors `creation_concurrency` in the machine creator.
     let expected_in_flight = CONCURRENCY.min(

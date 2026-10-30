@@ -59,6 +59,7 @@ helm-prereqs/
 ├── values/
 │   ├── nico-core.yaml           # NICo Core deployment values (hostname, siteConfig, VIPs)
 │   ├── nico-core-simulation.yaml  # NICo Core values for a machine-a-tron simulation site
+│   ├── nico-core-10k-hosts.yaml   # NICo Core values for the 556-rack (10,008-host) machine-a-tron fleet
 │   ├── machine-a-tron*.yaml     # machine-a-tron chart values: Override Mode and the scale profiles
 │   ├── nico-rest.yaml           # NICo REST deployment values (Keycloak config)
 │   ├── nico-site-agent.yaml     # Site-agent deployment values (DB config, gRPC settings)

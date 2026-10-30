@@ -213,7 +213,7 @@ kubectl annotate dpunode node-02-00-00-00-00-01 -n dpf-operator-system \
 > name within milliseconds, so `kubectl delete dpu`, which waits for the name
 > to disappear, hangs indefinitely.
 >
-> **Building on Apple Silicon:** the multi-stage `golang:1.25` build segfaults
+> **Building on Apple Silicon:** the multi-stage `golang:1.27.3` build segfaults
 > under QEMU. `make docker-build` sets `--platform linux/amd64`, which works on
 > native amd64 (CI); on an Apple-Silicon laptop, cross-compile first
 > (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/dpf-sim-controller ./cmd`)

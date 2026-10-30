@@ -1864,6 +1864,27 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 			},
 		},
 		{
+			name: "rejects tenant admin before Core dispatch",
+			run: func(t *testing.T) {
+				fixture := newSkuManagementFixture(t, []string{authz.TenantAdminRole})
+				skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
+				before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				description := "updated description"
+
+				rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
+					Description: &description,
+				}, fixture.updateHandler.Handle)
+
+				require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+				assert.JSONEq(t, `{"source":"","message":"User does not have Provider Admin role with org","data":null}`, rec.Body.String())
+				assert.Empty(t, fixture.requests)
+				after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, before, after, "denied PATCH must preserve the row and Updated")
+			},
+		},
+		{
 			name: "rejects inverted storage size range",
 			run: func(t *testing.T) {
 				fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})

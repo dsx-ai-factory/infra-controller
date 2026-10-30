@@ -34,7 +34,7 @@ If any of those are not true, the task is not complete.
    make --version
    ```
 
-   You need Go 1.26.4 or newer, plus working `git` and `make`. If any is missing or too old, stop and tell the user what to install. Do not attempt to install Go, git, or make yourself unless the user explicitly asks.
+   You need Go 1.27.3 or newer, plus working `git` and `make`. If any is missing or too old, stop and tell the user what to install. Do not attempt to install Go, git, or make yourself unless the user explicitly asks.
 
 2. Pick a working directory the user owns. Default to `~/Developer/nicocli-install/`. Do not use `/tmp/` (some agent sandboxes block it, and some build systems treat it as ephemeral):
 
@@ -83,19 +83,19 @@ If any of those are not true, the task is not complete.
 
 ### Common failures
 
-- **`command not found: go`** — Go is not installed. Stop and tell the user to install Go 1.26.4 or newer from [https://go.dev/dl/](https://go.dev/dl/). Do not auto-install Go.
+- **`command not found: go`**. Go is not installed. Stop and tell the user to install Go 1.27.3 or newer from [https://go.dev/dl/](https://go.dev/dl/). Do not auto-install Go.
 
-- **`go: go.mod requires go >= 1.26.4`** — Installed Go is too old. Stop and ask the user to upgrade.
+- **`go: go.mod requires go >= 1.27.3`**. Installed Go is too old. Stop and ask the user to upgrade.
 
-- **`command not found: make`** — `make` is not installed. On macOS, suggest `xcode-select --install`. On Debian/Ubuntu, suggest `sudo apt install build-essential`. If the user cannot install `make`, fall back to a direct `go build`:
+- **`command not found: make`**. `make` is not installed. On macOS, suggest `xcode-select --install`. On Debian/Ubuntu, suggest `sudo apt install build-essential`. If the user cannot install `make`, fall back to a direct `go build`:
 
   ```bash
   go build -o "$(go env GOPATH)/bin/nicocli" ./cli/cmd/cli
   ```
 
-- **`command not found: git`** — install `git` first. macOS: `xcode-select --install`. Linux: use the distro package manager.
+- **`command not found: git`**. Install `git` first. macOS: `xcode-select --install`. Linux: use the distro package manager.
 
-- **PATH not set: `nicocli: command not found` after a successful build** — `$(go env GOPATH)/bin` is not on `PATH`. Tell the user to add it. Detect the shell first:
+- **PATH not set: `nicocli: command not found` after a successful build**. `$(go env GOPATH)/bin` is not on `PATH`. Tell the user to add it. Detect the shell first:
 
   ```bash
   echo "$SHELL"
@@ -121,17 +121,17 @@ If any of those are not true, the task is not complete.
 
   Tell the user to open a new shell or `source` the rc file before running `nicocli`.
 
-- **`permission denied` writing to `/usr/local/bin` or another system path** — re-run with `sudo` or switch `INSTALL_DIR` to a user-owned directory (`~/.local/bin`, `~/bin`, etc.). Do not chmod the system directory.
+- **`permission denied` writing to `/usr/local/bin` or another system path**. Re-run with `sudo` or switch `INSTALL_DIR` to a user-owned directory (`~/.local/bin`, `~/bin`, etc.). Do not chmod the system directory.
 
-- **`fatal: unable to access 'https://github.com/...': ...` or `go mod download` network errors** — confirm the user has internet access and (if behind a corporate proxy) that `HTTPS_PROXY` / `GOPROXY` are set. Surface the exact error to the user; do not retry indefinitely.
+- **`fatal: unable to access 'https://github.com/...': ...` or `go mod download` network errors**. Confirm the user has internet access and (if behind a corporate proxy) that `HTTPS_PROXY` / `GOPROXY` are set. Surface the exact error to the user; do not retry indefinitely.
 
-- **Repo not found at `dsx-ai-factory/infra-controller`** — confirm that the
+- **Repo not found at `dsx-ai-factory/infra-controller`**. Confirm that the
   clone URL is [https://github.com/dsx-ai-factory/infra-controller.git](https://github.com/dsx-ai-factory/infra-controller.git). If the
   repository is unavailable, stop and surface the exact Git error.
 
-- **`go: cannot find main module`** — you are not inside the cloned repo. Re-run `cd` into the cloned directory.
+- **`go: cannot find main module`**. You are not inside the cloned repo. Re-run `cd` into the cloned directory.
 
-- **Build succeeds but `nicocli --version` prints nothing or hangs** — the binary may be partially built or running TUI mode. Confirm you are passing `--version` exactly, and run with a 10-second timeout:
+- **Build succeeds but `nicocli --version` prints nothing or hangs**. The binary may be partially built or running TUI mode. Confirm you are passing `--version` exactly, and run with a 10-second timeout:
 
   ```bash
   timeout 10 nicocli --version
@@ -142,7 +142,7 @@ If any of those are not true, the task is not complete.
 ### What not to do
 
 - Do not modify any source files in the cloned repo.
-- Do not create commits, branches, or PRs in the cloned repo — it is a build workspace, not a development checkout.
+- Do not create commits, branches, or PRs in the cloned repo. It is a build workspace, not a development checkout.
 - Do not delete or overwrite the user's existing `~/.nico/config.yaml`.
 - Do not install Go, git, or `make` automatically; ask the user instead.
 - Do not retry the same failing command more than twice. After two failures, change strategy or surface the failure to the user.

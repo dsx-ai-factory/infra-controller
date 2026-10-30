@@ -61,7 +61,7 @@ use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
+use carbide_resource_pool::PoolDefinitionSource;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
@@ -396,9 +396,28 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     } else {
         PoolDefinitionSource::SeedConfiguration
     };
-    let registry =
-        ResourcePoolRegistry::resolve(pool_definition_source, &mut txn, &pool_config.selections)
-            .await?;
+    // Production selection remains Integrated-only, including bindings left
+    // behind after their pool disappears from configuration. The lower
+    // registry initialization is also exercised with remote providers in tests.
+    for binding in db::resource_pool::binding::all(txn.as_pgconn()).await? {
+        eyre::ensure!(
+            binding.backend_kind == ResourcePoolBackendKind::Integrated,
+            "resource pool `{}` has a saved gRPC binding; v2.4 requires integrated allocation",
+            binding.pool_name,
+        );
+    }
+    let mut resource_pool_monitor = crate::resource_pool::ResourcePoolMonitor::new(
+        db_pool.clone(),
+        &carbide_config.resource_pool_backends,
+    )?;
+    let registry = resource_pool_monitor
+        .resolve_registry(
+            pool_definition_source,
+            &mut txn,
+            &pool_config.selections,
+            &work_lock_manager_handle,
+        )
+        .await?;
     // Ordinary seed definitions keep their stored values when TOML ranges or
     // types change. PKey initialization adds configured integer ranges later,
     // so it must not reuse a pool that already contains IP addresses.
@@ -416,10 +435,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // Pool inventory is the set of values, such as VNIs or IP addresses,
         // that NICo can allocate. Seed new pools here, preserving existing
         // inventory when its configured ranges change. `create_common_pools`
-        // below requires the mandatory pools to exist and have free values
-        // before it builds the handles used by the API and controllers. Route
-        // servers and site prefixes also need to reflect the config before
-        // the API starts serving requests.
+        // below requires free values for mandatory Integrated or unbound pools,
+        // and accepted definitions for remote pools, before it builds the handles
+        // used by the API and controllers. Route servers and site prefixes also
+        // need to reflect the config before the API starts serving requests.
         db::resource_pool::reconcile_pool_defs(&mut txn, &seed_data.initial_pools).await?;
         // We'll always update whatever route servers are in the config
         // to the database, and then leverage the enable_route_servers
@@ -466,6 +485,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         }
     }
     txn.commit().await?;
+
+    resource_pool_monitor
+        .register_pools(&registry, pool_definition_source, &cancel_token)
+        .await?;
 
     if !carbide_config.listen_only {
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
@@ -736,11 +759,6 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .build()
             .wrap_err("failed to build the firmware-object HTTP client")?,
     );
-
-    let resource_pool_monitor = crate::resource_pool::ResourcePoolMonitor::new(
-        db_pool.clone(),
-        &carbide_config.resource_pool_backends,
-    )?;
 
     let api_service = Arc::new(Api {
         certificate_provider,
@@ -1828,6 +1846,13 @@ async fn initialize_and_start_controllers<'a>(
         database_pool: health_pool,
         resource_pool_stats,
     });
+
+    api_service.resource_pool_monitor.start_recovery(
+        &api_service.resource_pool_registry,
+        meter.clone(),
+        join_set,
+        cancel_token.clone(),
+    )?;
 
     if let Some(seed_data) = seed_data {
         if !seed_data.initial_vpcs.is_empty() {

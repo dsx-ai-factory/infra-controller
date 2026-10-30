@@ -2833,6 +2833,7 @@ async fn test_site_explorer_audit_exploration_results(
         retained_boot_interface_window: None,
         admin_fnn_enabled: false,
         explorations_per_run: 7,
+        exploration_timeouts_before_prevent_allocations: 1,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),
         create_machines: Arc::new(true.into()),
@@ -3987,6 +3988,7 @@ async fn test_site_explorer_retries_matched_dpu_mode_on_next_iteration(
     explorer.endpoint_explorer().fail_next_set_nic_mode(
         EndpointExplorationError::ConnectionTimeout {
             details: "injected transient mode-setting failure".to_string(),
+            consecutive_count: 1,
         },
     );
     // The expected-serial fallback must not retry the failed PCIe match.
@@ -4453,6 +4455,7 @@ async fn test_site_explorer_waits_for_all_fallback_dpus(
     explorer.insert_endpoints(vec![(pending_ip, pending_dpu.clone().into())]);
     endpoint_explorer.fail_next_set_nic_mode(EndpointExplorationError::ConnectionTimeout {
         details: "injected transient fallback mode-setting failure".to_string(),
+        consecutive_count: 1,
     });
 
     let mut reset_at = None;

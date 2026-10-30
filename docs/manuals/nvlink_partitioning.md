@@ -157,7 +157,9 @@ whether it applied changes, checked in this order:
 With the default interval, a 61 s pass that applied changes idles 15 s
 rather than one second. The partition owners accept a couple of minutes of
 staleness, so a site whose passes overrun at `60s` can set `120s`. On 556
-simulated racks a pass took 27 to 33 s. Chassis and racks are reconciled in
+simulated racks with `partition_monitor_max_concurrent_groups = 64`, a pass
+took 27 to 33 s before unchanged groups were skipped, and with skipping the
+mean pass on the same fleet was about 10 s. Chassis and racks are reconciled in
 parallel, at most `nvlink_config.partition_monitor_max_concurrent_groups`
 (default `16`, documented range 1 to 256) at a time.
 

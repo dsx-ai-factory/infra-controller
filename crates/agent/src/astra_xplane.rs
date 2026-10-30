@@ -172,7 +172,6 @@ async fn notify_xplane_maintenance_reconcile_links(
     config: &AstraConfig,
     links: eyre::Result<Vec<LinkMessage>>,
 ) -> Vec<AstraMultiplaneInterfaceStatus> {
-    tracing::info!(socket_path = %socket_path.display(), requested_interface_count = config.multiplane_interfaces.len(), discovered_interface_count = ?links.as_ref().map(Vec::len).ok(), "spx-maintenance: [dpu-agent] Validating Xplane maintenance mappings");
     // 1. Validate each request and resolve its logical name to a PF netdev.
     // Keep one status per input, including failures, so Core can show each result.
     let mut statuses: Vec<_> = config

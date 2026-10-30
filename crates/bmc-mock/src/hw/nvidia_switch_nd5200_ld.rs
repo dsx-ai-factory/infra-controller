@@ -88,6 +88,8 @@ impl NvidiaSwitchNd5200Ld<'_> {
         }
     }
 
+    /// The tray's ComputerSystem. Its power callbacks let a BMC backend
+    /// power-cycle the switch, as a tray BMC can.
     pub(crate) fn system_config<C: Callbacks>(
         &self,
         callbacks: Arc<C>,

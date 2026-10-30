@@ -97,9 +97,9 @@ func TestUpdateMachineSpectrumXMultiplaneHandler_Handle(t *testing.T) {
 			require.NoError(t, err)
 		}, "", http.StatusBadRequest},
 		{"invalid request never proxies", nil, `{"rail":0,"allRails":true,"plane":0,"maintenanceMode":true}`, http.StatusBadRequest},
-		{"site feature disabled", func(_ *testing.T, f *common.TestSetupProviderMachineHandlerFixture) {
+		{"machine has no declared interfaces", func(_ *testing.T, f *common.TestSetupProviderMachineHandlerFixture) {
 			run := &tmocks.WorkflowRun{}
-			run.On("Get", mock.Anything, mock.Anything).Return(status.Error(codes.FailedPrecondition, "partial-multiplane maintenance is disabled for this site"))
+			run.On("Get", mock.Anything, mock.Anything).Return(status.Error(codes.FailedPrecondition, "host has no declared CX9 logical interfaces for SPX multiplane maintenance"))
 			client := &tmocks.Client{}
 			client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName,
 				mock.MatchedBy(func(req grpcproxy.Request) bool { *f.ProxiedReq = req; return true })).Return(run, nil)
@@ -137,7 +137,7 @@ func TestUpdateMachineSpectrumXMultiplaneHandler_Handle(t *testing.T) {
 			assert.Equal(t, cutil.GetPtr(false), request.MaintenanceMode)
 			assert.Equal(t, cutil.GetPtr(""), request.Reference)
 			if tc.code == http.StatusPreconditionFailed {
-				assert.Contains(t, rec.Body.String(), "disabled for this site")
+				assert.Contains(t, rec.Body.String(), "no declared CX9 logical interfaces")
 				return
 			}
 			var response model.APIMachineSpectrumXMultiplane

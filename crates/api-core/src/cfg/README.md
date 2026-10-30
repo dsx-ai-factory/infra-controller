@@ -538,6 +538,8 @@ leaves an existing pool's values unchanged. Administrative growth must keep the
 pool's stored value family; a pool with only a binding also rejects changes to
 that family.
 
+The v2.4 startup gate also rejects saved gRPC bindings, even when their pools no longer appear in configuration, before registry construction or pool writes.
+
 Administrative growth accepts a bare map of pool names to `ResourcePoolDef`
 tables, without the `pools` wrapper or the `backend` and `remote_pool` selectors.
 A new pool created through growth receives the default Integrated binding.
@@ -688,6 +690,7 @@ to keep the previous behavior.
 | `run_interval` | `Duration` | `120s` | Interval between exploration runs. |
 | `concurrent_explorations` | `u64` | `100` | Max nodes explored in parallel. `0` is treated as `1`. |
 | `explorations_per_run` | `u64` | `360` | Max nodes explored per run. |
+| `exploration_timeouts_before_prevent_allocations` | `u32` | `3` | Explorations of a BMC in a row that must time out before its `BmcExplorationFailure` alert prevents allocations. Other exploration errors prevent allocations immediately. `1` blocks on the first timeout. Until then the BMC is re-explored ahead of the routine refresh. |
 | `create_machines` | `bool` | `true` | When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true. Dynamically toggleable. |
 | `machines_created_per_run` | `u64` | `100` | Max ManagedHosts created per run. `0` creates none. |
 | `machine_creation_concurrency` | `u64` | `4` | ManagedHosts created at the same time within one run, each in its own transaction under its own admin-lock admission permit. Clamped to at most one below `admin_lock_admission_permits`, and still `1` when the permit count is `1`, in which case that single creation holds the only permit while it runs. `1` creates hosts one after another and `0` is treated as `1`. Read at startup. A change needs a restart. |
@@ -1531,7 +1534,7 @@ warning. Nest them under `[ewethers_config.svpc]` in new configurations.
 | `enabled` | `bool` | `false` | Enable Cluster Interconnect Network. |
 | `svpc_enabled` | `bool` | `false` | Enable the SVPC path. Not mutually exclusive with `astra_enabled`. |
 | `astra_enabled` | `bool` | `false` | Enable the Astra path. Not mutually exclusive with `svpc_enabled`. |
-| `partial-multiplane` | `"enabled"` or `"disabled"` | `"enabled"` | Site-wide partial multiplane maintenance control. `"disabled"` rejects maintenance operator RPCs, stops maintenance configuration delivery and observation recording, and omits maintenance initialization from newly provisioned Astra flavors. Saved requests and current plane states are preserved. Maintenance delivery and observations require `enabled` and `astra_enabled` to be `true` and an eligible BF4 DPU. See [partial multiplane maintenance](../../../../docs/manuals/dpf.md#site-wide-partial-multiplane-maintenance). |
+| `partial-multiplane` | `"enabled"` or `"disabled"` | `"enabled"` | Controls maintenance initialization for newly provisioned Astra planes. `"enabled"` initializes all planes in maintenance mode; `"disabled"` skips initialization, so planes will not be set in maintenance mode on provisioning. The setting does not impact runtime maintenance requests or observations. See [partial-multiplane maintenance](../../../../docs/manuals/dpf.md#site-wide-partial-multiplane-maintenance). |
 | `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA overlay network. |
 | `subnet_mask` | `i32` | `11` | IPv4 CIDR prefix length (0–32) for the DPA overlay network; also sets Weave `underlayConfigMapData.overlayNetworkPrefixLength` in the generated `DPUServiceConfiguration`. If weave is configured, it uses the default `11` when this field or the entire `ewethers_config` section is omitted. A functional Astra/Weave deployment requires explicit ewethers configuration with the appropriate enable flags and intended overlay subnet address and mask. |
 | `astra` | `AstraConfig` | *(defaults)* | Astra settings (see [AstraConfig](#astraconfig)). |
