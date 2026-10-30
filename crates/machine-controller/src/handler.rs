@@ -245,6 +245,20 @@ pub struct ReachabilityParams {
     pub scout_reporting_timeout: chrono::Duration,
     pub waiting_for_measurements_timeout: chrono::Duration,
     pub uefi_boot_wait: chrono::Duration,
+    /// Overrides the first DPU
+    /// restart delay when set.
+    pub dpu_first_restart_delay: Option<chrono::Duration>,
+}
+
+impl ReachabilityParams {
+    /// Delay before the first
+    /// restart of a machine.
+    pub fn first_restart_delay(&self, is_dpu: bool) -> chrono::Duration {
+        match self.dpu_first_restart_delay {
+            Some(dpu_first_restart_delay) if is_dpu => dpu_first_restart_delay,
+            _ => chrono::Duration::minutes(5),
+        }
+    }
 }
 
 /// Parameters used by the HostStateMachineHandler.
@@ -326,6 +340,7 @@ impl MachineStateHandlerBuilder {
                 scout_reporting_timeout: chrono::Duration::zero(),
                 waiting_for_measurements_timeout: chrono::Duration::zero(),
                 uefi_boot_wait: chrono::Duration::zero(),
+                dpu_first_restart_delay: None,
             },
             firmware_downloader: None,
             no_firmware_update_reset_retries: false,
@@ -425,6 +440,16 @@ impl MachineStateHandlerBuilder {
 
     pub fn uefi_boot_wait(mut self, uefi_boot_wait: chrono::Duration) -> Self {
         self.reachability_params.uefi_boot_wait = uefi_boot_wait;
+        self
+    }
+
+    /// Sets the first DPU
+    /// restart delay.
+    pub fn dpu_first_restart_delay(
+        mut self,
+        dpu_first_restart_delay: Option<chrono::Duration>,
+    ) -> Self {
+        self.reachability_params.dpu_first_restart_delay = dpu_first_restart_delay;
         self
     }
 
@@ -6380,7 +6405,7 @@ async fn trigger_reboot_if_needed_with_policy(
             // because the next reboot time is before the time the DPU entered State B.
             // Update the DPU's next reboot time to be 5 minutes after it entered State B to handle
             // this edge case.
-            entered_state_at + Duration::minutes(5)
+            entered_state_at + reachability_params.first_restart_delay(target.is_dpu())
         };
 
     let time_elapsed_since_state_change = (current_time - entered_state_at).num_minutes();
@@ -16226,6 +16251,41 @@ mod tests {
             ],
             |(cleanup_context, disable_lockdown)| {
                 should_reenable_boss_lockdown(cleanup_context, disable_lockdown)
+            },
+        );
+    }
+
+    #[test]
+    fn only_dpus_use_the_configured_first_restart_delay() {
+        let reachability_params = |dpu_first_restart_delay| ReachabilityParams {
+            dpu_wait_time: Duration::zero(),
+            power_down_wait: Duration::zero(),
+            failure_retry_time: Duration::zero(),
+            scout_reporting_timeout: Duration::zero(),
+            waiting_for_measurements_timeout: Duration::zero(),
+            uefi_boot_wait: Duration::zero(),
+            dpu_first_restart_delay,
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "DPUs keep five minutes by default",
+                    input: (None, true),
+                    expect: Duration::minutes(5),
+                },
+                Check {
+                    scenario: "DPUs wait the configured delay",
+                    input: (Some(Duration::minutes(15)), true),
+                    expect: Duration::minutes(15),
+                },
+                Check {
+                    scenario: "hosts keep five minutes",
+                    input: (Some(Duration::minutes(15)), false),
+                    expect: Duration::minutes(5),
+                },
+            ],
+            |(dpu_first_restart_delay, is_dpu)| {
+                reachability_params(dpu_first_restart_delay).first_restart_delay(is_dpu)
             },
         );
     }

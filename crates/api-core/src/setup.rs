@@ -2169,6 +2169,11 @@ async fn initialize_and_start_controllers<'a>(
                         .waiting_for_measurements_timeout,
                 )
                 .uefi_boot_wait(carbide_config.machine_state_controller.uefi_boot_wait)
+                .dpu_first_restart_delay(
+                    carbide_config
+                        .machine_state_controller
+                        .dpu_first_restart_delay,
+                )
                 .hardware_models(carbide_config.get_firmware_config())
                 .firmware_downloader(&downloader)
                 .attestation_enabled(carbide_config.attestation_enabled)
