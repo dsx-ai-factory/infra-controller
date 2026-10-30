@@ -1645,6 +1645,7 @@ impl MachineStateHandler {
                         deconfiguring_state,
                         mh_snapshot,
                         ctx,
+                        &self.host_handler.host_handler_params.reachability_params,
                     )
                     .await
                 }
@@ -8815,24 +8816,60 @@ impl StateHandler for HostMachineStateHandler {
                                 // `Nic`/`Ignore` hosts. Disable still needs the
                                 // shared status poll to reach platform
                                 // configuration. Preserve the established
-                                // Enable path, which does not require a
-                                // separately readable lockdown status.
+                                // Enable path for controls that apply immediately.
+                                // Boot-latched controls need a host boot after the
+                                // policy's restart request, not configured readback.
                                 if lockdown_info.mode == LockdownMode::Enable {
-                                    return complete_host_init_lockdown(
-                                        ctx,
-                                        mh_snapshot,
-                                        ManagedHostState::BomValidating {
-                                            bom_validating_state: BomValidating::MatchingSku(
-                                                BomValidatingContext {
-                                                    machine_validation_context: Some(
-                                                        MachineValidationContext::Discovery,
-                                                    ),
-                                                    ..BomValidatingContext::default()
-                                                },
-                                            ),
-                                        },
-                                    )
-                                    .await;
+                                    let host = &mh_snapshot.host_snapshot;
+                                    let redfish_client = ctx
+                                        .services
+                                        .create_redfish_client_from_machine(host)
+                                        .await?;
+                                    let has_boot_latched_controls = redfish_client
+                                        .lockdown_has_boot_latched_controls()
+                                        .await
+                                        .map_err(|e| {
+                                            redfish_error("lockdown_has_boot_latched_controls", e)
+                                        })?;
+                                    if has_boot_latched_controls
+                                        && !host.status.last_reboot_requested.as_ref().is_some_and(
+                                            |request| {
+                                                host.status
+                                                    .last_reboot_time
+                                                    .is_some_and(|boot| boot > request.time)
+                                            },
+                                        )
+                                    {
+                                        let status = trigger_reboot_if_needed(
+                                            host,
+                                            mh_snapshot,
+                                            None,
+                                            &self.host_handler_params.reachability_params,
+                                            ctx,
+                                        )
+                                        .await?;
+                                        return Ok(StateHandlerOutcome::wait(format!(
+                                            "Waiting for host boot to apply lockdown: {}",
+                                            status.status
+                                        )));
+                                    }
+                                    if !has_boot_latched_controls {
+                                        return complete_host_init_lockdown(
+                                            ctx,
+                                            mh_snapshot,
+                                            ManagedHostState::BomValidating {
+                                                bom_validating_state: BomValidating::MatchingSku(
+                                                    BomValidatingContext {
+                                                        machine_validation_context: Some(
+                                                            MachineValidationContext::Discovery,
+                                                        ),
+                                                        ..BomValidatingContext::default()
+                                                    },
+                                                ),
+                                            },
+                                        )
+                                        .await;
+                                    }
                                 }
                                 return Ok(StateHandlerOutcome::transition(
                                     ManagedHostState::HostInit {
@@ -11428,7 +11465,7 @@ impl HostUpgradeState {
                         && matches!(next_state, ManagedHostState::HostInit {
                             machine_state: MachineState::WaitingForLockdown {
                                 lockdown_info: LockdownInfo {
-                                    state: LockdownState::PollingLockdownStatus,
+                                    state: LockdownState::SetLockdown | LockdownState::PollingLockdownStatus,
                                     mode: Enable,
                                 },
                             },
@@ -11684,6 +11721,26 @@ impl HostUpgradeState {
         };
 
         if lockdown_disabled && !state.host_snapshot.host_profile.disable_lockdown {
+            // Readback is only configured state for boot-latched controls.
+            // Persist the existing apply/reboot flow before writing policy so
+            // a retry cannot skip the reboot after observing the new value.
+            if matches!(scenario, HostFirmwareScenario::Ready)
+                && redfish_client
+                    .lockdown_has_boot_latched_controls()
+                    .await
+                    .map_err(|e| redfish_error("lockdown_has_boot_latched_controls", e))?
+            {
+                return Ok(StateHandlerOutcome::transition(
+                    ManagedHostState::HostInit {
+                        machine_state: MachineState::WaitingForLockdown {
+                            lockdown_info: LockdownInfo {
+                                state: LockdownState::SetLockdown,
+                                mode: Enable,
+                            },
+                        },
+                    },
+                ));
+            }
             tracing::debug!("host firmware update: Reenabling lockdown");
             if let Err(e) = redfish_client
                 .lockdown(libredfish::EnabledDisabled::Enabled)
@@ -13939,12 +13996,7 @@ async fn do_ipmi_restart(
         trigger_location = %trigger_location,
         "IPMI Host Power Control"
     );
-    ctx.pending_db_writes
-        .push(MachineWriteOp::UpdateRebootRequestedTime {
-            machine_id: machine.id.into(),
-            mode: machine_last_reboot_requested_mode(action),
-            time: Utc::now(),
-        });
+    let requested_at = Utc::now();
 
     let bmc_mac = machine
         .status
@@ -13979,7 +14031,15 @@ async fn do_ipmi_restart(
         .await
         .map_err(|e| {
             StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
-        })
+        })?;
+    ctx.pending_db_writes
+        .push(MachineWriteOp::UpdateRebootRequestedTime {
+            machine_id: machine.id.into(),
+            mode: machine_last_reboot_requested_mode(action),
+            time: requested_at,
+        });
+
+    Ok(())
 }
 
 async fn resolve_ipmi_address(

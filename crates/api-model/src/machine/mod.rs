@@ -1206,11 +1206,13 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
 
     /// Whether this machine's BMC must have its lockdown disabled before its
     /// UEFI (BIOS setup) password can be changed, and re-enabled afterward.
-    /// Only Dell BMCs enforce a lockdown that blocks the BIOS password change;
-    /// other vendors accept it without unlocking. Centralizes the vendor check
-    /// so the UEFI setup and rotation flows don't special-case Dell inline.
+    /// Dell and Lenovo XCC BMCs can lock BIOS settings. On older Lenovo
+    /// firmware, the Redfish client skips the unsupported OEM controls.
     pub fn needs_bmc_unlock_for_uefi_setup(&self) -> bool {
-        self.bmc_vendor().is_dell()
+        matches!(
+            self.bmc_vendor(),
+            bmc_vendor::BMCVendor::Dell | bmc_vendor::BMCVendor::Lenovo
+        )
     }
 
     /// Does the forge-dpu-agent on this DPU need upgrading?
@@ -2551,8 +2553,8 @@ pub enum UefiSetupState {
     WaitForPasswordJobScheduled,
     PowercycleHost,
     WaitForPasswordJobCompletion,
-    // Deprecated: no-op state, transitions directly to WaitingForLockdown::SetLockdown
-    // Kept for backwards compatibility with hosts that may be in this state
+    /// Legacy ingestion no-op; transitions to WaitingForLockdown::SetLockdown.
+    /// Lenovo rotation retries BMC re-locking here after a failed password change.
     LockdownHost,
 }
 
@@ -4697,6 +4699,50 @@ mod tests {
                 },
             ],
             |machine| machine.bmc_vendor(),
+        );
+    }
+
+    #[test]
+    fn uefi_password_changes_unlock_dell_and_lenovo_xcc() {
+        check_values(
+            [
+                Check {
+                    scenario: "Dell",
+                    input: "Dell Inc.",
+                    expect: true,
+                },
+                Check {
+                    scenario: "Lenovo XCC",
+                    input: "Lenovo",
+                    expect: true,
+                },
+                Check {
+                    scenario: "Supermicro unchanged",
+                    input: "Supermicro",
+                    expect: false,
+                },
+                Check {
+                    scenario: "HPE unchanged",
+                    input: "HPE",
+                    expect: false,
+                },
+                Check {
+                    scenario: "unknown unchanged",
+                    input: "unknown",
+                    expect: false,
+                },
+            ],
+            |vendor| {
+                let mut machine = host_machine();
+                machine
+                    .status
+                    .hardware_info
+                    .as_mut()
+                    .and_then(|hardware| hardware.dmi_data.as_mut())
+                    .expect("fixture host has DMI data")
+                    .sys_vendor = vendor.to_string();
+                machine.needs_bmc_unlock_for_uefi_setup()
+            },
         );
     }
 
