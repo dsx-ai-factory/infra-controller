@@ -48,11 +48,6 @@ Skip host cleanup after the Instance is deleted. Data from the previous
 tenant stays on the host. Requires --allow-reset-with-instance and does
 not bypass the Admin network acknowledgement.
 
-`--ignore-cleanup`
-
-Skip host cleanup after the live instance is deleted. The previous
-tenants data stays on the host.
-
 `--update-message <UPDATE_MESSAGE>`
 
 If set, a HostUpdateInProgress health alert with this message is applied

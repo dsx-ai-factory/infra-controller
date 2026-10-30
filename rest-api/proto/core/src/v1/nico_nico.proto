@@ -1085,11 +1085,12 @@ service Forge {
 
   // SPDM attestation APIs start
   rpc TriggerMachineAttestation(SpdmMachineAttestationTriggerRequest) returns (SpdmMachineAttestationTriggerResponse);
-  rpc CancelMachineAttestation(common.MachineId) returns (google.protobuf.Empty);
+  rpc CancelAttestation(common.UUID) returns (google.protobuf.Empty);
 
-  rpc ListAttestationMachines(SpdmListAttestationMachinesRequest) returns (SpdmListAttestationMachinesResponse);
-  rpc GetAttestationMachine(common.MachineId) returns (SpdmGetAttestationMachineResponse);
-
+  rpc ListAttestation(SpdmListAttestationRequest) returns (SpdmListAttestationResponse);
+  rpc GetAttestation(common.UUID) returns (SpdmGetAttestationResponse);
+  // Lists fleet predictions in pages or assesses one machine using current attesters.
+  rpc ListMachineAttestationStatuses(ListMachineAttestationStatusesRequest) returns (ListMachineAttestationStatusesResponse);
   // Attestation profiles APIs
   rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
   rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (AttestationProfile);
@@ -1317,9 +1318,13 @@ enum SpdmAttestationStatus{
   SPDM_ATT_FAILED = 3;
 }
 
-message SpdmMachineAttestationStatus {
-  common.MachineId machine_id = 1;
+message SpdmAttestationJobStatus {
+  reserved 1;
+  reserved "machine_id";
   SpdmAttestationStatus attestation_status = 2;
+  common.UUID job_id = 3;
+  // Distinct machines this job affects.
+  repeated common.MachineId machine_ids = 4;
 }
 
 // Why one attestation scheduling attempt ended as it did.
@@ -1358,14 +1363,15 @@ message SpdmMachineAttestationTriggerResponse {
   // written for this machine's own class.
   bool used_any_fallback = 5;
   // Version of the profile that decided this call, absent when no profile
-  // applied. Scoped to this call: a later trigger replaces the machine's whole
-  // work set, so this is not a lasting claim about the attestation in flight.
+  // applied. Describes the policy used to select this job's devices.
   optional string profile_version = 6;
   // When the scheduled devices were written, absent unless something was
   // scheduled. Every device row this call wrote carries it, so a caller can
-  // tell whether its scheduling is still the live one or was replaced. The same
+  // correlate its scheduling with the stored device rows. The same
   // value is reported as SpdmAttestationDetails.started_at.
   optional google.protobuf.Timestamp started_at = 7;
+  // Present only when devices were scheduled. Use this ID to get or cancel the job.
+  common.UUID job_id = 8;
 }
 
 message SpdmAttestationDetails{
@@ -1378,7 +1384,7 @@ message SpdmAttestationDetails{
   optional google.protobuf.Timestamp completed_at = 9;
 }
 
-message SpdmGetAttestationMachineResponse {
+message SpdmGetAttestationResponse {
   repeated SpdmAttestationDetails attestations_details = 1;
 }
 
@@ -1387,20 +1393,23 @@ message SpdmMachineAttestationTriggerRequest {
   uint32 redfish_timeout_secs = 2;
 }
 
-enum SpdmListAttestationMachinesRequestSelector {
+enum SpdmListAttestationRequestSelector {
+  reserved 1;
+  reserved "SPDM_LIST_UNSUCCESSFUL";
   SPDM_LIST_IN_PROGRESS = 0;
-  SPDM_LIST_UNSUCCESSFUL = 1;
+  SPDM_LIST_CANCELLED = 2;
+  SPDM_LIST_FAILED = 3;
+  SPDM_LIST_PASSED = 4;
 }
 
-message SpdmListAttestationMachinesRequest {
-  oneof variant {
-    common.MachineId machine_id = 1;
-    SpdmListAttestationMachinesRequestSelector selector = 2;
-  }
+message SpdmListAttestationRequest {
+  reserved 1, 3;
+  reserved "machine_id", "job_id";
+  SpdmListAttestationRequestSelector selector = 2;
 }
 
-message SpdmListAttestationMachinesResponse {
-  repeated SpdmMachineAttestationStatus statuses = 1;
+message SpdmListAttestationResponse {
+  repeated SpdmAttestationJobStatus statuses = 1;
 }
 
 // Attestation profiles: one policy per hardware class, naming which attesters
@@ -12432,6 +12441,86 @@ message GetDesiredNicFirmwareResponse {
   // do not fail the request or remove saved selections. Ambiguous matches and
   // multiple selections for a device are reported in that device's result.error.
   repeated string warnings = 3;
+}
+
+// Lists either fleet predictions or a definitive assessment of one machine.
+// The target must be supplied; an omitted target returns INVALID_ARGUMENT.
+message ListMachineAttestationStatusesRequest {
+  reserved 1, 2, 3;
+  reserved "attestation_status", "page_size", "page_token";
+  oneof target {
+    // Database-only predictions, with filtering and pagination.
+    SpdmMachineAttestationFleetRequest fleet = 4;
+    // Read-only assessment using the current profile and BMC component inventory.
+    SpdmMachineAttestationMachineRequest machine = 5;
+  }
+}
+
+// Each page is ordered by ascending machine ID. Inventory and externally triggered jobs
+// are not consulted. Pages are separate reads: concurrent changes can affect membership.
+message SpdmMachineAttestationFleetRequest {
+  // Omission includes all machines, including those without a retained controller job.
+  // A supplied status excludes machines without such a job. Unknown enum values are rejected.
+  optional SpdmAttestationStatus attestation_status = 1;
+  // Maximum matching records to return. Zero uses RuntimeConfig.max_find_by_ids;
+  // larger values are capped at that setting. This setting defaults to 100.
+  uint32 page_size = 2;
+  // Empty for the first page; otherwise copy the preceding response's next_page_token.
+  // Tokens are opaque and bound to the status filter; keep the filter unchanged.
+  // Malformed tokens or a changed filter return INVALID_ARGUMENT. Page size may change.
+  string page_token = 3;
+}
+
+message SpdmMachineAttestationMachineRequest {
+  // Required. Unknown machines return NOT_FOUND; omission returns INVALID_ARGUMENT.
+  common.MachineId machine_id = 1;
+  // Omission uses 30 seconds. Explicit zero returns INVALID_ARGUMENT.
+  // Bounds the entire assessment, including profile lookup, Redfish discovery and status reads.
+  // Expiry returns DEADLINE_EXCEEDED. BMC errors are reported without a prediction fallback.
+  optional uint32 redfish_timeout_secs = 2;
+}
+
+// Why current policy and inventory selected this set of attesters. This is a read-only
+// decision: no outcome creates, cancels, or modifies attestation jobs.
+enum SpdmAttesterSelectionStatus {
+  SPDM_ATTESTER_SELECTION_STATUS_UNSPECIFIED = 0;
+  // All selection requirements were satisfied and at least one attester was selected.
+  SPDM_ATTESTER_SELECTION_STATUS_SELECTED = 1;
+  // Some allowlist patterns matched nothing. Status covers only the selected subset.
+  SPDM_ATTESTER_SELECTION_STATUS_PARTIALLY_SATISFIED = 2;
+  // Site-wide SPDM or the resolved profile disables attestation; the BMC is not contacted.
+  SPDM_ATTESTER_SELECTION_STATUS_DISABLED = 3;
+  SPDM_ATTESTER_SELECTION_STATUS_NO_ATTESTERS_FOUND = 4;
+  SPDM_ATTESTER_SELECTION_STATUS_POLICY_MATCHED_NOTHING = 5;
+  SPDM_ATTESTER_SELECTION_STATUS_CLASS_NOT_RECORDED = 6;
+  SPDM_ATTESTER_SELECTION_STATUS_NO_PROFILE = 7;
+}
+
+message SpdmMachineAttestationStatus {
+  reserved 3, 4;
+  reserved "job_id", "selection";
+  // Always present: the machine whose status is reported.
+  common.MachineId machine_id = 1;
+  // Unfinished takes precedence over failed, cancelled, then all-passed.
+  // Fleet: aggregate this machine's devices in its latest retained controller job;
+  // absent when no controller job is retained (unknown).
+  // Machine: aggregate each currently selected device's latest result, including external
+  // jobs, by started_at DESC then job_id DESC. Missing device results mean in-progress.
+  // Absent when selection is empty; inspect attester_selection_status for the reason.
+  optional SpdmAttestationStatus attestation_status = 2;
+  // Present and non-UNSPECIFIED only for a definitive single-machine assessment.
+  // Partial coverage is explicit even when the selected subset's aggregate is passed.
+  optional SpdmAttesterSelectionStatus attester_selection_status = 5;
+}
+
+message ListMachineAttestationStatusesResponse {
+  // Fleet: matching machines ordered by ID, at most the effective page size.
+  // No matches produces an empty list and empty next_page_token.
+  // Machine: exactly one definitive assessment, with attester_selection_status.
+  repeated SpdmMachineAttestationStatus statuses = 1;
+  // Fleet continuation, strictly after the last returned ID. Empty means no further matches.
+  // Always empty in machine mode. This does not preserve a snapshot across requests.
+  string next_page_token = 2;
 }
 
 // Administrator-managed desired inventory, separate from an NMX-C observed domain.

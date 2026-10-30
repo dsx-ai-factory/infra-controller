@@ -3650,25 +3650,32 @@ impl Forge for Api {
         crate::handlers::attestation::trigger_machine_attestation(self, request).await
     }
 
-    async fn cancel_machine_attestation(
+    async fn cancel_attestation(
         &self,
-        request: tonic::Request<MachineId>,
+        request: tonic::Request<::rpc::Uuid>,
     ) -> Result<tonic::Response<()>, Status> {
-        crate::handlers::attestation::cancel_machine_attestation(self, request).await
+        crate::handlers::attestation::cancel_attestation(self, request).await
     }
 
-    async fn list_attestation_machines(
+    async fn list_attestation(
         &self,
-        request: tonic::Request<rpc::SpdmListAttestationMachinesRequest>,
-    ) -> Result<Response<rpc::SpdmListAttestationMachinesResponse>, Status> {
-        crate::handlers::attestation::list_attestation_machines(self, request).await
+        request: tonic::Request<rpc::SpdmListAttestationRequest>,
+    ) -> Result<Response<rpc::SpdmListAttestationResponse>, Status> {
+        crate::handlers::attestation::list_attestation(self, request).await
     }
 
-    async fn get_attestation_machine(
+    async fn list_machine_attestation_statuses(
         &self,
-        request: tonic::Request<MachineId>,
-    ) -> Result<Response<rpc::SpdmGetAttestationMachineResponse>, Status> {
-        crate::handlers::attestation::get_attestation_machine(self, request).await
+        request: tonic::Request<rpc::ListMachineAttestationStatusesRequest>,
+    ) -> Result<Response<rpc::ListMachineAttestationStatusesResponse>, Status> {
+        crate::handlers::attestation::list_machine_attestation_statuses(self, request).await
+    }
+
+    async fn get_attestation(
+        &self,
+        request: tonic::Request<::rpc::Uuid>,
+    ) -> Result<Response<rpc::SpdmGetAttestationResponse>, Status> {
+        crate::handlers::attestation::get_attestation(self, request).await
     }
 
     async fn create_attestation_profile(

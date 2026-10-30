@@ -28,8 +28,8 @@ Select the switch by either BMC MAC address or ID. Supply at least one
 update field. Omitted fields and empty metadata names or descriptions
 remain unchanged. Supplied labels replace the whole label collection.
 Supplied NVOS ports (--nvos-interface) replace the stored set as a
-whole, so move the primary by resending every port with the new
-',primary' marker.
+whole, so move the primary by resending every port with the new ,primary
+marker.
 
 Supply a username, password, or both for BMC or NVOS. Each omitted
 credential field keeps its stored value. NVOS credentials must contain
@@ -76,9 +76,9 @@ Switch serial number of the expected switch
 `--nvos-interface <MAC[,primary]>`
 
 An NVOS ethernet port of the expected switch. Repeat for each port to
-replace the stored set. Append ',primary' to mark the primary port
-(eth0); when none is marked the first is primary and a single port is
-always primary
+replace the stored set. Append ,primary to mark the primary port (eth0);
+when none is marked the first is primary and a single port is always
+primary
 
 `--nvos-username <NVOS_USERNAME>`
 
@@ -124,7 +124,7 @@ internal UUIDs that are used to associate instances.
 Static IP for the single wired NVOS port. The updated switch must have
 exactly one NVOS port. When Core supports PATCH or masked updates, omit
 --nvos-interface only if the stored set already contains exactly one
-port; otherwise, supply exactly one --nvos-interface to replace the set. 
+port; otherwise, supply exactly one --nvos-interface to replace the set.
 Servers without NVOS IP support ignore this field
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`

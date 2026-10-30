@@ -1656,6 +1656,7 @@ async fn create_test_env_with_overrides_inner(
         inner: Arc::new(Mutex::new(SpdmAttestationStateHandler::new(
             Arc::new(verifier),
             nras::Config::default(),
+            config.spdm_state_controller.cancellation_timeout,
         ))),
     };
 

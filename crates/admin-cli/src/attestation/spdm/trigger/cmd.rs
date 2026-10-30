@@ -70,6 +70,12 @@ pub(super) async fn trigger(args: Args, api_client: &ApiClient) -> CarbideCliRes
     );
     println!("  outcome:        {}", outcome(res.outcome));
     println!("  devices:        {}", res.devices_under_attestation);
+    println!(
+        "  job ID:         {}",
+        res.job_id
+            .map(|id| id.value)
+            .unwrap_or_else(|| "none".to_string())
+    );
     // Empty when exploration has recorded no class, which is itself an outcome.
     println!(
         "  hardware class: {}",

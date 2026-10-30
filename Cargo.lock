@@ -3565,6 +3565,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-test-support",
  "carbide-utils",
+ "chrono",
  "config-version",
  "itertools 0.14.0",
  "libredfish",
@@ -7203,7 +7204,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.22#6ab23d1e5d24c8e7812beec44bd5907cadd4cbae"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.23#653ecdd5560783e8e071511b8cfd29614f9cc62c"
 dependencies = [
  "chrono",
  "clap",

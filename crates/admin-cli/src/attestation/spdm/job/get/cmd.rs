@@ -15,27 +15,19 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
-use clap::{Parser, ValueEnum};
+use crate::attestation::spdm::job::get::Args;
+use crate::errors::CarbideCliResult;
+use crate::rpc::ApiClient;
 
-#[derive(Parser, Debug)]
-#[command(after_long_help = "\
-EXAMPLES:
+pub(super) async fn get(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+    let attestation = api_client
+        .0
+        .get_attestation(::rpc::common::Uuid {
+            value: args.job_id.to_string(),
+        })
+        .await?;
 
-List all SPDM attestations recorded for a machine:
-    $ nico-admin-cli attestation spdm list 12345678-1234-5678-90ab-cdef01234567
+    println!("{}", serde_json::to_string_pretty(&attestation)?);
 
-")]
-pub(crate) struct Args {
-    #[clap(long, help = "Machine ID", conflicts_with = "selector")]
-    pub(super) machine_id: Option<MachineId>,
-    #[clap(long, value_enum, help = "Filter attestation machines by selector")]
-    pub(super) selector: Option<Selector>,
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-#[clap(rename_all = "kebab_case")]
-pub(super) enum Selector {
-    InProgress,
-    Unsuccessful,
+    Ok(())
 }

@@ -38,6 +38,7 @@ libredfish = { workspace = true }
 opentelemetry = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }
+chrono.workspace = true
 
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }

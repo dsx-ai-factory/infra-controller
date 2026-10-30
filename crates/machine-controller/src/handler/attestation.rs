@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
+
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -28,24 +30,24 @@ use model::attestation::spdm::{
 };
 use model::bmc_info::BmcInfo;
 use model::machine::{
-    AttestationMode, FailureCause, FailureDetails, FailureSource, MachineState, ManagedHostState,
-    ManagedHostStateSnapshot, SpdmMeasuringState, StateMachineArea,
+    CleanupContext, CleanupState, FailureCause, FailureDetails, FailureSource, MachineState,
+    ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, PgTransaction};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
 use crate::context::MachineStateHandlerContextObjects;
-use crate::handler::MachineStateHandlerServices;
+use crate::handler::{MachineStateHandlerServices, waiting_for_cleanup_state};
 
-/// What scheduling decided for one machine.
+/// The attester selection decision used by scheduling and read-only assessment.
 ///
 /// A BMC that cannot be reached is not one of these: it stays an error so the
 /// controller retries it, where every value here is a settled answer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, carbide_instrument::LabelValue)]
 pub enum SchedulingOutcome {
-    /// One work row was written per selected attester.
+    /// Eligible attesters were selected; scheduling writes one work row per attester.
     Scheduled,
     /// Work rows were written, but an allowlist pattern matched no eligible
     /// attester. Attesting is under way for less than the profile asked for.
@@ -111,13 +113,39 @@ pub struct SchedulingResult {
     /// may have been edited between the operator's last read and this call.
     pub profile_version: Option<String>,
     /// The `started_at` written on every device row this call scheduled,
-    /// absent when it scheduled none. Identifies the scheduling run, so a
-    /// caller can tell its own from one that replaced it.
+    /// absent when it scheduled none. Every device in the job shares it.
     pub started_at: Option<DateTime<Utc>>,
+    /// The persisted job, absent when this attempt scheduled no devices.
+    pub job_id: Option<uuid::Uuid>,
     pub devices_scheduled: u64,
 }
 
 impl SchedulingResult {
+    fn emit_scheduling_event(&self, machine_id: MachineId) {
+        // Count scheduling attempts for both API and managed-host triggers.
+        carbide_instrument::emit(AttestationScheduled {
+            outcome: self.outcome,
+            machine_id,
+            profile_source: ProfileSource::of(self),
+            hardware_class: self.hardware_class.clone(),
+            profile_version: self.profile_version.clone(),
+            devices_scheduled: self.devices_scheduled,
+        });
+    }
+}
+
+/// Selected BMC components and the policy decision, before any work is scheduled.
+pub struct MachineAttesterSelection {
+    /// The policy decision, before any attestation work is scheduled.
+    pub outcome: SchedulingOutcome,
+    hardware_class: String,
+    used_any_fallback: bool,
+    profile_version: Option<String>,
+    /// Eligible components selected by the resolved profile.
+    pub attesters: Vec<ComponentIntegrity>,
+}
+
+impl MachineAttesterSelection {
     /// A settled answer reached before any profile applied.
     fn unprofiled(outcome: SchedulingOutcome, hardware_class: Option<String>) -> Self {
         Self {
@@ -125,8 +153,7 @@ impl SchedulingResult {
             hardware_class: hardware_class.unwrap_or_default(),
             used_any_fallback: false,
             profile_version: None,
-            started_at: None,
-            devices_scheduled: 0,
+            attesters: Vec::new(),
         }
     }
 }
@@ -165,6 +192,9 @@ struct AttestationScheduled {
 /// Schedules SPDM attestation for a machine according to the profile its
 /// hardware class resolves to, writing one work row per selected attester.
 ///
+/// `triggered_by_mh_controller` is true only for managed-host lifecycle triggers;
+/// external triggers pass false. Every device row in the job records this origin.
+///
 /// `connect` is called only once the profile turns out to need the BMC.
 /// Building a client authenticates against it, so taking a built one would
 /// contact every BMC whose profile answers without it.
@@ -174,24 +204,23 @@ pub async fn trigger_attestation(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
+    triggered_by_mh_controller: bool,
 ) -> Result<SchedulingResult, StateHandlerError> {
-    let result = schedule(
+    let (result, txn) = schedule(
         db_pool,
         connect,
         bmc_info,
         machine_id,
         redfish_timeout_duration,
+        triggered_by_mh_controller,
     )
     .await?;
 
-    carbide_instrument::emit(AttestationScheduled {
-        outcome: result.outcome,
-        machine_id: *machine_id,
-        profile_source: ProfileSource::of(&result),
-        hardware_class: result.hardware_class.clone(),
-        profile_version: result.profile_version.clone(),
-        devices_scheduled: result.devices_scheduled,
-    });
+    // API triggers have no machine transition to persist with the new job.
+    if let Some(txn) = txn {
+        txn.commit().await?;
+    }
+    result.emit_scheduling_event(*machine_id);
 
     Ok(result)
 }
@@ -202,7 +231,403 @@ async fn schedule(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
-) -> Result<SchedulingResult, StateHandlerError> {
+    triggered_by_mh_controller: bool,
+) -> Result<(SchedulingResult, Option<PgTransaction<'static>>), StateHandlerError> {
+    // Complete profile resolution and BMC discovery before opening a write transaction.
+    let selection = select_machine_attesters(
+        db_pool,
+        connect,
+        bmc_info,
+        machine_id,
+        redfish_timeout_duration,
+    )
+    .await?;
+    let result = SchedulingResult {
+        outcome: selection.outcome,
+        hardware_class: selection.hardware_class,
+        used_any_fallback: selection.used_any_fallback,
+        profile_version: selection.profile_version,
+        started_at: None,
+        job_id: None,
+        devices_scheduled: 0,
+    };
+
+    // Policy-only and empty-inventory outcomes create no job.
+    if selection.attesters.is_empty() {
+        return Ok((result, None));
+    }
+
+    // Each scheduling attempt creates a separate job. Existing jobs retain
+    // their evidence collection claims and results until completion and cleanup.
+    // Truncated to what `timestamptz` stores, so the value reported back is
+    // the one a caller finds on the rows rather than a sub-microsecond miss.
+    let time_now = Utc::now().trunc_subsecs(6);
+    let job_id = uuid::Uuid::new_v4();
+    let device_attestations = selection
+        .attesters
+        .into_iter()
+        .map(|x| from_component_integrity(x, machine_id, &time_now, bmc_info, &job_id))
+        .collect_vec();
+
+    let mut txn = db_pool.begin().await?;
+
+    // Origin belongs to the whole job, so all its device rows receive the same value.
+    let records_inserted = db::attestation::spdm::insert_device_attestations(
+        &mut txn,
+        machine_id,
+        device_attestations,
+        &job_id,
+        triggered_by_mh_controller,
+    )
+    .await?;
+
+    // The caller commits the job with the state that records its ID when applicable.
+    Ok((
+        SchedulingResult {
+            started_at: Some(time_now),
+            job_id: Some(job_id),
+            devices_scheduled: records_inserted,
+            ..result
+        },
+        Some(txn),
+    ))
+}
+
+/// The lowest SPDM version this build attests, below which the responder is
+/// not required to carry the measurement blocks scheduling asks for.
+const MINIMUM_SPDM_VERSION: [u32; 3] = [1, 1, 0];
+
+/// Reads a dotted numeric version, treating absent components as zero so
+/// `1.1` compares equal to `1.1.0`.
+///
+/// `None` for anything else, which is not an error: BMCs report `unknown` and
+/// `N/A` here, and a version nobody can read is no evidence that the responder
+/// is too old.
+fn parse_spdm_version(version: &str) -> Option<[u32; 3]> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut parsed = [0_u32; 3];
+    for (slot, part) in parsed.iter_mut().zip(parts) {
+        *slot = part.parse().ok()?;
+    }
+    Some(parsed)
+}
+
+/// The attesters a profile's patterns may select: those the BMC reports as
+/// enabled, as speaking SPDM, and as speaking a version this build attests.
+///
+/// The version is compared rather than matched exactly, so a BMC reporting a
+/// newer version than this build knew about still attests while one reporting
+/// an older version does not. A version that does not parse is admitted, since
+/// real BMCs report `unknown` here and dropping those would stop attesting
+/// hardware that works. The version is not persisted.
+fn eligible_attesters(integrities: &ComponentIntegrities) -> Vec<&ComponentIntegrity> {
+    integrities
+        .members
+        .iter()
+        .filter(|component| {
+            component.component_integrity_enabled && component.component_integrity_type == "SPDM"
+        })
+        .filter(|component| {
+            let version = &component.component_integrity_type_version;
+            match parse_spdm_version(version) {
+                Some(reported) if reported < MINIMUM_SPDM_VERSION => {
+                    tracing::warn!(
+                        attester = %component.id,
+                        %version,
+                        "attester reports an SPDM version below the minimum; not attesting it"
+                    );
+                    false
+                }
+                Some(_) => true,
+                None => {
+                    tracing::warn!(
+                        attester = %component.id,
+                        %version,
+                        "attester reports an unreadable SPDM version; attesting it anyway"
+                    );
+                    true
+                }
+            }
+        })
+        .collect()
+}
+
+fn from_component_integrity(
+    integrity: ComponentIntegrity,
+    machine_id: &MachineId,
+    time_now: &DateTime<Utc>,
+    bmc_info: &BmcInfo,
+    job_id: &uuid::Uuid,
+) -> SpdmDeviceAttestation {
+    let ca_certificate_link = integrity
+        .spdm
+        .map(|x| x.identity_authentication)
+        .and_then(|x| x.responder_authentication.component_certificate)
+        .map(|x| x.odata_id);
+
+    let evidence_target =
+        if let Some(Some(data)) = integrity.actions.map(|x| x.get_signed_measurements) {
+            Some(data.target)
+        } else {
+            None
+        };
+
+    SpdmDeviceAttestation {
+        machine_id: *machine_id,
+        device_id: integrity.id,
+        nonce: uuid::Uuid::new_v4(),
+        bmc_info: bmc_info.clone(),
+        state: SpdmAttestationState::FetchMetadata,
+        state_version: ConfigVersion::initial(),
+        state_outcome: None,
+        metadata: None,
+        ca_certificate_link,
+        ca_certificate: None,
+        evidence_target,
+        evidence: None,
+        evidence_collection_locked: false,
+        job_id: *job_id,
+        started_at: *time_now,
+        cancelled_at: None,
+        completed_at: None,
+    }
+}
+
+/// Continue past SPDM when selected attesters have passed or been cancelled, or
+/// attestation is disabled or selects no work. The destination follows
+/// [`FailureDetails::source`] without scheduling another attestation.
+pub(crate) async fn handle_spdm_attestation_failed_recovery(
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    host_machine_id: &MachineId,
+    mh_snapshot: &ManagedHostStateSnapshot,
+    details: &FailureDetails,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    // Select before opening a transaction because selection may contact the BMC.
+    let selected_device_ids = if !ctx.services.site_config.spdm_enabled {
+        Vec::new()
+    } else {
+        let selection = select_machine_attesters(
+            &ctx.services.db_pool,
+            async || {
+                ctx.services
+                    .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
+                    .await
+            },
+            &mh_snapshot.host_snapshot.status.bmc_info,
+            host_machine_id,
+            std::time::Duration::MAX,
+        )
+        .await?;
+        selection
+            .attesters
+            .into_iter()
+            .map(|attester| attester.id)
+            .collect_vec()
+    };
+
+    let mut txn = ctx.services.db_pool.begin().await?;
+    // Cancellation waives attestation; a pass satisfies it. Neither needs a new job.
+    // Disabled attestation and an empty selection follow scheduling's skip path.
+    let should_advance = selected_device_ids.is_empty()
+        || matches!(
+            db::attestation::spdm::list_single_machine_attestation_status(
+                &mut txn,
+                host_machine_id,
+                Some(&selected_device_ids),
+            )
+            .await?,
+            SpdmAttestationStatus::Passed | SpdmAttestationStatus::Cancelled
+        );
+    if !should_advance {
+        return Ok(StateHandlerOutcome::do_nothing());
+    }
+
+    // Use the same destinations as successful polling in the original lifecycle stage.
+    let next_state = match &details.source {
+        FailureSource::StateMachineArea(StateMachineArea::HostInit) => ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForDiscovery,
+        },
+        FailureSource::StateMachineArea(StateMachineArea::AssignedInstance) => {
+            waiting_for_cleanup_state(CleanupState::Init, CleanupContext::Deprovision)
+        }
+        FailureSource::StateMachineArea(StateMachineArea::MainFlow) => {
+            ManagedHostState::StartAssignmentCycle
+        }
+        _ => return Ok(StateHandlerOutcome::do_nothing()),
+    };
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
+}
+
+pub(crate) async fn handle_spdm_trigger_state(
+    services: &MachineStateHandlerServices,
+    mh_snapshot: &mut ManagedHostStateSnapshot,
+    host_machine_id: &MachineId,
+    next_poll_state: impl FnOnce(uuid::Uuid) -> ManagedHostState,
+    next_skip_state: ManagedHostState,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    // Create the BMC client only when the resolved profile requires collection.
+    let (result, txn) = schedule(
+        &services.db_pool,
+        async || {
+            services
+                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
+                .await
+        },
+        &mh_snapshot.host_snapshot.status.bmc_info,
+        host_machine_id,
+        std::time::Duration::MAX,
+        true, // This job is part of the managed-host lifecycle.
+    )
+    .await?;
+    result.emit_scheduling_event(*host_machine_id);
+
+    // Persist the job and its polling state together; a rejected transition rolls back both.
+    // Empty selections have no transaction and advance without polling.
+    let next_state = match result.job_id {
+        Some(job_id) => next_poll_state(job_id),
+        None => next_skip_state,
+    };
+    Ok(StateHandlerOutcome::transition(next_state).with_txn_opt(txn))
+}
+
+pub(crate) async fn handle_spdm_poll_state(
+    services: &MachineStateHandlerServices,
+    mh_snapshot: &ManagedHostStateSnapshot,
+    host_machine_id: &MachineId,
+    job_id: &uuid::Uuid,
+    failure_source: FailureSource,
+    next_skip_state: ManagedHostState,
+    restart_state: ManagedHostState,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    // Check current membership even while the job is collecting, without holding a transaction over Redfish.
+    let selection = select_machine_attesters(
+        &services.db_pool,
+        async || {
+            services
+                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
+                .await
+        },
+        &mh_snapshot.host_snapshot.status.bmc_info,
+        host_machine_id,
+        std::time::Duration::MAX,
+    )
+    .await?;
+    let mut txn = services.db_pool.begin().await?;
+
+    // Retention can remove a job before either read; restart in the caller's lifecycle stage.
+    let job_attestations =
+        match db::attestation::spdm::get_attestations_for_job_id(&mut txn, job_id).await {
+            Ok(attestations) => attestations,
+            Err(db::DatabaseError::NotFoundError { .. }) => {
+                tracing::info!(
+                    machine_id = %host_machine_id,
+                    %job_id,
+                    "SPDM attestation job not found; restarting attestation"
+                );
+                return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+            }
+            Err(error) => return Err(error.into()),
+        };
+    let job_device_ids = job_attestations
+        .into_iter()
+        .map(|attester| attester.device_id)
+        .collect_vec();
+    let job_devices = job_device_ids.iter().collect::<HashSet<_>>();
+    let selected_devices = selection
+        .attesters
+        .iter()
+        .map(|attester| &attester.id)
+        .collect::<HashSet<_>>();
+
+    // Additions, removals, and an empty selection all invalidate the job's membership.
+    // Commit cancellation with the transition so the next iteration can create the replacement job.
+    if selected_devices != job_devices {
+        db::attestation::spdm::cancel_attestation_job(&mut txn, job_id).await?;
+        tracing::info!(
+            machine_id = %host_machine_id,
+            %job_id,
+            "SPDM attester selection changed; cancelling job and restarting attestation"
+        );
+        return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+    }
+    let job_status = match db::attestation::spdm::get_attestation_job_status(&mut txn, job_id).await
+    {
+        Ok(status) => status,
+        Err(db::DatabaseError::NotFoundError { .. }) => {
+            tracing::info!(
+                machine_id = %host_machine_id,
+                %job_id,
+                "SPDM attestation job not found; restarting attestation"
+            );
+            return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if job_status == SpdmAttestationStatus::InProgress {
+        return Ok(StateHandlerOutcome::do_nothing());
+    }
+
+    // A finished job alone does not settle newer attestations for its devices.
+    let attestation_status = db::attestation::spdm::list_single_machine_attestation_status(
+        &mut txn,
+        host_machine_id,
+        Some(&job_device_ids),
+    )
+    .await?;
+
+    match attestation_status {
+        SpdmAttestationStatus::Passed | SpdmAttestationStatus::Cancelled => {
+            Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn))
+        }
+        SpdmAttestationStatus::Failed => {
+            // Use the same job devices and latest revisions as the machine status.
+            let attestation_states = db::attestation::spdm::get_latest_attestations_for_machine_id(
+                &mut txn,
+                host_machine_id,
+                &job_device_ids,
+            )
+            .await?;
+            // here, move to failed state with full details
+            Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
+                details: FailureDetails {
+                    cause: FailureCause::SpdmAttestationFailed {
+                        err: attestation_states
+                            .iter()
+                            .filter(|elem| matches!(elem.state, SpdmAttestationState::Failed(_)))
+                            .fold(
+                                String::new(),
+                                |mut accum, x: &SpdmDeviceAttestationDetails| {
+                                    accum.push_str(&x.get_failure_cause().unwrap_or_default());
+                                    accum.push_str(". ");
+                                    accum
+                                },
+                            ),
+                    },
+                    failed_at: Utc::now(),
+                    source: failure_source,
+                },
+                retry_count: 0,
+                machine_id: *host_machine_id,
+            })
+            .with_txn(txn))
+        }
+        SpdmAttestationStatus::InProgress => Ok(StateHandlerOutcome::do_nothing()),
+    }
+}
+
+/// Resolves the machine's profile and selects eligible BMC components without scheduling work.
+/// Calls `connect` only when the profile requires BMC inventory, bounds each Redfish
+/// read by `redfish_timeout_duration`, and propagates database or BMC errors.
+pub async fn select_machine_attesters(
+    db_pool: &PgPool,
+    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
+    bmc_info: &BmcInfo,
+    machine_id: &MachineId,
+    redfish_timeout_duration: std::time::Duration,
+) -> Result<MachineAttesterSelection, StateHandlerError> {
     let bmc_address = bmc_info
         .ip_addr()
         .map_err(StateHandlerError::GenericError)?;
@@ -225,13 +650,13 @@ async fn schedule(
             used_any_fallback,
         } => (profile, used_any_fallback),
         ProfileResolution::ClassNotRecorded => {
-            return Ok(SchedulingResult::unprofiled(
+            return Ok(MachineAttesterSelection::unprofiled(
                 SchedulingOutcome::ClassNotRecorded,
                 recorded_class,
             ));
         }
         ProfileResolution::NoProfile => {
-            return Ok(SchedulingResult::unprofiled(
+            return Ok(MachineAttesterSelection::unprofiled(
                 SchedulingOutcome::NoProfile,
                 recorded_class,
             ));
@@ -240,13 +665,12 @@ async fn schedule(
 
     let hardware_class = recorded_class.unwrap_or_default();
     let profile_version = profile.version.to_string();
-    let settled = |outcome| SchedulingResult {
+    let settled = |outcome| MachineAttesterSelection {
         outcome,
         hardware_class: hardware_class.clone(),
         used_any_fallback,
         profile_version: Some(profile_version.clone()),
-        started_at: None,
-        devices_scheduled: 0,
+        attesters: Vec::new(),
     };
     let selection = &profile.policy_document.selection;
 
@@ -330,274 +754,20 @@ async fn schedule(
         }
     };
 
-    // The rows this writes replace the machine's existing ones: the profile
-    // decides what to attest, so this selection supersedes whatever an earlier
-    // trigger left behind.
-    // Truncated to what `timestamptz` stores, so the value reported back is
-    // the one a caller finds on the rows rather than a sub-microsecond miss.
-    let time_now = Utc::now().trunc_subsecs(6);
-    let device_attestations = eligible
+    // Return owned components so callers can use the selection after the BMC response is dropped.
+    let attesters = eligible
         .into_iter()
         .filter(|component| selected.contains(&component.id))
-        .map(|x| from_component_integrity(x.clone(), machine_id, &time_now, bmc_info))
+        .cloned()
         .collect_vec();
 
-    let mut txn = db_pool.begin().await?;
-
-    let records_inserted = db::attestation::spdm::insert_device_attestations(
-        &mut txn,
-        machine_id,
-        device_attestations,
-    )
-    .await?;
-
-    txn.commit().await?;
-
-    Ok(SchedulingResult {
+    Ok(MachineAttesterSelection {
         outcome,
         hardware_class,
         used_any_fallback,
         profile_version: Some(profile_version),
-        started_at: Some(time_now),
-        devices_scheduled: records_inserted,
+        attesters,
     })
-}
-
-/// The lowest SPDM version this build attests, below which the responder is
-/// not required to carry the measurement blocks scheduling asks for.
-const MINIMUM_SPDM_VERSION: [u32; 3] = [1, 1, 0];
-
-/// Reads a dotted numeric version, treating absent components as zero so
-/// `1.1` compares equal to `1.1.0`.
-///
-/// `None` for anything else, which is not an error: BMCs report `unknown` and
-/// `N/A` here, and a version nobody can read is no evidence that the responder
-/// is too old.
-fn parse_spdm_version(version: &str) -> Option<[u32; 3]> {
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() > 3 {
-        return None;
-    }
-    let mut parsed = [0_u32; 3];
-    for (slot, part) in parsed.iter_mut().zip(parts) {
-        *slot = part.parse().ok()?;
-    }
-    Some(parsed)
-}
-
-/// The attesters a profile's patterns may select: those the BMC reports as
-/// enabled, as speaking SPDM, and as speaking a version this build attests.
-///
-/// The version is compared rather than matched exactly, so a BMC reporting a
-/// newer version than this build knew about still attests while one reporting
-/// an older version does not. A version that does not parse is admitted, since
-/// real BMCs report `unknown` here and dropping those would stop attesting
-/// hardware that works. The version is not persisted.
-fn eligible_attesters(integrities: &ComponentIntegrities) -> Vec<&ComponentIntegrity> {
-    integrities
-        .members
-        .iter()
-        .filter(|component| {
-            component.component_integrity_enabled && component.component_integrity_type == "SPDM"
-        })
-        .filter(|component| {
-            let version = &component.component_integrity_type_version;
-            match parse_spdm_version(version) {
-                Some(reported) if reported < MINIMUM_SPDM_VERSION => {
-                    tracing::warn!(
-                        attester = %component.id,
-                        %version,
-                        "attester reports an SPDM version below the minimum; not attesting it"
-                    );
-                    false
-                }
-                Some(_) => true,
-                None => {
-                    tracing::warn!(
-                        attester = %component.id,
-                        %version,
-                        "attester reports an unreadable SPDM version; attesting it anyway"
-                    );
-                    true
-                }
-            }
-        })
-        .collect()
-}
-
-fn from_component_integrity(
-    integrity: ComponentIntegrity,
-    machine_id: &MachineId,
-    time_now: &DateTime<Utc>,
-    bmc_info: &BmcInfo,
-) -> SpdmDeviceAttestation {
-    let ca_certificate_link = integrity
-        .spdm
-        .map(|x| x.identity_authentication)
-        .and_then(|x| x.responder_authentication.component_certificate)
-        .map(|x| x.odata_id);
-
-    let evidence_target =
-        if let Some(Some(data)) = integrity.actions.map(|x| x.get_signed_measurements) {
-            Some(data.target)
-        } else {
-            None
-        };
-
-    SpdmDeviceAttestation {
-        machine_id: *machine_id,
-        device_id: integrity.id,
-        nonce: uuid::Uuid::new_v4(),
-        bmc_info: bmc_info.clone(),
-        state: SpdmAttestationState::FetchMetadata,
-        state_version: ConfigVersion::initial(),
-        state_outcome: None,
-        metadata: None,
-        ca_certificate_link,
-        ca_certificate: None,
-        evidence_target,
-        evidence: None,
-        started_at: *time_now,
-        cancelled_at: None,
-        completed_at: None,
-    }
-}
-
-/// When SPDM attestation failed, check whether attestation was restarted (admin / status) or
-/// disabled in config; if so, transition back to the appropriate measuring state based on
-/// [`FailureDetails::source`].
-pub(crate) async fn handle_spdm_attestation_failed_recovery(
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-    host_machine_id: &MachineId,
-    details: &FailureDetails,
-) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
-    let should_resume_attestation = if !ctx.services.site_config.spdm_enabled {
-        true
-    } else {
-        let attestation_status = db::attestation::spdm::list_single_machine_attestation_status(
-            &mut txn,
-            host_machine_id,
-        )
-        .await?;
-        attestation_status == SpdmAttestationStatus::InProgress
-            || attestation_status == SpdmAttestationStatus::Cancelled
-            || attestation_status == SpdmAttestationStatus::Passed
-    };
-    if should_resume_attestation {
-        match &details.source {
-            FailureSource::StateMachineArea(StateMachineArea::HostInit) => {
-                Ok(StateHandlerOutcome::transition(ManagedHostState::HostInit {
-                    machine_state: MachineState::SpdmMeasuring {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
-                    },
-                })
-                .with_txn(txn))
-            }
-            FailureSource::StateMachineArea(StateMachineArea::AssignedInstance) => Ok(
-                StateHandlerOutcome::transition(ManagedHostState::PostAssignedMeasuring {
-                    attestation_mode: AttestationMode::SpdmAttestation {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
-                    },
-                })
-                .with_txn(txn),
-            ),
-            FailureSource::StateMachineArea(StateMachineArea::MainFlow) => Ok(
-                StateHandlerOutcome::transition(ManagedHostState::PreAssignedMeasuring {
-                    spdm_measuring_state: SpdmMeasuringState::PollResult,
-                })
-                .with_txn(txn),
-            ),
-            _ => Ok(StateHandlerOutcome::do_nothing()),
-        }
-    } else {
-        Ok(StateHandlerOutcome::do_nothing())
-    }
-}
-
-pub(crate) async fn handle_spdm_trigger_state(
-    services: &MachineStateHandlerServices,
-    mh_snapshot: &mut ManagedHostStateSnapshot,
-    host_machine_id: &MachineId,
-    next_spdm_state: ManagedHostState,
-    next_skip_state: ManagedHostState,
-) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let result = trigger_attestation(
-        &services.db_pool,
-        async || {
-            services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await
-        },
-        &mh_snapshot.host_snapshot.status.bmc_info,
-        host_machine_id,
-        std::time::Duration::MAX,
-    )
-    .await?;
-
-    // The remaining outcomes left no work to poll for, whether because the
-    // operator asked for none or because none could be selected.
-    // `trigger_attestation` has already reported which, so the machine
-    // proceeds rather than waiting on results that will never arrive.
-    if matches!(
-        result.outcome,
-        SchedulingOutcome::Scheduled | SchedulingOutcome::PartiallySatisfied
-    ) {
-        Ok(StateHandlerOutcome::transition(next_spdm_state))
-    } else {
-        Ok(StateHandlerOutcome::transition(next_skip_state))
-    }
-}
-
-pub(crate) async fn handle_spdm_poll_state(
-    db_pool: &PgPool,
-    host_machine_id: &MachineId,
-    failure_source: FailureSource,
-    next_skip_state: ManagedHostState,
-) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let mut txn = db_pool.begin().await?;
-
-    // get attestation status for the entire machine
-    let attestation_status =
-        db::attestation::spdm::list_single_machine_attestation_status(&mut txn, host_machine_id)
-            .await?;
-
-    // passed or cancelled -> just move to the next state
-    // failed -> get states for all devices and log to the Failed state logging them there
-    match attestation_status {
-        SpdmAttestationStatus::Passed | SpdmAttestationStatus::Cancelled => {
-            Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn))
-        }
-        SpdmAttestationStatus::Failed => {
-            let attestation_states =
-                db::attestation::spdm::get_attestations_for_machine_id(&mut txn, host_machine_id)
-                    .await?;
-            // here, move to failed state with a full details
-            Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
-                details: FailureDetails {
-                    cause: FailureCause::SpdmAttestationFailed {
-                        err: attestation_states
-                            .iter()
-                            .filter(|elem| matches!(elem.state, SpdmAttestationState::Failed(_)))
-                            .fold(
-                                String::new(),
-                                |mut accum, x: &SpdmDeviceAttestationDetails| {
-                                    accum.push_str(&x.get_failure_cause().unwrap_or_default());
-                                    accum.push_str(". ");
-                                    accum
-                                },
-                            ),
-                    },
-                    failed_at: Utc::now(),
-                    source: failure_source,
-                },
-                retry_count: 0,
-                machine_id: *host_machine_id,
-            })
-            .with_txn(txn))
-        }
-        SpdmAttestationStatus::InProgress => Ok(StateHandlerOutcome::do_nothing()),
-    }
 }
 
 #[cfg(test)]
@@ -681,7 +851,8 @@ mod test {
                     used_any_fallback,
                     profile_version: profile_version.map(str::to_string),
                     started_at: None,
-                    devices_scheduled: 0,
+                    job_id: None,
+            devices_scheduled: 0,
                 })
             };
 
@@ -694,7 +865,7 @@ mod test {
             }
 
             // ClassNotRecorded and NoProfile both return through
-            // SchedulingResult::unprofiled, which records no version.
+            // MachineAttesterSelection::unprofiled, which records no version.
             "neither lookup yielded a profile" {
                 (None, false) => ProfileSource::Unprofiled,
             }

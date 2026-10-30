@@ -11,8 +11,8 @@ profile for a hardware class
 
 ```text
 nico-admin-cli attestation spdm profile delete
-[--if-version-match] [--force] [--extended]
-[--sort-by] [-h|--help] <HARDWARE_CLASS>
+[--if-version-match] [--force] [--sort-by]
+[-h|--help] <HARDWARE_CLASS>
 ```
 
 ## DESCRIPTION
@@ -30,14 +30,6 @@ whatever is stored now
 
 Required to remove the any fallback, which leaves every class without a
 profile of its own attesting nothing
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

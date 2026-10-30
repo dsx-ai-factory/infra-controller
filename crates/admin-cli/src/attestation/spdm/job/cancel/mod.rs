@@ -15,15 +15,19 @@
  * limitations under the License.
  */
 
-use crate::attestation::spdm::cancel::Args;
-use crate::errors::CarbideCliResult;
-use crate::rpc::ApiClient;
+pub(super) mod args;
+mod cmd;
+#[cfg(test)]
+mod tests;
 
-pub(super) async fn cancel(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    api_client
-        .0
-        .cancel_machine_attestation(args.machine_id)
-        .await?;
-    println!("Successfully submitted the command");
-    Ok(())
+use args::Args;
+
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
+use crate::errors::CarbideCliResult;
+
+impl Run for args::Args {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::cancel(self, &ctx.api_client).await
+    }
 }

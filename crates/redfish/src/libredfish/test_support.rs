@@ -56,7 +56,13 @@ struct RedfishSimState {
     secure_boot: AtomicBool,
     no_component_integrities: bool,
     firmware_for_component_error: bool,
-    get_task_trigger_evidence_returns_interrupted: bool,
+    get_task_trigger_evidence_returns_exception: bool,
+    evidence_collection_running: bool,
+    evidence_collection_requests: Vec<(String, String)>,
+    task_cancellation_requests: Vec<String>,
+    cancelling_evidence_tasks: HashSet<String>,
+    next_task_cancel_error: Option<RedfishError>,
+    task_http_errors: HashMap<String, http::StatusCode>,
     machine_setup_bios_job_id: Option<String>,
     is_bios_setup: Option<bool>,
     default_lockdown: Option<EnabledDisabled>,
@@ -363,13 +369,51 @@ impl RedfishSim {
         self.state.lock().unwrap().firmware_for_component_error = error;
     }
 
-    /// Return the evidence-collection task as `Interrupted`, modelling a BMC
+    /// Return the evidence-collection task as `Exception`, modelling a BMC
     /// that keeps failing to produce evidence.
-    pub fn set_get_task_trigger_evidence_returns_interrupted(&self, interrupted: bool) {
+    pub fn set_get_task_trigger_evidence_returns_exception(&self, exception: bool) {
         self.state
             .lock()
             .unwrap()
-            .get_task_trigger_evidence_returns_interrupted = interrupted;
+            .get_task_trigger_evidence_returns_exception = exception;
+    }
+
+    /// Keep evidence-collection tasks running until cleared. Tasks otherwise
+    /// complete immediately; the exception override takes precedence.
+    pub fn set_evidence_collection_running(&self, running: bool) {
+        self.state.lock().unwrap().evidence_collection_running = running;
+    }
+
+    /// Return evidence-collection requests in call order as `(url, nonce)` pairs.
+    pub fn evidence_collection_requests(&self) -> Vec<(String, String)> {
+        self.state
+            .lock()
+            .unwrap()
+            .evidence_collection_requests
+            .clone()
+    }
+
+    /// Return task IDs sent to cancellation, including failed attempts, in call order.
+    pub fn task_cancellation_requests(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .task_cancellation_requests
+            .clone()
+    }
+
+    /// Fail the next task cancellation so callers can exercise unsupported or retry paths.
+    pub fn set_next_task_cancel_error(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_task_cancel_error = Some(error);
+    }
+
+    /// Return the specified HTTP error on every lookup of this task.
+    pub fn set_task_http_error(&self, task_id: &str, status_code: http::StatusCode) {
+        self.state
+            .lock()
+            .unwrap()
+            .task_http_errors
+            .insert(task_id.to_string(), status_code);
     }
 
     pub fn set_machine_setup_bios_job_id(&self, job_id: Option<String>) {
@@ -890,6 +934,21 @@ impl RedfishSimClient {
 }
 
 impl Redfish for RedfishSimClient {
+    fn cancel_task<'a>(
+        &'a self,
+        task_id: &'a str,
+    ) -> libredfish::RedfishFuture<'a, Result<bool, RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            state.task_cancellation_requests.push(task_id.to_string());
+            if let Some(error) = state.next_task_cancel_error.take() {
+                return Err(error);
+            }
+            state.cancelling_evidence_tasks.insert(task_id.to_string());
+            Ok(false)
+        })
+    }
+
     fn std_redfish(&self) -> &RedfishStandard {
         panic!("RedfishSimClient must implement Redfish operations directly")
     }
@@ -1402,12 +1461,20 @@ impl Redfish for RedfishSimClient {
         id: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::task::Task, RedfishError>> {
         Box::pin(async move {
+            if let Some(status_code) = self.state.lock().unwrap().task_http_errors.get(id).copied()
+            {
+                return Err(sim_http_error(
+                    status_code,
+                    &format!("TaskService/Tasks/{id}"),
+                    "simulated task lookup failure",
+                ));
+            }
             if self
                 .state
                 .lock()
                 .unwrap()
-                .get_task_trigger_evidence_returns_interrupted
-                && id == TRIGGER_EVIDENCE_TASK_ID
+                .get_task_trigger_evidence_returns_exception
+                && id.starts_with(TRIGGER_EVIDENCE_TASK_ID)
             {
                 return Ok(serde_json::from_str(
                     "{
@@ -1417,13 +1484,13 @@ impl Redfish for RedfishSimClient {
                     \"PercentComplete\": 100,
                     \"StartTime\": \"2024-01-30T09:00:52+00:00\",
                     \"TaskMonitor\": \"/redfish/v1/TaskService/Tasks/0/Monitor\",
-                    \"TaskState\": \"Interrupted\",
-                    \"TaskStatus\": \"OK\"
+                    \"TaskState\": \"Exception\",
+                    \"TaskStatus\": \"Critical\"
                     }",
                 )
                 .unwrap());
             }
-            Ok(serde_json::from_str(
+            let mut task: Task = serde_json::from_str(
                 "{
             \"@odata.id\": \"/redfish/v1/TaskService/Tasks/0\",
             \"@odata.type\": \"#Task.v1_4_3.Task\",
@@ -1435,7 +1502,28 @@ impl Redfish for RedfishSimClient {
             \"TaskStatus\": \"OK\"
             }",
             )
-            .unwrap())
+            .unwrap();
+            if id.starts_with(TRIGGER_EVIDENCE_TASK_ID) {
+                // Each collection has its own task. Accepted cancellation remains
+                // asynchronous while the fixture keeps collection running.
+                let state = self.state.lock().unwrap();
+                task.id = id.to_string();
+                task.task_state = Some(
+                    match (
+                        state.cancelling_evidence_tasks.contains(id),
+                        state.evidence_collection_running,
+                    ) {
+                        (true, true) => libredfish::model::task::TaskState::Cancelling,
+                        (true, false) => libredfish::model::task::TaskState::Cancelled,
+                        (false, true) => libredfish::model::task::TaskState::Running,
+                        (false, false) => libredfish::model::task::TaskState::Completed,
+                    },
+                );
+                if state.evidence_collection_running {
+                    task.percent_complete = Some(0);
+                }
+            }
+            Ok(task)
         })
     }
 
@@ -2724,15 +2812,23 @@ impl Redfish for RedfishSimClient {
 
     fn trigger_evidence_collection<'a>(
         &'a self,
-        _url: &'a str,
-        _nonce: &'a str,
+        url: &'a str,
+        nonce: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<Task, RedfishError>> {
         Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            state
+                .evidence_collection_requests
+                .push((url.to_string(), nonce.to_string()));
+            let task_id = format!(
+                "{TRIGGER_EVIDENCE_TASK_ID}-{}",
+                state.evidence_collection_requests.len()
+            );
             let task_str = format!(
                 r##"{{
-                    "@odata.id": "/redfish/v1/TaskService/Tasks/{TRIGGER_EVIDENCE_TASK_ID}",
+                    "@odata.id": "/redfish/v1/TaskService/Tasks/{task_id}",
                     "@odata.type": "#Task.v1_4_3.Task",
-                    "Id": "{TRIGGER_EVIDENCE_TASK_ID}"
+                    "Id": "{task_id}"
                 }}"##
             );
             Ok(serde_json::from_str(&task_str).unwrap())

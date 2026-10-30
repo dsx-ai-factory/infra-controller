@@ -15,17 +15,19 @@
  * limitations under the License.
  */
 
-use crate::attestation::spdm::get::Args;
+pub(super) mod args;
+mod cmd;
+#[cfg(test)]
+mod tests;
+
+use args::Args;
+
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
-use crate::rpc::ApiClient;
 
-pub(super) async fn get(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    let attestation = api_client
-        .0
-        .get_attestation_machine(args.machine_id)
-        .await?;
-
-    println!("{}", serde_json::to_string_pretty(&attestation)?);
-
-    Ok(())
+impl Run for args::Args {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::get(self, &ctx.api_client).await
+    }
 }

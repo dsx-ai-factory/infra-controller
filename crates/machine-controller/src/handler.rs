@@ -2300,7 +2300,13 @@ impl MachineStateHandler {
                         }
                     }
                     FailureCause::SpdmAttestationFailed { .. } => {
-                        handle_spdm_attestation_failed_recovery(ctx, host_machine_id, details).await
+                        handle_spdm_attestation_failed_recovery(
+                            ctx,
+                            host_machine_id,
+                            mh_snapshot,
+                            details,
+                        )
+                        .await
                     }
                     FailureCause::MachineValidation { .. }
                         if machine_id.machine_type().is_host() =>
@@ -2457,23 +2463,33 @@ impl MachineStateHandler {
                                     ctx.services,
                                     mh_snapshot,
                                     host_machine_id,
-                                    ManagedHostState::PostAssignedMeasuring {
+                                    |job_id| ManagedHostState::PostAssignedMeasuring {
                                         attestation_mode: AttestationMode::SpdmAttestation {
-                                            spdm_measuring_state: SpdmMeasuringState::PollResult,
+                                            spdm_measuring_state: SpdmMeasuringState::PollResult(
+                                                job_id,
+                                            ),
                                         },
                                     },
                                     next_skip_state,
                                 )
                                 .await
                             }
-                            SpdmMeasuringState::PollResult => {
+                            SpdmMeasuringState::PollResult(job_id) => {
                                 handle_spdm_poll_state(
-                                    &ctx.services.db_pool,
+                                    ctx.services,
+                                    mh_snapshot,
                                     host_machine_id,
+                                    job_id,
                                     FailureSource::StateMachineArea(
                                         StateMachineArea::AssignedInstance,
                                     ),
                                     next_skip_state,
+                                    ManagedHostState::PostAssignedMeasuring {
+                                        attestation_mode: AttestationMode::SpdmAttestation {
+                                            spdm_measuring_state:
+                                                SpdmMeasuringState::TriggerMeasurements,
+                                        },
+                                    },
                                 )
                                 .await
                             }
@@ -2494,19 +2510,24 @@ impl MachineStateHandler {
                             ctx.services,
                             mh_snapshot,
                             host_machine_id,
-                            ManagedHostState::PreAssignedMeasuring {
-                                spdm_measuring_state: SpdmMeasuringState::PollResult,
+                            |job_id| ManagedHostState::PreAssignedMeasuring {
+                                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
                             },
                             next_skip_state,
                         )
                         .await
                     }
-                    SpdmMeasuringState::PollResult => {
+                    SpdmMeasuringState::PollResult(job_id) => {
                         handle_spdm_poll_state(
-                            &ctx.services.db_pool,
+                            ctx.services,
+                            mh_snapshot,
                             host_machine_id,
+                            job_id,
                             FailureSource::StateMachineArea(StateMachineArea::MainFlow),
                             next_skip_state,
+                            ManagedHostState::PreAssignedMeasuring {
+                                spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
+                            },
                         )
                         .await
                     }
@@ -8651,21 +8672,31 @@ impl StateHandler for HostMachineStateHandler {
                                 ctx.services,
                                 mh_snapshot,
                                 host_machine_id,
-                                ManagedHostState::HostInit {
+                                |job_id| ManagedHostState::HostInit {
                                     machine_state: MachineState::SpdmMeasuring {
-                                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                                        spdm_measuring_state: SpdmMeasuringState::PollResult(
+                                            job_id,
+                                        ),
                                     },
                                 },
                                 next_skip_state,
                             )
                             .await
                         }
-                        SpdmMeasuringState::PollResult => {
+                        SpdmMeasuringState::PollResult(job_id) => {
                             handle_spdm_poll_state(
-                                &ctx.services.db_pool,
+                                ctx.services,
+                                mh_snapshot,
                                 host_machine_id,
+                                job_id,
                                 FailureSource::StateMachineArea(StateMachineArea::HostInit),
                                 next_skip_state,
+                                ManagedHostState::HostInit {
+                                    machine_state: MachineState::SpdmMeasuring {
+                                        spdm_measuring_state:
+                                            SpdmMeasuringState::TriggerMeasurements,
+                                    },
+                                },
                             )
                             .await
                         }

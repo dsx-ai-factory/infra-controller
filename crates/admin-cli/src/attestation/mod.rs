@@ -27,7 +27,14 @@ use crate::cfg::measurement;
 #[derive(Dispatch, Parser, Debug)]
 pub(crate) enum Cmd {
     #[dispatch]
-    #[clap(about = "Perform SPDM attestation", subcommand)]
+    #[clap(
+        about = "Perform SPDM attestation",
+        subcommand,
+        defer = |command| {
+            // Hide the ignored global flag after inheritance so SPDM descendants inherit that visibility.
+            command.mut_arg("extended", |arg| arg.hide(true))
+        }
+    )]
     Spdm(spdm::Cmd),
     #[dispatch]
     #[clap(

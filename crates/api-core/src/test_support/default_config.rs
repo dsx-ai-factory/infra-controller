@@ -359,9 +359,7 @@ pub fn get() -> CarbideConfig {
         deprecated_rack_management_enabled: None,
         rms: RmsConfig::default(),
         rack_profiles: Default::default(),
-        spdm_state_controller: SpdmStateControllerConfig {
-            controller: StateControllerConfig::default(),
-        },
+        spdm_state_controller: SpdmStateControllerConfig::default(),
         spdm: SpdmConfig {
             enabled: false,
             nras_config: Some(nras::Config::default()),

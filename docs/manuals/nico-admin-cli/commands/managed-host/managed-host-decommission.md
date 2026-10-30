@@ -44,7 +44,8 @@ Print help (see a summary with -h)
 
 `<MACHINE_ID>`
 
-ID of the managed host to decommission. It must be ready and have no instance
+ID of the managed host to decommission. It must be ready and have no
+instance
 
 ## Examples
 

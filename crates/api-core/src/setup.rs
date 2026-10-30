@@ -2319,6 +2319,7 @@ async fn initialize_and_start_controllers<'a>(
             .state_handler(Arc::new(SpdmAttestationStateHandler::new(
                 verifier,
                 nras_config,
+                carbide_config.spdm_state_controller.cancellation_timeout,
             )))
             .build_and_spawn(join_set, cancel_token.clone())
             .expect("Unable to build SpdmStateController");

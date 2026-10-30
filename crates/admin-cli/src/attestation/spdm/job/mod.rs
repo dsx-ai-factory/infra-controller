@@ -15,17 +15,20 @@
  * limitations under the License.
  */
 
-pub(super) mod args;
-mod cmd;
+mod cancel;
+mod get;
+mod list;
 
-use args::Args;
+use clap::Parser;
 
-use crate::cfg::run::Run;
-use crate::cfg::runtime::RuntimeContext;
-use crate::errors::CarbideCliResult;
+use crate::cfg::dispatch::Dispatch;
 
-impl Run for args::Args {
-    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::cancel(self, &ctx.api_client).await
-    }
+#[derive(Dispatch, Parser, Debug)]
+pub(crate) enum Cmd {
+    #[clap(about = "Cancel an attestation job")]
+    Cancel(cancel::args::Args),
+    #[clap(about = "Get SPDM attestation details for a given job id")]
+    Get(get::args::Args),
+    #[clap(about = "List SPDM attestation jobs by status")]
+    List(list::args::Args),
 }

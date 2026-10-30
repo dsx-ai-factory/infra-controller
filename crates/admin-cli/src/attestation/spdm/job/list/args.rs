@@ -1,0 +1,46 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use clap::{Parser, ValueEnum};
+
+#[derive(Parser, Debug)]
+#[command(long_about = "List SPDM attestation jobs by status.\n\n\
+    Always prints JSON to stdout: an array of [job_id, status, machine_ids] entries, or [] when no jobs match. \
+    Status names are SPDM_ATT_IN_PROGRESS, SPDM_ATT_CANCELLED, SPDM_ATT_FAILED, and SPDM_ATT_PASSED. \
+    Machine IDs are distinct, sorted, and describe retained \
+    device attestations for each job. Older Core versions return an empty machine-ID array; \
+    upgrade Core first to obtain membership.")]
+#[command(after_long_help = "\
+EXAMPLES:
+
+List in-progress SPDM attestation jobs:
+    $ nico-admin-cli attestation spdm job list --selector in-progress
+
+")]
+pub(crate) struct Args {
+    #[clap(long, value_enum, help = "Filter attestation jobs by status")]
+    pub(super) selector: Selector,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+#[clap(rename_all = "kebab_case")]
+pub(super) enum Selector {
+    InProgress,
+    Cancelled,
+    Failed,
+    Passed,
+}
