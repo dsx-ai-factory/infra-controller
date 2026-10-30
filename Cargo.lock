@@ -3385,6 +3385,10 @@ dependencies = [
  "carbide-test-support",
  "chrono",
  "futures",
+ "http",
+ "http-body-util",
+ "k8s-openapi",
+ "kube",
  "regex",
  "reqwest 0.13.4",
  "schemars 1.2.1",
@@ -3395,7 +3399,9 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

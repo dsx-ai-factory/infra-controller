@@ -16,12 +16,14 @@
  */
 
 //! What every scale test shares: config, clocks, stop and cancel controls,
-//! sweep rules and the probe client.
+//! sweep rules, the probe client and the site lock.
 //!
 //! All state reads go through the site health probe ([`probe`]).
 
 pub mod clock;
+pub mod cluster;
 pub mod config;
 pub mod control;
+pub mod lock;
 pub mod probe;
 pub mod sweep;

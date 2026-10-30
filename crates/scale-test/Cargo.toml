@@ -27,13 +27,18 @@ repository.workspace = true
 name = "scale_test"
 
 [features]
-# Fakes for this crate's tests and for test commands built on it.
+# Fakes (probe, cluster, lock) for this crate's tests and for test commands
+# built on it.
 test-support = ["dep:axum", "dep:regex", "dep:serde_urlencoded"]
 
 [dependencies]
 async-trait = { workspace = true }
 axum = { optional = true, workspace = true }
 chrono = { features = ["serde"], workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+k8s-openapi = { features = ["latest"], workspace = true }
+kube = { features = ["aws-lc-rs", "client", "rustls-tls"], workspace = true }
 regex = { optional = true, workspace = true }
 reqwest = { default-features = false, features = [
   "json",
@@ -47,7 +52,9 @@ serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 url = { workspace = true }
+uuid = { features = ["v4"], workspace = true }
 
 # [local-dependencies]
 carbide-site-health-probe-api = { path = "../site-health-probe-api", features = [
