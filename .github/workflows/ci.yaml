@@ -1155,6 +1155,7 @@ jobs:
           mkdir -p "${{ github.workspace }}/.sccache"
           docker pull "${BUILD_CONTAINER}"
           docker run --rm \
+            --ulimit nofile=65536:65536 \
             -v "${{ github.workspace }}:/carbide" \
             -v "${{ github.workspace }}/.sccache:/sccache" \
             -w /carbide \
@@ -1162,6 +1163,7 @@ jobs:
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_MAKE_SKIP_CODECOV=true \
             -e DATABASE_URL='postgresql://root@%2Fvar%2Frun%2Fpostgresql/root' \
+            -e NICO_TEST_MAX_PG_CONNECTIONS=900 \
             -e SCCACHE_DIR=/sccache \
             -e SCCACHE_CACHE_SIZE=5G \
             -e RUSTC_WRAPPER=sccache \
@@ -1172,15 +1174,16 @@ jobs:
             "${BUILD_CONTAINER}" \
             bash -c '
               set -euo pipefail
+              echo "Open file descriptor limits: soft=$(ulimit -Sn), hard=$(ulimit -Hn)"
               # Everything in here runs as root, so sccache leaves /sccache
               # owned by root and the post-job archive step cannot read it back.
               # Hand the directory to the runner user on the way out, including
               # when the tests fail.
               trap "chown -R ${HOST_OWNER} /sccache 2>/dev/null || true" EXIT
               git config --global --add safe.directory /carbide
-              # max_connections is startup-only; the default of 100 is too low
-              # when Cargo runs several SQLx-backed test binaries concurrently.
-              printf "max_connections = 1000\n" | tee -a /etc/postgresql/*/main/postgresql.conf
+              # Apply durability, WAL and connection settings for this disposable
+              # CI cluster before PostgreSQL starts.
+              tee -a /etc/postgresql/*/main/postgresql.conf < .github/ci/postgresql.conf
               /etc/init.d/postgresql start
               sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
               createdb root
