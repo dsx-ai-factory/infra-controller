@@ -1968,6 +1968,23 @@ impl ManagedHostState {
         }
     }
 
+    /// Whether this state can hand control to a pending maintenance request.
+    /// Ready and Failed hosts can do so, as can boot configuration before writes
+    /// begin or after recovery has restored lockdown and parked in Failed.
+    /// Instance ownership and competing requests must be checked separately.
+    pub fn accepts_maintenance_request(&self) -> bool {
+        matches!(
+            self,
+            Self::Ready
+                | Self::Failed { .. }
+                | Self::BootConfiguring {
+                    boot_config_state: ReadyBootConfigState::Prepare
+                        | ReadyBootConfigState::Failed { .. },
+                    ..
+                }
+        )
+    }
+
     /// Starts `Maintenance` with the requested operation and saves the full
     /// request so completion can check whether it is still pending.
     pub fn maintenance_for_request(request: MachineMaintenanceRequest) -> Self {

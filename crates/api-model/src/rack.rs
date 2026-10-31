@@ -517,8 +517,10 @@ pub enum RackState {
 /// ## Sub-state Flow
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validation(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> PowerSequence -> Completed -> Validation(Pending)
 /// ```
+/// Activities can be skipped by scope, but a reset batch submitted after successful
+/// NMX-C configuration must complete before validation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RackMaintenanceState {
     FirmwareUpgrade {
@@ -532,6 +534,10 @@ pub enum RackMaintenanceState {
     },
     PowerSequence {
         rack_power: RackPowerState,
+        /// Hosts claimed by PowerReset. None means no batch has been submitted;
+        /// Some (including an empty list) resumes an already submitted batch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restart_machine_ids: Option<Vec<HostMachineId>>,
     },
     Completed,
 }
@@ -552,7 +558,7 @@ impl Display for RackMaintenanceState {
             } => {
                 write!(f, "ConfigureNmxCluster({})", configure_nmx_cluster)
             }
-            RackMaintenanceState::PowerSequence { rack_power } => {
+            RackMaintenanceState::PowerSequence { rack_power, .. } => {
                 write!(f, "PowerSequence({})", rack_power)
             }
             RackMaintenanceState::Completed => write!(f, "Completed"),
@@ -566,7 +572,8 @@ impl Display for RackMaintenanceState {
 /// RMS ScaleUpFabricManager workflow. `WaitForSwitchCertificateJob`,
 /// `WaitForScaleUpFabricManagerJob`, and the optional telemetry-only
 /// `WaitForPrimarySwitchCertificateJob` persist each asynchronous phase across
-/// controller restarts.
+/// controller restarts. `Completed` records successful configuration before
+/// compute-host restart admission, which no longer depends on RMS job history.
 ///
 /// `ConfigureCertificates`, `DisableScaleUpFabricState`,
 /// `ConfigureScaleUpFabricManager`, and `WaitForFabricStatus` name sub-states of
@@ -593,6 +600,10 @@ pub enum ConfigureNmxClusterState {
         /// Parent RMS job identifier returned by certificate configuration.
         job_id: String,
     },
+
+    /// Configuration succeeded; retries compute-host restart admission without
+    /// querying completed RMS jobs.
+    Completed,
 
     /// Retired sub-state. The braces make this a struct variant, which absorbs
     /// the payload the retired workflow wrote; a unit variant would reject it.
@@ -621,6 +632,7 @@ impl Display for ConfigureNmxClusterState {
             ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { job_id } => {
                 write!(f, "WaitForPrimarySwitchCertificateJob({job_id})")
             }
+            ConfigureNmxClusterState::Completed => write!(f, "Completed"),
             ConfigureNmxClusterState::ConfigureCertificates {} => {
                 write!(f, "ConfigureCertificates")
             }
@@ -669,6 +681,7 @@ impl Display for NvosUpdateState {
 pub enum RackPowerState {
     PoweringOn,
     PoweringOff,
+    /// Submits compute-host resets, or waits for the batch saved in PowerSequence.
     PowerReset,
 }
 
@@ -1013,6 +1026,48 @@ mod tests {
     use carbide_uuid::switch::{SwitchIdSource, SwitchType};
 
     use super::*;
+
+    #[test]
+    fn power_sequence_preserves_legacy_states_and_submitted_targets() {
+        let host_id: HostMachineId = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+            .parse()
+            .unwrap();
+        for (encoded, rack_power, restart_machine_ids) in [
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PoweringOn"}}),
+                RackPowerState::PoweringOn,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PoweringOff"}}),
+                RackPowerState::PoweringOff,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset"}}),
+                RackPowerState::PowerReset,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset", "restart_machine_ids": []}}),
+                RackPowerState::PowerReset,
+                Some(vec![]),
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset", "restart_machine_ids": [host_id]}}),
+                RackPowerState::PowerReset,
+                Some(vec![host_id]),
+            ),
+        ] {
+            let expected = RackMaintenanceState::PowerSequence {
+                rack_power,
+                restart_machine_ids,
+            };
+            let decoded: RackMaintenanceState = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
 
     // ConfigureNmxClusterState wire compatibility
 
