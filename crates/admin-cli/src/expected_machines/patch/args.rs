@@ -103,6 +103,13 @@ fixed IP. The omitted role and allocation policy keep their stored values:
     $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
     --interfaces '[{\"mac_address\":\"02:00:00:00:20:01\",\"fixed_ip\":\"192.0.2.10\"}]'
 
+Replace the interface list with a loopback reservation (no DpuOs entry is required):
+    $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+    --interfaces '[{\"mac_address\":\"02:00:00:00:20:01\",\"role\":\"dpu_loopback\",\"fixed_ip\":\"198.51.100.20\"}]'
+
+Clear the interface list, including loopback reservations:
+    $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[]'
+
 Reset that role to Host and infer Fixed allocation from fixed_ip:
     $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
     --interfaces '[{\"mac_address\":\"02:00:00:00:20:01\",\"role\":\"unspecified\",\"ip_allocation\":\"unspecified\",\"fixed_ip\":\"192.0.2.10\"}]'
@@ -238,7 +245,7 @@ pub(crate) struct Args {
         visible_alias = "host_nics",
         value_name = "INTERFACES",
         group = "group",
-        help = "Interfaces as a JSON array of ExpectedInterface objects (fields: mac_address, role, ip_allocation, network_segment_type, fixed_ip, fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values: role=host|dpu_os|dpu_bmc|host_bmc|unspecified and ip_allocation=dynamic|fixed|retained|unspecified. network_segment_type uses protobuf enum numbers: tenant=0, admin=1, underlay=2, host_inband=3. Replaces the full interface list for the machine. For a matching stored MAC, omitting role preserves the stored role; role=unspecified resets it to host. Omitting ip_allocation preserves the stored policy when the presence of fixed_ip is unchanged; ip_allocation=unspecified resets it to fixed_ip inference. Omitting any other optional interface field, including network_segment_type, clears its stored value."
+        help = "Interfaces as a JSON array of ExpectedInterface objects (fields: mac_address, role, ip_allocation, network_segment_type, fixed_ip, fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values: role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback|unspecified and ip_allocation=dynamic|fixed|retained|unspecified. network_segment_type uses protobuf enum numbers: tenant=0, admin=1, underlay=2, host_inband=3. Replaces the full interface list for the machine. For a matching stored MAC, omitting role preserves the stored role; role=unspecified resets it to host. Omitting ip_allocation preserves the stored policy when the presence of fixed_ip is unchanged; ip_allocation=unspecified resets it to fixed_ip inference. Omitting any other optional interface field, including network_segment_type, clears its stored value."
     )]
     pub(super) interfaces: Option<String>,
 

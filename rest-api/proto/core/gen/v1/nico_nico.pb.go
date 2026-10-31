@@ -5652,6 +5652,9 @@ const (
 	ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_BMC ExpectedInterfaceRole = 3
 	// Host Redfish/BMC interface. Never primary.
 	ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_HOST_BMC ExpectedInterfaceRole = 4
+	// Underlay loopback reservation identified by the DPU OS/admin MAC. Fixed
+	// allocation only, one fixed_ip per family. No physical interface is created.
+	ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK ExpectedInterfaceRole = 5
 )
 
 // Enum value maps for ExpectedInterfaceRole.
@@ -5662,13 +5665,15 @@ var (
 		2: "EXPECTED_INTERFACE_ROLE_DPU_OS",
 		3: "EXPECTED_INTERFACE_ROLE_DPU_BMC",
 		4: "EXPECTED_INTERFACE_ROLE_HOST_BMC",
+		5: "EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK",
 	}
 	ExpectedInterfaceRole_value = map[string]int32{
-		"EXPECTED_INTERFACE_ROLE_UNSPECIFIED": 0,
-		"EXPECTED_INTERFACE_ROLE_HOST":        1,
-		"EXPECTED_INTERFACE_ROLE_DPU_OS":      2,
-		"EXPECTED_INTERFACE_ROLE_DPU_BMC":     3,
-		"EXPECTED_INTERFACE_ROLE_HOST_BMC":    4,
+		"EXPECTED_INTERFACE_ROLE_UNSPECIFIED":  0,
+		"EXPECTED_INTERFACE_ROLE_HOST":         1,
+		"EXPECTED_INTERFACE_ROLE_DPU_OS":       2,
+		"EXPECTED_INTERFACE_ROLE_DPU_BMC":      3,
+		"EXPECTED_INTERFACE_ROLE_HOST_BMC":     4,
+		"EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK": 5,
 	}
 )
 
@@ -40506,8 +40511,10 @@ type ExpectedHostNic struct {
 	// On update, omission clears this guard.
 	NetworkSegmentType *NetworkSegmentType `protobuf:"varint,7,opt,name=network_segment_type,json=networkSegmentType,proto3,enum=forge.NetworkSegmentType,oneof" json:"network_segment_type,omitempty"`
 	// Machine endpoint that owns this interface. The role selects interface type
-	// and primary behavior only; every role accepts the same allocation policies
-	// and optional segment guard. On create, missing and Unspecified mean Host.
+	// and primary behavior. DpuLoopback instead reserves fixed_ip from the
+	// loopback resource pool using the DPU OS/admin MAC; only Fixed (or inferred
+	// Fixed) is supported and physical-interface settings are rejected.
+	// On create, missing and Unspecified mean Host.
 	// On update, omission preserves the stored role while explicit Unspecified
 	// resets it to Host.
 	Role *ExpectedInterfaceRole `protobuf:"varint,8,opt,name=role,proto3,enum=forge.ExpectedInterfaceRole,oneof" json:"role,omitempty"`
@@ -40517,7 +40524,8 @@ type ExpectedHostNic struct {
 	// matching stored policy while `fixed_ip` presence is unchanged; explicit
 	// Unspecified resets to inference. New interfaces use create behavior.
 	// Explicit Dynamic rejects `fixed_ip`. Explicit Fixed, or a DPU role that
-	// infers Fixed, requires `fixed_ip` inside a configured managed prefix. A
+	// infers Fixed, requires `fixed_ip` inside a configured managed prefix
+	// (DpuLoopback instead requires a non-auto-assign loopback pool address). A
 	// legacy Host declaration, or an inferred Host BMC Fixed policy that omits
 	// `network_segment_type`, may instead fall back to `static-assignments`; only
 	// the legacy Host case leaves `network_segment_type` as a first-DHCP
@@ -40745,6 +40753,12 @@ type ExpectedMachine struct {
 	// name will be presented to the switches in LLDP responses and is potentially
 	// used for cable validation, etc.
 	ServerName *string `protobuf:"bytes,20,opt,name=server_name,json=serverName,proto3,oneof" json:"server_name,omitempty"`
+	// Replace the DpuLoopback subset of host_nics, including clearing it when
+	// empty. False/omitted preserves stored loopbacks unless DpuLoopback entries
+	// are supplied, which also explicitly replace the subset. This preserves
+	// reservations across older clients' read-modify-write and replace-all.
+	// 21-28 are used by the REST protobuf snapshot's additional inventory fields.
+	ReplaceDpuLoopbacks bool `protobuf:"varint,29,opt,name=replace_dpu_loopbacks,json=replaceDpuLoopbacks,proto3" json:"replace_dpu_loopbacks,omitempty"`
 	// WARNING: Following fields are not present in Core, but added directly in REST snapshot
 	Name            *string `protobuf:"bytes,21,opt,name=name,proto3,oneof" json:"name,omitempty"`
 	Manufacturer    *string `protobuf:"bytes,22,opt,name=manufacturer,proto3,oneof" json:"manufacturer,omitempty"`
@@ -40927,6 +40941,13 @@ func (x *ExpectedMachine) GetServerName() string {
 		return *x.ServerName
 	}
 	return ""
+}
+
+func (x *ExpectedMachine) GetReplaceDpuLoopbacks() bool {
+	if x != nil {
+		return x.ReplaceDpuLoopbacks
+	}
+	return false
 }
 
 func (x *ExpectedMachine) GetName() string {
@@ -69543,6 +69564,11 @@ type PatchExpectedMachineRequest struct {
 	// nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
 	// only the mask selects interface replacement.
 	//
+	// When host_nics is selected, replace_dpu_loopbacks explicitly replaces its
+	// loopback subset, including clearing it when empty. Without this signal or
+	// any supplied DpuLoopback entries, stored loopbacks are preserved for older
+	// clients. The flag has no effect when host_nics is not selected.
+	//
 	// A selected `chassis_serial_number` must contain 4-32 ASCII letters,
 	// digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`
 	// must not contain duplicate strings.
@@ -79864,7 +79890,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x0f_logical_ifname\"[\n" +
 	"\x14HostLifecycleProfile\x12.\n" +
 	"\x10disable_lockdown\x18\x01 \x01(\bH\x00R\x0fdisableLockdown\x88\x01\x01B\x13\n" +
-	"\x11_disable_lockdown\"\xc4\f\n" +
+	"\x11_disable_lockdown\"\xf8\f\n" +
 	"\x0fExpectedMachine\x12&\n" +
 	"\x0fbmc_mac_address\x18\x01 \x01(\tR\rbmcMacAddress\x12!\n" +
 	"\fbmc_username\x18\x02 \x01(\tR\vbmcUsername\x12!\n" +
@@ -79889,7 +79915,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x11replace_host_nics\x18\x13 \x01(\bR\x0freplaceHostNics\x12$\n" +
 	"\vserver_name\x18\x14 \x01(\tH\n" +
 	"R\n" +
-	"serverName\x88\x01\x01\x12\x17\n" +
+	"serverName\x88\x01\x01\x122\n" +
+	"\x15replace_dpu_loopbacks\x18\x1d \x01(\bR\x13replaceDpuLoopbacks\x12\x17\n" +
 	"\x04name\x18\x15 \x01(\tH\vR\x04name\x88\x01\x01\x12'\n" +
 	"\fmanufacturer\x18\x16 \x01(\tH\fR\fmanufacturer\x88\x01\x01\x12\x19\n" +
 	"\x05model\x18\x17 \x01(\tH\rR\x05model\x88\x01\x01\x12%\n" +
@@ -83349,13 +83376,14 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x13OperatingSystemType\x12\x17\n" +
 	"\x13OS_TYPE_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fOS_TYPE_IPXE\x10\x01\x12\x1a\n" +
-	"\x16OS_TYPE_TEMPLATED_IPXE\x10\x02*\xd1\x01\n" +
+	"\x16OS_TYPE_TEMPLATED_IPXE\x10\x02*\xfb\x01\n" +
 	"\x15ExpectedInterfaceRole\x12'\n" +
 	"#EXPECTED_INTERFACE_ROLE_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cEXPECTED_INTERFACE_ROLE_HOST\x10\x01\x12\"\n" +
 	"\x1eEXPECTED_INTERFACE_ROLE_DPU_OS\x10\x02\x12#\n" +
 	"\x1fEXPECTED_INTERFACE_ROLE_DPU_BMC\x10\x03\x12$\n" +
-	" EXPECTED_INTERFACE_ROLE_HOST_BMC\x10\x04*\xda\x01\n" +
+	" EXPECTED_INTERFACE_ROLE_HOST_BMC\x10\x04\x12(\n" +
+	"$EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK\x10\x05*\xda\x01\n" +
 	"\x1dExpectedInterfaceIpAllocation\x120\n" +
 	",EXPECTED_INTERFACE_IP_ALLOCATION_UNSPECIFIED\x10\x00\x12,\n" +
 	"(EXPECTED_INTERFACE_IP_ALLOCATION_DYNAMIC\x10\x01\x12*\n" +

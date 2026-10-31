@@ -737,6 +737,7 @@ async fn test_add_expected_machine_dpu_serials(pool: sqlx::PgPool) {
         replace_host_nics: false,
         host_lifecycle_profile: None,
         server_name: None,
+        replace_dpu_loopbacks: false,
         #[allow(deprecated)]
         dpf_enabled: true,
     };
@@ -4914,6 +4915,7 @@ async fn test_create_missing_from_preallocates_interfaces(
     let mut txn = env.pool.begin().await?;
     crate::handlers::expected_machine::create_missing_from(
         &mut txn,
+        &env.api.common_pools,
         std::slice::from_ref(&machine),
     )
     .await?;
@@ -4972,10 +4974,403 @@ async fn test_create_missing_from_preallocates_interfaces(
     let mut txn = env.pool.begin().await?;
     crate::handlers::expected_machine::create_missing_from(
         &mut txn,
+        &env.api.common_pools,
         std::slice::from_ref(&machine),
     )
     .await?;
     txn.commit().await?;
 
     Ok(())
+}
+
+fn dpu_loopback_reservation(
+    mac: &str,
+    v4: Option<&str>,
+    v6: Option<&str>,
+) -> Vec<rpc::forge::ExpectedInterface> {
+    let addresses = v4.into_iter().chain(v6).map(Some).collect::<Vec<_>>();
+    let addresses = if addresses.is_empty() {
+        vec![None]
+    } else {
+        addresses
+    };
+    addresses
+        .into_iter()
+        .map(|ip| rpc::forge::ExpectedInterface {
+            mac_address: Some(mac.to_string()),
+            role: Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32),
+            ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Fixed as i32),
+            fixed_ip: ip.map(str::to_string),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn expected_machine_with_reservations(
+    bmc_mac_address: &str,
+    chassis_serial_number: &str,
+    reservations: Vec<Vec<rpc::forge::ExpectedInterface>>,
+) -> rpc::forge::ExpectedMachine {
+    rpc::forge::ExpectedMachine {
+        bmc_mac_address: bmc_mac_address.to_string(),
+        bmc_username: "ADMIN".into(),
+        bmc_password: "PASS".into(),
+        chassis_serial_number: chassis_serial_number.to_string(),
+        is_dpf_enabled: Some(true),
+        host_nics: reservations.into_iter().flatten().collect(),
+        replace_dpu_loopbacks: true,
+        ..Default::default()
+    }
+}
+
+/// The add handler rejects request-shape errors in a reservation set before any
+/// pool lookup: a reservation with no address, an empty MAC, or a MAC/family or
+/// address repeated within the request.
+#[crate::sqlx_test()]
+async fn add_rejects_malformed_dpu_loopback_reservations(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+
+    let cases: [(&str, Vec<Vec<rpc::forge::ExpectedInterface>>); 4] = [
+        (
+            "reservation with no address",
+            vec![dpu_loopback_reservation("02:00:00:00:00:01", None, None)],
+        ),
+        (
+            "empty MAC",
+            vec![dpu_loopback_reservation("   ", Some("192.0.2.10"), None)],
+        ),
+        (
+            "duplicate MAC and family in request",
+            vec![
+                dpu_loopback_reservation("02:00:00:00:00:01", Some("192.0.2.10"), None),
+                dpu_loopback_reservation("02:00:00:00:00:01", Some("192.0.2.11"), None),
+            ],
+        ),
+        (
+            "duplicate ipv4 in request",
+            vec![
+                dpu_loopback_reservation("02:00:00:00:00:01", Some("192.0.2.10"), None),
+                dpu_loopback_reservation("02:00:00:00:00:02", Some("192.0.2.10"), None),
+            ],
+        ),
+    ];
+
+    for (case, reservations) in cases {
+        let machine =
+            expected_machine_with_reservations("3A:3B:3C:3D:3E:3F", "VVG121GI", reservations);
+        let err = env
+            .api
+            .add_expected_machine(tonic::Request::new(machine))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "case: {case}");
+    }
+}
+
+/// A reserved address must exist in the matching pool, sit in the
+/// non-auto-assign partition, and be free; a free requestable value is
+/// accepted, and re-submitting the identical reservation stays a no-op even
+/// while the pool value is still free.
+#[crate::sqlx_test()]
+async fn dpu_loopback_reservation_pool_membership(pool: sqlx::PgPool) {
+    use std::net::IpAddr;
+
+    use model::resource_pool::OwnerType;
+
+    let env = create_test_env(pool.clone()).await;
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    // One requestable free value, one auto-assign value, one value already
+    // allocated to a different owner.
+    let free: IpAddr = "192.0.2.10".parse().unwrap();
+    let auto_assign: IpAddr = "192.0.2.20".parse().unwrap();
+    let taken: IpAddr = "192.0.2.30".parse().unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![free, taken], false)
+        .await
+        .unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![auto_assign], true)
+        .await
+        .unwrap();
+    db::resource_pool::allocate_exact(
+        loopback_pool,
+        &mut txn,
+        OwnerType::Machine,
+        "other-dpu",
+        taken,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // A value outside the pool is rejected as invalid.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:01",
+            "VVG12101",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:03",
+                Some("198.51.100.1"),
+                None,
+            )],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // An auto-assignable value cannot be explicitly reserved.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:02",
+            "VVG12102",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:04",
+                Some("192.0.2.20"),
+                None,
+            )],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // A value already allocated to another DPU is a precondition failure.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:03",
+            "VVG12103",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:05",
+                Some("192.0.2.30"),
+                None,
+            )],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+    // A free, requestable value is accepted.
+    env.api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:04",
+            "VVG12104",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:06",
+                Some("192.0.2.10"),
+                None,
+            )],
+        )))
+        .await
+        .expect("a free requestable value must be accepted");
+
+    // Re-submitting the identical reservation is a no-op: an unchanged value
+    // skips pool re-validation, so it succeeds even though the pool entry is
+    // still free (it is only claimed when the DPU machine is created).
+    env.api
+        .update_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:04",
+            "VVG12104",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:06",
+                Some("192.0.2.10"),
+                None,
+            )],
+        )))
+        .await
+        .expect("re-submitting an unchanged reservation must be a no-op");
+}
+
+/// Build a minimal model `ExpectedMachine` (as the `expected_machines.json`
+/// import deserializes) carrying a single DPU loopback reservation.
+fn model_expected_machine_with_reservation(
+    bmc_mac_address: &str,
+    serial_number: &str,
+    reservation: model::expected_machine::DpuLoopbackReservation,
+) -> ExpectedMachine {
+    ExpectedMachine {
+        id: None,
+        bmc_mac_address: bmc_mac_address.parse().unwrap(),
+        data: ExpectedMachineData {
+            bmc_username: "ADMIN".into(),
+            bmc_password: "PASS".into(),
+            serial_number: serial_number.into(),
+            interfaces: reservation.interfaces().collect(),
+            ..Default::default()
+        },
+    }
+}
+
+/// The `expected_machines.json` startup import (`create_missing_from`) runs the
+/// same reservation pool-membership validation as the RPC write paths, so a
+/// reserved address outside its pool is rejected at import rather than persisted
+/// for DPU discovery to fail on later; a free requestable value still imports.
+/// The three rejection reasons themselves are covered at the shared-helper layer
+/// by `dpu_loopback_reservation_pool_membership`.
+#[crate::sqlx_test()]
+async fn create_missing_from_validates_reservation_pool_membership(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool.clone()).await;
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    // Seed one free, requestable loopback value.
+    let free: std::net::IpAddr = "192.0.2.10".parse()?;
+    let mut txn = pool.begin().await?;
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![free], false).await?;
+    txn.commit().await?;
+
+    // An address outside the pool must be rejected at import, not deferred.
+    let outside_pool = model_expected_machine_with_reservation(
+        "1A:1B:1C:1D:1E:01",
+        "VVG12101",
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: "02:00:00:00:00:03".parse().unwrap(),
+            loopback_ipv4: Some("198.51.100.1".parse()?),
+            loopback_ipv6: None,
+        },
+    );
+    let mut txn = pool.begin().await?;
+    let error = crate::handlers::expected_machine::create_missing_from(
+        &mut txn,
+        &env.api.common_pools,
+        std::slice::from_ref(&outside_pool),
+    )
+    .await
+    .expect_err("an address outside the pool must be rejected at import");
+    assert!(matches!(error, CarbideError::InvalidArgument(_)));
+    txn.rollback().await?;
+
+    // A free, requestable value imports successfully.
+    let valid = model_expected_machine_with_reservation(
+        "1A:1B:1C:1D:1E:02",
+        "VVG12102",
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: "02:00:00:00:00:04".parse().unwrap(),
+            loopback_ipv4: Some("192.0.2.10".parse()?),
+            loopback_ipv6: None,
+        },
+    );
+    let mut txn = pool.begin().await?;
+    crate::handlers::expected_machine::create_missing_from(
+        &mut txn,
+        &env.api.common_pools,
+        std::slice::from_ref(&valid),
+    )
+    .await
+    .expect("a free requestable value must import");
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// All replacement endpoints preserve an older client's omitted loopbacks and
+/// clear them only when the current client supplies explicit replacement intent.
+#[crate::sqlx_test]
+async fn dpu_loopback_interface_update_compatibility(pool: sqlx::PgPool) {
+    let env = create_test_env(pool.clone()).await;
+    let ip: std::net::IpAddr = "198.51.100.20".parse().unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    db::resource_pool::populate(
+        env.api.common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![ip],
+        false,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    #[derive(Clone, Copy, Debug)]
+    enum Operation {
+        Update,
+        Batch,
+        ReplaceAll,
+    }
+    for operation in [Operation::Update, Operation::Batch, Operation::ReplaceAll] {
+        let mut input = expected_machine_with_reservations(
+            "02:00:00:00:01:01",
+            "LOOPBACK-HOST",
+            vec![dpu_loopback_reservation(
+                "02:00:00:00:00:20",
+                Some("198.51.100.20"),
+                None,
+            )],
+        );
+        input.id = Some(Uuid::new_v4().into());
+        env.api
+            .replace_all_expected_machines(tonic::Request::new(ExpectedMachineList {
+                expected_machines: vec![input.clone()],
+            }))
+            .await
+            .unwrap();
+        for replace in [false, true] {
+            let mut replacement = input.clone();
+            replacement.host_nics.clear();
+            replacement.replace_dpu_loopbacks = replace;
+            match operation {
+                Operation::Update => {
+                    env.api
+                        .update_expected_machine(tonic::Request::new(replacement))
+                        .await
+                        .unwrap();
+                }
+                Operation::Batch => {
+                    let response = env
+                        .api
+                        .update_expected_machines(tonic::Request::new(
+                            rpc::forge::BatchExpectedMachineOperationRequest {
+                                expected_machines: Some(ExpectedMachineList {
+                                    expected_machines: vec![replacement],
+                                }),
+                                accept_partial_results: false,
+                            },
+                        ))
+                        .await
+                        .unwrap()
+                        .into_inner();
+                    assert!(response.results[0].success);
+                }
+                Operation::ReplaceAll => {
+                    env.api
+                        .replace_all_expected_machines(tonic::Request::new(ExpectedMachineList {
+                            expected_machines: vec![replacement],
+                        }))
+                        .await
+                        .unwrap();
+                }
+            }
+            let stored = env
+                .api
+                .get_expected_machine(tonic::Request::new(ExpectedMachineRequest {
+                    bmc_mac_address: input.bmc_mac_address.clone(),
+                    id: None,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(
+                stored
+                    .host_nics
+                    .iter()
+                    .filter(
+                        |i| i.role == Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32)
+                    )
+                    .count(),
+                usize::from(!replace),
+                "{operation:?}, replace={replace}"
+            );
+            let json: serde_json::Value = sqlx::query_scalar(
+                "SELECT host_nics FROM expected_machines WHERE bmc_mac_address = $1",
+            )
+            .bind(input.bmc_mac_address.parse::<MacAddress>().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(
+                !json.to_string().contains("dpu_loopback"),
+                "child table is the sole persisted source"
+            );
+        }
+    }
 }

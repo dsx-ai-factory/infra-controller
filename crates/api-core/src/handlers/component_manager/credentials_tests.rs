@@ -85,9 +85,9 @@ async fn direct_dispatch_credentials_only_query_expected_inventory_on_vault_miss
 async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: sqlx::PgPool) {
     // Distinct credentials at the same MAC prove each kind selects its own table.
     let mac = MacAddress::new([2, 0, 0, 0, 0, 1]);
-    let mut conn = pool.acquire().await.unwrap();
+    let mut txn = pool.begin().await.unwrap();
     db::expected_machine::create(
-        &mut conn,
+        &mut txn,
         ExpectedMachine {
             id: None,
             bmc_mac_address: mac,
@@ -102,7 +102,7 @@ async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: s
     .await
     .unwrap();
     db::expected_switch::create(
-        &mut conn,
+        &mut txn,
         ExpectedSwitch {
             bmc_mac_address: mac,
             bmc_username: "switch".into(),
@@ -116,7 +116,7 @@ async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: s
     .await
     .unwrap();
     db::expected_power_shelf::create(
-        &mut conn,
+        &mut txn,
         ExpectedPowerShelf {
             bmc_mac_address: mac,
             bmc_username: "shelf".into(),
@@ -127,7 +127,7 @@ async fn direct_dispatch_credentials_use_the_matching_expected_component(pool: s
     )
     .await
     .unwrap();
-    drop(conn);
+    txn.commit().await.unwrap();
 
     for (user, kind) in [
         ("compute", RackComponent::ComputeBmc),

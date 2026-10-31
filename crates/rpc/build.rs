@@ -161,6 +161,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "#[serde(skip_serializing)]",
         )
         .field_attribute(
+            "ExpectedMachine.replace_dpu_loopbacks",
+            "#[serde(skip_serializing)]",
+        )
+        .field_attribute(
             "forge.NetworkSecurityGroupRuleAttributes.direction",
             "#[serde(deserialize_with = \"NetworkSecurityGroupRuleDirection::from_string\", serialize_with = \"NetworkSecurityGroupRuleDirection::serialize_from_enum_i32\")]",
         )

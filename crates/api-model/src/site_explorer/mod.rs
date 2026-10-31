@@ -855,6 +855,21 @@ pub struct ExploredDpu {
 }
 
 impl ExploredDpu {
+    /// OS/admin MACs reported by Redfish, also used for DPU interface association.
+    pub fn os_mac_addresses(&self) -> impl Iterator<Item = MacAddress> + '_ {
+        self.report
+            .systems
+            .iter()
+            .flat_map(|system| &system.ethernet_interfaces)
+            .filter(|interface| {
+                interface
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| id.to_lowercase().contains("oob"))
+            })
+            .filter_map(|interface| interface.mac_address)
+    }
+
     pub fn machine_id_if_valid_report(&self) -> ModelResult<DpuMachineId> {
         let Some(machine_id) = self.report.machine_id else {
             return Err(ModelError::MissingArgument("Missing Machine ID"));

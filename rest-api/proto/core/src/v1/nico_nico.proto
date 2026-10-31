@@ -7496,8 +7496,10 @@ message ExpectedHostNic {
   // On update, omission clears this guard.
   optional NetworkSegmentType network_segment_type = 7;
   // Machine endpoint that owns this interface. The role selects interface type
-  // and primary behavior only; every role accepts the same allocation policies
-  // and optional segment guard. On create, missing and Unspecified mean Host.
+  // and primary behavior. DpuLoopback instead reserves fixed_ip from the
+  // loopback resource pool using the DPU OS/admin MAC; only Fixed (or inferred
+  // Fixed) is supported and physical-interface settings are rejected.
+  // On create, missing and Unspecified mean Host.
   // On update, omission preserves the stored role while explicit Unspecified
   // resets it to Host.
   optional ExpectedInterfaceRole role = 8;
@@ -7507,7 +7509,8 @@ message ExpectedHostNic {
   // matching stored policy while `fixed_ip` presence is unchanged; explicit
   // Unspecified resets to inference. New interfaces use create behavior.
   // Explicit Dynamic rejects `fixed_ip`. Explicit Fixed, or a DPU role that
-  // infers Fixed, requires `fixed_ip` inside a configured managed prefix. A
+  // infers Fixed, requires `fixed_ip` inside a configured managed prefix
+  // (DpuLoopback instead requires a non-auto-assign loopback pool address). A
   // legacy Host declaration, or an inferred Host BMC Fixed policy that omits
   // `network_segment_type`, may instead fall back to `static-assignments`; only
   // the legacy Host case leaves `network_segment_type` as a first-DHCP
@@ -7628,6 +7631,12 @@ message ExpectedMachine {
   // name will be presented to the switches in LLDP responses and is potentially
   // used for cable validation, etc.
   optional string server_name = 20;
+  // Replace the DpuLoopback subset of host_nics, including clearing it when
+  // empty. False/omitted preserves stored loopbacks unless DpuLoopback entries
+  // are supplied, which also explicitly replace the subset. This preserves
+  // reservations across older clients' read-modify-write and replace-all.
+  // 21-28 are used by the REST protobuf snapshot's additional inventory fields.
+  bool replace_dpu_loopbacks = 29;
 
   // WARNING: Following fields are not present in Core, but added directly in REST snapshot
   optional string name = 21;
@@ -11181,6 +11190,9 @@ enum ExpectedInterfaceRole {
   EXPECTED_INTERFACE_ROLE_DPU_BMC = 3;
   // Host Redfish/BMC interface. Never primary.
   EXPECTED_INTERFACE_ROLE_HOST_BMC = 4;
+  // Underlay loopback reservation identified by the DPU OS/admin MAC. Fixed
+  // allocation only, one fixed_ip per family. No physical interface is created.
+  EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK = 5;
 }
 
 // Controls how an expected interface receives and retains its IP address.
@@ -11949,6 +11961,11 @@ message PatchExpectedMachineRequest {
   // Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the
   // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
   // only the mask selects interface replacement.
+  //
+  // When host_nics is selected, replace_dpu_loopbacks explicitly replaces its
+  // loopback subset, including clearing it when empty. Without this signal or
+  // any supplied DpuLoopback entries, stored loopbacks are preserved for older
+  // clients. The flag has no effect when host_nics is not selected.
   //
   // A selected `chassis_serial_number` must contain 4-32 ASCII letters,
   // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`

@@ -76,6 +76,7 @@ impl From<ExpectedInterfaceRole> for rpc::forge::ExpectedInterfaceRole {
         match role {
             ExpectedInterfaceRole::Host => Self::Host,
             ExpectedInterfaceRole::DpuOs => Self::DpuOs,
+            ExpectedInterfaceRole::DpuLoopback => Self::DpuLoopback,
             ExpectedInterfaceRole::DpuBmc => Self::DpuBmc,
             ExpectedInterfaceRole::HostBmc => Self::HostBmc,
         }
@@ -91,6 +92,7 @@ impl From<rpc::forge::ExpectedInterfaceRole> for ExpectedInterfaceRole {
             rpc::forge::ExpectedInterfaceRole::Unspecified
             | rpc::forge::ExpectedInterfaceRole::Host => Self::Host,
             rpc::forge::ExpectedInterfaceRole::DpuOs => Self::DpuOs,
+            rpc::forge::ExpectedInterfaceRole::DpuLoopback => Self::DpuLoopback,
             rpc::forge::ExpectedInterfaceRole::DpuBmc => Self::DpuBmc,
             rpc::forge::ExpectedInterfaceRole::HostBmc => Self::HostBmc,
         }
@@ -270,6 +272,16 @@ impl TryFrom<rpc::forge::ExpectedInterface> for ExpectedInterface {
     type Error = RpcDataConversionError;
 
     fn try_from(expected_interface: rpc::forge::ExpectedInterface) -> Result<Self, Self::Error> {
+        if expected_interface.role == Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32)
+            && expected_interface
+                .fixed_gateway
+                .as_ref()
+                .is_some_and(|gateway| !gateway.is_empty())
+        {
+            return Err(RpcDataConversionError::InvalidArgument(
+                "dpu_loopback does not accept fixed_gateway".to_string(),
+            ));
+        }
         let mac_address = match expected_interface.mac_address.as_deref() {
             None | Some("") => None,
             Some(mac) => Some(
@@ -377,6 +389,7 @@ impl From<ExpectedMachine> for rpc::forge::ExpectedMachine {
                         .disable_lockdown,
                 }),
             server_name: expected_machine.data.server_name,
+            replace_dpu_loopbacks: false,
         }
     }
 }
@@ -512,6 +525,7 @@ impl TryFrom<rpc::forge::ExpectedMachine> for ExpectedMachineData {
                 })
                 .unwrap_or_default(),
             server_name: em.server_name,
+            replace_dpu_loopbacks: em.replace_dpu_loopbacks,
         })
     }
 }
@@ -827,6 +841,29 @@ mod tests {
                 ..Default::default()
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn loopback_gateway_accepts_only_absent_or_empty_values() {
+        scenarios!(
+            run = |gateway: Option<&str>| {
+                ExpectedInterface::try_from(rpc::forge::ExpectedInterface {
+                    mac_address: Some("02:00:00:00:00:20".into()),
+                    role: Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32),
+                    fixed_ip: Some("198.51.100.20".into()),
+                    fixed_gateway: gateway.map(str::to_string),
+                    ..Default::default()
+                }).map(|interface| interface.fixed_gateway).map_err(drop)
+            };
+            "absent gateway" {
+                None => Yields(None),
+                Some("") => Yields(None),
+            }
+            "non-empty gateway" {
+                Some("198.51.100.1") => Fails,
+                Some("not-an-ip") => Fails,
+            }
         );
     }
 
@@ -1359,6 +1396,7 @@ mod tests {
                 ..Default::default()
             }],
             replace_host_nics: true,
+            replace_dpu_loopbacks: true,
             ..Default::default()
         };
 
@@ -1366,6 +1404,7 @@ mod tests {
         assert_eq!(json["interfaces"][0]["mac_address"], "AA:BB:CC:DD:EE:FF");
         assert_eq!(json.get("host_nics"), None);
         assert_eq!(json.get("replace_host_nics"), None);
+        assert_eq!(json.get("replace_dpu_loopbacks"), None);
     }
 
     #[test]

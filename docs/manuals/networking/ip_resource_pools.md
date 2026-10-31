@@ -22,7 +22,8 @@ The following IP pools are recognized by the API server.
 
 | Pool name | Allocation unit | Required |
 |---|---|---|
-| `lo-ip` | One IP per managed DPU | Yes |
+| `lo-ip` | One IPv4 per managed DPU | Yes |
+| `lo-ip-v6` | One IPv6 per managed DPU | No (dual-stack underlay only) |
 | `vpc-dpu-lo` | One IP per VPC per DPU that participates in that VPC | Yes |
 
 ### `lo-ip` — DPU Loopback IPs
@@ -30,6 +31,10 @@ The following IP pools are recognized by the API server.
 Each managed DPU receives a loopback IP address from this pool. The loopback is advertised over BGP and serves as the VTEP address for the VXLAN underlay. It is also used for BGP peering identification.
 
 One address is consumed per DPU at the time the DPU is first registered with the system. If a DPU is decommissioned, its address is returned to the pool.
+
+By default, addresses are drawn automatically from the pool's auto-assign partition when a DPU is registered. Operators who need a specific DPU to always receive a specific loopback can instead reserve one; see [Deterministic DPU loopback reservations](#deterministic-dpu-loopback-reservations). Reserved addresses must be placed in a non-auto-assign range so automatic registration never hands them to a different DPU.
+
+An optional companion pool, `lo-ip-v6` (`type = "ipv6"`), supplies IPv6 DPU loopbacks with the same per-DPU allocation and reservation behavior when the site enables dual-stack underlay addressing.
 
 ### `vpc-dpu-lo` — VPC DPU Loopback IPs
 
@@ -67,9 +72,22 @@ ranges = [
 ]
 ```
 
+Each range accepts an optional `auto_assign` boolean, which defaults to `true`. A range with `auto_assign = false` is excluded from automatic allocation: its addresses are handed out only when explicitly requested, which is how [deterministic DPU loopback reservations](#deterministic-dpu-loopback-reservations) claim a specific address. Prefix-based definitions are always auto-assign, so carve reservable addresses out as an explicit `auto_assign = false` range.
+
+```toml
+[pools.lo-ip]
+type = "ipv4"
+ranges = [
+  # Handed out automatically to DPUs as they register.
+  { start = "10.180.62.1", end = "10.180.62.199" },
+  # Held back for deterministic per-DPU reservations.
+  { start = "10.180.62.200", end = "10.180.62.254", auto_assign = false },
+]
+```
+
 ### Pool type values
 
-Both IP pools described on this page use `type = "ipv4"`.
+The `lo-ip` and `vpc-dpu-lo` pools use `type = "ipv4"`. The optional `lo-ip-v6` pool uses `type = "ipv6"`.
 
 ### Full example
 
@@ -126,6 +144,44 @@ At startup, the API server registers every pool defined in `[pools.*]` into the 
 This operation is additive only. Existing pools can be extended with new ranges or a larger prefix; they cannot be shrunk. This means a misconfigured range that was once registered cannot be removed by changing the config — it persists in the database. New ranges defined in the config are added to the existing pool on the next startup.
 
 If `listen_only = true` is set in the API server configuration, pool registration is skipped on that instance. It assumes another instance has already populated the pools.
+
+---
+
+## Deterministic DPU loopback reservations
+
+By default NICo assigns each DPU an underlay loopback automatically from the auto-assign partition of `lo-ip` (and `lo-ip-v6`, when configured). A reservation lets an operator pin a specific address to a specific DPU ahead of time — for example, to align a DPU's VTEP address with an external routing or monitoring configuration.
+
+Declare loopbacks in the host `ExpectedMachine.interfaces` list using `role: "dpu_loopback"` and `fixed_ip`. The MAC identifies the DPU's OS/admin interface; it may also appear in a `dpu_os` entry. A separate `dpu_os` entry is optional. For example:
+
+```json
+{
+  "interfaces": [
+    {"mac_address": "02:00:00:00:00:20", "role": "dpu_os", "ip_allocation": "fixed", "fixed_ip": "192.0.2.20"},
+    {"mac_address": "02:00:00:00:00:20", "role": "dpu_loopback", "ip_allocation": "fixed", "fixed_ip": "198.51.100.20"},
+    {"mac_address": "02:00:00:00:00:20", "role": "dpu_loopback", "ip_allocation": "fixed", "fixed_ip": "2001:db8::20"}
+  ]
+}
+```
+
+This is the interface portion of an ExpectedMachine configuration; retain the machine's identity and other required fields when creating it. Each MAC may declare one loopback per address family. Omitting `ip_allocation` infers Fixed from `fixed_ip`. Dynamic and Retained loopbacks are unsupported. Loopbacks reject interface names, segment hints, masks, gateways, and `primary`, including `primary: false`.
+
+### Validation and allocation
+
+A loopback address must belong to a non-auto-assign range (`auto_assign = false`) of `lo-ip` for IPv4 or `lo-ip-v6` for IPv6. It must not be reserved for another MAC or allocated to another DPU. MACs and per-family addresses are unique across the site, enforced by the reservation child table. Re-submitting unchanged intent is accepted, as is restoring an address already owned by the DPU with that MAC.
+
+Loopbacks do not participate in DHCP, physical-interface preallocation, or primary-interface selection. In the example, `192.0.2.20` configures the OS interface and must satisfy its managed-prefix rules; the other addresses come from loopback pools.
+
+Site Explorer matches each declared OS/admin MAC to one discovered DPU within the expected host. Missing or ambiguous matches defer creation with an error. When the expected host has `dpu_policy: "nic"` or `"ignore"` and no managed DPUs, ingestion proceeds while preserving loopback declarations without allocating their addresses. Direct discovery uses the authenticated caller's OS/admin interface MAC. Neither path needs a pre-existing MAC-to-machine association to allocate a loopback. Both claim addresses transactionally with creation, with live pool ownership assigned to the DPU MachineId. A family without a declaration keeps automatic allocation.
+
+### Updates and lifecycle
+
+Use the existing `expected-machine add --interfaces` or `patch --interfaces` options, or the `interfaces` field in files for `update` and `replace-all`. `nico-admin-cli expected-machine show` displays a `DPU Loopback Reservations` column with one DPU OS/admin MAC and reserved IP per line; machines without reservations have an empty cell. `nico-admin-cli --format json expected-machine show` includes the same reservations as `dpu_loopback` entries in `interfaces`. Interface replacement replaces the complete list: resubmit physical-interface entries that should remain. Remove only the loopback entries to clear reservations while retaining physical-interface configuration. Passing `--interfaces '[]'` clears the entire list.
+
+For file-based `update`, omitted or null `interfaces` preserves the stored list; a supplied array replaces it. `replace-all` is authoritative, including when a machine's interface list is omitted. The CLI sets the wire-level `replace_dpu_loopbacks` signal when it explicitly replaces interfaces. Older gRPC clients that omit this signal and loopback entries preserve stored reservations, including during replace-all. Supplying loopback entries explicitly replaces the loopback subset; an empty subset clears only when the signal is true. Native patches apply this behavior only when the interface field is selected in the update mask.
+
+Changing or clearing intent does not readdress a live DPU. Permanent deletion releases the addresses actually owned by that DPU; subsequent ingestion uses the latest declarations or automatic allocation. Existing-DPU IPv6 backfill, host–DPU pairing, `fallback_dpu_serial_numbers`, and the separate `vpc-dpu-lo` pool retain their existing behavior.
+
+See the [Core issue](https://github.com/dsx-ai-factory/infra-controller/issues/5705) and [loopback reservation epic](https://github.com/dsx-ai-factory/infra-controller/issues/5412) for scope. Live readdressing remains separate in [issue #2096](https://github.com/dsx-ai-factory/infra-controller/issues/2096).
 
 ---
 

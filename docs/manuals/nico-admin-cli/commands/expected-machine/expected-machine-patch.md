@@ -201,7 +201,7 @@ record. Unset preserves the existing per-host value.
 Interfaces as a JSON array of ExpectedInterface objects (fields:
 mac_address, role, ip_allocation, network_segment_type, fixed_ip,
 fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values:
-role=host|dpu_os|dpu_bmc|host_bmc|unspecified and
+role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback|unspecified and
 ip_allocation=dynamic|fixed|retained|unspecified.
 network_segment_type uses protobuf enum numbers: tenant=0, admin=1,
 underlay=2, host_inband=3. Replaces the full interface list for the
@@ -249,6 +249,8 @@ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --bmc-
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --dpu-policy ignore
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --bmc-ip-allocation retained
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","fixed_ip":"192.0.2.10"}]'
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"dpu_loopback","fixed_ip":"198.51.100.20"}]'
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[]'
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"unspecified","ip_allocation":"unspecified","fixed_ip":"192.0.2.10"}]'
 ```
 

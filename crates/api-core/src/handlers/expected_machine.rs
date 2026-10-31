@@ -15,15 +15,19 @@
  * limitations under the License.
  */
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::str::FromStr;
 
 use ::rpc::forge as rpc;
 use carbide_instrument::emit;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::expected_machine::{
-    BmcIpAllocationType, ExpectedInterface, ExpectedMachine, ExpectedMachineData,
-    ExpectedMachineRequest, HostDpuPolicy, LegacyHostBmcOverrides,
+    BmcIpAllocationType, DpuLoopbackReservation, ExpectedInterface, ExpectedMachine,
+    ExpectedMachineData, ExpectedMachineRequest, HostDpuPolicy, LegacyHostBmcOverrides,
 };
+use model::resource_pool::ResourcePool;
+use model::resource_pool::common::CommonPools;
 use regex::Regex;
 use uuid::Uuid;
 
@@ -83,6 +87,7 @@ pub(crate) async fn add(
     let machine = parse_expected_machine_for_insert(request.into_inner(), None)?;
 
     let mut txn = api.txn_begin().await?;
+    validate_expected_machine(&mut txn, &api.common_pools, &machine).await?;
     // Convert through CarbideError so a duplicate BMC MAC becomes AlreadyExists; the direct
     // DatabaseError to Status conversion reports it as FailedPrecondition.
     db::expected_machine::create(&mut txn, machine)
@@ -94,11 +99,13 @@ pub(crate) async fn add(
     Ok(tonic::Response::new(()))
 }
 
-/// `parse_expected_machine_for_insert` converts an RPC request and runs every
-/// validation required before creating an `ExpectedMachine`.
+/// `parse_expected_machine_for_insert` converts an RPC request into a
+/// normalized `ExpectedMachine`. It does not validate the result; callers run
+/// [`validate_expected_machine`] (shape plus pool membership) inside their
+/// transaction before creating the row.
 ///
-/// Keeping parsing separate from [`add`] lets [`replace_all`] reject every bad
-/// replacement before it clears the current inventory.
+/// Keeping parsing separate from [`add`] lets [`replace_all`] parse and validate
+/// every replacement before it clears the current inventory.
 fn parse_expected_machine_for_insert(
     request: rpc::ExpectedMachine,
     previous: Option<&ExpectedMachine>,
@@ -165,7 +172,6 @@ fn parse_expected_machine_for_insert(
     };
 
     normalize_host_bmc_configuration(&mut machine, previous, overrides)?;
-    validate_expected_machine_for_insert(&machine)?;
     Ok(machine)
 }
 
@@ -174,6 +180,7 @@ fn parse_expected_machine_for_insert(
 fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(), CarbideError> {
     validate_expected_interfaces(&machine.data.interfaces)?;
     validate_host_bmc_declaration(machine)?;
+    validate_dpu_loopback_reservation_shape(machine)?;
     machine
         .data
         .bmc_ip_allocation
@@ -195,13 +202,196 @@ fn validate_fixed_addresses(data: &ExpectedMachineData) -> Result<(), CarbideErr
     Ok(())
 }
 
+/// Full pre-insert validation: the pure shape checks in
+/// [`validate_expected_machine_for_insert`] followed by the transaction-backed
+/// [`validate_reservation_pool_membership`]. The cheap shape checks run first so
+/// a malformed request never pays for pool lookups.
+///
+/// Every create path runs this on an already-normalized machine inside its
+/// transaction: `add` and `replace_all` after [`parse_expected_machine_for_insert`],
+/// and `insert_expected_machine` plus the batch helpers on the machine they build.
+async fn validate_expected_machine(
+    txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
+    machine: &ExpectedMachine,
+) -> Result<(), CarbideError> {
+    validate_expected_machine_for_insert(machine)?;
+    validate_reservation_pool_membership(txn, common_pools, machine).await
+}
+
+/// Reject duplicate per-family addresses in the request. The child table also
+/// enforces uniqueness across machines and concurrent writers.
+fn validate_dpu_loopback_reservation_shape(machine: &ExpectedMachine) -> Result<(), CarbideError> {
+    let reservations = machine
+        .data
+        .dpu_loopback_reservations()
+        .map_err(|message| CarbideError::InvalidArgument(message.to_string()))?;
+    let mut addresses = HashSet::new();
+    for interface in reservations
+        .iter()
+        .flat_map(DpuLoopbackReservation::interfaces)
+    {
+        if !addresses.insert(interface.fixed_ip) {
+            return Err(CarbideError::InvalidArgument(
+                "duplicate DPU loopback address in request".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Serialize replacement with creation before checking live pool ownership.
+async fn validate_reservation_pool_membership(
+    txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
+    machine: &ExpectedMachine,
+) -> Result<(), CarbideError> {
+    if !machine.data.replaces_dpu_loopbacks() {
+        return Ok(());
+    }
+    let incoming = machine
+        .data
+        .dpu_loopback_reservations()
+        .map_err(|message| CarbideError::InvalidArgument(message.to_string()))?;
+    db::expected_dpu_loopback_reservation::lock_for_machine(txn, machine.bmc_mac_address).await?;
+    let existing =
+        db::expected_dpu_loopback_reservation::find_for_machine(&mut *txn, machine.bmc_mac_address)
+            .await?;
+    for reservation in incoming {
+        let stored = existing
+            .iter()
+            .find(|r| r.dpu_oob_net0_mac_address == reservation.dpu_oob_net0_mac_address);
+        if let Some(ipv4) = reservation.loopback_ipv4
+            && stored.and_then(|r| r.loopback_ipv4) != Some(ipv4)
+        {
+            validate_reserved_pool_address(
+                txn,
+                common_pools.ethernet.pool_loopback_ip.as_ref(),
+                IpAddr::V4(ipv4),
+                model::resource_pool::common::LOOPBACK_IP,
+                reservation.dpu_oob_net0_mac_address,
+            )
+            .await?;
+        }
+        if let Some(ipv6) = reservation.loopback_ipv6
+            && stored.and_then(|r| r.loopback_ipv6) != Some(ipv6)
+        {
+            validate_reserved_pool_address(
+                txn,
+                common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
+                ipv6,
+                model::resource_pool::common::LOOPBACK_IP_V6,
+                reservation.dpu_oob_net0_mac_address,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Check one reserved address against its pool: it must exist, be
+/// non-auto-assignable, and be either free or already allocated to the DPU this
+/// reservation targets (identified by `intended_dpu_oob_net0_mac`). A value owned by
+/// any other DPU is rejected.
+async fn validate_reserved_pool_address<T>(
+    txn: &mut sqlx::PgConnection,
+    pool: &ResourcePool<T>,
+    value: T,
+    pool_label: &str,
+    intended_dpu_oob_net0_mac: MacAddress,
+) -> Result<(), CarbideError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    <T as FromStr>::Err: std::error::Error,
+{
+    let value_text = value.to_string();
+    let Some(info) = db::resource_pool::find_value_in_pool(pool, &mut *txn, &value).await? else {
+        return Err(CarbideError::InvalidArgument(format!(
+            "loopback address {value_text} is not a member of the {pool_label} pool"
+        )));
+    };
+    if info.auto_assign {
+        return Err(CarbideError::InvalidArgument(format!(
+            "loopback address {value_text} is auto-assignable in the {pool_label} pool; \
+             reserve it from a non-auto-assign range"
+        )));
+    }
+    match info.state {
+        model::resource_pool::ResourcePoolEntryState::Free => Ok(()),
+        model::resource_pool::ResourcePoolEntryState::Allocated { owner, .. }
+            if pool_owner_is_dpu_oob_net0_mac(txn, &owner, intended_dpu_oob_net0_mac).await? =>
+        {
+            // The address is already this DPU's live allocation: restoring the
+            // same declaration must not fail while the DPU still owns it.
+            Ok(())
+        }
+        model::resource_pool::ResourcePoolEntryState::Allocated { .. } => {
+            Err(CarbideError::FailedPrecondition(format!(
+                "loopback address {value_text} is already allocated to another DPU"
+            )))
+        }
+    }
+}
+
+/// Accept an address already held by the DPU with this OS/admin MAC.
+async fn pool_owner_is_dpu_oob_net0_mac(
+    txn: &mut sqlx::PgConnection,
+    owner: &str,
+    intended_dpu_oob_net0_mac: MacAddress,
+) -> Result<bool, CarbideError> {
+    let Ok(owner_id) = owner.parse::<carbide_uuid::machine::DpuMachineId>() else {
+        tracing::warn!(
+            pool_owner = owner,
+            dpu_oob_net0_mac_address = %intended_dpu_oob_net0_mac,
+            "Loopback pool owner is not a valid DPU machine ID"
+        );
+        return Ok(false);
+    };
+    let interfaces =
+        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_oob_net0_mac).await?;
+    Ok(interfaces
+        .iter()
+        .any(|interface| interface.machine_id == Some(owner_id.into())))
+}
+
+/// Replace-all recreates parent rows. Preserve loopbacks that an older client
+/// cannot represent before the delete cascades through the child table.
+fn preserve_omitted_dpu_loopback_reservations(
+    replacement: &mut rpc::ExpectedMachine,
+    existing: Option<&ExpectedMachine>,
+) {
+    if replacement.replace_dpu_loopbacks
+        || replacement
+            .interfaces()
+            .iter()
+            .any(|i| i.role == Some(rpc::ExpectedInterfaceRole::DpuLoopback as i32))
+    {
+        return;
+    }
+    if let Some(existing) = existing {
+        replacement.interfaces_mut().extend(
+            existing
+                .data
+                .interfaces
+                .iter()
+                .filter(|i| i.role.is_dpu_loopback())
+                .cloned()
+                .map(rpc::ExpectedInterface::from),
+        );
+    }
+}
+
 /// Create missing expected_machines that aren't already in the database,
-/// calling `validate_expected_machine_for_insert` for each new entry. This is currently
-/// purely used by the expected_machines.json import path only, but lives
-/// here so it can re-leverage `validate_expected_machine_for_insert` and share the
-/// same validation codepath as the API handler.
+/// running the full `validate_expected_machine` (shape checks plus
+/// transaction-backed reservation pool membership) for each new entry. This is
+/// currently purely used by the expected_machines.json import path only, but
+/// lives here so it shares the same validation codepath as the API handler --
+/// including rejecting a DPU loopback reservation whose address is outside its
+/// pool, auto-assignable, or already allocated, rather than deferring that
+/// failure to DPU discovery.
 pub(crate) async fn create_missing_from(
     txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
     expected_machines: &[ExpectedMachine],
 ) -> Result<(), CarbideError> {
     let existing_macs: HashSet<String> = db::expected_machine::find_all(&mut *txn)
@@ -236,7 +426,7 @@ pub(crate) async fn create_missing_from(
             LegacyHostBmcOverrides::default()
         };
         normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-        validate_expected_machine_for_insert(&expected_machine)?;
+        validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
         db::expected_machine::create(&mut *txn, expected_machine).await?;
     }
 
@@ -315,7 +505,7 @@ pub(crate) async fn update(
         data,
     };
     normalize_host_bmc_configuration(&mut machine, existing.as_ref(), overrides)?;
-    validate_expected_machine_for_insert(&machine)?;
+    validate_expected_machine(&mut txn, &api.common_pools, &machine).await?;
 
     let preallocations = update_preallocated_interfaces(
         &mut txn,
@@ -491,6 +681,7 @@ async fn apply_machine_patches(
     for patch in patches {
         match apply_machine_patch(
             &mut txn,
+            &api.common_pools,
             patch,
             api.runtime_config.retained_boot_interface_window,
         )
@@ -512,6 +703,7 @@ async fn apply_machine_patches(
 
 async fn apply_machine_patch(
     txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
     request: ExpectedMachinePatch,
     retained_window: Option<chrono::Duration>,
 ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
@@ -545,6 +737,8 @@ async fn apply_machine_patch(
         let previous = machine.clone();
         if fields.contains(UpdateField::HostNics) {
             preserve_omitted_rpc_role_and_allocation(&mut patch, Some(&previous));
+            preserve_omitted_dpu_loopback_reservations(&mut patch, Some(&previous));
+            machine.data.replace_dpu_loopbacks = patch.replace_dpu_loopbacks;
             // Preserve the explicit reset before converting Unspecified to
             // the model's inferred allocation policy.
             if bmc_overrides.ip_allocation.is_none()
@@ -614,6 +808,7 @@ async fn apply_machine_patch(
         .validate(false)
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     validate_expected_machine_for_insert(&machine)?;
+    validate_reservation_pool_membership(txn, common_pools, &machine).await?;
     let preallocations = update_preallocated_interfaces(txn, &machine, retained_window).await?;
     db::expected_machine::update(txn, &machine).await?;
     Ok(preallocations)
@@ -637,6 +832,7 @@ pub(crate) async fn replace_all(
     for replacement in &mut replacements {
         let existing = find_previous_expected_machine(&previous, replacement);
         preserve_omitted_rpc_role_and_allocation(replacement, existing);
+        preserve_omitted_dpu_loopback_reservations(replacement, existing);
     }
 
     let mut seen_bmc_macs = HashSet::with_capacity(replacements.len());
@@ -645,6 +841,7 @@ pub(crate) async fn replace_all(
     for replacement in replacements {
         let existing = find_previous_expected_machine(&previous, &replacement);
         let parsed = parse_expected_machine_for_insert(replacement, existing)?;
+        validate_expected_machine(&mut txn, &api.common_pools, &parsed).await?;
         if !seen_bmc_macs.insert(parsed.bmc_mac_address) {
             return Err(CarbideError::InvalidArgument(format!(
                 "duplicate expected machine BMC MAC address {} in replacement list",
@@ -752,7 +949,8 @@ fn validate_expected_interfaces(interfaces: &[ExpectedInterface]) -> Result<(), 
 fn validate_expected_interface_role_and_allocation(
     interfaces: &[ExpectedInterface],
 ) -> Result<(), CarbideError> {
-    let mut roles_by_mac = HashMap::new();
+    let mut roles_by_mac: HashMap<MacAddress, Vec<model::expected_machine::ExpectedInterfaceRole>> =
+        HashMap::new();
     for interface in interfaces {
         interface
             .validate_identity()
@@ -773,20 +971,23 @@ fn validate_expected_interface_role_and_allocation(
                 interface.role,
             )));
         }
-        // One MAC may have separate IPv4 and IPv6 fixed reservations, so
-        // duplicate entries remain valid. Their role still has to agree:
-        // DHCP consumes one matching declaration while Site Explorer consumes
-        // every declaration, and role controls row type, primary behavior, and
-        // Redfish scanning in both paths.
-        if let Some(mac_address) = interface.mac_address
-            && let Some(existing_role) = roles_by_mac.insert(mac_address, interface.role)
-            && existing_role != interface.role
-        {
-            return Err(CarbideError::InvalidArgument(format!(
-                "interfaces entries for MAC {} must use the same role; found {existing_role} and {}",
-                interface.identity(),
-                interface.role,
-            )));
+        if let Some(mac) = interface.mac_address {
+            let roles = roles_by_mac.entry(mac).or_default();
+            for &role in roles.iter() {
+                use model::expected_machine::ExpectedInterfaceRole::{DpuLoopback, DpuOs};
+                if role != interface.role
+                    && !matches!(
+                        (role, interface.role),
+                        (DpuOs, DpuLoopback) | (DpuLoopback, DpuOs)
+                    )
+                {
+                    return Err(CarbideError::InvalidArgument(format!(
+                        "interfaces entries for MAC {mac} must use the same role except DpuOs/DpuLoopback; found {role} and {}",
+                        interface.role
+                    )));
+                }
+            }
+            roles.push(interface.role);
         }
     }
 
@@ -998,7 +1199,32 @@ fn preserve_omitted_rpc_role_and_allocation(
                 Some(mac)
             }
         };
+        // A legacy client may round-trip an address without its newer role.
+        // Recognize a stored loopback by MAC and address before falling
+        // back to the physical declaration sharing that MAC.
+        let loopback = interface.role == Some(rpc::ExpectedInterfaceRole::DpuLoopback as i32)
+            || (interface.role.is_none()
+                && existing.data.interfaces.iter().any(|stored| {
+                    stored.role.is_dpu_loopback()
+                        && stored.mac_address == mac_address
+                        && stored.fixed_ip.is_some()
+                        && stored.fixed_ip
+                            == interface.fixed_ip.as_deref().and_then(|ip| ip.parse().ok())
+                }));
         let matches_identity = |candidate: &&ExpectedInterface| {
+            if candidate.role.is_dpu_loopback() != loopback {
+                return false;
+            }
+            if loopback
+                && candidate.fixed_ip.map(|ip| ip.is_ipv4())
+                    != interface
+                        .fixed_ip
+                        .as_deref()
+                        .and_then(|ip| ip.parse::<IpAddr>().ok())
+                        .map(|ip| ip.is_ipv4())
+            {
+                return false;
+            }
             if let Some(mac) = mac_address {
                 candidate.mac_address == Some(mac)
             } else {
@@ -1076,9 +1302,10 @@ async fn update_preallocated_interfaces(
     }
 
     for interface in machine.data.interfaces.iter().filter(|interface| {
-        interface
-            .mac_address
-            .is_some_and(|mac| mac != machine.bmc_mac_address)
+        !interface.role.is_dpu_loopback()
+            && interface
+                .mac_address
+                .is_some_and(|mac| mac != machine.bmc_mac_address)
     }) {
         if interface.fixed_ip.is_some() {
             preallocations.push(
@@ -1156,6 +1383,7 @@ fn sanitize_expected_machine_and_get_ids(
 /// Creates one expected machine inside an existing transaction (batch API).
 async fn create_expected_machine(
     txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
     machine: rpc::ExpectedMachine,
     id: Uuid,
     parsed_mac: MacAddress,
@@ -1171,7 +1399,7 @@ async fn create_expected_machine(
     };
 
     normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-    validate_expected_machine_for_insert(&expected_machine)?;
+    validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
     db::expected_machine::create(txn, expected_machine).await?;
 
     Ok((result_machine, Vec::new()))
@@ -1183,6 +1411,7 @@ async fn create_expected_machine(
 /// as [`update`].
 async fn update_expected_machine(
     txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
     mut machine: rpc::ExpectedMachine,
     id: Uuid,
     parsed_mac: MacAddress,
@@ -1208,7 +1437,7 @@ async fn update_expected_machine(
         data,
     };
     normalize_host_bmc_configuration(&mut expected_machine, existing.as_ref(), overrides)?;
-    validate_expected_machine_for_insert(&expected_machine)?;
+    validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
     let preallocations =
         update_preallocated_interfaces(txn, &expected_machine, retained_window).await?;
 
@@ -1260,15 +1489,19 @@ fn build_failure_result(id: Uuid, error_message: String) -> rpc::ExpectedMachine
 async fn apply_operation(
     op: BatchOperation,
     txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
     machine: rpc::ExpectedMachine,
     id: Uuid,
     parsed_mac: MacAddress,
     retained_window: Option<chrono::Duration>,
 ) -> Result<(rpc::ExpectedMachine, Vec<PreallocationSuccess>), CarbideError> {
     match op {
-        BatchOperation::Create => create_expected_machine(txn, machine, id, parsed_mac).await,
+        BatchOperation::Create => {
+            create_expected_machine(txn, common_pools, machine, id, parsed_mac).await
+        }
         BatchOperation::Update => {
-            update_expected_machine(txn, machine, id, parsed_mac, retained_window).await
+            update_expected_machine(txn, common_pools, machine, id, parsed_mac, retained_window)
+                .await
         }
     }
 }
@@ -1315,6 +1548,7 @@ async fn process_batch_operations(
             match apply_operation(
                 op,
                 txn.as_pgconn(),
+                &api.common_pools,
                 machine,
                 id,
                 parsed_mac,
@@ -1365,6 +1599,7 @@ async fn process_batch_operations(
         let (result_machine, operation_preallocations) = match apply_operation(
             op,
             txn.as_pgconn(),
+            &api.common_pools,
             machine,
             id,
             parsed_mac,
@@ -1816,6 +2051,55 @@ mod tests {
                 },
             ],
             |interfaces| validate_expected_interface_role_and_allocation(&interfaces).is_ok(),
+        );
+    }
+
+    #[test]
+    fn omitted_role_preserves_loopback_identity_with_shared_mac() {
+        let mac: MacAddress = "02:00:00:00:00:20".parse().unwrap();
+        let existing = ExpectedMachine {
+            id: None,
+            bmc_mac_address: "02:00:00:00:00:01".parse().unwrap(),
+            data: ExpectedMachineData {
+                interfaces: vec![
+                    ExpectedInterface {
+                        mac_address: Some(mac),
+                        role: model::expected_machine::ExpectedInterfaceRole::DpuOs,
+                        fixed_ip: Some("192.0.2.20".parse().unwrap()),
+                        ..Default::default()
+                    },
+                    ExpectedInterface {
+                        mac_address: Some(mac),
+                        role: model::expected_machine::ExpectedInterfaceRole::DpuLoopback,
+                        fixed_ip: Some("198.51.100.20".parse().unwrap()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        };
+        // Legacy clients can reorder entries and omit the role. The loopback
+        // address must not inherit the OS role just because the MAC matches.
+        let mut replacement = rpc::ExpectedMachine {
+            host_nics: ["198.51.100.20", "192.0.2.20"]
+                .map(|address| rpc::ExpectedInterface {
+                    mac_address: Some(mac.to_string()),
+                    fixed_ip: Some(address.to_string()),
+                    primary: Some(false),
+                    ..Default::default()
+                })
+                .to_vec(),
+            ..Default::default()
+        };
+        preserve_omitted_rpc_role_and_allocation(&mut replacement, Some(&existing));
+        assert_eq!(
+            replacement.host_nics[0].role,
+            Some(rpc::ExpectedInterfaceRole::DpuLoopback as i32)
+        );
+        assert_eq!(replacement.host_nics[0].primary, None);
+        assert_eq!(
+            replacement.host_nics[1].role,
+            Some(rpc::ExpectedInterfaceRole::DpuOs as i32)
         );
     }
 
