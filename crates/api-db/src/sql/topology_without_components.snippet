@@ -1,0 +1,1 @@
+'topology', COALESCE(jsonb_set(mt2.topology, '{discovery_data,Info}', (mt2.topology #> '{discovery_data,Info}') - '{cpu_info,block_devices,nvme_devices,gpus,memory_devices,infiniband_interfaces,tpm_description}'::text[]), mt2.topology),
