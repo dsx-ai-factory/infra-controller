@@ -215,6 +215,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					IsDpfEnabled:             reported.IsDpfEnabled,
+					RetainBmcCredentials:     reported.RetainBmcCredentials,
 					HostLifecycleProfile:     reported.HostLifecycleProfile,
 					Labels:                   reported.Labels,
 					CreatedBy:                siteID, /* This would normally be a user ID, but that isn't something NICo provides */
@@ -263,6 +264,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			(reported.MachineID != nil && !util.PtrsEqual(cur.MachineID, reported.MachineID)) ||
 			(reported.FallbackDpuSerialNumbers != nil && !slices.Equal(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers)) ||
 			(reported.IsDpfEnabled != nil && !util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled)) ||
+			cur.RetainsBmcCredentials() != reported.RetainsBmcCredentials() ||
 			(reported.HostLifecycleProfile.DisableLockdown != nil && !util.PtrsEqual(cur.HostLifecycleProfile.DisableLockdown, reported.HostLifecycleProfile.DisableLockdown)) ||
 			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
@@ -297,6 +299,13 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					}
 				}
 
+				// Core reports bmc_retain_credentials only when true, so absence
+				// is false. Leave the column alone when the effective value matches.
+				var retainBmcCredentials *bool
+				if cur.RetainsBmcCredentials() != reported.RetainsBmcCredentials() {
+					retainBmcCredentials = cutil.GetPtr(reported.RetainsBmcCredentials())
+				}
+
 				var hostLifecycleProfile *cdbm.HostLifecycleProfile
 				if reported.HostLifecycleProfile.HasSetFields() {
 					hostLifecycleProfile = &reported.HostLifecycleProfile
@@ -315,6 +324,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					Interfaces:               reported.Interfaces,
 					IsDpfEnabled:             reported.IsDpfEnabled,
+					RetainBmcCredentials:     retainBmcCredentials,
 					HostLifecycleProfile:     hostLifecycleProfile,
 					Labels:                   reported.Labels,
 				})

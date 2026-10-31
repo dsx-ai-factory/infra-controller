@@ -1191,6 +1191,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 					SkuId:                    &sku.ID,
 					FallbackDpuSerialNumbers: []string{"DPU-1", "DPU-2"},
 					IsDpfEnabled:             cutil.GetPtr(true),
+					BmcRetainCredentials:     cutil.GetPtr(true),
 					HostLifecycleProfile:     &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
 				},
 				want: cdbm.ExpectedMachine{
@@ -1204,6 +1205,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 					MachineID:                &machine.ID,
 					FallbackDpuSerialNumbers: []string{"DPU-1", "DPU-2"},
 					IsDpfEnabled:             cutil.GetPtr(true),
+					RetainBmcCredentials:     cutil.GetPtr(true),
 					HostLifecycleProfile:     cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
 				},
 			},
@@ -1229,6 +1231,11 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 			{"DPF setting", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
 				reported.IsDpfEnabled = cutil.GetPtr(false)
 				want.IsDpfEnabled = cutil.GetPtr(false)
+			}},
+			// Core omits bmc_retain_credentials when it is false.
+			{"BMC credential retention", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.BmcRetainCredentials = nil
+				want.RetainBmcCredentials = cutil.GetPtr(false)
 			}},
 		} {
 			next := cases[len(cases)-1]
