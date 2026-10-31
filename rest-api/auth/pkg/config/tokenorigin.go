@@ -4,14 +4,19 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"sync"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/singleflight"
 )
 
 // TokenOrigin constants define the source of bearer tokens
@@ -24,13 +29,40 @@ const (
 	TokenOriginKas       = "kas"        // NGC API keys presented as bearer credentials
 )
 
-// AllowedOrigins is the list of valid token origins for the service
-var AllowedOrigins = []string{TokenOriginKasLegacy, TokenOriginKasSsa, TokenOriginKeycloak, TokenOriginCustom, TokenOriginKas}
+const (
+	// unknownIssuerTTL is how long an issuer the resolver did not find is remembered.
+	unknownIssuerTTL = 5 * time.Second
+
+	// maxUnknownIssuers bounds the unknown-issuer cache; on overflow one entry is
+	// evicted, so cycling through many names does not empty it.
+	maxUnknownIssuers = 256
+
+	// maxResolveFlights caps concurrent resolutions of distinct unknown issuers.
+	maxResolveFlights = 32
+
+	// DefaultResolveFlightTimeout bounds one shared resolution when
+	// auth.resolveFlightTimeout is unset.
+	DefaultResolveFlightTimeout = 30 * time.Second
+)
+
+var (
+	// AllowedOrigins is the list of valid token origins for the service
+	AllowedOrigins = []string{TokenOriginKasLegacy, TokenOriginKasSsa, TokenOriginKeycloak, TokenOriginCustom, TokenOriginKas}
+
+	// errResolverSaturated means no resolution slot was free; it is not a verdict on
+	// the issuer, so the name is not remembered as unknown.
+	errResolverSaturated = errors.New("issuer resolver saturated")
+)
 
 // TokenProcessor interface for processing bearer tokens
 type TokenProcessor interface {
 	ProcessToken(c echo.Context, tokenStr string, jwksConfig *JwksConfig, logger zerolog.Logger) (*cdbm.User, *util.APIError)
 }
+
+// IssuerResolver looks up an issuer missing from the registry, returning nil if it
+// does not exist. A resolver that returns a config must publish it with
+// AddJwksConfig first.
+type IssuerResolver func(ctx context.Context, issuerURL string) (*JwksConfig, error)
 
 // TokenOriginConfig holds configuration for token origins with multiple JWKS configs and handlers
 type TokenOriginConfig struct {
@@ -41,14 +73,142 @@ type TokenOriginConfig struct {
 	// MetricsNamespace prefixes any metric a processor registers. It is empty when
 	// metrics are disabled, which is the signal not to register them at all.
 	MetricsNamespace string
+
+	resolver       IssuerResolver
+	resolveGroup   singleflight.Group
+	resolveSlots   chan struct{}
+	unknownIssuers map[string]time.Time
+	resolveTimeout time.Duration
 }
 
 // NewTokenOriginConfig initializes and returns a configuration object with empty maps
 func NewTokenOriginConfig() *TokenOriginConfig {
 	return &TokenOriginConfig{
-		configs:    make(map[string]*JwksConfig),
-		processors: make(map[string]TokenProcessor),
+		configs:        make(map[string]*JwksConfig),
+		processors:     make(map[string]TokenProcessor),
+		resolveSlots:   make(chan struct{}, maxResolveFlights),
+		resolveTimeout: DefaultResolveFlightTimeout,
 	}
+}
+
+// SetResolveFlightTimeout sets the ceiling for one on-demand issuer resolution.
+// Zero or negative falls back to DefaultResolveFlightTimeout.
+func (toc *TokenOriginConfig) SetResolveFlightTimeout(d time.Duration) {
+	if d <= 0 {
+		d = DefaultResolveFlightTimeout
+	}
+	toc.Lock()
+	toc.resolveTimeout = d
+	toc.Unlock()
+}
+
+func (toc *TokenOriginConfig) resolveFlightTimeout() time.Duration {
+	toc.RLock()
+	d := toc.resolveTimeout
+	toc.RUnlock()
+	if d <= 0 {
+		return DefaultResolveFlightTimeout
+	}
+	return d
+}
+
+// SetIssuerResolver installs the resolve-on-miss backend. Passing nil disables
+// resolution, which is the default and what Keycloak mode uses.
+func (toc *TokenOriginConfig) SetIssuerResolver(r IssuerResolver) {
+	toc.Lock()
+	defer toc.Unlock()
+	toc.resolver = r
+}
+
+// ResolveConfig returns the issuer's config, calling the resolver on a registry
+// miss. Concurrent misses for one issuer share a resolver call.
+func (toc *TokenOriginConfig) ResolveConfig(ctx context.Context, issuer string) *JwksConfig {
+	if cfg := toc.GetConfig(issuer); cfg != nil {
+		return cfg
+	}
+
+	toc.RLock()
+	resolver := toc.resolver
+	expiry, known := toc.unknownIssuers[issuer]
+	toc.RUnlock()
+
+	if resolver == nil || (known && time.Now().Before(expiry)) {
+		return nil
+	}
+
+	ch := toc.resolveGroup.DoChan(issuer, func() (any, error) {
+		// Only the flight's leader takes a slot; waiters on the same name are free.
+		select {
+		case toc.resolveSlots <- struct{}{}:
+			defer func() { <-toc.resolveSlots }()
+		default:
+			return nil, errResolverSaturated
+		}
+		resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), toc.resolveFlightTimeout())
+		defer cancel()
+
+		// A concurrent reload may have installed it while this call was queued.
+		if cfg := toc.GetConfig(issuer); cfg != nil {
+			return cfg, nil
+		}
+		return resolver(resolveCtx, issuer)
+	})
+
+	var res singleflight.Result
+	select {
+	case <-ctx.Done():
+		return nil
+	case res = <-ch:
+	}
+
+	if errors.Is(res.Err, errResolverSaturated) {
+		log.Warn().Str("issuer", issuer).Msg("issuer resolver saturated; not resolving this name now")
+		return nil
+	}
+	if res.Err != nil {
+		// The issuer name is unauthenticated input; without a backoff a store outage
+		// turns every request naming an unknown issuer into a DB round-trip.
+		log.Warn().Err(res.Err).Str("issuer", issuer).Msg("failed to resolve issuer on demand; backing off")
+		toc.rememberUnknownIssuer(issuer)
+		return nil
+	}
+
+	if cfg, _ := res.Val.(*JwksConfig); cfg == nil {
+		toc.rememberUnknownIssuer(issuer)
+		return nil
+	}
+
+	// An issuer withdrawn during resolution is absent here and must not be served.
+	published := toc.GetConfig(issuer)
+	if published == nil {
+		toc.rememberUnknownIssuer(issuer)
+	}
+	return published
+}
+
+// rememberUnknownIssuer records an issuer the resolver reported as nonexistent.
+func (toc *TokenOriginConfig) rememberUnknownIssuer(issuer string) {
+	toc.Lock()
+	defer toc.Unlock()
+
+	now := time.Now()
+	if toc.unknownIssuers == nil {
+		toc.unknownIssuers = make(map[string]time.Time, 1)
+	}
+	if _, present := toc.unknownIssuers[issuer]; !present && len(toc.unknownIssuers) >= maxUnknownIssuers {
+		for name, expiry := range toc.unknownIssuers {
+			if now.After(expiry) {
+				delete(toc.unknownIssuers, name)
+			}
+		}
+		for name := range toc.unknownIssuers {
+			if len(toc.unknownIssuers) < maxUnknownIssuers {
+				break
+			}
+			delete(toc.unknownIssuers, name)
+		}
+	}
+	toc.unknownIssuers[issuer] = now.Add(unknownIssuerTTL)
 }
 
 // AddJwksConfig adds a pre-configured JwksConfig for an issuer
@@ -59,18 +219,18 @@ func (toc *TokenOriginConfig) AddJwksConfig(cfg *JwksConfig) {
 	toc.configs[cfg.Issuer] = cfg
 }
 
-// AddConfig adds a new JWKS config with the specified name, issuer, URL, origin, and serviceAccount flag
-func (toc *TokenOriginConfig) AddConfig(name, issuer, url string, origin string, serviceAccount bool, audiences []string, scopes []string) {
+// AddConfig adds a new JWKS config with the specified issuer, URL, origin, and serviceAccount flag
+func (toc *TokenOriginConfig) AddConfig(issuer, url string, origin string, serviceAccount bool, audiences []string, scopes []string) {
 	toc.Lock()
 	defer toc.Unlock()
-	toc.configs[issuer] = NewJwksConfig(name, url, issuer, origin, serviceAccount, audiences, scopes)
+	toc.configs[issuer] = NewJwksConfig(url, issuer, origin, serviceAccount, audiences, scopes)
 }
 
 // AddConfigWithProcessor adds a new JWKS config and processor for the specified origin
-func (toc *TokenOriginConfig) AddConfigWithProcessor(name, issuer, url string, origin string, serviceAccount bool, audiences []string, scopes []string, processor TokenProcessor) {
+func (toc *TokenOriginConfig) AddConfigWithProcessor(issuer, url string, origin string, serviceAccount bool, audiences []string, scopes []string, processor TokenProcessor) {
 	toc.Lock()
 	defer toc.Unlock()
-	toc.configs[issuer] = NewJwksConfig(name, url, issuer, origin, serviceAccount, audiences, scopes)
+	toc.configs[issuer] = NewJwksConfig(url, issuer, origin, serviceAccount, audiences, scopes)
 	toc.processors[origin] = processor
 }
 
@@ -142,7 +302,7 @@ func (toc *TokenOriginConfig) RemoveConfig(issuer string) {
 func (toc *TokenOriginConfig) GetAllConfigs() map[string]*JwksConfig {
 	toc.RLock()
 	defer toc.RUnlock()
-	return toc.configs
+	return maps.Clone(toc.configs)
 }
 
 // UpdateAllJWKS updates the JWKs for all configurations in the map
