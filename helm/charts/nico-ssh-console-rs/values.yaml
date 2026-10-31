@@ -30,6 +30,12 @@ replicas: 1
 ## Container resource requests and limits. Empty by default.
 resources: {}
 
+## OTLP/gRPC collector endpoint. Empty leaves span export off unless set through env.
+otlpEndpoint: ""
+
+## Extra environment variables for the ssh-console container.
+env: {}
+
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-ssh-console-rs.name" . }}-config-files'
 

@@ -35,7 +35,7 @@ path = "src/main.rs"
 # local dependencies
 carbide-rpc = { path = "../rpc" }
 carbide-authn = { path = "../authn" }
-carbide-instrument = { path = "../instrument" }
+carbide-instrument = { path = "../instrument", features = ["otlp-tracing"] }
 carbide-utils = { path = "../utils", default-features = false, features = ["shutdown-handler"] }
 carbide-uuid = { path = "../uuid" }
 carbide-tls = { path = "../tls" }
