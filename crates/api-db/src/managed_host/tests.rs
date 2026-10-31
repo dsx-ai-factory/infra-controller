@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
+
 use carbide_test_support::{Case, Outcome};
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSource, MachineType};
@@ -34,13 +36,15 @@ async fn load_by_machine_ids_preserves_shared_host_snapshot(
         [0x77; 32],
         MachineType::Host,
     );
-    let dpu_id = MachineId::new(
-        MachineIdSource::ProductBoardChassisSerial,
-        [0x78; 32],
-        MachineType::Dpu,
-    );
+    let dpu_ids = [0x78, 0x79].map(|index| {
+        MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [index; 32],
+            MachineType::Dpu,
+        )
+    });
     let mut txn = pool.begin().await?;
-    for machine_id in [host_id, dpu_id] {
+    for machine_id in [host_id].into_iter().chain(dpu_ids) {
         crate::machine::create(
             txn.as_mut(),
             None,
@@ -57,31 +61,40 @@ async fn load_by_machine_ids_preserves_shared_host_snapshot(
         NetworkSegmentControllerState::Ready,
     )
     .await?;
-    let interface = crate::machine_interface::create(
-        txn.as_mut(),
-        std::slice::from_ref(&segment),
-        &"02:00:00:00:00:78".parse()?,
-        true,
-        AddressSelectionStrategy::NextAvailableIp,
-        None,
-    )
-    .await?;
-    crate::machine_interface::associate_interface_with_machine(
-        &interface.id,
-        MachineInterfaceAssociation::Machine(host_id),
-        txn.as_mut(),
-    )
-    .await?;
-    crate::machine_interface::associate_interface_with_dpu_machine(
-        &interface.id,
-        &dpu_id,
-        txn.as_mut(),
-    )
-    .await?;
+    // Give each DPU its own host interface; the snapshot query finds a host's DPUs through them.
+    for (dpu_id, (mac, primary_interface)) in dpu_ids
+        .into_iter()
+        .zip([("02:00:00:00:00:78", true), ("02:00:00:00:00:79", false)])
+    {
+        let interface = crate::machine_interface::create(
+            txn.as_mut(),
+            std::slice::from_ref(&segment),
+            &mac.parse()?,
+            primary_interface,
+            AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        crate::machine_interface::associate_interface_with_machine(
+            &interface.id,
+            MachineInterfaceAssociation::Machine(host_id),
+            txn.as_mut(),
+        )
+        .await?;
+        crate::machine_interface::associate_interface_with_dpu_machine(
+            &interface.id,
+            &dpu_id,
+            txn.as_mut(),
+        )
+        .await?;
+    }
 
+    // The host and both of its DPUs share one loaded snapshot, so all three requests have to
+    // come back with the full snapshot, not just whichever one received the loaded original.
+    let requested_ids = [host_id, dpu_ids[0], dpu_ids[1]];
     let snapshots = super::load_by_machine_ids(
         txn.as_mut(),
-        &[host_id, dpu_id],
+        &requested_ids,
         LoadSnapshotOptions {
             include_instance_data: false,
             ..Default::default()
@@ -89,19 +102,20 @@ async fn load_by_machine_ids_preserves_shared_host_snapshot(
     )
     .await?;
 
-    assert_eq!(snapshots.len(), 2);
-    for machine_id in [host_id, dpu_id] {
+    assert_eq!(snapshots.len(), requested_ids.len());
+    for machine_id in requested_ids {
         let snapshot = snapshots
             .get(&machine_id)
-            .expect("both requested machines should resolve to their shared host snapshot");
+            .expect("every requested machine should resolve to the shared host snapshot");
         assert_eq!(snapshot.host_snapshot.id.to_machine_id(), host_id);
+        assert_eq!(snapshot.dpu_snapshots.len(), dpu_ids.len());
         assert_eq!(
             snapshot
                 .dpu_snapshots
                 .iter()
                 .map(|dpu| dpu.id.to_machine_id())
-                .collect::<Vec<_>>(),
-            vec![dpu_id],
+                .collect::<HashSet<_>>(),
+            HashSet::from(dpu_ids),
         );
     }
     Ok(())
