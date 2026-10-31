@@ -280,16 +280,24 @@ impl<P: Provider> Provider for NormalizeLegacyDpuPolicy<P> {
     }
 }
 
-pub(crate) fn merged_carbide_config_figment(
-    config_path: &Path,
-    site_config_path: Option<&Path>,
-) -> Figment {
-    let mut figment = Figment::new().merge(NormalizeLegacyDpuPolicy(Toml::file(config_path)));
-    if let Some(site_config_path) = site_config_path {
-        figment = figment.merge(NormalizeLegacyDpuPolicy(Toml::file(site_config_path)));
-    }
+fn merged_carbide_config_figment(config_path: &Path, site_config_path: Option<&Path>) -> Figment {
+    merge_carbide_config_providers(
+        Toml::file(config_path),
+        site_config_path.map(Toml::file),
+        Env::prefixed("CARBIDE_API_"),
+    )
+}
 
-    figment.merge(NormalizeLegacyDpuPolicy(Env::prefixed("CARBIDE_API_")))
+fn merge_carbide_config_providers(
+    global: impl Provider,
+    site: Option<impl Provider>,
+    environment: impl Provider,
+) -> Figment {
+    let mut figment = Figment::new().merge(NormalizeLegacyDpuPolicy(global));
+    if let Some(site) = site {
+        figment = figment.merge(NormalizeLegacyDpuPolicy(site));
+    }
+    figment.merge(NormalizeLegacyDpuPolicy(environment))
 }
 
 /// Load, normalize, and validate the Carbide API configuration, emitting
@@ -549,12 +557,147 @@ pub fn log_vpc_peering_policy_deprecations(config: &CarbideConfig) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use carbide_test_support::Outcome::{Fails, FailsWith, Yields};
     use carbide_test_support::scenarios;
+    use model::expected_machine::HostDpuPolicy;
     use tracing_subscriber::prelude::*;
 
     use super::*;
     use crate::logging::stream::{LogStream, LogStreamLayer};
+
+    #[derive(Clone, Copy)]
+    struct PolicyLayers {
+        global_setting: &'static str,
+        site_setting: &'static str,
+        environment_value: Option<&'static str>,
+    }
+
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn load_layered_dpu_policy(
+        layers: PolicyLayers,
+    ) -> Result<Option<HostDpuPolicy>, figment::Error> {
+        let global_config = format!(
+            "{}\n[site_explorer]\n{}\n",
+            include_str!("test_data/min_config.toml"),
+            layers.global_setting,
+        );
+        let site_config = format!("[site_explorer]\n{}\n", layers.site_setting);
+        // Parse the same structured value as Env without mutating process state.
+        let environment = layers
+            .environment_value
+            .unwrap_or("{}")
+            .parse::<Value>()
+            .expect("environment values parse infallibly");
+        Ok(merge_carbide_config_providers(
+            Toml::string(&global_config),
+            Some(Toml::string(&site_config)),
+            ("site_explorer", environment),
+        )
+        .extract::<CarbideConfig>()?
+        .site_explorer
+        .dpu_policy)
+    }
+
+    #[test]
+    fn site_explorer_dpu_policy_respects_provider_precedence_across_legacy_key() {
+        scenarios!(
+            run = load_layered_dpu_policy;
+            "site config overrides global config regardless of key spelling" {
+                PolicyLayers {
+                    global_setting: "dpu_policy = \"nic\"",
+                    site_setting: "dpu_mode = \"no_dpu\"",
+                    environment_value: None,
+                } => Yields(Some(HostDpuPolicy::Ignore)),
+                PolicyLayers {
+                    global_setting: "dpu_mode = \"no_dpu\"",
+                    site_setting: "dpu_policy = \"manage\"",
+                    environment_value: None,
+                } => Yields(Some(HostDpuPolicy::Manage)),
+            }
+
+            "environment overrides site config regardless of key spelling" {
+                PolicyLayers {
+                    global_setting: "",
+                    site_setting: "dpu_policy = \"nic\"",
+                    environment_value: Some("{dpu_mode=no_dpu}"),
+                } => Yields(Some(HostDpuPolicy::Ignore)),
+                PolicyLayers {
+                    global_setting: "",
+                    site_setting: "dpu_mode = \"no_dpu\"",
+                    environment_value: Some("{dpu_policy=manage}"),
+                } => Yields(Some(HostDpuPolicy::Manage)),
+            }
+
+            "canonical key wins within one provider" {
+                PolicyLayers {
+                    global_setting: concat!(
+                        "dpu_policy = \"nic\"\n",
+                        "dpu_mode = \"no_dpu\"",
+                    ),
+                    site_setting: "",
+                    environment_value: None,
+                } => Yields(Some(HostDpuPolicy::Nic)),
+            }
+        );
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn rack_profile_attributes_merge_per_key_with_provider_precedence() -> Result<(), figment::Error>
+    {
+        // Environment input overrides duplicate keys while retaining unrelated keys.
+        let global_config = format!(
+            r#"{}
+
+[rack_profiles.NVL72]
+product_family = "gb200"
+attributes = {{ attribute1 = "global", additional_attribute2 = "global" }}
+
+[rack_profiles.NVL72.rack_capabilities.compute]
+count = 18
+
+[rack_profiles.NVL72.rack_capabilities.switch]
+count = 9
+
+[rack_profiles.NVL72.rack_capabilities.power_shelf]
+count = 8
+"#,
+            include_str!("test_data/min_config.toml"),
+        );
+
+        let site_config = r#"
+[rack_profiles.NVL72]
+attributes = { attribute1 = "site", additional_attribute3 = "site" }
+"#;
+        let environment =
+            "{NVL72={attributes={attribute1=environment,additional_attribute4=environment}}}"
+                .parse::<Value>()
+                .expect("environment values parse infallibly");
+        let config = merge_carbide_config_providers(
+            Toml::string(&global_config),
+            Some(Toml::string(site_config)),
+            ("rack_profiles", environment),
+        )
+        .extract::<CarbideConfig>()?;
+
+        let attributes = &config.rack_profiles.get("NVL72").unwrap().attributes;
+
+        assert_eq!(
+            attributes,
+            &HashMap::from([
+                ("attribute1".to_string(), "environment".to_string()),
+                ("additional_attribute2".to_string(), "global".to_string()),
+                ("additional_attribute3".to_string(), "site".to_string()),
+                (
+                    "additional_attribute4".to_string(),
+                    "environment".to_string(),
+                ),
+            ])
+        );
+        Ok(())
+    }
 
     /// Loads downloader limits through the startup configuration path, including
     /// omission defaults, and rejects invalid limits before activating Core.
