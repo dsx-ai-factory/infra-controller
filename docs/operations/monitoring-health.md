@@ -271,9 +271,9 @@ Sensor-backed values (carrying a Redfish `DataSourceUri`) are skipped:
 the sensor collector already publishes them as `hw_sensor` series, so nothing
 is double-reported.
 
-Exported series are named
-`{prefix}_hw_metric_{metric_type}_{unit}` — with the default
-`carbide_hardware_health` prefix, for example:
+The entity metrics collector exports gauges named
+`{prefix}_hw_metric_{metric_type}_{unit}`. With the default
+`carbide_hardware_health` prefix, examples include:
 
 ```text
 carbide_hardware_health_hw_metric_correctable_core_errors_count
@@ -282,20 +282,89 @@ carbide_hardware_health_hw_metric_bandwidth_percent
 carbide_hardware_health_hw_metric_input_power_watts
 ```
 
-On the Prometheus endpoint, series carry entity labels (`processor_id`,
+Readings classified as cumulative counters also export a
+[counter alias](https://github.com/dsx-ai-factory/infra-controller/issues/7902) named
+`{prefix}_hw_metric_{metric_type}_{unit}_total` when the value is finite and
+nonnegative. The alias appends `_total` to the gauge name. For example, the
+PCIe correctable error count exports the following gauge and counter:
+
+```text
+carbide_hardware_health_hw_metric_pcie_correctable_errors_count
+carbide_hardware_health_hw_metric_pcie_correctable_errors_count_total
+```
+
+Within each sink, the gauge and its counter alias expose the same labels
+and absolute hardware reading. Repeated polls do not add readings together.
+If the source resets from 13 to 2, both series report 2 after collection.
+Readings classified as gauges, and negative or non-finite counter readings,
+export only the gauge. Processor core error counts and drive bad-block counts,
+for example, are gauges.
+
+On the `/telemetry` Prometheus endpoint, series carry entity labels (`processor_id`,
 `memory_id`, `drive_id`, `powersupply_id`, `system_id`, `model`, ...) plus the
 standard identity labels added by the sink (`machine_id`, `endpoint_ip`,
 `serial_number`, `rack_id`, ...), with `collector_type="metrics_collector"`.
+The Prometheus sink rejects an incoming sample, including its alias, and logs a
+warning if label names collide after normalization to Prometheus label names.
+This includes collisions between sample labels, custom endpoint labels, and
+identity labels supplied by the sink.
 
-The OTLP sink (`[sinks.otlp]`) emits the same metric *names* and puts the
-identity context in two places: on OTLP resource attributes, and on each
-datapoint under the Prometheus sink's label names, custom endpoint labels
-included. A backend that keeps resource attributes off its series, such as the
-OpenTelemetry Collector's Prometheus exporter with its default settings, still
-gets every identity label. A backend that flattens resource attributes onto
-every series, such as VictoriaMetrics, also shows the resource attributes whose
-names differ, for example `switch_serial_number` beside `serial_number`, with
-the same value.
+The OTLP sink (`[sinks.otlp]`) uses the same metric names and absolute readings.
+It exports gauge names as `Gauge` metrics and counter aliases as `Sum`
+metrics with cumulative temporality and `is_monotonic = true`.
+
+The OTLP sink puts identity context in resource attributes and adds standard
+identity labels and custom endpoint labels to each data point. If a sample
+label's normalized Prometheus name matches an added context label, the data
+point keeps the sample label and omits the conflicting context label. This
+precedence does not change resource attributes.
+
+If your backend uses data point attributes as series labels, those identity and
+custom labels are available without converting resource attributes, subject to
+this precedence. A backend configured to also convert resource attributes into
+series labels can expose additional names such as `switch_serial_number`
+alongside `serial_number`.
+
+A counter point's `start_time_unix_nano` identifies the source accumulation
+start when valid source metadata is available. The OTLP sink sets each point's
+`time_unix_nano` to the batch export time and preserves it across request
+splitting and retries. A missing start, a start before the Unix epoch, a start
+later than that point timestamp, or a start that does not fit in Unix
+nanoseconds is encoded as `0`, meaning unknown. A lower reading, collector
+startup, or reconnection does not establish a source accumulation start.
+
+Redfish `LifetimeStartDateTime` supplies the start for memory lifetime errors,
+drive I/O errors, and `DriveMetrics.PowerOnHours`. The drive power-on reading is
+in hours. Inline `PowerSupplyMetrics.EnergykWh.Reading`, measured in
+kilowatt-hours, uses `SensorResetTime`. This energy metric does not use
+`Sensor.LifetimeReading` or `Sensor.LifetimeStartDateTime`.
+
+The separate NVUE gNMI collector (`[collectors.nvue.gnmi]`) applies the same
+gauge and alias rules to seven OpenConfig interface counters and 10 InfiniBand
+port counters under `/infiniband/state/counters/port/*`. Its aliases use
+`{prefix}_nvue_gnmi_interface_{name}_{unit}_total`, for example
+`{prefix}_nvue_gnmi_interface_in_packets_count_total` for `in-pkts`.
+The generated [Core metrics catalogue](../observability/core_metrics.md) lists
+hardware metric names, types, and descriptions.
+
+The seven OpenConfig counters are `in-errors`, `out-errors`, `out-discards`,
+`in-octets`, `out-octets`, `in-pkts`, and `out-pkts`. They use `last-clear` from
+the same interface and streaming subscription. A known start requires a
+positive metadata notification timestamp, no earlier than `last-clear`, and a
+counter notification timestamp no earlier than the metadata notification.
+These are source notification times; OTLP points use the batch export time.
+Without valid metadata for the observation, the emitted start is unknown. Each
+new streaming subscription attempt, including a reconnect, clears retained
+starts. Source deletions covering the metadata can invalidate it. Starting a
+reconciliation snapshot does not clear starts. A completed snapshot can
+invalidate an interface's start if its telemetry disappeared. InfiniBand port
+counter aliases have unknown starts.
+
+With `collectors.nvue.gnmi.paths.interface_paths` set, the collector requests
+only mapped metric leaves and does not request `last-clear`. Selecting
+`state/counters/last-clear` in this list fails when the collector starts.
+Unrequested metadata received on that same stream can still supply a valid
+start.
 
 Entity discovery runs as its own periodic task (`[collectors.discovery]`,
 always on) that walks each BMC's Redfish Systems and Chassis trees and
@@ -317,11 +386,16 @@ service restarts. Their names are fixed and do not use `metrics.prefix`.
 | `carbide_health_otlp_ingress_records_total` | Log records or metric samples accepted into a target queue, including replacements and insertions that evict an older entry. |
 | `carbide_health_otlp_egress_records_total` | Log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections. |
 
-For `metrics`, each exported sample contributes one data point to the request.
-Filtered events and collection markers do not count as ingress. Sending the same
-record to multiple targets increments ingress once for each target. Failed
-attempts do not count as egress; successful retries and split requests count only
-their acknowledged records.
+For `metrics`, each sample with a counter alias contributes two data points to
+the request: the `Gauge` and the cumulative `Sum`. Other samples contribute one
+gauge point. Ingress counts one input sample for each accepted reading, before
+this expansion.
+
+Notifications marking collection start, collection end, or collector removal
+are not queued and do not count as ingress. Sending the same record to multiple
+targets increments ingress once for each target. Failed attempts do not count
+as egress; successful retries and split requests count only their acknowledged
+records.
 
 Partial-success responses are not retried. If the receiver reports a negative
 rejection count or rejects more records or data points than the request contains,
@@ -344,20 +418,30 @@ sum by (target, signal) (
 ```
 
 Both queries sum rates across service instances with the same target and signal.
-The units are log records per second for `logs` and metric samples or data points
-per second for `metrics`. The `[5m]` range averages each rate over five minutes.
+The units are log records per second for `logs`. For `metrics`, ingress measures
+input samples per second, while egress measures acknowledged data points per
+second. The `[5m]` range averages each rate over five minutes.
 Add scrape-label selectors to restrict either query to a specific instance.
 
-Ingress minus egress is not queue growth: queue replacements, capacity evictions,
-receiver rejections, export failures, and buffered or in-flight records affect
-the difference. Compare the rates with `carbide_health_otlp_queue_depth`,
+Counter aliases can make metric egress exceed ingress. Samples removed from
+the queue but awaiting export form a staged metrics batch. Replacements in the
+queue or this batch, capacity evictions, receiver rejections, export failures,
+and staged or in-flight samples also affect the difference. Subtracting the
+rates does not measure queue growth.
+
+Compare the rates with `carbide_health_otlp_queue_depth`,
 `carbide_health_otlp_queue_dropped_total`, and
 `carbide_health_otlp_export_failures_total`, plus the replacement counters
 `{prefix}_otlp_sink_replaced_total` and
 `{prefix}_otlp_sink_metrics_replaced_total`, where `{prefix}` is `metrics.prefix`.
-Queue depth excludes buffered and in-flight batches. Egress measures receiver
-acknowledgment, not unique delivery or downstream storage: a receiver can accept
-a request whose response is lost before a retry.
+For metrics, queue depth, queue replacements, and capacity drops count input
+entries before alias expansion. Queue depth excludes staged and in-flight
+batches. Before export, a newer reading can also replace the same series in a
+staged metrics batch. The superseded reading contributes ingress but no egress,
+and it does not increment either queue replacement counter.
+
+Egress measures receiver acknowledgment, not unique delivery or downstream
+storage: a receiver can accept a request whose response is lost before a retry.
 
 ### Hardware Health Logs
 
