@@ -1556,6 +1556,7 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
     ];
     let stored = MlxDeviceObservation {
         observed_at: "2026-09-29T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: devices
             .iter()
             .cloned()
@@ -1571,6 +1572,12 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
         db::ConditionalWrite::Applied(())
     );
     drop(connection);
+    let saved = db::machine::find_one(&env.pool, &host_machine_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .mlx_device_observation;
 
     let response = env
         .api
@@ -1600,7 +1607,7 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.status.mlx_device_observation, Some(stored));
+    assert_eq!(after.status.mlx_device_observation, saved);
     assert_eq!(after.state.value, machine.state.value);
     assert_eq!(after.state.version, machine.state.version);
     assert!(!env.api.scout_stream_registry.is_connected(machine_id).await);

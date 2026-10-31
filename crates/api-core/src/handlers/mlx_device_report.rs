@@ -89,6 +89,7 @@ fn observation(
         host_machine_id,
         MlxDeviceObservation {
             observed_at: report.timestamp,
+            received_at: None,
             devices: report.devices,
         },
     ))

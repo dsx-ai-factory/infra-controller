@@ -21,6 +21,7 @@ pub mod alloc_counter;
 pub mod dpu;
 pub mod machine_snapshot;
 pub mod managed_host;
+pub mod nic_firmware;
 pub mod power_shelf;
 pub mod rack;
 
