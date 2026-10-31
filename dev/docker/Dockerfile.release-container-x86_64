@@ -19,6 +19,10 @@
 ARG CONTAINER_BUILD_X86_64
 ARG CONTAINER_RUNTIME_X86_64
 
+# Empty unless CI passes its restored sccache directory as the `sccache-seed`
+# build context.
+FROM scratch AS sccache-seed
+
 FROM $CONTAINER_BUILD_X86_64 as builder
 ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
@@ -40,17 +44,16 @@ COPY . ./
 # (both compile the same targets on the same arch). Requires BuildKit (default in Docker 23+).
 #
 # The cache mount alone is only useful on a machine that keeps its BuildKit
-# state. CI runners get a fresh builder per job, so when the workflow supplies
-# Actions cache credentials we point sccache at that shared service instead and
-# the mount just becomes local scratch. dev/docker/sccache-cache.sh picks
-# between the two and reports on whether the choice worked.
+# state. CI runners get a fresh builder per job, so CI restores the previous
+# sccache directory from the Actions cache and passes it in as `sccache-seed`,
+# which sccache_setup copies into the mount. On main, CI then builds the
+# `sccache-export` target below to save the updated directory.
 RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
-    --mount=type=secret,id=actions_results_url \
-    --mount=type=secret,id=actions_runtime_token \
-    --mount=type=secret,id=sccache_gha_rw_mode \
+    --mount=type=bind,from=sccache-seed,target=/sccache-seed \
   export CARGO_MAKE_SKIP_CODECOV="true" && \
   export DATABASE_URL="postgresql://root@%2Fvar%2Frun%2Fpostgresql/root" && \
   export SCCACHE_DIR=/sccache && \
+  export SCCACHE_SEED_DIR=/sccache-seed && \
   export RUSTC_WRAPPER=sccache && \
   export CARGO_PROFILE_RELEASE_DEBUG=true && \
   . /carbide/dev/docker/sccache-cache.sh && \
@@ -66,6 +69,17 @@ RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
   rm -rf /carbide/target/debug && \
   rm -rf /carbide/target/release && \
   echo "$(date): Deleted artifacts"
+
+# CI builds this target after the image, on main only, to copy the updated
+# sccache directory out of the cache mount, which outlives the image build in
+# the same BuildKit builder. These stages stay ahead of the runtime stage,
+# which must remain last so it stays the default target.
+FROM $CONTAINER_BUILD_X86_64 AS sccache-collect
+RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
+  mkdir -p /sccache-out && cp -a /sccache/. /sccache-out/
+
+FROM scratch AS sccache-export
+COPY --from=sccache-collect /sccache-out/ /
 
 # After build, copy the release into the runtime container
 FROM $CONTAINER_RUNTIME_X86_64

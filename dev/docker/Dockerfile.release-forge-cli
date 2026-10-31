@@ -15,6 +15,10 @@
 
 ARG CONTAINER_BUILD
 
+# Empty unless CI passes its restored sccache directory as the `sccache-seed`
+# build context.
+FROM scratch AS sccache-seed
+
 FROM $CONTAINER_BUILD as builder
 ARG VERSION
 ENV VERSION $VERSION
@@ -25,22 +29,32 @@ WORKDIR ./carbide
 COPY . ./
 
 # --mount=type=cache persists the sccache directory across builds. Requires BuildKit (default in Docker 23+).
-# On CI the BuildKit state is discarded per job, so prefer the shared Actions
-# cache backend when the workflow supplies credentials.
-# dev/docker/sccache-cache.sh picks between the two and reports on whether the
-# choice worked.
+# On CI the BuildKit state is discarded per job, so CI restores the previous
+# sccache directory from the Actions cache and passes it in as `sccache-seed`,
+# which sccache_setup copies into the mount. On main, CI then builds the
+# `sccache-export` target below to save the updated directory.
 RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
-    --mount=type=secret,id=actions_results_url \
-    --mount=type=secret,id=actions_runtime_token \
-    --mount=type=secret,id=sccache_gha_rw_mode \
+    --mount=type=bind,from=sccache-seed,target=/sccache-seed \
   cd /carbide && \
   export SCCACHE_DIR=/sccache && \
+  export SCCACHE_SEED_DIR=/sccache-seed && \
   export RUSTC_WRAPPER=sccache && \
   export CARGO_PROFILE_RELEASE_DEBUG=true && \
   . /carbide/dev/docker/sccache-cache.sh && \
   sccache_setup && \
   cargo build --release -p nico-admin-cli && \
   sccache_report
+
+# CI builds this target after the image, on main only, to copy the updated
+# sccache directory out of the cache mount, which outlives the image build in
+# the same BuildKit builder. These stages stay ahead of the runtime stage,
+# which must remain last so it stays the default target.
+FROM $CONTAINER_BUILD AS sccache-collect
+RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
+  mkdir -p /sccache-out && cp -a /sccache/. /sccache-out/
+
+FROM scratch AS sccache-export
+COPY --from=sccache-collect /sccache-out/ /
 
 FROM debian:12-slim
 ARG CI_COMMIT_SHORT_SHA
