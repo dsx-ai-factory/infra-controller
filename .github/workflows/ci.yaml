@@ -2203,6 +2203,7 @@ jobs:
             bluefield/charts/nico-dhcp-server
             bluefield/charts/nico-fmds
             bluefield/charts/nico-otelcol
+            bluefield/charts/nico-unbound-local
             helm
             helm/charts/nico-api
             helm/charts/nico-bmc-proxy
@@ -2550,6 +2551,24 @@ jobs:
       artifact_pattern: 'bluefield-binaries-${{ github.run_id }}'
     secrets: inherit
 
+  build-bluefield-nico-unbound:
+    needs:
+      - prepare
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' }}
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      # public bases only: skip source login so anonymous nvcr pulls keep working
+      source_registry_host: ''
+      dockerfile_path: bluefield/containers/unbound/Dockerfile
+      image_name: ${{ needs.prepare.outputs.image_registry }}/nico-unbound
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/nico-unbound:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/arm64
+      runner: linux-arm64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+    secrets: inherit
+
   # ============================================================================
   # BUILD STAGE - Bluefield Helm Charts
   # ============================================================================
@@ -2604,6 +2623,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3-yaml busybox
           /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
+
+      # nico-api renders the required values and helm-validate has no values-file
+      # input, so lint against the test fixture with the helm the preceding
+      # helm-validate steps installed; the chart's helm-unittest suites run in
+      # the "Run Helm unit tests" step.
+      - name: Validate nico-unbound-local chart
+        run: helm lint --strict bluefield/charts/nico-unbound-local -f bluefield/charts/nico-unbound-local/tests/values.yaml
 
       - name: Test site-controller OTEL configuration
         run: |
@@ -2681,6 +2707,32 @@ jobs:
           ngc-duplicate: verify
           retries: 3
 
+      - name: Package and push nico-unbound-local chart
+        id: publish_nico_unbound_local
+        continue-on-error: true
+        if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: bluefield/charts/nico-unbound-local
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+
+      - name: Retry package and push nico-unbound-local chart
+        if: ${{ steps.publish_nico_unbound_local.outcome == 'failure' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: bluefield/charts/nico-unbound-local
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+
   build-summary:
     runs-on: linux-amd64-cpu4
     if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' }}
@@ -2724,6 +2776,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - lint-police
@@ -2857,6 +2910,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - security-secret-scan
@@ -2972,6 +3026,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
 

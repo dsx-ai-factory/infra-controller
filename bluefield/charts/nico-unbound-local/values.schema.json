@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "nico-unbound-local DPUService Helm chart values",
+  "description": "Values nico-api renders per resolver registration plus the DPF serviceDaemonSet contract. All Kubernetes resources use {{ .Release.Name }} in metadata.name so several registrations deploy side by side.",
+  "type": "object",
+  "required": [
+    "serviceDaemonSet",
+    "unboundConfig",
+    "dnsDir",
+    "image"
+  ],
+  "properties": {
+    "serviceDaemonSet": {
+      "type": "object",
+      "description": "Configuration for the service DaemonSet",
+      "required": [
+        "labels",
+        "annotations",
+        "updateStrategy",
+        "resources"
+      ],
+      "properties": {
+        "nodeSelector": {
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "Node selector for the DaemonSet using nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution",
+              "required": [
+                "nodeSelectorTerms"
+              ],
+              "properties": {
+                "nodeSelectorTerms": {
+                  "type": "array",
+                  "description": "Required node selector terms, one of which must match for pod scheduling",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "matchExpressions"
+                    ],
+                    "properties": {
+                      "matchExpressions": {
+                        "type": "array",
+                        "description": "Node selector requirements by node's labels",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "required": [
+                            "key",
+                            "operator",
+                            "values"
+                          ],
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "description": "The label key that the selector applies to"
+                            },
+                            "operator": {
+                              "type": "string",
+                              "description": "Represents a key's relationship to a set of values",
+                              "enum": [
+                                "In",
+                                "NotIn",
+                                "Exists",
+                                "DoesNotExist",
+                                "Gt",
+                                "Lt"
+                              ]
+                            },
+                            "values": {
+                              "type": "array",
+                              "description": "An array of string values. If operator is In or NotIn, values array must be non-empty",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "matchFields": {
+                        "type": "array",
+                        "description": "Node selector requirements by node's fields",
+                        "items": {
+                          "type": "object",
+                          "required": [
+                            "key",
+                            "operator",
+                            "values"
+                          ],
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "description": "The label key that the selector applies to"
+                            },
+                            "operator": {
+                              "type": "string",
+                              "description": "Represents a key's relationship to a set of values",
+                              "enum": [
+                                "In",
+                                "NotIn",
+                                "Exists",
+                                "DoesNotExist",
+                                "Gt",
+                                "Lt"
+                              ]
+                            },
+                            "values": {
+                              "type": "array",
+                              "description": "An array of string values. If operator is In or NotIn, values array must be non-empty",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "null",
+              "description": "Node selector can be null/empty"
+            },
+            {
+              "type": "object",
+              "description": "Node selector can be an empty object",
+              "maxProperties": 0
+            }
+          ]
+        },
+        "labels": {
+          "type": "object",
+          "description": "serviceDaemonSet pod labels",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "description": "serviceDaemonSet pod annotations",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "updateStrategy": {
+          "type": "object",
+          "description": "serviceDaemonSet upgrade strategy configuration",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "RollingUpdate",
+                "OnDelete"
+              ]
+            },
+            "rollingUpdate": {
+              "type": "object",
+              "properties": {
+                "maxUnavailable": {
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "description": "serviceDaemonset pod Resource requests/limits (e.g., CPU, memory)",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "unboundConfig": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Complete native Unbound configuration; a nonblank value is required."
+    },
+    "dnsDir": {
+      "type": "string",
+      "pattern": "^/\\S*$",
+      "description": "The VPC's directory on the DPU holding run/ and zone/; an absolute path is required."
+    },
+    "zoneName": {
+      "type": "string",
+      "description": "Name of the VPC's private zone; empty or absent for a VPC without one, which renders no zone mount or wait-for-zone init container."
+    },
+    "image": {
+      "type": "object",
+      "required": [
+        "repository"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Unbound image repository; a nonblank value is required."
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

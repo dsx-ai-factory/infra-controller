@@ -1,0 +1,67 @@
+### DPF contract ###
+# Filled by the DPUService controller from the DPUService spec: placement
+# (nodeSelector), pod labels and annotations (including the Multus annotation
+# that attaches the slot interface), update strategy and resources. The chart
+# renders no placement and no resource requests or limits of its own: with
+# nodeSelector unset the DaemonSet has no affinity, and with resources empty
+# the container has none.
+serviceDaemonSet:
+  nodeSelector:
+  labels: {}
+  annotations: {}
+  updateStrategy: {}
+  resources: {}
+
+### Values nico-api renders once per resolver registration ###
+# nico-api owns unboundConfig, dnsDir, zoneName and the image. It renders them
+# into the registration's chart values, identical on every DPU of that
+# registration; only dnsDir, zoneName and the unboundConfig derived from them
+# differ between VPCs. The DPU agent owns what lives under dnsDir: it creates
+# the directories, writes the zonefile and reloads Unbound over the control
+# socket. The pod holds no NICo credential and never talks to nico-api.
+# Nothing below is per site or per DPU and an operator does not edit these
+# values directly.
+
+# Complete native Unbound configuration, mounted read-only at
+# /etc/unbound/unbound.conf. Required and nonblank. It names the zonefile as
+# <dnsDir>/zone/zonefile and the control socket as <dnsDir>/run/control.sock,
+# the paths this chart mounts. A change restarts the pods and clears their
+# caches. The container runs as UID 0 with no chroot and a read-only root
+# filesystem, so the configuration sets username and chroot to "", names a
+# directory that exists in the image (it need not be writable), and names no
+# file Unbound writes: the control socket in <dnsDir>/run is its only write.
+unboundConfig: ""
+
+# The VPC's directory on the DPU, /opt/forge/dns/<vpc-id>. Required and an
+# absolute path. The agent creates <dnsDir>/run, where Unbound creates
+# control.sock, and <dnsDir>/zone, where it writes the zonefile (empty until
+# the VPC holds a zone), before the pod can start. Both are mounted as
+# existing host directories, so the pod stays in ContainerCreating until the
+# agent has created them.
+dnsDir: ""
+
+# Name of the VPC's private zone, when it holds one. Optional: unset, the
+# resolver recurses only and the chart renders neither the zone mount nor the
+# wait-for-zone init container. The zone itself is configured in
+# unboundConfig; the chart uses the name only as the switch.
+zoneName: ""
+
+# Unbound image. The repository is required.
+image:
+  repository: ""
+  pullPolicy: IfNotPresent
+  # Empty uses the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+
+# Container security. unbound binds port 53 and needs nothing else; it runs as
+# UID 0 like nico-fmds so it can create the control socket in the agent's
+# root-owned run directory.
+securityContext:
+  runAsUser: 0
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+    add: [NET_BIND_SERVICE]

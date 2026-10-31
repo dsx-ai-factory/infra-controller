@@ -1,0 +1,133 @@
+{{/*
+  Everything under dnsDir belongs to the DPU agent: it creates <dnsDir>/run and
+  <dnsDir>/zone (0700, root) and writes the zonefile; Unbound creates its
+  control socket in run/ and reads zone/. Both are hostPath type Directory, so
+  a pod scheduled before the agent has created them waits in ContainerCreating
+  instead of creating root-owned directories the agent would then find in its
+  way. The zone mount and its init container exist only for a VPC with a
+  private zone; without one the resolver recurses only.
+*/}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "nico-unbound-local.labels" . | nindent 4 }}
+    {{- with .Values.serviceDaemonSet.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.serviceDaemonSet.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.serviceDaemonSet.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "nico-unbound-local.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.serviceDaemonSet.annotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        checksum/config: {{ .Values.unboundConfig | sha256sum }}
+      labels:
+        {{- include "nico-unbound-local.selectorLabels" . | nindent 8 }}
+        {{- with .Values.serviceDaemonSet.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.serviceDaemonSet.nodeSelector }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            {{- toYaml . | nindent 12 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.zoneName }}
+      initContainers:
+        # Unbound exits when an auth-zone's zonefile is missing, and the agent
+        # writes it only after the pod can be scheduled; wait for it with the
+        # Unbound image's busybox shell so no second image is needed.
+        - name: wait-for-zone
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image's default user is not root, and the agent creates the
+          # zone directory 0700 root, so only UID 0 can see the zonefile.
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          command:
+            - /busybox/sh
+            - -c
+            - |
+              echo "Waiting for {{ .Values.dnsDir }}/zone/zonefile ..."
+              while [ ! -f {{ .Values.dnsDir }}/zone/zonefile ]; do
+                sleep 5
+              done
+              echo "Zonefile found."
+          volumeMounts:
+            - name: zone
+              mountPath: {{ .Values.dnsDir }}/zone
+              readOnly: true
+      {{- end }}
+      containers:
+        - name: unbound
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.serviceDaemonSet.resources }}
+          resources:
+            limits:
+              {{- toYaml . | nindent 14 }}
+            requests:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+          ports:
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/unbound
+              readOnly: true
+            # Read-write: Unbound creates control.sock here and the agent
+            # connects to it to reload the zone.
+            - name: run
+              mountPath: {{ .Values.dnsDir }}/run
+            {{- if .Values.zoneName }}
+            # Read-only: the agent writes the zonefile and its rollback copy;
+            # Unbound only reads them.
+            - name: zone
+              mountPath: {{ .Values.dnsDir }}/zone
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}
+        - name: run
+          hostPath:
+            path: {{ .Values.dnsDir }}/run
+            type: Directory
+        {{- if .Values.zoneName }}
+        - name: zone
+          hostPath:
+            path: {{ .Values.dnsDir }}/zone
+            type: Directory
+        {{- end }}
