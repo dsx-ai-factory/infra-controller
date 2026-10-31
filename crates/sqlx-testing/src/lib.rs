@@ -24,6 +24,13 @@
 //! is an error. Without the variable, each process prepares its own template as
 //! before. `cargo make test-release-container-services` prepares a shared template
 //! once before running the suite; direct `cargo test` retains the default mode.
+//!
+//! `NICO_TEST_MAX_PG_CONNECTIONS` sets the shared connection budget per test
+//! process. It defaults to 50 and must be an integer from 5 through 900. Each
+//! test pool has a limit of 5 within this budget. The variable is read when the
+//! shared pool is first initialized; invalid values fail the test setup. It does not change
+//! PostgreSQL's server-wide connection limit or cover independently opened
+//! connections.
 
 use std::ops::Deref;
 use std::str::FromStr;
@@ -36,6 +43,13 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::testing::{TestArgs, TestContext, TestTermination};
 use sqlx::{ConnectOptions, Connection, Executor, Postgres};
 use tokio::sync::OnceCell;
+
+#[cfg(test)]
+mod tests;
+
+const TEST_POOL_MAX_CONNECTIONS: u32 = 5;
+// Keep the shared budget below CI's server limit of 1000 connections.
+const MAX_TEST_CONNECTIONS: u32 = 900;
 
 static POOL: OnceCell<PgPool> = OnceCell::const_new();
 static DB_NUMBER: AtomicUsize = AtomicUsize::new(0);
@@ -201,10 +215,24 @@ async fn setup_test_db(copts: &PgConnectOptions, args: &TestArgs) {
 }
 
 async fn init_pool() -> PgPool {
+    let max_connections = match std::env::var("NICO_TEST_MAX_PG_CONNECTIONS") {
+        Ok(value) => {
+            let value = value
+                .parse::<u32>()
+                .expect("NICO_TEST_MAX_PG_CONNECTIONS must be an integer from 5 through 900");
+            assert!(
+                (TEST_POOL_MAX_CONNECTIONS..=MAX_TEST_CONNECTIONS).contains(&value),
+                "NICO_TEST_MAX_PG_CONNECTIONS must be an integer from 5 through 900"
+            );
+            value
+        }
+        Err(std::env::VarError::NotPresent) => 50,
+        Err(error) => panic!("cannot read NICO_TEST_MAX_PG_CONNECTIONS: {error}"),
+    };
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL is not set.");
     let opts = PgConnectOptions::from_str(&url).expect("failed to parse DATABASE_URL");
     let root_pool = PoolOptions::new()
-        .max_connections(50)
+        .max_connections(max_connections)
         .after_release(|_conn, _| Box::pin(async move { Ok(false) }))
         .connect_lazy_with(opts);
 
@@ -293,7 +321,7 @@ async fn test_context(args: &TestArgs) -> Result<TestContext<Postgres>, sqlx::Er
 
     Ok(TestContext {
         pool_opts: PoolOptions::new()
-            .max_connections(5)
+            .max_connections(TEST_POOL_MAX_CONNECTIONS)
             .idle_timeout(Some(Duration::from_secs(1)))
             .parent(pool.clone()),
         connect_opts: pool
