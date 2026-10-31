@@ -585,9 +585,7 @@ impl ManagedHostStateSnapshotRpc for ManagedHostStateSnapshot {
     /// Consumes the snapshot so the selected `Machine` moves into the
     /// conversion instead of being deep-cloned here; callers that hand over
     /// an owned snapshot per machine (like `snapshot_map_to_rpc_machines`)
-    /// get a clone-free conversion. DPU-keyed loads still deep-clone the
-    /// snapshot one frame earlier (`managed_host::load_by_machine_ids`) —
-    /// the next candidate for this same move-instead-of-clone treatment.
+    /// get a clone-free conversion.
     fn into_rpc_machine_state(
         self,
         dpu_machine_id: Option<&DpuMachineId>,
