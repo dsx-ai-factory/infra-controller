@@ -179,6 +179,7 @@ config:
     clientID: ""
     clientSecretPath: /var/secrets/keycloak/client-secret
     serviceAccount: false
+    serviceAccountOrg: ""
   rateLimiter:
     enabled: false
     rate: 10.0

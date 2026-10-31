@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/core/claim"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -59,12 +60,7 @@ func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCo
 	lastName := claims.LastName
 	auxId := claims.GetOidcId()
 	if claims.GetClientId() != "" {
-		// indicates service account, check if service accounts are enabled
-		if !jwksConfig.ServiceAccount {
-			logger.Error().Str("clientID", claims.GetClientId()).Msg("Service account detected but service accounts are not enabled")
-			return nil, util.NewAPIError(http.StatusUnauthorized, "Service accounts are not enabled", nil)
-		}
-		// use sub as auxId
+		// indicates a client credentials token, use sub as auxId
 		auxId = sub
 		firstName = claims.GetClientId()
 	}
@@ -78,8 +74,13 @@ func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCo
 	// Get org name from URL path parameter
 	reqOrgName := c.Param("orgName")
 
-	// Set isServiceAccount in context based on clientId
-	isServiceAccount := claims.GetClientId() != "" && jwksConfig.ServiceAccount
+	// A client is a service account only if it holds both Provider Admin and Tenant Admin in the
+	// requested org, and only for the configured service account org when one is set. A service
+	// account org is set up as its own Provider and Tenant.
+	reqOrg, hasReqOrg := tokenOrgData[reqOrgName]
+	isServiceAccount := claims.GetClientId() != "" && jwksConfig.ServiceAccount && hasReqOrg &&
+		(jwksConfig.ServiceAccountOrg == "" || reqOrgName == jwksConfig.ServiceAccountOrg) &&
+		authz.ValidateUserHasAllRolesInOrg(reqOrg, config.ServiceAccountRoles...)
 	config.SetIsServiceAccountInContext(c, isServiceAccount)
 
 	ctx := c.Request().Context()

@@ -159,9 +159,13 @@ type JwksConfig struct {
 
 	ClaimMappings []ClaimMapping // org/role mapping configuration
 
-	// ServiceAccount enables client credentials flow (Keycloak only).
-	// For custom issuers, use ClaimMapping.IsServiceAccount instead.
+	// ServiceAccount treats client credentials tokens holding every ServiceAccountRoles role in the
+	// requested org as service accounts for that org (Keycloak only). For custom issuers, use
+	// ClaimMapping.IsServiceAccount instead.
 	ServiceAccount bool
+
+	// ServiceAccountOrg, when set, limits service accounts to that org (Keycloak only).
+	ServiceAccountOrg string
 
 	// ReservedOrgNames prevents dynamic org mappings from claiming statically-configured org names.
 	// Populated by nico-rest-api during initialization.

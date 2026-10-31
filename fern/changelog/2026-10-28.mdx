@@ -1,0 +1,27 @@
+---
+tags: ["unreleased", "rest-api", "security", "deployment"]
+---
+
+## Keycloak service accounts (unreleased)
+
+A Keycloak client is now a service account only when it holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested org, and only for `keycloak.serviceAccountOrg` when that is set. Previously, every client credentials token was a service account in every org, so a Tenant's own client became its own Provider when it called `GET /v2/org/{org}/nico/service-account/current`.
+
+### Before upgrading
+
+<Warning title="Service account org is required in disconnected mode">
+In disconnected mode with `keycloak.serviceAccount: true`, set `keycloak.serviceAccountOrg`, otherwise `nico-rest-api` fails to start. Set it to the org whose client holds both roles, such as `ncx` for the bundled `ncx-service` client. The `helm-prereqs` values already set it. Refer to [Upgrading NICo](../../docs/manuals/upgrade.md) for the values change.
+</Warning>
+
+### Changed behavior
+
+- A client credentials token from a client that is not a service account is authorized by its roles in the requested org, like a user token. This includes `keycloak.serviceAccount: false`, where such a token previously got `401`.
+- In disconnected mode, a config with more than one `isServiceAccount: true` claim mapping across custom issuers fails to start.
+- In connected mode, Keycloak service accounts are allowed in every org unless `keycloak.serviceAccountOrg` is set, and custom issuer `isServiceAccount` mappings are accepted with no limit on their number.
+
+### New and changed configuration
+
+| Setting | Change |
+| --- | --- |
+| `keycloak.serviceAccountOrg` | New. Limits service accounts to one org. Required when `keycloak.serviceAccount` is `true` in disconnected mode, optional in connected mode. |
+| `keycloak.serviceAccount` | Now requires `keycloak.serviceAccountOrg` in disconnected mode. |
+| Custom issuer `isServiceAccount` and issuer `serviceAccount` | No longer limited to disconnected mode. |
