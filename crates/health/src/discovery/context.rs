@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
@@ -27,9 +28,11 @@ use carbide_uuid::machine::MachineId;
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
+use futures::future::join_all;
 use prometheus::{Histogram, HistogramOpts};
 use tokio::sync::Notify;
 
+use super::DiscoveryShutdown;
 use super::reachability::ReachabilitySpec;
 use crate::HealthError;
 use crate::api_client::ApiClientWrapper;
@@ -355,6 +358,21 @@ impl CollectorState {
         self.map(kind).len()
     }
 
+    /// Removes and returns every started collector, including reachability,
+    /// which `CollectorKind::ALL` omits.
+    fn take_all(&mut self) -> Vec<Collector> {
+        let mut collectors = Vec::new();
+
+        for kind in CollectorKind::ALL
+            .into_iter()
+            .chain(std::iter::once(CollectorKind::Reachability))
+        {
+            collectors.extend(self.map_mut(kind).drain().map(|(_, collector)| collector));
+        }
+
+        collectors
+    }
+
     pub(super) fn removed_keys(
         &self,
         active_keys: &HashSet<Cow<'static, str>>,
@@ -545,6 +563,32 @@ impl DiscoveryLoopContext {
             attributes: config.attributes.clone(),
         })
     }
+
+    /// Stops every started collector concurrently within `timeout`; collectors
+    /// still running when it passes are abandoned and counted as `timed_out`.
+    pub(crate) async fn drain_collectors(&mut self, timeout: Duration) -> DiscoveryShutdown {
+        let collectors = self.collectors.take_all();
+        let total = collectors.len();
+
+        if total == 0 {
+            return DiscoveryShutdown::default();
+        }
+
+        let closed = AtomicUsize::new(0);
+
+        let stops = collectors.into_iter().map(|collector| async {
+            collector.stop().await;
+            closed.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let finished = tokio::time::timeout(timeout, join_all(stops)).await.is_ok();
+        let closed = closed.load(Ordering::SeqCst);
+
+        DiscoveryShutdown {
+            closed,
+            timed_out: if finished { 0 } else { total - closed },
+        }
+    }
 }
 
 pub(crate) fn load_nmxc_schema_override(
@@ -645,5 +689,39 @@ mod tests {
             .expect("[tls.switch] config should be present");
 
         assert_eq!(actual_tls_config, &tls_config);
+    }
+
+    #[tokio::test]
+    async fn drain_collectors_stops_the_fleet_within_the_budget() {
+        let mut context = DiscoveryLoopContext::new(
+            Arc::new(crate::limiter::NoopLimiter),
+            Arc::new(MetricsManager::new("drain_collectors").expect("metrics manager")),
+            Arc::new(Config::default()),
+        )
+        .expect("context should initialize");
+
+        context.collectors.insert(
+            CollectorKind::Sensor,
+            Cow::Borrowed("stopping"),
+            noop_collector(),
+        );
+
+        context.collectors.insert(
+            CollectorKind::Reachability,
+            Cow::Borrowed("stopping-reachability"),
+            noop_collector(),
+        );
+
+        context.collectors.insert(
+            CollectorKind::Logs,
+            Cow::Borrowed("stuck"),
+            Collector::spawn_task(|_| async { std::future::pending::<()>().await }),
+        );
+
+        let shutdown = context.drain_collectors(Duration::from_millis(100)).await;
+
+        assert_eq!(shutdown.closed, 2);
+        assert_eq!(shutdown.timed_out, 1);
+        assert!(context.collectors.take_all().is_empty());
     }
 }
