@@ -462,6 +462,7 @@ async fn test_discover_dhcp_includes_site_ntp_server_ips(
     let mut config = get_config();
     config.ntp_servers = vec![
         "198.51.100.10".parse().unwrap(),
+        "2001:db8::123".parse().unwrap(),
         "198.51.100.11".parse().unwrap(),
     ];
     let env =
@@ -475,6 +476,7 @@ async fn test_discover_dhcp_includes_site_ntp_server_ips(
         .await?
         .into_inner();
 
+    // IPv6 entries are not valid DHCPv4 option 42 values and must be filtered out.
     assert_eq!(
         response.ntp_servers,
         vec!["198.51.100.10".to_string(), "198.51.100.11".to_string()]

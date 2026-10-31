@@ -507,18 +507,18 @@ To configure these flows:
    reachable from bare-metal hosts. This list is informational and is passed
    through to agents; it does not change how `nico-dhcp` itself serves leases.
    May be left as `[]`.
-6. **Set `ntp_servers`** in `siteConfig` to your IPv4 NTP server IPs. NICo uses this list to configure BMC NTP through Redfish during pre-ingestion, includes it in `DiscoverDhcp` responses, and passes it to DPU agents for DHCPv4 option 42.
+6. **Set `ntp_servers`** in `siteConfig` to your NTP server IP addresses (IPv4 or IPv6). NICo uses this list to configure BMC NTP through Redfish during pre-ingestion, includes IPv4 entries in `DiscoverDhcp` responses, and passes both families to DPU agents for DHCP NTP options. NICo sends the list to BMCs in configured order, and some BMCs keep only the first entries (two on HPE iLO and AMI, three on Dell), so list the preferred servers first. Whether a BMC accepts an IPv6 NTP server depends on its firmware.
 
 The values that `nico-dhcp` returns in DHCP options (nameservers, NTP servers, next-server, boot file, etc.) are sourced from:
 
-- The `ntp_servers` list in `siteConfig` — preferred for DHCP option 42 when non-empty.
-- The Kea hook parameters in the `nico-dhcp` Helm chart (`nico-nameserver`, `nico-ntpserver`, etc.) — set these to the `unbound.nico` (or `unbound.nico`, see [section 3](#3-dns-configuration)) recursive resolver VIP. `nico-ntpserver` is used only as a fallback when `siteConfig.ntp_servers` is empty.
+- The `ntp_servers` list in `siteConfig` — its IPv4 entries are preferred for DHCP option 42.
+- The Kea hook parameters in the `nico-dhcp` Helm chart (`nico-nameservers`, `nico-ntpserver`, etc.). Set `nico-nameservers` (the chart's `nameservers` value) to the `unbound.nico` recursive resolver VIP (see [section 3](#3-dns-configuration)). Set `nico-ntpserver` (the chart's `ntpServer` value) to one or more reachable IPv4 NTP service addresses, such as the `nico-ntp` LoadBalancer VIPs or a site NTP server. `nico-ntpserver` is used only as a fallback when `siteConfig.ntp_servers` contains no IPv4 address.
 - The per-segment definitions in `siteConfig` `[networks.<name>]` blocks — gateway, MTU, additional routes.
 
-The DPU-local DHCP server evaluates NTP precedence independently for each address family. Valid site-configured addresses replace service-discovered addresses only for the same family. When a family has no valid site-configured address, its service-discovered fallback is retained. Because `siteConfig.ntp_servers` accepts IPv4 addresses, it overrides DHCPv4 option 42 without suppressing service-discovered IPv6 servers advertised through DHCPv6 option 56.
+The DPU-local DHCP server evaluates NTP precedence independently for each address family. Valid site-configured addresses replace service-discovered addresses only for the same family. When a family has no valid site-configured address, its service-discovered fallback is retained. Site-configured IPv4 addresses override DHCPv4 option 42, and site-configured IPv6 addresses override DHCPv6 option 56 on the DPU-local DHCP server without suppressing unconfigured fallbacks.
 
 <Note>
-NICo does not run a standalone NTP service. Point `siteConfig.ntp_servers` to your enterprise IPv4 NTP servers. NICo also attempts to set those servers on host BMCs during pre-ingestion. If the Redfish operation fails repeatedly, pre-ingestion continues and the failure is logged.
+The optional `nico-ntp` chart runs chrony with one LoadBalancer VIP per replica. Point `siteConfig.ntp_servers` to the NTP servers that hosts and BMCs must use, either the `nico-ntp` VIPs or your enterprise NTP servers (IPv4 or IPv6). NICo also attempts to set those servers on host BMCs during pre-ingestion. If the Redfish operation fails repeatedly, pre-ingestion continues and the failure is logged.
 </Note>
 
 ### 2.3 How to Verify DHCP Is Working
@@ -627,7 +627,7 @@ The required DNS records are shown with both NTP names where they differ:
 | `nico-api.nico` | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Yes — `NICO_API_URL` env var on most clients |
 | `nico-pxe.nico` | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
 | `carbide-static-pxe.forge` (stock fallback) | 80 | Static PXE asset server VIP | Full Scout filesystem and update assets | **Yes, at boot.** Scout accepts `newrootfs=` for its full-image download and `pxe_uri=` for update checks. Embedded fallback URLs remain; see the [canonical endpoint reference](../configuration/dns-service-endpoints.md#nico-static-pxenico---static-boot-asset-server). |
-| `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | Operator-supplied NTP server IPs — A and AAAA records point at your existing NTP infrastructure, not a NICo-deployed service | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for IPv4. Configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
+| `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | NTP server IPs — A and AAAA records point at the `nico-ntp` VIPs or your existing NTP infrastructure | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for both families. When it has no IPv6 address, configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
 | `otel-receiver.nico` | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
 

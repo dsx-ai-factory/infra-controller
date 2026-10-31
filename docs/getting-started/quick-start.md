@@ -168,7 +168,7 @@ Open `helm-prereqs/values/nico-core.yaml` and update the following values:
   | `sitename` | Short identifier matching `siteName` in `values.yaml` |
   | `initial_domain_name` | Base DNS domain for the site (e.g. `mysite.example.com`) |
   | `dhcp_servers` | List of DHCP server IPs reachable from bare-metal hosts, or `[]` |
-  | `ntp_servers` | List of enterprise NTP server IPs for BMC time setup and DHCP option 42, or `[]` to use the legacy DHCP/DNS fallback |
+  | `ntp_servers` | List of enterprise NTP server IP addresses (IPv4 or IPv6) for BMC time setup and DHCP option 42 (IPv4 only), or `[]`. DHCP option 42 falls back to the legacy DHCP/DNS source when the list has no IPv4 entry |
   | `site_fabric_prefixes` | CIDRs that are part of the site fabric. Under mutual isolation, ETV uses these CIDRs for its isolation ACL and omitted `site_fabric_null_routes` inherits them for FNN blackholes |
   | `site_fabric_null_routes` | Optional FNN isolation CIDRs. Omit to inherit `site_fabric_prefixes`. Set `[]` to install no null routes |
   | `deny_prefixes` | CIDRs instances must not reach (OOB, control plane, management) |
