@@ -10517,6 +10517,7 @@ async fn handle_instance_network_config_update_request(
             // Legacy pending requests may carry obsolete endpoints. Only live state owns them.
             let mut new_config = update_request.new_config.clone();
             new_config.service_interfaces = current_instance.config.network.service_interfaces;
+            new_config.vpc_local_interfaces = current_instance.config.network.vpc_local_interfaces;
             // Update requested network config and increment version.
             db::instance::update_network_config(
                 txn.as_mut(),
