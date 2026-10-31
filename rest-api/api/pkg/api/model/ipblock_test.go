@@ -6,6 +6,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,9 +15,11 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
@@ -365,6 +368,126 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 			value, present := fields["managed"]
 			require.True(t, present, "false is a supported value, not an omitted field")
 			require.Equal(t, tc.dbObj.Managed, value)
+		})
+	}
+}
+
+func TestAPIIPBlockCreateRequest_ValidateTenant(t *testing.T) {
+	for _, row := range []struct {
+		name, prefix, routing, protocol string
+		bits                            int
+		description                     *string
+		valid                           bool
+	}{
+		{"largest private root", "10.0.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 8, nil, true},
+		{"smallest private root", "172.16.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 31, cutil.GetPtr(strings.Repeat("é", 512)), true},
+		{"third private range", "192.168.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 16, nil, true},
+		{"public IPv4", "8.8.8.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 24, nil, false},
+		{"private IPv6", "fd00::", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV6, 64, nil, false},
+		{"public routing", "10.0.0.0", cdbm.IPBlockRoutingTypePublic, cdbm.IPBlockProtocolVersionV4, 8, nil, false},
+		{"host route", "10.0.0.1", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 32, nil, false},
+		{"not network aligned", "10.0.0.1", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 24, nil, false},
+		{"range extends beyond RFC1918", "192.168.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 15, nil, false},
+		{"NUL description", "10.0.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 8, cutil.GetPtr("a\x00b"), false},
+		{"description byte limit", "10.0.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 8, cutil.GetPtr(strings.Repeat("é", 513)), false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			request := APIIPBlockCreateRequest{Name: "private-root", SiteID: uuid.NewString(), Prefix: row.prefix, PrefixLength: row.bits, RoutingType: row.routing, ProtocolVersion: row.protocol, Description: row.description}
+			assert.Equal(t, row.valid, request.ValidateTenant() == nil)
+		})
+	}
+	for _, row := range []struct {
+		name, value string
+	}{
+		{"embedded control character", "a\tb"},
+		{"non ASCII name", "réseau"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			request := APIIPBlockCreateRequest{Name: row.value, SiteID: uuid.NewString(), Prefix: "10.0.0.0", PrefixLength: 24, RoutingType: cdbm.IPBlockRoutingTypeDatacenterOnly, ProtocolVersion: cdbm.IPBlockProtocolVersionV4}
+			err := request.ValidateTenant()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "name")
+		})
+	}
+
+}
+
+func TestAPIIPBlockUpdateRequest_ValidateTenant(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		request APIIPBlockUpdateRequest
+		valid   bool
+	}{
+		{"omitted metadata", APIIPBlockUpdateRequest{}, true},
+		{"printable ASCII", APIIPBlockUpdateRequest{Name: cutil.GetPtr("private root-2")}, true},
+		{"embedded control character", APIIPBlockUpdateRequest{Name: cutil.GetPtr("a\tb")}, false},
+		{"non ASCII name", APIIPBlockUpdateRequest{Name: cutil.GetPtr("réseau")}, false},
+		{"Unicode and multiline description", APIIPBlockUpdateRequest{Description: cutil.GetPtr("réseau\nprivate")}, true},
+		{"empty description", APIIPBlockUpdateRequest{Description: cutil.GetPtr("")}, true},
+		{"NUL description", APIIPBlockUpdateRequest{Description: cutil.GetPtr("a\x00b")}, false},
+		{"description byte limit", APIIPBlockUpdateRequest{Description: cutil.GetPtr(strings.Repeat("é", 513))}, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			assert.Equal(t, row.valid, row.request.ValidateTenant() == nil)
+		})
+	}
+}
+
+func TestAPIIPBlockCreateRequest_ToSitePrefixCreationRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		description *string
+		want        string
+	}{
+		{"omitted description", nil, ""},
+		{"supplied description", cutil.GetPtr("private range"), "private range"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := uuid.New()
+			request := APIIPBlockCreateRequest{SitePrefixID: id, TenantOrg: "tenant-org", Name: "private", Description: tc.description, Prefix: "10.1.0.0", PrefixLength: 24}
+			got := request.ToSitePrefixCreationRequest()
+			require.Equal(t, id.String(), got.GetId().GetValue())
+			require.Equal(t, "tenant-org", got.TenantOrganizationId)
+			require.Equal(t, "10.1.0.0/24", got.Prefix)
+			require.Equal(t, "private", got.GetMetadata().GetName())
+			require.Equal(t, tc.want, got.GetMetadata().GetDescription())
+			wire, err := json.Marshal(request)
+			require.NoError(t, err)
+			require.NotContains(t, string(wire), id.String())
+			require.NotContains(t, string(wire), "tenant-org")
+		})
+	}
+}
+
+func TestAPIIPBlockUpdateRequest_ToSitePrefixUpdateRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		request                   APIIPBlockUpdateRequest
+		wantName, wantDescription string
+	}{
+		{"omitted fields preserve Core metadata", APIIPBlockUpdateRequest{}, "core-name", "core-description"},
+		{"rename preserves description", APIIPBlockUpdateRequest{Name: cutil.GetPtr("renamed")}, "renamed", "core-description"},
+		{"explicit empty description clears", APIIPBlockUpdateRequest{Description: cutil.GetPtr("")}, "core-name", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := uuid.New()
+			current := &corev1.SitePrefix{Id: &corev1.SitePrefixId{Value: id.String()}, Version: "v3", Metadata: &corev1.Metadata{Name: "core-name", Description: "core-description", Labels: []*corev1.Label{{Key: "owner", Value: cutil.GetPtr("retained")}}}}
+			before := proto.Clone(current)
+			tc.request.SitePrefixID, tc.request.TenantOrg = id, "tenant-org"
+			got := tc.request.ToSitePrefixUpdateRequest(current)
+			require.Equal(t, id.String(), got.GetId().GetValue())
+			require.Equal(t, "tenant-org", got.TenantOrganizationId)
+			require.Equal(t, "v3", got.GetIfVersionMatch())
+			require.NotNil(t, got.IfVersionMatch)
+			require.Equal(t, tc.wantName, got.Metadata.Name)
+			require.Equal(t, tc.wantDescription, got.Metadata.Description)
+			require.True(t, proto.Equal(current.Metadata.Labels[0], got.Metadata.Labels[0]))
+			got.Metadata.Labels[0].Key = "changed"
+			require.True(t, proto.Equal(before, current), "conversion must not mutate the authoritative snapshot")
+			wire, err := json.Marshal(tc.request)
+			require.NoError(t, err)
+			require.NotContains(t, string(wire), id.String())
+			require.NotContains(t, string(wire), "tenant-org")
 		})
 	}
 }

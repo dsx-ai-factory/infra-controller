@@ -187,8 +187,9 @@ func (tx *Tx) Rollback() error {
 	return tx.tx.Rollback()
 }
 
-// AcquireAdvisoryLock will "try" to take the specified advisory lock
-// on the transaction
+// AcquireAdvisoryLock takes the specified transaction advisory lock. Blocking
+// acquisition honors context cancellation and the transaction lock timeout.
+// Non-blocking acquisition returns ErrXactAdvisoryLockFailed on contention.
 // Error case:
 // -----------
 // if the lock is already held by another transaction, this will
@@ -213,7 +214,7 @@ func (tx *Tx) acquireAdvisoryLock(ctx context.Context, lockID uint64, blocking b
 
 	if blocking {
 		query := fmt.Sprintf("SELECT pg_advisory_xact_lock%s(%d)", sharedSuffix, lockID)
-		_, err := tx.tx.Exec(query)
+		_, err := tx.tx.ExecContext(ctx, query)
 		return err
 	}
 

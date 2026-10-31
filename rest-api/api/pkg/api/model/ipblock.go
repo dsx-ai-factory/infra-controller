@@ -7,14 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -35,8 +39,14 @@ const (
 	validationErrorIPv6BlockSizeMax       = "prefixLength must be at most 128"
 )
 
+// PostgreSQL text and SitePrefix inventory do not accept NUL in descriptions.
+var tenantIPBlockDescriptionRegexp = regexp.MustCompile(`^[^\x00]*$`)
+
 // APIIPBlockCreateRequest is the data structure to capture user request to create a new IPBlock
 type APIIPBlockCreateRequest struct {
+	// SitePrefixID and TenantOrg are supplied by the handler after authorization.
+	SitePrefixID uuid.UUID `json:"-"`
+	TenantOrg    string    `json:"-"`
 	// Name is the name of the IPBlock
 	Name string `json:"name"`
 	// Description is the description of the IPBlock
@@ -140,6 +150,9 @@ func (ipbcr *APIIPBlockCreateRequest) Validate() error {
 
 // APIIPBlockUpdateRequest is the data structure to capture user request to update an IPBlock
 type APIIPBlockUpdateRequest struct {
+	// SitePrefixID and TenantOrg are supplied by the handler after authorization.
+	SitePrefixID uuid.UUID `json:"-"`
+	TenantOrg    string    `json:"-"`
 	// Name is the name of the IPBlock
 	Name *string `json:"name"`
 	// Description is the description of the IPBlock
@@ -148,7 +161,6 @@ type APIIPBlockUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (ipbur APIIPBlockUpdateRequest) Validate() error {
-	fmt.Printf("%v", ipbur)
 	return validation.ValidateStruct(&ipbur,
 		validation.Field(&ipbur.Name,
 			// length validation rule accepts empty string as valid, hence, required is needed
@@ -310,4 +322,64 @@ type APIIPBlockUsageStats struct {
 	AvailableSmallestPrefixes uint64 `json:"availableSmallestPrefixes"`
 	// AcquiredPrefixes the number of acquired prefixes from the IPBlock
 	AcquiredPrefixes uint64 `json:"acquiredPrefixes"`
+}
+
+// ValidateTenant restricts tenant-created roots to Core's private IPv4 contract.
+func (r *APIIPBlockCreateRequest) ValidateTenant() error {
+	err := r.Validate()
+	if err != nil {
+		return err
+	}
+	prefix := netip.MustParsePrefix(fmt.Sprintf("%s/%d", r.Prefix, r.PrefixLength))
+	if r.RoutingType != cdbm.IPBlockRoutingTypeDatacenterOnly || !prefix.Addr().Is4() || prefix.Bits() < 8 || prefix.Bits() > 31 || !prefix.Addr().IsPrivate() {
+		return validation.Errors{"prefix": errors.New("tenant IP Blocks require DatacenterOnly RFC1918 IPv4 /8 through /31")}
+	}
+	// Aligned CIDRs beginning inside a private range must not extend beyond it.
+	private := false
+	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
+		root := netip.MustParsePrefix(cidr)
+		private = private || (root.Bits() <= prefix.Bits() && root.Contains(prefix.Addr()))
+	}
+	if !private {
+		return validation.Errors{"prefix": errors.New("tenant IP Block must be wholly contained in RFC1918 space")}
+	}
+	return validation.ValidateStruct(r,
+		validation.Field(&r.Name, validationis.PrintableASCII),
+		validation.Field(&r.Description, validation.Length(0, 1024), validation.Match(tenantIPBlockDescriptionRegexp).Error("must not contain NUL")),
+	)
+}
+
+// ValidateTenant checks metadata accepted by Core without changing provider validation.
+func (r APIIPBlockUpdateRequest) ValidateTenant() error {
+	err := r.Validate()
+	if err != nil {
+		return err
+	}
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Name, validationis.PrintableASCII),
+		validation.Field(&r.Description, validation.Length(0, 1024), validation.Match(tenantIPBlockDescriptionRegexp).Error("must not contain NUL")),
+	)
+}
+
+// ToSitePrefixCreationRequest maps a validated request to a tenant-owned Core root.
+func (r APIIPBlockCreateRequest) ToSitePrefixCreationRequest() *corev1.SitePrefixCreationRequest {
+	metadata := &corev1.Metadata{Name: r.Name}
+	if r.Description != nil {
+		metadata.Description = *r.Description
+	}
+	return &corev1.SitePrefixCreationRequest{Id: &corev1.SitePrefixId{Value: r.SitePrefixID.String()}, TenantOrganizationId: r.TenantOrg, Prefix: fmt.Sprintf("%s/%d", r.Prefix, r.PrefixLength), Metadata: metadata}
+}
+
+// ToSitePrefixUpdateRequest overlays supplied metadata on the validated Core snapshot.
+// The caller checks the snapshot's identity, ownership, metadata and version first.
+func (r APIIPBlockUpdateRequest) ToSitePrefixUpdateRequest(current *corev1.SitePrefix) *corev1.SitePrefixUpdateRequest {
+	metadata := proto.Clone(current.Metadata).(*corev1.Metadata)
+	if r.Name != nil {
+		metadata.Name = *r.Name
+	}
+	if r.Description != nil {
+		metadata.Description = *r.Description
+	}
+	version := current.Version
+	return &corev1.SitePrefixUpdateRequest{Id: &corev1.SitePrefixId{Value: r.SitePrefixID.String()}, TenantOrganizationId: r.TenantOrg, Metadata: metadata, IfVersionMatch: &version}
 }

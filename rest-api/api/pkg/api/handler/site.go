@@ -500,6 +500,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 
 			if apiRequest.Capabilities != nil {
 				siteUpdateInput.Config = &cdbm.SiteConfigUpdateInput{
+					TenantSitePrefix:          apiRequest.Capabilities.TenantSitePrefix,
 					NativeNetworking:          apiRequest.Capabilities.NativeNetworking,
 					NetworkSecurityGroup:      apiRequest.Capabilities.NetworkSecurityGroup,
 					Flow:                      apiRequest.Capabilities.Flow,
@@ -511,6 +512,9 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 			// Update Site
 			updated, derr := stDAO.Update(ctx, tx, siteUpdateInput)
 			if derr != nil {
+				if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+					return cutil.NewAPIError(http.StatusConflict, "Tenant IP Block mutation in progress; retry the request", nil)
+				}
 				logger.Error().Err(derr).Msg("error updating Site")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Site, DB error", nil)
 			}
@@ -1064,6 +1068,9 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 		// Delete Site
 		derr := stDAO.Delete(ctx, tx, stID)
 		if derr != nil {
+			if errors.Is(derr, cdb.ErrXactAdvisoryLockFailed) {
+				return cutil.NewAPIError(http.StatusConflict, "Tenant IP Block mutation in progress; retry the request", nil)
+			}
 			logger.Error().Err(derr).Msg("error deleting Site from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Site, error deleting Site in data store", nil)
 		}

@@ -1163,10 +1163,18 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: A Site with this name already exists, or tenant IP Block mutations did not finish within the lifecycle wait budget. Choose a different name or retry after concurrent mutations finish.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       tags:
         - Site
       description: |-
         Update a specific Site
+
+        Setting `capabilities.tenantSitePrefix` waits for admitted tenant IP Block REST transactions, for up to 50 seconds or the remaining request deadline. If the wait expires, the request returns 409 and can be retried. New tenant mutations cannot bypass a queued capability change. Other Site updates remain available. A Core operation already dispatched through Temporal can finish after its REST request is canceled and releases this fence; disabling the capability does not cancel such operations, and inventory can subsequently recover their roots.
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1212,6 +1220,12 @@ paths:
                     message: Deletion request was accepted
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Tenant IP Block mutations did not finish within the lifecycle wait budget; retry the request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       tags:
         - Site
       description: |-
@@ -1219,7 +1233,7 @@ paths:
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-        Site can only be deleted if all Allocations have been deleted.
+        Site can only be deleted if all Allocations have been deleted. Deletion waits for admitted tenant IP Block REST transactions, for up to 50 seconds or the remaining request deadline. If the wait expires, it returns 409 and can be retried. This fence ends when the REST transaction ends. A Core operation already dispatched through Temporal can finish after request cancellation and Site deletion; its root can remain in Core without a REST row because deleted Sites no longer accept inventory. Resolve uncertain tenant operations before deleting the Site.
       parameters:
         - schema:
             type: boolean
@@ -2422,6 +2436,7 @@ paths:
                       siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
                       infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
                       tenantId: null
+                      managed: true
                       routingType: Public
                       prefix: 202.168.1.0
                       prefixLength: 24
@@ -2444,7 +2459,7 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-ipblock
       description: |-
-        Retrieve the IP Blocks visible to the requesting organization. Tenant-created IP Blocks (`managed: false`) are not exposed through this API. Blocks allocated to Tenants by the Infrastructure Provider remain managed and visible within the requesting organization's scope.
+        Retrieve the IP Blocks visible to the requesting organization. Tenants see their allocated blocks (`managed: true`) and their own tenant-created blocks (`managed: false`). Providers see their managed blocks; tenant-created blocks are private to the owning tenant.
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix. `infrastructureProviderId` or `tenantId` query parameter may be required for older API versions.
       parameters:
@@ -2477,7 +2492,7 @@ paths:
             type: boolean
           in: query
           name: includeUsageStats
-          description: Include IP Block usage stats in response
+          description: Include IPAM usage statistics for managed IP Blocks. Tenant-created blocks do not use cloud IPAM and return null usageStats even when this is true. Defaults to false.
         - schema:
             type: string
           in: query
@@ -2522,18 +2537,37 @@ paths:
               - UPDATED_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Sort by name, prefix, status, creation time, or update time in the indicated direction before pagination. Defaults to CREATED_ASC. Ties use IP Block ID ascending.
     post:
       summary: Create IP Block
       operationId: create-ipblock
       responses:
         '201':
           description: Created
+          headers:
+            Location:
+              description: Relative URL of the created tenant IP Block, returned for tenant creation.
+              schema:
+                type: string
+                example: /v2/org/tenant-org/nico/ipblock/497f6eca-6276-4993-bfeb-53cbbbba6f08
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/IpBlock'
               examples:
+                tenant-created:
+                  value:
+                    id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    name: Tenant private network
+                    description: null
+                    siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+                    tenantId: 97c57510-b443-43b4-881c-974d4b86c87c
+                    managed: false
+                    routingType: DatacenterOnly
+                    prefix: 10.21.0.0
+                    prefixLength: 24
+                    protocolVersion: IPv4
+                    status: Provisioning
                 example-1:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
@@ -2542,6 +2576,7 @@ paths:
                     siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
                     infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
                     tenantId: null
+                    managed: true
                     routingType: Public
                     prefix: 202.168.1.0
                     prefixLength: 24
@@ -2559,7 +2594,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An IP Block conflicts with an existing name or address range, or Site fabric IP Blocks are being updated.
+          description: An IP Block conflicts with an existing name or address range, Site fabric IP Blocks are being updated, or a tenant mutation conflicts with a Site lifecycle change. Concurrent changes can be retried.
           content:
             application/json:
               schema:
@@ -2570,14 +2605,64 @@ paths:
                     source: nico
                     message: Site fabric IP Blocks are being updated; retry the request
                     data: null
+        '412':
+          description: Tenant-created IP Blocks are disabled, or Core admission preconditions are not met; inspect the response message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                capability-disabled:
+                  value:
+                    source: nico
+                    message: 'Tenant-created IP Blocks are disabled for this Site'
+                    data: null
+        '429':
+          description: Core tenant quota or Site isolation capacity exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                core-capacity:
+                  value:
+                    source: nico
+                    message: 'Core IP Block request failed: Too Many Requests'
+                    data: null
+        '503':
+          description: Site client or Core is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                site-client:
+                  value:
+                    source: nico
+                    message: 'Site client unavailable'
+                    data: null
+        '504':
+          description: Core request timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: 'Tenant IP Block request timed out'
+                    data: null
       description: |-
         Create an IP block for the org.
 
-        Only Infrastructure Providers can create a root IP Block. User must have authorization role with `PROVIDER_ADMIN` suffix.
+        A `PROVIDER_ADMIN` creates a managed provider root. A conflicting provider name or address range returns 409. A range conflicts when it overlaps another root IP Block of the Site, whatever its routing type. Provider creation also returns 409 while another Site fabric IP Block update holds the shared Site lock; retry the request. If the caller has both provider and tenant admin roles, creation uses the provider path.
 
-        Tenant IP Blocks are created via Allocation.
+        A `TENANT_ADMIN` without the provider admin role can create a private tenant root with `managed: false`. Site association and Registered status are checked when admitting the request. An admitted mutation may finish after the association or status changes. Removing the association does not revoke the owner's read access or ability to retire the block at a Registered Site. The provider-controlled `tenantSitePrefix` capability must be enabled (default false). The request uses the existing fields: `prefix` is a network-aligned IPv4 address, `prefixLength` is /8 through /31 wholly within RFC1918 space, `protocolVersion` is IPv4, and `routingType` is DatacenterOnly. Unknown fields, including caller-supplied ownership or managed values, are rejected. Tenant names require printable ASCII; descriptions permit Unicode and newlines but no NUL, with a limit of 1024 UTF-8 bytes.
 
-        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
+        Tenant creation writes the IP Block and calls Core CreateSitePrefix in one database transaction, using the same UUID for both resources. Success returns 201 with Provisioning status and a Location header. Core errors roll back the REST row and return a tenant-safe message without provider configuration or aggregate usage details, including quota errors as 429, invalid, denied, or overlapping tenant prefixes as 400, existing resource or concurrent Site mutation conflicts as 409, unmet Core admission preconditions as 412, unavailability as 503, and timeout as 504. If Core committed despite a lost response, subsequent SitePrefix inventory recreates the REST row with the same UUID. There is no create-retry key; clients should retrieve the recovered resource before retrying an uncertain create.
+
+        Tenant-created blocks remain outside cloud IPAM. Allocated tenant blocks retain their existing Allocation workflow and managed value of true. VPC Prefix and Subnet creation accept only allocated blocks; using tenant-created roots for VPC Prefixes is tracked by https://github.com/dsx-ai-factory/infra-controller/issues/3900. SitePrefix publication and final absence processing require the deployment described in https://github.com/dsx-ai-factory/infra-controller/issues/5763; the capability must remain disabled until that dependency is available. Complete the API and inventory-worker rollout before using tenant mutations; mixed-version writers do not share all admission guards.
       requestBody:
         content:
           application/json:
@@ -2629,6 +2714,7 @@ paths:
                     siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
                     infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
                     tenantId: null
+                    managed: true
                     routingType: Public
                     prefix: 192.168.20.0
                     prefixLength: 24
@@ -2656,7 +2742,7 @@ paths:
           $ref: '#/components/responses/NotFoundError'
       operationId: get-ipblock
       description: |-
-        Retrieve an IP Block by ID. Records outside the requesting organization's scope, including Tenant-created IP Blocks (`managed: false`), return the same 404 response as an unknown ID.
+        Retrieve an IP Block by ID. Tenants can retrieve both their allocated and tenant-created blocks. Tenant-created blocks are hidden from other tenants and from providers. Records outside the requesting organization's scope return the same 404 response as an unknown ID.
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix.
       parameters:
@@ -2678,7 +2764,7 @@ paths:
             type: boolean
           in: query
           name: includeUsageStats
-          description: Include IP Block usage stats in response
+          description: Include IPAM usage statistics for managed IP Blocks. Tenant-created blocks do not use cloud IPAM and return null usageStats even when this is true. Defaults to false.
         - schema:
             type: string
             enum:
@@ -2709,7 +2795,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: The IP Block is linked to an `OperatorManaged` SitePrefix. Remove the corresponding prefix from Core's `site_fabric_prefixes` configuration instead.
+          description: The IP Block is linked to an `OperatorManaged` SitePrefix, or a concurrent Site lifecycle change or mutation of the same tenant IP Block prevents admission. For OperatorManaged prefixes, remove the corresponding prefix from Core's `site_fabric_prefixes` configuration. Concurrent tenant mutations can be retried.
           content:
             application/json:
               schema:
@@ -2720,14 +2806,42 @@ paths:
                     source: nico
                     message: This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead
                     data: null
+        '503':
+          description: Site client or Core is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                site-client:
+                  value:
+                    source: nico
+                    message: 'Site client unavailable'
+                    data: null
+        '504':
+          description: Core request timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: 'Tenant IP Block request timed out'
+                    data: null
       description: |-
         Delete an IP block
 
-        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
+        For provider deletion, the org must have an Infrastructure Provider entity and the user must have `PROVIDER_ADMIN`. Only provider roots with no associated allocations can be deleted.
 
         If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
+        A Site fabric root linked to an `OperatorManaged` SitePrefix returns 409; remove the prefix from Core configuration instead. Allocated tenant blocks remain managed through Allocations.
+
+        A `TENANT_ADMIN` can delete its own tenant-created (`managed: false`) IP Block at a Registered Site. Retirement remains allowed when tenantSitePrefix is disabled or the Tenant Site association has been removed. The transaction sets Deleting and calls Core DeleteSitePrefix; a Core error other than NotFound rolls back the status change and is returned immediately. Success returns 202. Repeated deletion re-sends retirement to Core. Core NotFound also returns 202 for the known IP Block, including when an earlier retirement response was lost. The block stays visible as Deleting, and delayed Ready inventory cannot clear that status. Final removal through complete inventory absence depends on https://github.com/dsx-ai-factory/infra-controller/issues/5763.
+
+        Unknown IDs, other tenants' blocks, and allocated blocks requested by a tenant return 404. Providers cannot delete tenant-created blocks unless they also have the owning tenant's admin role.
       tags:
         - IP Block
     patch:
@@ -2749,6 +2863,7 @@ paths:
                     siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
                     infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
                     tenantId: null
+                    managed: true
                     routingType: Public
                     prefix: 202.168.16.0
                     prefixLength: 20
@@ -2767,14 +2882,76 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: A provider IP Block name conflicts with another block at the same Site, the tenant IP Block is Deleting, or a concurrent Site lifecycle change or mutation of the same IP Block prevents admission. Retry concurrent changes after the earlier operation completes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                deleting:
+                  value:
+                    source: nico
+                    message: 'IP Block is being deleted'
+                    data: null
+        '412':
+          description: The Core SitePrefix version changed, or Core reports that the prefix is being deleted while the REST status is not yet Deleting. The response does not distinguish these causes. Refresh the resource before retrying. After ownership, Site eligibility, and client availability checks pass, an IP Block with REST status Deleting returns 409 rather than 412.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                core-precondition:
+                  value:
+                    source: nico
+                    message: 'Core IP Block request failed: Precondition Failed'
+                    data: null
+        '502':
+          description: Core returned an invalid or inconsistent response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                core-response:
+                  value:
+                    source: nico
+                    message: 'Core returned an inconsistent SitePrefix'
+                    data: null
+        '503':
+          description: Site client or Core is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                site-client:
+                  value:
+                    source: nico
+                    message: 'Site client unavailable'
+                    data: null
+        '504':
+          description: Core request timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: 'Tenant IP Block request timed out'
+                    data: null
       description: |-
         Update an existing IP Block
 
-        Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
+        For provider updates, the org must have an Infrastructure Provider and the user must have `PROVIDER_ADMIN`. The IP Block must be a root belonging to that Provider.
 
         Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
+        A `TENANT_ADMIN` can update name and description on its own tenant-created (`managed: false`) IP Block at an associated, Registered Site, including when tenantSitePrefix is disabled. Names require printable ASCII; descriptions permit Unicode and newlines but no NUL, with a limit of 1024 UTF-8 bytes. Omitted or null metadata fields preserve their value; an empty description clears it. Unknown fields are rejected, and owner, Site, prefix, protocol version, routing type, and managed value cannot be changed. Deleting blocks return 409. Core metadata updates preserve labels and use the observed version to reject concurrent changes. The REST metadata update and Core call share a transaction; a Core error rolls back the REST change and is returned immediately. If Core committed despite a lost response or REST commit failure, GET can retain the earlier metadata until a successful PATCH reads Core metadata and applies the requested fields. Retry the desired metadata update to converge; inventory does not repair metadata.
+
+        Allocated tenant blocks remain managed through Allocations. Unknown IDs, other tenants' blocks, and allocated blocks requested by a tenant return 404. Providers cannot update tenant-created blocks unless they also have the owning tenant's admin role.
       requestBody:
         content:
           application/json:
@@ -2822,6 +2999,7 @@ paths:
                       description: This is the primary IP overlay for SJC4. All IPs are publicly routable
                       siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
                       infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
+                      managed: true
                       tenantId: 97c57510-b443-43b4-881c-974d4b86c87c
                       routingType: Public
                       prefix: 202.168.1.0
@@ -21447,6 +21625,10 @@ components:
       type: object
       description: Boolean flags to indicate features supported by a Site
       properties:
+        tenantSitePrefix:
+          type: boolean
+          default: false
+          description: Whether tenant administrators may create their own private IP Blocks at this Site. Provider-controlled and disabled by default. Disabling it preserves access to existing blocks. Enable only after SitePrefix inventory publication and absence processing are deployed (https://github.com/dsx-ai-factory/infra-controller/issues/5763).
         nativeNetworking:
           type: boolean
           description: 'Whether the Site supports native networking'
@@ -21624,6 +21806,11 @@ components:
       type: object
       description: Request to modify Site's capabilities. Partial update allowed, only specify capabilities that should be updated.
       properties:
+        tenantSitePrefix:
+          type:
+            - boolean
+            - 'null'
+          description: Enable or disable creation of tenant-owned private IP Blocks. Only Providers can update this field. Omission or null preserves the current value; the default is false. Disabling preserves read, metadata update, and deletion access to existing blocks. Enable only after SitePrefix inventory publication and absence processing are deployed (https://github.com/dsx-ai-factory/infra-controller/issues/5763).
         nativeNetworking:
           type:
             - boolean
@@ -33378,7 +33565,7 @@ components:
     IpBlock:
       title: IpBlock
       type: object
-      description: IP block contains information about an IPv4 address pool owned by the Infrastructure Provider and assigned as an overlay network for a particular Site. It is equivalent to Network Resource in product terminology.
+      description: An address range at a Site. Managed blocks are provider roots or tenant allocations; unmanaged blocks are private tenant-created Core SitePrefixes.
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: Public Network Overlay for Site SJC4
@@ -33576,7 +33763,7 @@ components:
     IpBlockCreateRequest:
       title: IpBlockCreateRequest
       type: object
-      description: Request data for creating IP block
+      description: Request data for creating an IP Block. Tenant creation requires a printable ASCII name, IPv4, DatacenterOnly, and a network-aligned RFC1918 prefix with length /8 through /31. The Site must be Registered, associated with the tenant, and have tenantSitePrefix enabled.
       examples:
         - name: Public Network Overlay for Site SJC4
           description: This is the primary IP overlay for SJC4. All IPs are publicly routable
@@ -33595,7 +33782,7 @@ components:
           type:
             - string
             - 'null'
-          description: 'Description of the IP Block'
+          description: 'Description of the IP Block. Tenant requests accept at most 1024 UTF-8 bytes and reject NUL.'
         siteId:
           type: string
           description: 'ID of the site'
@@ -33628,7 +33815,7 @@ components:
     IpBlockUpdateRequest:
       title: IpBlockUpdateRequest
       type: object
-      description: Request data for editing IP block
+      description: Request data for editing IP Block metadata. For tenant-created blocks, names require printable ASCII; omitted or null fields preserve the value; an empty description clears it. Only name and description can be updated.
       examples:
         - name: Public Network Overlay for Site SJC4
           description: This is the primary IP overlay for SJC4. All IPs are publicly routable
@@ -33644,7 +33831,7 @@ components:
           type:
             - string
             - 'null'
-          description: 'Description of the IP Block'
+          description: 'Description of the IP Block. Tenant requests accept at most 1024 UTF-8 bytes and reject NUL.'
     NetworkSecurityGroup:
       type: object
       examples:
