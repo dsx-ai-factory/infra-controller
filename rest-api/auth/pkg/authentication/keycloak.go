@@ -233,8 +233,3 @@ func (k *KeycloakAuthService) ClientCredentialsAuth(ctx context.Context, clientI
 		TokenType:    tokens.TokenType,
 	}, nil
 }
-
-// IsServiceAccountEnabled returns whether service accounts (client credentials) are enabled
-func (k *KeycloakAuthService) IsServiceAccountEnabled() bool {
-	return k.config.ServiceAccountEnabled
-}

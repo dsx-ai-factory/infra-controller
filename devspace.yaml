@@ -273,6 +273,7 @@ deployments:
               realm: nico-dev
               clientID: nico-api
               serviceAccount: true
+              serviceAccountOrg: test-org
         nico-rest-workflow:
           secrets:
             dbCreds: db-creds

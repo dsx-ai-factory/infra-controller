@@ -264,14 +264,14 @@ func TestLoginHandler_Handle_ClientCredentials(t *testing.T) {
 	mockServer := caa.CreateMockKeycloakServer(mockServerConfig)
 	defer mockServer.Close()
 
-	// Create real KeycloakAuthService with mock server
+	// Create real KeycloakAuthService with mock server and service accounts disabled, which must
+	// not block client credentials.
 	keycloakConfig := &config.KeycloakConfig{
-		BaseURL:               mockServer.URL,
-		ExternalBaseURL:       mockServer.URL,
-		ClientID:              "test-client",
-		ClientSecret:          "test-secret",
-		Realm:                 "nico",
-		ServiceAccountEnabled: true,
+		BaseURL:         mockServer.URL,
+		ExternalBaseURL: mockServer.URL,
+		ClientID:        "test-client",
+		ClientSecret:    "test-secret",
+		Realm:           "nico",
 	}
 
 	keycloakAuth := caa.NewKeycloakAuthService(keycloakConfig)
@@ -285,7 +285,7 @@ func TestLoginHandler_Handle_ClientCredentials(t *testing.T) {
 		wantErr        bool
 	}{
 		{
-			name: "successful client credentials authentication",
+			name: "successful client credentials authentication with service accounts disabled",
 			requestBody: cam.APILoginRequest{
 				ClientID:     stringPtr("test-client"),
 				ClientSecret: stringPtr("test-secret"),
@@ -337,86 +337,6 @@ func TestLoginHandler_Handle_ClientCredentials(t *testing.T) {
 				err = json.Unmarshal(rec.Body.Bytes(), &response)
 				require.NoError(t, err)
 				tt.validateResp(t, &response)
-			}
-		})
-	}
-}
-
-func TestLoginHandler_Handle_ClientCredentials_ServiceAccountsDisabled(t *testing.T) {
-	// Create mock Keycloak server
-	mockServerConfig := caa.MockKeycloakServerConfig{
-		Responses: caa.GetDefaultMockResponses(),
-		ValidCredentials: map[string]string{
-			"admin": "admin-password",
-		},
-		ValidTokens: map[string]bool{
-			"valid-access-token":   true,
-			"service-access-token": true,
-		},
-		ValidCodes: map[string]bool{
-			"valid-auth-code": true,
-		},
-	}
-
-	mockServer := caa.CreateMockKeycloakServer(mockServerConfig)
-	defer mockServer.Close()
-
-	// Create real KeycloakAuthService with service accounts disabled
-	keycloakConfig := &config.KeycloakConfig{
-		BaseURL:               mockServer.URL,
-		ExternalBaseURL:       mockServer.URL,
-		ClientID:              "test-client",
-		ClientSecret:          "test-secret",
-		Realm:                 "nico",
-		ServiceAccountEnabled: false, // Service accounts disabled
-	}
-
-	keycloakAuth := caa.NewKeycloakAuthService(keycloakConfig)
-	handler := NewLoginHandler(keycloakAuth)
-
-	tests := []struct {
-		name           string
-		requestBody    cam.APILoginRequest
-		expectedStatus int
-		expectedMsg    string
-		wantErr        bool
-	}{
-		{
-			name: "client credentials request when service accounts disabled",
-			requestBody: cam.APILoginRequest{
-				ClientID:     stringPtr("test-client"),
-				ClientSecret: stringPtr("test-secret"),
-			},
-			expectedStatus: http.StatusUnauthorized,
-			expectedMsg:    "Service accounts are not enabled",
-			wantErr:        false, // Handler returns HTTP error, not Go error
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create request
-			reqBody, err := json.Marshal(tt.requestBody)
-			require.NoError(t, err)
-
-			req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(reqBody))
-			req.Header.Set("Content-Type", "application/json")
-			rec := httptest.NewRecorder()
-			c := echo.New().NewContext(req, rec)
-
-			// Execute handler
-			err = handler.Handle(c)
-
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-			assert.Equal(t, tt.expectedStatus, rec.Code)
-
-			// Check error message contains expected text
-			if tt.expectedMsg != "" {
-				assert.Contains(t, rec.Body.String(), tt.expectedMsg)
 			}
 		})
 	}
