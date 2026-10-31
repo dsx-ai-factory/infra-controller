@@ -73,7 +73,7 @@ impl BucketLimiter {
     /// * `max_jitter` - Maximum random delay to spread requests
     pub fn new(capacity: usize, replenish_interval: Duration, max_jitter: Duration) -> Self {
         let epoch = Instant::now();
-        let capacity = (capacity as u64) * TOKEN_SCALE;
+        let capacity = (capacity as u64).saturating_mul(TOKEN_SCALE);
 
         Self {
             tokens: Arc::new(AtomicU64::new(capacity)),
@@ -139,7 +139,11 @@ impl BucketLimiter {
             {
                 self.tokens
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        Some((current + tokens_to_add_fixed).min(self.capacity))
+                        Some(
+                            current
+                                .saturating_add(tokens_to_add_fixed)
+                                .min(self.capacity),
+                        )
                     })
                     .ok();
             }
