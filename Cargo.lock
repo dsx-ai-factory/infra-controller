@@ -3048,6 +3048,7 @@ dependencies = [
  "carbide-version",
  "clap",
  "http-body",
+ "httpdate",
  "hyper",
  "hyper-util",
  "logfmt",
