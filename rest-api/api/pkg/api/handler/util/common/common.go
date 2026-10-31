@@ -750,9 +750,7 @@ func GetAllAllocationConstraintsForInstanceType(ctx context.Context, tx *cdb.Tx,
 // RollbackTx is called deferred in functions that create a transaction
 // if transaction was committed, this will do nothing
 func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
-	if committed != nil && !*committed {
-		tx.Rollback()
-	}
+	cdb.RollbackTx(ctx, tx, committed)
 }
 
 // HandleTxError translates an error returned by cdb.WithTx / cdb.WithTxResult

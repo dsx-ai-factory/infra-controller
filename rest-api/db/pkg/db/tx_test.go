@@ -4,8 +4,10 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"strconv"
@@ -15,10 +17,14 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/extra/bundebug"
 )
 
@@ -62,61 +68,101 @@ func testTxSetupSchema(t *testing.T, dbSession *Session) {
 	assert.Nil(t, err)
 }
 
-func TestTxBase(t *testing.T) {
-	dbSession := testTxGetTestSession(t)
-	defer dbSession.Close()
-	testTxSetupSchema(t, dbSession)
-	badSession, err := NewSession(context.Background(), "localhost", 1234, "postgres", "postgres", "postgres", "")
-	assert.Nil(t, err)
-	ctx := context.Background()
-	txOpts := sql.TxOptions{Isolation: sql.LevelRepeatableRead}
-	tests := []struct {
-		name      string
-		dbSession *Session
-		expectErr bool
-		commit    bool
-		rollback  bool
-	}{
-		{
-			name:      "error when bun's begintx fails",
-			dbSession: badSession,
-			expectErr: true,
-		},
-		{
-			name:      "success case with rollback",
-			dbSession: dbSession,
-			expectErr: false,
-			rollback:  true,
-		},
-		{
-			name:      "success case with commit",
-			dbSession: dbSession,
-			expectErr: false,
-			commit:    true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tx, err := BeginTx(ctx, tc.dbSession, &txOpts)
-			assert.Equal(t, tc.expectErr, err != nil)
-			if !tc.expectErr {
-				_, err := GetIDB(tx, tc.dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: "test"}).Exec(ctx)
-				assert.Nil(t, err)
-				if tc.commit {
-					assert.Nil(t, tx.Commit())
-					tt := &TestTable{}
-					err := GetIDB(nil, tc.dbSession).NewSelect().Model(tt).Where("name = ?", "test").Scan(ctx)
+func TestBeginTx(t *testing.T) {
+	t.Run("transaction lifecycle", func(t *testing.T) {
+		dbSession := testTxGetTestSession(t)
+		defer dbSession.Close()
+		testTxSetupSchema(t, dbSession)
+		badSession, err := NewSession(context.Background(), "localhost", 1234, "postgres", "postgres", "postgres", "")
+		assert.Nil(t, err)
+		ctx := context.Background()
+		txOpts := sql.TxOptions{Isolation: sql.LevelRepeatableRead}
+		tests := []struct {
+			name      string
+			dbSession *Session
+			expectErr bool
+			commit    bool
+			rollback  bool
+		}{
+			{
+				name:      "error when bun's begintx fails",
+				dbSession: badSession,
+				expectErr: true,
+			},
+			{
+				name:      "success case with rollback",
+				dbSession: dbSession,
+				expectErr: false,
+				rollback:  true,
+			},
+			{
+				name:      "success case with commit",
+				dbSession: dbSession,
+				expectErr: false,
+				commit:    true,
+			},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				tx, err := BeginTx(ctx, tc.dbSession, &txOpts)
+				assert.Equal(t, tc.expectErr, err != nil)
+				if !tc.expectErr {
+					_, err := GetIDB(tx, tc.dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: "test"}).Exec(ctx)
 					assert.Nil(t, err)
+					if tc.commit {
+						assert.Nil(t, tx.Commit())
+						tt := &TestTable{}
+						err := GetIDB(nil, tc.dbSession).NewSelect().Model(tt).Where("name = ?", "test").Scan(ctx)
+						assert.Nil(t, err)
+					}
+					if tc.rollback {
+						assert.Nil(t, tx.Rollback())
+						tt := &TestTable{}
+						err := GetIDB(nil, tc.dbSession).NewSelect().Model(tt).Where("name = ?", "test").Scan(ctx)
+						assert.NotNil(t, err)
+					}
 				}
-				if tc.rollback {
-					assert.Nil(t, tx.Rollback())
-					tt := &TestTable{}
-					err := GetIDB(nil, tc.dbSession).NewSelect().Model(tt).Where("name = ?", "test").Scan(ctx)
-					assert.NotNil(t, err)
+			})
+		}
+	})
+
+	t.Run("setup failure cleanup", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			rollbackErr error
+			wantLog     bool
+		}{
+			{name: "setup error is preserved"},
+			{name: "rollback failure is logged without replacing setup error", rollbackErr: errors.New("rollback connection failure"), wantLog: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sqlDB, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				bdb := bun.NewDB(sqlDB, pgdialect.New())
+				t.Cleanup(func() {
+					mock.ExpectClose()
+					require.NoError(t, bdb.Close())
+				})
+				setupErr := errors.New("lock timeout setup failed")
+				mock.ExpectBegin()
+				mock.ExpectExec("SET LOCAL lock_timeout").WillReturnError(setupErr)
+				mock.ExpectRollback().WillReturnError(tc.rollbackErr)
+				var logs bytes.Buffer
+				original := log.Logger
+				log.Logger = zerolog.New(&logs)
+				t.Cleanup(func() { log.Logger = original })
+				tx, err := BeginTx(context.Background(), &Session{DB: bdb}, nil)
+				require.ErrorIs(t, err, setupErr)
+				assert.Nil(t, tx)
+				if tc.wantLog {
+					assert.Contains(t, logs.String(), tc.rollbackErr.Error())
+				} else {
+					assert.Empty(t, logs.String())
 				}
-			}
-		})
-	}
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+		}
+	})
 }
 
 func TestTxGetIDB(t *testing.T) {
@@ -754,4 +800,88 @@ func TestGetBunTx(t *testing.T) {
 	assert.Nil(t, err)
 	buntxp := tx1.GetBunTx()
 	assert.NotNil(t, buntxp)
+}
+
+func TestRollbackTx(t *testing.T) {
+	rollbackErr := errors.New("rollback connection failure")
+	for _, tc := range []struct {
+		name          string
+		rollbackErr   error
+		committed     bool
+		nilFlag       bool
+		alreadyClosed bool
+		wantLog       bool
+	}{
+		{name: "successful rollback"},
+		{name: "rollback failure is logged", rollbackErr: rollbackErr, wantLog: true},
+		{name: "committed transaction is skipped", committed: true},
+		{name: "nil flag is skipped", nilFlag: true},
+		{name: "already closed transaction is quiet", alreadyClosed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlDB, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			bdb := bun.NewDB(sqlDB, pgdialect.New())
+			t.Cleanup(func() {
+				mock.ExpectClose()
+				require.NoError(t, bdb.Close())
+			})
+			mock.ExpectBegin()
+			btx, err := bdb.BeginTx(context.Background(), nil)
+			require.NoError(t, err)
+			tx := &Tx{tx: btx}
+			if tc.alreadyClosed || (!tc.committed && !tc.nilFlag) {
+				mock.ExpectRollback().WillReturnError(tc.rollbackErr)
+			}
+			if tc.alreadyClosed {
+				require.NoError(t, tx.Rollback())
+			}
+			var logs bytes.Buffer
+			original := log.Logger
+			log.Logger = zerolog.New(&logs)
+			t.Cleanup(func() { log.Logger = original })
+			committed := &tc.committed
+			if tc.nilFlag {
+				committed = nil
+			}
+			RollbackTx(context.Background(), tx, committed)
+			if tc.wantLog {
+				assert.Contains(t, logs.String(), rollbackErr.Error())
+				assert.Contains(t, logs.String(), "failed to rollback transaction")
+			} else {
+				assert.Empty(t, logs.String())
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+			if tc.committed || tc.nilFlag {
+				mock.ExpectRollback()
+				require.NoError(t, tx.Rollback())
+			}
+		})
+	}
+}
+
+func TestTx_RollbackWithLog(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	bdb := bun.NewDB(sqlDB, pgdialect.New())
+	t.Cleanup(func() {
+		mock.ExpectClose()
+		require.NoError(t, bdb.Close())
+	})
+	mock.ExpectBegin()
+	btx, err := bdb.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	rollbackErr := errors.New("rollback connection failure")
+	mock.ExpectRollback().WillReturnError(rollbackErr)
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).With().Str("MachineID", "machine-1").Logger()
+	tx := &Tx{tx: btx}
+	tx.RollbackWithLog(logger)
+	var record map[string]any
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+	assert.Equal(t, "machine-1", record["MachineID"])
+	assert.Equal(t, "error", record["level"])
+	assert.Equal(t, rollbackErr.Error(), record["error"])
+	assert.Equal(t, "failed to rollback transaction", record["message"])
+	require.NoError(t, mock.ExpectationsWereMet())
 }
