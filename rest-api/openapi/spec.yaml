@@ -9130,6 +9130,9 @@ paths:
                     source: nico
                     message: Failed to retrieve Machine Instance association
                     data: null
+        '501':
+          description: '`externalValidationRequestId` was specified, but external validation is not available at the Site.'
+          $ref: '#/components/responses/GenericHttpError'
         '503':
           description: Site communication unavailable. An uncertain outcome includes retryable false and recovery instructions.
           $ref: '#/components/responses/GenericHttpError'
@@ -11402,6 +11405,99 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       tags:
         - Machine
+  '/v2/org/{org}/nico/machine/external-validation/hold':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve all Machine external validation holds
+      operationId: get-all-machine-external-validation-hold
+      tags:
+        - Machine
+      x-fern-sdk-group-name:
+        - machine
+        - externalValidation
+      description: |-
+        Retrieve the active external validation holds at a Site. NICo places a hold on a Machine when the Site requires external validation for it. While the hold is active, the Machine can only be allocated through an external validation attempt by the Site's validation Tenant, which is set in the Site configuration. A hold leaves this list once its validation passes, the validation Instance is deleted, and local Machine validation succeeds.
+
+        Use this list to find Machines waiting for external validation, and to read `allocationStatus` of an attempt after a restart or a failed request. A held Machine reports `status` `Error` in Machine responses, so use this list rather than Machine status to find held Machines.
+
+        A Site without external validation returns `501`.
+
+        For Infrastructure Providers: Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Site, and the Tenant must be the Site's validation Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: siteId
+          required: true
+          description: ID of the Site
+        - schema:
+            type: string
+          in: query
+          name: machineId
+          description: ID of a Machine, to retrieve only the hold on that Machine
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - CREATED_ASC
+              - CREATED_DESC
+            default: CREATED_ASC
+          in: query
+          name: orderBy
+          description: Ordering by hold creation time, applied before pagination. Holds created at the same time are ordered by hold ID.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MachineExternalValidationHold'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":1,"orderBy":"CREATED_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: External validation is not available at the Site.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/machine/{machineId}':
     parameters:
       - schema:
@@ -12534,7 +12630,9 @@ paths:
       description: |-
         Retrieve validation runs for a specific Machine.
 
-        Org must have an Infrastructure Provider entity that owns the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
+        For Infrastructure Providers: Org must have an Infrastructure Provider entity that owns the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Machine's Site. User must have authorization role with `TENANT_ADMIN` suffix.
     post:
       summary: Create an on-demand Machine validation run
       tags:
@@ -12609,7 +12707,287 @@ paths:
       description: |-
         Retrieve validation results for a specific Machine.
 
+        For Infrastructure Providers: Org must have an Infrastructure Provider entity that owns the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Machine's Site. User must have authorization role with `TENANT_ADMIN` suffix. Validation output is stored unredacted, so `stdOut` and `stdErr` are empty in results returned to Tenants.
+  '/v2/org/{org}/nico/machine/{machineId}/external-validation/attempt':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    post:
+      summary: Start a Machine external validation attempt
+      operationId: start-machine-external-validation-attempt
+      tags:
+        - Machine
+      x-fern-sdk-group-name:
+        - machine
+        - externalValidation
+      description: |-
+        Start an external validation attempt for a Machine with an active external validation hold. Then create the validation Instance with [Create an Instance](#tag/Instance/operation/create-instance), passing the attempt `id` as `externalValidationRequestId`.
+
+        Persist `idempotencyKey` before calling. Replaying the same key returns the attempt it started, even after that attempt has finished. A new key is rejected with `409` while another attempt is open, and `data.id` in the error is the ID of the open attempt.
+
+        A Site without external validation returns `501`.
+
+        Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Machine's Site, and the Tenant must be the Site's validation Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineExternalValidationAttemptCreateRequest'
+      responses:
+        '200':
+          description: The `idempotencyKey` was used before. The attempt it started is returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineExternalValidationAttempt'
+        '201':
+          description: A new attempt was started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineExternalValidationAttempt'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another attempt is open for the Machine. `data.id` is the ID of the open attempt.
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: No hold on the Machine can take a new attempt. The hold may be cleared, the Machine may not be `Ready` or may be assigned, a health alert such as `RequestRepair` may block allocation, or the previous attempt may still be awaiting cleanup or recovery.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: External validation is not available at the Machine's Site.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/machine/{machineId}/external-validation/attempt/{attemptId}/complete':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+      - schema:
+          type: string
+          format: uuid
+        name: attemptId
+        in: path
+        required: true
+        description: ID of the external validation attempt
+    post:
+      summary: Complete a Machine external validation attempt
+      operationId: complete-machine-external-validation-attempt
+      tags:
+        - Machine
+      x-fern-sdk-group-name:
+        - machine
+        - externalValidation
+      description: |-
+        Record the result of an external validation attempt after its validation Instance was created. After recording any result, delete the validation Instance with [Delete an Instance](#tag/Instance/operation/delete-instance). NICo removes the hold only after a `Passed` result, Instance deletion and local Machine validation all succeed.
+
+        To abandon an attempt after its validation Instance was created, complete it with `outcome` `Cancelled`. Repeating an identical request returns the recorded attempt.
+
+        A Site without external validation returns `501`.
+
+        Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Machine's Site, and the Tenant must be the Site's validation Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineExternalValidationAttemptCompleteRequest'
+      responses:
+        '200':
+          description: The result was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineExternalValidationAttempt'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The attempt is no longer current, a different result was already recorded, or `instanceId` is not the attempt's validation Instance.
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: External validation is not available at the Machine's Site.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/machine/{machineId}/external-validation/attempt/{attemptId}/cancel':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+      - schema:
+          type: string
+          format: uuid
+        name: attemptId
+        in: path
+        required: true
+        description: ID of the external validation attempt
+    post:
+      summary: Cancel a Machine external validation attempt
+      operationId: cancel-machine-external-validation-attempt
+      tags:
+        - Machine
+      x-fern-sdk-group-name:
+        - machine
+        - externalValidation
+      description: |-
+        Cancel an external validation attempt while its `allocationStatus` is `NotStarted`. After the validation Instance is created, complete the attempt with `outcome` `Cancelled` instead. Repeating an identical request returns the cancelled attempt.
+
+        A Site without external validation returns `501`.
+
+        Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Machine's Site, and the Tenant must be the Site's validation Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineExternalValidationAttemptCancelRequest'
+      responses:
+        '200':
+          description: The attempt was cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineExternalValidationAttempt'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The attempt is no longer current, or it was already cancelled with different `details`.
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: The validation Instance allocation for the attempt has started.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: External validation is not available at the Machine's Site.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/machine/{machineId}/external-validation/hold/{holdId}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+      - schema:
+          type: string
+          format: uuid
+        name: holdId
+        in: path
+        required: true
+        description: ID of the external validation hold
+    delete:
+      summary: Delete a Machine external validation hold
+      operationId: delete-machine-external-validation-hold
+      tags:
+        - Machine
+      x-fern-sdk-group-name:
+        - machine
+        - externalValidation
+      description: |-
+        Remove an external validation hold from a Machine without a passing validation. Delete any validation Instance for the hold first. Once the hold is removed, the Machine can be allocated unless another health alert blocks it.
+
+        The `reason` is recorded with the removal. Repeating an identical request succeeds without affecting a newer hold on the Machine.
+
+        A Site without external validation returns `501`.
+
         Org must have an Infrastructure Provider entity that owns the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineExternalValidationHoldDeleteRequest'
+      responses:
+        '204':
+          description: The hold was removed.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: '`holdId` is not the current hold on the Machine, or the hold was already removed with a different `reason`.'
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: The validation Instance allocation or cleanup for the hold is not resolved.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: External validation is not available at the Machine's Site.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/machine/{machineId}/status-history':
     parameters:
       - schema:
@@ -20520,10 +20898,10 @@ components:
           description: Arguments supplied to the validation command.
         stdOut:
           type: string
-          description: Standard output from the validation command.
+          description: Standard output from the validation command. Empty in results returned to Tenants.
         stdErr:
           type: string
-          description: Standard error from the validation command.
+          description: Standard error from the validation command. Empty in results returned to Tenants.
         context:
           type: string
           description: Context in which the validation test ran.
@@ -20544,6 +20922,210 @@ components:
         testID:
           type: string
           description: ID of the validation test.
+    MachineExternalValidationHold:
+      type: object
+      title: MachineExternalValidationHold
+      description: Allocation gate that keeps a Machine out of regular allocation until its external validation passes
+      examples:
+        - id: 3c1f6a2e-8b4d-4e7a-9f15-6d2c8b0a4e93
+          machineId: fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30
+          siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+          tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+          status: AttemptOpen
+          recoveryReason: null
+          attempt:
+            id: b7e4c9a1-2f3d-4c8e-a6b5-1d9f0e7c3a24
+            holdId: 3c1f6a2e-8b4d-4e7a-9f15-6d2c8b0a4e93
+            idempotencyKey: 0d5a8e3c-7b1f-4a92-8c6e-4f2b9d1a7e58
+            status: Open
+            allocationStatus: Created
+            instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+            details: null
+            created: '2026-10-20T18:05:00Z'
+          created: '2026-10-20T18:00:00Z'
+      required:
+        - id
+        - machineId
+        - siteId
+        - tenantId
+        - status
+        - recoveryReason
+        - attempt
+        - created
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: ID of the hold.
+        machineId:
+          type: string
+          description: ID of the held Machine.
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Machine belongs to.
+        tenantId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the Site's validation Tenant. Null when no Tenant exists for the org named in the Site configuration.
+        status:
+          type: string
+          enum:
+            - Pending
+            - AttemptOpen
+            - AwaitingCleanup
+            - Recovery
+          description: |-
+            Status of the hold. `Pending` means the hold has no attempt. `AttemptOpen` means an attempt can allocate the validation Instance. `AwaitingCleanup` means a result was recorded, and the validation Instance deletion or local Machine validation has not finished. `Recovery` means the hold needs operator attention, as described in `recoveryReason`.
+        recoveryReason:
+          type:
+            - string
+            - 'null'
+          description: Why the hold needs operator attention. Set only when `status` is `Recovery`.
+        attempt:
+          oneOf:
+            - $ref: '#/components/schemas/MachineExternalValidationAttempt'
+            - type: 'null'
+          description: Current attempt on the hold. Null when `status` is `Pending`.
+        created:
+          type: string
+          format: date-time
+          description: Time the hold was created.
+    MachineExternalValidationAttempt:
+      type: object
+      title: MachineExternalValidationAttempt
+      description: External validation attempt on a held Machine
+      examples:
+        - id: b7e4c9a1-2f3d-4c8e-a6b5-1d9f0e7c3a24
+          holdId: 3c1f6a2e-8b4d-4e7a-9f15-6d2c8b0a4e93
+          idempotencyKey: 0d5a8e3c-7b1f-4a92-8c6e-4f2b9d1a7e58
+          status: Open
+          allocationStatus: NotStarted
+          instanceId: null
+          details: null
+          created: '2026-10-20T18:05:00Z'
+      required:
+        - id
+        - holdId
+        - idempotencyKey
+        - status
+        - allocationStatus
+        - instanceId
+        - details
+        - created
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: ID of the attempt. Pass it as `externalValidationRequestId` when creating the validation Instance.
+        holdId:
+          type: string
+          format: uuid
+          description: ID of the hold the attempt belongs to.
+        idempotencyKey:
+          type: string
+          format: uuid
+          description: Key the attempt was started with.
+        status:
+          type: string
+          enum:
+            - Open
+            - Passed
+            - Failed
+            - Cancelled
+          description: Status of the attempt. `Open` until a result is recorded, and `Passed`, `Failed` and `Cancelled` are final.
+        allocationStatus:
+          type: string
+          enum:
+            - NotStarted
+            - Creating
+            - Created
+          description: |-
+            Progress of the validation Instance allocation. `NotStarted` means no allocation was accepted, so the attempt can be cancelled or the Instance create corrected. `Creating` means an allocation was accepted but its outcome is not known, so send the identical Instance create again. `Created` means the validation Instance exists.
+        instanceId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the validation Instance. Null until the Instance is created, and kept after the Instance is deleted.
+        details:
+          type:
+            - string
+            - 'null'
+          description: Text recorded when the attempt was completed or cancelled.
+        created:
+          type: string
+          format: date-time
+          description: Time the attempt was started.
+    MachineExternalValidationAttemptCreateRequest:
+      type: object
+      title: MachineExternalValidationAttemptCreateRequest
+      description: Request to start an external validation attempt
+      examples:
+        - idempotencyKey: 0d5a8e3c-7b1f-4a92-8c6e-4f2b9d1a7e58
+      required:
+        - idempotencyKey
+      properties:
+        idempotencyKey:
+          type: string
+          format: uuid
+          description: Caller-generated key for this start request. Persist it before calling, so a replay returns the attempt it started.
+    MachineExternalValidationAttemptCompleteRequest:
+      type: object
+      title: MachineExternalValidationAttemptCompleteRequest
+      description: Request to record the result of an external validation attempt
+      examples:
+        - outcome: Passed
+          instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          details: 'Validation run 4821: all checks passed'
+      required:
+        - outcome
+        - instanceId
+      properties:
+        outcome:
+          type: string
+          enum:
+            - Passed
+            - Failed
+            - Cancelled
+          description: Result of the external validation. Only `Passed` lets NICo remove the hold.
+        instanceId:
+          type: string
+          format: uuid
+          description: ID of the validation Instance created for the attempt.
+        details:
+          type:
+            - string
+            - 'null'
+          description: Text or a reference to the external result, at most 4096 bytes of UTF-8.
+    MachineExternalValidationAttemptCancelRequest:
+      type: object
+      title: MachineExternalValidationAttemptCancelRequest
+      description: Request to cancel an external validation attempt before its validation Instance allocation starts
+      examples:
+        - details: Validation run 4821 was aborted before allocation
+      required:
+        - details
+      properties:
+        details:
+          type: string
+          minLength: 1
+          description: Reason for cancelling the attempt, at most 4096 bytes of UTF-8.
+    MachineExternalValidationHoldDeleteRequest:
+      type: object
+      title: MachineExternalValidationHoldDeleteRequest
+      description: Request to remove an external validation hold
+      examples:
+        - reason: Machine is exempt from external validation for this Site
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          description: Reason for removing the hold, recorded with the removal. At most 4096 bytes of UTF-8.
     InfrastructureProvider:
       description: Infrastructure providers own and manage datacenters
       type: object
@@ -25661,6 +26243,12 @@ components:
         allowUnhealthyMachine:
           type: boolean
           description: Set to true in order to target Machines are in maintenance or have health alerts preventing regular provision flow. Requires Targeted Instance Creation capability enabled for Tenant
+        externalValidationRequestId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the external validation attempt this Instance is created for, from [Start a Machine external validation attempt](#tag/Machine/operation/start-machine-external-validation-attempt). Requires `machineId` and `allowUnhealthyMachine` set to `true`. A Site without external validation rejects the request with `501`.
       required:
         - name
         - tenantId

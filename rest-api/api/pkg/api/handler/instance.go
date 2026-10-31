@@ -472,6 +472,12 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(verr).Msg("error validating Instance creation request data")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating Instance creation request data", verr)
 	}
+
+	// TODO: Bind the allocation to the external validation attempt once Core accepts the request ID.
+	if apiRequest.ExternalValidationRequestID != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusNotImplemented, machineExternalValidationNotImplementedMessage, nil)
+	}
+
 	logger.Info().Interface("MachineLabelSelector", apiRequest.MachineLabelSelector).
 		Msg("validated Instance creation placement selector")
 
