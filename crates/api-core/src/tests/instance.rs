@@ -3051,12 +3051,17 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
         let waiting = ManagedHostState::Assigned {
             instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
         };
-        env.run_machine_state_controller_iteration_until_state_matches(
-            &mh.id.into(),
-            10,
-            waiting.clone(),
-        )
-        .await;
+        // Observe each transition once: requeueing can skip this intermediate wait.
+        for _ in 0..10 {
+            env.run_machine_state_controller_iteration_no_requeue()
+                .await;
+            let mut txn = env.db_txn().await;
+            let state = mh.snapshot(&mut txn).await.managed_state;
+            txn.commit().await.unwrap();
+            if state == waiting {
+                break;
+            }
+        }
 
         let mut txn = env.db_txn().await;
         let snapshot = mh.snapshot(&mut txn).await;
@@ -3247,7 +3252,9 @@ async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
             "{scenario}"
         );
         txn.commit().await.unwrap();
-        env.run_machine_state_controller_iteration().await;
+        // Keep the immediate successor visible even while another host is queued.
+        env.run_machine_state_controller_iteration_no_requeue()
+            .await;
         let mut txn = env.db_txn().await;
         let snapshot = mh.snapshot(&mut txn).await;
         assert_eq!(
