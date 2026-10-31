@@ -17,6 +17,16 @@ rest_api_dir = os.path.join(repo_root, 'rest-api')
 rest_api_docker_local = os.path.join(rest_api_dir, 'docker/local')
 values_file = os.path.join(tilt_dir, 'values.yaml')
 kea_version = str(read_file(os.path.join(repo_root, 'dev/docker/kea.version'))).strip()
+docker_platform = str(local(['docker', 'info', '--format', '{{.OSType}}/{{.Architecture}}'], quiet=True)).strip()
+native_platforms = {
+    'linux/amd64': ('linux/amd64', 'x86_64'),
+    'linux/x86_64': ('linux/amd64', 'x86_64'),
+    'linux/arm64': ('linux/arm64', 'aarch64'),
+    'linux/aarch64': ('linux/arm64', 'aarch64'),
+}
+if docker_platform not in native_platforms:
+    fail('Local development requires a Linux AMD64 or ARM64 Docker daemon; got %s' % docker_platform)
+build_platform, compiler_arch = native_platforms[docker_platform]
 
 all_values = read_yaml(values_file)
 tilt_values = all_values['tilt']
@@ -190,6 +200,7 @@ def rest_image(name, dockerfile, only):
         'localhost/%s' % name,
         rest_api_dir,
         dockerfile=os.path.join(rest_api_docker_local, dockerfile),
+        platform=build_platform,
         only=only + [
             'go.mod',
             'go.sum',
@@ -855,18 +866,21 @@ local_resource(
 
 docker_build(
     'nico-tilt-runtime-base',
-    tilt_dir,
-    dockerfile=os.path.join(tilt_dir, 'Dockerfile.runtime-base'),
-    only=['Dockerfile.runtime-base'],
+    repo_root,
+    dockerfile=os.path.join(repo_root, 'dev/docker/Dockerfile.dev-runtime'),
+    only=['dev/docker/Dockerfile.dev-runtime'],
+    platform=build_platform,
 )
 docker_build(
     'build-container-localdev',
-    os.path.join(repo_root, 'dev/docker'),
+    repo_root,
     dockerfile=os.path.join(
         repo_root,
-        'dev/docker/Dockerfile.build-container-x86_64',
+        'dev/docker/Dockerfile.build-container-%s' % compiler_arch,
     ),
+    only=['dev/docker'],
     build_args={'KEA_VERSION': kea_version},
+    platform=build_platform,
 )
 # A target packages only the service being refreshed. Cargo caches are shared.
 core_images = [
@@ -884,9 +898,14 @@ for image, target in core_images:
     docker_build(
         image,
         repo_root,
-        dockerfile=os.path.join(tilt_dir, 'Dockerfile.core'),
+        dockerfile=os.path.join(repo_root, 'dev/docker/Dockerfile.dev-services'),
         target=target,
-        build_args={'KEA_VERSION': kea_version},
+        build_args={
+            'KEA_VERSION': kea_version,
+            'CONTAINER_BUILD': 'build-container-localdev',
+            'CONTAINER_RUNTIME': 'nico-tilt-runtime-base',
+        },
+        platform=build_platform,
     )
 docker_build(
     'mat-k8s-controller',
@@ -896,6 +915,7 @@ docker_build(
         'Dockerfile.mat-k8s-controller',
     ),
     only=['dev/k8s/machine-a-tron-controller'],
+    platform=build_platform,
 )
 
 rest_image(
