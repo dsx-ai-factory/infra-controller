@@ -262,8 +262,16 @@ request handling. nico-dns exposes query rates and resolution latency.
 
 ### Console services
 
-nico-ssh-console-rs exposes `carbide_ssh_console_*` metrics for BMC connection counts,
-session durations and error rates. This is useful for debugging console access issues.
+nico-ssh-console-rs exposes legacy `ssh_console_*` metrics for console sessions,
+BMC connections, and errors, plus `carbide_ssh_console_*` counters.
+`carbide_ssh_console_bmc_recovery_attempts_total` counts iterations of the BMC
+connection recovery loop, excluding each client's initial iteration. This
+service-wide counter has no labels, survives BMC client recreation, and resets
+when the service restarts. The legacy `ssh_console_bmc_recovery_attempts` gauge
+provides per-machine values through its `machine_id` label and resets when that
+client is recreated. `carbide_ssh_console_stream_lines_dropped_total` counts lines
+omitted from individual console-log gRPC streams. Its `reason` label is
+`client_queue_full` or `completed_line_broadcast_lag`.
 
 ## 3. Collection architecture
 
