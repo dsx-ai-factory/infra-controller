@@ -221,8 +221,10 @@ not a separate top-level workflow.
 
 ```mermaid
 flowchart TD
-    A["Ordered component differs from default"] --> B{"Packaged Scout script exists?"}
-    B -- Yes --> C["Send verified task and artifacts to Scout"]
+    A["Ordered component differs from default"] --> S{"Firmware entry names a Scout script URL?"}
+    S -- Yes --> C["Send verified task and artifacts to Scout"]
+    S -- No --> B{"Packaged Scout script exists?"}
+    B -- Yes --> C
     B -- No --> D{"Firmware entry has legacy script?"}
     D -- Yes --> E["Run local script from NICo Core"]
     D -- No --> F["Download artifact and upload through Redfish"]
@@ -235,13 +237,16 @@ flowchart TD
 
 The route precedence is:
 
-1. **Scout script.** NICo first looks for a packaged
+1. **Scout script.** If the firmware entry sets `scout.script.url`, NICo sends
+   Scout that URL, its digest, and the entry's `scout` timeouts. Refer to
+   [Scout script by URL](configuration.md#scout-script-by-url). Otherwise NICo
+   looks for a packaged
    `/opt/carbide/scout-firmware-scripts/<vendor>/<model>/<component>/upgrade.sh`
-   and its `metadata.toml`. If present, NICo sends Scout the verified script,
-   artifact URLs and digests, and execution timeouts. Scout downloads and
-   verifies the files, runs the script on the host, and reports the result.
-1. **Core-local script.** If no Scout script exists and the firmware entry has
-   `script`, NICo runs that legacy script on the Core service with the BMC
+   and its `metadata.toml`, and sends Scout that script and the timeouts from
+   its metadata. Either way, Scout downloads and verifies the script and
+   artifacts, runs the script on the host, and reports the result.
+1. **Core-local script.** If there is no script URL or packaged Scout script and
+   the firmware entry has `script`, NICo runs that legacy script on the Core service with the BMC
    address and credentials in its environment. The script is responsible for
    installation and activation; after it succeeds, NICo returns to inventory
    checking.
