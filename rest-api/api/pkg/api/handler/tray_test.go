@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	temporalEnums "go.temporal.io/api/enums/v1"
+	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
@@ -1367,20 +1368,23 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 	tenantUser := testTrayBuildUser(t, dbSession, "tenant-user-pc-tray", org, []string{authz.TenantAdminRole})
 
 	handler := NewUpdateTrayPowerStateHandler(dbSession, nil, scp, cfg)
+	e.PATCH("/v2/org/:orgName/nico/tray/:id/power", handler.Handle)
 
 	trayID := uuid.New().String()
 
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		reqOrg         string
-		user           *cdbm.User
-		trayID         string
-		body           string
-		mockTaskIDs    []*flowv1.UUID
-		mockResultErr  error
-		expectedStatus int
+		name              string
+		reqOrg            string
+		user              *cdbm.User
+		trayID            string
+		expectedTrayID    string
+		malformedEncoding bool
+		body              string
+		mockTaskIDs       []*flowv1.UUID
+		mockResultErr     error
+		expectedStatus    int
 	}{
 		{
 			name:           "failure - Flow rejects operation",
@@ -1396,9 +1400,49 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			reqOrg:         org,
 			user:           providerUser,
 			trayID:         trayID,
+			expectedTrayID: trayID,
 			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "encoded MAC",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         "d8%3Aab%3Acd%3Aef%3A00%3A01",
+			expectedTrayID: "d8:ab:cd:ef:00:01",
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "decoded once",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         "unit%252Flabel",
+			expectedTrayID: "unit%2Flabel",
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "decoded once with RawPath",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         "unit%3Along%252Flabel",
+			expectedTrayID: "unit:long%2Flabel",
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:              "malformed encoding",
+			reqOrg:            org,
+			user:              providerUser,
+			trayID:            "d8%ZZ",
+			malformedEncoding: true,
+			body:              fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus:    http.StatusBadRequest,
 		},
 		{
 			name:           "success - power off tray",
@@ -1463,18 +1507,32 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			} else {
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
 			}
-			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
+			var started tClient.StartWorkflowOptions
+			var powerOnRequest flowv1.PowerOnRackRequest
+			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Run(func(args mock.Arguments) {
+					if tt.expectedTrayID != "" {
+						started = args.Get(1).(tClient.StartWorkflowOptions)
+						testFlowProxyRequest(t, args, &powerOnRequest)
+					}
+				}).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			path := fmt.Sprintf("/v2/org/%s/nico/tray/%s/power", tt.reqOrg, tt.trayID)
 
+			if tt.malformedEncoding {
+				path = fmt.Sprintf("/v2/org/%s/nico/tray/safe/power", tt.reqOrg)
+			}
+
 			req := httptest.NewRequest(http.MethodPatch, path, strings.NewReader(tt.body))
+			if tt.malformedEncoding {
+				req.URL.RawPath = fmt.Sprintf("/v2/org/%s/nico/tray/%s/power", tt.reqOrg, tt.trayID)
+			}
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
 			ec := e.NewContext(req, rec)
-			ec.SetParamNames("orgName", "id")
-			ec.SetParamValues(tt.reqOrg, tt.trayID)
+			e.Router().Find(http.MethodPatch, echo.GetPath(req), ec)
 			ec.Set("user", tt.user)
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
@@ -1486,6 +1544,19 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.malformedEncoding {
+				var response map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, "Tray identifier in URL is invalid", response["message"])
+				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			}
+			if tt.expectedTrayID != "" {
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				targets := powerOnRequest.GetTargetSpec().GetComponents().GetTargets()
+				require.Len(t, targets, 1)
+				assert.Equal(t, tt.expectedTrayID, targets[0].GetExternal().GetId())
+				assert.Equal(t, "tray-power-state-update-on-"+tt.expectedTrayID, started.ID)
+			}
 			if tt.mockResultErr != nil {
 				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
 				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
