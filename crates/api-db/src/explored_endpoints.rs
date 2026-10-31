@@ -895,56 +895,71 @@ pub async fn set_preingestion_script_running(
     set_preingestion(address, state, txn).await
 }
 
+/// Queue BFB recovery with the DPU BMC MAC validated by the caller.
+/// `None` preserves an unbound legacy state, which workers reject before another
+/// copy or power-off; new requests must supply the resolved MAC.
 pub async fn set_preingestion_bfb_recovery_needed(
     address: IpAddr,
     reason: String,
     host_bmc_ip: IpAddr,
     pre_copy_powercycle: bool,
+    dpu_bmc_mac: Option<MacAddress>,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let state = PreingestionState::BfbRecoveryNeeded {
         reason,
         host_bmc_ip,
+        dpu_bmc_mac,
         pre_copy_powercycle,
     };
     set_preingestion(address, state, txn).await
 }
 
+/// Persist a BFB host power-cycle phase while retaining the queued DPU BMC MAC.
+/// An unbound legacy recovery can restore host power, but cannot start another copy or power-off.
 pub async fn set_preingestion_bfb_platform_powercycle(
     address: IpAddr,
     host_bmc_ip: IpAddr,
     phase: model::site_explorer::BfbPlatformPowercyclePhase,
     post_install: bool,
+    dpu_bmc_mac: Option<MacAddress>,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let state = PreingestionState::BfbPlatformPowercycle {
         host_bmc_ip,
+        dpu_bmc_mac,
         phase,
         post_install,
     };
     set_preingestion(address, state, txn).await
 }
 
+/// Record BFB copy dispatch, retaining the DPU BMC MAC for recovery after a worker restart.
 pub async fn set_preingestion_bfb_copy_in_progress(
     address: IpAddr,
     host_bmc_ip: IpAddr,
+    dpu_bmc_mac: Option<MacAddress>,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let state = PreingestionState::BfbCopyInProgress {
         started_at: Utc::now(),
         host_bmc_ip,
+        dpu_bmc_mac,
     };
     set_preingestion(address, state, txn).await
 }
 
+/// Record BFB installation polling with the DPU BMC identity retained from copy dispatch.
 pub async fn set_preingestion_bfb_installation_wait(
     address: IpAddr,
     host_bmc_ip: IpAddr,
+    dpu_bmc_mac: Option<MacAddress>,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let state = PreingestionState::BfbInstallationWait {
         started_at: Utc::now(),
         host_bmc_ip,
+        dpu_bmc_mac,
     };
     set_preingestion(address, state, txn).await
 }

@@ -81,6 +81,7 @@ mod network_segment_lifecycle;
 mod nic_firmware;
 mod nvl_instance;
 mod nvl_logical_partition;
+mod preingestion_bfb_identity;
 mod preingestion_dpu_nic_mode;
 mod primary_interface;
 mod rack_health;

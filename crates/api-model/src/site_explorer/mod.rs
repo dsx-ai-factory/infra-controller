@@ -634,11 +634,19 @@ pub enum PreingestionState {
     BfbRecoveryNeeded {
         reason: String,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
         #[serde(default)]
         pre_copy_powercycle: bool,
     },
     BfbPlatformPowercycle {
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
         phase: BfbPlatformPowercyclePhase,
         #[serde(default)]
         post_install: bool,
@@ -646,10 +654,18 @@ pub enum PreingestionState {
     BfbCopyInProgress {
         started_at: DateTime<Utc>,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
     },
     BfbInstallationWait {
         started_at: DateTime<Utc>,
         host_bmc_ip: IpAddr,
+        /// DPU BMC identity captured when recovery was queued. Missing in legacy
+        /// states, which must be requeued before another copy or power-off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpu_bmc_mac: Option<MacAddress>,
     },
     InitialReset {
         phase: InitialResetPhase,
@@ -720,6 +736,18 @@ pub enum PreingestionState {
 }
 
 impl PreingestionState {
+    /// DPU BMC identity retained across BFB recovery phases and worker restarts.
+    /// `None` denotes a legacy unbound recovery or a state outside BFB recovery.
+    pub fn bfb_target_mac(&self) -> Option<MacAddress> {
+        match self {
+            Self::BfbRecoveryNeeded { dpu_bmc_mac, .. }
+            | Self::BfbPlatformPowercycle { dpu_bmc_mac, .. }
+            | Self::BfbCopyInProgress { dpu_bmc_mac, .. }
+            | Self::BfbInstallationWait { dpu_bmc_mac, .. } => *dpu_bmc_mac,
+            _ => None,
+        }
+    }
+
     /// Whether a `waiting_for_explorer_refresh` set in this state is a
     /// preingestion park that only a fresh exploration report can end. These
     /// are the states whose next step reads the report: the post-reset
@@ -2952,6 +2980,49 @@ mod tests {
     use super::*;
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
+
+    #[test]
+    fn bfb_target_identity_survives_serialization() {
+        let mac: MacAddress = "02:00:00:00:84:76".parse().unwrap();
+        let cases = [
+            ("bfbrecoveryneeded", serde_json::json!({"reason": "test"})),
+            (
+                "bfbplatformpowercycle",
+                serde_json::json!({"phase": "poweroff"}),
+            ),
+            (
+                "bfbcopyinprogress",
+                serde_json::json!({"started_at": "2026-10-31T00:00:00Z"}),
+            ),
+            (
+                "bfbinstallationwait",
+                serde_json::json!({"started_at": "2026-10-31T00:00:00Z"}),
+            ),
+        ]
+        .into_iter()
+        .map(|(state, extra)| Check {
+            scenario: state,
+            input: (state, extra),
+            expect: (None, Some(mac), true),
+        });
+        check_values(cases, |(state, extra)| {
+            let mut stored = serde_json::json!({"state": state, "host_bmc_ip": "192.0.2.200"});
+            stored
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let legacy: PreingestionState = serde_json::from_value(stored.clone()).unwrap();
+            stored["dpu_bmc_mac"] = serde_json::to_value(mac).unwrap();
+            let pinned: PreingestionState = serde_json::from_value(stored).unwrap();
+            let restored: PreingestionState =
+                serde_json::from_str(&serde_json::to_string(&pinned).unwrap()).unwrap();
+            (
+                legacy.bfb_target_mac(),
+                restored.bfb_target_mac(),
+                restored == pinned,
+            )
+        });
+    }
 
     /// Stored reports written before inventory entries carried drive data
     /// still load, and the drive data round-trips.
