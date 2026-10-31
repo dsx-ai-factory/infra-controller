@@ -1,0 +1,34 @@
+--- a/src/lib/dhcpsrv/alloc_engine.cc
++++ b/src/lib/dhcpsrv/alloc_engine.cc
+@@ -89,6 +89,9 @@
+ AllocEngineHooks Hooks;
+ 
+ }  // namespace
+ 
++// Distinguish this backport from stock Kea 2.2 at DHCPv6 hook startup.
++extern "C" int nico_kea_lease6_reuse_null_checked() { return 1; }
++
+ namespace isc {
+ namespace dhcp {
+@@ -1012,7 +1015,9 @@
+                                           callout_status);
+ 
+                 /// @todo: We support only one lease per ia for now
+-                leases.push_back(lease);
++                if (lease) {
++                    leases.push_back(lease);
++                }
+                 return (leases);
+ 
+             } else {
+@@ -1205,7 +1210,9 @@
+                 existing = reuseExpiredLease(existing, ctx, prefix_len,
+                                              callout_status);
+ 
+-                leases.push_back(existing);
++                if (existing) {
++                    leases.push_back(existing);
++                }
+                 return (leases);
+             }
+         }
