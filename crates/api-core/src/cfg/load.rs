@@ -611,6 +611,33 @@ request_timeout_seconds = 5"#
         })
     }
 
+    /// Verifies site NTP configuration accepts IPv6 and mixed-family lists.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn ntp_servers_configuration_accepts_ipv6_and_mixed() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.ntp_servers.clone())
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "ntp_servers configuration" {
+                    r#"ntp_servers = ["2001:db8::123"]"# => Yields(vec!["2001:db8::123".parse().unwrap()]),
+                    r#"ntp_servers = ["192.0.2.1", "2001:db8::123"]"# => Yields(vec![
+                        "192.0.2.1".parse().unwrap(),
+                        "2001:db8::123".parse().unwrap(),
+                    ]),
+                }
+            );
+            Ok(())
+        })
+    }
+
     /// Verifies production configuration loading traverses both admin and named
     /// profiles so invalid route targets cannot survive startup.
     #[test]

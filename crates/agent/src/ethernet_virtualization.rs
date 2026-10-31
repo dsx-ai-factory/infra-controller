@@ -166,34 +166,39 @@ fn dhcpv6_server_preference(
         .wrap_err("DHCPv6 server preference must be between 0 and 255")
 }
 
-/// Resolve site-configured DHCPv4 NTP and DNS-discovered DHCPv6 NTP options.
+/// Resolve DHCP NTP options, letting each valid site-configured family replace its service-discovered fallback.
 fn build_dhcp_ntp_servers(
     nc: &rpc::ManagedHostNetworkConfigResponse,
     service_addrs: &ServiceAddresses,
 ) -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
     // Start with the NTP servers from the service addresses, which is read from carbide-ntp.forge.
-    let (mut ntpservers_v4, ntpservers_v6) = split_addresses_by_family(&service_addrs.ntpservers);
+    let (mut ntpservers_v4, mut ntpservers_v6) =
+        split_addresses_by_family(&service_addrs.ntpservers);
 
-    // The site configuration contract is IPv4-only, so it replaces option 42
-    // without suppressing the DNS-derived DHCPv6 option 56 fallback.
+    // Site-configured addresses replace service-discovered addresses only for the same family.
     if !nc.ntp_servers.is_empty() {
-        let site_v4 = nc
+        let site_addrs: Vec<IpAddr> = nc
             .ntp_servers
             .iter()
-            .filter_map(|server| match Ipv4Addr::from_str(server) {
+            .filter_map(|server| match server.parse::<IpAddr>() {
                 Ok(address) => Some(address),
                 Err(error) => {
                     tracing::debug!(
                         ntp_server = %server,
                         error = %error,
-                        "Invalid IPv4 NTP server from ManagedHostNetworkConfigResponse, ignoring"
+                        "Invalid NTP server from ManagedHostNetworkConfigResponse, ignoring"
                     );
                     None
                 }
             })
-            .collect::<Vec<_>>();
+            .collect();
+        let (site_v4, site_v6) = split_addresses_by_family(&site_addrs);
+
         if !site_v4.is_empty() {
             ntpservers_v4 = site_v4;
+        }
+        if !site_v6.is_empty() {
+            ntpservers_v6 = site_v6;
         }
     }
 
@@ -2928,7 +2933,7 @@ esac
         );
     }
 
-    /// Verifies IPv4 site NTP overrides do not suppress DNS-derived DHCPv6 NTP.
+    /// Verifies site NTP overrides replace service fallbacks per family independently.
     #[test]
     fn test_build_dhcp_ntp_servers() {
         use carbide_test_support::value_scenarios;
@@ -2955,6 +2960,16 @@ esac
                     vec![Ipv4Addr::from([198, 51, 100, 1])],
                     vec!["2001:db8::20".parse::<Ipv6Addr>().unwrap()],
                 ),
+                // The site IPv6 value replaces only its DHCPv6 fallback.
+                vec!["2001:db8::99".to_string()] => (
+                    vec![Ipv4Addr::from([192, 0, 2, 20])],
+                    vec!["2001:db8::99".parse::<Ipv6Addr>().unwrap()],
+                ),
+                // Both site families override their respective fallbacks.
+                vec!["198.51.100.1".to_string(), "2001:db8::99".to_string()] => (
+                    vec![Ipv4Addr::from([198, 51, 100, 1])],
+                    vec!["2001:db8::99".parse::<Ipv6Addr>().unwrap()],
+                ),
             }
             "empty configuration fallback" {
                 // With no site values, both service-provided families survive.
@@ -2964,7 +2979,7 @@ esac
                 ),
             }
             "invalid-address fallback" {
-                // An invalid site IPv4 value retains both service-provided families.
+                // An invalid site value retains both service-provided families.
                 vec!["not-an-ip".to_string()] => (
                     vec![Ipv4Addr::from([192, 0, 2, 20])],
                     vec!["2001:db8::20".parse::<Ipv6Addr>().unwrap()],

@@ -240,7 +240,7 @@ pub struct CarbideConfig {
 
     /// NTP server IP addresses for the site.
     #[serde(default)]
-    pub ntp_servers: Vec<Ipv4Addr>,
+    pub ntp_servers: Vec<IpAddr>,
 
     /// Route server IP addresses for L2VPN (Ethernet
     /// Virtual) network support on DPUs.
