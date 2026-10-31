@@ -894,7 +894,9 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 						assert.Equal(t, controllerDes.LatestVersionInfo.Data, updatedDpuExtService.VersionInfo.Data)
 						assert.Equal(t, controllerDes.LatestVersionInfo.HasCredential, updatedDpuExtService.VersionInfo.HasCredentials)
 						if expectedCreated, ok := tt.expectedCreated[updatedDpuExtService.ID]; ok {
-							assert.Equal(t, expectedCreated, updatedDpuExtService.VersionInfo.Created)
+							// Compare instants: the value read from Postgres may carry time.Local while the
+							// JSON round trip returns UTC, and assert.Equal also compares the location.
+							assert.WithinDuration(t, expectedCreated, updatedDpuExtService.VersionInfo.Created, 0)
 						} else {
 							assert.Equal(t, controllerDes.LatestVersionInfo.Created, updatedDpuExtService.VersionInfo.Created.Format(DpuExtensionServiceTimeFormat))
 						}
