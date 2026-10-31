@@ -331,7 +331,7 @@ const SWITCHES_WITH_BMC_INFO: &str = r#"SELECT
     id, config, status, deleted, bmc_mac_address, bmc_info,
     bmc_credential_rotation_requested, decommission_requested,
     controller_state, controller_state_version, controller_state_outcome,
-    switch_maintenance_requested, switch_reprovisioning_requested,
+    switch_maintenance_requested || jsonb_build_object('action_id', (SELECT id FROM cm_actions WHERE switch_id = switches.id AND request_key = switches.switch_maintenance_requested->>'requested_at')) AS switch_maintenance_requested, switch_reprovisioning_requested,
     firmware_upgrade_status, nvos_update_status, fabric_manager_status,
     nvlink_domain_uuid, name, description, labels, version, is_primary,
     rack_id, slot_number, tray_index, health_reports
@@ -526,7 +526,7 @@ pub async fn find_maintenance_requests(
     ids: &[SwitchId],
 ) -> DatabaseResult<HashMap<SwitchId, SwitchMaintenanceRequest>> {
     let requests = sqlx::query_as::<_, (SwitchId, sqlx::types::Json<SwitchMaintenanceRequest>)>(
-        "SELECT id, switch_maintenance_requested FROM switches
+        "SELECT id, switch_maintenance_requested || jsonb_build_object('action_id', (SELECT id FROM cm_actions WHERE switch_id = switches.id AND request_key = switches.switch_maintenance_requested->>'requested_at')) AS switch_maintenance_requested FROM switches
          WHERE id = ANY($1) AND switch_maintenance_requested IS NOT NULL",
     )
     .bind(ids)
@@ -547,18 +547,12 @@ pub async fn set_switch_maintenance_requested(
     operation: SwitchMaintenanceOperation,
 ) -> DatabaseResult<()> {
     let req = SwitchMaintenanceRequest {
+        action_id: None,
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
         operation,
     };
-    let query = "UPDATE switches SET switch_maintenance_requested = $1 WHERE id = $2 RETURNING id";
-    sqlx::query_as::<_, SwitchId>(query)
-        .bind(sqlx::types::Json(req))
-        .bind(switch_id)
-        .fetch_one(txn)
-        .await
-        .map_err(|e| DatabaseError::new("set_switch_maintenance_requested", e))?;
-    Ok(())
+    crate::cm_action::set_maintenance(txn, crate::cm_action::Target::Switch(&switch_id), &req).await
 }
 
 /// Clears only the maintenance request that the controller completed.
@@ -568,17 +562,13 @@ pub async fn clear_switch_maintenance_requested(
     switch_id: SwitchId,
     request: &SwitchMaintenanceRequest,
 ) -> DatabaseResult<crate::ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
-    let query = "UPDATE switches SET switch_maintenance_requested = NULL WHERE id = $1 AND switch_maintenance_requested = $2 RETURNING id";
-    let cleared = sqlx::query_as::<_, SwitchId>(query)
-        .bind(switch_id)
-        .bind(sqlx::types::Json(request))
-        .fetch_optional(txn)
-        .await
-        .map_err(|e| DatabaseError::new("clear_switch_maintenance_requested", e))?;
-    Ok(match cleared {
-        Some(_) => crate::ConditionalWrite::Applied(()),
-        None => crate::ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
-    })
+    crate::cm_action::clear_maintenance(
+        txn,
+        crate::cm_action::Target::Switch(&switch_id),
+        request,
+        request.action_id,
+    )
+    .await
 }
 
 /// Sets firmware_upgrade_status on the switch. Call from any state machine or service to report

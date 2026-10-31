@@ -305,6 +305,7 @@ enum StagedFirmwareObject {
     /// job completes.
     Staged {
         system_image_job: String,
+        trace_id: Option<trace_propagation::correlation::TraceId>,
         config_json: String,
         component_filters: Vec<String>,
         options: FirmwareUpdateOptions,
@@ -1268,6 +1269,63 @@ impl std::fmt::Debug for RmsBackend {
 }
 
 impl RmsBackend {
+    async fn firmware_trace_id(
+        &self,
+        bmc_mac: MacAddress,
+        job: &RmsTrackedFirmwareJob,
+    ) -> Option<trace_propagation::correlation::TraceId> {
+        match db::direct_dispatch_firmware_job::trace_id(
+            &self.db,
+            bmc_mac,
+            job.kind(),
+            job.job_id(),
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%bmc_mac, error = %error, "Failed to read firmware log correlation");
+                None
+            }
+        }
+    }
+
+    async fn poll_firmware_job(
+        &self,
+        bmc_mac: MacAddress,
+        job: &RmsTrackedFirmwareJob,
+    ) -> (FirmwareState, Option<String>) {
+        let trace_id = self.firmware_trace_id(bmc_mac, job).await;
+        trace_propagation::correlation::resume(trace_id, async {
+            let outcome = query_tracked_firmware_job_status(
+                self.client.as_ref(),
+                self.switch_system_image_client.as_deref(),
+                job,
+            )
+            .await;
+            self.finish_firmware_action(bmc_mac, job, outcome.0).await;
+            outcome
+        })
+        .await
+    }
+
+    async fn finish_firmware_action(
+        &self,
+        bmc_mac: MacAddress,
+        job: &RmsTrackedFirmwareJob,
+        state: FirmwareState,
+    ) {
+        if matches!(
+            state,
+            FirmwareState::Completed | FirmwareState::Failed | FirmwareState::Cancelled
+        ) && let Err(error) =
+            db::direct_dispatch_firmware_job::finish(&self.db, bmc_mac, job.kind(), job.job_id())
+                .await
+        {
+            tracing::warn!(%bmc_mac, error = %error, "Failed to complete firmware log correlation");
+        }
+    }
+
     pub fn new(
         client: Arc<dyn RmsApi>,
         switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
@@ -1459,75 +1517,87 @@ impl RmsBackend {
             config_json,
             component_filters,
             options,
+            trace_id,
             ..
         }) = claimed
         else {
             return Some(StagedFirmwareObjectOutcome::Waiting);
         };
 
-        let submitted = self
-            .submit_staged_firmware_object(endpoint, &config_json, &component_filters, &options)
-            .await;
-        let job_id = match submitted {
-            Ok(Some(job_id)) => job_id,
-            Ok(None) => {
-                return Some(self.abandon_staged_firmware_object(
+        trace_propagation::correlation::resume(trace_id, async {
+            let submitted = self
+                .submit_staged_firmware_object(endpoint, &config_json, &component_filters, &options)
+                .await;
+            let job_id = match submitted {
+                Ok(Some(job_id)) => job_id,
+                Ok(None) => {
+                    return Some(self.abandon_staged_firmware_object(
                     bmc_mac,
                     &system_image_job,
                     "RMS accepted the firmware-object update without a job id, so its progress \
                      cannot be tracked"
                         .to_owned(),
                 ));
-            }
-            Err(error) => {
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        bmc_mac_address = %bmc_mac,
+                        %error,
+                        "staged switch firmware-object update failed to submit"
+                    );
+                    return Some(self.abandon_staged_firmware_object(
+                        bmc_mac,
+                        &system_image_job,
+                        error,
+                    ));
+                }
+            };
+
+            // Release the phase only while it is still the one this poll claimed.
+            // A newer update for this switch owns its staged phase and its tracked
+            // jobs now, and both of this poll's are stale.
+            let released = {
+                let staged = self.staged_firmware_objects.lock().unwrap();
+                matches!(
+                    staged.get(&bmc_mac),
+                    Some(StagedFirmwareObject::Submitting {
+                        system_image_job: job,
+                    }) if *job == system_image_job
+                )
+            };
+            if !released {
                 tracing::warn!(
                     bmc_mac_address = %bmc_mac,
-                    %error,
-                    "staged switch firmware-object update failed to submit"
+                    backend_job_id = %job_id,
+                    "a newer switch update superseded this firmware-object update after RMS \
+                     accepted it, so its job is not tracked"
                 );
-                return Some(self.abandon_staged_firmware_object(
-                    bmc_mac,
-                    &system_image_job,
-                    error,
-                ));
+                return Some(StagedFirmwareObjectOutcome::Waiting);
             }
-        };
 
-        // Release the phase only while it is still the one this poll claimed.
-        // A newer update for this switch owns its staged phase and its tracked
-        // jobs now, and both of this poll's are stale.
-        let released = {
-            let mut staged = self.staged_firmware_objects.lock().unwrap();
-            let mine = matches!(
-                staged.get(&bmc_mac),
-                Some(StagedFirmwareObject::Submitting {
-                    system_image_job: job,
-                }) if *job == system_image_job
-            );
-            if mine {
-                staged.remove(&bmc_mac);
-            }
-            mine
-        };
-        if !released {
-            tracing::warn!(
+            tracing::info!(
                 bmc_mac_address = %bmc_mac,
                 backend_job_id = %job_id,
-                "a newer switch update superseded this firmware-object update after RMS \
-                 accepted it, so its job is not tracked"
+                "Submitted the staged switch firmware-object update after its NVOS job completed"
             );
-            return Some(StagedFirmwareObjectOutcome::Waiting);
-        }
-
-        tracing::info!(
-            bmc_mac_address = %bmc_mac,
-            backend_job_id = %job_id,
-            "Submitted the staged switch firmware-object update after its NVOS job completed"
-        );
-        let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
-        self.add_tracked_switch_firmware_job(bmc_mac, job.clone())
-            .await;
-        Some(StagedFirmwareObjectOutcome::Submitted(job))
+            let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
+            self.add_tracked_switch_firmware_job(bmc_mac, job.clone())
+                .await;
+            // Keep Submitting visible until both persisted and in-memory job
+            // tracking include the follow-up job.
+            {
+                let mut staged = self.staged_firmware_objects.lock().unwrap();
+                if matches!(
+                    staged.get(&bmc_mac),
+                    Some(StagedFirmwareObject::Submitting { system_image_job: current })
+                        if *current == system_image_job
+                ) {
+                    staged.remove(&bmc_mac);
+                }
+            }
+            Some(StagedFirmwareObjectOutcome::Submitted(job))
+        })
+        .await
     }
 
     /// Submits one staged firmware-object apply, returning its backend job id.
@@ -2344,10 +2414,19 @@ impl PowerShelfManager for RmsBackend {
                 job_id: job_id.clone(),
             };
 
-            match red::instrumented(
-                "rms",
-                "get_firmware_job_status",
-                self.client.get_firmware_job_status(request),
+            let trace_id = self
+                .firmware_trace_id(
+                    *pmc_mac,
+                    &RmsTrackedFirmwareJob::FirmwareObject(job_id.clone()),
+                )
+                .await;
+            match trace_propagation::correlation::resume(
+                trace_id,
+                red::instrumented(
+                    "rms",
+                    "get_firmware_job_status",
+                    self.client.get_firmware_job_status(request),
+                ),
             )
             .await
             {
@@ -2358,6 +2437,12 @@ impl PowerShelfManager for RmsBackend {
                     } else {
                         FirmwareState::Unknown
                     };
+                    self.finish_firmware_action(
+                        *pmc_mac,
+                        &RmsTrackedFirmwareJob::FirmwareObject(job_id.clone()),
+                        state,
+                    )
+                    .await;
                     let error = if response.error_message.is_empty() {
                         (!status_success).then(|| {
                             format!("RMS could not report status for firmware job {job_id}")
@@ -3680,6 +3765,7 @@ impl NvSwitchManager for RmsBackend {
                 if let Some(system_image_job) = system_image_job {
                     staged_firmware_object = Some(StagedFirmwareObject::Staged {
                         system_image_job,
+                        trace_id: trace_propagation::correlation::current_id(),
                         config_json: bundle_version.to_owned(),
                         component_filters: component_filters.clone(),
                         options: options.clone(),
@@ -3830,12 +3916,7 @@ impl NvSwitchManager for RmsBackend {
             let mut states = Vec::with_capacity(jobs.len());
             let mut errors = Vec::new();
             for job in &jobs {
-                let (state, error) = query_tracked_firmware_job_status(
-                    self.client.as_ref(),
-                    self.switch_system_image_client.as_deref(),
-                    job,
-                )
-                .await;
+                let (state, error) = self.poll_firmware_job(bmc_mac, job).await;
                 states.push(state);
                 if let Some(error) = error {
                     errors.push(error);
@@ -3854,12 +3935,7 @@ impl NvSwitchManager for RmsBackend {
                 .await
             {
                 Some(StagedFirmwareObjectOutcome::Submitted(job)) => {
-                    let (state, error) = query_tracked_firmware_job_status(
-                        self.client.as_ref(),
-                        self.switch_system_image_client.as_deref(),
-                        &job,
-                    )
-                    .await;
+                    let (state, error) = self.poll_firmware_job(bmc_mac, &job).await;
                     states.push(state);
                     if let Some(error) = error {
                         errors.push(error);
@@ -3876,7 +3952,19 @@ impl NvSwitchManager for RmsBackend {
                 Some(StagedFirmwareObjectOutcome::Waiting) => {
                     states.push(FirmwareState::InProgress)
                 }
-                None => {}
+                None => {
+                    // A concurrent poll may have published a follow-up after
+                    // our snapshot. Its state has not been polled here yet.
+                    if self
+                        .firmware_jobs
+                        .lock()
+                        .unwrap()
+                        .get(&bmc_mac)
+                        .is_some_and(|current| current.iter().any(|job| !jobs.contains(job)))
+                    {
+                        states.push(FirmwareState::InProgress);
+                    }
+                }
             }
 
             if states.is_empty() {
@@ -5675,8 +5763,7 @@ impl ComputeTrayManager for RmsBackend {
 
             let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
 
-            let (state, error) =
-                query_tracked_firmware_job_status(self.client.as_ref(), None, &job).await;
+            let (state, error) = self.poll_firmware_job(ep.bmc_mac, &job).await;
 
             statuses.push(ComputeTrayFirmwareUpdateStatus {
                 bmc_ip: ep.bmc_ip,
@@ -5699,8 +5786,7 @@ impl ComputeTrayManager for RmsBackend {
     ) -> Result<ComputeTrayFirmwareUpdateStatus, ComponentManagerError> {
         let job = RmsTrackedFirmwareJob::FirmwareObject(job_id.to_string());
 
-        let (state, error) =
-            query_tracked_firmware_job_status(self.client.as_ref(), None, &job).await;
+        let (state, error) = self.poll_firmware_job(bmc_mac, &job).await;
 
         Ok(ComputeTrayFirmwareUpdateStatus {
             bmc_ip,
@@ -10610,13 +10696,17 @@ mod tests {
     async fn sw_mixed_update_defers_firmware_object_until_nvos_completes(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
         let eps = vec![make_sw_endpoint(SW_MAC_1)];
-        queue_mixed_switch_update(
-            &mock,
-            &backend,
-            &sw1.to_string(),
-            &eps,
-            &firmware_update_options(),
-            "sw-nvos-job",
+        let origin = trace_propagation::correlation::TraceId::generate();
+        trace_propagation::correlation::scope(
+            origin,
+            queue_mixed_switch_update(
+                &mock,
+                &backend,
+                &sw1.to_string(),
+                &eps,
+                &firmware_update_options(),
+                "sw-nvos-job",
+            ),
         )
         .await;
 
@@ -10664,6 +10754,18 @@ mod tests {
 
         assert_eq!(statuses[0].state, FirmwareState::InProgress);
         let apply_calls = mock.apply_firmware_object_calls().await;
+        assert_eq!(
+            db::direct_dispatch_firmware_job::trace_id(
+                &pool,
+                SW_MAC_1.parse().unwrap(),
+                FirmwareJobKind::FirmwareObject,
+                "sw-fw-job",
+            )
+            .await
+            .unwrap(),
+            Some(origin),
+            "the follow-up job retains the submission's trace, not the poll's"
+        );
         assert_eq!(apply_calls.len(), 1);
         assert_eq!(apply_calls[0].config_json, r#"{"Id":"fw-json"}"#);
         assert_eq!(apply_calls[0].access_token.as_deref(), Some("token"));

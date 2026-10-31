@@ -91,17 +91,28 @@ pub async fn save(
     job_kind: FirmwareJobKind,
     job_id: &str,
 ) -> Result<(), DatabaseError> {
-    let sql = "INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_kind, job_id) \
-               VALUES ($1, $2, $3) \
+    let mut txn = db
+        .begin()
+        .await
+        .map_err(|error| DatabaseError::query("firmware_job::begin", error))?;
+    crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
+    let action_id = crate::cm_action::firmware(&mut txn, bmc_mac, job_kind, job_id).await?;
+    let sql = "INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_kind, job_id, action_id) \
+               VALUES ($1, $2, $3, $4) \
                ON CONFLICT (bmc_mac, job_kind) \
-               DO UPDATE SET job_id = EXCLUDED.job_id, created = now()";
+               DO UPDATE SET job_id = EXCLUDED.job_id, action_id = EXCLUDED.action_id, created = now()";
     sqlx::query(sql)
         .bind(bmc_mac)
         .bind(job_kind.as_str())
         .bind(job_id)
-        .execute(db)
+        .bind(action_id)
+        .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
+    crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
+    txn.commit()
+        .await
+        .map_err(|error| DatabaseError::query("firmware_job::commit", error))?;
     Ok(())
 }
 
@@ -118,14 +129,23 @@ pub async fn delete(
     bmc_mac: MacAddress,
     job_kind: FirmwareJobKind,
 ) -> Result<(), DatabaseError> {
+    let mut txn = db
+        .begin()
+        .await
+        .map_err(|error| DatabaseError::query("firmware_job::begin", error))?;
+    crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
     let sql = "DELETE FROM direct_dispatch_firmware_update_jobs \
                WHERE bmc_mac = $1 AND job_kind = $2";
     sqlx::query(sql)
         .bind(bmc_mac)
         .bind(job_kind.as_str())
-        .execute(db)
+        .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
+    crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
+    txn.commit()
+        .await
+        .map_err(|error| DatabaseError::query("firmware_job::commit", error))?;
     Ok(())
 }
 
@@ -144,6 +164,34 @@ pub async fn get(
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
     Ok(row.map(|(job_id,)| job_id))
+}
+
+/// Read the originating log trace for the exact backend job being polled.
+/// Legacy jobs and jobs replaced during a poll have no matching context.
+pub async fn trace_id(
+    db: &sqlx::PgPool,
+    bmc_mac: MacAddress,
+    job_kind: FirmwareJobKind,
+    job_id: &str,
+) -> Result<Option<trace_propagation::correlation::TraceId>, DatabaseError> {
+    let metadata: Option<sqlx::types::Json<crate::cm_action::Metadata>> = sqlx::query_scalar("SELECT a.metadata FROM direct_dispatch_firmware_update_jobs j JOIN cm_actions a ON a.id = j.action_id AND a.request_key = j.job_kind || ':' || j.job_id WHERE j.bmc_mac = $1 AND j.job_kind = $2 AND j.job_id = $3")
+        .bind(bmc_mac).bind(job_kind.as_str()).bind(job_id).fetch_optional(db).await
+        .map_err(|error| DatabaseError::query("firmware_job::trace_id", error))?;
+    Ok(metadata.map(|metadata| metadata.0.trace_id))
+}
+
+/// Mark the exact backend job's action finished. A replacement job is untouched;
+/// its predecessor's completion can arrive after a newer submission.
+pub async fn finish(
+    db: &sqlx::PgPool,
+    bmc_mac: MacAddress,
+    job_kind: FirmwareJobKind,
+    job_id: &str,
+) -> Result<(), DatabaseError> {
+    sqlx::query("UPDATE cm_actions a SET completed_at = statement_timestamp() WHERE completed_at IS NULL AND id = (SELECT action_id FROM direct_dispatch_firmware_update_jobs j WHERE bmc_mac = $1 AND job_kind = $2 AND job_id = $3 AND a.request_key = j.job_kind || ':' || j.job_id)")
+        .bind(bmc_mac).bind(job_kind.as_str()).bind(job_id).execute(db).await
+        .map_err(|error| DatabaseError::query("firmware_job::finish", error))?;
+    Ok(())
 }
 
 /// Fetch every persisted `(job_kind, job_id)` for `bmc_mac`.
@@ -185,6 +233,8 @@ pub async fn replace(
         .await
         .map_err(|e| DatabaseError::new("direct_dispatch_firmware_job::replace: begin", e))?;
 
+    crate::cm_action::lock_firmware(&mut txn, bmc_mac).await?;
+
     let delete_sql = "DELETE FROM direct_dispatch_firmware_update_jobs WHERE bmc_mac = $1";
     sqlx::query(delete_sql)
         .bind(bmc_mac)
@@ -192,17 +242,21 @@ pub async fn replace(
         .await
         .map_err(|e| DatabaseError::new(delete_sql, e))?;
 
-    let insert_sql = "INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_kind, job_id) \
-                      VALUES ($1, $2, $3)";
+    let insert_sql = "INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_kind, job_id, action_id) \
+                      VALUES ($1, $2, $3, $4)";
     for (job_kind, job_id) in jobs {
+        let action_id = crate::cm_action::firmware(&mut txn, bmc_mac, *job_kind, job_id).await?;
         sqlx::query(insert_sql)
             .bind(bmc_mac)
             .bind(job_kind.as_str())
             .bind(job_id)
+            .bind(action_id)
             .execute(&mut *txn)
             .await
             .map_err(|e| DatabaseError::new(insert_sql, e))?;
     }
+
+    crate::cm_action::reconcile_firmware(&mut txn, bmc_mac).await?;
 
     txn.commit()
         .await

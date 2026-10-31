@@ -59,27 +59,37 @@ pub async fn handle_maintenance(
     };
     let request = request.as_ref();
 
-    match operation {
-        SwitchMaintenanceOperation::PowerOn => {
-            handle_power_on(switch_id, state, request, ctx).await
-        }
-        SwitchMaintenanceOperation::PowerOff { graceful } => {
-            handle_power_off(switch_id, state, request, ctx, *graceful).await
-        }
-        SwitchMaintenanceOperation::Reset => handle_reset(switch_id, state, request, ctx).await,
-        SwitchMaintenanceOperation::ReconfigureCertificate => {
-            handle_reconfigure_certificate(
-                switch_id,
-                state,
-                request,
-                ctx,
-                configure_certificate
-                    .clone()
-                    .unwrap_or(ConfigureCertificateState::Start),
-            )
-            .await
-        }
-    }
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        request.and_then(|request| request.action_id),
+        async {
+            match operation {
+                SwitchMaintenanceOperation::PowerOn => {
+                    handle_power_on(switch_id, state, request, ctx).await
+                }
+                SwitchMaintenanceOperation::PowerOff { graceful } => {
+                    handle_power_off(switch_id, state, request, ctx, *graceful).await
+                }
+                SwitchMaintenanceOperation::Reset => {
+                    handle_reset(switch_id, state, request, ctx).await
+                }
+                SwitchMaintenanceOperation::ReconfigureCertificate => {
+                    handle_reconfigure_certificate(
+                        switch_id,
+                        state,
+                        request,
+                        ctx,
+                        configure_certificate
+                            .clone()
+                            .unwrap_or(ConfigureCertificateState::Start),
+                    )
+                    .await
+                }
+            }
+        },
+    )
+    .await?
 }
 
 async fn handle_power_on(

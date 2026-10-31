@@ -269,7 +269,7 @@ const POWER_SHELVES_WITH_BMC_INFO: &str = r#"SELECT
     id, config, status, deleted, bmc_mac_address, bmc_info,
     bmc_credential_rotation_requested, decommission_requested,
     controller_state, controller_state_version, controller_state_outcome,
-    power_shelf_maintenance_requested, power_shelf_reprovisioning_requested,
+    power_shelf_maintenance_requested || jsonb_build_object('action_id', (SELECT id FROM cm_actions WHERE power_shelf_id = power_shelves.id AND request_key = power_shelves.power_shelf_maintenance_requested->>'requested_at')) AS power_shelf_maintenance_requested, power_shelf_reprovisioning_requested,
     firmware_upgrade_status, nvlink_domain_uuid, name, description, labels,
     version, rack_id, health_reports
 FROM (
@@ -370,7 +370,7 @@ pub async fn find_maintenance_requests(
             sqlx::types::Json<PowerShelfMaintenanceRequest>,
         ),
     >(
-        "SELECT id, power_shelf_maintenance_requested FROM power_shelves
+        "SELECT id, power_shelf_maintenance_requested || jsonb_build_object('action_id', (SELECT id FROM cm_actions WHERE power_shelf_id = power_shelves.id AND request_key = power_shelves.power_shelf_maintenance_requested->>'requested_at')) AS power_shelf_maintenance_requested FROM power_shelves
              WHERE id = ANY($1) AND power_shelf_maintenance_requested IS NOT NULL",
     )
     .bind(ids)
@@ -391,18 +391,17 @@ pub async fn set_power_shelf_maintenance_requested(
     operation: PowerShelfMaintenanceOperation,
 ) -> DatabaseResult<()> {
     let req = PowerShelfMaintenanceRequest {
+        action_id: None,
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
         operation,
     };
-    let query = "UPDATE power_shelves SET power_shelf_maintenance_requested = $1 WHERE id = $2 RETURNING id";
-    sqlx::query_as::<_, PowerShelfId>(query)
-        .bind(sqlx::types::Json(req))
-        .bind(power_shelf_id)
-        .fetch_optional(txn)
-        .await
-        .map_err(|e| DatabaseError::new("set_power_shelf_maintenance_requested", e))?;
-    Ok(())
+    crate::cm_action::set_maintenance(
+        txn,
+        crate::cm_action::Target::PowerShelf(&power_shelf_id),
+        &req,
+    )
+    .await
 }
 
 /// Records a request to start decommissioning when the power shelf is Ready.
@@ -443,17 +442,13 @@ pub async fn clear_power_shelf_maintenance_requested(
     power_shelf_id: PowerShelfId,
     request: &PowerShelfMaintenanceRequest,
 ) -> DatabaseResult<crate::ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
-    let query = "UPDATE power_shelves SET power_shelf_maintenance_requested = NULL WHERE id = $1 AND power_shelf_maintenance_requested = $2 RETURNING id";
-    let cleared = sqlx::query_as::<_, PowerShelfId>(query)
-        .bind(power_shelf_id)
-        .bind(sqlx::types::Json(request))
-        .fetch_optional(txn)
-        .await
-        .map_err(|e| DatabaseError::new("clear_power_shelf_maintenance_requested", e))?;
-    Ok(match cleared {
-        Some(_) => crate::ConditionalWrite::Applied(()),
-        None => crate::ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
-    })
+    crate::cm_action::clear_maintenance(
+        txn,
+        crate::cm_action::Target::PowerShelf(&power_shelf_id),
+        request,
+        request.action_id,
+    )
+    .await
 }
 
 /// Record an operator force-converge request against a power shelf's BMC (PMC)
@@ -1573,6 +1568,7 @@ mod tests {
         assert!(shelf.power_shelf_maintenance_requested.is_none());
 
         let request = PowerShelfMaintenanceRequest {
+            action_id: None,
             requested_at: Utc::now(),
             initiator: "operator".to_owned(),
             operation: PowerShelfMaintenanceOperation::PowerOn,
