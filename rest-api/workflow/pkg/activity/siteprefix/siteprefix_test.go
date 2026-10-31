@@ -6,6 +6,7 @@ package siteprefix
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"reflect"
@@ -470,6 +471,7 @@ func (f testFixture) runWithAllocationWaiting(t *testing.T, inventory *corev1.Si
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	root := f.linkedBlock(t, inventory.SitePrefixes[0].GetId().GetValue())
+	allocation := util.TestBuildAllocation(t, f.session, &cdbm.InfrastructureProvider{ID: f.site.InfrastructureProviderID}, f.tenants["tenant"], f.site, "concurrent allocation")
 	tx, err := cdb.BeginTx(ctx, f.session, nil)
 	require.NoError(t, err)
 	defer func() { _ = tx.Rollback() }()
@@ -497,6 +499,15 @@ func (f testFixture) runWithAllocationWaiting(t *testing.T, inventory *corev1.Si
 		ProtocolVersion:          root.ProtocolVersion,
 		Status:                   cdbm.IPBlockStatusReady,
 		CreatedBy:                &f.user.ID,
+	})
+	require.NoError(t, err)
+	allocator := cipam.NewWithStorage(ipam.NewIpamStorage(f.session.DB, tx.GetBunTx()))
+	allocator.SetNamespace(f.namespace())
+	_, err = allocator.AcquireChildPrefix(ctx, "10.0.0.0/24", 25)
+	require.NoError(t, err)
+	_, err = cdbm.NewAllocationConstraintDAO(f.session).Create(ctx, tx, cdbm.AllocationConstraintCreateInput{
+		AllocationID: allocation.ID, ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: root.ID,
+		ConstraintType: cdbm.AllocationConstraintTypeOnDemand, ConstraintValue: 25, CreatedBy: f.user.ID,
 	})
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
@@ -603,6 +614,7 @@ func (hook *testSiteLockHook) AfterQuery(ctx context.Context, event *bun.QueryEv
 }
 
 func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
+	checkSitePrefixRetirement(t)
 	idA, idB, idC := uuid.NewString(), uuid.NewString(), uuid.NewString()
 	deleting := corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
 	provisioning := corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_PROVISIONING
@@ -1030,6 +1042,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					status:        cdbm.IPBlockStatusDeleting,
 					existing:      true,
 					statusDetails: 2,
+					deleted:       true,
 				},
 				{
 					cidr:          "10.1.0.0/24",
@@ -1038,9 +1051,9 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					status:        cdbm.IPBlockStatusDeleting,
 					existing:      true,
 					statusDetails: 2,
+					deleted:       true,
 				},
 			},
-			wantIPAM:    []string{"10.0.0.0/24", "10.1.0.0/24"},
 			wantLookups: 1,
 		},
 		{
@@ -1100,9 +1113,9 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					status:        cdbm.IPBlockStatusDeleting,
 					existing:      true,
 					statusDetails: 1,
+					deleted:       true,
 				},
 			},
-			wantIPAM: []string{"10.0.0.0/24"},
 		},
 		{
 			name: "linked Tenant IP Block keeps its REST metadata and applies the reported lifecycle",
@@ -1256,9 +1269,10 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			name: "resize preserves Deleting lifecycle with old root first",
 			existingIPBlocks: []testExistingIPBlock{
 				{
-					cidr:         "10.0.0.0/24",
-					name:         "old-root",
-					sitePrefixID: idA,
+					cidr:           "10.0.0.0/24",
+					name:           "old-root",
+					sitePrefixID:   idA,
+					allocatedChild: true,
 				},
 			},
 			reported: []testSitePrefix{
@@ -1284,7 +1298,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					statusDetails: 1,
 				},
 			},
-			wantIPAM:              []string{"10.0.0.0/24"},
+			wantIPAM:              []string{"10.0.0.0/24", "10.0.0.0/28"},
 			wantLogs:              []string{"overlaps an existing root"},
 			wantNoErrors:          true,
 			wantAllocationBlocked: []string{idA},
@@ -1293,9 +1307,10 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			name: "resize preserves Deleting lifecycle with replacement first",
 			existingIPBlocks: []testExistingIPBlock{
 				{
-					cidr:         "10.0.0.0/24",
-					name:         "old-root",
-					sitePrefixID: idA,
+					cidr:           "10.0.0.0/24",
+					name:           "old-root",
+					sitePrefixID:   idA,
+					allocatedChild: true,
 				},
 			},
 			reported: []testSitePrefix{
@@ -1321,7 +1336,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					statusDetails: 1,
 				},
 			},
-			wantIPAM:              []string{"10.0.0.0/24"},
+			wantIPAM:              []string{"10.0.0.0/24", "10.0.0.0/28"},
 			wantLogs:              []string{"overlaps an existing root"},
 			wantNoErrors:          true,
 			wantAllocationBlocked: []string{idA},
@@ -1856,7 +1871,8 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 		},
 	}
 	lockTests := []struct {
-		name string
+		name    string
+		missing bool
 		// failAfter cancels every lock attempt after that one.
 		failAfter int
 		// wantLogLevel is the one of warn and error that is logged.
@@ -1871,12 +1887,31 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			failAfter:    1,
 			wantLogLevel: "error",
 		},
+		{
+			name:         "exhausted lock contention skips the missing prefix with a warning",
+			missing:      true,
+			wantLogLevel: "warn",
+		},
+		{
+			name:         "database failure after lock contention for a missing prefix logs an error",
+			missing:      true,
+			failAfter:    1,
+			wantLogLevel: "error",
+		},
 	}
 
 	for _, tt := range lockTests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			f := newTestFixture(t)
+			inventory := testSitePrefixInventory(lockReported)
+			if tt.missing {
+				root := f.root(t, true)
+				ageBlock(t, f, root)
+				inventory = testSitePrefixInventory(nil)
+			}
+			before := f.blocks(t)
+			beforeIPAM := f.ipamCIDRs(t, cdbm.IPBlockRoutingTypeDatacenterOnly)
 			var output bytes.Buffer
 			previousLogger := log.Logger
 			log.Logger = zerolog.New(&output)
@@ -1886,12 +1921,30 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { _ = tx.Rollback() }()
 			require.NoError(t, tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(f.site.InfrastructureProviderID, f.site.ID), false))
-			f.session.DB.AddQueryHook(&testLockAttemptHook{failAfter: tt.failAfter})
+			hook := &testLockAttemptHook{failAfter: tt.failAfter}
+			f.session.DB.AddQueryHook(hook)
 
-			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testSitePrefixInventory(lockReported)))
-			require.Empty(t, f.ipBlockStates(t, nil))
+			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+			require.Positive(t, hook.attempts)
+			require.Equal(t, before, f.blocks(t))
+			require.Equal(t, beforeIPAM, f.ipamCIDRs(t, cdbm.IPBlockRoutingTypeDatacenterOnly))
 			for _, level := range []string{"warn", "error"} {
 				require.Equal(t, level == tt.wantLogLevel, strings.Contains(output.String(), `"level":"`+level+`"`), level)
+			}
+			for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+				var event map[string]interface{}
+				require.NoError(t, json.Unmarshal([]byte(line), &event))
+				if event["level"] == tt.wantLogLevel {
+					require.Equal(t, "UpdateSitePrefixesInDB", event["Activity"])
+					require.Equal(t, f.site.ID.String(), event["Site ID"])
+				}
+			}
+			if tt.missing {
+				require.NoError(t, tx.Rollback())
+				hook.failAfter = 0
+				require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, inventory))
+				require.NotNil(t, f.blocks(t)[0].Deleted)
+				require.Empty(t, f.ipamCIDRs(t, cdbm.IPBlockRoutingTypeDatacenterOnly))
 			}
 		})
 	}
@@ -2001,7 +2054,7 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					tenantOrg: "tenant",
 				},
 			},
-			wantIPAM: []string{"10.0.0.0/24"},
+			wantIPAM: []string{"10.0.0.0/24", "10.0.0.0/25"},
 		},
 	}
 

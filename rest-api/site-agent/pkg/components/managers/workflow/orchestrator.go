@@ -261,6 +261,8 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 		}
 	}
 
+	logRegistrationError("SitePrefix publisher", ManagerAccess.API.SitePrefix.RegisterPublisher())
+
 	logRegistrationError("VPC subscriber", ManagerAccess.API.VPC.RegisterSubscriber())
 	logRegistrationError("VPC publisher", ManagerAccess.API.VPC.RegisterPublisher())
 

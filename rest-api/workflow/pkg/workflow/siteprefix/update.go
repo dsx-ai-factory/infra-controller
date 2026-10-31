@@ -13,8 +13,8 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-// UpdateSitePrefixInventory receives one Core inventory page without inferring
-// absence or enabling Site Agent publication.
+// UpdateSitePrefixInventory reconciles reported Core SitePrefixes and eligible
+// missing entries through the Cloud inventory receiver.
 func UpdateSitePrefixInventory(ctx workflow.Context, siteID string, inventory *corev1.SitePrefixInventory) error {
 	logger := log.With().Str("Workflow", "UpdateSitePrefixInventory").Str("Site ID", siteID).Logger()
 	logger.Info().Msg("starting workflow")
