@@ -54,7 +54,8 @@ WORKDIR /workspace/workflow
 RUN VERSION=${VERSION} && \
     BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S") && \
     go build \
-        -ldflags "-extldflags '-static' -w -s" \
+        -ldflags "-extldflags '-static' -w -s \
+                  -X 'github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}'" \
         -o /app/workflow \
         ./cmd/workflow
 
