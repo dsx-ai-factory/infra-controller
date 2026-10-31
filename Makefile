@@ -125,6 +125,35 @@ CORE_BUILD_CONTAINER_ARM64 ?= $(IMAGE_REGISTRY)/nico-buildcontainer:$(IMAGE_TAG)
 CORE_RUNTIME_CONTAINER_AMD64 ?= $(IMAGE_REGISTRY)/nico-runtime-container:$(IMAGE_TAG)-amd64
 CORE_RUNTIME_CONTAINER_ARM64 ?= $(IMAGE_REGISTRY)/nico-runtime-container:$(IMAGE_TAG)-arm64
 
+DEV_TARGET ?= api
+DEV_IMAGE ?= nico-dev-$(DEV_TARGET):$(IMAGE_TAG)
+DEV_BUILD_CONTAINER ?= nico-dev-build:$(IMAGE_TAG)
+DEV_RUNTIME_CONTAINER ?= nico-dev-runtime:$(IMAGE_TAG)
+DEV_TARGETS := api bmc-proxy dhcp machine-a-tron ssh-console mat-protocol-gateway nico-postgres-exporter
+
+.PHONY: images-dev
+images-dev: ## Build one local native development image (DEV_TARGET=api; does not push or deploy)
+	$(if $(and $(filter 1,$(words $(DEV_TARGET))),$(if $(filter-out $(DEV_TARGETS),$(DEV_TARGET)),,yes)),,$(error Unsupported DEV_TARGET '$(DEV_TARGET)'; choose one of $(DEV_TARGETS)))
+	@set -eu; \
+	docker_context="$$(docker context show)"; \
+	export DOCKER_CONTEXT="$$docker_context" BUILDX_BUILDER="$$docker_context"; \
+	platform="$$(docker info --format '{{.OSType}}/{{.Architecture}}')"; \
+	case "$$platform" in \
+		linux/amd64|linux/x86_64) arch=amd64; compiler=x86_64 ;; \
+		linux/arm64|linux/aarch64) arch=arm64; compiler=aarch64 ;; \
+		*) echo "images-dev requires a Linux AMD64 or ARM64 Docker daemon; got '$$platform'" >&2; exit 1 ;; \
+	esac; \
+	DOCKER_BUILDKIT=1 docker build --platform "linux/$$arch" \
+		--build-arg KEA_VERSION="$(KEA_VERSION)" \
+		--file "dev/docker/Dockerfile.build-container-$$compiler" --tag "$(DEV_BUILD_CONTAINER)" .; \
+	DOCKER_BUILDKIT=1 docker build --platform "linux/$$arch" \
+		--file dev/docker/Dockerfile.dev-runtime --tag "$(DEV_RUNTIME_CONTAINER)" .; \
+	DOCKER_BUILDKIT=1 docker build --platform "linux/$$arch" \
+		--build-arg CONTAINER_BUILD="$(DEV_BUILD_CONTAINER)" \
+		--build-arg CONTAINER_RUNTIME="$(DEV_RUNTIME_CONTAINER)" \
+		--build-arg KEA_VERSION="$(KEA_VERSION)" \
+		--file dev/docker/Dockerfile.dev-services --target "$(DEV_TARGET)" --tag "$(DEV_IMAGE)" .
+
 .PHONY: images images-arm images-all images-all-arm images-validate images-all-validate images-registry \
 		images-base images-core images-rest images-machine-validation images-machine-validation-arm \
 		images-boot-artifacts images-bfb images-bfb-arm images-machine-lifecycle
