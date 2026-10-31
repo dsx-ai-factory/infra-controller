@@ -142,10 +142,21 @@ async fn exercise_rack_queries(
         }),
         maintenance_termination_requested: true,
     };
-    assert_rack(
-        &update(&mut txn, &expected.id, &expected.config).await?,
-        &expected,
-    )?;
+    let updated = update(&mut txn, &expected.id, &expected.config).await?;
+    let action_id = updated
+        .config
+        .maintenance_requested
+        .as_ref()
+        .unwrap()
+        .action_id;
+    assert!(action_id.is_some());
+    expected
+        .config
+        .maintenance_requested
+        .as_mut()
+        .unwrap()
+        .action_id = action_id;
+    assert_rack(&updated, &expected)?;
 
     expected.config.maintenance_requested = None;
     expected.config.maintenance_termination_requested = false;

@@ -94,6 +94,7 @@ async fn exercise_switch_reader(
         source_ref: None,
     });
     expected.switch_maintenance_requested = Some(SwitchMaintenanceRequest {
+        action_id: None,
         requested_at: timestamp,
         initiator: "projection-test".to_string(),
         operation: SwitchMaintenanceOperation::Reset,

@@ -27,11 +27,16 @@ description = "W3C trace-context propagation helpers (extract on ingress, inject
 http = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-http = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 tower = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }

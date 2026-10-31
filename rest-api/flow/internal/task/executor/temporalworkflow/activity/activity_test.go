@@ -6,11 +6,13 @@ package activity
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
@@ -77,9 +79,15 @@ func TestActivityCallsManagerWhenCapabilityIsSupported(t *testing.T) {
 		capability.CapabilityPowerControl,
 	)
 
-	err := acts.PowerControl(
+	target := newActivityTestTarget()
+	target.TraceID = "1234567890abcdef1234567890abcdef"
+	raw, err := json.Marshal(target)
+	require.NoError(t, err)
+	var restored common.Target
+	require.NoError(t, json.Unmarshal(raw, &restored))
+	err = acts.PowerControl(
 		context.Background(),
-		newActivityTestTarget(),
+		restored,
 		operations.PowerControlTaskInfo{
 			Operation: operations.PowerOperationPowerOn,
 		},
@@ -87,6 +95,8 @@ func TestActivityCallsManagerWhenCapabilityIsSupported(t *testing.T) {
 
 	require.NoError(t, err)
 	require.True(t, manager.called)
+	md, _ := metadata.FromOutgoingContext(manager.context)
+	require.Equal(t, []string{target.TraceID}, md.Get("x-nico-trace-id"))
 }
 
 func TestFirmwareControlDataCipherAvailability(t *testing.T) {
@@ -311,6 +321,7 @@ func capabilityCheckedActivityCalls(
 }
 
 type capabilityTestManager struct {
+	context               context.Context
 	descriptor            cmcatalog.Descriptor
 	called                bool
 	firmwareInfo          operations.FirmwareControlTaskInfo
@@ -331,10 +342,11 @@ func (m *capabilityTestManager) InjectExpectation(
 }
 
 func (m *capabilityTestManager) PowerControl(
-	context.Context,
-	common.Target,
-	operations.PowerControlTaskInfo,
+	ctx context.Context,
+	_ common.Target,
+	_ operations.PowerControlTaskInfo,
 ) error {
+	m.context = ctx
 	m.called = true
 	return nil
 }

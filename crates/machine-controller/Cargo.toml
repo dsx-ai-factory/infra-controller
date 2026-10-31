@@ -31,6 +31,7 @@ default = []
 test-support = ["dep:mockall"]
 
 [dependencies]
+trace-propagation = { path = "../trace-propagation" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }

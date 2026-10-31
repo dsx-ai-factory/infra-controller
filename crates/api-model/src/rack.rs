@@ -857,6 +857,9 @@ impl std::fmt::Display for MaintenanceActivity {
 /// is maintained.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MaintenanceScope {
+    /// Durable CM action reference, absent for legacy work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub machine_ids: Vec<HostMachineId>,
     #[serde(default)]
@@ -901,6 +904,7 @@ impl MaintenanceScope {
             power_shelf_ids,
             activities,
             requested_at: _,
+            action_id: _,
         } = self;
         *machine_ids == other.machine_ids
             && *switch_ids == other.switch_ids

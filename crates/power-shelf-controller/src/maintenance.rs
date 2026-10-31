@@ -50,14 +50,22 @@ pub async fn handle_maintenance(
     };
     let request = request.as_ref();
 
-    match operation {
-        PowerShelfMaintenanceOperation::PowerOn => {
-            handle_power_on(power_shelf_id, state, request, ctx).await
-        }
-        PowerShelfMaintenanceOperation::PowerOff { graceful } => {
-            handle_power_off(power_shelf_id, state, request, ctx, *graceful).await
-        }
-    }
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        request.and_then(|request| request.action_id),
+        async {
+            match operation {
+                PowerShelfMaintenanceOperation::PowerOn => {
+                    handle_power_on(power_shelf_id, state, request, ctx).await
+                }
+                PowerShelfMaintenanceOperation::PowerOff { graceful } => {
+                    handle_power_off(power_shelf_id, state, request, ctx, *graceful).await
+                }
+            }
+        },
+    )
+    .await?
 }
 
 async fn handle_power_on(

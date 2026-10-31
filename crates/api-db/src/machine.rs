@@ -3395,18 +3395,17 @@ pub async fn set_machine_maintenance_requested(
     operation: MachineMaintenanceOperation,
 ) -> DatabaseResult<()> {
     let req = model::machine::MachineMaintenanceRequest {
+        action_id: None,
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
         operation,
     };
-    let query = "UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2 RETURNING id";
-    sqlx::query_as::<_, MachineId>(query)
-        .bind(sqlx::types::Json(req))
-        .bind(machine_id)
-        .fetch_one(txn)
-        .await
-        .map_err(|e| DatabaseError::new("set_machine_maintenance_requested", e))?;
-    Ok(())
+    crate::cm_action::set_maintenance(
+        txn,
+        crate::cm_action::Target::Machine(&machine_id.into()),
+        &req,
+    )
+    .await
 }
 
 pub async fn set_decommission_requested(
@@ -3442,17 +3441,13 @@ pub async fn clear_machine_maintenance_requested(
     machine_id: impl MachineIdSubtypeTrait,
     request: &model::machine::MachineMaintenanceRequest,
 ) -> DatabaseResult<ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
-    let query = "UPDATE machines SET machine_maintenance_requested = NULL WHERE id = $1 AND machine_maintenance_requested = $2 RETURNING id";
-    let cleared = sqlx::query_as::<_, MachineId>(query)
-        .bind(machine_id)
-        .bind(sqlx::types::Json(request))
-        .fetch_optional(txn)
-        .await
-        .map_err(|e| DatabaseError::new("clear_machine_maintenance_requested", e))?;
-    Ok(match cleared {
-        Some(_) => ConditionalWrite::Applied(()),
-        None => ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
-    })
+    crate::cm_action::clear_maintenance(
+        txn,
+        crate::cm_action::Target::Machine(&machine_id.into()),
+        request,
+        request.action_id,
+    )
+    .await
 }
 
 /// Record an operator "force-converge this BMC now" request on the machine that
