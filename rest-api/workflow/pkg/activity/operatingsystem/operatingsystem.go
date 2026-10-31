@@ -6,7 +6,10 @@ package operatingsystem
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/google/uuid"
@@ -132,8 +135,17 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 
 			ossa, ok := existingOsImageMap[osImageIDStr]
 			if !ok {
-				slogger.Error().Msg("OS Image Site Association does not have a record in DB, possibly created directly on Site")
-				continue
+				ossa, err = mos.createOrUpdateImageOperatingSystemFromSite(ctx, site, controllerOsImage)
+				if err != nil {
+					slogger.Error().Err(err).Msg("failed to recover OS Image from Site inventory")
+					continue
+				}
+				if ossa == nil {
+					continue
+				}
+				existingOsImageMap[osImageIDStr] = ossa
+				updatedOperatingSystemMap[ossa.OperatingSystemID] = true
+				slogger.Info().Msg("created or undeleted OS Image and Site association from Site inventory")
 			}
 
 			reportedOsImageIDMap[ossa.OperatingSystemID] = true
@@ -264,6 +276,330 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 	}
 
 	return updatedOsIDs, nil
+}
+
+// createOrUpdateImageOperatingSystemFromSite recovers a tenant-owned image Operating System
+// and its Site association from Site inventory. The Site already has the image, so recovery
+// persists REST state only and never dispatches a create workflow back to the Site.
+func (mos ManageOsImage) createOrUpdateImageOperatingSystemFromSite(ctx context.Context, site *cdbm.Site, controllerOsImage *corev1.OsImage) (*cdbm.OperatingSystemSiteAssociation, error) {
+	if controllerOsImage == nil || controllerOsImage.Attributes == nil {
+		return nil, nil
+	}
+	attributes := controllerOsImage.Attributes
+	controllerID := attributes.GetId().GetValue()
+	osID, err := uuid.Parse(controllerID)
+	if err != nil {
+		return nil, nil
+	}
+
+	tenantOrg := attributes.GetTenantOrganizationId()
+	if tenantOrg == "" || attributes.GetSourceUrl() == "" || attributes.GetDigest() == "" {
+		return nil, nil
+	}
+
+	logger := log.With().
+		Str("Activity", "createOrUpdateImageOperatingSystemFromSite").
+		Str("Site ID", site.ID.String()).
+		Str("OS Image ID", osID.String()).
+		Str("Tenant Org", tenantOrg).
+		Logger()
+
+	return cdb.WithTxResult(ctx, mos.dbSession, func(tx *cdb.Tx) (*cdbm.OperatingSystemSiteAssociation, error) {
+		tenants, _, tenantErr := cdbm.NewTenantDAO(mos.dbSession).GetAll(
+			ctx,
+			tx,
+			cdbm.TenantFilterInput{Orgs: []string{tenantOrg}},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if tenantErr != nil {
+			return nil, fmt.Errorf("unable to recover OS Image from Site: failed to retrieve Tenant, DB error: %w", tenantErr)
+		}
+		if len(tenants) == 0 {
+			logger.Warn().Msg("unable to recover OS Image from Site: Tenant was not found")
+			return nil, nil
+		}
+		tenant := &tenants[0]
+
+		hasSiteAccess, accessErr := cdbm.TenantHasSiteAccess(ctx, tx, mos.dbSession, tenant, site.ID)
+		if accessErr != nil {
+			return nil, fmt.Errorf("unable to recover OS Image from Site: failed to validate Tenant access, DB error: %w", accessErr)
+		}
+		if !hasSiteAccess {
+			logger.Warn().Msg("unable to recover OS Image from Site: Tenant does not have access to Site")
+			return nil, nil
+		}
+
+		if lockErr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(osID.String()), nil); lockErr != nil {
+			return nil, lockErr
+		}
+		if lockErr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString("image-operating-system-recovery-"+tenant.ID.String()), nil); lockErr != nil {
+			return nil, lockErr
+		}
+
+		osDAO := cdbm.NewOperatingSystemDAO(mos.dbSession)
+		existingOperatingSystems, _, osErr := osDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.OperatingSystemFilterInput{
+				OperatingSystemIds: []uuid.UUID{osID},
+				IncludeDeleted:     true,
+			},
+			cdbp.PageInput{Limit: cutil.GetPtr(1)},
+			nil,
+		)
+		if osErr != nil {
+			return nil, fmt.Errorf("unable to recover OS Image from Site: failed to retrieve Operating System, DB error: %w", osErr)
+		}
+
+		var existingOS *cdbm.OperatingSystem
+		if len(existingOperatingSystems) > 0 {
+			existingOS = &existingOperatingSystems[0]
+			if existingOS.Type != cdbm.OperatingSystemTypeImage ||
+				existingOS.TenantID == nil ||
+				*existingOS.TenantID != tenant.ID ||
+				existingOS.Org != tenantOrg {
+				logger.Warn().Msg("unable to recover OS Image from Site: existing Operating System ownership or type differs")
+				return nil, nil
+			}
+			if existingOS.Deleted == nil && existingOS.Status == cdbm.OperatingSystemStatusDeleting {
+				logger.Info().Msg("not recovering OS Image while Operating System deletion is in progress")
+				return nil, nil
+			}
+			if existingOS.Deleted != nil && site.IsTimeWithinStaleInventoryThreshold(*existingOS.Deleted) {
+				logger.Info().Msg("not undeleting OS Image yet because it was deleted within the inventory staleness window")
+				return nil, nil
+			}
+		}
+
+		ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(mos.dbSession)
+		associations, _, associationErr := ossaDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.OperatingSystemSiteAssociationFilterInput{
+				OperatingSystemIDs: []uuid.UUID{osID},
+				SiteIDs:            []uuid.UUID{site.ID},
+				IncludeDeleted:     true,
+			},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if associationErr != nil {
+			return nil, fmt.Errorf("unable to recover OS Image from Site: failed to retrieve Site association, DB error: %w", associationErr)
+		}
+
+		var activeAssociation *cdbm.OperatingSystemSiteAssociation
+		var deletedAssociation *cdbm.OperatingSystemSiteAssociation
+		for i := range associations {
+			association := &associations[i]
+			if association.Deleted == nil {
+				activeAssociation = association
+				continue
+			}
+			if deletedAssociation == nil || association.Deleted.After(*deletedAssociation.Deleted) {
+				deletedAssociation = association
+			}
+		}
+		if existingOS != nil && existingOS.Deleted == nil && activeAssociation != nil {
+			return activeAssociation, nil
+		}
+		if deletedAssociation != nil && site.IsTimeWithinStaleInventoryThreshold(*deletedAssociation.Deleted) {
+			logger.Info().Msg("not undeleting OS Image Site association yet because it was deleted within the inventory staleness window")
+			return nil, nil
+		}
+
+		recoveredName := ""
+		if existingOS != nil && existingOS.Deleted == nil {
+			recoveredName = existingOS.Name
+		} else {
+			recoveredName = attributes.GetName()
+			nameLength := utf8.RuneCountInString(recoveredName)
+			if nameLength < 2 || nameLength > 256 || strings.TrimSpace(recoveredName) != recoveredName {
+				recoveredName = "recovered-" + osID.String()[:8]
+			}
+			baseName := recoveredName
+			for attempt := 1; ; attempt++ {
+				matches, _, nameErr := osDAO.GetAll(
+					ctx,
+					tx,
+					cdbm.OperatingSystemFilterInput{
+						TenantIDs: []uuid.UUID{tenant.ID},
+						Names:     []string{recoveredName},
+					},
+					cdbp.PageInput{Limit: cutil.GetPtr(1)},
+					nil,
+				)
+				if nameErr != nil {
+					return nil, fmt.Errorf("unable to recover OS Image from Site: failed to validate name uniqueness, DB error: %w", nameErr)
+				}
+				if len(matches) == 0 {
+					break
+				}
+
+				suffix := "-recovered-" + osID.String()[:8]
+				if attempt > 1 {
+					suffix = fmt.Sprintf("%s-%d", suffix, attempt)
+				}
+				maxBaseRunes := 256 - len([]rune(suffix))
+				baseRunes := []rune(baseName)
+				if len(baseRunes) > maxBaseRunes {
+					baseRunes = baseRunes[:maxBaseRunes]
+				}
+				recoveredName = string(baseRunes) + suffix
+			}
+		}
+
+		statusMessage := cutil.GetPtr("Operating System was found on Site, syncing")
+		operatingSystemRecovered := false
+		if existingOS == nil {
+			imageURL := attributes.GetSourceUrl()
+			imageSHA := attributes.GetDigest()
+			created, createErr := osDAO.Create(ctx, tx, cdbm.OperatingSystemCreateInput{
+				ID:                 osID,
+				Name:               recoveredName,
+				Description:        attributes.Description,
+				Org:                tenantOrg,
+				TenantID:           &tenant.ID,
+				OsType:             cdbm.OperatingSystemTypeImage,
+				ImageURL:           &imageURL,
+				ImageSHA:           &imageSHA,
+				ImageAuthType:      attributes.AuthType,
+				ImageAuthToken:     attributes.AuthToken,
+				ImageDisk:          attributes.BootDisk,
+				RootFsId:           attributes.RootfsId,
+				RootFsLabel:        attributes.RootfsLabel,
+				EnableBlockStorage: attributes.GetCreateVolume(),
+				Status:             cdbm.OperatingSystemStatusSyncing,
+				CreatedBy:          tenant.CreatedBy,
+			})
+			if createErr != nil {
+				return nil, fmt.Errorf("unable to recover OS Image from Site: failed to create Operating System, DB error: %w", createErr)
+			}
+			existingOS = created
+			operatingSystemRecovered = true
+			if _, statusErr := cdbm.NewStatusDetailDAO(mos.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+				EntityID: osID.String(),
+				Status:   cdbm.OperatingSystemStatusSyncing,
+				Message:  statusMessage,
+			}); statusErr != nil {
+				return nil, fmt.Errorf("unable to recover OS Image from Site: failed to create Operating System status detail, DB error: %w", statusErr)
+			}
+		} else if existingOS.Deleted != nil {
+			clearInput := cdbm.OperatingSystemClearInput{
+				OperatingSystemId: existingOS.ID,
+				Description:       attributes.Description == nil,
+				ImageAuthType:     attributes.AuthType == nil,
+				ImageAuthToken:    attributes.AuthToken == nil,
+				ImageDisk:         attributes.BootDisk == nil,
+				RootFsId:          attributes.RootfsId == nil,
+				RootFsLabel:       attributes.RootfsLabel == nil,
+				DeactivationNote:  true,
+				Deleted:           true,
+			}
+			if _, clearErr := osDAO.Clear(ctx, tx, clearInput); clearErr != nil {
+				return nil, fmt.Errorf("unable to recover OS Image from Site: failed to undelete Operating System, DB error: %w", clearErr)
+			}
+			imageURL := attributes.GetSourceUrl()
+			imageSHA := attributes.GetDigest()
+			osType := cdbm.OperatingSystemTypeImage
+			status := cdbm.OperatingSystemStatusSyncing
+			isActive := true
+			enableBlockStorage := attributes.GetCreateVolume()
+			updated, updateErr := osDAO.Update(ctx, tx, cdbm.OperatingSystemUpdateInput{
+				OperatingSystemId:  existingOS.ID,
+				Name:               &recoveredName,
+				Description:        attributes.Description,
+				Org:                &tenantOrg,
+				TenantID:           &tenant.ID,
+				OsType:             &osType,
+				ImageURL:           &imageURL,
+				ImageSHA:           &imageSHA,
+				ImageAuthType:      attributes.AuthType,
+				ImageAuthToken:     attributes.AuthToken,
+				ImageDisk:          attributes.BootDisk,
+				RootFsId:           attributes.RootfsId,
+				RootFsLabel:        attributes.RootfsLabel,
+				EnableBlockStorage: &enableBlockStorage,
+				IsActive:           &isActive,
+				Status:             &status,
+			})
+			if updateErr != nil {
+				return nil, fmt.Errorf("unable to recover OS Image from Site: failed to refresh Operating System, DB error: %w", updateErr)
+			}
+			existingOS = updated
+			operatingSystemRecovered = true
+			if _, statusErr := cdbm.NewStatusDetailDAO(mos.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+				EntityID: osID.String(),
+				Status:   cdbm.OperatingSystemStatusSyncing,
+				Message:  statusMessage,
+			}); statusErr != nil {
+				return nil, fmt.Errorf("unable to recover OS Image from Site: failed to create Operating System status detail, DB error: %w", statusErr)
+			}
+		}
+
+		var association *cdbm.OperatingSystemSiteAssociation
+		if activeAssociation != nil {
+			association = activeAssociation
+			if operatingSystemRecovered {
+				syncing := cdbm.OperatingSystemSiteAssociationStatusSyncing
+				notMissing := false
+				updated, updateErr := ossaDAO.Update(ctx, tx, cdbm.OperatingSystemSiteAssociationUpdateInput{
+					OperatingSystemSiteAssociationID: association.ID,
+					Status:                           &syncing,
+					IsMissingOnSite:                  &notMissing,
+				})
+				if updateErr != nil {
+					return nil, fmt.Errorf("unable to recover OS Image from Site: failed to refresh Site association, DB error: %w", updateErr)
+				}
+				association = updated
+			}
+		} else if deletedAssociation != nil {
+			restored, clearErr := ossaDAO.Clear(ctx, tx, cdbm.OperatingSystemSiteAssociationClearInput{
+				OperatingSystemSiteAssociationID: deletedAssociation.ID,
+				Deleted:                          true,
+			})
+			if clearErr != nil {
+				return nil, fmt.Errorf("unable to recover OS Image from Site: failed to undelete Site association, DB error: %w", clearErr)
+			}
+			association = restored
+			syncing := cdbm.OperatingSystemSiteAssociationStatusSyncing
+			notMissing := false
+			updated, updateErr := ossaDAO.Update(ctx, tx, cdbm.OperatingSystemSiteAssociationUpdateInput{
+				OperatingSystemSiteAssociationID: association.ID,
+				Status:                           &syncing,
+				IsMissingOnSite:                  &notMissing,
+			})
+			if updateErr != nil {
+				return nil, fmt.Errorf("unable to recover OS Image from Site: failed to refresh Site association, DB error: %w", updateErr)
+			}
+			association = updated
+		} else {
+			created, createErr := ossaDAO.Create(ctx, tx, cdbm.OperatingSystemSiteAssociationCreateInput{
+				OperatingSystemID: existingOS.ID,
+				SiteID:            site.ID,
+				Status:            cdbm.OperatingSystemSiteAssociationStatusSyncing,
+				CreatedBy:         tenant.CreatedBy,
+			})
+			if createErr != nil {
+				return nil, fmt.Errorf("unable to recover OS Image from Site: failed to create Site association, DB error: %w", createErr)
+			}
+			association = created
+		}
+
+		versioned, versionErr := ossaDAO.GenerateAndUpdateVersion(ctx, tx, association.ID)
+		if versionErr != nil {
+			return nil, fmt.Errorf("unable to recover OS Image from Site: failed to generate Site association version, DB error: %w", versionErr)
+		}
+		if _, statusErr := cdbm.NewStatusDetailDAO(mos.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+			EntityID: association.ID.String(),
+			Status:   cdbm.OperatingSystemSiteAssociationStatusSyncing,
+			Message:  statusMessage,
+		}); statusErr != nil {
+			return nil, fmt.Errorf("unable to recover OS Image from Site: failed to create Site association status detail, DB error: %w", statusErr)
+		}
+
+		return versioned, nil
+	})
 }
 
 // updateOperatingSystemSiteAssociationStatusInDB is helper function to write OperatingSystemSiteAssociation updates to DB

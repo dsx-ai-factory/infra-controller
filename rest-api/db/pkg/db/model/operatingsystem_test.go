@@ -2107,6 +2107,36 @@ func TestOperatingSystemSQLDAO_Clear(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete", func(t *testing.T) {
+		deletedOS, createErr := ossd.Create(ctx, nil, OperatingSystemCreateInput{
+			Name:      "restore-deleted-os",
+			Org:       tenant1.Org,
+			TenantID:  &tenant1.ID,
+			OsType:    OperatingSystemTypeImage,
+			ImageURL:  cutil.GetPtr("https://example.invalid/image"),
+			ImageSHA:  cutil.GetPtr("sha256:restore"),
+			Status:    OperatingSystemStatusDeleting,
+			CreatedBy: user.ID,
+		})
+		require.NoError(t, createErr)
+		require.NoError(t, ossd.Delete(ctx, nil, deletedOS.ID))
+
+		deletedRows, _, getErr := ossd.GetAll(ctx, nil, OperatingSystemFilterInput{
+			OperatingSystemIds: []uuid.UUID{deletedOS.ID},
+			IncludeDeleted:     true,
+		}, paginator.PageInput{Limit: cutil.GetPtr(1)}, nil)
+		require.NoError(t, getErr)
+		require.Len(t, deletedRows, 1)
+		require.NotNil(t, deletedRows[0].Deleted)
+
+		restored, clearErr := ossd.Clear(ctx, nil, OperatingSystemClearInput{
+			OperatingSystemId: deletedOS.ID,
+			Deleted:           true,
+		})
+		require.NoError(t, clearErr)
+		assert.Nil(t, restored.Deleted)
+	})
 }
 
 func TestOperatingSystemSQLDAO_Delete(t *testing.T) {

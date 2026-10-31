@@ -111,11 +111,18 @@ type OperatingSystemSiteAssociationUpdateInput struct {
 	IsMissingOnSite                  *bool
 }
 
+// OperatingSystemSiteAssociationClearInput identifies nullable fields to clear.
+type OperatingSystemSiteAssociationClearInput struct {
+	OperatingSystemSiteAssociationID uuid.UUID
+	Deleted                          bool
+}
+
 type OperatingSystemSiteAssociationFilterInput struct {
 	OperatingSystemIDs []uuid.UUID
 	SiteIDs            []uuid.UUID
 	Versions           []string
 	Statuses           []string
+	IncludeDeleted     bool
 }
 
 var _ bun.BeforeAppendModelHook = (*OperatingSystemSiteAssociation)(nil)
@@ -155,6 +162,8 @@ type OperatingSystemSiteAssociationDAO interface {
 	GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, ID uuid.UUID) (*OperatingSystemSiteAssociation, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input OperatingSystemSiteAssociationUpdateInput) (*OperatingSystemSiteAssociation, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input OperatingSystemSiteAssociationClearInput) (*OperatingSystemSiteAssociation, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -275,6 +284,9 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) GetAll(ctx context.Context, t
 	}
 	if filter.Statuses != nil {
 		query = query.Where("ossa.status IN (?)", bun.In(filter.Statuses))
+	}
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
 	}
 
 	for _, relation := range includeRelations {
@@ -419,6 +431,36 @@ func (ossasd OperatingSystemSiteAssociationSQLDAO) Update(
 		return nil, err
 	}
 	return nv, nil
+}
+
+// Clear sets selected nullable fields on an OperatingSystemSiteAssociation to NULL.
+func (ossasd OperatingSystemSiteAssociationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input OperatingSystemSiteAssociationClearInput) (_ *OperatingSystemSiteAssociation, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "OperatingSystemSiteAssociationDAO.Clear")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.String("id", input.OperatingSystemSiteAssociationID.String()))
+
+	ossa := &OperatingSystemSiteAssociation{ID: input.OperatingSystemSiteAssociationID}
+	updatedFields := []string{}
+	if input.Deleted {
+		ossa.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+		query := db.GetIDB(tx, ossasd.dbSession).NewUpdate().
+			Model(ossa).
+			Column(updatedFields...).
+			Where("ossa.id = ?", input.OperatingSystemSiteAssociationID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return ossasd.GetByID(ctx, tx, input.OperatingSystemSiteAssociationID, nil)
 }
 
 // Delete deletes an OperatingSystemSiteAssociation by ID
