@@ -39,6 +39,7 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 │      route_targets_on_exports                                           │
 │      leak_* flags                                                       │
 │    additional_route_target_imports                                      │
+│    common_internal_route_target (optional)                              │
 └──────────────────────┬──────────────────────────────────────────────────┘
                        │ configuration poll (every 30 seconds)
                        ▼
@@ -52,7 +53,7 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 │  VPC VRF  ◄─── VPC VNI (vpc-vni or external-vpc-vni pool)               │
 │    native + peered VPC RT imports: <datacenter_asn>:<imported_vni>      │
 │    additional RT imports: from routing profile + fnn config             │
-│    export tags: native RT + route_targets_on_exports                    │
+│    export tags: native RT + profile RTs + optional site common RT       │
 │    site_fabric_null_routes: distance-250 blackholes in mutual isolation │
 │                                                                         │
 │  deny_prefixes ACL ──► blocks listed prefixes from tenant traffic       │
@@ -72,6 +73,7 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 | Site BGP ASN | `asn` in the API server config | Ethernet-virtualization ASN; still present in the config but superseded by per-DPU ASNs |
 | Datacenter ASN | `datacenter_asn` in the API server config | The ASN component used when forming route-targets from VNIs: `<datacenter_asn>:<vni>` |
 | Routing profile | `fnn.routing_profiles` in the API server config | Defines `route_target_imports`, `route_targets_on_exports`, and leak behavior for a VPC's VRF |
+| Common export RT | `fnn.common_internal_route_target` | Optional site-wide tag added to tenant VRF exports independently of the routing profile |
 | Additional RT imports | `fnn.additional_route_target_imports` | Extra route-targets imported into every VPC VRF site-wide |
 | Deny-prefix ACL | `deny_prefixes` in the API server config | Prefixes tenant instances are not permitted to reach |
 | Site fabric prefixes | `site_fabric_prefixes` in the API server config | IP prefixes assigned for tenant use within this site. |
@@ -186,20 +188,36 @@ For the per-fabric isolation story across Ethernet, InfiniBand, and NVLink, see
 
 ## Intra-VPC Connectivity
 
-Instances in the same VPC communicate via the VPC VRF on each DPU. No operator configuration
-beyond VNI pool provisioning and routing profile assignment is required to enable this.
+An FNN VPC is a routed L3 overlay. Each IPv4 instance interface has its own `/31` point-to-point link to its DPU: the even address is the DPU gateway and the odd address is the host. A shared VPC prefix is an allocation pool, not a shared L2 subnet. The fabric must provide the underlay and EVPN connectivity described in [Network Prerequisites](../../getting-started/prerequisites/network.md).
 
 The flow:
 
-1. A tenant instance boots on a managed host. The DPU receives a configuration that places the
-   host interface into the VPC VRF, identified by the VPC VNI.
-1. The host's instance IP is advertised from the host into the DPU via a BGP session between the
-   host OS and the DPU.
-1. The DPU re-advertises that host route into the fabric as a BGP EVPN type-5 prefix, tagged with
-   the VPC's native route-target: `<datacenter_asn>:<vpc_vni>`.
-1. Every other DPU that has an instance in the same VPC imports that same route-target (it is the
-   per-VPC default import) and installs the host route in its local copy of the VPC VRF.
-1. Return traffic follows the per-VPC loopback IP (`vpc-dpu-lo` pool) as the EVPN next-hop.
+1. A tenant instance boots on a managed host. The DPU receives a configuration that places the host interface into the VPC VRF, identified by the VPC VNI.
+1. The DPU redistributes the connected `/31` into BGP and exports it into the fabric as an EVPN type-5 prefix, tagged with the VPC's native route-target: `<datacenter_asn>:<vpc_vni>`. Ordinary instance connectivity does not require a BGP daemon in the host OS.
+1. Every other DPU that has an instance in the same VPC imports that same route-target (it is the per-VPC default import) and installs the prefix in its local copy of the VPC VRF.
+1. A packet to a remote instance goes to the local DPU gateway, crosses the fabric in VXLAN to the remote DPU VTEP, and is routed onto the destination's `/31`. Return traffic uses the reverse routed path. Both directions must pass any applicable NSGs and site policy.
+
+For example, host A at `192.0.2.1/31` uses DPU gateway `192.0.2.0`, while host B at `192.0.2.3/31` uses DPU gateway `192.0.2.2`. A sends traffic for B to its gateway without ARPing for B. The advertised connected prefixes are `192.0.2.0/31` and `192.0.2.2/31`, not host `/32` routes. DPU loopback `/32`s serve a separate purpose: reaching the tunnel endpoints.
+
+```mermaid
+flowchart TB
+    hostA["Host A<br/>192.0.2.1/31"]
+    dpuA["DPU A<br/>Gateway: 192.0.2.0<br/>VPC VRF and VTEP"]
+    dpuB["DPU B<br/>Gateway: 192.0.2.2<br/>VPC VRF and VTEP"]
+    hostB["Host B<br/>192.0.2.3/31"]
+
+    hostA -->|"192.0.2.0/31 link"| dpuA
+    dpuA -->|"VXLAN across the routed fabric"| dpuB
+    dpuB -->|"192.0.2.2/31 link"| hostB
+```
+
+Both hosts belong to the same VPC. The arrows follow a packet from A to B. Replies use the same links in reverse. The DPUs exchange the connected prefixes through EVPN.
+
+Host BGP is useful for additional application routes, such as Kubernetes service VIPs. See [BGP Peering](../networking/bgp_peering.md). Cluster software must support routed node connectivity or supply its own overlay, rather than assume L2 adjacency. Kubernetes installation, CNI selection, and control-plane HA belong to the platform consuming NICo. See [Scope and Boundaries](../../overview/scope-and-boundaries.md).
+
+For ingress, VPC peering, and storage outside NICo-managed DPUs, see [Tenant Connectivity and Shared Services](tenant_connectivity.md).
+
+The connected-prefix redistribution and route-target imports are rendered by the [FNN DPU template](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/templates/nvue_startup_fnn.conf).
 
 ### Site-wide additional route-target imports
 
@@ -213,8 +231,8 @@ such as control-plane service VIPs. The standard import for site-controller VIPs
 
 ## Internet Connectivity
 
-A default route must be present in the VPC VRF for instances to reach destinations outside the
-overlay. There are three mechanisms by which this can happen. The correct choice depends on the
+A default route in the VPC VRF provides general internet reachability for destinations without
+a more-specific route. There are three mechanisms by which this can happen. The correct choice depends on the
 site's network deployment model and must be agreed between the NICo operator and the network team.
 
 ### Mechanism 1: Explicit route-target import in the routing profile
@@ -229,10 +247,10 @@ Configure this in `fnn.routing_profiles.<name>.route_target_imports`:
 internal = false
 access_tier = 2
 route_target_imports = [
-    { asn = 11414, vni = 50500 },   # network-advertised default route for external VPCs
+    { asn = 11414, vni = 50700 },   # example RT carrying only the gateway's default route
 ]
 route_targets_on_exports = [
-    { asn = 11414, vni = 50500 },
+    { asn = 11414, vni = 50500 },   # common external tenant RT for return routes
 ]
 leak_default_route_from_underlay = false
 leak_tenant_host_routes_to_underlay = false
@@ -240,6 +258,8 @@ leak_tenant_host_routes_to_underlay = false
 
 This is the most explicit mechanism and is preferred when the network team operates a dedicated
 gateway VRF that exports a default route with a known route-target.
+
+The default-route RT (`11414:50700` here) must be different from the common tenant export RT (`11414:50500`). If tenants import their common export RT, they also import each other's routes. Choose a default-only RT with the network team and ensure the gateway exports only the intended default under it.
 
 ### Mechanism 2: Default route injection via the native VPC route-target
 
@@ -328,20 +348,20 @@ accepted_leaks_from_underlay = [
 When the DPU advertises routes from a VPC into the fabric, it tags them with:
 
 1. The VPC's native route-target: `<datacenter_asn>:<vpc_vni>`
-1. Any route-targets listed in `route_targets_on_exports` for the VPC's routing profile
+1. Any route-targets listed in `route_targets_on_exports` for the VPC's effective routing profile, including per-VPC overrides
+1. The optional site-wide `fnn.common_internal_route_target`, when configured
 
-The network device VRFs must import the route-targets present on VPC routes to see those routes
-and return traffic to instances. If they do not, the overlay routing table appears correct from
-the VPC side but external hosts cannot reach instances — the same symptom as no internet access.
+The profile's export RTs can be shared by many VPCs. For example, an internal profile can tag all its tenant routes with `:50200`, while an external profile uses `:50500`. A storage or gateway VRF can import those common RTs to learn return routes without tracking each VPC's native RT. Exporting a common RT does not make tenant VPCs import it. Imports are configured separately.
 
-This is the most common cause of one-way connectivity: the instance can send packets out, but
-responses are dropped because the network cannot route back.
+`fnn.common_internal_route_target` is an optional `{ asn, vni }` object with unsigned 32-bit fields. Set both values explicitly to match the network's RT plan. Omitting the object adds no site-wide tag. Despite the setting's name, the DPU template adds it to every tenant VRF it renders without checking the profile's `internal` flag. Per-VPC profile overrides do not remove it. See the [FNN DPU template](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/templates/nvue_startup_fnn.conf) for the export and import lists.
 
-**Diagnostic question to ask the network team**: Is the network VRF configured to import the
-route-targets listed in `route_targets_on_exports` for this VPC's routing profile?
+The network device VRFs must import the route-targets present on VPC routes to see those routes and return traffic to instances. If they do not, the overlay routing table appears correct from the VPC side but external hosts cannot reach instances — the same symptom as no internet access.
 
-See [VPC Routing Profiles — Troubleshooting: No Internet Access](vpc_routing_profiles.md#troubleshooting-example-no-internet-access-in-a-vpc)
-for the full troubleshooting procedure.
+This is the most common cause of one-way connectivity: the instance can send packets out, but responses are dropped because the network cannot route back.
+
+**Diagnostic question to ask the network team**: Does the network VRF import at least one RT carried by the VPC's routes? Check the VPC's native RT, `route_targets_on_exports` from its effective profile (including per-VPC overrides), and `fnn.common_internal_route_target` when configured.
+
+See [VPC Routing Profiles — Troubleshooting: No Internet Access](vpc_routing_profiles.md#troubleshooting-example-no-internet-access-in-a-vpc) for the full troubleshooting procedure.
 
 ---
 
@@ -437,7 +457,7 @@ numbers `:50100`, `:50200`, and `:50500` are conventional; see
 
 Have the network team confirm:
 
-- [ ] Network device VRFs import the route-targets that external VPCs export (`route_targets_on_exports`).
+- [ ] Network device VRFs import an RT carried by each external VPC's routes. Check the [full export policy](#export-route-targets-and-return-path-reachability).
 - [ ] Network device VRFs export a default route tagged with either:
   - the route-target listed in `route_target_imports` for each VPC profile that needs internet
     access, or
@@ -481,6 +501,6 @@ For routing-profile-specific troubleshooting, see
 | VPC creation fails with `NOT_FOUND` | Routing profile name is not defined in `fnn.routing_profiles` |
 | DPU reports no BGP sessions | `datacenter_asn` or `fnn-asn` pool mismatch; route servers not reachable |
 | Intra-VPC connectivity works but internet access fails | `route_target_imports` missing or network not advertising the expected route-target |
-| Internet access works but no return traffic | Network VRF not importing `route_targets_on_exports` |
+| Internet access works but no return traffic | Network VRF has no matching import for the VPC's [export RTs](#export-route-targets-and-return-path-reachability) |
 | All connectivity fails after adding a second VPC | VNI pool exhausted; check pool capacity in [VNI Resource Pools](vni_resource_pools.md) |
 | `vpc-dpu-lo` allocation error | Per-VPC DPU loopback pool exhausted; check [IP Resource Pools](../networking/ip_resource_pools.md) |
