@@ -148,9 +148,11 @@ Explicit `unspecified`/`Unspecified` resets the policy to Auto.
 | Select Fixed with `bmc_ip_address` | **Fixed** | Same fixed behavior as inferred Auto. |
 
 Fixed requires `bmc_ip_address`. Dynamic and Retained reject a configured
-address. A retained address is not written back to the Expected Machine, so
-deleting the machine-interface row and re-ingesting the host can select a new
-address. Use a fixed address when it must survive interface recreation. Mixing
+address. NICo rejects an unspecified (`0.0.0.0` or `::`), multicast, or IPv4
+limited-broadcast (`255.255.255.255`) `bmc_ip_address`, including the
+IPv4-mapped IPv6 form of each. A retained address is not written back to the
+Expected Machine, so deleting the machine-interface row and re-ingesting the
+host can select a new address. Use a fixed address when it must survive interface recreation. Mixing
 policies within one site is supported.
 
 #### Capacity and Network Setup

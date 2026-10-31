@@ -2901,6 +2901,8 @@ message ExpectedPowerShelf {
   string bmc_password = 3;
   string shelf_serial_number = 4;
   // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Unspecified, multicast, and IPv4 limited-broadcast addresses, including
+  // their IPv4-mapped IPv6 forms, also fail INVALID_ARGUMENT.
   // Empty or omitted means no inventory address on add, full update, or
   // replace-all. Masked updates apply this field only when selected.
   // Clearing the inventory address does not remove existing interface addresses.
@@ -3162,6 +3164,8 @@ message ExpectedSwitch {
   reserved 10;
   reserved "nvos_mac_addresses";
   // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Unspecified, multicast, and IPv4 limited-broadcast addresses, including
+  // their IPv4-mapped IPv6 forms, also fail INVALID_ARGUMENT.
   // Empty or omitted means no inventory address on add, full update, or
   // replace-all. Masked updates apply this field only when selected.
   // Clearing the inventory address does not remove existing interface addresses.
@@ -3170,7 +3174,9 @@ message ExpectedSwitch {
   // factory-default credentials in Vault as-is.
   optional bool bmc_retain_credentials = 12;
   // Static IP reservation for the single wired NVOS port. Only meaningful
-  // when `nvos_interfaces` has exactly one entry.
+  // when `nvos_interfaces` has exactly one entry. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string nvos_ip_address = 13;
   // The switch's NVOS ethernet ports. Create and replace-all entries require
   // at least one port. Exactly one entry must be flagged
@@ -7476,6 +7482,9 @@ message ExpectedHostNic {
   // Legacy free-form segment hint (bf3, onboard, oob, ...). Kept for backward
   // compatibility; declare `network_segment_type` instead, which wins.
   optional string nic_type = 2;
+  // Address that NICo reserves for this interface. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string fixed_ip = 3;
   optional string fixed_mask = 4;
   optional string fixed_gateway = 5;
@@ -7599,7 +7608,9 @@ message ExpectedMachine {
   // switches and power shelves; external IPs use the static-assignments
   // segment. Single and batch update omission preserves the effective Host BMC
   // setting; an explicit empty string clears it. Replace-all keeps its earlier
-  // replacement semantics for legacy-only rows.
+  // replacement semantics for legacy-only rows. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string bmc_ip_address = 14;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.

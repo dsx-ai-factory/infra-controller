@@ -163,15 +163,15 @@ pub(crate) struct Args {
     #[clap(
         long = "bmc-ip-address",
         value_name = "BMC_IP_ADDRESS",
-        help = "BMC IP address of the expected switch"
+        help = "BMC IP address of the expected switch. Must not be unspecified, multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6 form of each"
     )]
     bmc_ip_address: Option<IpAddr>,
 
     #[clap(
         long = "nvos-ip-address",
         value_name = "NVOS_IP_ADDRESS",
-        help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS interface",
-        long_help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS port. When Core supports PATCH or masked updates, omit --nvos-interface only if the stored set already contains exactly one port; otherwise, supply exactly one --nvos-interface to replace the set. Servers without NVOS IP support ignore this field"
+        help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS interface. Must not be unspecified, multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6 form of each",
+        long_help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS port. When Core supports PATCH or masked updates, omit --nvos-interface only if the stored set already contains exactly one port; otherwise, supply exactly one --nvos-interface to replace the set. Servers without NVOS IP support ignore this field. Must not be unspecified, multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6 form of each"
     )]
     nvos_ip_address: Option<IpAddr>,
 

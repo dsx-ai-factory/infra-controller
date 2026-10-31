@@ -21,7 +21,7 @@ Each `interfaces` entry supports these fields:
 | `logical_ifname` | No | Logical interface name stored for inventory consumers. |
 | `role` | No | Interface role: `host`, `dpu_os`, `dpu_bmc`, or `host_bmc`. The default is `host`. |
 | `ip_allocation` | No | Address policy: `dynamic`, `fixed`, or `retained`. NICo can also infer the policy as described in [IP Allocation Policies](#ip-allocation-policies). |
-| `fixed_ip` | For `fixed` | Address that NICo reserves for this interface. |
+| `fixed_ip` | For `fixed` | Address that NICo reserves for this interface. NICo rejects an unspecified (`0.0.0.0` or `::`), multicast, or IPv4 limited-broadcast (`255.255.255.255`) address, including the IPv4-mapped IPv6 form of each. |
 | `network_segment_type` | No | Optional segment-type guard. Admin CLI manifest and RPC JSON values are Tenant `0`, Admin `1`, Underlay `2`, and HostInband `3`. The corresponding model names are `tenant`, `admin`, `underlay`, and `host_inband`. |
 | `primary` | No | Marks a `host` interface as the host boot interface. At most one `host` interface can set this to `true`. |
 | `nic_type` | No | Legacy segment hint. Use `network_segment_type` for new configurations. |
