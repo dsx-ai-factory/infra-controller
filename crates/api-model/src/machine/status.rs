@@ -77,6 +77,13 @@ pub struct MachineStatus {
 pub struct MlxDeviceObservation {
     /// Time Scout generated the report, not the time Core received it.
     pub observed_at: DateTime<Utc>,
+    /// Database time taken while the write that accepted this report ran,
+    /// somewhere between that write's start and its commit. Writers leave it
+    /// `None`; `update_mlx_device_observation` sets it, including when Scout
+    /// re-sends a report with the same `observed_at`. Older stored reports omit
+    /// it. Reception after an action does not prove collection after it.
+    #[serde(default)]
+    pub received_at: Option<DateTime<Utc>>,
     /// All reported devices, including entries with unavailable optional facts.
     pub devices: Vec<MlxDeviceInfo>,
 }
