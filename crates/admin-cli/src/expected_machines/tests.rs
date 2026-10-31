@@ -527,6 +527,7 @@ fn standalone_boolean_patches_preserve_explicit_false() {
             ("--bmc-retain-credentials", "bmc_retain_credentials") => Yields(Some(false)),
             ("--default_pause_ingestion_and_poweron", "default_pause_ingestion_and_poweron") => Yields(Some(false)),
             ("--disable-lockdown", "disable_lockdown") => Yields(Some(false)),
+            ("--control-plane", "control_plane") => Yields(Some(false)),
         }
     );
 }

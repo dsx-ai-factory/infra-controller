@@ -202,6 +202,7 @@ async fn machine_flags_select_only_supplied_fields() {
                 bmc_retain_credentials: Some(false),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
+                    control_plane: None,
                 }),
                 dpu_mode: Some(forge::DpuMode::Unspecified as i32),
                 bmc_ip_allocation: Some(forge::BmcIpAllocationType::Auto as i32),
@@ -225,6 +226,28 @@ async fn machine_flags_select_only_supplied_fields() {
                 id: Some(rpc_id()),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
+                    control_plane: None,
+                }),
+                ..Default::default()
+            },
+        },
+        Case {
+            scenario: "standalone control-plane flag selects only the nested lifecycle field",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--control-plane",
+                "true",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["host_lifecycle_profile.control_plane"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: None,
+                    control_plane: Some(true),
                 }),
                 ..Default::default()
             },
@@ -568,6 +591,38 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
             },
         },
         Case {
+            scenario: "legacy lockdown patch keeps the stored control-plane designation",
+            args: &[
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--disable-lockdown",
+                "true",
+            ],
+            patch_reply: PatchReply::Grpc(Code::Unimplemented),
+            lookup_id: Some(ID),
+            methods: &[
+                "PatchExpectedMachine",
+                "GetExpectedMachine",
+                "UpdateExpectedMachine",
+            ],
+            selector: forge::ExpectedMachineRequest {
+                id: Some(rpc_id()),
+                ..Default::default()
+            },
+            expected: forge::ExpectedMachine {
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: Some(true),
+                    control_plane: Some(true),
+                }),
+                #[allow(deprecated)]
+                dpf_enabled: true,
+                is_dpf_enabled: None,
+                ..stored_machine()
+            },
+        },
+        Case {
             scenario: "file update preserves omission rules after an old site's HTTP 403",
             args: &[
                 "expected-machine",
@@ -860,6 +915,34 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
         requests[1].headers[EXPECTED_SWITCH_UPDATE_MASK_HEADER],
         "bmc_password,nvos_username,nvos_password"
     );
+}
+
+/// An older site has no `control_plane` field. The legacy update would drop it
+/// and still answer OK, so the CLI would report a designation the site never
+/// stored and never validated. Fail before the legacy write instead.
+#[tokio::test]
+async fn legacy_fallback_rejects_a_control_plane_designation() {
+    let (result, requests) = dispatch_with_replies(
+        &[
+            "expected-machine",
+            "patch",
+            "--id",
+            ID,
+            "--control-plane",
+            "true",
+        ],
+        PatchReply::Grpc(Code::Unimplemented),
+        Code::Ok,
+        Some(ID),
+    )
+    .await;
+    let error = result.expect_err("the legacy update cannot store a control-plane designation");
+    assert!(
+        error.to_string().contains("control-plane designation"),
+        "unexpected error: {error}"
+    );
+    // The legacy read/merge/update must not run at all.
+    assert_methods(&requests, &["PatchExpectedMachine"]);
 }
 
 #[tokio::test]
@@ -1396,6 +1479,10 @@ fn stored_machine() -> forge::ExpectedMachine {
             mac_address: Some("00:11:22:33:44:66".to_string()),
             ..Default::default()
         }],
+        host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+            disable_lockdown: None,
+            control_plane: Some(true),
+        }),
         ..Default::default()
     }
 }
