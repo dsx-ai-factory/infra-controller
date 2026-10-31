@@ -547,6 +547,7 @@ type OperatingSystemClearInput struct {
 	IpxeTemplateParameters bool
 	IpxeTemplateArtifacts  bool
 	IpxeOSHash             bool
+	Deleted                bool
 }
 
 type OperatingSystemFilterInput struct {
@@ -1047,11 +1048,19 @@ func (ossd OperatingSystemSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Op
 		it.IpxeTemplateDefinitionHash = nil
 		updatedFields = append(updatedFields, "ipxe_template_definition_hash")
 	}
+	if input.Deleted {
+		it.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ossd.dbSession).NewUpdate().Model(it).Column(updatedFields...).Where("id = ?", input.OperatingSystemId).Exec(ctx)
+		query := db.GetIDB(tx, ossd.dbSession).NewUpdate().Model(it).Column(updatedFields...).Where("id = ?", input.OperatingSystemId)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
