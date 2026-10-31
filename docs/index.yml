@@ -562,6 +562,14 @@ navigation:
                   - GET /v2/org/{org}/nico/machine/{machineId}/validation/run
                   - POST /v2/org/{org}/nico/machine/{machineId}/validation/run
                   - GET /v2/org/{org}/nico/machine/{machineId}/validation/result
+              - section: External Validation
+                skip-slug: true
+                contents:
+                  - GET /v2/org/{org}/nico/machine/external-validation/hold
+                  - POST /v2/org/{org}/nico/machine/{machineId}/external-validation/attempt
+                  - POST /v2/org/{org}/nico/machine/{machineId}/external-validation/attempt/{attemptId}/complete
+                  - POST /v2/org/{org}/nico/machine/{machineId}/external-validation/attempt/{attemptId}/cancel
+                  - DELETE /v2/org/{org}/nico/machine/{machineId}/external-validation/hold/{holdId}
               - section: Statistics
                 skip-slug: true
                 contents:

@@ -684,6 +684,9 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 		NVLinkInterfaces               []APINVLinkInterfaceCreateOrUpdateRequest
 		Labels                         map[string]string
 		MachineLabelSelector           map[string]string
+		MachineID                      *string
+		AllowUnhealthyMachine          *bool
+		ExternalValidationRequestID    *string
 	}
 	tooManyMachineLabelSelector := make(map[string]string, util.LabelCountMax+1)
 	for i := 0; i <= util.LabelCountMax; i++ {
@@ -1365,6 +1368,62 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 			wantErr:          true,
 			wantErrorMessage: "userData: " + validationErrorUserDataLength,
 		},
+		{
+			name: "test valid Instance for an external validation attempt",
+			fields: fields{
+				Name:                        "test-name",
+				TenantID:                    uuid.NewString(),
+				VpcID:                       uuid.NewString(),
+				OperatingSystemID:           cutil.GetPtr(uuid.NewString()),
+				Interfaces:                  []APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(uuid.NewString())}},
+				MachineID:                   cutil.GetPtr("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"),
+				AllowUnhealthyMachine:       cutil.GetPtr(true),
+				ExternalValidationRequestID: cutil.GetPtr(uuid.NewString()),
+			},
+		},
+		{
+			name: "test invalid Instance with malformed externalValidationRequestId",
+			fields: fields{
+				Name:                        "test-name",
+				TenantID:                    uuid.NewString(),
+				VpcID:                       uuid.NewString(),
+				OperatingSystemID:           cutil.GetPtr(uuid.NewString()),
+				Interfaces:                  []APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(uuid.NewString())}},
+				MachineID:                   cutil.GetPtr("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"),
+				AllowUnhealthyMachine:       cutil.GetPtr(true),
+				ExternalValidationRequestID: cutil.GetPtr("attempt-1"),
+			},
+			wantErr:          true,
+			wantErrorMessage: "externalValidationRequestId: must be a valid UUID",
+		},
+		{
+			name: "test invalid Instance with externalValidationRequestId and Instance Type",
+			fields: fields{
+				Name:                        "test-name",
+				TenantID:                    uuid.NewString(),
+				InstanceTypeID:              uuid.NewString(),
+				VpcID:                       uuid.NewString(),
+				OperatingSystemID:           cutil.GetPtr(uuid.NewString()),
+				Interfaces:                  []APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(uuid.NewString())}},
+				ExternalValidationRequestID: cutil.GetPtr(uuid.NewString()),
+			},
+			wantErr:          true,
+			wantErrorMessage: "`machineId` must be specified when `externalValidationRequestId` is specified",
+		},
+		{
+			name: "test invalid Instance with externalValidationRequestId without allowUnhealthyMachine",
+			fields: fields{
+				Name:                        "test-name",
+				TenantID:                    uuid.NewString(),
+				VpcID:                       uuid.NewString(),
+				OperatingSystemID:           cutil.GetPtr(uuid.NewString()),
+				Interfaces:                  []APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(uuid.NewString())}},
+				MachineID:                   cutil.GetPtr("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"),
+				ExternalValidationRequestID: cutil.GetPtr(uuid.NewString()),
+			},
+			wantErr:          true,
+			wantErrorMessage: "`allowUnhealthyMachine` must be `true` when `externalValidationRequestId` is specified",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1385,6 +1444,13 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 				NVLinkInterfaces:               tt.fields.NVLinkInterfaces,
 				Labels:                         tt.fields.Labels,
 				MachineLabelSelector:           tt.fields.MachineLabelSelector,
+				MachineID:                      tt.fields.MachineID,
+				AllowUnhealthyMachine:          tt.fields.AllowUnhealthyMachine,
+				ExternalValidationRequestID:    tt.fields.ExternalValidationRequestID,
+			}
+			// A Machine-targeted request has no Instance Type.
+			if tt.fields.MachineID != nil {
+				icr.InstanceTypeID = nil
 			}
 
 			err := icr.Validate()
