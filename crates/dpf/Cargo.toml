@@ -22,6 +22,10 @@ driver = ["dep:clap", "dep:tracing-subscriber", "dep:libredfish"]
 
 [dependencies]
 hex = { workspace = true }
+http = { workspace = true }
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 indoc = { workspace = true }
 kube = { default-features = false, features = [
   "runtime",
@@ -64,12 +68,15 @@ tracing-subscriber = { workspace = true, features = [
 libredfish = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
+trace-propagation = { path = "../trace-propagation" }
 carbide-test-support = { path = "../test-support" }
 dashmap = { workspace = true }
 tower-test = { workspace = true }
 hyper = { features = ["client", "http1"], workspace = true }
-http = { workspace = true }
 once_cell = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 # requires this patch version for kopium. without this we have to specify a specific anyhow patch version in the main workspace.
