@@ -2097,7 +2097,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Hosts per reported in-band software component and version.",
+      "description": "DPUs per reported in-band software component and version.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2183,7 +2183,7 @@
           "refId": "A"
         }
       ],
-      "title": "Host inventory component versions",
+      "title": "DPU inventory component versions",
       "type": "timeseries",
       "id": 27
     },
