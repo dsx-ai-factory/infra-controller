@@ -65,6 +65,8 @@ type ExpectedMachine struct {
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// When true, this host is eligible for DPF-based provisioning. Returns the effective setting: true when no value is configured. An explicitly configured false value is returned as false.
 	IsDpfEnabled *bool `json:"isDpfEnabled,omitempty"`
+	// Whether Site Explorer keeps this BMC's factory-default credentials instead of rotating them when it first stores credentials for the BMC. This is the stored setting, not the current credential state: if it changed to true after rotation, NICo still holds the rotated password. Returns false when no value is stored, as for Expected Machines created before this field existed.
+	RetainBmcCredentials *bool `json:"retainBmcCredentials,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Machines
 	Labels map[string]string `json:"labels,omitempty"`
 	// Optional per-host lifecycle profile
@@ -896,6 +898,38 @@ func (o *ExpectedMachine) SetIsDpfEnabled(v bool) {
 	o.IsDpfEnabled = &v
 }
 
+// GetRetainBmcCredentials returns the RetainBmcCredentials field value if set, zero value otherwise.
+func (o *ExpectedMachine) GetRetainBmcCredentials() bool {
+	if o == nil || IsNil(o.RetainBmcCredentials) {
+		var ret bool
+		return ret
+	}
+	return *o.RetainBmcCredentials
+}
+
+// GetRetainBmcCredentialsOk returns a tuple with the RetainBmcCredentials field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *ExpectedMachine) GetRetainBmcCredentialsOk() (*bool, bool) {
+	if o == nil || IsNil(o.RetainBmcCredentials) {
+		return nil, false
+	}
+	return o.RetainBmcCredentials, true
+}
+
+// HasRetainBmcCredentials returns a boolean if a field has been set.
+func (o *ExpectedMachine) HasRetainBmcCredentials() bool {
+	if o != nil && !IsNil(o.RetainBmcCredentials) {
+		return true
+	}
+
+	return false
+}
+
+// SetRetainBmcCredentials gets a reference to the given bool and assigns it to the RetainBmcCredentials field.
+func (o *ExpectedMachine) SetRetainBmcCredentials(v bool) {
+	o.RetainBmcCredentials = &v
+}
+
 // GetLabels returns the Labels field value if set, zero value otherwise.
 func (o *ExpectedMachine) GetLabels() map[string]string {
 	if o == nil || IsNil(o.Labels) {
@@ -1096,6 +1130,9 @@ func (o ExpectedMachine) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.IsDpfEnabled) {
 		toSerialize["isDpfEnabled"] = o.IsDpfEnabled
+	}
+	if !IsNil(o.RetainBmcCredentials) {
+		toSerialize["retainBmcCredentials"] = o.RetainBmcCredentials
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels
