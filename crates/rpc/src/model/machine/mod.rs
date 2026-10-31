@@ -583,11 +583,8 @@ impl ManagedHostStateSnapshotRpc for ManagedHostStateSnapshot {
     /// Creates an RPC Machine representation for either the Host or one of the DPUs.
     ///
     /// Consumes the snapshot so the selected `Machine` moves into the
-    /// conversion instead of being deep-cloned here; callers that hand over
-    /// an owned snapshot per machine (like `snapshot_map_to_rpc_machines`)
-    /// get a clone-free conversion. DPU-keyed loads still deep-clone the
-    /// snapshot one frame earlier (`managed_host::load_by_machine_ids`) —
-    /// the next candidate for this same move-instead-of-clone treatment.
+    /// conversion instead of deep-cloning the whole machine. Individual
+    /// fields may still be cloned by the conversion.
     fn into_rpc_machine_state(
         self,
         dpu_machine_id: Option<&DpuMachineId>,
@@ -623,7 +620,6 @@ impl ManagedHostStateSnapshotRpc for ManagedHostStateSnapshot {
                 let dpu_snapshot = dpu_snapshots
                     .into_iter()
                     .find(|dpu| dpu.id == *dpu_machine_id)?;
-                let mut rpc_machine: rpc::forge::Machine = dpu_snapshot.clone().into();
                 let sla: rpc::forge::StateSla = state_sla(
                     &dpu_snapshot.id,
                     &dpu_snapshot.state.value,
@@ -632,6 +628,7 @@ impl ManagedHostStateSnapshotRpc for ManagedHostStateSnapshot {
                     sla_config,
                 )
                 .into();
+                let mut rpc_machine: rpc::forge::Machine = dpu_snapshot.into();
                 // In case the DPU does not know the associated Host - we can backfill the data here
                 rpc_machine.state_sla = Some(sla);
                 if let Some(status) = rpc_machine.status.as_mut() {
