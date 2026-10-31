@@ -193,6 +193,15 @@ retrying pre-ingestion. NICo also marks the tray `Failed` if RMS no longer
 recognizes a persisted job ID. A failed RMS submission is also terminal; when
 the response includes a job ID, reconcile that job before retrying.
 
+The BMC time synchronization and firmware pre-update resets power off the
+host, reset the BMC, power the host on, and wait 20 minutes for it to boot. A
+BlueField-3 DPU that reports `Paused` after power-off is treated as off and is
+force-restarted after the BMC reset. If the host does not power on within 30
+minutes of the BMC reset, or does not report `On` after the boot wait, time
+synchronization counts the cycle as one of its three reset attempts. The
+pre-update reset moves the endpoint to `Failed` instead, but keeps waiting
+while the host reports `PoweringOn` or `Reset`.
+
 Some failures, including an unsuccessful upgrade script or exhausted BMC time
 synchronization attempts, move the endpoint to `Failed`. Correct the underlying
 problem, then clear the error to restart pre-ingestion from `Initial`:
