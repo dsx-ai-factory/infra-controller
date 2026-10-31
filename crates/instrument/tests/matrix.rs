@@ -631,6 +631,67 @@ fn red_helper_counts_everything_and_logs_only_failures() {
     }
 }
 
+/// Slow outbound calls retain finite buckets through five minutes, while
+/// longer calls still contribute to the overflow bucket, count, and sum.
+#[test]
+fn red_histogram_resolves_slow_calls() {
+    let metrics = MetricsCapture::start();
+    let name = "carbide_external_call_duration_milliseconds";
+    let labels = &[
+        ("backend", "matrix_slow_backend"),
+        ("operation", "read"),
+        ("outcome", "error"),
+    ];
+    for elapsed_ms in [5.0, 20_000.0, 300_000.0, 360_000.0] {
+        carbide_instrument::red::record("matrix_slow_backend", "read", "error", elapsed_ms);
+    }
+
+    assert_eq!(metrics.histogram_count_delta(name, labels), 4);
+    assert_eq!(
+        metrics.histogram_sum_delta(name, labels),
+        ApproxHistogramSum(680_005.0)
+    );
+    let rendered = metrics.render();
+    let prefix = format!(
+        "{name}_bucket{{backend=\"matrix_slow_backend\",operation=\"read\",outcome=\"error\",le=\""
+    );
+    let buckets: Vec<_> = rendered
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .map(|sample| {
+            let (boundary, count) = sample.split_once("\"} ").expect("bucket sample");
+            (boundary, count.parse::<u64>().expect("bucket count"))
+        })
+        .collect();
+    assert_eq!(
+        buckets,
+        [
+            ("0", 0),
+            ("5", 1),
+            ("10", 1),
+            ("25", 1),
+            ("50", 1),
+            ("75", 1),
+            ("100", 1),
+            ("250", 1),
+            ("500", 1),
+            ("750", 1),
+            ("1000", 1),
+            ("2500", 1),
+            ("5000", 1),
+            ("7500", 1),
+            ("10000", 1),
+            ("15000", 1),
+            ("30000", 2),
+            ("60000", 2),
+            ("120000", 2),
+            ("180000", 2),
+            ("300000", 3),
+            ("+Inf", 4),
+        ]
+    );
+}
+
 /// Event identity fields survive the real formatter boundary as searchable
 /// logfmt key/value pairs, without changing the human-readable message.
 #[test]
