@@ -42,9 +42,13 @@ tags:
       Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
 
       ### Creating Site-Level IP Blocks
-      NICo creates a Site-level IP Block for each `site_fabric_prefixes` entry in the Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
+      NICo publishes Core SitePrefix inventory on the Site Agent's inventory schedule. Each operator-managed prefix creates a managed Site IP Block, or adopts an existing compatible, unlinked block with the same CIDR. A prefix wholly inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block; other prefixes get `Public`. REST owns the block's name and description after creation or adoption. When no REST IP Block, including a retired one, already carries that Core ID, a `Deleting` report can adopt and retire a compatible unlinked root, even if it was renamed or created manually. A REST name is not an exemption from Core-managed lifecycle.
 
-      When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. A new prefix that overlaps a remaining Site IP Block doesn't get an IP Block until the overlap is gone. The Site's other IP Block changes still apply. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+      When Core reports an operator prefix as `Deleting`, its Site IP Block becomes `Deleting`, rejects new Allocations, and is removed together with its IPAM root once existing Allocations drain. Repeated `Deleting` reports do not recreate it. A later `Ready` report for the same Core ID restores the original REST identity and IPAM root. An overlapping replacement prefix, such as a `/23` replacing a `/24`, is created after the old root is removed. If the replacement is processed first, it is retried on a later inventory.
+
+      The final successful inventory page carries the complete set of Core prefix IDs. Missing linked IP Blocks are reconciled from that list, including an empty inventory; blocks created within the Site's inventory interval are protected. A missing operator root is removed when free. If Allocations remain, it becomes `Deleting`, continues to reject new Allocations and resizing, and its Core link is cleared so a new Core ID for the same CIDR can adopt it. Once unlinked, it is not swept again; after its Allocations drain, a Provider can delete it manually, or a new Core ID can adopt it. Missing tenant-created unmanaged blocks are removed if already `Deleting`; otherwise they become `Error`. Allocated tenant blocks and unlinked roots are not swept. Failed inventory messages do not change IP Blocks.
+
+      Site configuration inventory no longer creates or removes IP Blocks from `site_fabric_prefixes`. Upgrade the Site Agent as part of the rollout: until it runs the SitePrefix publisher, new Cloud workflows do not reconcile fabric-prefix changes for that Site. Existing Temporal histories retain the legacy importer for replay. The SitePrefix receiver and publisher replace that importer as described in [receiver issue #5762](https://github.com/dsx-ai-factory/infra-controller/issues/5762), [receiver implementation #7008](https://github.com/dsx-ai-factory/infra-controller/pull/7008), and [publication and retirement issue #5763](https://github.com/dsx-ai-factory/infra-controller/issues/5763).
 
       To create any other IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock). It rejects a range that overlaps an existing Site IP Block.
 
@@ -2096,7 +2100,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of an `OperatorManaged` SitePrefix.
+          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of the source site-level IP Block.
           content:
             application/json:
               schema:
@@ -2107,13 +2111,18 @@ paths:
                     source: nico
                     message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready'
                     data: null
+                unlinked-provider-root-not-ready:
+                  value:
+                    source: nico
+                    message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 is not Ready'
+                    data: null
       description: |-
         Create an Allocation for the org.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         To successfully create a compute Allocation, there must be enough unallocated Machines associated with the Instance Type to satisfy the constraint value.
-        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. When that IP Block is linked to an `OperatorManaged` SitePrefix, it must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
+        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. The source IP Block must also be `Ready`, including when it has no Core SitePrefix link. A conflict involving capacity, address space, or lifecycle state returns 409.
       requestBody:
         content:
           application/json:
@@ -2367,6 +2376,11 @@ paths:
                     source: nico
                     message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready"
                     data: null
+                unlinked-provider-root-not-ready:
+                  value:
+                    source: nico
+                    message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 is not Ready"
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |
@@ -2378,7 +2392,7 @@ paths:
 
         For an InstanceType resource, `constraintValue` can be incremented at any time, but not decremented if doing so requires decommissioning Tenant resources.
 
-        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. If the source IP Block is linked to an `OperatorManaged` SitePrefix, its status must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
+        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. The source site-level IP Block must also be `Ready` before `constraintValue` can change, including when it has no Core SitePrefix link. A change blocked by either condition returns 400.
 
         Submitting the existing `constraintValue` leaves the constraint unchanged and does not require the source IP Block to be `Ready`.
       requestBody:
@@ -2725,7 +2739,7 @@ paths:
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
 
-        If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
+        For a root linked to an `OperatorManaged` SitePrefix, remove its prefix from Core's `site_fabric_prefixes` configuration. SitePrefix inventory retires the root after existing Allocations drain. An unlinked root can be deleted through this endpoint once no Allocations use it.
 
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
       tags:
@@ -2772,7 +2786,7 @@ paths:
 
         Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
 
-        Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
+        REST preserves the name and description of a Site fabric root across inventory updates. Renaming it does not prevent retirement when Core reports its linked SitePrefix as `Deleting`.
 
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
       requestBody:

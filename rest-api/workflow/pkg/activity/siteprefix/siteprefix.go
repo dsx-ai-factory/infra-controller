@@ -29,7 +29,7 @@ const (
 	sitePrefixNameMaxLength          = 256
 )
 
-// ManageSitePrefix reconciles reported Core roots without inferring absence.
+// ManageSitePrefix reconciles Core SitePrefixes and their absence.
 type ManageSitePrefix struct {
 	dbSession *cdb.Session
 }
@@ -43,8 +43,6 @@ func NewManageSitePrefix(session *cdb.Session) ManageSitePrefix {
 // It looks up the active IP Block, creates, adopts, or restores one when missing, then
 // applies lifecycle without changing REST metadata or the block's Site, owner, or CIDR.
 // Unreconcilable entries are logged and skipped; later entries still proceed.
-// Publication, absence processing, and retiring the legacy importer belong to
-// the follow-up SitePrefix publication and retirement implementation.
 func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, siteID uuid.UUID, inventory *corev1.SitePrefixInventory) error {
 	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", siteID.String()).Logger()
 	logger.Info().Msg("starting activity")
@@ -101,14 +99,15 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			return ctx.Err()
 		}
 		// Validate per entry so a malformed report cannot hold back the rest of
-		// the page. Page IDs do not imply absence.
+		// the page.
 		err := validatePrefix(prefix)
 		if err != nil {
 			logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
 				Msg("received invalid SitePrefix")
 			continue
 		}
-		// Keep one prefix's IP Block, IPAM changes, and status detail atomic.
+		// Keep one prefix's changes atomic, except retirement cleanup uses a
+		// savepoint so a cleanup failure preserves the Deleting lifecycle.
 		// A failed prefix must not roll back earlier prefixes in the page.
 		isLockContention := false
 		id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
@@ -186,6 +185,9 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 					return err
 				}
 			}
+			if block.Managed && block.TenantID == nil && status == cdbm.IPBlockStatusDeleting {
+				return manager.removeOperatorRoot(ctx, tx, block, false, logger)
+			}
 			reconciledBlock = block
 			return nil
 		})
@@ -210,8 +212,9 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			existingBlockMap[id] = reconciledBlock
 		}
 	}
+	err = manager.reconcileAbsence(ctx, site, inventory, logger)
 	logger.Info().Msg("completing activity")
-	return ctx.Err()
+	return err
 }
 
 // createOrUpdateSitePrefixFromSite creates, adopts, or restores the IP Block for

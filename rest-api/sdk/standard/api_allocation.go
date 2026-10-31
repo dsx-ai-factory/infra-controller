@@ -49,7 +49,7 @@ Create an Allocation for the org.
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 To successfully create a compute Allocation, there must be enough unallocated Machines associated with the Instance Type to satisfy the constraint value.
-For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. When that IP Block is linked to an `OperatorManaged` SitePrefix, it must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
+For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. The source IP Block must also be `Ready`, including when it has no Core SitePrefix link. A conflict involving capacity, address space, or lifecycle state returns 409.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -883,7 +883,7 @@ Modifying allocations may not be possible if Tenant has started utilizing resour
 
 For an InstanceType resource, `constraintValue` can be incremented at any time, but not decremented if doing so requires decommissioning Tenant resources.
 
-For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. If the source IP Block is linked to an `OperatorManaged` SitePrefix, its status must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
+For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. The source site-level IP Block must also be `Ready` before `constraintValue` can change, including when it has no Core SitePrefix link. A change blocked by either condition returns 400.
 
 Submitting the existing `constraintValue` leaves the constraint unchanged and does not require the source IP Block to be `Ready`.
 
