@@ -45,6 +45,44 @@ legacyAlias:
 
 replicas: 1
 
+## Pod-level security context. The artifact init containers need root to copy
+## from their images; only the serving container runs as UID/GID 10001. The
+## final artifact init container derives the target group at runtime from the
+## admitted emptyDir volume (kubelet applies the effective fsGroup — this
+## value, or the SCC-assigned group), falling back to this value (default
+## 10001, honored verbatim when explicitly set — including 0) when the mount
+## is root-owned, so the restrictive source modes stay readable by the
+## serving container. On
+## OpenShift, restricted SCCs assign fsGroup from the namespace range; when
+## the namespace range excludes 10001, null the field inside a map so the
+## SCC assigns the group (a top-level null is treated as an absent key and
+## falls back to the default, for --reuse-values upgrades):
+##   podSecurityContext:
+##     fsGroup: null
+## Keep the value aligned with containerSecurityContext below when
+## overriding. To drop the pod securityContext, null fsGroup as shown above
+## (a bare `podSecurityContext: {}` merges with this default and keeps
+## fsGroup: 10001).
+podSecurityContext:
+  fsGroup: 10001
+
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline (chart-managed; an
+## allowPrivilegeEscalation key set here is ignored). The chart default keeps the
+## non-root UID/GID; OpenShift's restricted Security Context Constraints (SCC)
+## assign UIDs from the namespace range, so override there:
+##   containerSecurityContext:
+##     runAsNonRoot: true
+##     runAsUser: null
+##     runAsGroup: null
+## Null the fields inside the map rather than the whole key: a top-level
+## null is treated as an absent key and falls back to the default, for
+## --reuse-values upgrades from releases that predate this value.
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+
 ## Soft open-file limit applied before startup. Clamped to the runtime hard
 ## limit when it exceeds it. null falls back to 65536; non-null values must be
 ## a positive integer (validated at render).
@@ -94,6 +132,11 @@ initContainers: []
 ## on the copied trees, including source files with mode 0600. Existing copy
 ## commands work without migration. No world permissions are added.
 ## The final init uses /bin/sh, chgrp, and chmod from the selected PXE image.
+## ⚠ That permissions init runs as UID 0 with CHOWN/FOWNER/DAC_OVERRIDE
+## capabilities, so OpenShift's restricted-v2 SCC rejects the pod regardless of
+## the containerSecurityContext/podSecurityContext overrides. On restricted
+## SCCs, either bind a more permissive SCC to the service account or bundle the
+## boot artifacts in a compatible PXE image (leave this list empty).
 ## When empty, no boot-artifacts volume is mounted, preserving image-bundled files.
 ## Quote tags (for example, tag: "1.10") to preserve their exact text.
 ## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls

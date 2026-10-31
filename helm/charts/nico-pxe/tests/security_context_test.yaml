@@ -15,3 +15,61 @@ tests:
           value: 10001
       - notExists:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
+
+  - it: renders the pod fsGroup from podSecurityContext and drops it when nulled in a map
+    # A top-level null deletes the key (indistinguishable from absent, which
+    # falls back to the default for --reuse-values upgrades); nulling the
+    # field inside a map is the supported way to drop it.
+    set:
+      podSecurityContext:
+        fsGroup: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
+
+  - it: follows a custom podSecurityContext fsGroup in the artifact permissions init
+    set:
+      bootArtifactContainers:
+        - name: artifacts
+          repository: example.invalid/artifacts
+          tag: "1"
+      podSecurityContext:
+        fsGroup: 2000
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 2000
+      - matchRegex:
+          path: spec.template.spec.initContainers[-1].command[2]
+          pattern: 'target_group=2000; fi'
+
+  - it: preserves an explicit fsGroup of 0 in the artifact permissions init
+    set:
+      bootArtifactContainers:
+        - name: artifacts
+          repository: example.invalid/artifacts
+          tag: "1"
+      podSecurityContext:
+        fsGroup: 0
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 0
+      - matchRegex:
+          path: spec.template.spec.initContainers[-1].command[2]
+          pattern: 'target_group=0; fi'
+
+  - it: falls back to 10001 when fsGroup is nulled in a map with artifact containers
+    set:
+      bootArtifactContainers:
+        - name: artifacts
+          repository: example.invalid/artifacts
+          tag: "1"
+      podSecurityContext:
+        fsGroup: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
+      - matchRegex:
+          path: spec.template.spec.initContainers[-1].command[2]
+          pattern: 'target_group=10001; fi'

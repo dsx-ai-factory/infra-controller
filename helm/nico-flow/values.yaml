@@ -121,6 +121,9 @@ database:
   flow:
     name: flow
     credentialsSecret: flow.nico.nico-pg-cluster.credentials
+    ## Key in the Secret that holds the database user name. Defaults to
+    ## "username" (Zalando); set to "user" for Crunchy PGO.
+    usernameKey: username
 
 ## NICo Core API endpoint (gRPC) that flow calls.
 nicoCoreApi:
@@ -185,3 +188,21 @@ extraEnv:
 imagePullSecret:
   create: true
   dockerconfigjson: "eyJhdXRocyI6e319"
+
+## Extra container security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline (chart-managed; an
+## allowPrivilegeEscalation key set here is ignored). Empty by default; no
+## override is needed on OpenShift restricted Security Context Constraints
+## (SCC). Null drops all overrides; the hardcoded baseline survives.
+containerSecurityContext: {}
+
+## createNamespace controls whether nico-flow renders its own Namespace resource.
+## Defaults to false. Set to true only if the chart must create the namespace
+## itself; do not combine with `helm install --create-namespace`.
+## Direct installs (outside helm-prereqs/setup.sh) must pre-create and label
+## the namespace themselves — the nico.nvidia.com/managed: "true" label lets
+## the nico-roots ClusterExternalSecret sync the site CA in:
+##   kubectl create namespace flow
+##   kubectl label namespace flow nico.nvidia.com/managed=true
+## setup.sh pre-applies the labeled namespace before the Helm install.
+createNamespace: false

@@ -12,6 +12,10 @@ data:
     {{- else }}
     {{- /* Replace hardcoded nico-system namespace with actual global.namespace */ -}}
     {{- $config := .Files.Get "files/ssh-console-rs-config.toml" | replace "nico-system" (include "nico-ssh-console-rs.namespace" .) | replace "nico.local" .Values.global.spiffe.trustDomain | replace "/sa/nico-api" (printf "/sa/%s" .Values.apiServiceName) | replace "https://nico-api." (printf "https://%s." .Values.apiServiceName) -}}
+    {{- /* The packaged config listens on *:22. Follow service.port so clusters
+           that reserve ports below 1024 (e.g. OpenShift restricted SCC runs the
+           container as a non-root UID) can use an unprivileged port. */ -}}
+    {{- $config = $config | replace "listen_address = \"*:22\"" (printf "listen_address = \"*:%d\"" (int .Values.service.port)) -}}
     {{- /* Operator certificate auth. Substitutes the empty placeholders in the packaged
            config so a deployment can set just these two without restating the whole file.
            Left unset, the placeholders stand and certificate auth stays disabled. */ -}}

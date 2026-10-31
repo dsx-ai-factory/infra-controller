@@ -27,6 +27,17 @@ namespaceOverride: ""
 
 replicas: 1
 
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline (chart-managed; an
+## allowPrivilegeEscalation key set here is ignored). The chart default adds IPC_LOCK.
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it, so
+## set the value to null there; the baseline is still applied:
+##   containerSecurityContext: null
+containerSecurityContext:
+  capabilities:
+    add:
+      - IPC_LOCK
+
 ## Container resource requests and limits. Empty by default.
 resources: {}
 
@@ -41,6 +52,10 @@ fileDescriptorLimit: 65536
 imagePullSecrets: []
 
 service:
+  ## SSH listener port, used by the containerPort, the packaged config's
+  ## listen_address, the readiness/liveness probes, and the external Service
+  ## targetPort. The default 22 requires root or CAP_NET_BIND_SERVICE; on
+  ## OpenShift restricted SCC (non-root, no privileged ports) set e.g. 2222.
   port: 22
   grpcPort: 1079
 
@@ -63,8 +78,10 @@ certificate:
   extraUris: []
 
 readinessProbe:
+  # Named port follows service.port (the containerPort), so clusters using an
+  # unprivileged listener port (e.g. OpenShift restricted SCC) stay probed.
   tcpSocket:
-    port: 22
+    port: ssh
   initialDelaySeconds: 1
   periodSeconds: 30
   failureThreshold: 3
@@ -127,8 +144,8 @@ externalService:
   # Service's primary family (the first entry) cannot be changed in place.
   ipFamilyPolicy: ""
   ipFamilies: []
-  # External SSH port. The backend target port stays 22, and clients must use
-  # the port set here.
+  # External SSH port. The backend target port follows service.port, and
+  # clients must use the port set here.
   port: 22
   # Empty keeps the Kubernetes default (Cluster). Set Local to preserve client
   # source IPs. MetalLB only lets Local Services share an IP with Services
