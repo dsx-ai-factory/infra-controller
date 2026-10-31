@@ -355,6 +355,17 @@ impl CollectorState {
         self.map(kind).len()
     }
 
+    /// Counts distinct endpoint keys with registered collectors.
+    /// Retained caches and inventory entries do not contribute.
+    pub(super) fn active_endpoint_count(&self) -> usize {
+        CollectorKind::ALL
+            .into_iter()
+            .chain([CollectorKind::Reachability])
+            .flat_map(|kind| self.map(kind).keys())
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
     pub(super) fn removed_keys(
         &self,
         active_keys: &HashSet<Cow<'static, str>>,
@@ -590,12 +601,52 @@ mod tests {
     use std::borrow::Cow;
     use std::collections::HashSet;
 
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
     use crate::collectors::Collector;
     use crate::config::MtlsProfileConfig;
 
     fn noop_collector() -> Collector {
         Collector::spawn_task(|_| async {})
+    }
+
+    #[tokio::test]
+    async fn active_endpoint_count_deduplicates_collectors_and_excludes_retained_state() {
+        check_values(
+            [
+                Check {
+                    scenario: "retained state without collectors",
+                    input: vec![],
+                    expect: 0,
+                },
+                Check {
+                    scenario: "distinct endpoints across overlapping collector types",
+                    input: vec![
+                        (CollectorKind::Sensor, "bmc"),
+                        (CollectorKind::Metrics, "bmc"),
+                        (CollectorKind::NvueRest, "switch"),
+                    ],
+                    expect: 2,
+                },
+                Check {
+                    scenario: "reachability without other collectors",
+                    input: vec![(CollectorKind::Reachability, "host")],
+                    expect: 1,
+                },
+            ],
+            |collectors| {
+                let mut state = CollectorState::new();
+                state.gnmi_cache_for("retained-gnmi");
+                state.inventory_for("retained-inventory");
+
+                for (kind, key) in collectors {
+                    state.insert(kind, Cow::Borrowed(key), noop_collector());
+                }
+
+                state.active_endpoint_count()
+            },
+        );
     }
 
     #[tokio::test]
