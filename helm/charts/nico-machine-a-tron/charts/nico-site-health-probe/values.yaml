@@ -31,20 +31,37 @@ image:
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 
+## Sized for the state readers at full scale (snapshots of every host, DPU
+## and instance, kept for paging clients).
 resources:
   limits:
-    cpu: 200m
-    memory: 128Mi
+    cpu: "1"
+    memory: 512Mi
   requests:
-    cpu: 50m
-    memory: 64Mi
+    cpu: 100m
+    memory: 256Mi
 
 ## Metrics endpoint (also serves /health and /ready).
 metrics:
   port: 9009
 
+## The /v1 site state API, served with `state.enabled` on its own Service,
+## <name>-api.
+api:
+  port: 9010
+
 serviceMonitor:
   enabled: false
+  ## Also the scrape interval the /v1/summary math assumes. Two intervals
+  ## must fit in the fastest enabled reader interval.
+  interval: 5s
+
+## nico-api client certificate (ca.crt, tls.crt, tls.key) for the state
+## readers. Required while a nico-api reader is on: the probe's SPIFFE
+## identity may call only FindMachineIds and FindMachinesByIds. The
+## certificate must map to an external user through a trusted issuer.
+nicoApiClientCert:
+  existingSecret: ""
 
 ## SPIFFE client certificate for nico-api mTLS. nico-api accepts SPIFFE URIs
 ## under its own deploy/auth namespace (plus /default/sa/), so the identity
@@ -101,3 +118,66 @@ probes:
       existingSecret:
         name: ""
         key: "client-secret"
+
+## Site state readers and the /v1 API: counts, units, config and crossing
+## summaries for scale tests. Off by default.
+state:
+  enabled: false
+  ## The REST site ID of this NICo site.
+  siteId: ""
+  ## Per API: at most one call in flight, this many calls per second, a
+  ## deadline per call, and back-off on pushback.
+  caps:
+    callsPerSecond: 2
+    callTimeout: 5s
+    maxBackoff: 30s
+  nicoApi:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    ## full: FindMachinesByIds. compact and auto need nico-api's compact
+    ## host read.
+    hostRead: full
+    batchSize: 100
+    maxDecodingMessageSize: 67108864
+  ## nico-rest-api, GET only. Each identity uses client credentials
+  ## (tokenUrl, clientId and a client secret in existingSecret), a bearer
+  ## token in existingSecret (no tokenUrl), or a token file path.
+  rest:
+    target: ""
+    provider:
+      org: ""
+      auth:
+        tokenUrl: ""
+        clientId: ""
+        tokenFile: ""
+        existingSecret:
+          name: ""
+          key: client-secret
+  ## Reader schedules. A sweep may outlast its interval; the next tick is
+  ## then skipped. The REST reader is off until the site provides the
+  ## `state.rest` inputs (see the README for a complete example).
+  readers:
+    devices:
+      enabled: true
+      interval: 120s
+      timeout: 600s
+    restInventory:
+      enabled: false
+      interval: 120s
+      timeout: 600s
+  ## The Prometheus-compatible store /v1/summary reads the probe's series
+  ## from. An empty selector selects this probe by job (the metrics Service
+  ## name) and namespace; a shared store needs both.
+  ## A summary reads its window in one-hour chunks of up to three store
+  ## calls at caps.callsPerSecond, and those calls may take at most half of
+  ## summaryDeadline: 24h fits 90s at 2 calls/s, a longer maxWindow needs a
+  ## longer deadline or a faster gate.
+  metricsStore:
+    url: ""
+    selector: {}
+    maxWindow: 24h
+    summaryDeadline: 90s
+  ## A replaced snapshot that a /v1/units cursor points into stays readable
+  ## this long for the paging client. Others are dropped when replaced.
+  paging:
+    keepSeconds: 300
+    maxKeptSnapshots: 6

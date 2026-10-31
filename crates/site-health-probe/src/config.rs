@@ -289,7 +289,7 @@ impl Default for MetricsStoreConfig {
         Self {
             url: String::new(),
             selector: BTreeMap::new(),
-            max_window: Duration::from_secs(48 * 60 * 60),
+            max_window: Duration::from_secs(24 * 60 * 60),
             summary_deadline: Duration::from_secs(90),
             scrape_interval: Duration::from_secs(5),
         }
@@ -450,7 +450,6 @@ impl Config {
 
     /// `api_listen_addr` resolves `api_listen` like [`Config::listen_addr`],
     /// defaulting to `:9010`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the /v1 API listens on it"))]
     pub(crate) fn api_listen_addr(&self) -> eyre::Result<SocketAddr> {
         resolve_listen("api_listen", &self.api_listen, ":9010")
     }
@@ -560,6 +559,28 @@ impl StateConfig {
         }
         if store.summary_deadline.is_zero() {
             errs.push("state.metrics_store.summary_deadline must be positive".to_string());
+        } else if self.caps.calls_per_second.is_finite() && self.caps.calls_per_second > 0.0 {
+            // The store calls of a summary over the longest window may take
+            // half the deadline; the other half is for store latency and the
+            // wait for the final scrape.
+            let slowest = readers
+                .iter()
+                .filter(|(_, reader)| reader.enabled)
+                .map(|(_, reader)| reader.interval)
+                .max()
+                .unwrap_or_default();
+            let reads = crate::summary::least_read_time(
+                store.max_window,
+                slowest,
+                self.caps.calls_per_second,
+            );
+            if reads > store.summary_deadline / 2 {
+                errs.push(format!(
+                    "state.metrics_store.max_window is too long for the summary_deadline: its \
+                     store calls alone take {reads:?} at state.caps.calls_per_second, more than \
+                     half the deadline"
+                ));
+            }
         }
         if store.scrape_interval.is_zero() {
             errs.push("state.metrics_store.scrape_interval must be positive".to_string());
@@ -995,7 +1016,7 @@ state:
         assert_eq!(schedule(&readers.devices), (true, 120, 600));
         assert_eq!(schedule(&readers.rest_inventory), (true, 120, 600));
         let store = &state.metrics_store;
-        assert_eq!(store.max_window, Duration::from_secs(48 * 3600));
+        assert_eq!(store.max_window, Duration::from_secs(24 * 3600));
         assert_eq!(store.summary_deadline, Duration::from_secs(90));
         assert_eq!(store.scrape_interval, Duration::from_secs(5));
         assert_eq!(state.paging, Paging::default());
@@ -1022,6 +1043,35 @@ state:
         let off = "  readers:\n    devices: {enabled: false, interval: 20s, timeout: 600s}\n";
         state_with(&format!("    scrape_interval: 30s\n{off}"))
             .expect("only enabled readers bound the scrape interval");
+    }
+
+    #[test]
+    fn state_config_bounds_max_window() {
+        // A 48 h window and two 120 s reader intervals are 49 one-hour
+        // chunks of up to 3 store calls at 2 calls/s: 73.5 s of a 90 s
+        // deadline.
+        let err = state_with("    max_window: 48h\n")
+            .expect_err("48 h needs more than half of 90 s")
+            .to_string();
+        assert!(
+            err.contains("state.metrics_store.max_window is too long for the summary_deadline"),
+            "{err}"
+        );
+        // 30 chunks are 45 s, exactly half.
+        state_with("    max_window: 29h56m\n").expect("half the deadline is enough");
+        assert!(
+            state_with("    max_window: 29h57m\n").is_err(),
+            "31 chunks are 46.5 s"
+        );
+        state_with("    max_window: 48h\n    summary_deadline: 150s\n")
+            .expect("a longer deadline fits it");
+        state_with("    max_window: 48h\n  caps: {calls_per_second: 4}\n")
+            .expect("a faster gate fits it");
+        // So slow a gate that the reads saturate is refused, not a panic.
+        let err = state_with("  caps: {calls_per_second: 1e-300}\n")
+            .expect_err("no window fits")
+            .to_string();
+        assert!(err.contains("max_window is too long"), "{err}");
     }
 
     #[test]
@@ -1159,6 +1209,253 @@ state:
             let err = load_str(yaml).expect_err(scenario).to_string();
             assert!(err.contains(want), "{scenario}: {err:?} lacks {want:?}");
         }
+    }
+
+    /// The config.yaml the chart renders with the state section filled in
+    /// (helm template with every state input set). Keep it in step with
+    /// templates/configmap.yaml.
+    const CHART_RENDERED: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+    ca: "/var/secrets/rest-ca/ca.crt"
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+    ca: "/var/secrets/rest-ca/ca.crt"
+state:
+  enabled: true
+  site_id: "site-1"
+  caps:
+    calls_per_second: 2
+    call_timeout: "5s"
+    max_backoff: "30s"
+  nico_api:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    host_read: full
+    batch_size: 100
+    max_decoding_message_size: 67108864
+    tls:
+      ca: /var/run/secrets/nico-admin/ca.crt
+      cert: /var/run/secrets/nico-admin/tls.crt
+      key: /var/run/secrets/nico-admin/tls.key
+  rest:
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    ca: "/var/secrets/rest-ca/ca.crt"
+    provider:
+      org: "provider-org"
+      auth:
+        token_url: "https://keycloak.example.com/realms/nico/protocol/openid-connect/token"
+        client_id: "probe"
+        client_secret_path: "/var/secrets/state-provider/client-secret"
+  readers:
+    devices:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+    rest_inventory:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+  metrics_store:
+    url: "http://prometheus.monitoring.svc:9090"
+    selector:
+      job: "nico-site-health-probe-metrics"
+      namespace: "default"
+    max_window: "24h"
+    summary_deadline: "90s"
+    scrape_interval: "5s"
+  paging:
+    keep_seconds: 300
+    max_kept_snapshots: 6
+"#;
+
+    /// The config.yaml the parent chart renders with only the required
+    /// state inputs (`state.enabled`, `siteId`, `metricsStore.url` and the
+    /// admin certificate). Keep it in step with templates/configmap.yaml.
+    const CHART_MINIMAL: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+state:
+  enabled: true
+  site_id: "s"
+  caps:
+    calls_per_second: 2
+    call_timeout: "5s"
+    max_backoff: "30s"
+  nico_api:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    host_read: full
+    batch_size: 100
+    max_decoding_message_size: 67108864
+    tls:
+      ca: /var/run/secrets/nico-admin/ca.crt
+      cert: /var/run/secrets/nico-admin/tls.crt
+      key: /var/run/secrets/nico-admin/tls.key
+  rest:
+    target: ""
+    provider:
+      org: ""
+      auth:
+        token_url: ""
+        client_id: ""
+  readers:
+    devices:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+    rest_inventory:
+      enabled: false
+      interval: "120s"
+      timeout: "600s"
+  metrics_store:
+    url: "http://p:9090"
+    selector:
+      job: "nico-site-health-probe-metrics"
+      namespace: "default"
+    max_window: "24h"
+    summary_deadline: "90s"
+    scrape_interval: "5s"
+  paging:
+    keep_seconds: 300
+    max_kept_snapshots: 6
+"#;
+
+    /// The config.yaml the chart renders with state off and slower caps
+    /// (`state.caps.callsPerSecond: 0.1`). Keep it in step with
+    /// templates/configmap.yaml.
+    const CHART_STATE_OFF: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+state:
+  enabled: false
+  caps:
+    calls_per_second: 0.1
+    call_timeout: "5s"
+    max_backoff: "30s"
+"#;
+
+    #[test]
+    fn chart_state_off_keeps_its_caps() {
+        let cfg = load_str(CHART_STATE_OFF).expect("the state-off rendering loads");
+        assert!(!cfg.state.enabled);
+        assert_eq!(cfg.state.caps.calls_per_second, 0.1);
+    }
+
+    #[test]
+    fn chart_minimal_state_config_passes_validation() {
+        let cfg = load_str(CHART_MINIMAL).expect("the minimal rendering passes validation");
+        let readers = &cfg.state.readers;
+        assert!(readers.devices.enabled);
+        assert!(
+            !readers.rest_inventory.enabled,
+            "the REST reader stays off until its inputs exist"
+        );
+    }
+
+    #[test]
+    fn chart_rendered_state_config_loads() {
+        let cfg = load_str(CHART_RENDERED).expect("the chart's rendering loads");
+        assert!(cfg.state.enabled);
+        assert_eq!(cfg.state.rest.provider.org, "provider-org");
+        assert_eq!(
+            cfg.state
+                .metrics_store
+                .selector
+                .get("job")
+                .map(String::as_str),
+            Some("nico-site-health-probe-metrics")
+        );
+        assert_eq!(cfg.api_listen_addr().expect("api").port(), 9010);
     }
 
     #[test]

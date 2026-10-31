@@ -11,6 +11,10 @@ metadata:
     app.kubernetes.io/metrics: nico-site-health-probe
 spec:
   ipFamilyPolicy: PreferDualStack
+  # With state readers on, the pod turns ready only after every reader's
+  # first complete sweep. Scrapes must not wait for that: /v1/summary reads
+  # the sweeps before it, including failed ones, from the store.
+  publishNotReadyAddresses: true
   selector:
     {{- include "nico-site-health-probe.selectorLabels" . | nindent 4 }}
   ports:

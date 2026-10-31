@@ -57,7 +57,11 @@ fn harness() -> Harness {
         )))
         .expect("register");
     Harness {
-        router: router(ApiState::new(Arc::clone(&store), &cfg)),
+        router: router(ApiState::new(
+            Arc::clone(&store),
+            &cfg,
+            SummaryState::unused(&cfg.metrics_store),
+        )),
         store,
         registry,
     }
@@ -284,7 +288,13 @@ const COUNT_FILTERS: [&str; 10] = [
 async fn count_equals_published_metric_sum() {
     let h = harness();
     small_fleet(&h);
-    let caps = ApiState::new(Arc::clone(&h.store), &state_config()).caps;
+    let cfg = state_config();
+    let caps = ApiState::new(
+        Arc::clone(&h.store),
+        &cfg,
+        SummaryState::unused(&cfg.metrics_store),
+    )
+    .caps;
     for query in COUNT_FILTERS {
         let reply = h.get(&format!("/v1/count?{query}")).await;
         let filter: Filter = serde_urlencoded::from_str(query).unwrap();
@@ -820,7 +830,11 @@ fn rest_reader(enabled: bool) -> Harness {
     let mut h = harness();
     let mut cfg = state_config();
     cfg.readers.rest_inventory.enabled = enabled;
-    h.router = router(ApiState::new(Arc::clone(&h.store), &cfg));
+    h.router = router(ApiState::new(
+        Arc::clone(&h.store),
+        &cfg,
+        SummaryState::unused(&cfg.metrics_store),
+    ));
     h
 }
 
@@ -984,6 +998,237 @@ async fn rest_site_from_the_inventory_reader_without_upstream_text() {
     assert!(!logs.text().contains(SENTINEL), "{}", logs.text());
 }
 
+fn summary_harness() -> (Harness, Arc<crate::store::fake::FakeStore>, SystemTime) {
+    summary_harness_with(StateConfig::default().metrics_store.summary_deadline)
+}
+
+fn summary_harness_with(
+    deadline: Duration,
+) -> (Harness, Arc<crate::store::fake::FakeStore>, SystemTime) {
+    let mut h = harness();
+    let base = UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let started = tokio::time::Instant::now();
+    let clock: crate::summary::Clock = Arc::new(move || base + started.elapsed());
+    let fake = Arc::new(crate::store::fake::FakeStore::new(Arc::clone(&clock)));
+    let mut cfg = state_config();
+    cfg.metrics_store.selector = [("job", "j"), ("namespace", "ns")]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    cfg.metrics_store.summary_deadline = deadline;
+    let summaries = crate::summary::SummaryState::new(
+        Arc::clone(&fake) as Arc<dyn crate::store::MetricsStore>,
+        &cfg.metrics_store,
+        clock,
+    );
+    h.router = router(ApiState::new(Arc::clone(&h.store), &cfg, summaries));
+    (h, fake, base)
+}
+
+fn summary_uri(base: SystemTime) -> String {
+    let params = carbide_site_health_probe_api::SummaryParams {
+        start: DateTime::<Utc>::from(base - Duration::from_secs(600)),
+        end: DateTime::<Utc>::from(base),
+        base: 0,
+        n: 1,
+        direction: carbide_site_health_probe_api::Direction::Up,
+        q: None,
+        add_window_seconds: 0.0,
+    };
+    format!(
+        "/v1/summary?type=host&stage=ready&{}",
+        serde_urlencoded::to_string(&params).unwrap()
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn summary_busy_is_429() {
+    let (h, fake, base) = summary_harness();
+    fake.set_delay(Duration::from_secs(20));
+    let uri = summary_uri(base);
+    let (first, second) = tokio::join!(h.get(&uri), h.get(&uri));
+    // The first summary has no sweeps, so it answers with null values.
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(first.body["timingErrorSeconds"], Value::Null);
+    assert_eq!(second.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.code(), "busy");
+    assert_eq!(second.headers[header::RETRY_AFTER], "10");
+}
+
+#[tokio::test(start_paused = true)]
+async fn summary_busy_within_a_short_deadline_is_429() {
+    // The wait for the summary in flight ends at the deadline, as busy.
+    let (h, fake, base) = summary_harness_with(Duration::from_secs(10));
+    fake.set_delay(Duration::from_secs(20));
+    let uri = summary_uri(base);
+    let started = tokio::time::Instant::now();
+    let (first, second) = tokio::join!(h.get(&uri), h.get(&uri));
+    assert_eq!(first.status, StatusCode::GATEWAY_TIMEOUT, "{}", first.body);
+    assert_eq!(
+        second.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        second.body
+    );
+    assert_eq!(second.code(), "busy");
+    assert_eq!(started.elapsed(), Duration::from_secs(10));
+}
+
+/// A metrics store whose every answer is an error carrying a URL with
+/// credentials and upstream text.
+struct LeakyStore;
+
+#[async_trait::async_trait]
+impl crate::store::MetricsStore for LeakyStore {
+    async fn raw(
+        &self,
+        _: &crate::store::RawQuery,
+        _: SystemTime,
+    ) -> Result<Vec<crate::store::RawSeries>, StoreError> {
+        Err(StoreError::Unavailable(format!(
+            "metrics store: {SENTINEL} http://user:token@p:9090/api/v1/query?query=up"
+        )))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn store_routes_never_serve_store_text() {
+    let (mut h, _, base) = summary_harness();
+    let mut cfg = state_config();
+    cfg.metrics_store.selector = [("job", "j"), ("namespace", "ns")]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let clock: crate::summary::Clock = Arc::new(move || base);
+    h.router = router(ApiState::new(
+        Arc::clone(&h.store),
+        &cfg,
+        SummaryState::new(Arc::new(LeakyStore), &cfg.metrics_store, clock),
+    ));
+    let logs = CapturedLogs::default();
+    let guard = logs.capture();
+    for uri in [summary_uri(base), "/v1/store-status".to_string()] {
+        let reply = h.get(&uri).await;
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{uri}");
+        assert_eq!(reply.code(), "store_unavailable");
+        let body = reply.body.to_string();
+        assert!(
+            !body.contains(SENTINEL) && !body.contains("token"),
+            "{body}"
+        );
+    }
+    drop(guard);
+    assert!(logs.text().contains(SENTINEL), "the error is logged");
+}
+
+/// A sweep time past year 9999 in a real store reply is a 502, through the
+/// store client and the route.
+#[tokio::test]
+async fn store_status_out_of_range_sweep_time_is_502() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs_f64();
+    let matrix = json!({
+        "status": "success",
+        "data": {"resultType": "matrix", "result": [{
+            "metric": {
+                "__name__": "carbide_site_health_probe_sweep_complete_timestamp_seconds",
+                "family": "host",
+            },
+            "values": [[now - 5.0, "1e300"]],
+        }]},
+    });
+    let upstream = Router::new().route(
+        "/api/v1/query",
+        get(move || {
+            let matrix = matrix.clone();
+            async move { Json(matrix) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("address");
+    tokio::spawn(async move { axum::serve(listener, upstream).await });
+
+    let mut cfg = state_config();
+    cfg.metrics_store.selector = [("job", "j"), ("namespace", "ns")]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let store = crate::store::PromStore::new(
+        reqwest::Client::new(),
+        &format!("http://{addr}"),
+        Arc::new(CallGate::new(
+            "metrics-store",
+            100.0,
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+        )),
+    )
+    .expect("store");
+    let mut h = harness();
+    h.router = router(ApiState::new(
+        Arc::clone(&h.store),
+        &cfg,
+        SummaryState::new(
+            Arc::new(store),
+            &cfg.metrics_store,
+            Arc::new(crate::clock::now),
+        ),
+    ));
+    let reply = h.get("/v1/store-status").await;
+    assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{}", reply.body);
+    assert_eq!(reply.code(), "store_unavailable");
+    assert!(!reply.body.to_string().contains("1e300"), "{}", reply.body);
+}
+
+#[tokio::test]
+async fn store_unavailable_serves_fixed_text_and_logs_the_error() {
+    let logs = CapturedLogs::default();
+    let guard = logs.capture();
+    let response = ApiError::store(StoreError::Unavailable(format!(
+        "store query: {SENTINEL} for url (http://u:p@p:9090/api/v1/query?query=up)"
+    )))
+    .into_response();
+    drop(guard);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        body["error"],
+        json!({
+            "code": "store_unavailable",
+            "message": "the metrics store is unavailable",
+            "field": null,
+        })
+    );
+    assert!(logs.text().contains(SENTINEL), "{}", logs.text());
+}
+
+#[tokio::test(start_paused = true)]
+async fn summary_deadline_is_504() {
+    let (h, fake, base) = summary_harness();
+    fake.set_delay(Duration::from_secs(50));
+    let started = tokio::time::Instant::now();
+    let reply = h.get(&summary_uri(base)).await;
+    assert_eq!(reply.status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(reply.code(), "store_timeout");
+    assert_eq!(reply.headers[header::RETRY_AFTER], "10");
+    assert_eq!(started.elapsed(), Duration::from_secs(90));
+
+    fake.set_delay(Duration::ZERO);
+    let status = h.get("/v1/store-status").await;
+    assert_eq!(status.status, StatusCode::OK, "{}", status.body);
+    assert_eq!(status.body["lastSampleAt"], Value::Null);
+    let reply = h.get(&format!("{}&bogus=1", summary_uri(base))).await;
+    assert_eq!((reply.status.as_u16(), reply.field()), (400, "bogus"));
+}
+
 /// Log lines written while the guard lives, at every level.
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -1016,3 +1261,39 @@ impl CapturedLogs {
 }
 
 const SENTINEL: &str = "SENTINEL-c0ffee";
+
+#[tokio::test(start_paused = true)]
+async fn summary_unrepresentable_targets_are_400() {
+    let (h, fake, base) = summary_harness();
+    let uri = |target_base: u64, n: u64, direction: &str| {
+        let params = carbide_site_health_probe_api::SummaryParams {
+            start: DateTime::<Utc>::from(base - Duration::from_secs(600)),
+            end: DateTime::<Utc>::from(base),
+            base: target_base,
+            n,
+            direction: serde_json::from_value(json!(direction)).unwrap(),
+            q: Some("1".to_string()),
+            add_window_seconds: 0.0,
+        };
+        format!(
+            "/v1/summary?type=host&stage=ready&{}",
+            serde_urlencoded::to_string(&params).unwrap()
+        )
+    };
+    let reply = h.get(&uri(u64::MAX, 1, "up")).await;
+    assert_eq!(
+        (reply.status.as_u16(), reply.code(), reply.field()),
+        (400, "invalid_param", "base")
+    );
+    let reply = h.get(&uri(1, u64::MAX, "up")).await;
+    assert_eq!((reply.status.as_u16(), reply.field()), (400, "base"));
+    let reply = h.get(&uri(10, 100, "down")).await;
+    assert_eq!(
+        (reply.status.as_u16(), reply.code(), reply.field()),
+        (400, "invalid_param", "n")
+    );
+    assert!(
+        fake.queries.lock().unwrap().is_empty(),
+        "rejected before any store query"
+    );
+}

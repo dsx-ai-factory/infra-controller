@@ -20,63 +20,46 @@
 //! site-health-probe runs synthetic probes against a NICo site's APIs and
 //! exposes the results as Prometheus metrics (issue #5360).
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod api;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod census;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod clock;
 mod config;
+#[cfg(test)]
+mod e2e_tests;
 mod framework;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod gate;
 mod logging;
 mod metrics;
-#[expect(dead_code, reason = "the state readers are wired in later")]
 mod nico;
 mod probes;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod readers;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod rest;
-#[expect(dead_code, reason = "the state readers are wired in later")]
 mod snapshot;
-#[expect(dead_code, reason = "the state readers are wired in later")]
+#[cfg(test)]
+mod soak_tests;
 mod state;
-#[expect(dead_code, reason = "the state readers are wired in later")]
 mod state_metrics;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod store;
-#[expect(dead_code, reason = "the state readers are wired in later")]
 mod summary;
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
+use carbide_site_health_probe_api::Family;
 use clap::Parser;
 use eyre::{WrapErr, eyre};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+/// How long requests in flight on the /v1 API may finish at shutdown. A
+/// summary can run for its whole deadline; the pod's grace period (30 s by
+/// default) also covers the probes' drain before and the metrics endpoint
+/// after.
+const API_DRAIN: Duration = Duration::from_secs(10);
+/// How long the /v1 connections get to close once their requests are cut
+/// short, and again once their I/O is closed, before the server is stopped.
+const API_CLOSE: Duration = Duration::from_secs(1);
 
 #[derive(Parser)]
 #[command(about = "Synthetic monitoring probes against a NICo site's APIs")]
@@ -103,6 +86,8 @@ async fn run() -> eyre::Result<()> {
     let cfg = config::Config::load(&args.config).wrap_err("configuration")?;
     let listen_addr = cfg.listen_addr()?;
 
+    let process_start = SystemTime::now();
+
     // The global meter stays unset on purpose: instrumented clients in linked
     // crates would otherwise add series beyond the probe's documented set.
     let metrics_setup = metrics_endpoint::new_metrics_setup("site-health-probe", "nico", false)?;
@@ -123,7 +108,32 @@ async fn run() -> eyre::Result<()> {
             )
             .build(),
     );
-    let enabled = build_probes(&cfg, &gates).wrap_err("build probes")?;
+    let store = Arc::new(state::store::SnapshotStore::new(&cfg.state.paging));
+    if cfg.state.enabled {
+        metrics_setup
+            .registry
+            .register(Box::new(state_metrics::StateCollector::new(
+                Arc::clone(&store),
+                process_start,
+                cfg.state.nico_api.host_read,
+            )))
+            .wrap_err("register state metrics")?;
+    }
+    let state_sink = Arc::new(state_metrics::CountingSink::new(
+        Arc::clone(&store),
+        &metrics_setup.meter,
+    ));
+
+    let mut enabled = build_probes(&cfg, &gates).wrap_err("build probes")?;
+    let (readers, families) = build_readers(
+        &cfg,
+        &gates,
+        state_sink,
+        Arc::clone(&store) as _,
+        process_start,
+    )
+    .wrap_err("build state readers")?;
+    enabled.extend(readers);
     if enabled.is_empty() {
         return Err(eyre!(
             "no probes enabled — refusing to run a monitor that monitors nothing"
@@ -132,11 +142,43 @@ async fn run() -> eyre::Result<()> {
     let names: Vec<&str> = enabled.iter().map(|p| p.name()).collect();
     tracing::info!(probes = ?names, metrics_listen = %listen_addr, "starting");
 
-    // Two shutdown stages: probes stop and drain first, the metrics endpoint
-    // last — so the final results of a shutdown still land in /metrics-served
-    // state for as long as the endpoint lives.
+    // Three shutdown stages: probes and readers stop and drain first, then
+    // the /v1 API, the metrics endpoint last — so the final results of a
+    // shutdown still land in /metrics-served state for as long as the
+    // endpoint lives.
     let stop_probes = CancellationToken::new();
+    let stop_api = CancellationToken::new();
+    let api_shutdown = ApiShutdown::default();
     let stop_server = CancellationToken::new();
+
+    let mut api_server = if cfg.state.enabled {
+        let api_addr = cfg.api_listen_addr()?;
+        let listener = bind(api_addr).await.wrap_err("bind the /v1 API")?;
+        tracing::info!(api_listen = %listener.local_addr()?, "serving /v1");
+        let metrics_store = store::PromStore::new(
+            rest::client::new_http_client("")?,
+            &cfg.state.metrics_store.url,
+            Arc::clone(&gates.metrics_store),
+        )?;
+        let summaries = summary::SummaryState::new(
+            Arc::new(metrics_store),
+            &cfg.state.metrics_store,
+            Arc::new(clock::now),
+        );
+        let router = api::router(api::ApiState::new(
+            Arc::clone(&store),
+            &cfg.state,
+            summaries,
+        ));
+        Some(serve_api(
+            listener,
+            router,
+            stop_api.clone(),
+            api_shutdown.clone(),
+        ))
+    } else {
+        None
+    };
 
     let mut server = tokio::spawn({
         let endpoint_config = metrics_endpoint::MetricsEndpointConfig {
@@ -158,12 +200,24 @@ async fn run() -> eyre::Result<()> {
     let (results, loops) = framework::start(enabled, stop_probes.clone());
     let mut scheduler = tokio::spawn(framework::join_loops(loops));
     let collector = tokio::spawn(framework::collect(results, sink));
-    metrics_setup.health_controller.set_ready(true);
+    // With state readers on, the pod is ready once each has published one
+    // complete sweep of every family, and it stays ready: a later failed
+    // read keeps that family's last snapshot.
+    let readiness = tokio::spawn({
+        let health = metrics_setup.health_controller.clone();
+        let all_ready = store.wait_all_ready(&families);
+        async move {
+            all_ready.await;
+            health.set_ready(true);
+            tracing::info!("ready");
+        }
+    });
 
     let mut sigterm = signal(SignalKind::terminate()).wrap_err("install SIGTERM handler")?;
     let mut sigint = signal(SignalKind::interrupt()).wrap_err("install SIGINT handler")?;
 
     let mut scheduler_ended = false;
+    let mut api_ended = false;
     let mut server_ended = false;
     let failure = tokio::select! {
         _ = sigterm.recv() => None,
@@ -177,6 +231,19 @@ async fn run() -> eyre::Result<()> {
                 Err(err) => eyre!("probe supervisor task: {err}"),
             })
         }
+        joined = async {
+            match api_server.as_mut() {
+                Some(task) => task.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            api_ended = true;
+            Some(match joined {
+                Ok(Ok(())) => eyre!("/v1 API server exited unexpectedly"),
+                Ok(Err(err)) => eyre!("/v1 API server: {err}"),
+                Err(err) => eyre!("/v1 API server task: {err}"),
+            })
+        }
         joined = &mut server => {
             server_ended = true;
             Some(match joined {
@@ -188,10 +255,11 @@ async fn run() -> eyre::Result<()> {
     };
 
     // Shutdown in dependency order: probes stop and drain first, then the
-    // endpoint is cancelled and joined, so the final results still land in
-    // served /metrics state and no task is left mid-shutdown. Tasks that
-    // already ended in the select above must not be polled again.
+    // API, then the endpoint is cancelled and joined, so the final results
+    // still land in served /metrics state and no task is left mid-shutdown.
+    // Tasks that already ended in the select above must not be polled again.
     tracing::info!("shutting down");
+    stop_task(readiness).await;
     metrics_setup.health_controller.set_ready(false);
     stop_probes.cancel();
     let mut shutdown: eyre::Result<()> = Ok(());
@@ -208,6 +276,21 @@ async fn run() -> eyre::Result<()> {
     {
         shutdown = Err(eyre!("collector task: {err}"));
     }
+    stop_api.cancel();
+    if !api_ended
+        && let Some(task) = api_server
+        && let Err(err) = drain(task, API_DRAIN, &api_shutdown)
+            .await
+            .map_err(|e| eyre!("/v1 API server task: {e}"))
+            .and_then(|joined| {
+                joined
+                    .unwrap_or(Ok(()))
+                    .map_err(|e| eyre!("/v1 API server shutdown: {e}"))
+            })
+        && shutdown.is_ok()
+    {
+        shutdown = Err(err);
+    }
     stop_server.cancel();
     if !server_ended
         && let Err(err) = server
@@ -222,6 +305,80 @@ async fn run() -> eyre::Result<()> {
     match failure {
         Some(err) => Err(err),
         None => shutdown,
+    }
+}
+
+/// Binds the /v1 API like the metrics listener: a bare-port address is the
+/// dual-stack IPv6 wildcard, which falls back to IPv4 only where the node
+/// has no IPv6. A port in use stays an error.
+async fn bind(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    metrics_endpoint::bind_tcp_listener(addr).await
+}
+
+/// Aborts `task` and waits until it no longer runs: an abort alone lets a
+/// task in the middle of a poll finish that poll.
+async fn stop_task(task: JoinHandle<()>) {
+    task.abort();
+    let _ = task.await;
+}
+
+/// How the /v1 server's work ends at shutdown, past its graceful drain.
+#[derive(Clone, Default)]
+struct ApiShutdown {
+    /// Cuts every request short, its body included.
+    requests: CancellationToken,
+    /// Fails every read and write of every connection, so even a reply its
+    /// client never reads ends.
+    connections: CancellationToken,
+}
+
+/// Serves the /v1 API until `stop`, then finishes the requests in flight
+/// until `shutdown` ends them.
+fn serve_api(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+    stop: CancellationToken,
+    shutdown: ApiShutdown,
+) -> JoinHandle<std::io::Result<()>> {
+    let router = api::cancellable(router, shutdown.requests);
+    let listener = api::closable::ClosableListener::new(listener, shutdown.connections);
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+    })
+}
+
+/// Waits up to `limit` for the stopped server `task` to finish its
+/// requests. Then it cuts the requests short and, [`API_CLOSE`] later,
+/// closes the connections' I/O, each time waiting [`API_CLOSE`] for the
+/// server to end. `None` when even that did not end it, and it was stopped.
+async fn drain<T>(
+    mut task: JoinHandle<T>,
+    limit: Duration,
+    shutdown: &ApiShutdown,
+) -> Result<Option<T>, tokio::task::JoinError> {
+    if let Ok(joined) = tokio::time::timeout(limit, &mut task).await {
+        return joined.map(Some);
+    }
+    tracing::warn!(
+        ?limit,
+        "/v1 requests still in flight at shutdown, cutting them short"
+    );
+    shutdown.requests.cancel();
+    if let Ok(joined) = tokio::time::timeout(API_CLOSE, &mut task).await {
+        return joined.map(Some);
+    }
+    tracing::warn!("/v1 connections still open at shutdown, closing them");
+    shutdown.connections.cancel();
+    if let Ok(joined) = tokio::time::timeout(API_CLOSE, &mut task).await {
+        return joined.map(Some);
+    }
+    tracing::warn!("/v1 server still running at shutdown, stopping it");
+    task.abort();
+    match task.await {
+        Err(err) if err.is_cancelled() => Ok(None),
+        joined => joined.map(Some),
     }
 }
 
@@ -253,6 +410,70 @@ fn build_probes(
         )?));
     }
     Ok(out)
+}
+
+/// A set of scheduled probes and readers.
+type ProbeSet = Vec<Arc<dyn framework::Probe>>;
+
+/// Builds the enabled state readers, publishing into `sink`, starts their
+/// families' sweep counters at 0 and lists the families readiness waits for. Each API's readers share its gate with the
+/// latency probes.
+fn build_readers(
+    cfg: &config::Config,
+    gates: &gate::Gates,
+    sink: Arc<state_metrics::CountingSink>,
+    census: Arc<dyn snapshot::CensusView>,
+    process_start: SystemTime,
+) -> eyre::Result<(ProbeSet, Vec<Family>)> {
+    use readers::devices::{DEVICE_FAMILIES, DevicesReader};
+    use readers::rest_inventory::{Inventory, RestInventoryReader};
+    use rest::auth::Auth;
+    use rest::client::{RestClient, new_http_client};
+
+    let mut out: ProbeSet = Vec::new();
+    let mut families = Vec::new();
+    let state = &cfg.state;
+    if !state.enabled {
+        return Ok((out, families));
+    }
+    let schedule = &state.readers;
+
+    let nico: Arc<dyn nico::NicoConnector> =
+        Arc::new(nico::grpc::GrpcConnector::new(state.nico_api.clone()));
+    if schedule.devices.enabled {
+        out.push(Arc::new(DevicesReader::new(
+            schedule.devices.clone(),
+            state.nico_api.batch_size,
+            Arc::clone(&nico),
+            Arc::clone(&gates.nico_api),
+            Arc::clone(&sink) as _,
+            process_start,
+        )));
+        families.extend(DEVICE_FAMILIES);
+    }
+    if schedule.rest_inventory.enabled {
+        let rest = &state.rest;
+        let http = new_http_client(&rest.ca)?;
+        out.push(Arc::new(RestInventoryReader::new(
+            schedule.rest_inventory.clone(),
+            Arc::new(RestClient::new(
+                http.clone(),
+                &rest.target,
+                Arc::clone(&gates.rest),
+            )?),
+            Inventory {
+                provider_auth: Arc::new(Auth::new(&rest.provider.auth, http)),
+                provider_org: rest.provider.org.clone(),
+                site_id: state.site_id.clone(),
+            },
+            census,
+            Arc::clone(&sink) as _,
+            process_start,
+        )));
+        families.extend([Family::RestTotals, Family::RestSiteMatch]);
+    }
+    sink.start_counters(&families);
+    Ok((out, families))
 }
 
 #[cfg(test)]
@@ -323,5 +544,331 @@ mod tests {
                     .collect::<Vec<_>>()
             },
         );
+    }
+
+    /// A wildcard bind whose port is in use fails; it never moves to IPv4.
+    #[tokio::test]
+    async fn api_bind_keeps_port_in_use() {
+        // An IPv6-only listener on the wildcard, which an IPv4 bind would
+        // not see. Hosts without IPv6 skip this.
+        let holder = || -> std::io::Result<socket2::Socket> {
+            let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None)?;
+            socket.set_only_v6(true)?;
+            socket
+                .bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)).into())?;
+            socket.listen(1)?;
+            Ok(socket)
+        };
+        let Ok(holder) = holder() else {
+            return;
+        };
+        let port = holder
+            .local_addr()
+            .ok()
+            .and_then(|a| a.as_socket())
+            .expect("address")
+            .port();
+        let err = bind(std::net::SocketAddr::from((
+            std::net::Ipv6Addr::UNSPECIFIED,
+            port,
+        )))
+        .await
+        .expect_err("the port is in use");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    /// Once stopped, the readiness task cannot mark the pod ready, even from
+    /// the middle of a poll.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_readiness_stays_not_ready() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (polling, polled) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let task = tokio::spawn({
+            let ready = Arc::clone(&ready);
+            async move {
+                // All families ready; the poll is still running.
+                polling.send(()).expect("test waits");
+                released.recv().expect("test releases");
+                ready.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        tokio::task::spawn_blocking(move || polled.recv().expect("task polls"))
+            .await
+            .expect("join");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            release.send(()).expect("task waits");
+        });
+        stop_task(task).await;
+        ready.store(false, std::sync::atomic::Ordering::SeqCst);
+        releaser.join().expect("releaser");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!ready.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A server that does not end even after its requests are cut short is
+    /// stopped, and that is not a shutdown error.
+    #[tokio::test(start_paused = true)]
+    async fn api_drain_is_bounded() {
+        let started = tokio::time::Instant::now();
+        let shutdown = ApiShutdown::default();
+        let stuck = tokio::spawn(std::future::pending::<()>());
+        assert!(matches!(drain(stuck, API_DRAIN, &shutdown).await, Ok(None)));
+        assert_eq!(started.elapsed(), API_DRAIN + API_CLOSE * 2);
+        assert!(shutdown.requests.is_cancelled() && shutdown.connections.is_cancelled());
+
+        let shutdown = ApiShutdown::default();
+        let done = tokio::spawn(async { 7 });
+        assert!(matches!(
+            drain(done, API_DRAIN, &shutdown).await,
+            Ok(Some(7))
+        ));
+        assert!(!shutdown.requests.is_cancelled(), "nothing to cut short");
+    }
+
+    /// A metrics store call that never returns.
+    struct HangingStore {
+        entered: Arc<tokio::sync::Notify>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct SetOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl store::MetricsStore for HangingStore {
+        async fn raw(
+            &self,
+            _: &store::RawQuery,
+            _: SystemTime,
+        ) -> Result<Vec<store::RawSeries>, store::StoreError> {
+            let _guard = SetOnDrop(Arc::clone(&self.dropped));
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    /// Reads what the server sends until it closes the connection.
+    async fn until_closed(client: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut reply = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut reply))
+            .await
+            .expect("the server closes the connection")
+            .expect("read");
+        String::from_utf8_lossy(&reply).into_owned()
+    }
+
+    /// At shutdown, a request whose body never finishes and a summary whose
+    /// store call never returns are cut short with 503, both connections
+    /// close with the clients still open, and the server ends on its own.
+    #[tokio::test]
+    async fn api_shutdown_cuts_stalled_requests_short() {
+        use tokio::io::AsyncWriteExt;
+
+        let cfg = Config::default();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hanging = HangingStore {
+            entered: Arc::clone(&entered),
+            dropped: Arc::clone(&dropped),
+        };
+        let router = api::router(api::ApiState::new(
+            Arc::new(state::store::SnapshotStore::new(&cfg.state.paging)),
+            &cfg.state,
+            summary::SummaryState::new(
+                Arc::new(hanging),
+                &cfg.state.metrics_store,
+                Arc::new(clock::now),
+            ),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let stop = CancellationToken::new();
+        let shutdown = ApiShutdown::default();
+        let server = serve_api(listener, router, stop.clone(), shutdown.clone());
+
+        let mut stalled = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        stalled
+            .write_all(
+                b"POST /v1/units/query HTTP/1.1\r\nhost: probe\r\n\
+                  content-type: application/json\r\ncontent-length: 100\r\n\r\n{\"type\"",
+            )
+            .await
+            .expect("partial request");
+        let end = chrono::DateTime::<chrono::Utc>::from(clock::now() - Duration::from_secs(1));
+        let start = end - chrono::Duration::seconds(600);
+        let query = serde_urlencoded::to_string([
+            ("type", "host".to_string()),
+            ("stage", "ready".to_string()),
+            ("start", start.to_rfc3339()),
+            ("end", end.to_rfc3339()),
+            ("base", "0".to_string()),
+            ("n", "1".to_string()),
+            ("direction", "up".to_string()),
+            ("addWindowSeconds", "0".to_string()),
+        ])
+        .expect("query");
+        let mut summary = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        summary
+            .write_all(
+                format!("GET /v1/summary?{query} HTTP/1.1\r\nhost: probe\r\n\r\n").as_bytes(),
+            )
+            .await
+            .expect("summary request");
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the summary reaches the store");
+        // Let the server read the stalled request's head.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        stop.cancel();
+        let joined = drain(server, Duration::from_millis(300), &shutdown).await;
+        assert!(
+            matches!(joined, Ok(Some(Ok(())))),
+            "the server ends once its requests are cut short: {joined:?}"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the summary's store call stopped"
+        );
+        for client in [&mut stalled, &mut summary] {
+            let reply = until_closed(client).await;
+            assert!(reply.starts_with("HTTP/1.1 503"), "{reply}");
+            assert!(reply.contains("shutting down"), "{reply}");
+        }
+    }
+
+    /// At shutdown, an HTTP/2 client that keeps its connection open with a
+    /// zero window, so no reply body can reach it, still loses its
+    /// connection, and the server ends on its own.
+    #[tokio::test]
+    async fn api_shutdown_closes_a_connection_that_never_reads() {
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let cfg = Config::default();
+        let router = api::router(api::ApiState::new(
+            Arc::new(state::store::SnapshotStore::new(&cfg.state.paging)),
+            &cfg.state,
+            summary::SummaryState::unused(&cfg.state.metrics_store),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let stop = CancellationToken::new();
+        let shutdown = ApiShutdown::default();
+        let server = serve_api(listener, router, stop.clone(), shutdown.clone());
+
+        let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .initial_stream_window_size(0)
+                .handshake(TokioIo::new(tcp))
+                .await
+                .expect("HTTP/2 handshake");
+        let connection = tokio::spawn(connection);
+        // The reply's head arrives; its body waits for a window that never
+        // opens.
+        let reply = sender
+            .send_request(
+                axum::http::Request::get(format!("http://{addr}/v1/count?type=host&stage=ready"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("reply head");
+        assert_eq!(reply.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        stop.cancel();
+        let joined = drain(server, Duration::from_millis(300), &shutdown).await;
+        assert!(
+            matches!(joined, Ok(Some(Ok(())))),
+            "the server ends once its connections close: {joined:?}"
+        );
+        assert!(shutdown.connections.is_cancelled());
+        let _ = tokio::time::timeout(Duration::from_secs(5), connection)
+            .await
+            .expect("the client's connection ends")
+            .expect("join");
+        drop((sender, reply));
+    }
+
+    /// Each enabled reader is built, readiness waits for all of its
+    /// families, and only those families' sweep counters start, at 0.
+    #[test]
+    fn build_readers_follow_the_schedule() {
+        let mut cfg = Config::default();
+        cfg.state.enabled = true;
+        cfg.state.rest.target = "https://nico-rest-api:8388".to_string();
+        let gates = gate::Gates::new(&cfg.state.caps);
+        let store = Arc::new(state::store::SnapshotStore::new(&cfg.state.paging));
+        let names = |cfg: &Config| {
+            let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
+                .expect("metrics setup");
+            let sink = Arc::new(state_metrics::CountingSink::new(
+                Arc::clone(&store),
+                &setup.meter,
+            ));
+            let (readers, families) = build_readers(
+                cfg,
+                &gates,
+                sink,
+                Arc::clone(&store) as _,
+                SystemTime::now(),
+            )
+            .expect("readers build");
+            let names: Vec<&str> = readers.iter().map(|r| r.name()).collect();
+            // (family, result) of every sweep counter series, all at 0.
+            let mut sweeps = Vec::new();
+            for family in setup.registry.gather() {
+                if family.name() != "carbide_site_health_probe_sweeps_total" {
+                    continue;
+                }
+                for metric in family.get_metric() {
+                    assert_eq!(metric.counter.value(), 0.0);
+                    let label = |name: &str| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .find(|l| l.name() == name)
+                            .map(|l| l.value().to_string())
+                            .expect("label")
+                    };
+                    sweeps.push((label("family"), label("result")));
+                }
+            }
+            sweeps.sort();
+            let mut want: Vec<(String, String)> = families
+                .iter()
+                .flat_map(|f| {
+                    let family = serde_json::to_value(f)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .expect("family name");
+                    ["complete", "incomplete"].map(|r| (family.clone(), r.to_string()))
+                })
+                .collect();
+            want.sort();
+            assert_eq!(sweeps, want, "two zero series per enabled family only");
+            (names, families.len())
+        };
+        assert_eq!(names(&cfg), (vec!["devices", "rest_inventory"], 10));
+        cfg.state.readers.rest_inventory.enabled = false;
+        assert_eq!(names(&cfg), (vec!["devices"], 8));
+        cfg.state.readers.rest_inventory.enabled = true;
+        cfg.state.readers.devices.enabled = false;
+        assert_eq!(names(&cfg), (vec!["rest_inventory"], 2));
+        cfg.state.enabled = false;
+        assert_eq!(names(&cfg), (vec![], 0));
     }
 }

@@ -22,4 +22,5 @@ spec:
   endpoints:
     - port: metrics
       path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
 {{- end }}
