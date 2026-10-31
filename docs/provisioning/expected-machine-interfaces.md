@@ -126,9 +126,14 @@ Expected Machine configuration.
 
 To change an existing allocation, update the Expected Machine configuration
 first, then explicitly assign or remove the address. The `assign-address`
-command can replace a DHCP, SLAAC, or Static address. The `remove-address`
-command removes a Static address; it does not cause NICo to reapply the
-Expected Machine allocation policy:
+command can replace a DHCP, SLAAC, or Static address. If the new address belongs
+to a different network segment, the interface's address in the other family must
+already belong to that segment; otherwise the command fails with
+`FailedPrecondition` and changes nothing. Because `remove-address` removes only
+Static addresses, first replace a DHCP or SLAAC address in the other family with
+a Static address in the current segment, remove it, then assign the new address.
+The `remove-address` command removes a Static address; it does not cause NICo
+to reapply the Expected Machine allocation policy:
 
 ```bash
 # Find the interface ID and its current addresses.
