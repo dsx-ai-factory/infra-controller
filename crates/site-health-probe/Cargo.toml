@@ -63,7 +63,11 @@ logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 
 [dev-dependencies]
+axum = { features = ["http2"], workspace = true }
 carbide-test-support = { path = "../test-support" }
+hyper = { features = ["client", "http2"], workspace = true }
+hyper-util = { features = ["tokio"], workspace = true }
+socket2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { features = ["test-util"], workspace = true }
 tower = { workspace = true }
