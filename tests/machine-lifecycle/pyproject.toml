@@ -39,7 +39,7 @@ packages = ["lib"]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.14.6",
+    "ruff>=0.17.2",
 ]
 
 [tool.pytest]
