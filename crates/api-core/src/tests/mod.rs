@@ -83,6 +83,7 @@ mod nic_firmware_artifact;
 mod nic_firmware_operation;
 mod nvl_instance;
 mod nvl_logical_partition;
+mod preingestion_bfb_identity;
 mod preingestion_dpu_nic_mode;
 mod primary_interface;
 mod rack_health;
