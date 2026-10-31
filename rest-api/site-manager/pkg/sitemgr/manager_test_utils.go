@@ -160,7 +160,7 @@ func (s *Suite) setup() error {
 		}
 	})
 
-	rtr.HandleFunc("/v1/pki/cloud-cert", func(w http.ResponseWriter, _ *http.Request) {
+	rtr.HandleFunc("/v1/pki/cloud-cert", func(w http.ResponseWriter, r *http.Request) {
 		resp := &certs.CertificateResponse{
 			Key:         testKey,
 			Certificate: testCert,

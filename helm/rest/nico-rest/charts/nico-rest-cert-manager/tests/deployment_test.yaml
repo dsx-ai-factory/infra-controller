@@ -18,6 +18,27 @@ tests:
   - it: covers every in-cluster name of the Service by default
     asserts:
       - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_ALLOWED_IDENTITIES
+            value: spiffe://nico.local/nico-rest/sa/nico-rest-site-manager
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_MODE
+            value: AUDIT
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_CLIENT_CA_FILE
+            value: ""
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+      - lengthEqual:
+          path: spec.template.spec.containers[0].volumeMounts
+          count: 2
+      - contains:
           path: spec.template.spec.containers[0].args
           content: --dns-name=nico-rest-cert-manager
       - contains:
@@ -57,3 +78,84 @@ tests:
       - notContains:
           path: spec.template.spec.containers[0].args
           content: --dns-name=nico-rest-cert-manager
+
+  - it: authorizes separately configured identities in enforce mode
+    set:
+      authorization:
+        mode: ENFORCE
+        allowedIdentities:
+          - spiffe://custom.test/registration/sa/issuer-client
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_ALLOWED_IDENTITIES
+            value: spiffe://custom.test/registration/sa/issuer-client
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_MODE
+            value: ENFORCE
+
+  - it: rejects invalid authorization mode
+    set:
+      authorization.mode: enforce
+    asserts:
+      - failedTemplate:
+          errorMessage: authorization.mode must be AUDIT or ENFORCE
+
+  - it: prevents extraEnv from bypassing identity validation
+    set:
+      extraEnv.CERT_AUTH_ALLOWED_IDENTITIES: spiffe://other.test/caller
+    asserts:
+      - failedTemplate:
+          errorPattern: configure CERT_AUTH_ALLOWED_IDENTITIES through chart values
+
+  - it: mounts a separate client CA and points authorization at its bundle
+    set:
+      authorization.clientCaSecretName: site-client-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_CLIENT_CA_FILE
+            value: /etc/pki/client-ca/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: client-ca
+            mountPath: /etc/pki/client-ca
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: client-ca
+            secret:
+              secretName: site-client-ca
+              items:
+                - key: ca.crt
+                  path: ca.crt
+
+  - it: rejects ambiguous client CA sources
+    set:
+      authorization.clientCaSecretName: site-client-ca
+      authorization.clientCaFile: /etc/pki/ca/tls.crt
+    asserts:
+      - failedTemplate:
+          errorMessage: authorization.clientCaSecretName and clientCaFile are mutually exclusive
+
+  - it: preserves a client CA path in an existing mount
+    set:
+      authorization.clientCaFile: /etc/pki/ca/tls.crt
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_CLIENT_CA_FILE
+            value: /etc/pki/ca/tls.crt
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+      - lengthEqual:
+          path: spec.template.spec.containers[0].volumeMounts
+          count: 2
