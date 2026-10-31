@@ -39,6 +39,13 @@ vars:
     default: "18080"
   LOCAL_DEV_DSX_GATEWAY_PROFILE: "0"
   LOCAL_DEV_EXTRA_CORE_IMAGE: ""
+  LOCAL_DEV_TARGET_BACKEND: machine-a-tron
+  LOCAL_DEV_VM_HOST_COUNT:
+    source: env
+    default: "2"
+  LOCAL_DEV_VM_HOSTS_BOOT_IMAGE:
+    source: env
+    default: ""
 
 pipelines:
   build: |-
@@ -77,7 +84,12 @@ functions:
     # Custom-build onChange state can outlive the corresponding local Docker
     # image. Always invoke these inexpensive second-stage builds so the tags
     # consumed by the Kind image-loading hook are guaranteed to exist.
-    build_images nico-api nico-bmc-proxy machine-a-tron --force-rebuild
+    build_images nico-api nico-bmc-proxy --force-rebuild
+    if [ "${LOCAL_DEV_TARGET_BACKEND}" = "machine-a-tron" ]; then
+      build_images machine-a-tron --force-rebuild
+    else
+      build_images vm-hosts-bmc vm-hosts-libvirt --force-rebuild
+    fi
     if [ -n "${LOCAL_DEV_EXTRA_CORE_IMAGE}" ]; then
       build_images "${LOCAL_DEV_EXTRA_CORE_IMAGE}" --force-rebuild
     fi
@@ -88,6 +100,8 @@ images:
     tags:
       - latest
     dockerfile: dev/deployment/devspace/Dockerfile.core-artifacts
+    buildArgs:
+      TARGET_BACKEND: ${LOCAL_DEV_TARGET_BACKEND}
     context: .
     buildKit: {}
     skipPush: true
@@ -562,6 +576,81 @@ profiles:
                 "${runtime.images.nico-pxe.image}:${runtime.images.nico-pxe.tag}"
               ;;
           esac
+  - name: vm-hosts
+    parent: full
+    patches:
+      - op: replace
+        path: vars.LOCAL_DEV_TARGET_BACKEND
+        value: bmc-mock
+      - op: replace
+        path: pipelines.purge
+        value: |-
+          python3 dev/deployment/devspace/vm-hosts/lab.py check-purge
+          LOCAL_DEV_NAMESPACE=${DEVSPACE_NAMESPACE} dev/deployment/devspace/reset-kind-cluster.sh
+      - op: remove
+        path: images.machine-a-tron
+      - op: replace
+        path: deployments.carbide-local.helm.values.nico-machine-a-tron
+        value:
+          enabled: false
+      - op: add
+        path: deployments.carbide-local.helm.valuesFiles
+        value: .devspace/vm-hosts-values.json
+      - op: add
+        path: images.vm-hosts-bmc
+        value:
+          image: nico-devspace-bmc-mock
+          tags: [latest]
+          dockerfile: dev/deployment/devspace/vm-hosts/Dockerfile.bmc-mock
+          context: .
+          buildKit: {}
+          skipPush: true
+      - op: add
+        path: images.vm-hosts-libvirt
+        value:
+          image: nico-devspace-libvirt
+          tags: [latest]
+          dockerfile: dev/deployment/devspace/vm-hosts/Dockerfile.libvirt
+          context: .
+          buildKit: {}
+          skipPush: true
+      - op: add
+        path: hooks
+        value:
+          name: prepare-vm-hosts
+          events: ["before:build", "before:deploy"]
+          command: |-
+            python3 dev/deployment/devspace/vm-hosts/configure.py \
+              --boot-image "${LOCAL_DEV_VM_HOSTS_BOOT_IMAGE}" \
+              --output .devspace/vm-hosts-values.json
+      - op: replace
+        path: hooks.name=load-images-into-local-cluster.command
+        value: |-
+          CONTEXT=$(kubectl config current-context)
+          case "$CONTEXT" in
+            kind-*)
+              kind load docker-image --name "${CONTEXT#kind-}" \
+                "${runtime.images.nico-api.image}:${runtime.images.nico-api.tag}" \
+                "${runtime.images.nico-bmc-proxy.image}:${runtime.images.nico-bmc-proxy.tag}" \
+                "${runtime.images.nico-pxe.image}:${runtime.images.nico-pxe.tag}"
+              ;;
+            *) echo "vm-hosts requires a local kind cluster" >&2; exit 1 ;;
+          esac
+          if docker image inspect "${LOCAL_DEV_VM_HOSTS_BOOT_IMAGE}" >/dev/null 2>&1; then
+            kind load docker-image --name "${CONTEXT#kind-}" "${LOCAL_DEV_VM_HOSTS_BOOT_IMAGE}"
+          fi
+          python3 dev/deployment/devspace/vm-hosts/lab.py up --count ${LOCAL_DEV_VM_HOST_COUNT}
+      - op: replace
+        path: hooks.name=setup-rest-integration.command
+        value: |-
+          bash dev/deployment/devspace/setup-core-services.sh ${LOCAL_DEV_NAMESPACE}
+          bash dev/deployment/devspace/vm-hosts/setup.sh ${LOCAL_DEV_NAMESPACE}
+          LOCAL_DEV_TARGET_BACKEND=vm-hosts \
+          LOCAL_DEV_REST_API_FORWARD_PORT=${LOCAL_DEV_REST_API_FORWARD_PORT} \
+          LOCAL_DEV_KEYCLOAK_FORWARD_PORT=${LOCAL_DEV_KEYCLOAK_FORWARD_PORT} \
+          LOCAL_DEV_DSX_GATEWAY_FORWARD_PORT=${LOCAL_DEV_DSX_GATEWAY_FORWARD_PORT} \
+          LOCAL_DEV_DSX_GATEWAY_ENABLED=${LOCAL_DEV_DSX_GATEWAY_PROFILE} \
+            dev/deployment/devspace/setup-rest-integration.sh
   - name: core-only
     patches:
       - op: add
