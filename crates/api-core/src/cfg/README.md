@@ -113,6 +113,7 @@ behavior.
 | `bom_validation` | `BomValidationConfig` | *(see below)* | `machines` | BOM/SKU validation (see [BomValidationConfig](#bomvalidationconfig)). |
 | `bios_profiles` | `BiosProfileVendor` | *(default)* | `machines` | BIOS profiles by vendor/model for Redfish BIOS management. |
 | `selected_profile` | `BiosProfileType` | *(default)* | `machines` | Default BIOS profile type applied to machines. |
+| `named_bios_profiles` | `HashMap<String, NamedBiosProfile>` | `{}` | `machines` | BIOS recipes by name, each with `vendor`, `model` (spaces replaced by underscores) and `attributes`. A host whose `bios-profile` machine label names a recipe matching its vendor and model gets these attributes instead of its `bios_profiles` entry. |
 | `ewethers_config` | `Option<EwEthersConfig>` | — | `networking` | Cluster Interconnect (east-west Ethernet) config (see [EwEthersConfig](#ewethersconfig)). Accepts the legacy `dpa_config` section name; legacy inline `mqtt_endpoint`, `mqtt_broker_port`, `hb_interval`, and `auth` keys are migrated into `svpc` at load time with a deprecation warning. |
 | `dsx_exchange_event_bus` | `Option<DsxExchangeEventBusConfig>` | — | `integrations` | MQTT event bus for managed-host state publishing plus BMS metadata subscription and rack/isolation/heartbeat publishing (see [DsxExchangeEventBusConfig](#dsxexchangeeventbusconfig)). |
 | `datacenter_asn` | `u32` | `11414` | `networking` | Datacenter ASN used by FNN for DC-specific route targets. |

@@ -62,8 +62,14 @@ async fn test_oem_manager_profiles_passed_to_machine_setup() {
         .await
         .unwrap();
 
-    let result =
-        call_machine_setup_and_handle_no_dpu_error(client.as_ref(), None, 1, &config).await;
+    let result = call_machine_setup_and_handle_no_dpu_error(
+        client.as_ref(),
+        None,
+        1,
+        &config.bios_profiles,
+        &config,
+    )
+    .await;
 
     assert!(result.is_ok());
 
@@ -72,6 +78,7 @@ async fn test_oem_manager_profiles_passed_to_machine_setup() {
     assert_eq!(
         actions[0],
         RedfishSimAction::MachineSetup {
+            bios_profiles: config.bios_profiles,
             oem_manager_profiles: config.oem_manager_profiles,
             boot_interface_mac: None,
         }

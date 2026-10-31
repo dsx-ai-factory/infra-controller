@@ -165,6 +165,7 @@ struct RedfishSimState {
     bios_attributes: Option<HashMap<String, serde_json::Value>>,
     /// Optional ComputerSystem identifier used to drive platform classification.
     system_id: Option<String>,
+    system_model: Option<String>,
     /// Physical-port MAC addresses exposed through the adapter Ports collection.
     network_adapter_port_mac_addresses: Vec<MacAddress>,
     /// Chassis linked from the simulated ComputerSystem.
@@ -696,6 +697,10 @@ impl RedfishSim {
         self.state.lock().unwrap().system_id = Some(system_id.into());
     }
 
+    pub fn set_system_model(&self, model: impl Into<String>) {
+        self.state.lock().unwrap().system_model = Some(model.into());
+    }
+
     /// Configure the physical-port MAC addresses returned by the simulated
     /// `Chassis/.../NetworkAdapters/.../Ports` collection. A non-empty value
     /// also advertises the parent `NetworkAdapters` link on `Card1`.
@@ -801,6 +806,7 @@ pub enum RedfishSimAction {
     SetUtcTimezone,
     SetNtpServers(Vec<String>),
     MachineSetup {
+        bios_profiles: libredfish::BiosProfileVendor,
         oem_manager_profiles: libredfish::BiosProfileVendor,
         /// The boot interface the setup call targeted (`None` when the caller
         /// ran setup without one, e.g. DPU setup), letting tests assert which
@@ -1019,7 +1025,7 @@ impl Redfish for RedfishSimClient {
     fn machine_setup<'a>(
         &'a self,
         boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
-        _bios_profiles: &'a HashMap<
+        bios_profiles: &'a HashMap<
             libredfish::model::service_root::RedfishVendor,
             HashMap<
                 String,
@@ -1049,6 +1055,7 @@ impl Redfish for RedfishSimClient {
                 .boot_interface_targets
                 .push(boot_interface.map(RedfishSimBootInterfaceRef::from));
             host_state.actions.push(RedfishSimAction::MachineSetup {
+                bios_profiles: bios_profiles.clone(),
                 oem_manager_profiles: oem_manager_profiles.clone(),
                 boot_interface_mac: boot_interface.map(boot_interface_ref_to_string),
             });
@@ -1600,12 +1607,14 @@ impl Redfish for RedfishSimClient {
                     odata_id: format!("/redfish/v1/Chassis/{id}"),
                 })
                 .collect::<Vec<_>>();
+            let model = self.state.lock().unwrap().system_model.clone();
             Ok(libredfish::model::ComputerSystem {
                 odata: libredfish::model::OData {
                     odata_id: format!("/redfish/v1/Systems/{id}"),
                     ..Default::default()
                 },
                 id,
+                model,
                 links: (!chassis.is_empty()).then_some(
                     libredfish::model::system::ComputerSystemLinks {
                         chassis: Some(chassis),
