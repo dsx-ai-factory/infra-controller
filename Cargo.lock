@@ -2142,6 +2142,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-fleet-history"
+version = "0.0.0"
+dependencies = [
+ "carbide-site-health-probe-api",
+ "chrono",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "carbide-fmds"
 version = "0.0.1"
 dependencies = [
