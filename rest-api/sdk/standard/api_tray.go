@@ -740,7 +740,7 @@ func (r ApiGetAllTrayRequest) Id(id string) ApiGetAllTrayRequest {
 	return r
 }
 
-// Restrict to trays at this rack slot (matches &#x60;position.slotId&#x60;). Requires &#x60;rackId&#x60; or &#x60;rackName&#x60;. Composes with the rest of the filter via AND.
+// Restrict to trays at this rack slot (matches &#x60;position.slotId&#x60;). Requires &#x60;rackId&#x60; or &#x60;rackName&#x60;. Composes with the rest of the filter using AND.
 func (r ApiGetAllTrayRequest) SlotId(slotId int32) ApiGetAllTrayRequest {
 	r.slotId = &slotId
 	return r
@@ -2290,7 +2290,7 @@ func (r ApiValidateTraysRequest) Id(id string) ApiValidateTraysRequest {
 	return r
 }
 
-// Restrict validation to trays at this rack slot (matches &#x60;position.slotId&#x60;). Requires &#x60;rackId&#x60; or &#x60;rackName&#x60;. Composes with the rest of the filter via AND.
+// Restrict validation to trays at this rack slot (matches &#x60;position.slotId&#x60;). Requires &#x60;rackId&#x60; or &#x60;rackName&#x60;. Composes with the rest of the filter using AND.
 func (r ApiValidateTraysRequest) SlotId(slotId int32) ApiValidateTraysRequest {
 	r.slotId = &slotId
 	return r

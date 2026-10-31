@@ -38,7 +38,7 @@ type TenantIdentityConfigCreateOrUpdateRequestWithKeyRotation struct {
 	SubjectPrefix *string `json:"subjectPrefix,omitempty"`
 	// Must be `true` for this variant. Generates a fresh ES256 signing keypair into the other key slot, swaps the current signer, and arms a JWKS overlap window for the previous key.
 	RotateKey bool `json:"rotateKey"`
-	// Required when `rotateKey` is `true`. Number of seconds the previous verification key remains in JWKS so that JWTs already signed with it stay verifiable until they expire. Must be `>= tokenTtlSeconds`. The Core gRPC API enforces an upper bound via its `[machine_identity].signing_key_overlap_max_sec` config; values above that bound are rejected with `400 Bad Request`.
+	// Required when `rotateKey` is `true`. Number of seconds the previous verification key remains in JWKS so that JWTs already signed with it stay verifiable until they expire. Must be `>= tokenTtlSeconds`. The Core gRPC API enforces an upper bound with its `[machine_identity].signing_key_overlap_max_sec` config; values above that bound are rejected with `400 Bad Request`.
 	SigningKeyOverlapSeconds uint32 `json:"signingKeyOverlapSeconds"`
 }
 

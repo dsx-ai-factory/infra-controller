@@ -22,7 +22,7 @@ var _ MappedNullable = &BMCResetRequest{}
 
 // BMCResetRequest Request to reset a Machine BMC
 type BMCResetRequest struct {
-	// Reset the BMC via ipmitool instead of Redfish. The request may be silently ignored while the BMC is in lockdown mode.
+	// Reset the BMC using ipmitool instead of Redfish. The request may be silently ignored while the BMC is in lockdown mode.
 	UseIpmiTool *bool `json:"useIpmiTool,omitempty"`
 	// Acknowledges that an Instance is currently attached to the Machine and this action may disrupt Tenant workload on the Instance.
 	AcknowledgeAttachedInstance *bool `json:"acknowledgeAttachedInstance,omitempty"`

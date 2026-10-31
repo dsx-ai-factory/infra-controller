@@ -24,7 +24,7 @@ var _ MappedNullable = &BatchInstanceCreateRequest{}
 
 // BatchInstanceCreateRequest Request data to batch create multiple Instances with topology-optimized machine allocation. Explicit interface `ipAddress` values are not supported in batch requests.  The primary `vpcId` must be owned by the Instance Tenant. Shared non-primary Interfaces may select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant only when the caller is a Tenant Admin and the Tenant has effective `crossTenantInterfaceCreation` capability at the Site. Cross-Tenant Subnets remain unsupported, and the capability grants no cross-Tenant discovery or CRUD access. The primary physical Interface rules are the same as single Instance create. Instance-level Network Security Group policy takes precedence on all Interfaces, including cross-Tenant VPC Interfaces.
 type BatchInstanceCreateRequest struct {
-	// Prefix for instance names. Instances will be named with this prefix followed by a random 6-character suffix (e.g., \"worker\" becomes \"worker-abc123\")
+	// Prefix for instance names. Instances will be named with this prefix followed by a random 6-character suffix (for example, \"worker\" becomes \"worker-abc123\")
 	NamePrefix string `json:"namePrefix"`
 	// Number of instances to create in this batch. Minimum 2, maximum 18 (limited by topology domain size)
 	Count int32 `json:"count"`

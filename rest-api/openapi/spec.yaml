@@ -8818,8 +8818,10 @@ paths:
           name: vpcId
           description: Filter by VPC ID. Can be specified multiple times to filter on more than one VPC.
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: instanceTypeId
           description: Filter by instance type ID. Can be specified multiple times to filter on more than one instance type.
@@ -8830,7 +8832,9 @@ paths:
           name: operatingSystemId
           description: Filter by operating system ID. Can be specified multiple times to filter on more than one operating system.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: machineId
           description: Filter by machine ID. Can be specified multiple times to filter on more than one machine.
@@ -8845,7 +8849,9 @@ paths:
           name: status
           description: Filter Instances by Status. Can be specified multiple times to filter on more than one status.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: ipAddress
           description: Filter by IP address. Can be specified multiple times to filter on more than one IP address.
@@ -11185,7 +11191,7 @@ paths:
             type: boolean
           in: query
           name: includeMetadata
-          description: 'Include Machine metadata e.g. BMC, DPU, GPU and Interface data. Can only be requested by Provider.'
+          description: 'Include Machine metadata such as BMC, DPU, GPU, and Interface data. Can only be requested by Provider.'
         - schema:
             type: string
           in: query
@@ -11815,7 +11821,7 @@ paths:
             type: boolean
           in: query
           name: includeMetadata
-          description: 'Include Machine metadata e.g. BMC, DPU, GPU and Interface data. Can only be requested by Provider.'
+          description: 'Include Machine metadata such as BMC, DPU, GPU, and Interface data. Can only be requested by Provider.'
     patch:
       summary: Update Machine
       operationId: update-machine
@@ -14295,7 +14301,7 @@ paths:
           name: slotId
           in: query
           description: |-
-            Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
+            Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter using AND.
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -16048,7 +16054,7 @@ paths:
           in: query
           required: false
           description: |-
-            Restrict validation to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
+            Restrict validation to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter using AND.
       responses:
         '200':
           description: OK
@@ -19646,7 +19652,7 @@ components:
         useIpmiTool:
           type: boolean
           default: false
-          description: Reset the BMC via ipmitool instead of Redfish. The request may be silently ignored while the BMC is in lockdown mode.
+          description: Reset the BMC using ipmitool instead of Redfish. The request may be silently ignored while the BMC is in lockdown mode.
         acknowledgeAttachedInstance:
           type: boolean
           description: Acknowledges that an Instance is currently attached to the Machine and this action may disrupt Tenant workload on the Instance.
@@ -25728,7 +25734,7 @@ components:
           type: string
           minLength: 2
           maxLength: 240
-          description: Prefix for instance names. Instances will be named with this prefix followed by a random 6-character suffix (e.g., "worker" becomes "worker-abc123")
+          description: Prefix for instance names. Instances will be named with this prefix followed by a random 6-character suffix (for example, "worker" becomes "worker-abc123")
         count:
           type: integer
           minimum: 2
@@ -27250,7 +27256,7 @@ components:
           format: int32
           minimum: 0
           description: |-
-            Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
+            Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter using AND.
     NVLinkDomain:
       title: NVLinkDomain
       type: object
@@ -29414,14 +29420,14 @@ components:
               - dpu
           description: |-
             Optional subset of firmware targets to update within each matched tray.
-            Names are lowercase and select sub-parts of the tray
-            (BMC, BIOS, etc.). The accepted set per tray type comes from
+            Names are lowercase and select sub-parts of the tray, such as
+            BMC and BIOS. The accepted set per tray type comes from
             the Flow service's NICo proto bindings (which mirror Core's
-            per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`),
+            per-tray-type enums in `crates/rpc/proto/forge.proto`),
             so the supported values track Core as new sub-parts are added:
-              - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
-              - powershelf trays (PowerShelfComponent): currently pmc, psu
-              - compute trays (ComputeTrayComponent): currently bmc, bios
+              - switch trays (NvSwitchComponent): bmc, cpld, bios, nvos
+              - powershelf trays (PowerShelfComponent): pmc, psu
+              - compute trays (ComputeTrayComponent): bmc, bios
 
             The default `nico` compute component manager forwards BMC and BIOS
             selections through `UpdateComponentFirmware`. The opt-in
@@ -29660,14 +29666,14 @@ components:
               - dpu
           description: |-
             Optional subset of firmware targets to update within the targeted tray.
-            Names are lowercase and select sub-parts of the tray
-            (BMC, BIOS, etc.). The accepted set per tray type comes from
+            Names are lowercase and select sub-parts of the tray, such as
+            BMC and BIOS. The accepted set per tray type comes from
             the Flow service's NICo proto bindings (which mirror Core's
-            per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`),
+            per-tray-type enums in `crates/rpc/proto/forge.proto`),
             so the supported values track Core as new sub-parts are added:
-              - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
-              - powershelf trays (PowerShelfComponent): currently pmc, psu
-              - compute trays (ComputeTrayComponent): currently bmc, bios
+              - switch trays (NvSwitchComponent): bmc, cpld, bios, nvos
+              - powershelf trays (PowerShelfComponent): pmc, psu
+              - compute trays (ComputeTrayComponent): bmc, bios
 
             The default `nico` compute component manager forwards BMC and BIOS
             selections through `UpdateComponentFirmware`. The opt-in
@@ -35644,7 +35650,7 @@ components:
             the previous verification key remains in JWKS so that
             JWTs already signed with it stay verifiable until they
             expire. Must be `>= tokenTtlSeconds`. The Core gRPC API
-            enforces an upper bound via its
+            enforces an upper bound with its
             `[machine_identity].signing_key_overlap_max_sec` config;
             values above that bound are rejected with
             `400 Bad Request`.

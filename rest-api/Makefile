@@ -905,6 +905,7 @@ generate-sdk: $(OPENAPI_GENERATOR_JAR)
 		--include-untracked 'sdk/standard/api_*.go' \
 		--include-untracked 'sdk/standard/model_*.go'
 	python3 scripts/format_sdk_comments.py sdk/standard/model_*.go
+	python3 scripts/variadic_query_setters.py sdk/standard/api_*.go
 	@echo "Client generated in sdk/standard/"
 	cd sdk/standard && go build ./...
 	@echo "Client compiles successfully"
