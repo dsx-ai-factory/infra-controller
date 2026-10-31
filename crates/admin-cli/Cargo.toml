@@ -32,6 +32,7 @@ path = "src/main.rs"
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-model = { path = "../api-model" }
 carbide-macros = { path = "../macros" }
+carbide-machine-validation-adapters = { path = "../machine-validation-adapters" }
 carbide-network = { path = "../network" }
 carbide-ssh = { path = "../ssh" }
 carbide-tls = { path = "../tls" }

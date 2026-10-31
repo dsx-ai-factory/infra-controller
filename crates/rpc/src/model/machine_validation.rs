@@ -349,6 +349,7 @@ impl From<rpc::forge::MachineValidationPlugin> for MachineValidationPlugin {
             } else {
                 value.r#type
             },
+            container_plugin_adapter: value.container_plugin_adapter,
             image: value.image,
             entrypoint: value.entrypoint,
             parameters_json: value.parameters_json,
@@ -362,6 +363,7 @@ impl From<MachineValidationPlugin> for rpc::forge::MachineValidationPlugin {
     fn from(value: MachineValidationPlugin) -> Self {
         Self {
             r#type: value.plugin_type,
+            container_plugin_adapter: value.container_plugin_adapter,
             image: value.image,
             entrypoint: value.entrypoint,
             parameters_json: value.parameters_json,
@@ -429,6 +431,23 @@ impl TryFrom<rpc::forge::MachineValidationResult> for MachineValidationResult {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn container_adapter_survives_rpc_and_json_revision_snapshots() {
+        let legacy_json = serde_json::json!({"type":"container", "image":"example.com/check", "entrypoint":["/check"], "parameters_json":"{}", "privileged":false, "host_access_full":false});
+        let legacy: MachineValidationPlugin = serde_json::from_value(legacy_json.clone()).unwrap();
+        assert!(legacy.container_plugin_adapter.is_none());
+        assert_eq!(serde_json::to_value(&legacy).unwrap(), legacy_json);
+        let rpc_plugin = rpc::forge::MachineValidationPlugin {
+            container_plugin_adapter: Some("DSXHealthValidation".to_owned()),
+            ..legacy.into()
+        };
+        let model: MachineValidationPlugin = rpc_plugin.clone().into();
+        let snapshot = serde_json::to_vec(&model).unwrap();
+        let restored: MachineValidationPlugin = serde_json::from_slice(&snapshot).unwrap();
+        let round_trip: rpc::forge::MachineValidationPlugin = restored.into();
+        assert_eq!(round_trip, rpc_plugin);
+    }
 
     #[test]
     fn tests_get_request_from_rpc() {
