@@ -22,6 +22,8 @@ var _ MappedNullable = &SiteCapabilitiesUpdateRequest{}
 
 // SiteCapabilitiesUpdateRequest Request to modify Site's capabilities. Partial update allowed, only specify capabilities that should be updated.
 type SiteCapabilitiesUpdateRequest struct {
+	// Enable or disable creation of tenant-owned private IP Blocks. Only Providers can update this field. Omission or null preserves the current value; the default is false. Disabling preserves read, metadata update, and deletion access to existing blocks. Enable only after SitePrefix inventory publication and absence processing are deployed (https://github.com/dsx-ai-factory/infra-controller/issues/5763).
+	TenantSitePrefix NullableBool `json:"tenantSitePrefix,omitempty"`
 	// Enable or disable native networking for the Site
 	NativeNetworking NullableBool `json:"nativeNetworking,omitempty"`
 	// Enable or disable network security groups for the Site
@@ -47,6 +49,49 @@ func NewSiteCapabilitiesUpdateRequest() *SiteCapabilitiesUpdateRequest {
 func NewSiteCapabilitiesUpdateRequestWithDefaults() *SiteCapabilitiesUpdateRequest {
 	this := SiteCapabilitiesUpdateRequest{}
 	return &this
+}
+
+// GetTenantSitePrefix returns the TenantSitePrefix field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *SiteCapabilitiesUpdateRequest) GetTenantSitePrefix() bool {
+	if o == nil || IsNil(o.TenantSitePrefix.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.TenantSitePrefix.Get()
+}
+
+// GetTenantSitePrefixOk returns a tuple with the TenantSitePrefix field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *SiteCapabilitiesUpdateRequest) GetTenantSitePrefixOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.TenantSitePrefix.Get(), o.TenantSitePrefix.IsSet()
+}
+
+// HasTenantSitePrefix returns a boolean if a field has been set.
+func (o *SiteCapabilitiesUpdateRequest) HasTenantSitePrefix() bool {
+	if o != nil && o.TenantSitePrefix.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTenantSitePrefix gets a reference to the given NullableBool and assigns it to the TenantSitePrefix field.
+func (o *SiteCapabilitiesUpdateRequest) SetTenantSitePrefix(v bool) {
+	o.TenantSitePrefix.Set(&v)
+}
+
+// SetTenantSitePrefixNil sets the value for TenantSitePrefix to be an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) SetTenantSitePrefixNil() {
+	o.TenantSitePrefix.Set(nil)
+}
+
+// UnsetTenantSitePrefix ensures that no value is present for TenantSitePrefix, not even an explicit nil
+func (o *SiteCapabilitiesUpdateRequest) UnsetTenantSitePrefix() {
+	o.TenantSitePrefix.Unset()
 }
 
 // GetNativeNetworking returns the NativeNetworking field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -231,6 +276,9 @@ func (o SiteCapabilitiesUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o SiteCapabilitiesUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.TenantSitePrefix.IsSet() {
+		toSerialize["tenantSitePrefix"] = o.TenantSitePrefix.Get()
+	}
 	if o.NativeNetworking.IsSet() {
 		toSerialize["nativeNetworking"] = o.NativeNetworking.Get()
 	}

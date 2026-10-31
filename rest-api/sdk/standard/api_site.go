@@ -189,7 +189,7 @@ DeleteSite Delete Site
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-Site can only be deleted if all Allocations have been deleted.
+Site can only be deleted if all Allocations have been deleted. Deletion waits for admitted tenant IP Block REST transactions, for up to 50 seconds or the remaining request deadline. If the wait expires, it returns 409 and can be retried. This fence ends when the REST transaction ends. A Core operation already dispatched through Temporal can finish after request cancellation and Site deletion; its root can remain in Core without a REST row because deleted Sites no longer accept inventory. Resolve uncertain tenant operations before deleting the Site.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -272,6 +272,17 @@ func (a *SiteAPIService) DeleteSiteExecute(r ApiDeleteSiteRequest) (*MessageResp
 			error: localVarHTTPResponse.Status,
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
@@ -871,6 +882,8 @@ UpdateSite Update Site
 
 # Update a specific Site
 
+Setting `capabilities.tenantSitePrefix` waits for admitted tenant IP Block REST transactions, for up to 50 seconds or the remaining request deadline. If the wait expires, the request returns 409 and can be retried. New tenant mutations cannot bypass a queued capability change. Other Site updates remain available. A Core operation already dispatched through Temporal can finish after its REST request is canceled and releases this fence; disabling the capability does not cancel such operations, and inventory can subsequently recover their roots.
+
 User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 Infrastructure Provider updating the Site must be the owner of the Site. At present, there are no other Site-specific configurations modifiable by Tenant.
@@ -968,6 +981,17 @@ func (a *SiteAPIService) UpdateSiteExecute(r ApiUpdateSiteRequest) (*Site, *http
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

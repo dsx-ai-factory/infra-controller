@@ -330,6 +330,9 @@ func (f testFixture) ipBlockStates(t *testing.T, before map[uuid.UUID]cdbm.IPBlo
 	for _, block := range f.blocks(t) {
 		require.Equal(t, block.SitePrefixID == nil || block.TenantID == nil, block.Managed, "managed flag of %s", block.Name)
 		previous, existing := before[block.ID]
+		if !existing && block.TenantID != nil && block.SitePrefixID != nil {
+			require.Equal(t, *block.SitePrefixID, block.ID, "new tenant roots reuse the Core SitePrefix ID")
+		}
 		state := testIPBlockState{
 			cidr:        fmt.Sprintf("%s/%d", block.Prefix, block.PrefixLength),
 			name:        block.Name,
@@ -1624,10 +1627,10 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					cidr:          "10.0.0.0/24",
 					sitePrefixID:  idA,
 					name:          "tenant-prefix",
-					status:        cdbm.IPBlockStatusReady,
+					status:        cdbm.IPBlockStatusDeleting,
 					tenantOrg:     "tenant",
 					existing:      true,
-					statusDetails: 1,
+					statusDetails: 0,
 				},
 			},
 		},
