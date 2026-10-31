@@ -19,9 +19,10 @@
 
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use eyre::eyre;
-use libredfish::{Redfish, SystemPowerControl};
+use libredfish::model::{BootProgress, BootProgressTypes};
+use libredfish::{Redfish, RedfishError, SystemPowerControl};
 use model::machine::{
     BiosConfigInfo, BiosConfigState, ManagedHostState, ManagedHostStateSnapshot, PowerState,
 };
@@ -66,6 +67,47 @@ pub(super) enum PollingBiosSetupOutcome {
     Wait(String),
     EnterRecovery(BiosConfigInfo),
     Failed { failure: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BiosApplySettle {
+    Proceed,
+    TimedOut(String),
+    Wait(String),
+}
+
+fn bios_apply_settle(
+    boot_progress: Result<Option<&BootProgress>, &RedfishError>,
+    settle_since: DateTime<Utc>,
+    now: DateTime<Utc>,
+    settle_timeout: chrono::Duration,
+) -> BiosApplySettle {
+    let pending = match boot_progress {
+        Err(error) => format!("host BootProgress could not be read: {error}"),
+        Ok(None) => return BiosApplySettle::Proceed,
+        Ok(Some(boot_progress)) => match &boot_progress.last_state {
+            None | Some(BootProgressTypes::OEM) => return BiosApplySettle::Proceed,
+            Some(state @ (BootProgressTypes::OSBootStarted | BootProgressTypes::OSRunning)) => {
+                match boot_progress
+                    .last_state_time
+                    .as_deref()
+                    .and_then(|time| DateTime::parse_from_rfc3339(time).ok())
+                    .map(|time| time.with_timezone(&Utc))
+                {
+                    Some(time) if time <= settle_since => {
+                        format!("host BootProgress {state} dates from {time}, before the reboot")
+                    }
+                    _ => return BiosApplySettle::Proceed,
+                }
+            }
+            Some(state) => format!("host BootProgress is {state}"),
+        },
+    };
+    if now - settle_since >= settle_timeout {
+        BiosApplySettle::TimedOut(pending)
+    } else {
+        BiosApplySettle::Wait(pending)
+    }
 }
 
 /// Outcome of entering HandleBiosJobFailure recovery, or failing once the budget is exhausted.
@@ -408,6 +450,36 @@ pub(super) async fn advance_polling_bios_setup(
     };
     match is_bios_setup_result {
         Ok(true) => {
+            let host = &mh_snapshot.host_snapshot;
+            let settle_since = host
+                .status
+                .last_reboot_requested
+                .as_ref()
+                .map(|request| request.time)
+                .unwrap_or_else(|| host.state.version.timestamp());
+            let system = redfish_client.get_system().await;
+            match bios_apply_settle(
+                system.as_ref().map(|system| system.boot_progress.as_ref()),
+                settle_since,
+                Utc::now(),
+                machine_controller_config.bios_apply_settle_timeout,
+            ) {
+                BiosApplySettle::Proceed => {}
+                BiosApplySettle::TimedOut(reason) => tracing::warn!(
+                    machine_id = %host.id,
+                    %reason,
+                    %settle_since,
+                    settle_timeout_minutes = machine_controller_config
+                        .bios_apply_settle_timeout
+                        .num_minutes(),
+                    "Host has not finished booting after the BIOS reboot within the settle timeout; finishing the BIOS step anyway"
+                ),
+                BiosApplySettle::Wait(reason) => {
+                    return Ok(PollingBiosSetupOutcome::Wait(format!(
+                        "BIOS settings are staged; waiting for the host to apply them and finish booting after the reboot at {settle_since}: {reason}"
+                    )));
+                }
+            }
             tracing::info!("BIOS setup verified successfully");
             Ok(PollingBiosSetupOutcome::Verified)
         }
@@ -506,6 +578,9 @@ pub(super) async fn handle_bios_setup_failed_recovery(
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
+    use chrono::TimeZone;
+
     use super::*;
 
     #[test]
@@ -590,6 +665,66 @@ mod tests {
         assert_eq!(
             info.retry_count,
             machine_controller_config.max_bios_config_retries
+        );
+    }
+
+    fn at(hour: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 24, hour, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn bios_apply_settles_once_the_host_has_booted_after_the_reboot() {
+        let rebooted_at = at(1);
+        let minutes_after_reboot = |minutes| rebooted_at + chrono::Duration::minutes(minutes);
+        let progress = |last_state, last_state_time: Option<&str>| {
+            Ok(Some(BootProgress {
+                last_state,
+                last_state_time: last_state_time.map(str::to_string),
+                oem_last_state: None,
+            }))
+        };
+        let unreadable = || {
+            Err(RedfishError::GenericError {
+                error: "connection reset".to_string(),
+            })
+        };
+        value_scenarios!(
+            run = |(boot_progress, minutes): (Result<Option<BootProgress>, RedfishError>, i64)| {
+                match bios_apply_settle(
+                    boot_progress.as_ref().map(Option::as_ref),
+                    rebooted_at,
+                    minutes_after_reboot(minutes),
+                    chrono::Duration::minutes(20),
+                ) {
+                    BiosApplySettle::Proceed => "proceed",
+                    BiosApplySettle::TimedOut(_) => "proceed after timeout",
+                    BiosApplySettle::Wait(_) => "wait",
+                }
+            };
+            "a BMC without a standard BootProgress keeps today's behaviour" {
+                (Ok(None), 1) => "proceed",
+                (progress(None, None), 1) => "proceed",
+                (progress(Some(BootProgressTypes::OEM), None), 1) => "proceed",
+            }
+            "the host has booted since the reboot" {
+                (progress(Some(BootProgressTypes::OSRunning), None), 9) => "proceed",
+                (progress(Some(BootProgressTypes::OSBootStarted), Some("2026-10-24T01:08:00Z")), 9) => "proceed",
+                (progress(Some(BootProgressTypes::OSRunning), Some("2026-10-24T01:08:00+00:00")), 30) => "proceed",
+                (progress(Some(BootProgressTypes::OSRunning), Some("not a timestamp")), 9) => "proceed",
+            }
+            "the host is still applying the settings" {
+                (progress(Some(BootProgressTypes::MemoryInitializationStarted), None), 4) => "wait",
+                (progress(Some(BootProgressTypes::None), None), 4) => "wait",
+                (progress(Some(BootProgressTypes::SetupEntered), None), 4) => "wait",
+                (progress(Some(BootProgressTypes::OSRunning), Some("2026-10-24T00:55:00Z")), 4) => "wait",
+                (progress(Some(BootProgressTypes::OSRunning), Some("2026-10-24T01:00:00Z")), 4) => "wait",
+                (unreadable(), 4) => "wait",
+            }
+            "the settle timeout bounds the wait" {
+                (progress(Some(BootProgressTypes::PCIResourceConfigStarted), None), 20) => "proceed after timeout",
+                (progress(Some(BootProgressTypes::OSRunning), Some("2026-10-24T00:55:00Z")), 25) => "proceed after timeout",
+                (unreadable(), 21) => "proceed after timeout",
+            }
         );
     }
 }

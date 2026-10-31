@@ -16,10 +16,29 @@
  */
 
 use carbide_state_controller_common::config::StateControllerConfig;
-use carbide_utils::config::as_duration;
+use carbide_utils::config::{as_duration, as_option_duration};
 use chrono::Duration;
 use duration_str::deserialize_duration_chrono;
 use serde::{Deserialize, Serialize};
+
+fn deserialize_option_positive_duration_chrono<'de, D>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| {
+            let duration = duration_str::parse_chrono(&value).map_err(serde::de::Error::custom)?;
+            if duration <= Duration::zero() {
+                return Err(serde::de::Error::custom(
+                    "duration must be greater than zero",
+                ));
+            }
+            Ok(duration)
+        })
+        .transpose()
+}
 
 /// Deserializes a recurring interval and rejects zero or negative durations.
 fn deserialize_positive_duration_chrono<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -34,6 +53,49 @@ where
     }
 
     Ok(duration)
+}
+
+/// Hard maximum for the BIOS
+/// settle timeout, below the
+/// BootConfiguring SLA.
+const BIOS_APPLY_SETTLE_TIMEOUT_MAX_MINUTES: i64 = 60;
+
+/// Hard maximum for the first
+/// DPU restart delay.
+const DPU_FIRST_RESTART_DELAY_MAX_MINUTES: i64 = 30;
+
+fn at_most<E: serde::de::Error>(duration: Duration, max_minutes: i64) -> Result<Duration, E> {
+    if duration > Duration::minutes(max_minutes) {
+        return Err(E::custom(format!(
+            "duration must be at most {max_minutes} minutes"
+        )));
+    }
+    Ok(duration)
+}
+
+/// Positive and at most the
+/// settle timeout maximum.
+fn deserialize_bios_apply_settle_timeout<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    at_most(
+        deserialize_positive_duration_chrono(deserializer)?,
+        BIOS_APPLY_SETTLE_TIMEOUT_MAX_MINUTES,
+    )
+}
+
+/// Positive and at most the
+/// restart delay maximum.
+fn deserialize_dpu_first_restart_delay<'de, D>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_option_positive_duration_chrono(deserializer)?
+        .map(|duration| at_most(duration, DPU_FIRST_RESTART_DELAY_MAX_MINUTES))
+        .transpose()
 }
 
 /// MachineStateController related config.
@@ -122,6 +184,24 @@ pub struct MachineStateControllerConfig {
         serialize_with = "as_duration"
     )]
     pub boot_interface_observation_interval: Duration,
+    /// Longest wait for the host
+    /// to boot after a BIOS
+    /// reboot before PollingBiosSetup
+    /// finishes anyway.
+    #[serde(
+        default = "MachineStateControllerConfig::bios_apply_settle_timeout_default",
+        deserialize_with = "deserialize_bios_apply_settle_timeout",
+        serialize_with = "as_duration"
+    )]
+    pub bios_apply_settle_timeout: Duration,
+    /// Delay before the first DPU
+    /// restart; unset keeps five minutes.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_dpu_first_restart_delay",
+        serialize_with = "as_option_duration"
+    )]
+    pub dpu_first_restart_delay: Option<Duration>,
 }
 
 impl MachineStateControllerConfig {
@@ -144,6 +224,9 @@ impl MachineStateControllerConfig {
             // Keep periodic Redfish reads out of unrelated controller tests.
             // Focused tests explicitly age the observation they exercise.
             boot_interface_observation_interval: Duration::weeks(52),
+            bios_apply_settle_timeout:
+                MachineStateControllerConfig::bios_apply_settle_timeout_default(),
+            dpu_first_restart_delay: None,
         }
     }
 
@@ -187,6 +270,11 @@ impl MachineStateControllerConfig {
     pub fn boot_interface_observation_interval_default() -> Duration {
         Duration::minutes(10)
     }
+
+    /// Default BIOS settle timeout.
+    pub fn bios_apply_settle_timeout_default() -> Duration {
+        Duration::minutes(20)
+    }
 }
 
 impl Default for MachineStateControllerConfig {
@@ -209,6 +297,50 @@ impl Default for MachineStateControllerConfig {
                 MachineStateControllerConfig::polling_bios_setup_stuck_threshold_default(),
             boot_interface_observation_interval:
                 MachineStateControllerConfig::boot_interface_observation_interval_default(),
+            bios_apply_settle_timeout:
+                MachineStateControllerConfig::bios_apply_settle_timeout_default(),
+            dpu_first_restart_delay: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct SettleTimeout {
+        #[serde(deserialize_with = "deserialize_bios_apply_settle_timeout")]
+        value: Duration,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct FirstRestartDelay {
+        #[serde(default, deserialize_with = "deserialize_dpu_first_restart_delay")]
+        value: Option<Duration>,
+    }
+
+    #[test]
+    fn bios_apply_settle_timeout_is_bounded() {
+        let parse = |value: &str| {
+            serde_json::from_str::<SettleTimeout>(&format!(r#"{{"value":"{value}"}}"#))
+                .map(|parsed| parsed.value)
+        };
+        assert_eq!(parse("60m").unwrap(), Duration::minutes(60));
+        assert!(parse("61m").is_err());
+        assert!(parse("0s").is_err());
+    }
+
+    #[test]
+    fn dpu_first_restart_delay_is_bounded() {
+        let parse =
+            |json: &str| serde_json::from_str::<FirstRestartDelay>(json).map(|parsed| parsed.value);
+        assert_eq!(parse("{}").unwrap(), None);
+        assert_eq!(
+            parse(r#"{"value":"30m"}"#).unwrap(),
+            Some(Duration::minutes(30))
+        );
+        assert!(parse(r#"{"value":"31m"}"#).is_err());
+        assert!(parse(r#"{"value":"0s"}"#).is_err());
     }
 }

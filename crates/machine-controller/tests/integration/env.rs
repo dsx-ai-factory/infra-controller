@@ -133,6 +133,9 @@ impl EnvBuilder {
                 .machine_state_controller
                 .waiting_for_measurements_timeout,
             uefi_boot_wait: runtime_config.machine_state_controller.uefi_boot_wait,
+            dpu_first_restart_delay: runtime_config
+                .machine_state_controller
+                .dpu_first_restart_delay,
         };
         let power_options: PowerOptionConfig = runtime_config.power_manager_options.clone().into();
         let machine_handler = MachineStateHandlerBuilder::builder()

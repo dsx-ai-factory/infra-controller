@@ -1605,6 +1605,7 @@ async fn create_test_env_with_overrides_inner(
             .machine_state_controller
             .waiting_for_measurements_timeout,
         uefi_boot_wait: Duration::seconds(0),
+        dpu_first_restart_delay: config.machine_state_controller.dpu_first_restart_delay,
     };
 
     let machine_swap = SwapHandler {
