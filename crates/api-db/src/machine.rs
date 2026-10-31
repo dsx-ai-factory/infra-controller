@@ -2907,7 +2907,8 @@ where
 ///
 /// The caller supplies `new_version` for every machine and its history entry.
 /// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
-/// version changed; no state or history changes remain. Successful writes return
+/// version changed, or a captured maintenance request is no longer pending;
+/// no state or history changes remain. Successful writes return
 /// `Applied(())` and remain in the caller's transaction. Database failures remain
 /// errors.
 pub async fn try_update_controller_state(
@@ -2931,10 +2932,16 @@ pub async fn try_update_controller_state(
     )
     .await?;
 
+    // A replaced or cancelled request cannot be admitted from an old snapshot.
+    let maintenance_request = match new_state {
+        ManagedHostState::Maintenance { request, .. } => request.as_ref(),
+        _ => None,
+    };
     let query = r#"
         UPDATE machines
         SET controller_state_version = $1, controller_state = $2
         WHERE id = $3 AND controller_state_version = $4
+          AND ($5::jsonb IS NULL OR machine_maintenance_requested = $5)
         RETURNING id
     "#;
     let updated: Option<HostMachineId> = sqlx::query_scalar(query)
@@ -2942,6 +2949,7 @@ pub async fn try_update_controller_state(
         .bind(sqlx::types::Json(new_state))
         .bind(host_id)
         .bind(expected_version)
+        .bind(maintenance_request.map(sqlx::types::Json))
         .fetch_optional(inner_txn.as_pgconn())
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -5870,6 +5878,138 @@ mod test {
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(stored.0, newer);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn maintenance_admission_checks_the_captured_request(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::MachineMaintenanceOperation::{PowerOn, Reset};
+
+        #[derive(Clone, Copy, Debug)]
+        enum Pending {
+            Current,
+            Replaced,
+            Cancelled,
+            Legacy,
+        }
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        for (case, applied) in [
+            (Pending::Current, true),
+            (Pending::Replaced, false),
+            (Pending::Cancelled, false),
+            (Pending::Legacy, true),
+        ] {
+            let mut txn = pool.begin().await?;
+            super::create(
+                txn.as_mut(),
+                None,
+                &machine_id.into(),
+                ManagedHostState::Ready,
+                None,
+                super::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+            super::set_machine_maintenance_requested(
+                txn.as_mut(),
+                machine_id,
+                "component-manager",
+                Reset,
+            )
+            .await?;
+            let snapshot = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            let captured = snapshot.machine_maintenance_requested.clone().unwrap();
+            let next = if matches!(case, Pending::Legacy) {
+                ManagedHostState::Maintenance {
+                    operation: Reset,
+                    request: None,
+                }
+            } else {
+                ManagedHostState::maintenance_for_request(captured.clone())
+            };
+            match case {
+                Pending::Current => {}
+                Pending::Replaced => {
+                    super::set_machine_maintenance_requested(
+                        txn.as_mut(),
+                        machine_id,
+                        "component-manager",
+                        PowerOn,
+                    )
+                    .await?
+                }
+                Pending::Cancelled | Pending::Legacy => assert_eq!(
+                    super::clear_machine_maintenance_requested(txn.as_mut(), machine_id, &captured)
+                        .await?,
+                    crate::ConditionalWrite::Applied(())
+                ),
+            }
+            let before = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            let history_before: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM machine_state_history WHERE object_id = $1",
+            )
+            .bind(machine_id.to_string())
+            .fetch_one(txn.as_mut())
+            .await?;
+            let next_version = snapshot.state.version.increment();
+            let result = super::try_update_controller_state(
+                txn.as_mut(),
+                &machine_id,
+                snapshot.state.version,
+                next_version,
+                &next,
+            )
+            .await?;
+            assert_eq!(
+                result,
+                if applied {
+                    crate::ConditionalWrite::Applied(())
+                } else {
+                    crate::ConditionalWrite::NotApplied(super::ControllerStateNotCurrent)
+                },
+                "{case:?}"
+            );
+            let after = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            assert_eq!(
+                after.machine_maintenance_requested, before.machine_maintenance_requested,
+                "{case:?}"
+            );
+            assert_eq!(
+                after.state.value,
+                if applied { next } else { before.state.value },
+                "{case:?}"
+            );
+            assert_eq!(
+                after.state.version,
+                if applied {
+                    next_version
+                } else {
+                    before.state.version
+                },
+                "{case:?}"
+            );
+            let history_after: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM machine_state_history WHERE object_id = $1",
+            )
+            .bind(machine_id.to_string())
+            .fetch_one(txn.as_mut())
+            .await?;
+            assert_eq!(
+                history_after,
+                history_before + if applied { 1 } else { 0 },
+                "{case:?}"
+            );
+            txn.rollback().await?;
+        }
         Ok(())
     }
 
