@@ -42,8 +42,9 @@ A definition contains model-level settings and one or more component entries:
 | `files` | Firmware version | Structured list of firmware artifacts. Each entry provides a filename or URL and can include a SHA-256 digest. The API exposes this list as `artifacts`. |
 | `install_only_specified` | Firmware version | Tells Redfish to install only the component identified by the firmware definition when the package contains multiple components. |
 | `power_drains_needed` | Firmware version | Number of full power-drain cycles required to activate the firmware after installation. |
-| `pre_update_resets` | Firmware version | Requests the platform-specific reset sequence before NICo starts the installation. |
+| `pre_update_resets` | Firmware version | Requests the platform-specific reset sequence before NICo starts a Redfish installation. Scout and Core-local script installations skip it. |
 | `script` | Firmware version | Legacy path that hands the update to a local script instead of using the normal Redfish upload path. |
+| `scout` | Firmware version | Names the Scout upgrade script by URL, with its timeouts. Without `scout.script.url`, NICo uses the script packaged in its image. Legacy `metadata.toml` and `host_models` only; the Host Firmware Config API does not accept it. Refer to [Scout script by URL](#scout-script-by-url). |
 
 `current_version_reported_as` is matched against firmware inventory entry
 identifiers, not against version strings. For example,
@@ -52,9 +53,45 @@ inventory. NICo then reads the installed version from that matching entry.
 
 Legacy metadata also accepts the older artifact fields `filename`, `filenames`,
 `url`, and `checksum`; new API entries use URL-based `artifacts`. The data model
-still parses `mandatory_upgrade_from_priority` and `scout`, but the current
-upgrade workflow does not use them as firmware-policy controls, so they are not
-listed as active settings here.
+still parses `mandatory_upgrade_from_priority`, but the current upgrade workflow
+does not use it as a firmware-policy control, so it is not listed as an active
+setting here.
+
+### Scout script by URL
+
+A firmware version in a legacy `metadata.toml` or in `host_models` can name the
+script Scout runs instead of using the script packaged in NICo:
+
+```toml
+[[components.cx7.known_firmware]]
+version = "28.47.2682"
+
+[components.cx7.known_firmware.scout]
+execution_timeout_seconds = 7200
+artifact_download_timeout_seconds = 600
+
+[components.cx7.known_firmware.scout.script]
+url = "https://<script-repository>/cx7/upgrade.sh"
+sha256 = "<64 hexadecimal characters>"
+```
+
+- Scout downloads the script directly from `url` and checks it against
+  `sha256`, so the URL must be reachable from the discovery environment without
+  credentials.
+- `url` must use HTTPS and end in a file name, such as `.../upgrade.sh`; Scout
+  saves the script under that name. `sha256` must be the script's
+  64-character hexadecimal digest, in either case, and both timeouts must be
+  non-zero. NICo skips a `metadata.toml` that breaks these rules and logs
+  `Failed to merge firmware metadata`; in `host_models`, the NICo configuration
+  fails to load.
+- `execution_timeout_seconds` and `artifact_download_timeout_seconds` apply only
+  to a script named by URL. A packaged script uses the timeouts in its own
+  `metadata.toml`.
+- Without `script.url`, NICo uses its packaged script, then the legacy and
+  Redfish routes described in
+  [Installation route](host-firmware.md#installation-route). A
+  `script.filename`, written for NICo releases before 2.0, is accepted and
+  ignored.
 
 ### Minimum and default versions
 
