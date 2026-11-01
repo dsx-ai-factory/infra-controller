@@ -28777,8 +28777,14 @@ func (x *SshRequest) GetEndpointRequest() *BmcEndpointRequest {
 }
 
 type CopyBfbToDpuRshimRequest struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	SshRequest *SshRequest            `protobuf:"bytes,1,opt,name=ssh_request,json=sshRequest,proto3" json:"ssh_request,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The DPU BMC IP must resolve to a machine interface. If endpoint_request.mac_address
+	// is supplied, it must match that interface; it does not override credential lookup.
+	// The resolved MAC is retained even when omitted, and rechecked before BFB copy
+	// and host power-off. Invalid requests do not queue recovery or pause remediation.
+	// A changed/missing target at execution fails recovery and releases the host pause.
+	// Legacy queued states without a retained MAC must be explicitly requeued.
+	SshRequest *SshRequest `protobuf:"bytes,1,opt,name=ssh_request,json=sshRequest,proto3" json:"ssh_request,omitempty"`
 	// Host BMC IP address. Required for the mandatory post-copy host
 	// power-cycle to apply the new BFB.
 	HostBmcIp string `protobuf:"bytes,3,opt,name=host_bmc_ip,json=hostBmcIp,proto3" json:"host_bmc_ip,omitempty"`

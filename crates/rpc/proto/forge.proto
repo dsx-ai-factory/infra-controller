@@ -5504,6 +5504,12 @@ message SshRequest {
 }
 
 message CopyBfbToDpuRshimRequest {
+  // The DPU BMC IP must resolve to a machine interface. If endpoint_request.mac_address
+  // is supplied, it must match that interface; it does not override credential lookup.
+  // The resolved MAC is retained even when omitted, and rechecked before BFB copy
+  // and host power-off. Invalid requests do not queue recovery or pause remediation.
+  // A changed/missing target at execution fails recovery and releases the host pause.
+  // Legacy queued states without a retained MAC must be explicitly requeued.
   SshRequest ssh_request = 1;
   reserved 2;
   // Host BMC IP address. Required for the mandatory post-copy host
