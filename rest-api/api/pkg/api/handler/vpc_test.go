@@ -46,6 +46,32 @@ import (
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 )
 
+type vpcPowerProvisionerStub struct {
+	dpsclient.PowerProvisioner
+	addedMachineIDs []string
+}
+
+func (s *vpcPowerProvisionerStub) CreateResourceGroup(context.Context, string, int64) error {
+	return nil
+}
+
+func (s *vpcPowerProvisionerStub) DeleteResourceGroup(context.Context, string) error {
+	return nil
+}
+
+func (s *vpcPowerProvisionerStub) AddMachine(_ context.Context, _, machineID, _ string) error {
+	s.addedMachineIDs = append(s.addedMachineIDs, machineID)
+	return nil
+}
+
+func (s *vpcPowerProvisionerStub) RemoveMachine(context.Context, string, string) error {
+	return nil
+}
+
+func (s *vpcPowerProvisionerStub) ActivateResourceGroup(context.Context, string) error {
+	return nil
+}
+
 func testVPCInitDB(t *testing.T) *cdb.Session {
 	dbSession := cdbu.GetTestDBSession(t, false)
 	dbSession.DB.AddQueryHook(bundebug.NewQueryHook(
@@ -2505,6 +2531,65 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("power assignments exclude another Tenant's secondary attachment", func(t *testing.T) {
+		_, err := cdbm.NewSiteDAO(dbSession).Update(ctx, nil, cdbm.SiteUpdateInput{
+			SiteID: st.ID,
+			Config: &cdbm.SiteConfigUpdateInput{DPSPowerManagement: cutil.GetPtr(true)},
+		})
+		require.NoError(t, err)
+
+		ownerVpc := testVPCBuildVPC(t, dbSession, "test-power-owner-vpc", ip, tn, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu)
+		crossTenantVpc := testVPCBuildVPC(t, dbSession, "test-power-cross-tenant-vpc", ip, tn2, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu2)
+		ownerVpc.PowerResourceGroup = cutil.GetPtr("owner-group")
+		testUpdateVPC(t, dbSession, ownerVpc)
+
+		ownerMachine := testInstanceBuildMachine(t, dbSession, ip.ID, st.ID, cutil.GetPtr(true), nil)
+		testInstanceBuildInstance(t, dbSession, "test-power-owner-instance", tn.ID, ip.ID, st.ID, nil, ownerVpc.ID, &ownerMachine.ID, nil, nil, cdbm.InstanceStatusReady)
+		crossTenantMachine := testInstanceBuildMachine(t, dbSession, ip.ID, st.ID, cutil.GetPtr(true), nil)
+		crossTenantInstance := testInstanceBuildInstance(t, dbSession, "test-power-cross-tenant-instance", tn2.ID, ip.ID, st.ID, nil, crossTenantVpc.ID, &crossTenantMachine.ID, nil, nil, cdbm.InstanceStatusReady)
+		_, err = cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+			InstanceID: crossTenantInstance.ID,
+			VpcID:      &ownerVpc.ID,
+			Status:     cdbm.InterfaceStatusReady,
+			CreatedBy:  tnu2.ID,
+		})
+		require.NoError(t, err)
+
+		t.Setenv(strings.ToUpper(config.ConfigDPSEnabled), "true")
+		require.True(t, cfg.GetDPSEnabled())
+
+		run := &tmocks.WorkflowRun{}
+		run.On("GetID").Return("test-vpc-power-group-update")
+		run.On("Get", mock.Anything, mock.Anything).Return(nil)
+		siteClient := &tmocks.Client{}
+		siteClient.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"), "UpdateVPC", mock.Anything).Return(run, nil).Once()
+		pool := sc.NewClientPool(tcfg)
+		pool.IDClientMap[st.ID.String()] = siteClient
+
+		dps := &vpcPowerProvisionerStub{}
+		handler := UpdateVPCHandler{
+			dbSession: dbSession,
+			tc:        &tmocks.Client{},
+			scp:       pool,
+			cfg:       cfg,
+			dps:       dps,
+		}
+		requestBody, err := json.Marshal(model.APIVpcUpdateRequest{PowerResourceGroup: cutil.GetPtr("replacement-group")})
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(requestBody)))
+		request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		response := httptest.NewRecorder()
+		echoContext := echo.New().NewContext(request, response)
+		echoContext.SetParamNames("orgName", "id")
+		echoContext.SetParamValues(tnOrg, ownerVpc.ID.String())
+		echoContext.Set("user", tnu)
+
+		require.NoError(t, handler.Handle(echoContext))
+		assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		assert.Equal(t, []string{ownerMachine.ID}, dps.addedMachineIDs)
+		siteClient.AssertExpectations(t)
+	})
 }
 
 func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
@@ -4080,6 +4165,20 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 	vpcPrefix := testVPCBuildVPCPrefix(t, dbSession, "test-vpc-prefix", tn1, vpc3, cutil.GetPtr(ipb1.ID), "10.0.0.0/24", tnu1)
 	assert.NotNil(t, vpcPrefix)
 
+	vpcWithCrossTenantAttachment := testVPCBuildVPC(t, dbSession, "test-vpc-with-cross-tenant-attachment", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
+	crossTenantPrimaryVpc := testVPCBuildVPC(t, dbSession, "test-cross-tenant-primary-vpc", ip, tn2, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu2)
+	crossTenantInstance := testInstanceBuildInstance(
+		t, dbSession, "test-cross-tenant-instance", tn2.ID, ip.ID, st.ID,
+		nil, crossTenantPrimaryVpc.ID, nil, nil, nil, cdbm.InstanceStatusReady,
+	)
+	_, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID: crossTenantInstance.ID,
+		VpcID:      &vpcWithCrossTenantAttachment.ID,
+		Status:     cdbm.InterfaceStatusReady,
+		CreatedBy:  tnu2.ID,
+	})
+	require.NoError(t, err)
+
 	nvllp := testBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp", cutil.GetPtr("Test NVLink Logical Partition"), tn1.Org, st, tn1, cutil.GetPtr(cdbm.NVLinkLogicalPartitionStatusReady), false)
 	assert.NotNil(t, nvllp)
 
@@ -4344,6 +4443,22 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 				reqUser:  tnu1,
 				respCode: http.StatusBadRequest,
 			},
+		},
+		{
+			name: "VPC delete is blocked by a cross-Tenant Interface attachment",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqVPC:   vpcWithCrossTenantAttachment.ID.String(),
+				reqOrg:   tnOrg1,
+				reqUser:  tnu1,
+				respCode: http.StatusBadRequest,
+			},
+			responseContains: "one or more instances for this VPC",
 		},
 	}
 	for _, tt := range tests {

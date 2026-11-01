@@ -2237,11 +2237,12 @@ mod tests {
                 expected_nads
             );
             for (name, nad) in &rendered_nads {
-                // Verify each NAD retains the bridge and MTU assigned by its service contract.
+                // Match each NAD to its service contract so the slot listener uses its bridge and
+                // jumbo MTU while ordinary DHCP and FMDS remain unchanged.
                 let (expected_bridge, expected_mtu) = match name.as_str() {
-                    "service-vpc-dhcp-slot0" => ("br-svc-0", carbide_dpf::SERVICE_VPC_MTU),
-                    DHCP_SERVER_SERVICE_NAD_NAME => ("br-sfc", 1500),
-                    FMDS_SERVICE_NAD_NAME => ("br-sfc", 1500),
+                    "service-vpc-dhcp-slot0" => ("br-svc-0", SERVICE_VPC_MTU),
+                    DHCP_SERVER_SERVICE_NAD_NAME => ("br-sfc", DHCP_SERVER_SERVICE_MTU),
+                    FMDS_SERVICE_NAD_NAME => ("br-sfc", FMDS_SERVICE_MTU),
                     _ => unreachable!("rendered NAD names were checked above"),
                 };
                 assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));

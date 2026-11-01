@@ -162,14 +162,14 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 		}
 	} else if tas[0].Status != cdbm.TenantAccountStatusReady || !tas[0].Config.TargetedInstanceCreation {
 		statusChanged := tas[0].Status != cdbm.TenantAccountStatusReady
+		accountConfig := tas[0].Config
+		accountConfig.TargetedInstanceCreation = true
 		sdDAO := cdbm.NewStatusDetailDAO(gcsah.dbSession)
 		serr = cdb.WithTx(ctx, gcsah.dbSession, func(tx *cdb.Tx) error {
 			_, derr := taDAO.Update(ctx, tx, cdbm.TenantAccountUpdateInput{
 				TenantAccountID: tas[0].ID,
 				Status:          cutil.GetPtr(cdbm.TenantAccountStatusReady),
-				Config: &cdbm.TenantAccountConfig{
-					TargetedInstanceCreation: true,
-				},
+				Config:          &accountConfig,
 			})
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error updating Tenant Account capabilities for org")

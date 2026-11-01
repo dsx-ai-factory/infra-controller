@@ -260,6 +260,24 @@ impl ForgeClientConfig {
         self
     }
 
+    /// True if `root_ca_path` is a readable PEM file from which
+    /// [`RootCertStore::add_parsable_certificates`] accepts at least one
+    /// certificate, i.e. one that will populate the root store when
+    /// connecting. Lets a caller decide up front whether to opt in to
+    /// [`require_tls_enforcement`](Self::require_tls_enforcement) without
+    /// breaking when the CA is missing or malformed.
+    pub fn root_ca_is_usable(&self) -> bool {
+        std::fs::read(&self.root_ca_path)
+            .map(|pem| {
+                let mut roots = RootCertStore::empty();
+                let (added, _ignored) = roots.add_parsable_certificates(
+                    rustls_pemfile::certs(&mut &pem[..]).filter_map(|cert| cert.ok()),
+                );
+                added > 0
+            })
+            .unwrap_or(false)
+    }
+
     /// Attaches an explicit node-auth token provider — e.g. a pre-built
     /// [`NodeJwtMinter`] the caller also serves through the agent's local
     /// API, or a `SocketTokenSource` in a process that holds no key at all.
@@ -1140,6 +1158,38 @@ mod tests {
             config.enforce_tls,
             "opting in must restore server certificate validation"
         );
+    }
+
+    #[test]
+    fn root_ca_is_usable_requires_a_parseable_certificate() {
+        let valid = include_str!("../../../dev/certs/forge_root.pem");
+        let cases: [(&str, Option<String>, bool); 7] = [
+            ("missing file", None, false),
+            ("empty file", Some(String::new()), false),
+            ("not PEM", Some("not a certificate".to_string()), false),
+            (
+                "certificate block with invalid DER",
+                Some("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_string()),
+                false,
+            ),
+            ("valid cert", Some(valid.to_string()), true),
+            ("valid bundle", Some(format!("{valid}\n{valid}")), true),
+            (
+                "valid cert after junk",
+                Some(format!("junk\n{valid}")),
+                true,
+            ),
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        for (name, contents, expected) in cases {
+            let path = dir.path().join(name.replace(' ', "_"));
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let config = ForgeClientConfig::new(path.to_string_lossy().into_owned(), None);
+            assert_eq!(config.root_ca_is_usable(), expected, "{name}");
+        }
     }
 
     #[derive(Debug)]

@@ -355,6 +355,7 @@ This diagram intentionally summarizes the success and release paths; the canonic
 Created → DpuDiscoveringState → HostInit → Validation → Ready
                 (DPU hosts)        │
                                    ├─ EnableIpmiOverLan
+                                   ├─ DisableOnboardNics               (Vera Rubin with managed DPUs only)
                                    ├─ WaitingForPlatformConfiguration  (configure BIOS)
                                    ├─ WaitingForBiosJob                (Dell BIOS job)
                                    ├─ PollingBiosSetup                 (verify BIOS)
@@ -368,6 +369,8 @@ Ready ── allocation ──→ Assigned ── release ──→ Ready
 ```
 
 Site-explorer creates the host in `Created` (DPUs, if any, in `DpuDiscoveringState`), records the boot **predictions**, and initializes the desired target as soon as selection is unambiguous. The machine-controller then drives `HostInit`, where it configures BIOS and sets the boot order. If final verification cannot be recorded there, the desired version remains pending and `Ready` enters the persisted `BootConfiguring` path before the host can be allocated.
+
+`DisableOnboardNics` is limited to Vera Rubin because other SKUs do not support disabling onboard NICs through the BMC. Vera Rubin hosts without managed DPUs also skip it, preserving their onboard NIC settings for host networking.
 
 ### Resolving and persisting the boot interface
 

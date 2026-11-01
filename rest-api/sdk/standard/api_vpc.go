@@ -224,7 +224,7 @@ DeleteVpc Delete a VPC
 
 Delete a specific VPC by ID.
 
-Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
+Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Instance checks include direct and prefix-derived Interface attachments owned by other Tenants. Delete those dependent resources first.
 
 First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 

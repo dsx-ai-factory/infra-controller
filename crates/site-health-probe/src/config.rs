@@ -125,14 +125,204 @@ pub(crate) struct Probes {
     pub rest_instances: RestProbe,
 }
 
+/// Caps every per-API call gate applies. At most one call is in flight per
+/// API; the rate and deadline are shared by the state readers and the latency
+/// probes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Caps {
+    pub calls_per_second: f64,
+    #[serde(deserialize_with = "duration_str::deserialize_duration")]
+    pub call_timeout: Duration,
+    #[serde(deserialize_with = "duration_str::deserialize_duration")]
+    pub max_backoff: Duration,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            calls_per_second: 2.0,
+            call_timeout: Duration::from_secs(5),
+            max_backoff: Duration::from_secs(30),
+        }
+    }
+}
+
+/// How host details are read. Only `full` (FindMachinesByIds) exists until
+/// nico-api serves a compact host read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum HostReadMode {
+    #[default]
+    Full,
+    Compact,
+    Auto,
+}
+
+/// The nico-api side of the state readers.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct NicoApiStateConfig {
+    /// `host:port`, no scheme — the connection is always TLS.
+    pub target: String,
+    pub host_read: HostReadMode,
+    /// IDs per by-ID read. nico-api refuses more than its `max_find_by_ids`
+    /// (default 100).
+    pub batch_size: usize,
+    pub max_decoding_message_size: usize,
+    pub tls: TlsConfig,
+}
+
+impl Default for NicoApiStateConfig {
+    fn default() -> Self {
+        Self {
+            target: "nico-api.nico-system.svc.cluster.local:1079".to_string(),
+            host_read: HostReadMode::Full,
+            batch_size: 100,
+            max_decoding_message_size: 64 << 20,
+            tls: TlsConfig::default(),
+        }
+    }
+}
+
+/// One REST identity: client credentials, or a mounted token file.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RestCredentials {
+    pub token_url: String,
+    pub client_id: String,
+    pub client_secret_path: String,
+    /// A bearer token re-read from this file on every call.
+    pub token_file: String,
+}
+
+/// The provider org identity reads site-wide totals.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ProviderAccount {
+    pub org: String,
+    pub auth: RestCredentials,
+}
+
+/// The nico-rest-api side of the state readers. GET only.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RestStateConfig {
+    /// Base URL including scheme, e.g. `https://nico-rest-api…:8388`.
+    pub target: String,
+    /// Optional extra CA bundle path for the REST endpoint.
+    pub ca: String,
+    pub provider: ProviderAccount,
+}
+
+/// One reader's schedule. A sweep may outlast its interval: the next tick is
+/// then skipped, never queued.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReaderConfig {
+    pub enabled: bool,
+    #[serde(deserialize_with = "duration_str::deserialize_duration")]
+    pub interval: Duration,
+    #[serde(deserialize_with = "duration_str::deserialize_duration")]
+    pub timeout: Duration,
+}
+
+impl ReaderConfig {
+    fn new(interval_secs: u64, timeout_secs: u64) -> Self {
+        Self {
+            enabled: true,
+            interval: Duration::from_secs(interval_secs),
+            timeout: Duration::from_secs(timeout_secs),
+        }
+    }
+}
+
+/// The state readers. A reader given in the file must set all its fields; an
+/// absent reader takes its default schedule.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Readers {
+    pub devices: ReaderConfig,
+    pub rest_inventory: ReaderConfig,
+}
+
+impl Default for Readers {
+    fn default() -> Self {
+        Self {
+            devices: ReaderConfig::new(120, 600),
+            rest_inventory: ReaderConfig::new(120, 600),
+        }
+    }
+}
+
+impl Readers {
+    /// Every reader with its config key, in a fixed order.
+    pub(crate) fn all(&self) -> [(&'static str, &ReaderConfig); 2] {
+        [
+            ("devices", &self.devices),
+            ("rest_inventory", &self.rest_inventory),
+        ]
+    }
+}
+
+/// How long a replaced snapshot that a cursor points into stays readable
+/// for its paging client.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Paging {
+    pub keep_seconds: u64,
+    /// Replaced snapshots kept per paged family, besides the current one.
+    pub max_kept_snapshots: usize,
+}
+
+impl Default for Paging {
+    fn default() -> Self {
+        Self {
+            keep_seconds: 300,
+            max_kept_snapshots: 6,
+        }
+    }
+}
+
+impl Paging {
+    /// Replaced snapshots a paged family must hold to keep each one for
+    /// `keep_seconds`: the publications that fit in that window, plus one
+    /// because a slow sweep can be followed at once by an overdue tick.
+    /// `None` when that many cannot be counted.
+    pub(crate) fn needed_for(&self, interval: Duration) -> Option<usize> {
+        let keep = u128::from(self.keep_seconds) * 1_000_000_000;
+        let per_window = keep.div_ceil(interval.as_nanos());
+        usize::try_from(per_window).ok()?.checked_add(1)
+    }
+}
+
+/// Site state readers and the `/v1` API. Off by default; with it off the
+/// probe runs only the latency probes.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct StateConfig {
+    pub enabled: bool,
+    pub site_id: String,
+    pub caps: Caps,
+    pub nico_api: NicoApiStateConfig,
+    pub rest: RestStateConfig,
+    pub readers: Readers,
+    pub paging: Paging,
+}
+
 /// The root configuration.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     #[serde(default)]
     pub metrics_listen: String,
+    /// Listen address of the `/v1` API, defaulting to `:9010`.
+    #[serde(default)]
+    pub api_listen: String,
     #[serde(default)]
     pub probes: Probes,
+    #[serde(default)]
+    pub state: StateConfig,
 }
 
 impl Config {
@@ -206,6 +396,24 @@ impl Config {
             validate_timing(name, p.interval, p.timeout, &mut errs);
         }
 
+        // The gates use the caps whether or not the state readers run: the
+        // latency probes call through them too.
+        self.state.caps.validate(&mut errs);
+        if self.state.enabled {
+            self.state.validate(&mut errs);
+            // The /v1 API binds before the metrics endpoint, which would then
+            // fail at runtime on the shared port.
+            if let (Ok(metrics), Ok(api)) = (self.listen_addr(), self.api_listen_addr())
+                && metrics.port() != 0
+                && metrics.port() == api.port()
+                && (metrics.ip() == api.ip()
+                    || metrics.ip().is_unspecified()
+                    || api.ip().is_unspecified())
+            {
+                errs.push("api_listen must not share the metrics_listen port".to_string());
+            }
+        }
+
         if errs.is_empty() {
             Ok(())
         } else {
@@ -218,21 +426,157 @@ impl Config {
     /// accepts both address families, falling back to IPv4 if IPv6 setup fails.
     /// Explicit addresses retain their configured address family.
     pub(crate) fn listen_addr(&self) -> eyre::Result<SocketAddr> {
-        let configured = if self.metrics_listen.is_empty() {
-            ":9009"
-        } else {
-            self.metrics_listen.as_str()
-        };
-        let listen = if configured.starts_with(':') {
-            format!("[::]{configured}")
-        } else {
-            configured.to_string()
-        };
-        listen
-            .to_socket_addrs()
-            .map_err(|e| eyre!("invalid metrics_listen {:?}: {e}", self.metrics_listen))?
-            .next()
-            .ok_or_else(|| eyre!("invalid metrics_listen {:?}", self.metrics_listen))
+        resolve_listen("metrics_listen", &self.metrics_listen, ":9009")
+    }
+
+    /// `api_listen_addr` resolves `api_listen` like [`Config::listen_addr`],
+    /// defaulting to `:9010`.
+    pub(crate) fn api_listen_addr(&self) -> eyre::Result<SocketAddr> {
+        resolve_listen("api_listen", &self.api_listen, ":9010")
+    }
+}
+
+fn resolve_listen(key: &str, raw: &str, default: &str) -> eyre::Result<SocketAddr> {
+    let configured = if raw.is_empty() { default } else { raw };
+    let listen = if configured.starts_with(':') {
+        format!("[::]{configured}")
+    } else {
+        configured.to_string()
+    };
+    listen
+        .to_socket_addrs()
+        .map_err(|e| eyre!("invalid {key} {raw:?}: {e}"))?
+        .next()
+        .ok_or_else(|| eyre!("invalid {key} {raw:?}"))
+}
+
+/// The slowest call rate a gate takes: one call an hour.
+const MIN_CALLS_PER_SECOND: f64 = 1.0 / 3600.0;
+
+impl Caps {
+    fn validate(&self, errs: &mut Vec<String>) {
+        if !(self.calls_per_second.is_finite() && self.calls_per_second > 0.0) {
+            errs.push("state.caps.calls_per_second must be positive".to_string());
+        } else if self.calls_per_second < MIN_CALLS_PER_SECOND {
+            // The gates space calls 1 / calls_per_second apart, which must
+            // stay a representable time.
+            errs.push(
+                "state.caps.calls_per_second must allow at least one call an hour".to_string(),
+            );
+        }
+        if self.call_timeout.is_zero() {
+            errs.push("state.caps.call_timeout must be positive".to_string());
+        }
+        if self.max_backoff < Duration::from_secs(1) {
+            errs.push("state.caps.max_backoff must be at least 1s".to_string());
+        }
+    }
+}
+
+impl StateConfig {
+    /// Checks the state section. Only called when it is enabled: a disabled
+    /// section may carry unusable defaults.
+    fn validate(&self, errs: &mut Vec<String>) {
+        if self.site_id.is_empty() {
+            errs.push("state.site_id is required".to_string());
+        }
+
+        let readers = self.readers.all();
+        for (name, reader) in readers {
+            if !reader.enabled {
+                continue;
+            }
+            // Unlike the latency probes, a sweep may outlast its interval.
+            if reader.interval.is_zero() {
+                errs.push(format!("state.readers.{name}.interval must be positive"));
+            }
+            if reader.timeout.is_zero() {
+                errs.push(format!("state.readers.{name}.timeout must be positive"));
+            }
+        }
+        if readers.iter().all(|(_, reader)| !reader.enabled) {
+            errs.push("state.readers enables no reader".to_string());
+        }
+
+        if self.readers.devices.enabled {
+            let nico = &self.nico_api;
+            if !is_host_port(&nico.target) {
+                errs.push(
+                    "state.nico_api.target must be host:port with an explicit port and nothing \
+                     else"
+                        .to_string(),
+                );
+            }
+            if nico.host_read != HostReadMode::Full {
+                errs.push(
+                    "state.nico_api.host_read must be full: nico-api has no compact host read yet"
+                        .to_string(),
+                );
+            }
+            if !(1..=100).contains(&nico.batch_size) {
+                errs.push("state.nico_api.batch_size must be between 1 and 100".to_string());
+            }
+            if nico.max_decoding_message_size == 0 {
+                errs.push("state.nico_api.max_decoding_message_size must be positive".to_string());
+            }
+            if nico.tls.ca.is_empty() || nico.tls.cert.is_empty() || nico.tls.key.is_empty() {
+                errs.push("state.nico_api.tls requires ca, cert, and key paths".to_string());
+            }
+        }
+
+        if self.readers.rest_inventory.enabled {
+            let rest = &self.rest;
+            if !is_https_url(&rest.target) {
+                errs.push("state.rest.target must be an https:// URL".to_string());
+            }
+            if rest.provider.org.is_empty() {
+                errs.push("state.rest.provider.org is required".to_string());
+            }
+            validate_credentials("state.rest.provider.auth", &rest.provider.auth, errs);
+        }
+
+        if self.paging.keep_seconds == 0 {
+            errs.push("state.paging.keep_seconds must be positive".to_string());
+        }
+        for (name, reader) in [
+            ("devices", &self.readers.devices),
+            ("rest_inventory", &self.readers.rest_inventory),
+        ] {
+            if !reader.enabled || reader.interval.is_zero() || self.paging.keep_seconds == 0 {
+                continue;
+            }
+            match self.paging.needed_for(reader.interval) {
+                None => errs.push(format!(
+                    "state.paging.keep_seconds is too long for the {name} reader interval"
+                )),
+                Some(needed) if self.paging.max_kept_snapshots < needed => errs.push(format!(
+                    "state.paging.max_kept_snapshots must be at least {needed} for the {name} \
+                     reader interval"
+                )),
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+/// A REST identity is either client credentials or a token file, never both.
+fn validate_credentials(key: &str, auth: &RestCredentials, errs: &mut Vec<String>) {
+    let client = [&auth.token_url, &auth.client_id, &auth.client_secret_path];
+    if !auth.token_file.is_empty() {
+        if client.iter().any(|field| !field.is_empty()) {
+            errs.push(format!(
+                "{key} takes token_file or client credentials, not both"
+            ));
+        }
+        return;
+    }
+    if client.iter().any(|field| field.is_empty()) {
+        errs.push(format!(
+            "{key} requires token_url, client_id, and client_secret_path, or token_file"
+        ));
+    } else if !is_https_url(&auth.token_url) {
+        // The token POST carries the client secret in its body.
+        errs.push(format!("{key}.token_url must be an https:// URL"));
     }
 }
 
@@ -430,6 +774,23 @@ probes:
         }
     }
 
+    /// The latency probe's timeout is its own budget for the whole run, so it
+    /// may exceed the gate's call timeout: the gate then cuts a slow call at
+    /// 5 s and the probe records a timeout well before its own 8 s.
+    #[test]
+    fn probe_timeout_may_exceed_call_timeout() {
+        let cfg = load_str(
+            "probes:\n  grpc_machines:\n    enabled: true\n    target: t:1\n    \
+             interval: 10s\n    timeout: 8s\n    tls: {ca: a, cert: b, key: c}\n\
+             state:\n  enabled: false\n  caps: {call_timeout: 5s}\n",
+        )
+        .expect("probe timeout above the call timeout loads");
+        assert_eq!(cfg.probes.grpc_machines.timeout, Duration::from_secs(8));
+        assert_eq!(cfg.probes.grpc_machines.interval, Duration::from_secs(10));
+        assert_eq!(cfg.state.caps.call_timeout, Duration::from_secs(5));
+        assert!(!cfg.state.enabled, "no state readers");
+    }
+
     #[test]
     fn disabled_probes_skip_validation() {
         // Disabled probes carry no usable fields, and that must be fine.
@@ -544,6 +905,464 @@ probes:
                 .effective_page_size()
             },
         );
+    }
+
+    /// A minimal valid state section; tests append or override keys.
+    const STATE: &str = r#"
+state:
+  enabled: true
+  site_id: site-1
+  nico_api:
+    tls: {ca: /certs/ca.crt, cert: /certs/tls.crt, key: /certs/tls.key}
+  rest:
+    target: https://nico-rest-api.nico-rest.svc.cluster.local:8388
+    provider:
+      org: provider-org
+      auth: {token_url: https://k/token, client_id: probe, client_secret_path: /s/provider}
+"#;
+
+    fn state_with(extra: &str) -> eyre::Result<Config> {
+        load_str(&format!("{STATE}{extra}"))
+    }
+
+    #[test]
+    fn state_config_defaults() {
+        let off = load_str("metrics_listen: \":9009\"\n").expect("loads");
+        assert!(!off.state.enabled, "state is off by default");
+        assert_eq!(
+            off.api_listen_addr().expect("defaults").to_string(),
+            "[::]:9010"
+        );
+
+        let cfg = state_with("").expect("minimal state section loads");
+        let state = &cfg.state;
+        assert_eq!(state.caps, Caps::default());
+        assert_eq!(state.caps.calls_per_second, 2.0);
+        assert_eq!(state.caps.call_timeout, Duration::from_secs(5));
+        assert_eq!(state.caps.max_backoff, Duration::from_secs(30));
+        assert_eq!(
+            state.nico_api.target,
+            "nico-api.nico-system.svc.cluster.local:1079"
+        );
+        assert_eq!(state.nico_api.host_read, HostReadMode::Full);
+        assert_eq!(state.nico_api.batch_size, 100);
+        assert_eq!(state.nico_api.max_decoding_message_size, 67_108_864);
+        let schedule = |r: &ReaderConfig| (r.enabled, r.interval.as_secs(), r.timeout.as_secs());
+        let readers = &state.readers;
+        assert_eq!(schedule(&readers.devices), (true, 120, 600));
+        assert_eq!(schedule(&readers.rest_inventory), (true, 120, 600));
+        assert_eq!(state.paging, Paging::default());
+        assert_eq!(
+            (state.paging.keep_seconds, state.paging.max_kept_snapshots),
+            (300, 6)
+        );
+    }
+
+    #[test]
+    fn state_config_allows_sweep_timeout_over_interval() {
+        let cfg = load_str(&format!(
+            "{STATE}  readers:\n    devices: {{enabled: true, interval: 20s, timeout: 600s}}\n  \
+             paging: {{max_kept_snapshots: 16}}\n"
+        ))
+        .expect("a sweep may outlast its interval");
+        assert_eq!(cfg.state.readers.devices.timeout, Duration::from_secs(600));
+
+        // The latency probes keep their rule.
+        let err = load_str(
+            "probes:\n  grpc_machines:\n    enabled: true\n    target: t:1\n    interval: 5s\n    \
+             timeout: 10s\n    tls: {ca: a, cert: b, key: c}\n",
+        )
+        .expect_err("latency probe timeout over interval")
+        .to_string();
+        assert!(
+            err.contains("timeout must be shorter than its interval"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn state_config_rejects_undersized_paging() {
+        check_values(
+            [
+                Check {
+                    scenario: "default 6 covers the 120 s device sweep (needs 4)",
+                    input: (120, 6),
+                    expect: None,
+                },
+                Check {
+                    scenario: "20 s sweeps need 16",
+                    input: (20, 16),
+                    expect: None,
+                },
+                Check {
+                    scenario: "20 s sweeps with the default 6",
+                    input: (20, 6),
+                    expect: Some(
+                        "state.paging.max_kept_snapshots must be at least 16 for the devices \
+                         reader interval"
+                            .to_string(),
+                    ),
+                },
+                Check {
+                    scenario: "120 s sweeps with 3, both paged readers",
+                    input: (120, 3),
+                    expect: Some(
+                        "state.paging.max_kept_snapshots must be at least 4 for the devices \
+                         reader interval\nstate.paging.max_kept_snapshots must be at least 4 \
+                         for the rest_inventory reader interval"
+                            .to_string(),
+                    ),
+                },
+            ],
+            |(interval, kept)| {
+                let yaml = format!(
+                    "{STATE}  readers:\n    devices: {{enabled: true, interval: {interval}s, \
+                     timeout: 600s}}\n  paging: {{max_kept_snapshots: {kept}}}\n"
+                );
+                load_str(&yaml).err().map(|err| err.to_string())
+            },
+        );
+    }
+
+    #[test]
+    fn state_config_rejects_a_shared_listen_port() {
+        for (listen, why) in [
+            (
+                "metrics_listen: \":9010\"\n",
+                "both default to the wildcard",
+            ),
+            (
+                "metrics_listen: \"127.0.0.1:9010\"\n",
+                "the wildcard API covers the loopback",
+            ),
+            (
+                "metrics_listen: \"127.0.0.1:9009\"\napi_listen: \"127.0.0.1:9009\"\n",
+                "the same address",
+            ),
+        ] {
+            let err = load_str(&format!("{listen}{STATE}"))
+                .expect_err(why)
+                .to_string();
+            assert!(
+                err.contains("api_listen must not share the metrics_listen port"),
+                "{why}: {err}"
+            );
+        }
+        load_str(&format!(
+            "metrics_listen: \"127.0.0.1:9009\"\napi_listen: \"127.0.0.2:9009\"\n{STATE}"
+        ))
+        .expect("distinct addresses may share a port");
+        load_str("metrics_listen: \":9010\"\n").expect("no /v1 API with state off");
+    }
+
+    /// A keep window that holds more snapshots than can be counted is
+    /// refused, not an overflow.
+    #[test]
+    fn state_config_rejects_uncountable_paging() {
+        let err = load_str(&format!(
+            "{STATE}  readers:\n    devices: {{enabled: true, interval: 1ns, timeout: 600s}}\n  \
+             paging: {{keep_seconds: {}}}\n",
+            u64::MAX
+        ))
+        .expect_err("uncountable snapshots")
+        .to_string();
+        assert!(
+            err.contains("state.paging.keep_seconds is too long for the devices reader interval"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn caps_validated_without_state_readers() {
+        for (caps, want) in [
+            (
+                "calls_per_second: 0",
+                "state.caps.calls_per_second must be positive",
+            ),
+            (
+                "calls_per_second: 1e-20",
+                "state.caps.calls_per_second must allow at least one call an hour",
+            ),
+            (
+                "call_timeout: 0s",
+                "state.caps.call_timeout must be positive",
+            ),
+            (
+                "max_backoff: 500ms",
+                "state.caps.max_backoff must be at least 1s",
+            ),
+        ] {
+            let err = load_str(&format!(
+                "probes:\n  grpc_machines:\n    enabled: true\n    target: t:1\n    \
+                 interval: 10s\n    timeout: 5s\n    tls: {{ca: a, cert: b, key: c}}\n\
+                 state:\n  enabled: false\n  caps: {{{caps}}}\n"
+            ))
+            .expect_err(caps)
+            .to_string();
+            assert!(err.contains(want), "{caps}: {err}");
+        }
+    }
+
+    #[test]
+    fn state_config_validation_errors() {
+        for (scenario, yaml, want) in [
+            (
+                "site id required",
+                "state:\n  enabled: true\n",
+                "state.site_id is required",
+            ),
+            (
+                "nico-api reader needs tls",
+                "state:\n  enabled: true\n",
+                "state.nico_api.tls requires ca, cert, and key paths",
+            ),
+            (
+                "compact host read not available",
+                "state:\n  enabled: true\n  nico_api: {host_read: auto}\n",
+                "state.nico_api.host_read must be full",
+            ),
+            (
+                "batch above max_find_by_ids",
+                "state:\n  enabled: true\n  nico_api: {batch_size: 101}\n",
+                "state.nico_api.batch_size must be between 1 and 100",
+            ),
+            (
+                "rest credentials are one kind",
+                "state:\n  enabled: true\n  rest: {provider: {auth: {token_file: f, client_id: c}}}\n",
+                "state.rest.provider.auth takes token_file or client credentials, not both",
+            ),
+            (
+                "partial reader rejected",
+                "state:\n  readers: {devices: {enabled: true}}\n",
+                "parse config",
+            ),
+        ] {
+            let err = load_str(yaml).expect_err(scenario).to_string();
+            assert!(err.contains(want), "{scenario}: {err:?} lacks {want:?}");
+        }
+    }
+
+    /// The config.yaml the chart renders with the state section filled in
+    /// (helm template with every state input set). Keep it in step with
+    /// templates/configmap.yaml.
+    const CHART_RENDERED: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+    ca: "/var/secrets/rest-ca/ca.crt"
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+    ca: "/var/secrets/rest-ca/ca.crt"
+state:
+  enabled: true
+  site_id: "site-1"
+  caps:
+    calls_per_second: 2
+    call_timeout: "5s"
+    max_backoff: "30s"
+  nico_api:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    host_read: full
+    batch_size: 100
+    max_decoding_message_size: 67108864
+    tls:
+      ca: /var/run/secrets/nico-admin/ca.crt
+      cert: /var/run/secrets/nico-admin/tls.crt
+      key: /var/run/secrets/nico-admin/tls.key
+  rest:
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    ca: "/var/secrets/rest-ca/ca.crt"
+    provider:
+      org: "provider-org"
+      auth:
+        token_url: "https://keycloak.example.com/realms/nico/protocol/openid-connect/token"
+        client_id: "probe"
+        client_secret_path: "/var/secrets/state-provider/client-secret"
+  readers:
+    devices:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+    rest_inventory:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+  paging:
+    keep_seconds: 300
+    max_kept_snapshots: 6
+"#;
+
+    /// The config.yaml the parent chart renders with only the required
+    /// state inputs (`state.enabled`, `siteId` and the admin certificate).
+    /// Keep it in step with templates/configmap.yaml.
+    const CHART_MINIMAL: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+state:
+  enabled: true
+  site_id: "s"
+  caps:
+    calls_per_second: 2
+    call_timeout: "5s"
+    max_backoff: "30s"
+  nico_api:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    host_read: full
+    batch_size: 100
+    max_decoding_message_size: 67108864
+    tls:
+      ca: /var/run/secrets/nico-admin/ca.crt
+      cert: /var/run/secrets/nico-admin/tls.crt
+      key: /var/run/secrets/nico-admin/tls.key
+  rest:
+    target: ""
+    provider:
+      org: ""
+      auth:
+        token_url: ""
+        client_id: ""
+  readers:
+    devices:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+    rest_inventory:
+      enabled: false
+      interval: "120s"
+      timeout: "600s"
+  paging:
+    keep_seconds: 300
+    max_kept_snapshots: 6
+"#;
+
+    /// The config.yaml the chart renders with state off and slower caps
+    /// (`state.caps.callsPerSecond: 0.1`). Keep it in step with
+    /// templates/configmap.yaml.
+    const CHART_STATE_OFF: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+state:
+  enabled: false
+  caps:
+    calls_per_second: 0.1
+    call_timeout: "5s"
+    max_backoff: "30s"
+"#;
+
+    #[test]
+    fn chart_state_off_keeps_its_caps() {
+        let cfg = load_str(CHART_STATE_OFF).expect("the state-off rendering loads");
+        assert!(!cfg.state.enabled);
+        assert_eq!(cfg.state.caps.calls_per_second, 0.1);
+    }
+
+    #[test]
+    fn chart_minimal_state_config_passes_validation() {
+        let cfg = load_str(CHART_MINIMAL).expect("the minimal rendering passes validation");
+        let readers = &cfg.state.readers;
+        assert!(readers.devices.enabled);
+        assert!(
+            !readers.rest_inventory.enabled,
+            "the REST reader stays off until its inputs exist"
+        );
+    }
+
+    #[test]
+    fn chart_rendered_state_config_loads() {
+        let cfg = load_str(CHART_RENDERED).expect("the chart's rendering loads");
+        assert!(cfg.state.enabled);
+        assert_eq!(cfg.state.rest.provider.org, "provider-org");
+        assert_eq!(cfg.api_listen_addr().expect("api").port(), 9010);
     }
 
     #[test]

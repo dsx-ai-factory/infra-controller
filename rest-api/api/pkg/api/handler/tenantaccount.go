@@ -914,22 +914,31 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			return cutil.NewAPIError(http.StatusBadRequest, "Tenant Account does not have an associated Tenant", nil)
 		}
 
-		var accountValue *bool
+		var accountCapability *model.APITenantAccountSiteCapabilityUpdate
 		for _, cap := range *apiRequest.SiteCapabilities {
 			if len(cap.SiteIDs) == 0 {
-				accountValue = cap.TargetedInstanceCreation
+				capability := cap
+				accountCapability = &capability
 				break
 			}
 		}
-		if accountValue == nil {
+		if accountCapability == nil {
 			return cutil.NewAPIError(http.StatusBadRequest, "siteCapabilities must include exactly one entry with empty siteIds", nil)
+		}
+
+		targetedInstanceCreationReplaced := accountCapability.TargetedInstanceCreation != nil
+		crossTenantInterfaceCreationReplaced := accountCapability.CrossTenantInterfaceCreation != nil
+		accountConfig := ta.Config
+		if targetedInstanceCreationReplaced {
+			accountConfig.TargetedInstanceCreation = *accountCapability.TargetedInstanceCreation
+		}
+		if crossTenantInterfaceCreationReplaced {
+			accountConfig.CrossTenantInterfaceCreation = *accountCapability.CrossTenantInterfaceCreation
 		}
 
 		_, derr = taDAO.Update(ctx, tx, cdbm.TenantAccountUpdateInput{
 			TenantAccountID: taID,
-			Config: &cdbm.TenantAccountConfig{
-				TargetedInstanceCreation: *accountValue,
-			},
+			Config:          &accountConfig,
 		})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error updating TenantAccount config in DB")
@@ -937,8 +946,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		}
 
 		tsDAO := cdbm.NewTenantSiteDAO(utah.dbSession)
-		siteUpdates := map[uuid.UUID]bool{}
-		siteIDs := map[uuid.UUID]struct{}{}
+		siteUpdates := map[uuid.UUID]model.APITenantAccountSiteCapabilityUpdate{}
 
 		for _, cap := range *apiRequest.SiteCapabilities {
 			if len(cap.SiteIDs) == 0 {
@@ -949,17 +957,34 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 				if perr != nil {
 					return cutil.NewAPIError(http.StatusBadRequest, "Invalid Site ID in siteCapabilities", nil)
 				}
-				siteUpdates[siteID] = *cap.TargetedInstanceCreation
-				siteIDs[siteID] = struct{}{}
+				siteUpdates[siteID] = cap
 			}
 		}
 
-		for siteID := range siteUpdates {
+		for siteID, capability := range siteUpdates {
 			lockKey = fmt.Sprintf("%s-%s-%s", ta.InfrastructureProviderID, siteID, ta.TenantID)
 			derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
 			if derr != nil {
 				return derr
 			}
+
+			config := &cdbm.TenantSiteConfig{}
+			clearConfig := cdbm.TenantAccountConfig{}
+			if targetedInstanceCreationReplaced {
+				if capability.TargetedInstanceCreation != nil {
+					config.TargetedInstanceCreation = capability.TargetedInstanceCreation
+				} else {
+					clearConfig.TargetedInstanceCreation = true
+				}
+			}
+			if crossTenantInterfaceCreationReplaced {
+				if capability.CrossTenantInterfaceCreation != nil {
+					config.CrossTenantInterfaceCreation = capability.CrossTenantInterfaceCreation
+				} else {
+					clearConfig.CrossTenantInterfaceCreation = true
+				}
+			}
+
 			ts, gerr := tsDAO.GetByTenantIDAndSiteID(ctx, tx, *ta.TenantID, siteID, []string{"Site"})
 			if gerr != nil {
 				if errors.Is(gerr, cdb.ErrDoesNotExist) {
@@ -970,14 +995,19 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 					if serr != nil || site.InfrastructureProviderID != ta.InfrastructureProviderID {
 						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID.String()), nil)
 					}
+					if config.TargetedInstanceCreation == nil && config.CrossTenantInterfaceCreation == nil {
+						continue
+					}
 					_, derr = tsDAO.Create(ctx, tx, cdbm.TenantSiteCreateInput{
 						TenantID: *ta.TenantID, TenantOrg: ta.TenantOrg, SiteID: siteID, CreatedBy: dbUser.ID,
-						Config: &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(siteUpdates[siteID])},
+						Config: config,
 					})
 					if derr != nil {
 						return derr
 					}
-					if siteUpdates[siteID] {
+					if config.TargetedInstanceCreation != nil &&
+						*config.TargetedInstanceCreation &&
+						!ta.Config.TargetedInstanceCreation {
 						newSiteIDs = append(newSiteIDs, siteID)
 					}
 					continue
@@ -989,15 +1019,34 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID.String()), nil)
 			}
 
-			_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
-				TenantSiteID: ts.ID,
-				Config: &cdbm.TenantSiteConfig{
-					TargetedInstanceCreation: cutil.GetPtr(siteUpdates[siteID]),
-				},
-			})
-			if derr != nil {
-				logger.Error().Err(derr).Msg("error updating TenantSite config for siteCapabilities")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+			previousTargetedInstanceCreation := ta.Config.TargetedInstanceCreation
+			if ts.Config.TargetedInstanceCreation != nil {
+				previousTargetedInstanceCreation = *ts.Config.TargetedInstanceCreation
+			}
+			if config.TargetedInstanceCreation != nil || config.CrossTenantInterfaceCreation != nil {
+				_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
+					TenantSiteID: ts.ID,
+					Config:       config,
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error updating TenantSite config for siteCapabilities")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				}
+			}
+			if clearConfig.TargetedInstanceCreation || clearConfig.CrossTenantInterfaceCreation {
+				_, derr = tsDAO.Clear(ctx, tx, cdbm.TenantSiteClearInput{
+					TenantSiteID: ts.ID,
+					Config:       clearConfig,
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error clearing TenantSite config for siteCapabilities")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				}
+			}
+			if config.TargetedInstanceCreation != nil &&
+				*config.TargetedInstanceCreation &&
+				!previousTargetedInstanceCreation {
+				newSiteIDs = append(newSiteIDs, siteID)
 			}
 		}
 
@@ -1013,30 +1062,47 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			if ts.Site == nil || ts.Site.InfrastructureProviderID != ta.InfrastructureProviderID {
 				continue
 			}
-			if _, listed := siteIDs[ts.SiteID]; listed {
-				continue
-			}
 			lockKey = fmt.Sprintf("%s-%s-%s", ta.InfrastructureProviderID, ts.SiteID, ta.TenantID)
 			derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
 			if derr != nil {
 				return derr
 			}
-			if ts.Config.TargetedInstanceCreation != nil {
-				_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
+
+			capability, listed := siteUpdates[ts.SiteID]
+			clearConfig := cdbm.TenantAccountConfig{}
+			targetedInstanceCreationOverride := ts.Config.TargetedInstanceCreation
+			crossTenantInterfaceCreationOverride := ts.Config.CrossTenantInterfaceCreation
+			if targetedInstanceCreationReplaced {
+				hasOverride := listed && capability.TargetedInstanceCreation != nil
+				if !hasOverride && targetedInstanceCreationOverride != nil {
+					clearConfig.TargetedInstanceCreation = true
+					targetedInstanceCreationOverride = nil
+				}
+			}
+			if crossTenantInterfaceCreationReplaced {
+				hasOverride := listed && capability.CrossTenantInterfaceCreation != nil
+				if !hasOverride && crossTenantInterfaceCreationOverride != nil {
+					clearConfig.CrossTenantInterfaceCreation = true
+					crossTenantInterfaceCreationOverride = nil
+				}
+			}
+			if clearConfig.TargetedInstanceCreation || clearConfig.CrossTenantInterfaceCreation {
+				_, derr = tsDAO.Clear(ctx, tx, cdbm.TenantSiteClearInput{
 					TenantSiteID: ts.ID,
-					Config:       &cdbm.TenantSiteConfig{},
+					Config:       clearConfig,
 				})
 				if derr != nil {
 					logger.Error().Err(derr).Msg("error clearing stale TenantSite capability override")
 					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
 				}
 			}
-			// Omitted overrides are revoked by replacement; check the remaining privileges before cleanup.
-			enabled, derr := common.TenantHasTargetedInstanceCreation(ctx, tx, utah.dbSession, &cdbm.Tenant{ID: *ta.TenantID}, &common.TenantPrivilegeScope{SiteID: &ts.SiteID})
-			if derr != nil {
-				return derr
+
+			// Keep rows that still carry either capability override. Each
+			// capability has independent replacement semantics.
+			if targetedInstanceCreationOverride != nil || crossTenantInterfaceCreationOverride != nil {
+				continue
 			}
-			if enabled {
+			if accountConfig.TargetedInstanceCreation {
 				continue
 			}
 			count, derr := cdbm.NewAllocationDAO(utah.dbSession).GetCount(ctx, tx, cdbm.AllocationFilterInput{

@@ -17,8 +17,9 @@
 
 use http::HeaderMap;
 use nv_redfish::bmc_http::reqwest::{BmcError, Client};
-use nv_redfish::bmc_http::{BmcCredentials, HttpClient, MultipartUpdateRequest};
-use nv_redfish::core::upload::HttpPushUriUpdateRequest;
+use nv_redfish::bmc_http::{
+    BmcCredentials, HttpClient, HttpPushUriUpdateRequest, MultipartUpdateRequest,
+};
 use nv_redfish::core::{
     BoxTryStream, ModificationResponse, ODataETag, Repair, SessionCreateResponse, UploadReader,
 };

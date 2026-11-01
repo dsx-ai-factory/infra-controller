@@ -421,6 +421,35 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
         ))
     }
 
+    /// Restore account 1 IPMI access after a recovered Lenovo password change.
+    /// Uses the current credentials without repeating the password change;
+    /// other vendors require no repair. Errors redact the supplied password.
+    async fn restore_bmc_root_ipmi_access(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        vendor: RedfishVendor,
+        credentials: Credentials,
+    ) -> Result<(), RedfishClientCreationError> {
+        if vendor != RedfishVendor::Lenovo {
+            return Ok(());
+        }
+        let Credentials::UsernamePassword { username, password } = credentials;
+        let client = self
+            .create_client(
+                host,
+                port,
+                RedfishAuth::Direct(username, password.clone()),
+                Some(vendor),
+            )
+            .await?;
+        client
+            .enable_ipmi_account_access("1", &password)
+            .await
+            .map_err(|err| redact_password(err, &password))
+            .map_err(RedfishClientCreationError::RedfishError)
+    }
+
     /// Rotate a BMC's root password in place, then apply the vendor-specific
     /// password policy.
     ///
@@ -493,13 +522,16 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
                     .map_err(|err| redact_password(err, curr_password.as_str()))
                     .map_err(RedfishClientCreationError::RedfishError)?;
             }
-            // AMI-based BMCs, including Vikings and Lenovo GB300s.
+            // AMI-based BMCs, including Vikings, Lenovo GB300s and Giga Computing.
             // Resolve the admin account by username. If reads are blocked by
             // `PasswordChangeRequired`, use its account URI or fall back to id "2".
             // Any other error propagates.
             //
             // https://docs.nvidia.com/dgx/dgxh100-user-guide/redfish-api-supp.html
-            RedfishVendor::AMI | RedfishVendor::LenovoAMI | RedfishVendor::LenovoGB300 => {
+            RedfishVendor::AMI
+            | RedfishVendor::LenovoAMI
+            | RedfishVendor::LenovoGB300
+            | RedfishVendor::GigaComputingAMI => {
                 match client
                     .change_password(curr_user.as_str(), new_password.as_str())
                     .await
@@ -553,10 +585,18 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
             .create_client(
                 host,
                 port,
-                RedfishAuth::Direct(curr_user.to_string(), new_password),
+                RedfishAuth::Direct(curr_user.to_string(), new_password.clone()),
                 Some(vendor),
             )
             .await?;
+
+        if vendor == RedfishVendor::Lenovo {
+            vendored_client
+                .enable_ipmi_account_access("1", &new_password)
+                .await
+                .map_err(|err| redact_password(err, &new_password))
+                .map_err(RedfishClientCreationError::RedfishError)?;
+        }
 
         vendored_client
             .set_machine_password_policy()
@@ -1070,6 +1110,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovered_ipmi_access_is_lenovo_only_and_redacts_failures() {
+        let sim = test_support::RedfishSim::default();
+        let credentials = Credentials::new("1", "test-recovery-password");
+        sim.restore_bmc_root_ipmi_access(
+            "127.0.0.1",
+            None,
+            RedfishVendor::Dell,
+            credentials.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(sim.create_client_calls().is_empty());
+
+        sim.seed_user("1", "test-recovery-password");
+        sim.fail_next_ipmi_access("rejected test-recovery-password");
+        let error = sim
+            .restore_bmc_root_ipmi_access("127.0.0.1", None, RedfishVendor::Lenovo, credentials)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("test-recovery-password"));
+        assert!(!sim.ipmi_account_access_enabled("1"));
+    }
+
+    #[tokio::test]
     async fn test_power_state() {
         let sim = RedfishSim::default();
         let client = sim
@@ -1248,15 +1313,30 @@ mod tests {
         // Lenovo dispatches to account id "1"; seed it so the rotation succeeds.
         let sim = RedfishSim::default();
         sim.seed_user("1", "factory_pass");
+        sim.set_enforce_auth(true);
         sim.set_bmc_root_password(
             "127.0.0.1",
             Some(443),
             RedfishVendor::Lenovo,
-            Credentials::new("root", "factory_pass"),
+            Credentials::new("1", "factory_pass"),
             "site_pass".to_string(),
         )
         .await
         .expect("Lenovo rotation against account id 1 should succeed");
+        assert!(sim.ipmi_account_access_enabled("1"));
+        assert_eq!(
+            sim.auth_attempts(),
+            vec![
+                test_support::RedfishSimAuthAttempt {
+                    credentials: Credentials::new("1", "factory_pass"),
+                    authorized: true,
+                },
+                test_support::RedfishSimAuthAttempt {
+                    credentials: Credentials::new("1", "site_pass"),
+                    authorized: true,
+                },
+            ],
+        );
     }
 
     #[tokio::test]

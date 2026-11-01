@@ -188,7 +188,13 @@ async fn get_managed_host_network_config_inner(
         }
     };
 
-    let mut maybe_instance = super::instance::snapshot_to_optional_instance(snapshot.clone())?;
+    // `snapshot_to_optional_instance` returns `Ok(None)` without an instance,
+    // so skip cloning the whole `ManagedHostStateSnapshot` in that case.
+    let mut maybe_instance = if snapshot.instance.is_some() {
+        super::instance::snapshot_to_optional_instance(snapshot.clone())?
+    } else {
+        None
+    };
 
     let primary_dpu_snapshot = snapshot
         .host_snapshot
@@ -1014,30 +1020,12 @@ pub(crate) async fn record_dpu_network_status(
 
     let mut txn = api.txn_begin().await?;
 
-    // Load the DPU Object. We require it to update the health report based
-    // on the last report
-    let dpu_machine = db::machine::find_one(
-        &mut txn,
-        &dpu_machine_id,
-        MachineSearchConfig {
-            include_dpus: true,
-            // We should probably be setting this to to true everywhere
-            // or including FOR UPDATE on all SELECT queries, but
-            // this wasn't being done up to now.  Based on the nature
-            // of health/status reporting (things could go
-            // unhealthy at any time, including moments after
-            // checking), the locking probably wouldn't buy much
-            // here, but maybe someone with broader knowledge of
-            // the codebase should re-examine that assumption.
-            for_update: false,
-            ..Default::default()
-        },
-    )
-    .await?
-    .ok_or_else(|| CarbideError::NotFoundError {
-        kind: "machine",
-        id: dpu_machine_id.to_string(),
-    })?;
+    let status_inputs = db::machine::find_dpu_network_status_inputs(&mut txn, &dpu_machine_id)
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "machine",
+            id: dpu_machine_id.to_string(),
+        })?;
 
     let machine_obs = {
         let mut obs = MachineNetworkStatusObservation::try_from(request.clone())
@@ -1049,7 +1037,7 @@ pub(crate) async fn record_dpu_network_status(
         obs
     };
 
-    let any_observed_version_changed = match dpu_machine.network_status_observation.as_ref() {
+    let any_observed_version_changed = match status_inputs.network_status_observation.as_ref() {
         None => true,
         Some(old_observation) => old_observation.any_observed_version_changed(&machine_obs),
     };
@@ -1061,19 +1049,20 @@ pub(crate) async fn record_dpu_network_status(
     {
         return Err(db::DatabaseError::from(reason).into());
     }
-    if dpu_machine.network_config.value.use_admin_network_changed == Some(true)
-        && machine_obs.network_config_version.as_ref() == Some(&dpu_machine.network_config.version)
+    if status_inputs.network_config.value.use_admin_network_changed == Some(true)
+        && machine_obs.network_config_version.as_ref()
+            == Some(&status_inputs.network_config.version)
     {
         match db::machine::clear_use_admin_network_changed_if_version_matches(
             &mut txn,
             &dpu_machine_id,
-            &dpu_machine.network_config.version,
+            &status_inputs.network_config.version,
         )
         .await?
         {
             ConditionalWrite::Applied(()) => tracing::info!(
                 dpu_machine_id = %dpu_machine_id,
-                network_config_version = %dpu_machine.network_config.version,
+                network_config_version = %status_inputs.network_config.version,
                 agent_version = ?machine_obs.agent_version,
                 "Cleared use_admin_network_changed after matching-version ACK; OVS restart may have been skipped by agents that do not support the flag"
             ),
@@ -1136,7 +1125,7 @@ pub(crate) async fn record_dpu_network_status(
     health_report.source = health_report::HealthReport::DPU_AGENT_SOURCE.to_string();
     health_report.observed_at = Some(chrono::Utc::now());
     // Fix the in_alert times based on the previously stored report
-    health_report.update_in_alert_since(dpu_machine.dpu_agent_health_report());
+    health_report.update_in_alert_since(status_inputs.dpu_agent_health_report.as_ref());
 
     db::machine::update_dpu_agent_health_report(&mut txn, &dpu_machine_id, &health_report).await?;
 

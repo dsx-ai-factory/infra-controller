@@ -216,7 +216,7 @@ jobs:
           persist-credentials: false
 
       - name: Package and push Helm prereqs chart to production NGC
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -224,4 +224,5 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NVCR_PROD_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.prod_registry_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3

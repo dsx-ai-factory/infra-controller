@@ -568,6 +568,24 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
     fi
 fi
 
+# KMIP KEK provider client material. setup.sh loads these three files into
+# Secret nico-system/nico-kmip-client before Phase 6; see README.md →
+# "Opting in to the KMIP KEK provider". The mounts and the Secret itself are
+# checked against the site config in 4c below.
+if [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+    if [[ "${SKIP_CORE:-false}" == "true" ]]; then
+        ERRORS+=("NICO_KMIP_CLIENT_DIR cannot be used with --skip-core — unset it or install NICo Core")
+    elif [[ ! -d "${NICO_KMIP_CLIENT_DIR}" ]]; then
+        ERRORS+=("NICO_KMIP_CLIENT_DIR='${NICO_KMIP_CLIENT_DIR}' is not a directory")
+    else
+        for _kmip_file in ca.pem client.pem client.key; do
+            if [[ ! -s "${NICO_KMIP_CLIENT_DIR}/${_kmip_file}" || ! -r "${NICO_KMIP_CLIENT_DIR}/${_kmip_file}" ]]; then
+                ERRORS+=("NICO_KMIP_CLIENT_DIR='${NICO_KMIP_CLIENT_DIR}' has no readable, non-empty ${_kmip_file}    (setup.sh loads ca.pem, client.pem, and client.key into Secret nico-system/nico-kmip-client)")
+            fi
+        done
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Required tools
 # ---------------------------------------------------------------------------
@@ -1158,6 +1176,38 @@ if [[ "${_CLUSTER_REACHABLE}" == "true" ]]; then
             elif [[ -n "${_missing_core_pull_secrets}" ]]; then
                 WARNINGS+=("${_CORE_VALUES_LABEL}: imagePullSecrets not found in nico-system: ${_missing_core_pull_secrets}")
             fi
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # 4c. KMIP KEK provider — when the site TOML declares a type = "kmip"
+    #     provider, its ca_bundle, client_cert and client_key paths must lie
+    #     under a nico-api.extraVolumeMounts mount, and the Secret behind that
+    #     mount must exist in nico-system with the keys those paths read,
+    #     unless setup.sh creates nico-kmip-client from NICO_KMIP_CLIENT_DIR
+    #     this run, in which case an existing Secret must carry setup's label.
+    #     Otherwise the mistake surfaces only inside the install, as a Pod
+    #     stuck on a missing Secret or nico-api refusing to start on a
+    #     missing file. The checker decides from the decoded values, so YAML
+    #     quoting cannot hide a provider; it needs the TOML parser (python3
+    #     3.11 or the tomli package) only when the site config mentions KMIP.
+    # -----------------------------------------------------------------------
+    if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
+        _kmip_check_args=("${_CORE_VALUES_CFG}")
+        if [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+            _kmip_check_args+=(--managed-secret)
+        fi
+        if ! command -v python3 &>/dev/null; then
+            ERRORS+=("KMIP provider preflight requires python3 with PyYAML — install them before running setup.sh")
+        elif _kmip_checks="$(python3 "${SCRIPT_DIR}/check-kmip-provider.py" "${_kmip_check_args[@]}" 2>&1)"; then
+            while IFS= read -r _check; do
+                case "${_check}" in
+                    "ERROR: "*) ERRORS+=("${_CORE_VALUES_LABEL}: ${_check#ERROR: }") ;;
+                    "WARNING: "*) WARNINGS+=("${_CORE_VALUES_LABEL}: ${_check#WARNING: }") ;;
+                esac
+            done <<< "${_kmip_checks}"
+        else
+            ERRORS+=("${_CORE_VALUES_LABEL}: ${_kmip_checks}")
         fi
     fi
 

@@ -957,11 +957,10 @@ pub(crate) async fn admin_force_delete_machine(
         if let Some(instance_id) = instance_id {
             response.instance_id = instance_id.to_string();
 
-            // The Machine lock makes concurrent Instance allocation visible here.
-            // TODO(#6125): Endpoint publication must add an Instance-to-Machine
-            // eligibility fence before activation. Reconcile existing
-            // Machine-to-Instance writers first; its address-table and Instance
-            // locks alone do not participate in this Machine lock.
+            // The Machine lock makes concurrent Instance allocation visible because service-VPC
+            // activation takes the same lock before storing an attachment's service interfaces.
+            // TODO(#6133): Validate observed external cleanup before reclaiming the final
+            // attachment and allowing force deletion to advance.
             // Without explicit orphan consent, rejecting before commit rolls back ForceDeletion
             // and leaves endpoint cleanup owned by the retained Instance service attachments.
             if !request.allow_delete_with_orphaned_dpf_crds

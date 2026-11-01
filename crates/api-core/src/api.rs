@@ -1043,6 +1043,13 @@ impl Forge for Api {
         crate::handlers::machine::find_machines_by_ids(self, request).await
     }
 
+    async fn find_host_states_by_ids(
+        &self,
+        request: Request<rpc::HostStatesByIdsRequest>,
+    ) -> Result<Response<rpc::HostStateList>, Status> {
+        crate::handlers::host_state::find_host_states_by_ids(self, request).await
+    }
+
     async fn find_machine_state_histories(
         &self,
         request: Request<rpc::MachineStateHistoriesRequest>,

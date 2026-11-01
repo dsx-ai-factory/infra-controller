@@ -44,6 +44,7 @@ pub(super) enum ScoutAction {
     LogError,
     MachineValidation,
     MlxAction,
+    MlxDeviceInfoReport,
     FirmwareUpgrade,
 }
 
@@ -59,6 +60,7 @@ impl From<&fac::Action> for ScoutAction {
             fac::Action::LogError(_) => Self::LogError,
             fac::Action::MachineValidation(_) => Self::MachineValidation,
             fac::Action::MlxAction(_) => Self::MlxAction,
+            fac::Action::MlxDeviceInfoReport(_) => Self::MlxDeviceInfoReport,
             fac::Action::FirmwareUpgrade(_) => Self::FirmwareUpgrade,
         }
     }
@@ -1529,6 +1531,11 @@ mod tests {
                     scenario: "mlx action",
                     input: fac::Action::MlxAction(fac::MlxAction::default()),
                     expect: ScoutAction::MlxAction,
+                },
+                Check {
+                    scenario: "requested mlx inventory",
+                    input: fac::Action::MlxDeviceInfoReport(fac::MlxDeviceInfoReport {}),
+                    expect: ScoutAction::MlxDeviceInfoReport,
                 },
                 Check {
                     scenario: "firmware upgrade",

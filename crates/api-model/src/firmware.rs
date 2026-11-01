@@ -24,7 +24,7 @@ use regex::Regex;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
-use crate::site_explorer::EndpointExplorationReport;
+use crate::site_explorer::{EndpointExplorationReport, Service};
 
 /// Firmware versions this carbide instance wants to install onto hosts
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -129,6 +129,41 @@ impl Firmware {
             ordering = ORDERING.to_vec();
         }
         ordering
+    }
+
+    /// Every installed inventory entry matching each configured component, as
+    /// the updater matches them. A configured component without a match gets
+    /// an empty group. Groups are sorted by component slug, then by drive
+    /// model, and entries by service, inventory and version. `None` when a
+    /// configured component is unknown.
+    pub fn installed_inventory(&self, services: &[Service]) -> Option<Vec<ComponentInventory>> {
+        let mut groups = self
+            .components
+            .keys()
+            .map(|&component| {
+                let mut entries: Vec<_> = services
+                    .iter()
+                    .flat_map(|service| {
+                        service
+                            .inventories
+                            .iter()
+                            .filter(move |inventory| {
+                                self.matching_version_id(&inventory.id, component)
+                            })
+                            .map(|inventory| InstalledFirmwareEntry {
+                                service_id: service.id.clone(),
+                                inventory_id: inventory.id.clone(),
+                                version: inventory.version.clone(),
+                            })
+                    })
+                    .collect();
+                entries.sort();
+                (component != FirmwareComponentType::Unknown)
+                    .then_some(ComponentInventory { component, entries })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        groups.sort_by_key(|group| (group.component.slug(), group.component));
+        Some(groups)
     }
 
     /// find_version will locate a version number within an EndpointExplorationReport
@@ -563,11 +598,92 @@ impl Display for AgentUpgradePolicyChoice {
     }
 }
 
+/// Installed inventory entries matched to one configured component.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentInventory {
+    pub component: FirmwareComponentType,
+    pub entries: Vec<InstalledFirmwareEntry>,
+}
+
+/// One installed firmware inventory entry of an explored report.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InstalledFirmwareEntry {
+    pub service_id: String,
+    pub inventory_id: String,
+    pub version: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+    use crate::site_explorer::Inventory;
+
+    #[test]
+    fn inventory_keeps_every_match() {
+        let firmware = |components: &[(FirmwareComponentType, &str)]| Firmware {
+            components: components
+                .iter()
+                .map(|&(component, regex)| {
+                    let reported_as = Some(Regex::new(regex).unwrap());
+                    (
+                        component,
+                        FirmwareComponent {
+                            current_version_reported_as: reported_as,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let services = |inventories: &[(&str, Option<&str>)]| {
+            let inventories = inventories.iter().map(|&(id, version)| Inventory {
+                id: id.to_string(),
+                version: version.map(str::to_string),
+                ..Default::default()
+            });
+            let id = "FirmwareInventory".to_string();
+            vec![Service {
+                id,
+                inventories: inventories.collect(),
+            }]
+        };
+        let entry = |inventory_id: &str, version: Option<&str>| InstalledFirmwareEntry {
+            service_id: "FirmwareInventory".to_string(),
+            inventory_id: inventory_id.to_string(),
+            version: version.map(str::to_string),
+        };
+        let cx7_and_bmc = firmware(&[
+            (FirmwareComponentType::Cx7, "^CX7_"),
+            (FirmwareComponentType::Bmc, "^BMC$"),
+        ]);
+        let both_cards = Some(vec![
+            ("bmc", vec![]),
+            (
+                "cx7",
+                vec![entry("CX7_0", Some("28.2")), entry("CX7_1", Some("28.1"))],
+            ),
+        ]);
+
+        value_scenarios!(
+            run = |(firmware, installed): (&Firmware, Vec<Service>)| {
+                let groups = firmware.installed_inventory(&installed)?;
+                Some(groups.into_iter().map(|group| (group.component.slug(), group.entries)).collect::<Vec<_>>())
+            };
+            "every match is kept in any report order, a component without one is empty" {
+                (&cx7_and_bmc, services(&[("CX7_0", Some("28.2")), ("NIC_0", Some("1")), ("CX7_1", Some("28.1"))])) => both_cards.clone(),
+                (&cx7_and_bmc, services(&[("CX7_1", Some("28.1")), ("CX7_0", Some("28.2"))])) => both_cards.clone(),
+            }
+            "an entry without a version is kept" {
+                (&cx7_and_bmc, services(&[("BMC", None)])) => Some(vec![("bmc", vec![entry("BMC", None)]), ("cx7", vec![])]),
+            }
+            "an unknown configured component fails closed" {
+                (&firmware(&[(FirmwareComponentType::Unknown, "^X$")]), services(&[("X", Some("1"))])) => None,
+            }
+        );
+    }
 
     fn drive(model: &str) -> FirmwareComponentType {
         FirmwareComponentType::Drive {

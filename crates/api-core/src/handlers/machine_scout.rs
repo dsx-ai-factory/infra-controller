@@ -171,8 +171,8 @@ pub(crate) async fn forge_agent_control(
 
     use rpc::forge_agent_control_response::Action;
 
-    let request = request.into_inner();
-    let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let machine_id: MachineId =
+        convert_and_log_machine_id(request.into_inner().machine_id.as_ref())?;
 
     let (action, maybe_pending_txn) = if let Ok(dpu_machine_id) = DpuMachineId::try_from(machine_id)
     {
@@ -472,35 +472,9 @@ pub(crate) async fn forge_agent_control(
         txn.commit().await?;
     }
 
-    Ok(Response::new(build_agent_control_response(
-        action,
-        &request.capabilities,
-    )?))
-}
-
-/// Build the poll response only when Scout can execute its required contract.
-fn build_agent_control_response(
-    action: fac::Action,
-    capabilities: &[i32],
-) -> Result<ForgeAgentControlResponse, CarbideError> {
-    let requires_firmware_update = match &action {
-        fac::Action::MlxAction(action) => action.device_actions.iter().any(|device| {
-            matches!(
-                device.command,
-                Some(fac::mlx_device_action::Command::UpdateFirmware(_))
-            )
-        }),
-        _ => false,
-    };
-    if requires_firmware_update
-        && !capabilities.contains(&(rpc::ForgeAgentControlCapability::NicFirmwareUpdateV1 as i32))
-    {
-        return Err(CarbideError::FailedPrecondition(
-            "scout does not advertise NIC_FIRMWARE_UPDATE_V1".into(),
-        ));
-    }
-
-    ForgeAgentControlResponse::build_and_fill_legacy_fields(action)
+    Ok(Response::new(
+        ForgeAgentControlResponse::build_and_fill_legacy_fields(action)?,
+    ))
 }
 
 /// Records reboot duration metric for a machine if applicable
@@ -588,101 +562,4 @@ pub(crate) async fn reboot_completed(
     }
 
     Ok(Response::new(rpc::MachineRebootCompletedResponse {}))
-}
-
-#[cfg(test)]
-mod tests {
-    use ::rpc::protos::mlx_device;
-
-    use super::*;
-
-    /// Unknown or omitted capabilities cannot enable a command whose digest
-    /// requirements an older Scout would silently discard. Ordinary MLX
-    /// commands remain available without optional capabilities.
-    #[test]
-    fn firmware_update_response_requires_advertised_capability() {
-        let lock_action = fac::MlxDeviceAction {
-            pci_name: "0000:cb:00.0".into(),
-            command: Some(fac::mlx_device_action::Command::Lock(fac::MlxDeviceLock {
-                key: "fixture-key".into(),
-            })),
-        };
-        // Put legacy work first so checking only the first command cannot
-        // bypass the capability required by the later firmware update.
-        let action = fac::Action::MlxAction(fac::MlxAction {
-            device_actions: vec![
-                lock_action.clone(),
-                fac::MlxDeviceAction {
-                    pci_name: "0000:cc:00.0".into(),
-                    command: Some(fac::mlx_device_action::Command::UpdateFirmware(
-                        fac::MlxDeviceUpdateFirmware {
-                            operation_id: "nic-firmware:attempt".into(),
-                            phase_id: "update:1".into(),
-                            profile: Some(mlx_device::FirmwareFlasherProfile {
-                                firmware_spec: Some(mlx_device::FirmwareSpec {
-                                    part_number: "900-9D3D4-00EN-HA0_Ax".into(),
-                                    psid: "MT_0000001069".into(),
-                                    version: "32.42.1000".into(),
-                                }),
-                                flash_spec: Some(mlx_device::FlashSpec {
-                                    firmware_url: "http://artifacts.test/firmware.bin".into(),
-                                    ..Default::default()
-                                }),
-                                flash_options: None,
-                            }),
-                            expected_digests: Some(mlx_device::FirmwareArtifactDigests {
-                                image_sha256: "ab".repeat(32),
-                                configuration_sha256: None,
-                            }),
-                        },
-                    )),
-                },
-            ],
-        });
-
-        for (scenario, capabilities) in [
-            ("predecessor Scout omits capabilities", vec![]),
-            (
-                "unknown capability does not authorize update",
-                vec![i32::MAX],
-            ),
-        ] {
-            let error: Status = build_agent_control_response(action.clone(), &capabilities)
-                .unwrap_err()
-                .into();
-            assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
-            assert!(
-                error.message().contains("NIC_FIRMWARE_UPDATE_V1"),
-                "{scenario}"
-            );
-        }
-
-        // The supported response preserves both typed commands, but only the
-        // lock can be represented without discarding required input checks.
-        let response = build_agent_control_response(
-            action.clone(),
-            &[rpc::ForgeAgentControlCapability::NicFirmwareUpdateV1 as i32],
-        )
-        .unwrap();
-        assert_eq!(response.action, Some(action));
-        let legacy_pairs = response.data.expect("legacy response data").pair;
-        assert_eq!(legacy_pairs.len(), 1);
-        assert_eq!(legacy_pairs[0].key, lock_action.pci_name);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&legacy_pairs[0].value).unwrap(),
-            serde_json::json!({"op": {"Lock": {"key": "fixture-key"}}})
-        );
-
-        // Requiring the new capability for all MLX actions would break clients
-        // whose ordinary lock commands still have a safe legacy projection.
-        let lock_only = fac::Action::MlxAction(fac::MlxAction {
-            device_actions: vec![lock_action],
-        });
-        let response = build_agent_control_response(lock_only.clone(), &[]).unwrap();
-        assert_eq!(response.action, Some(lock_only));
-        assert_eq!(
-            response.data.expect("legacy lock response data").pair,
-            legacy_pairs
-        );
-    }
 }

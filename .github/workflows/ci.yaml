@@ -1912,6 +1912,9 @@ jobs:
           cache: true
           cache-dependency-path: rest-api/go.sum
 
+      - name: Download REST dependencies
+        uses: ./.github/actions/go-mod-download
+
       - name: Regenerate REST protos from Core protos
         run: make -C rest-api core-proto
 
@@ -2182,6 +2185,9 @@ jobs:
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
+      - name: Check KMIP provider preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_kmip_provider.py'
+
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
@@ -2236,7 +2242,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2244,7 +2250,8 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
   build-validate-helm-prereqs-chart:
     needs:
@@ -2325,10 +2332,18 @@ jobs:
       - name: Test doca-platform pin
         run: bash helm-prereqs/tests/doca-platform-pin_test.sh
 
+      - name: Test KMIP client Secret
+        run: bash helm-prereqs/tests/setup-kmip-client-secret_test.sh
+
+  # Waits for the nico chart push. NGC answers an upload with HTTP 409 while
+  # another upload to the same namespace is updating its chart index, and the
+  # CLI reports that as "already exists". `!cancelled()` still runs this job
+  # when the nico chart push fails.
   build-push-helm-prereqs-chart:
     needs:
       - prepare
       - build-validate-helm-prereqs-chart
+      - build-push-helm-chart
     if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-prereqs-chart.result == 'success' && needs.prepare.outputs.publish_images == 'true' }}
     runs-on: linux-amd64-cpu4
     steps:
@@ -2339,7 +2354,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2347,7 +2362,8 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
   # ============================================================================
   # BUILD STAGE - Bluefield Images
@@ -2598,10 +2614,13 @@ jobs:
           /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_map_endpoints.py
           /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_otel_post_install.py
 
+  # Waits for the prereqs chart push, for the same reason as
+  # `build-push-helm-prereqs-chart`.
   build-push-bluefield-helm-charts:
     needs:
       - prepare
       - build-validate-bluefield-helm-charts
+      - build-push-helm-prereqs-chart
     if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-bluefield-helm-charts.result == 'success' && needs.prepare.outputs.publish_images == 'true' }}
     runs-on: linux-amd64-cpu4
     steps:
@@ -2612,7 +2631,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2620,11 +2639,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2632,11 +2652,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2644,11 +2665,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: bluefield/charts/nico-fmds
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2656,7 +2678,8 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
   build-summary:
     runs-on: linux-amd64-cpu4

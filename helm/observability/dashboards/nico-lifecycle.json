@@ -227,9 +227,10 @@
           { "selected": false, "text": "ib_partitions", "value": "ib_partitions" },
           { "selected": false, "text": "switches", "value": "switches" },
           { "selected": false, "text": "racks", "value": "racks" },
-          { "selected": false, "text": "power_shelves", "value": "power_shelves" }
+          { "selected": false, "text": "power_shelves", "value": "power_shelves" },
+          { "selected": false, "text": "extension_services", "value": "extension_services" }
         ],
-        "query": "machines,network_segments,vpc_prefixes,ib_partitions,switches,racks,power_shelves",
+        "query": "machines,network_segments,vpc_prefixes,ib_partitions,switches,racks,power_shelves,extension_services",
         "type": "custom"
       }
     ]

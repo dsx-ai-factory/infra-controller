@@ -749,6 +749,12 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
 
     assert!(!timed_out_call.stopped.is_cancelled());
 
+    // The healthy observations are complete and the stalled call has entered
+    // the provider. Advance its deadline without racing real connection setup.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::resume();
+
     assert_eq!(
         wait_for_pool_observation(
             &observations,

@@ -543,6 +543,31 @@ tilt:
             cpu: 500m
             memory: 512Mi
 
+    tempo:
+      fullnameOverride: tempo
+      tempo:
+        reportingEnabled: false
+        retention: 24h
+        # Leave headroom for memory outside the Go runtime during compaction.
+        extraEnv:
+          - name: GOMEMLIMIT
+            value: 3GiB
+        receivers:
+          otlp:
+            protocols:
+              grpc:
+                endpoint: 0.0.0.0:4317
+        resources:
+          requests:
+            cpu: 100m
+            memory: 1Gi
+          limits:
+            cpu: "1"
+            memory: 4Gi
+      persistence:
+        enabled: true
+        size: 2Gi
+
     loki:
       deploymentMode: Monolithic
       loki:
@@ -700,6 +725,13 @@ tilt:
               jsonData:
                 httpMethod: POST
                 timeInterval: 30s
+            - name: Tempo
+              uid: tempo
+              type: tempo
+              access: proxy
+              url: http://tempo.observability.svc.cluster.local:3200
+              isDefault: false
+              editable: false
             - name: Loki
               uid: loki
               type: loki

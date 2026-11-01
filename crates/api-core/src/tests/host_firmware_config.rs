@@ -589,14 +589,14 @@ async fn fresh_gate_rows(
     Ok(rows)
 }
 
-async fn host_reprovision_requested(env: &TestEnv, host: &TestManagedHost) -> bool {
+pub(super) async fn host_reprovision_requested(env: &TestEnv, host: &TestManagedHost) -> bool {
     let mut txn = env.pool.begin().await.unwrap();
     let machine = host.host().db_machine(&mut txn).await;
     txn.rollback().await.unwrap();
     machine.host_reprovision_requested.is_some()
 }
 
-fn update_manager(env: &TestEnv, config: Arc<CarbideConfig>) -> MachineUpdateManager {
+pub(super) fn update_manager(env: &TestEnv, config: Arc<CarbideConfig>) -> MachineUpdateManager {
     MachineUpdateManager::new(
         env.pool.clone(),
         config,

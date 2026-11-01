@@ -7,7 +7,9 @@ use std::error::Error;
 use std::io;
 
 use libmlx::firmware::error::AttemptError;
-use libmlx::firmware::operation::{DirectMlxClaim, SupervisorConfig};
+use libmlx::firmware::operation::{
+    DirectMlxClaim, SupervisorConfig, has_unresolved_firmware_claim,
+};
 use libmlx::lockdown::error::MlxError;
 use libmlx::runner::error::MlxRunnerError;
 
@@ -46,6 +48,34 @@ impl DirectMlxAccess {
             claim,
             process_unsettled: false,
         })
+    }
+
+    /// `acquire_or_defer` claims the host for a command that a later poll can
+    /// repeat. It returns `None` without touching the card when other hardware
+    /// work holds the claim, when that claim's marker is unsafe or unreadable,
+    /// or when acquisition fails for another reason; the log says which.
+    pub(super) fn acquire_or_defer(config: &SupervisorConfig, device: &str) -> Option<Self> {
+        match Self::acquire(config, device) {
+            Ok(access) => Some(access),
+            Err(DirectMlxAccessError::Acquire(error))
+                if error.kind() == io::ErrorKind::AlreadyExists =>
+            {
+                match has_unresolved_firmware_claim(config) {
+                    Ok(_) => tracing::debug!(
+                        pci_name = device,
+                        "deferring automatic NIC command while hardware access is occupied"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(pci_name = device, %error, "deferring automatic NIC command because the hardware claim is unsafe or unreadable")
+                    }
+                }
+                None
+            }
+            Err(error) => {
+                tracing::warn!(pci_name = device, %error, "deferring automatic NIC command without probing hardware");
+                None
+            }
+        }
     }
 
     /// An ordinary failed command has stopped and may release the host. A

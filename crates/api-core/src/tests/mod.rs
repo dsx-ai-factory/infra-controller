@@ -40,6 +40,7 @@ mod finder;
 mod firmware_component_manager;
 mod host_bmc_firmware_test;
 mod host_firmware_config;
+mod host_state_find;
 mod ib_fabric_monitor;
 mod ib_instance;
 mod ib_machine;
@@ -101,6 +102,7 @@ mod tpm_ca;
 mod vpc;
 mod vpc_peering;
 mod vpc_prefix;
+mod vpc_remote;
 // NOTE: the admin web UI tests moved to the `carbide-api-web` crate (alongside the web code they
 // exercise).
 

@@ -302,7 +302,7 @@ curl() {
 				shift 2
 				continue
 				;;
-			--retry-all-errors|-k|-L)
+			--fail|--retry-all-errors|-k|-L)
 				shift
 				continue
 				;;
@@ -524,10 +524,11 @@ image_url="https://images.example/image.qcow2"
 image_auth=()
 curl_url "$image_url"
 read_mock_curl_args
-assert_eq "unauthenticated curl arg count" "8" "${#mock_curl_args[@]}"
-assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[5]}"
-assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[6]}"
-assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[7]}"
+assert_eq "unauthenticated curl arg count" "9" "${#mock_curl_args[@]}"
+assert_eq "unauthenticated curl treats HTTP errors as failures" "--fail" "${mock_curl_args[0]}"
+assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[6]}"
+assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[7]}"
+assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[8]}"
 
 file=
 query_marker="synthetic-query-marker"
@@ -551,13 +552,13 @@ fi
 curl_url "$image_url" "${image_auth[@]}"
 read_mock_curl_args
 assert_eq "authenticated query selects the path filename" "image.qcow2" "$file"
-assert_eq "authenticated curl arg count" "10" "${#mock_curl_args[@]}"
-assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[5]}"
+assert_eq "authenticated curl arg count" "11" "${#mock_curl_args[@]}"
+assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[6]}"
 assert_eq "authenticated curl auth value is the header file, not the token" \
-	"$image_auth_header_file" "${mock_curl_args[6]}"
-assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[7]}"
-assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[8]}"
-assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[9]}"
+	"$image_auth_header_file" "${mock_curl_args[7]}"
+assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[8]}"
+assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[9]}"
+assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[10]}"
 for arg in "${mock_curl_args[@]}"; do
 	case "$arg" in
 		*my-token*) fail "token leaked into curl's argument list: $arg" ;;
@@ -686,5 +687,118 @@ assert_eq "override partition" "/dev/targetp2" "$boot_part"
 assert_eq "override source" "override" "$boot_part_source"
 assert_log_contains "Resolved /boot from bootfs_uuid=boot-override to /dev/targetp2"
 bootfs_uuid=
+
+echo "verify_sha: accepts a matching digest for every supported length"
+probe_file="$temp_dir/probe.bin"
+printf 'probe data\n' >"$probe_file"
+file="$probe_file"
+for digest_tool in sha1sum sha256sum sha384sum sha512sum; do
+	probe_sha=$("$digest_tool" "$probe_file")
+	verify_sha "${probe_sha%% *}" >/dev/null 2>&1 ||
+		fail "verify_sha rejected a matching $digest_tool digest"
+done
+
+echo "verify_sha: mismatching checksum"
+if verify_sha "$(printf '%064d' 0)" >/dev/null 2>&1; then
+	fail "mismatching sha verification succeeded unexpectedly"
+fi
+
+echo "verify_sha: unknown digest length"
+if verify_sha "short" >/dev/null 2>&1; then
+	fail "invalid sha digest length succeeded unexpectedly"
+fi
+
+echo "curl_url: preserves failure exit code"
+mock_failing_curl() {
+	return 22
+}
+curl() {
+	mock_failing_curl
+}
+curl_url "http://example.com/fail.qcow2" >/dev/null 2>&1
+assert_eq "curl_url failure status" 22 "$?"
+
+unset -f curl
+
+echo "write_image_to_disk: returns qemu-img's failure, not tee's success"
+qemu-img() { echo "qemu-img: Could not open input" >&2; return 1; }
+file="$temp_dir/missing.qcow2"
+image_disk="$temp_dir/disk.raw"
+write_image_to_disk >/dev/null 2>&1
+assert_eq "write_image_to_disk failure status" 1 "$?"
+assert_log_contains "Imaging failed 1"
+unset -f qemu-img
+
+# get_distro_image writes shafile to the working directory, so run it in temp_dir.
+distro_workdir="$temp_dir/distro"
+mkdir -p "$distro_workdir"
+pushd "$distro_workdir" >/dev/null || fail "cannot enter $distro_workdir"
+distro_name="ubuntu"
+distro_version="24.04"
+case "$(uname -m)" in
+	x86_64) distro_arch=amd64 ;;
+	aarch64) distro_arch=arm64 ;;
+	*) distro_arch=$(uname -m) ;;
+esac
+
+echo "get_distro_image: fails when the checksum download fails, even with a stale shafile"
+printf '%064d *ubuntu-24.04-server-cloudimg-%s.img\n' 1 "$distro_arch" >shafile
+curl() { return 1; }
+if get_distro_image >/dev/null 2>&1; then
+	fail "get_distro_image used a stale shafile after the download failed"
+fi
+assert_log_contains "Failed to download checksum file"
+
+echo "get_distro_image: fails when shafile has no entry for the image"
+curl() { : >shafile; return 0; }
+if get_distro_image >/dev/null 2>&1; then
+	fail "get_distro_image succeeded when the checksum was missing"
+fi
+assert_log_contains "not found in"
+
+popd >/dev/null || fail "cannot leave $distro_workdir"
+unset -f curl
+distro_name=
+distro_version=
+
+echo "entrypoint: reboot suppression on failed main"
+entrypoint_test_script="$temp_dir/test_entrypoint.sh"
+cat << 'EOF' > "$entrypoint_test_script"
+#!/bin/bash
+log_output=/dev/null
+main() { return 1; }
+systemctl() { echo "unexpected systemctl call: $*" >&2; return 0; }
+EOF
+sed -n '/^if \[\[ "\${BASH_SOURCE\[0\]}" == "\$0" \]\]; then/,$p' "$script_under_test" >> "$entrypoint_test_script"
+chmod +x "$entrypoint_test_script"
+entrypoint_output=$("${BASH:-bash}" "$entrypoint_test_script" 2>&1)
+entrypoint_status=$?
+assert_eq "entrypoint failure status" 1 "$entrypoint_status"
+if [[ "$entrypoint_output" =~ "Rebooting" ]]; then
+	fail "entrypoint attempted reboot after main failed: $entrypoint_output"
+fi
+if [[ ! "$entrypoint_output" =~ "Imaging failed; reboot suppressed" ]]; then
+	fail "entrypoint did not indicate reboot was suppressed: $entrypoint_output"
+fi
+
+echo "entrypoint: reboots on successful main"
+entrypoint_success_script="$temp_dir/test_entrypoint_success.sh"
+cat << 'EOF' > "$entrypoint_success_script"
+#!/bin/bash
+log_output=/dev/null
+main() { return 0; }
+systemctl() { echo "systemctl called: $*"; return 0; }
+EOF
+sed -n '/^if \[\[ "\${BASH_SOURCE\[0\]}" == "\$0" \]\]; then/,$p' "$script_under_test" >> "$entrypoint_success_script"
+chmod +x "$entrypoint_success_script"
+entrypoint_success_output=$("${BASH:-bash}" "$entrypoint_success_script" 2>&1)
+entrypoint_success_status=$?
+assert_eq "entrypoint success status" 0 "$entrypoint_success_status"
+if [[ ! "$entrypoint_success_output" =~ "Rebooting" ]]; then
+	fail "entrypoint did not reboot after main succeeded: $entrypoint_success_output"
+fi
+if [[ ! "$entrypoint_success_output" =~ "systemctl called: reboot" ]]; then
+	fail "entrypoint did not invoke systemctl reboot: $entrypoint_success_output"
+fi
 
 echo "disk imaging identifier tests passed"

@@ -95,17 +95,24 @@ pub enum CertBackend {
 ///
 /// `shared_vault` is the already-constructed credential Vault client, reused
 /// for [`CertBackend::SharedVault`] so no second client or token lease is
-/// created in the common case. `spiffe` is the site's SPIFFE identity; a
-/// dedicated Vault issues certs under the same identity namespace as the rest
-/// of the deployment.
+/// created in the common case; that backend fails without it, and a dedicated
+/// Vault never uses it. `spiffe` is the site's SPIFFE identity; a dedicated
+/// Vault issues certs under the same identity namespace as the rest of the
+/// deployment.
 pub fn create_certificate_provider(
     config: &CertificateConfig,
-    shared_vault: &Arc<ForgeVaultClient>,
+    shared_vault: Option<&Arc<ForgeVaultClient>>,
     spiffe: SpiffeIdentity,
 ) -> eyre::Result<Arc<dyn CertificateProvider>> {
     match &config.backend {
         CertBackend::SharedVault => {
-            let provider: Arc<dyn CertificateProvider> = shared_vault.clone();
+            let provider: Arc<dyn CertificateProvider> = shared_vault
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "the shared vault certificate backend requires the credential vault client"
+                    )
+                })?
+                .clone();
             Ok(provider)
         }
         CertBackend::DedicatedVault(dedicated) => {

@@ -204,11 +204,11 @@ func testMachineEnableTenantAccountTargetedInstanceCreation(t *testing.T, dbSess
 	require.NoError(t, err)
 	require.NotEmpty(t, tas)
 
+	accountConfig := tas[0].Config
+	accountConfig.TargetedInstanceCreation = true
 	_, err = taDAO.Update(context.Background(), nil, cdbm.TenantAccountUpdateInput{
 		TenantAccountID: tas[0].ID,
-		Config: &cdbm.TenantAccountConfig{
-			TargetedInstanceCreation: true,
-		},
+		Config:          &accountConfig,
 	})
 	assert.Nil(t, err)
 }
