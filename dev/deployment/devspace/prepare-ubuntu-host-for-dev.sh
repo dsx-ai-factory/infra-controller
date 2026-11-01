@@ -23,6 +23,7 @@ PROTO_SHA256_X86_64="877408bab02767938d1e5555f11c39dfe05e96f2a9571bc59dd2639f33d
 PROTO_SHA256_AARCH_64="58135d20be2831d9ca5a39675f4499f9cbad8b44f9c3d814287c0b543155a812"
 GRPCURL_VERSION="1.8.7"
 VAULT_VERSION="1.21.4-1"
+HASHICORP_GPG_FINGERPRINT="D55C0D1AC78A8D8126CB631CFC9CA96ACA026560"
 CORE_POSTGRES_IMAGE="postgres:14.5-alpine"
 REST_POSTGRES_IMAGE="postgres:14.4-alpine"
 CORE_POSTGRES_CONTAINER="nico-core-test-postgres"
@@ -239,6 +240,20 @@ EOF
   chmod 0644 "${OPENSSL_COMPAT_CONFIG}"
 }
 
+is_valid_hashicorp_keyring() {
+  local keyring="${1-/usr/share/keyrings/hashicorp-archive-keyring.gpg}"
+  command -v gpg >/dev/null 2>&1 || return 1
+  [[ -f "${keyring}" && -s "${keyring}" ]] || return 1
+  local keys
+  keys="$(gpg --batch --with-colons --show-keys "${keyring}" 2>/dev/null)" || return 1
+  awk -F: -v expected="fpr:::::::::${HASHICORP_GPG_FINGERPRINT}:" '
+    { sub(/[ \t\r]+$/, "") }
+    $0 == expected { matched = 1 }
+    $2 == "r" || $2 == "e" { invalid = 1 }
+    END { exit (matched && !invalid ? 0 : 1) }
+  ' <<<"${keys}"
+}
+
 configure_hashicorp_apt_source() {
   local keyring=/usr/share/keyrings/hashicorp-archive-keyring.gpg
   local source=/etc/apt/sources.list.d/hashicorp.sources
@@ -246,9 +261,10 @@ configure_hashicorp_apt_source() {
   # Normalize the malformed deb822 source produced by older setup versions.
   # A duplicate source with different Signed-By settings also breaks apt.
   rm -f /etc/apt/sources.list.d/hashicorp.list
-  if [[ ! -s "${keyring}" ]]; then
+  if ! is_valid_hashicorp_keyring "${keyring}"; then
     rm -f "${source}"
-    return
+    log "HashiCorp keyring is not verified; deferring source configuration to Vault installation"
+    return 0
   fi
   cat >"${source}" <<EOF
 Types: deb
@@ -506,16 +522,26 @@ install_vault() {
   installed_version="$(
     dpkg-query -W -f='${Version}' vault 2>/dev/null || true
   )"
-  if [[ ! -s "${keyring}" || \
-    -z "${vault_path}" || \
-    "$(readlink -f "${vault_path}" 2>/dev/null || true)" != "/usr/bin/vault" || \
-    "${installed_version}" != "${VAULT_VERSION}" ]]; then
-    curl -fsSL https://apt.releases.hashicorp.com/gpg |
-      gpg --dearmor --yes -o "${keyring}"
+  if ! is_valid_hashicorp_keyring "${keyring}"; then
+    local keyring_dir temp_keyring
+    keyring_dir="$(dirname "${keyring}")"
+    install -m 0755 -d "${keyring_dir}"
+    temp_keyring="$(mktemp -p "${keyring_dir}" .hashicorp-keyring.XXXXXX)"
+    if ! curl -fsSL https://apt.releases.hashicorp.com/gpg |
+         gpg --dearmor --yes -o "${temp_keyring}"; then
+      rm -f "${temp_keyring}"
+      die "failed to download or verify HashiCorp APT keyring"
+    fi
+    chmod 0644 "${temp_keyring}"
+    if ! is_valid_hashicorp_keyring "${temp_keyring}"; then
+      rm -f "${temp_keyring}"
+      die "failed to download or verify HashiCorp APT keyring"
+    fi
+    mv "${temp_keyring}" "${keyring}"
   fi
   configure_hashicorp_apt_source
   if [[ -n "${vault_path}" && \
-    "$(readlink -f "${vault_path}")" == "/usr/bin/vault" && \
+    "$(readlink -f "${vault_path}" 2>/dev/null || true)" == "/usr/bin/vault" && \
     "${installed_version}" == "${VAULT_VERSION}" ]]; then
     log "Reusing installed Vault"
     return
