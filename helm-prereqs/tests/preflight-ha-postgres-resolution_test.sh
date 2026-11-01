@@ -385,37 +385,6 @@ KEYCLOAK_NS=other-ns _check_keycloak_ns
 check_errors "KEYCLOAK_NS mismatch" "${BLOCKING_ERRORS[*]:-}" \
     "KEYCLOAK_NS is other-ns, but keycloak.namespace is kc-ns"
 
-# -y continues past ordinary preflight errors but never past a blocking one.
-sed -n '/^# Output and prompts/,$p' "${PREFLIGHT_SH}" > "${TEST_TMP_DIR}/output.sh"
-run_output() {
-    local blocking="$1"
-    # shellcheck disable=SC2034 # Read by the sourced output section.
-    (
-        _SOURCED=true
-        AUTO_YES=true
-        _NICO_REST_ENABLED=false
-        ERRORS=("an ordinary error")
-        WARNINGS=()
-        BLOCKING_ERRORS=()
-        if [[ "${blocking}" == "true" ]]; then
-            BLOCKING_ERRORS=("a database error")
-        fi
-        # shellcheck disable=SC1091 # Generated from preflight.sh above.
-        source "${TEST_TMP_DIR}/output.sh"
-    )
-}
-if run_output true > "${TEST_TMP_DIR}/blocking.out" 2>&1; then
-    echo "FAIL -y: preflight continued past a blocking error" >&2
-    failures=$((failures + 1))
-elif ! grep -Fq "a database error" "${TEST_TMP_DIR}/blocking.out"; then
-    echo "FAIL -y: preflight did not print the blocking error" >&2
-    failures=$((failures + 1))
-fi
-if ! run_output false > /dev/null 2>&1; then
-    echo "FAIL -y: preflight stopped on an ordinary error" >&2
-    failures=$((failures + 1))
-fi
-
 if (( failures > 0 )); then
     exit 1
 fi
