@@ -77,6 +77,9 @@ jobs:
       - name: Test DevSpace REST integration addresses
         run: bash dev/deployment/devspace/setup-rest-integration_test.sh
 
+      - name: Test DevSpace host runtime
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest dev/deployment/devspace/tests/test_host_runtime.py
+
       - name: Test development bootstrap addresses
         run: python3 -B dev/bin/test_bootstrap_addresses.py
 
