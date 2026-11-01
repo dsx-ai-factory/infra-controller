@@ -1,0 +1,48 @@
+suite: hardware-health termination grace period
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: leaves headroom over the default 20s collector drain budget
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 30
+
+  - it: allows operators to set a longer grace period
+    set:
+      terminationGracePeriodSeconds: 45
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 45
+
+  - it: fails when the grace period does not exceed the default shutdown_timeout
+    set:
+      terminationGracePeriodSeconds: 20
+    asserts:
+      - failedTemplate:
+          errorMessage: terminationGracePeriodSeconds (20) must exceed hardware-health's shutdown_timeout (20s)
+
+  - it: fails when the grace period does not exceed a configured shutdown_timeout
+    set:
+      env.CARBIDE_HEALTH__SHUTDOWN_TIMEOUT: 60s
+    asserts:
+      - failedTemplate:
+          errorMessage: terminationGracePeriodSeconds (30) must exceed hardware-health's shutdown_timeout (60s)
+
+  - it: allows a grace period above a configured shutdown_timeout
+    set:
+      terminationGracePeriodSeconds: 15
+      env.CARBIDE_HEALTH__SHUTDOWN_TIMEOUT: 10s
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 15
+
+  - it: skips shutdown_timeout values that are not whole seconds
+    set:
+      env.CARBIDE_HEALTH__SHUTDOWN_TIMEOUT: 1m
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 30
