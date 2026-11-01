@@ -146,7 +146,8 @@
 #   export NICO_REST_IMAGE_TAG=<tag>       # unless using --skip-rest
 #   export REGISTRY_PULL_SECRET=<secret>  # optional
 #   ./setup.sh                          # prompts before deploying NICo Core and NICo REST
-#   ./setup.sh -y                       # skip all prompts, deploy everything automatically
+#   ./setup.sh -y                       # accept routine prompts; failed preflight checks still stop setup
+#   ./setup.sh -y --ignore-preflight-errors  # explicitly bypass ordinary preflight errors (database safety checks still stop setup)
 #   ./setup.sh --skip-core              # skip Phase 6 NICo Core (print command, deploy manually)
 #   ./setup.sh --skip-rest              # skip Phase 7 NICo REST entirely (no repo needed)
 #   ./setup.sh --skip-rms               # skip the Rack Manager Service (installed by default otherwise)
@@ -200,6 +201,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 AUTO_YES=false
+IGNORE_PREFLIGHT_ERRORS=false
 SKIP_CORE=false
 SKIP_REST=false
 # DPF (DOCA Platform Framework) DPU provisioning installs by DEFAULT. Opt out
@@ -221,6 +223,7 @@ SITE_OVERLAY=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y)             AUTO_YES=true  ;;
+        --ignore-preflight-errors) IGNORE_PREFLIGHT_ERRORS=true ;;
         --skip-core)    SKIP_CORE=true ;;
         --skip-rest)    SKIP_REST=true ;;
         --install-dpf)  INSTALL_DPF=true ;;   # explicit; DPF is the default
@@ -250,17 +253,18 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--ignore-preflight-errors] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
 
 # ---------------------------------------------------------------------------
 # Pre-flight checks — env vars, tools, config files. Resolves NICO_REST_DIR
-# (in-tree rest-api/) and NICO_REST_HELM_DIR (in-tree helm/rest/). Exits 1 if
-# user declines to continue.
+# (in-tree rest-api/) and NICO_REST_HELM_DIR (in-tree helm/rest/). Failed checks
+# stop setup unless --ignore-preflight-errors permits them; database safety
+# checks always stop setup.
 # ---------------------------------------------------------------------------
-export AUTO_YES SKIP_CORE SKIP_REST INSTALL_DPF INSTALL_RMS
+export AUTO_YES IGNORE_PREFLIGHT_ERRORS SKIP_CORE SKIP_REST INSTALL_DPF INSTALL_RMS
 # Validate INSTALL_DPF BEFORE sourcing preflight — preflight gates its DPF
 # checks on INSTALL_DPF==true, so a garbage NICO_INSTALL_DPF would otherwise
 # silently skip those checks before erroring here.

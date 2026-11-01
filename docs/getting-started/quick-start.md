@@ -419,6 +419,13 @@ source ./preflight.sh
 
 The `preflight.sh` script is also run automatically at the start of every `setup.sh` invocation.
 
+Failed prerequisite checks return exit code `1` and stop setup, including when
+`-y` is set. To continue despite ordinary errors reported in the preflight
+summary, explicitly pass `--ignore-preflight-errors` to `setup.sh` or standalone
+`bash ./preflight.sh`. The override prints the errors and a continuation message;
+database safety errors remain fatal. It does not accept routine deployment
+prompts automatically. Warnings alone prompt for confirmation unless `-y` is set.
+
 The `preflight.sh` script checks the following:
 
 | Category | Checks |
@@ -463,7 +470,8 @@ You can combine common options as needed:
 | `--skip-rest` | Skip all Phase 7 NICo REST phases. |
 | `--skip-rms` | Skip Phase 5c Rack Management Service (installs by default; `NICO_RMS_IMAGE_TAG` required otherwise). |
 | `--with-observability` | Install the optional local metrics, logs, and traces stack before Phase 7. This also runs with `--skip-rest`; see [`helm-prereqs/observability/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/README.md) for standalone installation. |
-| `-y` | Accept setup prompts automatically. |
+| `-y` | Accept routine setup prompts and preflight warnings automatically. Preflight errors still stop setup. |
+| `--ignore-preflight-errors` | Continue despite ordinary errors reported in the preflight summary. Database safety errors remain fatal. Combine with `-y` to also accept routine prompts. |
 
 The `setup.sh` script installs all prerequisites and NICo components in sequential phases:
 
