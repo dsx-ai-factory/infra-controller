@@ -878,6 +878,48 @@ impl K8sConfigRepository for KubeRepository {
 }
 
 #[async_trait]
+impl BmcCredentialRepository for KubeRepository {
+    async fn get_bmc_credential_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<Secret>, DpfError> {
+        let api: Api<Secret> = self.api(namespace);
+        Ok(api.get_opt(name).await?)
+    }
+
+    async fn create_bmc_credential_secret(&self, secret: &Secret) -> Result<(), DpfError> {
+        let namespace = secret.metadata.namespace.as_deref().ok_or_else(|| {
+            DpfError::InvalidState("BMC credential Secret namespace is missing".to_string())
+        })?;
+        let api: Api<Secret> = self.api(namespace);
+        api.create(&PostParams::default(), secret).await?;
+        Ok(())
+    }
+
+    async fn delete_bmc_credential_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        let api: Api<Secret> = self.api(namespace);
+        let params = DeleteParams {
+            preconditions: Some(Preconditions {
+                uid: Some(preconditions.uid.clone()),
+                resource_version: Some(preconditions.resource_version.clone()),
+            }),
+            ..Default::default()
+        };
+        match api.delete(name, &params).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(error)) if error.is_not_found() => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[async_trait]
 impl DpfOperatorConfigRepository for KubeRepository {
     async fn get(
         &self,
