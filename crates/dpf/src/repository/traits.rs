@@ -388,6 +388,7 @@ pub trait K8sConfigRepository: Send + Sync {
 /// Immutable per-device BMC credential Secrets.
 #[async_trait]
 pub trait BmcCredentialRepository: Send + Sync {
+    /// Fetch the named Secret, returning `None` when it is absent from the namespace.
     async fn get_bmc_credential_secret(
         &self,
         name: &str,
@@ -395,12 +396,17 @@ pub trait BmcCredentialRepository: Send + Sync {
     ) -> Result<Option<k8s_openapi::api::core::v1::Secret>, DpfError>;
 
     /// Create only; an existing Secret must never be overwritten.
+    /// The Secret must include its namespace. A name collision must return
+    /// `DpfError::AlreadyExists` or `DpfError::KubeError` with Kubernetes reason
+    /// `AlreadyExists`, so the SDK can reread and verify the existing Secret.
     async fn create_bmc_credential_secret(
         &self,
         secret: &k8s_openapi::api::core::v1::Secret,
     ) -> Result<(), DpfError>;
 
     /// Delete exactly the observed Secret, respecting its finalizers.
+    /// A missing Secret is success. A UID or resource-version mismatch must return
+    /// an error without deleting the Secret currently at that name.
     async fn delete_bmc_credential_secret(
         &self,
         name: &str,

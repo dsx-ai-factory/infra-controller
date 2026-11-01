@@ -263,9 +263,9 @@ impl<R: DpuDeviceRepository, L> DpfSdk<R, L> {
 
 impl<R: BmcCredentialRepository + DpuDeviceRepository, L> DpfSdk<R, L> {
     /// Request deletion of a NICo-owned old Secret only after confirmed adoption of its replacement.
-    /// Checks the target DPUDevice's adoption and Secret ownership. The caller must serialize lifecycle
-    /// work. UID and resource-version preconditions protect Secret replacements, and DPF's finalizers
-    /// remain intact. Missing is success.
+    /// Checks the target DPUDevice's adoption and Secret ownership. Callers must keep each credential
+    /// Secret exclusive to its owning DPUDevice and serialize lifecycle work. UID and resource-version
+    /// preconditions protect Secret replacements, and DPF's finalizers remain intact. Missing is success.
     pub async fn delete_old_bmc_credential_secret(
         &self,
         device_id: &str,
