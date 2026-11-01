@@ -207,14 +207,6 @@ case "${NICO_DPF_EXTERNAL}" in
     true|false) ;;
     *) echo "Error: NICO_DPF_EXTERNAL must be true or false (got '${NICO_DPF_EXTERNAL}')"; exit 1 ;;
 esac
-if [[ "${NICO_DPF_EXTERNAL}" == "true" && "${INSTALL_DPF}" != "true" ]]; then
-    echo "Error: NICO_DPF_EXTERNAL=true requires DPF enabled in NICo Core; do not combine it with --skip-dpf/NICO_SKIP_DPF/NICO_INSTALL_DPF=false." >&2
-    exit 1
-fi
-# INSTALL_DPF controls the NICo Core DPF integration. The external mode only
-# suppresses the platform installation phase; Core still renders [dpf] and RBAC.
-INSTALL_DPF_PLATFORM="${INSTALL_DPF}"
-[[ "${NICO_DPF_EXTERNAL}" == "true" ]] && INSTALL_DPF_PLATFORM=false
 # RMS (Rack Manager Service) installs by DEFAULT, mirroring DPF. Opt out with
 # --skip-rms or NICO_SKIP_RMS=true (e.g. sites without rack management, or an
 # externally managed RMS). NICO_INSTALL_RMS=false is honored too.
@@ -262,6 +254,15 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ "${NICO_DPF_EXTERNAL}" == "true" && "${INSTALL_DPF}" != "true" ]]; then
+    echo "Error: NICO_DPF_EXTERNAL=true requires DPF enabled in NICo Core; do not combine it with --skip-dpf/NICO_SKIP_DPF/NICO_INSTALL_DPF=false." >&2
+    exit 1
+fi
+# INSTALL_DPF controls the NICo Core DPF integration. The external mode only
+# suppresses the platform installation phase; Core still renders [dpf] and RBAC.
+INSTALL_DPF_PLATFORM="${INSTALL_DPF}"
+[[ "${NICO_DPF_EXTERNAL}" == "true" ]] && INSTALL_DPF_PLATFORM=false
 
 # ---------------------------------------------------------------------------
 # Pre-flight checks — env vars, tools, config files. Resolves NICO_REST_DIR
@@ -533,7 +534,7 @@ _prepare_bmc_v0_bootstrap_secret_untraced() {
 
     # The setup-managed credential exists only to bootstrap a locally installed
     # DPF stack. External DPF owns the shared credential and NICo must reuse it.
-    if [[ "${NICO_DPF_EXTERNAL}" == "true" ]] || ! "${INSTALL_DPF}"; then
+    if [[ "${NICO_DPF_EXTERNAL:-false}" == "true" ]] || ! "${INSTALL_DPF}"; then
         return 0
     fi
 
@@ -1306,8 +1307,8 @@ prepare_dpf_service_credentials() {
     # 5b.3 Pull + repo secrets. Idempotent (apply of a dry-run render).
     #      The dpu.nvidia.com/image-pull-secret label makes DPF propagate the
     #      Secret into DPUService image-pull secrets on the DPU cluster.
-    if [[ -n "${NICO_DPF_NGC_API_KEY}" ]]; then
-        echo "Creating DPF pull and Argo CD repository secrets..."
+    if [[ -n "${NICO_DPF_NGC_API_KEY}" || -n "${NICO_DPF_NICO_NGC_API_KEY}" ]]; then
+        echo "Creating configured DPF/NICo pull and Argo CD repository secrets..."
         # Build the docker-registry secrets off-argv: a kubectl `--docker-password`
         # argument is world-readable via ps / /proc on the host running setup.sh.
         # Feed the token through the builtin printf + a process-substitution file
@@ -1316,6 +1317,11 @@ prepare_dpf_service_credentials() {
         # docker-registry` would produce.
         _dpf_docker_secret() {  # secret-name, registry-server, token
             local _n="$1" _srv="$2" _tok="$3" _auth
+            if [[ "${NICO_DPF_EXTERNAL:-false}" == "true" ]] && kubectl get secret "${_n}" \
+                --namespace dpf-operator-system &>/dev/null; then
+                echo "Preserving externally managed secret ${_n}."
+                return 0
+            fi
             _auth="$(printf '%s' "\$oauthtoken:${_tok}" | base64 | tr -d '\n')"
             kubectl create secret generic "${_n}" \
                 --namespace dpf-operator-system \
@@ -1325,14 +1331,25 @@ prepare_dpf_service_credentials() {
                     "${_srv}" "${_tok}" "${_auth}") \
                 --dry-run=client -o yaml | kubectl apply -f -
         }
-        _dpf_docker_secret dpf-pull-secret  nvcr.io "${NICO_DPF_NGC_API_KEY}"
-        _dpf_docker_secret nico-pull-secret nvcr.io "${NICO_DPF_NICO_NGC_API_KEY}"
-        kubectl label secret dpf-pull-secret nico-pull-secret \
-            -n dpf-operator-system dpu.nvidia.com/image-pull-secret="" --overwrite
+        if [[ -n "${NICO_DPF_NGC_API_KEY}" ]]; then
+            _dpf_docker_secret dpf-pull-secret nvcr.io "${NICO_DPF_NGC_API_KEY}"
+            kubectl label secret dpf-pull-secret \
+                -n dpf-operator-system dpu.nvidia.com/image-pull-secret="" --overwrite
+        fi
+        if [[ -n "${NICO_DPF_NICO_NGC_API_KEY}" ]]; then
+            _dpf_docker_secret nico-pull-secret nvcr.io "${NICO_DPF_NICO_NGC_API_KEY}"
+            kubectl label secret nico-pull-secret \
+                -n dpf-operator-system dpu.nvidia.com/image-pull-secret="" --overwrite
+        fi
         # Argo CD helm repository secrets (argocd.argoproj.io/secret-type label
         # is how Argo CD discovers them). URLs must not end with '/'.
         _dpf_argo_repo_secret() {  # name, repo-name, url, extra literals...
             local _name="$1" _repo="$2" _url="$3"; shift 3
+            if [[ "${NICO_DPF_EXTERNAL:-false}" == "true" ]] && kubectl get secret "${_name}" \
+                --namespace dpf-operator-system &>/dev/null; then
+                echo "Preserving externally managed secret ${_name}."
+                return 0
+            fi
             kubectl create secret generic "${_name}" \
                 --namespace dpf-operator-system \
                 --from-literal=name="${_repo}" \
@@ -1350,13 +1367,15 @@ prepare_dpf_service_credentials() {
         # crates/api-core/src/dpf_services.rs), or Argo CD can't match the repo
         # and the private chart pull fails. Override in lockstep with
         # [dpf.services.*] when you mirror the charts.
-        _dpf_argo_repo_secret ngc-doca-oci-helm nvidia-doca-oci \
-            "${NICO_DPF_HELM_REPO_OCI:-nvcr.io/nvidia/doca}" \
-            --from-literal=enableOCI=true
-        _dpf_argo_repo_secret ngc-doca-https-helm nvidia-doca-https \
-            "${NICO_DPF_HELM_REPO_HTTPS:-https://helm.ngc.nvidia.com/nvidia/doca}"
-        _dpf_argo_repo_secret ngc-carbide-https-helm nvidia-carbide-https \
-            "${NICO_DPF_HELM_REPO_CARBIDE:-https://helm.ngc.nvidia.com/0837451325059433/carbide-dev}"
+        if [[ -n "${NICO_DPF_NGC_API_KEY}" ]]; then
+            _dpf_argo_repo_secret ngc-doca-oci-helm nvidia-doca-oci \
+                "${NICO_DPF_HELM_REPO_OCI:-nvcr.io/nvidia/doca}" \
+                --from-literal=enableOCI=true
+            _dpf_argo_repo_secret ngc-doca-https-helm nvidia-doca-https \
+                "${NICO_DPF_HELM_REPO_HTTPS:-https://helm.ngc.nvidia.com/nvidia/doca}"
+            _dpf_argo_repo_secret ngc-carbide-https-helm nvidia-carbide-https \
+                "${NICO_DPF_HELM_REPO_CARBIDE:-https://helm.ngc.nvidia.com/0837451325059433/carbide-dev}"
+        fi
     else
         echo "NICO_DPF_NGC_API_KEY / REGISTRY_PULL_SECRET not set — skipping DPF pull"
         echo "and Argo CD repository secrets (air-gapped or pre-loaded registry)."
