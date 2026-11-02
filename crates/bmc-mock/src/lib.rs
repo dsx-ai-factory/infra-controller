@@ -181,6 +181,9 @@ pub enum HardwareType {
     LiteOnPowerShelf,
     #[serde(rename = "delta_power_shelf")]
     DeltaPowerShelf,
+    /// VR NVL72 Delta AHE54V2037A shelf, modeled from PMC 3.3.8.
+    #[serde(rename = "delta_vrnvl72_power_shelf")]
+    DeltaVrnvl72PowerShelf,
     #[serde(rename = "nvidia_switch_nd5200_ld")]
     NvidiaSwitchNd5200Ld,
     #[serde(rename = "nvidia_switch_n5700_ld")]
@@ -210,6 +213,7 @@ impl fmt::Display for HardwareType {
             Self::NvidiaDgxVr => "NVIDIA DGX VR NVL".fmt(f),
             Self::LiteOnPowerShelf => "Lite-On Power Shelf".fmt(f),
             Self::DeltaPowerShelf => "Delta Power Shelf".fmt(f),
+            Self::DeltaVrnvl72PowerShelf => "Delta VR NVL72 Power Shelf".fmt(f),
             Self::NvidiaSwitchNd5200Ld => "NVIDIA Switch ND5200_LD".fmt(f),
             Self::NvidiaSwitchN5700Ld => "NVIDIA Switch N5700_LD".fmt(f),
             Self::NvidiaDgxH100 => "NVIDIA DGX H100".fmt(f),
@@ -244,7 +248,7 @@ impl HardwareType {
             Self::SupermicroGb300Nvl => Some(1),
             Self::NvidiaDgxVr => Some(1),
             Self::LiteOnPowerShelf => Some(0),
-            Self::DeltaPowerShelf => Some(0),
+            Self::DeltaPowerShelf | Self::DeltaVrnvl72PowerShelf => Some(0),
             Self::NvidiaSwitchNd5200Ld => Some(0),
             Self::NvidiaSwitchN5700Ld => Some(0),
             Self::NvidiaDgxH100 => Some(1),
@@ -349,6 +353,12 @@ pub trait Callbacks: Send + Sync + 'static {
         std::future::ready(Ok(()))
     }
 
+    /// Current externally owned chassis power: `Some(true)` is on, `Some(false)` is off.
+    /// Returning `None` leaves the hardware profile's initial power observation intact.
+    fn chassis_power_state(&self) -> Option<bool> {
+        None
+    }
+
     fn state_refresh_indication(&self);
 }
 
@@ -365,6 +375,21 @@ pub enum BootOptionKind {
 #[cfg(test)]
 mod hardware_type_tests {
     use super::HardwareType;
+
+    #[test]
+    fn vr_delta_shelf_serde_preserves_distinct_zero_dpu_identity() {
+        let hardware = HardwareType::DeltaVrnvl72PowerShelf;
+        assert_eq!(
+            serde_json::to_string(&hardware).unwrap(),
+            r#""delta_vrnvl72_power_shelf""#
+        );
+        assert_eq!(
+            serde_json::from_str::<HardwareType>(r#""delta_vrnvl72_power_shelf""#).unwrap(),
+            hardware
+        );
+        assert_eq!(hardware.fixed_number_of_dpu(), Some(0));
+        assert_ne!(hardware, HardwareType::DeltaPowerShelf);
+    }
 
     #[test]
     fn nvidia_switch_n5700_ld_serde_and_dpu_count() {

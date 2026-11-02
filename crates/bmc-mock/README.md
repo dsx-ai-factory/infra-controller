@@ -28,6 +28,52 @@ JSON builders. Runtime state, routing, capabilities, and fault injection remain 
 registry-defined BIOS/Dell attributes, bound actions, and expanded navigation
 payloads that the server generator does not yet model.
 
+## VR NVL72 Delta shelf, PMC 3.3.8
+
+Machine-a-tron's `delta_vrnvl72_power_shelf` hardware type models the recorded
+Delta AHE54V2037A controller with manager `PMC_0`, chassis `PowerShelf_0`, six
+PSUs, and nine firmware inventory components. Its initial versions are PMC
+`3.3.8`, backup PMC `3.3.6`, ERoT `1206`, and PSU `04320409`.
+The existing `delta_power_shelf` profile remains the older Delta 810 model.
+
+Add this machine entry to an otherwise configured Machine-a-tron file:
+
+```toml
+[machines.vr_delta_338]
+hw_type = "delta_vrnvl72_power_shelf"
+host_count = 1
+dpu_per_host_count = 0
+underlay_dhcp_relay_address = "192.0.2.1"
+bmc_dhcp_relay_address = "192.0.2.1"
+```
+
+Use relay addresses belonging to the test site's declared networks. This adds
+individual shelves; it does not introduce a full Vera Rubin rack layout.
+The profile omits `Systems`, exposes `PowerEquipment/PowerShelves`, and advertises
+`Chassis.Reset` with `On`, `ForceOn`, and `ForceOff`. It deliberately does not
+invent the legacy Delta OEM `TurnOnPSUs`/`TurnOffPSUs` actions. The power callback
+drives the shelf actor, and reads report its current chassis/PSU commanded state.
+Individual PSU reset and hardware-specific firmware activation are not modeled.
+
+`delta_vrnvl72_3_3_8.tar.gz` is a separate, sanitized GET snapshot in the existing
+Redfish mockup archive format: `redfish/v1/.../index.json`, without an enclosing
+vendor directory. It contains 77 successful responses captured read-only on
+29–30 October 2026. The observed `/Systems` HTTP 404 is preserved by omitting
+that resource. The adjacent manifest records resource hashes, versions, capture
+scope, and exclusions. IP/MAC addresses, hostnames, serials, and UUIDs are synthetic;
+account/session collections, certificates, logs, and write targets were excluded.
+
+For static replay, run from the repository root:
+
+```bash
+cargo run -p bmc-mock -- \
+  --targz crates/bmc-mock/delta_vrnvl72_3_3_8.tar.gz --port 8126
+```
+
+Archive replay is GET-only and does not implement authentication or mutable
+power. Use the generated hardware profile for Machine-a-tron actor behavior;
+use the archive to inspect the recorded resource tree and firmware quirks.
+
 ## Build the libvirt image
 
 Run from the infra-controller repository root:

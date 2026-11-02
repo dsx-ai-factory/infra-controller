@@ -71,6 +71,11 @@ async fn get_service_root<C: Callbacks>(State(state): State<BmcState<C>>) -> Res
                 .as_ref(),
         )
         .chassis(redfish::chassis::collection().odata_id.as_ref());
+    let builder = if state.power_equipment.is_some() {
+        builder.power_equipment(redfish::power_equipment::RESOURCE)
+    } else {
+        builder
+    };
     // Delta power shelves advertise no `Systems` collection (see `BmcState`).
     let builder = if state.exposes_computer_systems {
         builder.systems(redfish::computer_system::collection().odata_id.as_ref())

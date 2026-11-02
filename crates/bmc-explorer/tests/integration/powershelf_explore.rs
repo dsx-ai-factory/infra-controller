@@ -97,6 +97,33 @@ async fn explore_delta_power_shelf() {
     );
 }
 
+#[test]
+async fn explore_vr_delta_pmc_3_3_8_inventory_without_systems() {
+    let h = test_support::delta_vrnvl72_powershelf_bmc().await;
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
+    assert_eq!(report.endpoint_type, EndpointType::Bmc);
+    assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Delta));
+    assert_eq!(report.chassis[0].id, "PowerShelf_0");
+    assert_eq!(report.chassis[0].model.as_deref(), Some("AHE54V2037A"));
+    assert_eq!(report.systems[0].power_state, PowerState::On);
+    let inventory = report
+        .service
+        .iter()
+        .find(|s| s.id == "FirmwareInventory")
+        .unwrap();
+    assert_eq!(inventory.inventories.len(), 9);
+    for (id, version) in [
+        ("FW_PMC_primary", "3.3.8"),
+        ("FW_PMC_alt", "3.3.6"),
+        ("FW_PSU_1", "04320409"),
+    ] {
+        let component = inventory.inventories.iter().find(|f| f.id == id).unwrap();
+        assert_eq!(component.version.as_deref(), Some(version), "{id}");
+    }
+}
+
 // When every Delta PSU reports `Power: false`, the aggregated shelf state must
 // resolve to Off (all-off => Off), exercising the non-On path end-to-end.
 #[test]

@@ -51,11 +51,34 @@ pub(super) fn collection(chassis_id: &str) -> redfish::Collection<'static> {
 pub(crate) struct PowerSupply {
     pub(crate) id: Cow<'static, str>,
     value: serde_json::Value,
+    power_state_format: PowerStateFormat,
+}
+
+enum PowerStateFormat {
+    Boolean,
+    OemBoolean {
+        namespace: &'static str,
+        property: &'static str,
+    },
 }
 
 impl PowerSupply {
     pub(crate) fn to_json(&self) -> serde_json::Value {
         self.value.clone()
+    }
+
+    pub(crate) fn to_json_with_power_state(&self, powered_on: Option<bool>) -> serde_json::Value {
+        let mut value = self.to_json();
+        if let Some(on) = powered_on {
+            match self.power_state_format {
+                PowerStateFormat::Boolean => value["PowerState"] = on.into(),
+                PowerStateFormat::OemBoolean {
+                    namespace,
+                    property,
+                } => value["Oem"][namespace][property] = on.into(),
+            }
+        }
+        value
     }
 }
 
@@ -75,6 +98,7 @@ impl PowerSupply {
         .status(redfish::resource::Status::Ok.into());
         Self {
             id: resource.id.to_string().into(),
+            power_state_format: PowerStateFormat::Boolean,
             value: model
                 .into_json()
                 .patch(json!({"PowerState": powered_on, "CapacityWatts": capacity})),
@@ -87,6 +111,7 @@ impl PowerSupply {
         powered_on: bool,
         capacity: f64,
         fan_speed_target: i64,
+        firmware_version: Option<&str>,
     ) -> Self {
         let model = super::schema::power_supply::PowerSupply::new(
             resource.odata_id.as_ref(),
@@ -110,8 +135,17 @@ impl PowerSupply {
             .into(),
         ));
 
+        let model = if let Some(version) = firmware_version {
+            model.firmware_version(version)
+        } else {
+            model
+        };
         Self {
             id: resource.id.to_string().into(),
+            power_state_format: PowerStateFormat::OemBoolean {
+                namespace: "deltaenergysystems",
+                property: "Power",
+            },
             value: model.into_json(),
         }
     }

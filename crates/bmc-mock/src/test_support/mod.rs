@@ -53,6 +53,7 @@ pub struct TestCallbacks {
     pub(crate) refresh_count: AtomicUsize,
     command_received: Notify,
     actor: Mutex<Option<TestActorHandle>>,
+    chassis_power: Mutex<Option<bool>>,
 }
 
 #[derive(Debug)]
@@ -96,6 +97,13 @@ struct TestActor {
 impl TestActor {
     fn publish(&mut self, power_state: PowerState) {
         self.power_state = power_state;
+        if let Some(callbacks) = self.callbacks.upgrade() {
+            *callbacks.chassis_power.lock().unwrap() = match power_state {
+                PowerState::On => Some(true),
+                PowerState::Off => Some(false),
+                _ => None,
+            };
+        }
         if let Some(state) = self.state.upgrade() {
             state.set_power_state(power_state);
         }
@@ -259,6 +267,10 @@ impl TestCallbacks {
 }
 
 impl Callbacks for TestCallbacks {
+    fn chassis_power_state(&self) -> Option<bool> {
+        *self.chassis_power.lock().unwrap()
+    }
+
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
@@ -547,6 +559,28 @@ pub async fn delta_powershelf_bmc() -> TestBmcHandle {
         MachineRouterOptions::default(),
     ))
     .await
+}
+
+/// Generated VR NVL72 Delta AHE54V2037A shelf, PMC 3.3.8, with live chassis power.
+pub async fn delta_vrnvl72_powershelf_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::DeltaVrnvl72PowerShelf),
+        TestBmcConfig::default(),
+        "test-vr-delta".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+/// GET-only replay of the sanitized VR Delta PMC 3.3.8 capture.
+/// Authentication and mutable power behavior are not emulated by the archive router.
+#[cfg(test)]
+pub(crate) fn recorded_delta_vrnvl72_3_3_8_router() -> Router {
+    let archive_path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("delta_vrnvl72_3_3_8.tar.gz");
+    crate::tar_router::tar_router(crate::tar_router::TarGzOption::Disk(&archive_path), None)
+        .expect("recorded VR Delta archive must be readable")
 }
 
 /// Delta power shelf whose PSUs report the given per-bay on/off states under
