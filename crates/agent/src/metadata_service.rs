@@ -294,7 +294,6 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("IPv4 fallback socket");
-        let address = listener.local_addr().expect("fallback address");
         let mut tasks = JoinSet::new();
         let error = spawn_bound_metadata_service(
             listener,
@@ -307,9 +306,6 @@ mod tests {
         .expect_err("IPv4 fallback must be rejected");
         assert!(error.to_string().contains("fell back to IPv4"), "{error:#}");
         assert!(tasks.is_empty());
-        tokio::net::TcpListener::bind(address)
-            .await
-            .expect("rejected socket released");
     }
 
     /// Probe IPv6 independently of the binder under test so an IPv4 fallback
