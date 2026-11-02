@@ -159,7 +159,7 @@ pub async fn create(
         .bind(value.machine_id)
         .bind(value.mac_address)
         .bind(value.expected_network_segment_type)
-        .bind(&value.boot_interface_id)
+        .bind(value.boot_interface_id)
         .bind(value.primary_interface)
         .fetch_one(txn)
         .await

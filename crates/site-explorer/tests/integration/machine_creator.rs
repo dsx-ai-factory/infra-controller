@@ -297,6 +297,113 @@ async fn test_zero_dpu_rediscovery_after_stable_registration(
     Ok(())
 }
 
+/// A reported MAC belonging to another BMC must prevent both creation and refresh,
+/// whether ownership is still predicted or has already been promoted by DHCP.
+#[sqlx_test]
+async fn test_zero_dpu_rejects_interfaces_of_another_bmc(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let test_harness = TestHarness::builder(pool.clone()).build().await;
+    let domain = test_harness.test_domain().await;
+    let network_controller = test_harness.network_controller();
+    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    let host_inband_segment = network_controller.create_host_inband_segment(&domain).await;
+    let env = Env {
+        pool,
+        underlay_segment,
+        test_harness,
+    };
+    let creator = machine_creator(&env, machine_creator_config());
+    let owner = ManagedHostConfig::zero_dpu();
+    let shared_mac = owner.non_dpu_macs[0];
+    let mut owner_fixture = explored_host_fixture(&env, &owner).await;
+    assert!(
+        creator
+            .create_managed_host(
+                &owner_fixture.host,
+                &mut owner_fixture.host_report,
+                Some(&expected_machine(&owner)),
+                &env.pool,
+            )
+            .await?
+    );
+    let mut txn = env.pool.begin().await?;
+    let owner_machine_id: HostMachineId =
+        db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), shared_mac)
+            .await?
+            .expect("initial creation should predict the owner's NIC")
+            .machine_id
+            .try_into()?;
+    txn.rollback().await?;
+
+    let candidate = ManagedHostConfig::zero_dpu();
+    let extra_mac = candidate.non_dpu_macs[0];
+    let candidate = ManagedHostConfig {
+        non_dpu_macs: vec![shared_mac, extra_mac],
+        ..candidate
+    };
+    let mut candidate_fixture = explored_host_fixture(&env, &candidate).await;
+
+    for (scenario, promote_interface) in [("pending prediction", false), ("leased interface", true)]
+    {
+        if promote_interface {
+            env.api()
+                .discover_dhcp(
+                    rpc::forge::DhcpDiscovery::builder(
+                        shared_mac,
+                        host_inband_segment.relay_address,
+                    )
+                    .vendor_string("Bluefield")
+                    .tonic_request(),
+                )
+                .await?;
+        }
+
+        // Missing boot metadata makes an accidental refresh of the owner observable.
+        sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
+            .bind(owner_machine_id)
+            .execute(&env.pool)
+            .await?;
+        assert!(
+            !creator
+                .create_managed_host(
+                    &candidate_fixture.host,
+                    &mut candidate_fixture.host_report,
+                    Some(&expected_machine(&candidate)),
+                    &env.pool,
+                )
+                .await?,
+            "{scenario}: the conflicting report must not create a host",
+        );
+
+        let mut txn = env.pool.begin().await?;
+        assert!(
+            db::machine_desired_boot_interface::get(txn.as_mut(), &owner_machine_id)
+                .await?
+                .is_none(),
+            "{scenario}: the conflicting report must not refresh the owner's boot target",
+        );
+        assert!(
+            db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), extra_mac)
+                .await?
+                .is_none(),
+            "{scenario}: the conflicting report must not add its other NIC",
+        );
+        assert!(
+            db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
+                txn.as_mut(),
+                candidate.bmc_mac_address,
+            )
+            .await?
+            .is_none(),
+            "{scenario}: the conflicting BMC must remain unassociated",
+        );
+        txn.rollback().await?;
+    }
+
+    Ok(())
+}
+
 #[sqlx_test]
 async fn test_mi_attach_dpu_if_mi_exists_during_machine_creation(
     pool: PgPool,
