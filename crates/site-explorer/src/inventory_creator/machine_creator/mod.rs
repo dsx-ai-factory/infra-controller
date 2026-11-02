@@ -353,13 +353,11 @@ impl MachineCreator {
         attached_host_machine_id(&existing_hosts_by_dpu_id, &dpu_ids).map(Some)
     }
 
-    /// Creates a `Machine` objects for an identified `ManagedHost` with initial states
+    /// Creates machines for an identified managed host or reconciles an existing host.
     ///
-    /// Returns `true` if new `Machine` objects have been created or `false` otherwise.
+    /// Returns `true` only when new machines have been created.
     ///
-    /// Refuses to create a Managed Host when `expected_machine` is `None`: only hosts
-    /// listed in the `expected_machines` table are allowed to become Managed Hosts.
-    /// Already ingested hosts are not affected.
+    /// Both creation and reconciliation require a matching `expected_machine` entry.
     pub async fn create_managed_host(
         &self,
         explored_host: &ExploredManagedHost,
@@ -501,14 +499,12 @@ impl MachineCreator {
 
             let host_machine_id = attached_host_machine_id(&existing_hosts_by_dpu_id, &dpu_ids)?;
 
-            for dpu_report in managed_host.explored_host.dpus.iter() {
-                self.configure_dpu_interface(&mut txn, dpu_report).await?;
-            }
-
-            // The primary on an existing host may predate source
-            // tracking. Do not infer its historical selector from today's
-            // exploration or ExpectedMachine data.
-            reconcile_desired_boot_interface(&mut txn, &host_machine_id, None, None).await?;
+            Self::reconcile_existing_dpu_host(
+                &mut txn,
+                &host_machine_id,
+                &managed_host.explored_host.dpus,
+            )
+            .await?;
 
             txn.commit().await?;
             return Ok(ManagedHostCreation::Repaired {
@@ -632,6 +628,25 @@ impl MachineCreator {
         txn.commit().await?;
 
         Ok(ManagedHostCreation::Created { host_machine_id })
+    }
+
+    /// Reconciles DPU OOB ownership and the existing host's desired boot target.
+    /// The caller validates DPU attachment and owns the transaction.
+    async fn reconcile_existing_dpu_host(
+        txn: &mut PgConnection,
+        host_machine_id: &HostMachineId,
+        dpus: &[ExploredDpu],
+    ) -> SiteExplorerResult<()> {
+        for dpu in dpus {
+            Self::ensure_dpu_oob_interface_ownership(txn, dpu).await?;
+        }
+
+        // The primary on an existing host may predate source
+        // tracking. Do not infer its historical selector from today's
+        // exploration or ExpectedMachine data.
+        reconcile_desired_boot_interface(txn, host_machine_id, None, None).await?;
+
+        Ok(())
     }
 
     async fn dpf_based_dpu_provisioning_possible(
@@ -1177,7 +1192,7 @@ impl MachineCreator {
         explored_dpu: &ExploredDpu,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         if let Some(dpu_machine) = self.create_dpu_machine(txn, explored_dpu).await? {
-            self.configure_dpu_interface(txn, explored_dpu).await?;
+            Self::ensure_dpu_oob_interface_ownership(txn, explored_dpu).await?;
             let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
             let dpu_bmc_info = explored_dpu.bmc_info();
             let dpu_hw_info = explored_dpu.hardware_info()?;
@@ -1220,8 +1235,7 @@ impl MachineCreator {
     // the interface, associate it directly. Otherwise record a trusted prediction that DHCP can
     // promote atomically. DiscoverMachine requires this ownership before returning credentials, so
     // deferring the association to a later Site Explorer sweep would strand the DPU in discovery.
-    async fn configure_dpu_interface(
-        &self,
+    async fn ensure_dpu_oob_interface_ownership(
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
     ) -> SiteExplorerResult<bool> {
