@@ -103,8 +103,8 @@ impl InventoryCreator {
         }
     }
 
-    /// Creates machines, power shelves, and switches in their existing order.
-    pub(super) async fn create_inventory(
+    /// Creates or reconciles hosts, with periodic switch and power-shelf passes.
+    pub(super) async fn create_or_reconcile_hosts(
         &self,
         metrics: &mut SiteExplorationMetrics,
         identified_hosts: &mut [IdentifiedManagedHost],
@@ -112,7 +112,7 @@ impl InventoryCreator {
         already_ingested_bmc_ips: &HashSet<IpAddr>,
         explored_this_run: &HashSet<IpAddr>,
         suppressed_bmc_macs: &HashSet<MacAddress>,
-    ) -> SiteExplorerResult<()> {
+    ) {
         if self.config.create_machines.load(Ordering::Relaxed) {
             // The identify phase hands the hosts over in hash order. Creating
             // them in rack order lets each run complete the racks it can.
@@ -189,31 +189,6 @@ impl InventoryCreator {
                 reconcile_admin_addresses_start.elapsed(),
             );
         }
-
-        let reconcile_desired_boot_interfaces_start = Instant::now();
-        let reconcile_desired_boot_interfaces_res = self
-            .machine_creator
-            .reconcile_desired_boot_interfaces()
-            .await;
-        metrics.record_phase_latency(
-            "reconcile_desired_boot_interfaces",
-            reconcile_desired_boot_interfaces_start.elapsed(),
-        );
-        if let Err(error) = reconcile_desired_boot_interfaces_res {
-            tracing::warn!(
-                %error,
-                "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
-            );
-        }
-
-        self.create_switches_and_power_shelves(
-            metrics,
-            expected_endpoint_index,
-            suppressed_bmc_macs,
-        )
-        .await?;
-
-        Ok(())
     }
 
     /// Identifies and creates the power shelves and switches whose endpoints
@@ -227,7 +202,7 @@ impl InventoryCreator {
     /// and restarts when the pass becomes due, before the pass runs. The
     /// per-run latency totals and the per-run caps accumulate over the passes
     /// of one run.
-    async fn create_switches_and_power_shelves(
+    pub(super) async fn create_switches_and_power_shelves(
         &self,
         metrics: &mut SiteExplorationMetrics,
         expected_endpoint_index: &ExploredEndpointIndex,
