@@ -334,7 +334,9 @@ jobs:
       # Only main saves, like the other sccache entries: other refs can read
       # main's entry but not each other's. A run whose Cargo.lock matches the
       # restored entry skips the export and the upload. Gated on a successful
-      # build so an empty or partial directory is never saved under the key.
+      # build and export so an empty or partial directory is never saved under
+      # the key. A failed export only skips the save, since the image is
+      # already built and pushed by then.
       - name: Clear sccache directory for the export
         if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
         env:
@@ -342,7 +344,9 @@ jobs:
         run: rm -rf "${DIR}" && mkdir -p "${DIR}"
 
       - name: Export sccache directory
+        id: sccache-export
         if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.context_path }}
@@ -354,7 +358,7 @@ jobs:
           provenance: false
 
       - name: Save sccache
-        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true' && steps.sccache-export.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/sccache-build

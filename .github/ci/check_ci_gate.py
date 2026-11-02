@@ -75,6 +75,10 @@ CORE_POLICY = GatePolicy(
             "This administrative job reports the completed build to Slack on "
             "protected refs."
         ),
+        "prune-sccache": (
+            "This housekeeping job deletes superseded sccache archives on main "
+            "and does not validate build output."
+        ),
         "core-ci-pass": "A job cannot depend on itself.",
     },
 )
