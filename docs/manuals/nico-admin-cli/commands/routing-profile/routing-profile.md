@@ -16,10 +16,10 @@ nico-admin-cli routing-profile [-h|--help]
 
 ## DESCRIPTION
 
-Inspect named profiles from the connected Core servers loaded
-fnn.routing_profiles configuration. This is site-wide configuration
-inventory, not a tenants permitted choices or a VPCs effective policy.
-The inline admin VPC profile is excluded.
+Inspect named profiles from the fnn.routing_profiles configuration
+loaded by the connected Core server. This is site-wide configuration
+inventory, not the permitted choices for a tenant or the effective
+policy for a VPC. The inline admin VPC profile is excluded.
 
 ## OPTIONS
 

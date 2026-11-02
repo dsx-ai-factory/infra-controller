@@ -31,7 +31,7 @@ use crate::cfg::dispatch::Dispatch;
     _ => arg,
 }))]
 #[command(
-    long_about = "Inspect named profiles from the connected Core server's loaded fnn.routing_profiles configuration. This is site-wide configuration inventory, not a tenant's permitted choices or a VPC's effective policy. The inline admin VPC profile is excluded."
+    long_about = "Inspect named profiles from the fnn.routing_profiles configuration loaded by the connected Core server. This is site-wide configuration inventory, not the permitted choices for a tenant or the effective policy for a VPC. The inline admin VPC profile is excluded."
 )]
 pub(crate) enum Cmd {
     /// Show one or more configured routing profile definitions in name order, preserving unset values
