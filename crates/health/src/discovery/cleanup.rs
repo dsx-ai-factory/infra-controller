@@ -330,6 +330,8 @@ pub(super) async fn stop_removed_bmc_collectors(
             remaining_sensor_collector_count = ctx.collectors.len(CollectorKind::Sensor),
             remaining_log_collector_count = ctx.collectors.len(CollectorKind::Logs),
             remaining_firmware_collector_count = ctx.collectors.len(CollectorKind::Firmware),
+            remaining_resource_status_collector_count =
+                ctx.collectors.len(CollectorKind::ResourceStatus),
             remaining_leak_detector_collector_count =
                 ctx.collectors.len(CollectorKind::LeakDetector),
             remaining_nmxt_collector_count = ctx.collectors.len(CollectorKind::Nmxt),

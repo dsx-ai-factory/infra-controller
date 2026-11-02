@@ -512,6 +512,70 @@ pub struct FirmwareInfo {
     pub attributes: Vec<MetricLabel>,
 }
 
+/// Redfish resource kinds covered by periodic status observations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedfishResourceType {
+    /// A `ComputerSystem` resource.
+    System,
+    /// A `Manager` resource.
+    Manager,
+    /// A `Chassis` resource.
+    Chassis,
+    /// A `SoftwareInventory` resource beneath `UpdateService/FirmwareInventory`.
+    Firmware,
+}
+
+impl RedfishResourceType {
+    /// Returns the stable lowercase OTLP attribute value for this resource type.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Manager => "manager",
+            Self::Chassis => "chassis",
+            Self::Firmware => "firmware",
+        }
+    }
+}
+
+/// One periodically observed top-level Redfish resource and its status.
+#[derive(Clone, Debug)]
+pub struct ResourceStatusInfo {
+    /// Kind of Redfish resource observed.
+    pub resource_type: RedfishResourceType,
+    /// Redfish resource `Id`.
+    pub id: String,
+    /// Redfish resource `Name`.
+    pub name: String,
+    /// `None` when the BMC omits `Status`; absence is not interpreted as healthy.
+    pub status: Option<RedfishStatus>,
+}
+
+/// Status attached to a periodically observed Redfish resource.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RedfishStatus {
+    /// Redfish `Status.State` using its canonical wire spelling.
+    pub state: Option<String>,
+    /// Redfish `Status.Health` using its canonical wire spelling.
+    pub health: Option<String>,
+    /// Redfish `Status.HealthRollup` using its canonical wire spelling.
+    pub health_rollup: Option<String>,
+    /// Active Redfish conditions, or `None` when the BMC omitted the property.
+    pub conditions: Option<Vec<RedfishCondition>>,
+}
+
+/// Bounded, machine-readable detail from one active Redfish condition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RedfishCondition {
+    /// Time at which the condition occurred, when reported.
+    pub timestamp: Option<String>,
+    /// Redfish message registry identifier.
+    pub message_id: String,
+    /// Redfish condition severity using its canonical wire spelling.
+    pub severity: Option<String>,
+    /// Redfish condition type using its canonical wire spelling.
+    pub condition_type: Option<String>,
+}
+
 /// Placement of the sensor behind a sensor probe result.
 ///
 /// Lets a consumer attribute a reading to its power supply without parsing
@@ -567,6 +631,8 @@ pub enum CollectorEvent {
     CollectorRemoved,
     Log(Box<LogRecord>),
     Firmware(FirmwareInfo),
+    /// Periodic status observation for one top-level Redfish resource.
+    ResourceStatus(Box<ResourceStatusInfo>),
     HealthReport(Arc<HealthReport>),
 }
 

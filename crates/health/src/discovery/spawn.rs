@@ -33,9 +33,10 @@ use crate::collectors::{
     ManagerCollector, ManagerCollectorConfig, MetricsCollector, MetricsCollectorConfig,
     NmxcCollector, NmxcCollectorConfig, NmxcSchemaOverrideCollector,
     NmxcSchemaOverrideCollectorConfig, NmxtCollector, NmxtCollectorConfig, NvueRestCollector,
-    NvueRestCollectorConfig, SensorCollector, SensorCollectorConfig, SseCursorSink,
-    SseLogCollector, SseLogCollectorConfig, StreamingCollectorStartContext, TelemetryCollector,
-    TelemetryCollectorConfig, spawn_gnmi_collector,
+    NvueRestCollectorConfig, ResourceStatusCollector, ResourceStatusCollectorConfig,
+    SensorCollector, SensorCollectorConfig, SseCursorSink, SseLogCollector, SseLogCollectorConfig,
+    StreamingCollectorStartContext, TelemetryCollector, TelemetryCollectorConfig,
+    spawn_gnmi_collector,
 };
 use crate::config::{
     Configurable, LogCollectionMode, NmxcCollectorConfig as NmxcCollectorOptions, PeriodicLogConfig,
@@ -149,6 +150,7 @@ pub(super) fn collector_eligibility(
                 || ctx.telemetry_config.is_enabled()
                 || logs
                 || ctx.firmware_config.is_enabled()
+                || ctx.resource_status_config.is_enabled()
                 || (ctx.manager_config.is_enabled()
                     && matches!(endpoint.metadata, Some(EndpointMetadata::PowerShelf(_))))
                 || ctx.leak_detector_config.is_enabled()
@@ -649,6 +651,48 @@ fn spawn_generic_redfish_collectors(
                     endpoint = ?endpoint.addr,
                     rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     "Could not start firmware collector"
+                )
+            }
+        }
+    }
+
+    if let Configurable::Enabled(resource_status_cfg) = &ctx.resource_status_config
+        && !ctx.collectors.contains(CollectorKind::ResourceStatus, &key)
+    {
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("resource_status_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
+        match Collector::start::<ResourceStatusCollector<BmcClient>>(
+            endpoint_arc.clone(),
+            bmc.clone(),
+            ResourceStatusCollectorConfig {
+                data_sink: data_sink.clone(),
+            },
+            CollectorStartContext {
+                limiter: ctx.limiter.clone(),
+                iteration_interval: resource_status_cfg.poll_interval,
+                collector_registry,
+                metrics_manager: ctx.metrics_manager.clone(),
+            },
+        ) {
+            Ok(collector) => {
+                ctx.collectors
+                    .insert(CollectorKind::ResourceStatus, key.clone().into(), collector);
+                tracing::info!(
+                    endpoint_key = %key,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                    resource_status_collector_count =
+                        ctx.collectors.len(CollectorKind::ResourceStatus),
+                    "Started resource status collection for BMC endpoint"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    endpoint = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                    "Could not start resource status collector"
                 )
             }
         }
@@ -1266,6 +1310,7 @@ mod tests {
         config.collectors.sensors = Configurable::Enabled(Default::default());
         config.collectors.logs = Configurable::Enabled(Default::default());
         config.collectors.firmware = Configurable::Enabled(Default::default());
+        config.collectors.resource_status = Configurable::Enabled(Default::default());
         config.collectors.leak_detector = Configurable::Enabled(Default::default());
         config.collectors.nmxt = Configurable::Disabled;
         config.collectors.nmxc = Configurable::Disabled;
@@ -1289,7 +1334,37 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Firmware), 0);
+        assert_eq!(ctx.collectors.len(CollectorKind::ResourceStatus), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::LeakDetector), 0);
+    }
+
+    #[tokio::test]
+    async fn resource_status_collector_starts_for_generic_redfish_endpoints() {
+        let mut config = Config::default();
+        config.collectors.sensors = Configurable::Disabled;
+        config.collectors.manager = Configurable::Disabled;
+        config.collectors.logs = Configurable::Disabled;
+        config.collectors.firmware = Configurable::Disabled;
+        config.collectors.resource_status = Configurable::Enabled(Default::default());
+        config.collectors.leak_detector = Configurable::Disabled;
+
+        let mut ctx = context_with_config(config, "test_resource_status_start");
+        let endpoint = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 8),
+            "55:66:77:88:99:bb",
+            Some(machine_metadata()),
+        );
+
+        spawn_collectors_for_endpoint(
+            &mut ctx,
+            &endpoint,
+            Some(Arc::new(NoopSink)),
+            "test_resource_status_start",
+        )
+        .expect("spawn should succeed");
+
+        assert_eq!(ctx.collectors.len(CollectorKind::ResourceStatus), 1);
+        assert_eq!(ctx.collectors.len(CollectorKind::Firmware), 0);
     }
 
     #[tokio::test]

@@ -389,6 +389,15 @@ impl DataSink for OtlpSink {
                 let key = format!("{}|firmware|{}", context.endpoint_key, info.component);
                 (key, event.clone())
             }
+            CollectorEvent::ResourceStatus(info) => {
+                let key = format!(
+                    "{}|resource_status|{}|{}",
+                    context.endpoint_key,
+                    info.resource_type.as_str(),
+                    info.id
+                );
+                (key, event.clone())
+            }
             _ => return Ok(()),
         };
 

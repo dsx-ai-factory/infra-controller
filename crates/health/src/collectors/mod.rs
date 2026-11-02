@@ -30,6 +30,7 @@ mod nvue;
 #[cfg(test)]
 pub(in crate::collectors) mod projection_test_support;
 mod reachability;
+mod resource_status;
 mod runtime;
 mod sensors;
 mod telemetry;
@@ -63,6 +64,7 @@ pub(crate) use reachability::{
     ReachabilityCollectorStartConfig, ReachabilityService, ReachabilityTarget,
 };
 pub(crate) use runtime::CANCELLED_CONNECT_GRACE;
+pub use resource_status::{ResourceStatusCollector, ResourceStatusCollectorConfig};
 pub use runtime::{
     BackoffConfig, CloseReason, Collector, CollectorStartContext, EventStream, ExponentialBackoff,
     IterationResult, PeriodicCollector, StreamMetrics, StreamingCollector,

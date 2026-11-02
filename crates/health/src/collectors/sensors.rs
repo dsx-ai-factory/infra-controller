@@ -629,6 +629,7 @@ mod tests {
                 CollectorEvent::CollectorRemoved => Some(ObservedEvent::Removed),
                 CollectorEvent::Log(_)
                 | CollectorEvent::Firmware(_)
+                | CollectorEvent::ResourceStatus(_)
                 | CollectorEvent::HealthReport(_) => None,
             };
 
