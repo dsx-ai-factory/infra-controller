@@ -1166,6 +1166,8 @@ impl MainLoop {
 
                 let tenant_peers = ethernet_virtualization::tenant_peers(&conf);
                 let mut should_check_ipv6_unicast = false;
+                // Stays `None` when HBN is down and the DHCP update is skipped.
+                let mut dhcp_server_update = None;
                 if self.is_hbn_up {
                     // First thing is to read the existing HBN version and properly set the hbn device names
                     // associated with that version.
@@ -1371,20 +1373,20 @@ impl MainLoop {
                         &update_result,
                         &dhcp_result,
                     );
-                    match (update_result, dhcp_result) {
+                    match (update_result, &dhcp_result) {
                         (Ok(hbn_changed), Ok(dhcp_changed)) if !version_recorded => {
                             // Leave an obsolete successful apply pending so the next iteration
                             // reconciles the latest cached response. Retain its change flags for the
                             // post-config health wait and active loop period.
                             has_changed_hbn_config = hbn_changed;
-                            has_changed_configs = hbn_changed || dhcp_changed;
+                            has_changed_configs = hbn_changed || *dhcp_changed;
                             tracing::info!(
                                 "Desired network configuration changed during the update"
                             );
                         }
                         (Ok(hbn_changed), Ok(dhcp_changed)) => {
                             has_changed_hbn_config = hbn_changed;
-                            has_changed_configs = hbn_changed || dhcp_changed;
+                            has_changed_configs = hbn_changed || *dhcp_changed;
                             hbn_dhcp_applied_ok = true;
                             if self.options.agent_platform_type.is_dpu_os()
                                 && let Err(err) = mtu::ensure().await
@@ -1449,6 +1451,7 @@ impl MainLoop {
                             status_out.network_config_error = Some(err.to_string());
                         }
                     }
+                    dhcp_server_update = Some(dhcp_result.map(|_| ()));
 
                     if let Some(result) = astra_config_status {
                         set_astra_config_status(
@@ -1489,7 +1492,7 @@ impl MainLoop {
                 // It will guarantee that the Instance Config that is acknowledged to
                 // carbide via the status message is actually visible to the tenant via
                 // FMDS
-                let fmds_applied_ok = self
+                let fmds_update = self
                     .fmds_updater
                     .update(instance_data.clone(), Some(conf.clone()))
                     .await;
@@ -1500,7 +1503,7 @@ impl MainLoop {
                 // mode, which has no readiness probe wired up.
                 if self.options.agent_platform_type.is_containerized()
                     && hbn_dhcp_applied_ok
-                    && fmds_applied_ok
+                    && fmds_update.is_ok()
                 {
                     self.health_controller.set_ready(true);
                 }
@@ -1537,6 +1540,8 @@ impl MainLoop {
                             min_healthy_links,
                             hbn_device_names: &self.hbn_device_names,
                             has_changed_hbn_config,
+                            dhcp_server_update: dhcp_server_update.as_ref(),
+                            fmds_update: &fmds_update,
                         }
                         .health_check()
                         .await
