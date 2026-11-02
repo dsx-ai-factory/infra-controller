@@ -489,6 +489,29 @@ fn is_gpu_in_tray_default_partition(partition: &PartitionInfo, slot_id: i32) -> 
     partition.name == tray_default_partition_name(slot_id)
 }
 
+/// Whether an operator marked the host for NVLink isolation with the
+/// `IsolateFromNvLinkPartitions` health classification (for example through the
+/// admin-cli `compute-tray-due-for-swap` template) before moving or replacing its tray.
+fn is_marked_for_nvlink_isolation(snapshot: &ManagedHostStateSnapshot) -> bool {
+    snapshot
+        .aggregate_health
+        .find_alert_by_classification(
+            &health_report::HealthAlertClassification::isolate_from_nvlink_partitions(),
+        )
+        .is_some()
+}
+
+/// How [`NvlPartitionMonitor::check_machine_and_handle_gpu_removals`] treats a host's GPUs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuRemovalMode {
+    /// Host without an instance in admin network mode: remove GPUs from tenant and unknown
+    /// partitions and keep them in the tray default partition.
+    Idle,
+    /// Host marked for NVLink isolation: remove GPUs from every partition, including the tray
+    /// default partition, and leave them out.
+    Isolate,
+}
+
 impl PartitionProcessingContext {
     fn new(
         nmx_c_partitions: Vec<PartitionInfo>,
@@ -679,6 +702,45 @@ impl PartitionProcessingContext {
                 },
             )
         })
+    }
+
+    // Observation for a host marked for NVLink isolation. Each GPU reports the tenant partition
+    // NMX-C currently has it in, which is none once the isolation removals complete.
+    fn isolated_host_observation(
+        &self,
+        mh: &ManagedHostStateSnapshot,
+    ) -> MachineNvLinkStatusObservation {
+        let nvlink_gpus = mh
+            .host_snapshot
+            .status
+            .nvlink_info
+            .iter()
+            .flat_map(|info| {
+                info.gpus.iter().map(move |gpu| {
+                    let mut observation = MachineNvLinkGpuStatusObservation {
+                        device_instance: gpu.device_id as u32 - 1,
+                        domain_id: info.domain_uuid,
+                        gpu_id: gpu.guid.to_string(),
+                        guid: gpu.guid,
+                        ..Default::default()
+                    };
+                    if let Some((partition_id, logical_partition_id, _, _)) = self
+                        .gpu_to_partition_map
+                        .get(&gpu.guid)
+                        .and_then(|partition| partition.partition_id)
+                        .and_then(|id| self.get_db_partition_info(id.partition_id))
+                    {
+                        observation.partition_id = partition_id;
+                        observation.logical_partition_id = logical_partition_id;
+                    }
+                    observation
+                })
+            })
+            .collect();
+        MachineNvLinkStatusObservation {
+            observed_at: Utc::now(),
+            nvlink_gpus,
+        }
     }
 
     // Get the list of GPUs that should remain in a partition after removing a specific GPU from a logical partition.
@@ -2414,9 +2476,36 @@ impl NvlPartitionMonitor {
 
         for mh in mh_snapshots.values() {
             metrics.num_machines_scanned += 1;
+            if is_marked_for_nvlink_isolation(mh) {
+                // The host is about to have its tray moved or replaced. Remove its GPUs from every
+                // partition while NMX-C still recognizes them, and skip instance reconciliation,
+                // which would add them back to the tenant's partition.
+                if let Err(e) = self.check_machine_and_handle_gpu_removals(
+                    mh,
+                    partition_ctx,
+                    GpuRemovalMode::Isolate,
+                ) {
+                    tracing::warn!(
+                        machine_id = %mh.host_snapshot.id,
+                        error = %e,
+                        "Failed to enqueue NVLink isolation removals",
+                    );
+                }
+                if let Some(instance) = &mh.instance {
+                    machine_gpu_statuses.insert(
+                        instance.machine_id,
+                        partition_ctx.isolated_host_observation(mh),
+                    );
+                }
+                continue;
+            }
             let Some(instance) = &mh.instance else {
                 // For machines with no instance, check if machine is in admin network and any cleanup is required
-                let _ = self.check_machine_and_handle_gpu_removals(mh, partition_ctx);
+                let _ = self.check_machine_and_handle_gpu_removals(
+                    mh,
+                    partition_ctx,
+                    GpuRemovalMode::Idle,
+                );
                 continue;
             };
             metrics.num_instances_scanned += 1;
@@ -2806,17 +2895,23 @@ impl NvlPartitionMonitor {
 
     // Managed hosts that are no longer an instance should not have GPUs in tenant or NMX-C default
     // partitions: move every GPU into its tray default partition (`tray_partition_{slot_id}`).
+    //
+    // With `GpuRemovalMode::Isolate`, the host is marked for NVLink isolation: every GPU leaves
+    // every partition, including the tray default partition, and is not placed anywhere.
     pub fn check_machine_and_handle_gpu_removals(
         &self,
         mh: &ManagedHostStateSnapshot,
         partition_ctx: &mut PartitionProcessingContext,
+        mode: GpuRemovalMode,
     ) -> NvLinkManagerResult<()> {
         // If not in admin-network mode, skip processing. GPUs should stay
         // attached to tenant partitions, but zero-DPU hosts are always
         // considered admin network (since they don't have a DPU to put them
         // in an overlay network). In other words, zero-DPU hosts get GPU
         // removals, but hosts with DPUs in tenant networks don't.
-        if !mh.use_admin_network() {
+        // Isolation applies regardless: the tray may be failed with its
+        // instance still assigned.
+        if mode == GpuRemovalMode::Idle && !mh.use_admin_network() {
             return Ok(());
         }
 
@@ -2825,6 +2920,7 @@ impl NvlPartitionMonitor {
                 let nmxc_partition = match partition_ctx.gpu_to_partition_map.get(&gpu.guid) {
                     // GPU is in a partition, so we need to remove it from the partition.
                     Some(p) => p,
+                    None if mode == GpuRemovalMode::Isolate => continue,
                     None => {
                         // GPU is not in any NMX-C partition; place it in the tray default partition
                         // (named from this GPU's slot id), creating that partition if needed.
@@ -2837,7 +2933,9 @@ impl NvlPartitionMonitor {
                     }
                 };
 
-                if is_gpu_in_tray_default_partition(nmxc_partition, gpu.slot_id) {
+                if mode == GpuRemovalMode::Idle
+                    && is_gpu_in_tray_default_partition(nmxc_partition, gpu.slot_id)
+                {
                     continue;
                 }
 
@@ -2878,6 +2976,7 @@ impl NvlPartitionMonitor {
                         gpu_guid = %gpu.guid,
                         nvlink_logical_partition_id = %logical_id,
                         gpus_to_keep = ?gpus_to_keep,
+                        removal_mode = ?mode,
                         "Handling GPU removal from partition for machine in admin network"
                     );
                     partition_ctx.handle_gpu_removal(&gpu_ctx, gpus_to_keep)?;
@@ -2906,6 +3005,7 @@ impl NvlPartitionMonitor {
                         gpu_guid = %gpu.guid,
                         nmx_c_partition_id = pid_struct.partition_id,
                         gpus_to_keep = ?gpus_to_keep,
+                        removal_mode = ?mode,
                         "Handling GPU removal from NMX-C partition without DB row (admin network)"
                     );
                     partition_ctx.handle_gpu_removal_from_unknown_partition(
@@ -4273,7 +4373,7 @@ mod machine_group_tests {
     use carbide_uuid::rack::{RackId, RackProfileId};
     use db::test_support::power_shelf::create_seeded;
     use db::test_support::switch::create_seeded_discovered;
-    use model::hardware_info::MachineNvLinkInfo;
+    use model::hardware_info::{MachineNvLinkInfo, NvLinkGpu};
     use model::machine::{HostHealthConfig, ManagedHostStateSnapshot};
     use model::rack::RackConfig;
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
@@ -5020,6 +5120,7 @@ mod machine_group_tests {
             config_version: u64,
             gpu_logical_partition: Option<NvLinkLogicalPartitionId>,
             admin_network: bool,
+            isolated: bool,
             gpu_guid: u64,
             domain: NvLinkDomainId,
             partition_in_domain: bool,
@@ -5040,6 +5141,7 @@ mod machine_group_tests {
             config_version: 3,
             gpu_logical_partition: Some(logical_partition_id),
             admin_network: false,
+            isolated: false,
             gpu_guid: 0xdb48_8cb1_7978_0480,
             domain: domain_a,
             partition_in_domain: true,
@@ -5116,6 +5218,12 @@ mod machine_group_tests {
                         .network_config
                         .value
                         .use_admin_network = Some(spec.admin_network);
+                    if spec.isolated {
+                        snapshot
+                            .aggregate_health
+                            .alerts
+                            .push(nvlink_isolation_alert());
+                    }
                     if spec.with_instance {
                         snapshot.instance = Some(instance(spec, snapshot.host_snapshot.id));
                     }
@@ -5232,6 +5340,11 @@ mod machine_group_tests {
             Check {
                 scenario: "admin network toggled",
                 input: Box::new(|spec| spec.admin_network = true),
+                expect: false,
+            },
+            Check {
+                scenario: "host marked for nvlink isolation",
+                input: Box::new(|spec| spec.isolated = true),
                 expect: false,
             },
             Check {
@@ -5358,6 +5471,156 @@ mod machine_group_tests {
                 expected_partition_list_calls,
                 "{scenario}"
             );
+        }
+
+        join_set.shutdown().await;
+        Ok(())
+    }
+
+    fn nvlink_isolation_alert() -> health_report::HealthProbeAlert {
+        health_report::HealthProbeAlert {
+            id: "Maintenance".parse().unwrap(),
+            target: Some("ComputeTrayDueForSwap".to_string()),
+            in_alert_since: None,
+            message: String::new(),
+            tenant_message: None,
+            classifications: vec![
+                health_report::HealthAlertClassification::isolate_from_nvlink_partitions(),
+            ],
+        }
+    }
+
+    /// A host marked for NVLink isolation leaves every partition, including its
+    /// tray default partition, and is not placed back into one. An unmarked
+    /// idle host keeps, or gets, its tray default partition.
+    #[sqlx_test]
+    async fn marked_host_is_removed_from_every_nvlink_partition(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const GPU_A: u64 = 0x1000;
+        const GPU_B: u64 = 0x1001;
+        const OTHER_TRAY_GPU: u64 = 0x2000;
+
+        let mut join_set = JoinSet::new();
+        let work_lock_manager =
+            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let test_meter = TestMeter::default();
+        let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
+
+        struct Case {
+            scenario: &'static str,
+            marked: bool,
+            nmxc: NmxcSimClient,
+            expected_partitions: Vec<(&'static str, Vec<u64>)>,
+        }
+
+        for Case {
+            scenario,
+            marked,
+            nmxc,
+            expected_partitions,
+        } in [
+            Case {
+                scenario: "idle host keeps its tray partition",
+                marked: false,
+                nmxc: NmxcSimClient::with_partition(9, "tray_partition_1", vec![GPU_A, GPU_B]),
+                expected_partitions: vec![("tray_partition_1", vec![GPU_A, GPU_B])],
+            },
+            Case {
+                scenario: "idle host without a partition gets its tray partition",
+                marked: false,
+                nmxc: NmxcSimClient::default(),
+                expected_partitions: vec![("tray_partition_1", vec![GPU_A, GPU_B])],
+            },
+            Case {
+                scenario: "marked host's tray partition is deleted",
+                marked: true,
+                nmxc: NmxcSimClient::with_partition(9, "tray_partition_1", vec![GPU_A, GPU_B]),
+                expected_partitions: vec![],
+            },
+            Case {
+                scenario: "marked host leaves a partition other GPUs keep",
+                marked: true,
+                nmxc: NmxcSimClient::with_partition(
+                    12345,
+                    "unknown-partition",
+                    vec![GPU_A, OTHER_TRAY_GPU, GPU_B],
+                ),
+                expected_partitions: vec![("unknown-partition", vec![OTHER_TRAY_GPU])],
+            },
+            Case {
+                scenario: "marked host without a partition is not placed in one",
+                marked: true,
+                nmxc: NmxcSimClient::default(),
+                expected_partitions: vec![],
+            },
+        ] {
+            let mut managed_snapshot = snapshot(&HostSpec {
+                id_byte: 13,
+                chassis_serial: Some("CHASSIS-A"),
+                rack_id: None,
+            });
+            managed_snapshot
+                .host_snapshot
+                .network_config
+                .value
+                .use_admin_network = Some(true);
+            let info = managed_snapshot
+                .host_snapshot
+                .status
+                .nvlink_info
+                .as_mut()
+                .expect("test snapshot has nvlink info");
+            info.domain_uuid = domain_uuid;
+            info.gpus = [GPU_A, GPU_B]
+                .into_iter()
+                .zip(1..)
+                .map(|(guid, device_id)| NvLinkGpu {
+                    tray_index: 1,
+                    slot_id: 1,
+                    device_id,
+                    guid,
+                })
+                .collect();
+            if marked {
+                managed_snapshot
+                    .aggregate_health
+                    .alerts
+                    .push(nvlink_isolation_alert());
+            }
+            let machine_id = managed_snapshot.host_snapshot.id;
+            let nvlink_info = managed_snapshot.host_snapshot.status.nvlink_info.clone();
+            let all_snapshots = HashMap::from([(machine_id, managed_snapshot)]);
+            let chassis_snapshots = vec![&all_snapshots[&machine_id]];
+
+            let nmxc = Arc::new(nmxc);
+            let monitor = NvlPartitionMonitor::new(
+                pool.clone(),
+                nmxc.clone(),
+                test_meter.meter(),
+                NvLinkConfig::default(),
+                HostHealthConfig::default(),
+                work_lock_manager.clone(),
+            );
+            monitor
+                .process_nmx_c_partition_monitor_group(ProcessMachineGroupInput {
+                    group_id: "CHASSIS-A".to_string(),
+                    group_type: nmx_c_endpoint::ManagedHostGroupType::Chassis,
+                    snapshots: &chassis_snapshots,
+                    endpoint_url: Some("http://nmxc.example:9370"),
+                    rack_id: None,
+                    all_managed_host_snapshots: &all_snapshots,
+                    machine_nvlink_info: HashMap::from([(machine_id, nvlink_info)]),
+                    db_nvl_partitions: &[],
+                    db_nvl_logical_partitions: &[],
+                })
+                .await;
+
+            let expected_partitions: Vec<(String, Vec<u64>)> = expected_partitions
+                .into_iter()
+                .map(|(name, gpu_uids)| (name.to_string(), gpu_uids))
+                .collect();
+            assert_eq!(nmxc.partitions(), expected_partitions, "{scenario}");
         }
 
         join_set.shutdown().await;

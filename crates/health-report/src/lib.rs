@@ -774,6 +774,15 @@ impl HealthAlertClassification {
     pub fn exclude_from_state_machine_sla() -> Self {
         Self("ExcludeFromStateMachineSla".to_string())
     }
+
+    /// Tells the NVLink partition monitor to remove every GPU on the host from
+    /// every NVLink partition, tenant or tray default, and to keep them out
+    /// until the classification is cleared. Applied before a compute tray is
+    /// physically moved or replaced, so NMX-C is never left holding the UIDs
+    /// of GPUs that are no longer in the rack.
+    pub fn isolate_from_nvlink_partitions() -> Self {
+        Self("IsolateFromNvLinkPartitions".to_string())
+    }
 }
 
 /// A health report could not be converted from an external format

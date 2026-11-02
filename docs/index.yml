@@ -327,6 +327,8 @@ navigation:
               path: playbooks/force_delete.md
             - page: Rebooting a Machine
               path: playbooks/machine_reboot.md
+            - page: Replacing a GB200 Compute Tray
+              path: playbooks/tray_replacement.md
             - section: Stuck Objects
               contents:
                 - page: Overview and General Troubleshooting
