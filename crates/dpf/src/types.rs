@@ -190,6 +190,10 @@ pub struct InitDpfResourcesConfig {
     pub(crate) partial_multiplane_disabled: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
     pub(crate) deployment_type: DpuDeploymentType,
+    /// Optional exact labels used to select DPUNode objects created by external DPF automation.
+    /// When absent, the SDK uses NICo-owned deployment labels.
+    #[builder(setter(strip_option))]
+    pub(crate) dpu_node_selector: Option<BTreeMap<String, String>>,
 }
 
 /// Parameters for a `BlueFieldSoftware` CR, used to provision BF4-class DPUs.
@@ -233,6 +237,7 @@ impl Default for InitDpfResourcesConfig {
             enable_delay_host_init: false,
             partial_multiplane_disabled: false,
             deployment_type: DpuDeploymentType::Bf3,
+            dpu_node_selector: None,
         }
     }
 }
