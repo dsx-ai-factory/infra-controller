@@ -134,8 +134,8 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 			slogger := logger.With().Str("OS Image ID", osImageIDStr).Logger()
 
 			ossa, ok := existingOsImageMap[osImageIDStr]
-			if !ok {
-				ossa, err = mos.createOrUpdateImageOperatingSystemFromSite(ctx, site, controllerOsImage)
+			if !ok || ossa.OperatingSystem == nil || ossa.OperatingSystem.Deleted != nil {
+				ossa, err = mos.createOrUpdateOperatingSystemFromSite(ctx, site, controllerOsImage)
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to recover OS Image from Site inventory")
 					continue
@@ -202,6 +202,10 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 				}
 				updatedOperatingSystemMap[ossa.OperatingSystemID] = true
 			}
+		} else if controllerOsImage == nil {
+			logger.Warn().Msg("unable to recover OS Image from Site: inventory record is nil")
+		} else {
+			logger.Warn().Msg("unable to recover OS Image from Site: inventory record has no attributes")
 		}
 	}
 
@@ -278,31 +282,49 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 	return updatedOsIDs, nil
 }
 
-// createOrUpdateImageOperatingSystemFromSite recovers a tenant-owned image Operating System
+// createOrUpdateOperatingSystemFromSite recovers a tenant-owned image Operating System
 // and its Site association from Site inventory. The Site already has the image, so recovery
 // persists REST state only and never dispatches a create workflow back to the Site.
-func (mos ManageOsImage) createOrUpdateImageOperatingSystemFromSite(ctx context.Context, site *cdbm.Site, controllerOsImage *corev1.OsImage) (*cdbm.OperatingSystemSiteAssociation, error) {
-	if controllerOsImage == nil || controllerOsImage.Attributes == nil {
+func (mos ManageOsImage) createOrUpdateOperatingSystemFromSite(ctx context.Context, site *cdbm.Site, controllerOsImage *corev1.OsImage) (*cdbm.OperatingSystemSiteAssociation, error) {
+	logger := log.With().
+		Str("Activity", "UpdateOsImagesInDB").
+		Str("Site ID", site.ID.String()).
+		Logger()
+
+	if controllerOsImage == nil {
+		logger.Warn().Msg("unable to recover OS Image from Site: inventory record is nil")
+		return nil, nil
+	}
+	if controllerOsImage.Attributes == nil {
+		logger.Warn().Msg("unable to recover OS Image from Site: inventory record has no attributes")
 		return nil, nil
 	}
 	attributes := controllerOsImage.Attributes
 	controllerID := attributes.GetId().GetValue()
-	osID, err := uuid.Parse(controllerID)
-	if err != nil {
-		return nil, nil
-	}
-
 	tenantOrg := attributes.GetTenantOrganizationId()
-	if tenantOrg == "" || attributes.GetSourceUrl() == "" || attributes.GetDigest() == "" {
-		return nil, nil
-	}
-
-	logger := log.With().
-		Str("Activity", "createOrUpdateImageOperatingSystemFromSite").
-		Str("Site ID", site.ID.String()).
-		Str("OS Image ID", osID.String()).
+	logger = logger.With().
+		Str("OS Image ID", controllerID).
 		Str("Tenant Org", tenantOrg).
 		Logger()
+
+	osID, err := uuid.Parse(controllerID)
+	if err != nil {
+		logger.Warn().Err(err).Msg("unable to recover OS Image from Site: ID is not a valid UUID")
+		return nil, nil
+	}
+
+	if tenantOrg == "" {
+		logger.Warn().Msg("unable to recover OS Image from Site: Tenant organization ID is empty")
+		return nil, nil
+	}
+	if attributes.GetSourceUrl() == "" {
+		logger.Warn().Msg("unable to recover OS Image from Site: source URL is empty")
+		return nil, nil
+	}
+	if attributes.GetDigest() == "" {
+		logger.Warn().Msg("unable to recover OS Image from Site: digest is empty")
+		return nil, nil
+	}
 
 	return cdb.WithTxResult(ctx, mos.dbSession, func(tx *cdb.Tx) (*cdbm.OperatingSystemSiteAssociation, error) {
 		tenants, _, tenantErr := cdbm.NewTenantDAO(mos.dbSession).GetAll(
@@ -320,15 +342,6 @@ func (mos ManageOsImage) createOrUpdateImageOperatingSystemFromSite(ctx context.
 			return nil, nil
 		}
 		tenant := &tenants[0]
-
-		hasSiteAccess, accessErr := cdbm.TenantHasSiteAccess(ctx, tx, mos.dbSession, tenant, site.ID)
-		if accessErr != nil {
-			return nil, fmt.Errorf("unable to recover OS Image from Site: failed to validate Tenant access, DB error: %w", accessErr)
-		}
-		if !hasSiteAccess {
-			logger.Warn().Msg("unable to recover OS Image from Site: Tenant does not have access to Site")
-			return nil, nil
-		}
 
 		if lockErr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(osID.String()), nil); lockErr != nil {
 			return nil, lockErr
