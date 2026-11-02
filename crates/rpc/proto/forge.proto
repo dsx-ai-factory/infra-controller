@@ -3325,7 +3325,8 @@ message ExpectedRackGroup {
   // Ordered racks and their devices. Rack IDs and device identities are unique across the group.
   // May be empty; updates replace the complete list.
   repeated ExpectedRackGroupRack racks = 6;
-  // Required external rack-management protocol identifier.
+  // Optional external rack-management protocol identifier. Empty means unspecified.
+  // Non-empty declarations must be non-blank and at most 128 characters.
   string protocol = 7;
 }
 

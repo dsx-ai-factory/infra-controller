@@ -331,9 +331,6 @@ API DELETE /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} removed the success respo
 
 # Expected rack group declarations need their protocol to derive the correct rack profile.
 # New declarations must provide it; legacy stored declarations remain readable with null.
-API POST /v2/org/{org}/nico/expected-rack-group added the new required request property `protocol`
-API PUT /v2/org/{org}/nico/expected-rack-group added the new required request property `expectedRackGroups/items/protocol`
-API PUT /v2/org/{org}/nico/expected-rack-group/all added the new required request property `expectedRackGroups/items/protocol`
 
 # Expected switches require operator-declared NVOS ports; discovery no longer fills them.
 # Compatibility exception and migration: fern/changelog/2026-10-19.mdx.
