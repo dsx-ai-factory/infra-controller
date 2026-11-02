@@ -27,10 +27,10 @@ use tracing::metadata::LevelFilter;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let tracing = setup_logging(&cli);
 
     match cli.command {
         Command::Run(run_command) => {
+            let tracing = setup_logging(cli.debug);
             let sigterm_cancel_token = carbide_utils::shutdown_handler::start()?;
             let spawn_handle =
                 ssh_console::spawn((*run_command).try_into()?, Some(sigterm_cancel_token)).await?;
@@ -235,12 +235,12 @@ enum CliError {
     Config(#[from] ConfigError),
 }
 
-fn setup_logging(cli: &Cli) -> carbide_instrument::otlp_tracing::Tracing {
+fn setup_logging(debug: bool) -> carbide_instrument::otlp_tracing::Tracing {
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let level = if cli.debug {
+    let level = if debug {
         Some(LevelFilter::DEBUG)
     } else {
         None
