@@ -83,6 +83,14 @@ struct RedfishSimState {
     /// (perfectly in sync); tests set it to simulate a BMC clock that is out of
     /// sync to exercise the time-sync reset/retry path.
     bmc_time_offset_seconds: i64,
+    /// When enabled, powered-off hosts report the stable BlueField-3
+    /// StandbyOffline state as `Paused`.
+    paused_when_off: bool,
+    /// When enabled, successful `ForceRestart` requests leave power unchanged.
+    force_restart_leaves_power_unchanged: bool,
+    /// Number of `get_tasks` calls to fail after a BMC reset, modelling the
+    /// interval before the reset service is reachable again.
+    bmc_reset_unavailable_polls: usize,
     /// Records every call to `RedfishClientPool::create_client` so tests can
     /// assert what vendor was passed at each call site.
     create_client_calls: Vec<CreateClientCall>,
@@ -243,6 +251,7 @@ struct RedfishSimHostState {
     /// Per-host so one host's boot-order state can't flip another host's
     /// `is_boot_order_setup` check.
     is_boot_order_setup: Option<bool>,
+    bmc_reset_unavailable_polls: usize,
 }
 
 impl Default for RedfishSimHostState {
@@ -257,6 +266,7 @@ impl Default for RedfishSimHostState {
             // de-enumeration, see the boot order configure normally.
             http_dev1_enabled: true,
             is_boot_order_setup: None,
+            bmc_reset_unavailable_polls: 0,
         }
     }
 }
@@ -505,6 +515,27 @@ impl RedfishSim {
     /// the time-sync threshold to simulate an out-of-sync BMC clock.
     pub fn set_bmc_time_offset_seconds(&self, offset: i64) {
         self.state.lock().unwrap().bmc_time_offset_seconds = offset;
+    }
+
+    /// Keep the simulated BMC unavailable to task queries for this many polls
+    /// after reset, before allowing the caller to power the host back on.
+    pub fn set_bmc_reset_unavailable_polls(&self, polls: usize) {
+        self.state.lock().unwrap().bmc_reset_unavailable_polls = polls;
+    }
+
+    /// Make powered-off hosts report `Paused`, matching BlueField-3.
+    /// `On` leaves this state unchanged, modeling a DPU stuck in the UEFI shell;
+    /// a restart is required to boot again.
+    pub fn set_paused_when_off(&self, paused: bool) {
+        self.state.lock().unwrap().paused_when_off = paused;
+    }
+
+    /// Model a BMC accepting `ForceRestart` without changing host power.
+    pub fn set_force_restart_leaves_power_unchanged(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap()
+            .force_restart_leaves_power_unchanged = enabled;
     }
 
     /// Returns a snapshot of every `create_client` call made through this sim,
@@ -920,7 +951,12 @@ impl Redfish for RedfishSimClient {
                 }
                 *remaining -= 1;
             }
-            Ok(state.hosts[&self._host].power)
+            let power = state.hosts[&self._host].power;
+            Ok(if state.paused_when_off && power == PowerState::Off {
+                PowerState::Paused
+            } else {
+                power
+            })
         })
     }
 
@@ -955,8 +991,17 @@ impl Redfish for RedfishSimClient {
                     .push(RedfishSimAction::PowerFailed(action));
                 return Err(error);
             }
+            let paused_when_off = state.paused_when_off;
+            let force_restart_leaves_power_unchanged = state.force_restart_leaves_power_unchanged;
             let host_state = state.hosts.get_mut(&self._host).unwrap();
-            host_state.power = power_state;
+            if !(paused_when_off
+                && host_state.power == PowerState::Off
+                && action == SystemPowerControl::On)
+                && !(force_restart_leaves_power_unchanged
+                    && action == SystemPowerControl::ForceRestart)
+            {
+                host_state.power = power_state;
+            }
             host_state.actions.push(RedfishSimAction::Power(action));
             Ok(())
         })
@@ -972,10 +1017,12 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            let unavailable_polls = state.bmc_reset_unavailable_polls;
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state
                 .actions
                 .push(RedfishSimAction::BmcReset(reset_type));
+            host_state.bmc_reset_unavailable_polls = unavailable_polls;
             Ok(())
         })
     }
@@ -1983,7 +2030,17 @@ impl Redfish for RedfishSimClient {
     }
 
     fn get_tasks<'a>(&'a self) -> libredfish::RedfishFuture<'a, Result<Vec<String>, RedfishError>> {
-        Box::pin(async move { Ok(Vec::new()) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let host_state = state.hosts.get_mut(&self._host).unwrap();
+            if host_state.bmc_reset_unavailable_polls > 0 {
+                host_state.bmc_reset_unavailable_polls -= 1;
+                return Err(RedfishError::GenericError {
+                    error: "BMC reset is still in progress".to_string(),
+                });
+            }
+            Ok(Vec::new())
+        })
     }
 
     fn add_secure_boot_certificate<'a>(
