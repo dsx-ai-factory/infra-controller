@@ -104,9 +104,12 @@ means something is blocking normal lifecycle progression and warrants investigat
 Common causes include BMC connectivity issues, PXE boot failures or external service
 timeouts.
 
-Related metrics include `carbide_<object>_per_state` (current count per state),
-`carbide_<object>_state_time_in_state_seconds` (histogram of time spent) and
-`carbide_<object>_state_handler_errors_total` (processing failures).
+Related metrics include:
+
+- `carbide_<object>_per_state` - current count per state
+- `carbide_<object>_time_in_state_seconds` - histogram of elapsed seconds in state
+- `carbide_<object>_with_state_handling_errors_per_state` - gauge of objects with error,
+grouped by state, substate and error name
 
 ### Capacity: "How much headroom do we have?"
 
