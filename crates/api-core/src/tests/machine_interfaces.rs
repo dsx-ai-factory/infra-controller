@@ -1635,7 +1635,7 @@ async fn test_delete_bmc_interface_with_machine(
 }
 
 #[crate::sqlx_test]
-async fn machine_bmc_info_uses_topology_selected_bmc_and_interfaces_exclude_it(
+async fn machine_bmc_endpoint_uses_topology_selected_bmc_and_interfaces_exclude_it(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Topology identifies the active BMC even when an older attached interface
@@ -1777,20 +1777,20 @@ async fn machine_bmc_info_uses_topology_selected_bmc_and_interfaces_exclude_it(
     let host_bmc_interface_ip = host_bmc_interface_ip.to_string();
     let dpu_bmc_interface_ip = dpu_bmc_interface_ip.to_string();
 
-    let host_bmc_info = host_rpc_machine
-        .bmc_info
+    let host_bmc_endpoint = host_rpc_machine
+        .bmc
         .as_ref()
-        .expect("host RPC BMC info must exist");
+        .expect("host RPC BMC endpoint must exist");
     assert_eq!(
-        host_bmc_info.machine_interface_id,
+        host_bmc_endpoint.machine_interface_id,
         Some(host_bmc_interface_id)
     );
     assert_eq!(
-        host_bmc_info.mac.as_deref(),
+        host_bmc_endpoint.mac.as_deref(),
         Some(host_bmc_interface_mac.as_str())
     );
     assert_eq!(
-        host_bmc_info.ip.as_deref(),
+        host_bmc_endpoint.ip.as_deref(),
         Some(host_bmc_interface_ip.as_str())
     );
     assert!(
@@ -1804,20 +1804,20 @@ async fn machine_bmc_info_uses_topology_selected_bmc_and_interfaces_exclude_it(
                 && interface.id != Some(host_bmc_interface_id))
     );
 
-    let dpu_bmc_info = dpu_rpc_machine
-        .bmc_info
+    let dpu_bmc_endpoint = dpu_rpc_machine
+        .bmc
         .as_ref()
-        .expect("DPU RPC BMC info must exist");
+        .expect("DPU RPC BMC endpoint must exist");
     assert_eq!(
-        dpu_bmc_info.machine_interface_id,
+        dpu_bmc_endpoint.machine_interface_id,
         Some(dpu_bmc_interface_id)
     );
     assert_eq!(
-        dpu_bmc_info.mac.as_deref(),
+        dpu_bmc_endpoint.mac.as_deref(),
         Some(dpu_bmc_interface_mac.as_str())
     );
     assert_eq!(
-        dpu_bmc_info.ip.as_deref(),
+        dpu_bmc_endpoint.ip.as_deref(),
         Some(dpu_bmc_interface_ip.as_str())
     );
     assert!(
