@@ -391,7 +391,12 @@ fn plugin_execution_spec(
     } else {
         PluginPrivilege::Isolated
     };
+    if !plugin.r#type.is_empty() && plugin.r#type != "container" {
+        return Err(format!("unsupported plugin type {:?}", plugin.r#type));
+    }
+    machine_validation_adapters::resolve(plugin.container_plugin_adapter.as_deref())?;
     Ok(PluginRuntimeSpec {
+        container_plugin_adapter: plugin.container_plugin_adapter.clone(),
         image: plugin.image.clone(),
         entrypoint: plugin.entrypoint.clone(),
         privilege,
@@ -1890,6 +1895,7 @@ mod tests {
             version: "1.2.3".to_owned(),
             plugin: Some(rpc::forge::MachineValidationPlugin {
                 r#type: "container".to_owned(),
+                container_plugin_adapter: None,
                 image: "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 entrypoint: vec!["/plugin/entrypoint".to_owned(), "--check".to_owned()],
                 parameters_json: r#"{"expectedGpuCount":8}"#.to_owned(),
@@ -1917,6 +1923,21 @@ mod tests {
         let privileged = plugin_test(true, false, false);
         let runtime = plugin_execution_spec(&privileged).expect("privileged plugin");
         assert_eq!(runtime.privilege, PluginPrivilege::Privileged);
+    }
+
+    #[test]
+    fn immutable_adapter_selection_reaches_runtime_and_unknown_names_fail_closed() {
+        let mut test = plugin_test(false, false, false);
+        test.plugin.as_mut().unwrap().container_plugin_adapter =
+            Some("DSXHealthValidation".to_owned());
+        let spec = plugin_execution_spec(&test).unwrap();
+        assert_eq!(
+            spec.container_plugin_adapter.as_deref(),
+            Some("DSXHealthValidation")
+        );
+        assert_eq!(spec.privilege, PluginPrivilege::Isolated);
+        test.plugin.as_mut().unwrap().container_plugin_adapter = Some("unknown".to_owned());
+        assert!(plugin_execution_spec(&test).is_err());
     }
 
     #[test]

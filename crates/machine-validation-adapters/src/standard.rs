@@ -22,32 +22,55 @@ use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use serde::Deserialize;
+use futures_util::future::BoxFuture;
+use serde_json::Value;
+
+use crate::{
+    AdapterContext, AdapterInvocation, AdapterOutput, ContainerPluginAdapter, PluginResult,
+};
+
+pub(super) struct StandardAdapter;
+
+impl ContainerPluginAdapter for StandardAdapter {
+    fn validate_registration(
+        &self,
+        _entrypoint: &[String],
+        _parameters: &Value,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn prepare<'a>(
+        &'a self,
+        _context: AdapterContext<'a>,
+        entrypoint: &'a [String],
+    ) -> BoxFuture<'a, Result<AdapterInvocation, String>> {
+        Box::pin(async move {
+            // Preserve existing revisions: their vector is passed after the
+            // image, so the image's ENTRYPOINT remains authoritative.
+            Ok(AdapterInvocation {
+                arguments: entrypoint.to_vec(),
+                ..Default::default()
+            })
+        })
+    }
+    fn interpret(
+        &self,
+        context: AdapterContext<'_>,
+        output: AdapterOutput<'_>,
+    ) -> Result<PluginResult, String> {
+        if output.exit_code != Some(0) {
+            return Err(format!(
+                "plugin exited unsuccessfully with status {:?}; ignoring result.json",
+                output.exit_code
+            ));
+        }
+        read_plugin_result(&context.output_dir.join("result.json"))
+    }
+}
 
 const MAX_RESULT_SIZE: u64 = 64 * 1024;
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PluginResult {
-    #[serde(rename = "contractVersion")]
-    pub(crate) contract_version: String,
-    pub(crate) kind: String,
-    pub(crate) outcome: String,
-    pub(crate) summary: String,
-    #[serde(default)]
-    pub(crate) severity: Option<String>,
-    #[serde(default)]
-    pub(crate) findings: Vec<PluginFinding>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PluginFinding {
-    pub(crate) name: String,
-    pub(crate) message: String,
-}
-
-pub(crate) fn read_plugin_result(path: &Path) -> Result<PluginResult, String> {
+fn read_plugin_result(path: &Path) -> Result<PluginResult, String> {
     #[cfg(unix)]
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -119,6 +142,41 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[tokio::test]
+    async fn omitted_adapter_preserves_the_command_and_reads_result_json() {
+        let directory = std::env::temp_dir().join(format!("standard-adapter-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("result.json"), br#"{"contractVersion":"v1","kind":"MachineValidationPluginResult","outcome":"pass","summary":"completed"}"#).unwrap();
+        let input = serde_json::json!({});
+        let context = AdapterContext {
+            input: &input,
+            input_dir: &directory,
+            output_dir: &directory,
+            contract_dir: Path::new("/contract"),
+        };
+        let adapter = crate::resolve(None).unwrap();
+        let command = vec!["/plugin/check".to_owned(), "run".to_owned()];
+        assert_eq!(
+            adapter.prepare(context, &command).await.unwrap(),
+            AdapterInvocation {
+                arguments: command,
+                ..Default::default()
+            }
+        );
+        for (exit, should_pass) in [(0, true), (1, false)] {
+            let result = adapter.interpret(
+                context,
+                AdapterOutput {
+                    exit_code: Some(exit),
+                    stdout: b"ignored",
+                    stdout_truncated: false,
+                },
+            );
+            assert_eq!(result.is_ok(), should_pass);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn plugin_result_contract_validation() {

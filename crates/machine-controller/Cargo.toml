@@ -43,6 +43,7 @@ carbide-firmware = { path = "../firmware", default-features = false }
 carbide-instrument = { path = "../instrument" }
 carbide-ipmi = { path = "../ipmi", default-features = false }
 carbide-libmlx-model = { path = "../libmlx-model" }
+carbide-machine-validation-adapters = { path = "../machine-validation-adapters" }
 carbide-measured-boot = { path = "../measured-boot", default-features = false }
 carbide-redfish = { path = "../redfish", default-features = false }
 carbide-secrets = { path = "../secrets" }

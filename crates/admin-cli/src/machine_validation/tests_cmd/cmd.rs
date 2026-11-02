@@ -86,6 +86,7 @@ fn convert_tests_to_nice_table(tests: Vec<forgerpc::MachineValidationTest>) -> B
         "Command",
         "Timeout",
         "PluginType",
+        "PluginAdapter",
         "IsVerified",
         "Version",
         "IsEnabled",
@@ -100,6 +101,10 @@ fn convert_tests_to_nice_table(tests: Vec<forgerpc::MachineValidationTest>) -> B
             test.plugin
                 .as_ref()
                 .map_or("", |plugin| plugin.r#type.as_str()),
+            test.plugin
+                .as_ref()
+                .and_then(|plugin| plugin.container_plugin_adapter.as_deref())
+                .unwrap_or_default(),
             test.verified,
             test.version,
             test.is_enabled,
@@ -181,6 +186,10 @@ fn convert_tests_to_nice_format(
             ("IsEnabled", test.is_enabled.to_string()),
             ("FullHostApproved", test.full_host_approved.to_string()),
             ("PluginType", plugin.r#type),
+            (
+                "PluginAdapter",
+                plugin.container_plugin_adapter.unwrap_or_default(),
+            ),
             ("PluginImage", plugin.image),
             ("PluginEntrypoint", plugin_entrypoint),
             ("PluginParameters", plugin.parameters_json),
@@ -366,6 +375,7 @@ mod tests {
                         test_id: "plugin-test".to_string(),
                         plugin: Some(MachineValidationPlugin {
                             r#type: "container".to_string(),
+                            container_plugin_adapter: Some("DSXHealthValidation".to_owned()),
                             image: "registry.example.com/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
                             entrypoint: vec!["/plugin/entrypoint".to_string(), "--check-gpus".to_string()],
                             parameters_json: r#"{"expectedGpuCount":8}"#.to_string(),
@@ -389,6 +399,8 @@ mod tests {
         assert!(output.contains("TestId        : legacy-test"));
         assert!(output.contains("PluginType    : \n"));
         assert!(output.contains("/plugin/entrypoint"));
+        assert!(output.contains("PluginAdapter : DSXHealthValidation"));
+        assert!(output.contains("PluginAdapter : \n"));
         assert!(output.contains("PluginParameters"));
         assert!(output.contains("PluginPrivileged: true"));
         assert!(output.contains("PluginHostAccessFull: true"));
@@ -463,6 +475,7 @@ mod tests {
                 "Command",
                 "Timeout",
                 "PluginType",
+                "PluginAdapter",
                 "IsVerified",
                 "Version",
                 "IsEnabled"
@@ -470,6 +483,8 @@ mod tests {
         );
         assert_eq!(rows[1][0], "plugin-test");
         assert_eq!(rows[1][4], "container");
+        assert_eq!(rows[1][5], "DSXHealthValidation");
+        assert_eq!(rows[2][5], "");
         assert_eq!(rows[2][0], "legacy-test");
         assert_eq!(rows[2][4], "");
     }
@@ -506,6 +521,7 @@ mod tests {
                             test_id: "plugin-test".to_string(),
                             plugin: Some(MachineValidationPlugin {
                                 r#type: "container".to_string(),
+                                container_plugin_adapter: Some("DSXHealthValidation".to_owned()),
                                 ..Default::default()
                             }),
                             ..Default::default()
