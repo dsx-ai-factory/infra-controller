@@ -300,6 +300,7 @@ mod tests {
             }),
             rest: None,
             rest_site: None,
+            metrics: None,
         });
         let (addr, _stop) = serve(fake.clone()).await;
         (fake, client(addr, PATIENT), addr)

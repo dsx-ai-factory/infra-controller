@@ -132,7 +132,7 @@ async fn fake_site_counts_match_the_site() {
         t0,
     );
 
-    let app = router(ApiState::new(Arc::clone(&store), &cfg));
+    let app = router(ApiState::new(Arc::clone(&store), &cfg, t0));
 
     let cancel = CancellationToken::new();
     let probes: Vec<Arc<dyn Probe>> = vec![Arc::new(reader)];

@@ -34,10 +34,11 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use carbide_site_health_probe_api::metrics::{CONTRACT_VERSION, FilterError, gauge_labels};
 use carbide_site_health_probe_api::{
     Component, ConfigResponse, CountResponse, ErrorBody, ErrorCode, ErrorDetail, Family, Filter,
-    ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo, Unit, UnitType, UnitsQuery,
-    UnitsResponse,
+    MetricsInfo, ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo, Unit, UnitType,
+    UnitsQuery, UnitsResponse,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,7 @@ use crate::readers::devices::DEVICE_FAMILIES;
 use crate::readers::rest_inventory::{RestTotalsData, SiteMatchData};
 use crate::snapshot::AnySnapshot;
 use crate::state::store::SnapshotStore;
-use crate::state_metrics::{Series, data_of, family_series, gauge_labels, units_of};
+use crate::state_metrics::{Series, data_of, family_series, units_of, unix_seconds};
 
 /// Units per page unless the client asks for fewer.
 const DEFAULT_LIMIT: u32 = 100;
@@ -68,10 +69,18 @@ pub(crate) struct ApiState {
     /// Each family's reader interval.
     pub intervals: BTreeMap<Family, Duration>,
     pub caps: Capabilities,
+    /// `/v1/config`'s metrics block, when a metrics store is declared.
+    pub metrics: Option<MetricsInfo>,
 }
 
 impl ApiState {
-    pub(crate) fn new(store: Arc<SnapshotStore>, state: &StateConfig) -> Self {
+    /// `process_start` is the time the collector publishes as the process
+    /// start.
+    pub(crate) fn new(
+        store: Arc<SnapshotStore>,
+        state: &StateConfig,
+        process_start: SystemTime,
+    ) -> Self {
         let readers = &state.readers;
         let mut intervals: BTreeMap<Family, Duration> = DEVICE_FAMILIES
             .iter()
@@ -80,6 +89,25 @@ impl ApiState {
         for family in [Family::RestTotals, Family::RestSiteMatch] {
             intervals.insert(family, readers.rest_inventory.interval);
         }
+        let metrics = state.metrics.as_ref().map(|metrics| MetricsInfo {
+            contract_version: CONTRACT_VERSION,
+            selector: metrics.selector.clone(),
+            scrape_interval_seconds: metrics.scrape_interval_seconds,
+            // Only families a reader sweeps: a disabled reader's families
+            // have no series to read.
+            reader_intervals_seconds: intervals
+                .iter()
+                .filter(|(family, _)| {
+                    if DEVICE_FAMILIES.contains(family) {
+                        readers.devices.enabled
+                    } else {
+                        readers.rest_inventory.enabled
+                    }
+                })
+                .map(|(family, interval)| (*family, interval.as_secs_f64()))
+                .collect(),
+            process_start_seconds: unix_seconds(process_start),
+        });
         Self {
             store,
             rest_inventory: readers.rest_inventory.enabled,
@@ -87,6 +115,7 @@ impl ApiState {
             caps: Capabilities {
                 full_host_read: state.nico_api.host_read == HostReadMode::Full,
             },
+            metrics,
         }
     }
 
@@ -184,12 +213,6 @@ impl ApiError {
             None,
             format!("no complete {} sweep yet", spec::wire(family)),
         )
-    }
-
-    /// The reply status, for tests.
-    #[cfg(test)]
-    pub(crate) fn status(&self) -> StatusCode {
-        self.status
     }
 
     fn snapshot_expired() -> Self {
@@ -324,7 +347,8 @@ fn parse_query<T: serde::de::DeserializeOwned>(query: &str) -> Result<T, ApiErro
 }
 
 /// Whether the snapshot can answer the filter's needs: REST totals only
-/// where they exist.
+/// where they exist. No snapshot has allocatability or update eligibility
+/// until the probe reads the compact host read.
 fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
     for need in needs {
         match need {
@@ -345,6 +369,9 @@ fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
                         format!("the {} total is unavailable {why}", spec::wire(resource)),
                     ));
                 }
+            }
+            Need::CompactHostRead(field) => {
+                return Err(FilterError::compact_host_read(field).into());
             }
         }
     }
@@ -459,6 +486,7 @@ fn list_units(api: &ApiState, filter: &Filter, page: Page) -> Result<UnitsRespon
         }
         None => (api.current(spec.family)?, None),
     };
+    check_needs(&spec.needs, snap.as_ref())?;
     let all = units_of(snap.as_ref()).map_or(&[][..], |data| data.units.as_slice());
 
     let present: BTreeSet<&str> = all.iter().map(|u| u.id.as_str()).collect();
@@ -586,6 +614,7 @@ async fn config(
         nico_api: None,
         rest: None,
         rest_site,
+        metrics: api.metrics.clone(),
     }))
 }
 
