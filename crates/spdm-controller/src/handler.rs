@@ -35,7 +35,7 @@ use state_controller::state_handler::{
 
 use crate::context::SpdmStateHandlerContextObjects;
 
-// Unexpected nonterminal tasks get two minutes from entering PollEvidenceCollection.
+// Nonterminal tasks get two minutes from entering PollEvidenceCollection.
 // Cancellation cleanup then has its own configurable grace period.
 const EVIDENCE_COLLECTION_POLL_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
 
@@ -393,6 +393,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                     Err(error) => return Err(redfish_error("get_task_state", error)),
                 };
                 let task_stopped = evidence_collection_task_stopped(task.task_state.as_ref());
+                let time_in_state = snapshot.state_version.since_state_change();
 
                 match classify_evidence_collection_task_state(task.task_state.as_ref()) {
                     EvidenceCollectionTaskStateClass::Completed => {
@@ -433,16 +434,18 @@ impl StateHandler for SpdmAttestationStateHandler {
                                 .with_txn(txn),
                         )
                     }
-                    EvidenceCollectionTaskStateClass::InProgress => {
+                    EvidenceCollectionTaskStateClass::InProgress
+                        if time_in_state < EVIDENCE_COLLECTION_POLL_TIMEOUT =>
+                    {
                         Ok(StateHandlerOutcome::wait(format!(
                             "Measurement collection is pending {}%",
                             task.percent_complete.unwrap_or_default(),
                         )))
                     }
-                    EvidenceCollectionTaskStateClass::Unexpected(task_state) => {
+                    task_state_class @ (EvidenceCollectionTaskStateClass::InProgress
+                    | EvidenceCollectionTaskStateClass::Unexpected(_)) => {
                         // Only confirmed termination permits another collection. Request
-                        // cancellation here before entering the separate polling state.
-                        let time_in_state = snapshot.state_version.since_state_change();
+                        // cancellation for expired tasks before entering the cleanup state.
                         let next_action = if task_stopped && *retry_count > 4 {
                             EvidenceCollectionNextAction::Fail
                         } else if task_stopped {
@@ -453,15 +456,19 @@ impl StateHandler for SpdmAttestationStateHandler {
                             EvidenceCollectionNextAction::Wait
                         };
 
-                        emit(SpdmEvidenceCollectionTaskStateUnexpected {
-                            task_state,
-                            next_action,
-                            machine_id: machine_id.to_string(),
-                            device_id: device_id.clone(),
-                            task_id: task_id.clone(),
-                            retry_count: *retry_count,
-                            error: task.messages.iter().map(|t| t.message.as_str()).join("\n"),
-                        });
+                        if let EvidenceCollectionTaskStateClass::Unexpected(task_state) =
+                            task_state_class
+                        {
+                            emit(SpdmEvidenceCollectionTaskStateUnexpected {
+                                task_state,
+                                next_action,
+                                machine_id: machine_id.to_string(),
+                                device_id: device_id.clone(),
+                                task_id: task_id.clone(),
+                                retry_count: *retry_count,
+                                error: task.messages.iter().map(|t| t.message.as_str()).join("\n"),
+                            });
+                        }
 
                         if next_action == EvidenceCollectionNextAction::Wait {
                             return Ok(StateHandlerOutcome::wait(
