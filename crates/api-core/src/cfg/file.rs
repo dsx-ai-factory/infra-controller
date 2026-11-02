@@ -1105,7 +1105,8 @@ pub struct ApiAdmissionControlConfig {
     pub pending_timeout: std::time::Duration,
 
     /// Maximum time an admitted request may execute its handler. Must cover the
-    /// longest legitimate unary RPC served by nico-api.
+    /// longest legitimate unary RPC served by nico-api, including twice
+    /// `certificates.cert_manager.request_timeout_secs` when cert-manager is enabled.
     #[serde(
         default = "default_api_admission_max_execution_time",
         deserialize_with = "deserialize_duration",
@@ -3718,6 +3719,29 @@ impl CarbideConfig {
     /// is referenced by the per-machine "Logs" deep link).
     /// Also rejects entries whose `url` is unparsable or doesn't use the `http` /
     /// `https` scheme.
+    /// Reject an admission deadline that would drop a cert-manager issuance before its
+    /// cleanup runs. Issuance and cleanup each wait up to `request_timeout_secs`, and a
+    /// dropped handler leaves its CertificateRequest behind. Machine identities always
+    /// get the global limit, so service overrides do not need this check.
+    pub fn validate_admission_covers_cert_manager(&self) -> eyre::Result<()> {
+        if !self.api_admission_control.enabled {
+            return Ok(());
+        }
+        let Some(cert_manager) = self.certificates.cert_manager_config()? else {
+            return Ok(());
+        };
+        let required =
+            std::time::Duration::from_secs(cert_manager.request_timeout_secs).saturating_mul(2);
+        eyre::ensure!(
+            self.api_admission_control.max_execution_time >= required,
+            "api_admission_control.max_execution_time ({:?}) must be at least twice \
+             certificates.cert_manager.request_timeout_secs ({}s) when cert-manager is enabled",
+            self.api_admission_control.max_execution_time,
+            cert_manager.request_timeout_secs,
+        );
+        Ok(())
+    }
+
     pub fn validate_web_ui_sidebar_tools(&self) -> eyre::Result<()> {
         let mut seen = std::collections::HashSet::new();
         for tool in &self.web_ui_sidebar_tools {
@@ -4368,7 +4392,9 @@ const fn default_api_admission_max_pending_per_client() -> usize {
 }
 
 const fn default_api_admission_max_execution_time() -> std::time::Duration {
-    std::time::Duration::from_secs(120)
+    // Matches the Rust client's request timeout. That client sends no `grpc-timeout`, so a
+    // shorter default would cut off admin-cli, Scout and DPU agent calls the client still waits on.
+    std::time::Duration::from_secs(300)
 }
 
 const fn default_api_admission_pending_timeout() -> std::time::Duration {
@@ -7027,6 +7053,75 @@ path = "credentials.yaml"
         });
     }
 
+    /// The default admission deadline covers cert-manager's default issuance plus cleanup, and a
+    /// longer cert-manager timeout needs a longer deadline only while both features are enabled.
+    #[test]
+    fn validate_admission_covers_cert_manager_issuance_and_cleanup() {
+        struct Case {
+            name: &'static str,
+            admission_enabled: bool,
+            use_cert_manager: bool,
+            request_timeout_secs: u64,
+            valid: bool,
+        }
+        let cases = [
+            Case {
+                name: "exactly twice the default deadline",
+                admission_enabled: true,
+                use_cert_manager: true,
+                request_timeout_secs: 150,
+                valid: true,
+            },
+            Case {
+                name: "over half the default deadline",
+                admission_enabled: true,
+                use_cert_manager: true,
+                request_timeout_secs: 151,
+                valid: false,
+            },
+            Case {
+                name: "cert-manager disabled",
+                admission_enabled: true,
+                use_cert_manager: false,
+                request_timeout_secs: 600,
+                valid: true,
+            },
+            Case {
+                name: "admission disabled",
+                admission_enabled: false,
+                use_cert_manager: true,
+                request_timeout_secs: 600,
+                valid: true,
+            },
+        ];
+
+        for case in cases {
+            let mut config: CarbideConfig = Figment::new()
+                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                .extract()
+                .unwrap();
+            config.api_admission_control.enabled = case.admission_enabled;
+            config.certificates.use_cert_manager = case.use_cert_manager;
+            config.certificates.cert_manager = Some(cert_manager::Config {
+                request_timeout_secs: case.request_timeout_secs,
+                ..Default::default()
+            });
+
+            let result = config.validate_admission_covers_cert_manager();
+            if case.valid {
+                result.unwrap_or_else(|error| panic!("{}: {error}", case.name));
+            } else {
+                let error = result.expect_err(case.name).to_string();
+                assert!(
+                    error.contains("api_admission_control.max_execution_time")
+                        && error.contains("request_timeout_secs (151s)"),
+                    "{}: unexpected error: {error}",
+                    case.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn api_admission_control_parses_max_execution_time_overrides() {
         let config = toml::from_str::<ApiAdmissionControlConfig>(
@@ -7221,7 +7316,7 @@ path = "credentials.yaml"
                 max_work_in_flight_per_client: 8,
                 max_pending_per_client: 64,
                 pending_timeout: std::time::Duration::from_secs(5),
-                max_execution_time: std::time::Duration::from_secs(120),
+                max_execution_time: std::time::Duration::from_secs(300),
                 client_idle_timeout: std::time::Duration::from_secs(5 * 60),
                 service_limits: BTreeMap::new(),
             }
