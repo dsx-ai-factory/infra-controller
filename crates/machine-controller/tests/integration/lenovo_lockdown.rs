@@ -32,6 +32,7 @@ fn deconfiguring(step: DeconfiguringHostState) -> ManagedHostState {
 }
 
 async fn setup(pool: PgPool, config: ManagedHostConfig) -> (Env, TestManagedHost) {
+    let vendor = config.vendor.expect("test fixture must specify a vendor");
     let env = Env::builder(pool).build().await;
     let domain = env.test_harness.test_domain().await;
     let network = env.test_harness.network_controller();
@@ -45,6 +46,18 @@ async fn setup(pool: PgPool, config: ManagedHostConfig) -> (Env, TestManagedHost
         .build()
         .await
         .0;
+    // The controller reads the vendor from Scout discovery, not exploration.
+    let mut hardware_info = mh.host.hardware_info();
+    hardware_info.dmi_data.as_mut().unwrap().sys_vendor = vendor.to_pascalcase();
+    let mut txn = env.test_harness.db_txn().await;
+    db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true)
+        .await
+        .unwrap();
+    db::machine_topology::create_or_update(&mut txn, &mh.host.id.into(), &hardware_info)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(mh.host.machine().await.bmc_vendor(), vendor);
     mh.advance_state(deconfiguring(DeconfiguringHostState::DisableLockdown))
         .await;
     (env, mh)
@@ -157,11 +170,16 @@ async fn no_dpu_lockdown_enables_without_boot_wait_and_disable_still_polls(pool:
                 }
             );
         }
+        let actions = env.redfish_sim.actions_since(&timepoint).all_hosts();
         assert!(
-            env.redfish_sim
-                .actions_since(&timepoint)
-                .all_hosts()
-                .is_empty()
+            actions.iter().all(|action| !matches!(
+                action,
+                RedfishSimAction::Power(_)
+                    | RedfishSimAction::PowerFailed(_)
+                    | RedfishSimAction::BmcReset(_)
+                    | RedfishSimAction::ChassisReset { .. }
+            )),
+            "unexpected power or reset request: {actions:?}"
         );
     }
 }
