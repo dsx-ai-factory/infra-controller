@@ -276,8 +276,8 @@ async fn routing_profiles_unicode_names_do_not_panic(pool: sqlx::PgPool) {
     // The original logger truncated this valid request in the middle of a
     // UTF-8 character at its 1500-byte limit, panicking before lookup.
     let request_debug = format!("{request:?}");
-    assert!(request_debug.len() > 1500);
-    assert!(!request_debug.is_char_boundary(1500));
+    assert!(request_debug.len() > ::rpc::MAX_ERR_MSG_SIZE as usize);
+    assert!(!request_debug.is_char_boundary(::rpc::MAX_ERR_MSG_SIZE as usize));
     let profiles = api
         .find_routing_profiles_by_names(Request::new(request))
         .await
