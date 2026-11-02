@@ -177,6 +177,7 @@ impl StateControllerIO for MachineStateControllerIO {
                 MachineState::Discovered { .. } => "discovered",
                 MachineState::WaitingForLockdown { .. } => "waitingforlockdown",
                 MachineState::EnableIpmiOverLan => "enableipmioverlan",
+                MachineState::DisableOnboardNics { .. } => "disableonboardnics",
                 MachineState::Measuring { .. } => "machinestatemeasuring",
                 MachineState::SpdmMeasuring { .. } => "machinestatespdmmeasuring",
             }

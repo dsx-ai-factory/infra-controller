@@ -22,6 +22,7 @@ use itertools::Itertools;
 pub mod bluefield;
 pub mod dell;
 pub mod gb200;
+pub mod giga_computing_ami;
 pub mod hpe;
 pub mod lenovo;
 pub mod lenovo_ami;
@@ -45,6 +46,7 @@ pub enum HwType {
     Hpe,
     Lenovo,
     LenovoAmi,
+    GigaComputingAmi,
     LenovoGb300,
     SupermicroGb300,
     Supermicro,
@@ -68,6 +70,7 @@ impl HwType {
             Self::Hpe => Some(bmc_vendor::BMCVendor::Hpe),
             Self::Lenovo => Some(bmc_vendor::BMCVendor::Lenovo),
             Self::LenovoAmi => Some(bmc_vendor::BMCVendor::LenovoAMI),
+            Self::GigaComputingAmi => Some(bmc_vendor::BMCVendor::GigaComputing),
             Self::LenovoGb300 => Some(bmc_vendor::BMCVendor::LenovoAMI),
             // SMC GB300 runs a Supermicro (OpenBMC) host BMC.
             Self::SupermicroGb300 => Some(bmc_vendor::BMCVendor::Supermicro),
@@ -98,6 +101,7 @@ impl HwType {
             Self::Hpe => None,
             Self::Lenovo => Some(BiosAttr::new_str("BootModes_InfiniteBootRetry", "Enabled")),
             Self::LenovoAmi => Some(BiosAttr::new_str("EndlessBoot", "Enabled")),
+            Self::GigaComputingAmi => Some(BiosAttr::new_str("GBT0183", "Enabled")),
             Self::LenovoGb300 => Some(BiosAttr::new_int("LEM0003", 50)),
             // TODO(smc): confirm the SMC GB300 infinite-boot BIOS attribute from the tray BIOS.
             Self::SupermicroGb300 => None,
@@ -190,6 +194,7 @@ mod tests {
                 HwType::Hpe => Some(BMCVendor::Hpe),
                 HwType::Lenovo => Some(BMCVendor::Lenovo),
                 HwType::LenovoAmi => Some(BMCVendor::LenovoAMI),
+                HwType::GigaComputingAmi => Some(BMCVendor::GigaComputing),
                 HwType::LenovoGb300 => Some(BMCVendor::LenovoAMI),
                 HwType::SupermicroGb300 => Some(BMCVendor::Supermicro),
                 HwType::Supermicro => Some(BMCVendor::Supermicro),

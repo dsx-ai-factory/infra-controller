@@ -161,7 +161,7 @@ jobs:
           python-version: '3.13'
 
       - name: Download dependencies
-        run: go mod download
+        uses: ./.github/actions/go-mod-download
 
       - name: Validate bundle prerequisites and identity
         run: |

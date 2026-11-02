@@ -3621,6 +3621,81 @@ func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 	}
 }
 
+func TestTenantHasCrossTenantInterfaceCreation(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testCommonInitDB(t)
+	defer dbSession.Close()
+	testCommonSetupSchema(t, dbSession)
+
+	user := testCommonBuildUser(t, dbSession, uuid.NewString(), []string{"cross-interface-provider"}, []string{authz.ProviderAdminRole})
+	provider := testCommonBuildInfrastructureProvider(t, dbSession, "Cross Interface Provider", "cross-interface-provider", user)
+	otherProvider := testCommonBuildInfrastructureProvider(t, dbSession, "Other Provider", "cross-interface-other-provider", user)
+	defaultSite := testCommonBuildSite(t, dbSession, provider, "Default Site", user)
+	overrideSite := testCommonBuildSite(t, dbSession, provider, "Override Site", user)
+	otherProviderSite := testCommonBuildSite(t, dbSession, otherProvider, "Other Provider Site", user)
+
+	buildTenant := func(name, status string, accountDefault bool) *cdbm.Tenant {
+		tenant := cdbm.TestBuildTenant(t, dbSession, name, name+"-org", user)
+		_, err := cdbm.NewTenantAccountDAO(dbSession).Create(ctx, nil, cdbm.TenantAccountCreateInput{
+			AccountNumber:             uuid.NewString(),
+			TenantID:                  &tenant.ID,
+			TenantOrg:                 tenant.Org,
+			InfrastructureProviderID:  provider.ID,
+			InfrastructureProviderOrg: provider.Org,
+			Status:                    status,
+			Config: &cdbm.TenantAccountConfig{
+				CrossTenantInterfaceCreation: accountDefault,
+			},
+			CreatedBy: user.ID,
+		})
+		require.NoError(t, err)
+		return tenant
+	}
+
+	enabledTenant := buildTenant("cross-interface-enabled", cdbm.TenantAccountStatusReady, true)
+	disabledTenant := buildTenant("cross-interface-disabled", cdbm.TenantAccountStatusReady, false)
+	pendingTenant := buildTenant("cross-interface-pending", cdbm.TenantAccountStatusPending, true)
+
+	cdbm.TestBuildTenantSite(t, dbSession, enabledTenant, overrideSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(false),
+	}, user)
+	cdbm.TestBuildTenantSite(t, dbSession, disabledTenant, overrideSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(true),
+	}, user)
+	cdbm.TestBuildTenantSite(t, dbSession, enabledTenant, otherProviderSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(true),
+	}, user)
+
+	tests := []struct {
+		name     string
+		tenant   *cdbm.Tenant
+		siteID   uuid.UUID
+		expected bool
+		wantErr  bool
+	}{
+		{name: "nil Tenant is disabled", siteID: defaultSite.ID},
+		{name: "enabled account default", tenant: enabledTenant, siteID: defaultSite.ID, expected: true},
+		{name: "disabled account default", tenant: disabledTenant, siteID: defaultSite.ID},
+		{name: "false Site override disables true default", tenant: enabledTenant, siteID: overrideSite.ID},
+		{name: "true Site override enables false default", tenant: disabledTenant, siteID: overrideSite.ID, expected: true},
+		{name: "non-Ready account does not authorize", tenant: pendingTenant, siteID: defaultSite.ID},
+		{name: "override without Ready account at Site Provider fails closed", tenant: enabledTenant, siteID: otherProviderSite.ID},
+		{name: "missing Site returns an error", tenant: enabledTenant, siteID: uuid.New(), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tc.tenant, tc.siteID)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
 func TestHandleTxError(t *testing.T) {
 	for _, tt := range []struct {
 		name string

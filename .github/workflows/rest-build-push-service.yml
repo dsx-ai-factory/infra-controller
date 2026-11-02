@@ -167,10 +167,29 @@ jobs:
           echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
           echo "major_minor_tag=$MAJOR_MINOR" >> $GITHUB_OUTPUT
 
+      # Same cache entry as `.github/actions/go-mod-download`. The Dockerfile
+      # downloads whatever the restored entry lacks from the proxy, which is
+      # everything on a miss.
+      - name: Restore Go module downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/rest-go-mod-download
+          key: rest-go-mod-download-${{ hashFiles('rest-api/go.sum') }}
+          restore-keys: rest-go-mod-download-
+
+      - name: Locate Go module downloads
+        id: go-mod-download
+        run: |
+          dir="${HOME}/.cache/rest-go-mod-download"
+          mkdir -p "${dir}"
+          echo "dir=${dir}" >> "$GITHUB_OUTPUT"
+
       - name: Build ${{ inputs.service_name }} (${{ matrix.arch }})
         uses: docker/build-push-action@v5
         with:
           context: ./rest-api
+          # Replaces the empty `gomodcache` stage in the Dockerfile.
+          build-contexts: gomodcache=${{ steps.go-mod-download.outputs.dir }}
           file: ${{ inputs.dockerfile }}
           platforms: ${{ matrix.platform }}
           push: false

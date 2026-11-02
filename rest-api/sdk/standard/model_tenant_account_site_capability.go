@@ -22,12 +22,14 @@ import (
 // checks if the TenantAccountSiteCapability type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TenantAccountSiteCapability{}
 
-// TenantAccountSiteCapability TargetedInstanceCreation capability for the Tenant Account default or an explicit Site list.  Update payloads must satisfy all of the following when siteCapabilities is sent on PATCH: - the siteCapabilities array must contain at least one entry - exactly one entry must omit siteIds or provide an empty siteIds array - each siteId may appear at most once across all entries - every provided siteId must be a valid Site UUID - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400  PATCH uses replace semantics: previously configured per-site overrides whose siteId is omitted from the new payload are cleared.
+// TenantAccountSiteCapability Effective Tenant capabilities returned for the Tenant Account default or a group of Sites.
 type TenantAccountSiteCapability struct {
-	// Sites to configure. An omitted or empty array identifies the Tenant Account default entry. Each value must be a valid Site UUID, may appear only once across all siteCapabilities entries in the same request, and must be owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
-	SiteIds []string `json:"siteIds,omitempty"`
+	// Empty for the account-default entry; otherwise the sorted Sites whose effective capability values match this entry.
+	SiteIds []string `json:"siteIds"`
 	// Whether TargetedInstanceCreation is enabled for the Tenant Account default or listed Sites. When true, Tenant Admins with a Ready Tenant Account on the Site's Infrastructure Provider may create Instances by Machine ID and perform related privileged actions on that Site.
 	TargetedInstanceCreation bool `json:"targetedInstanceCreation"`
+	// Whether cross-Tenant Interface creation is enabled for the Tenant Account default or listed Sites. When true, non-primary Instance Interfaces may select another Tenant's VPC or VPC Prefix on that Site.
+	CrossTenantInterfaceCreation bool `json:"crossTenantInterfaceCreation"`
 }
 
 type _TenantAccountSiteCapability TenantAccountSiteCapability
@@ -36,9 +38,11 @@ type _TenantAccountSiteCapability TenantAccountSiteCapability
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantAccountSiteCapability(targetedInstanceCreation bool) *TenantAccountSiteCapability {
+func NewTenantAccountSiteCapability(siteIds []string, targetedInstanceCreation bool, crossTenantInterfaceCreation bool) *TenantAccountSiteCapability {
 	this := TenantAccountSiteCapability{}
+	this.SiteIds = siteIds
 	this.TargetedInstanceCreation = targetedInstanceCreation
+	this.CrossTenantInterfaceCreation = crossTenantInterfaceCreation
 	return &this
 }
 
@@ -50,34 +54,26 @@ func NewTenantAccountSiteCapabilityWithDefaults() *TenantAccountSiteCapability {
 	return &this
 }
 
-// GetSiteIds returns the SiteIds field value if set, zero value otherwise.
+// GetSiteIds returns the SiteIds field value
 func (o *TenantAccountSiteCapability) GetSiteIds() []string {
-	if o == nil || IsNil(o.SiteIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.SiteIds
 }
 
-// GetSiteIdsOk returns a tuple with the SiteIds field value if set, nil otherwise
+// GetSiteIdsOk returns a tuple with the SiteIds field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccountSiteCapability) GetSiteIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.SiteIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SiteIds, true
 }
 
-// HasSiteIds returns a boolean if a field has been set.
-func (o *TenantAccountSiteCapability) HasSiteIds() bool {
-	if o != nil && !IsNil(o.SiteIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteIds gets a reference to the given []string and assigns it to the SiteIds field.
+// SetSiteIds sets field value
 func (o *TenantAccountSiteCapability) SetSiteIds(v []string) {
 	o.SiteIds = v
 }
@@ -106,6 +102,30 @@ func (o *TenantAccountSiteCapability) SetTargetedInstanceCreation(v bool) {
 	o.TargetedInstanceCreation = v
 }
 
+// GetCrossTenantInterfaceCreation returns the CrossTenantInterfaceCreation field value
+func (o *TenantAccountSiteCapability) GetCrossTenantInterfaceCreation() bool {
+	if o == nil {
+		var ret bool
+		return ret
+	}
+
+	return o.CrossTenantInterfaceCreation
+}
+
+// GetCrossTenantInterfaceCreationOk returns a tuple with the CrossTenantInterfaceCreation field value
+// and a boolean to check if the value has been set.
+func (o *TenantAccountSiteCapability) GetCrossTenantInterfaceCreationOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.CrossTenantInterfaceCreation, true
+}
+
+// SetCrossTenantInterfaceCreation sets field value
+func (o *TenantAccountSiteCapability) SetCrossTenantInterfaceCreation(v bool) {
+	o.CrossTenantInterfaceCreation = v
+}
+
 func (o TenantAccountSiteCapability) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -116,10 +136,9 @@ func (o TenantAccountSiteCapability) MarshalJSON() ([]byte, error) {
 
 func (o TenantAccountSiteCapability) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.SiteIds) {
-		toSerialize["siteIds"] = o.SiteIds
-	}
+	toSerialize["siteIds"] = o.SiteIds
 	toSerialize["targetedInstanceCreation"] = o.TargetedInstanceCreation
+	toSerialize["crossTenantInterfaceCreation"] = o.CrossTenantInterfaceCreation
 	return toSerialize, nil
 }
 
@@ -128,7 +147,9 @@ func (o *TenantAccountSiteCapability) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
+		"siteIds",
 		"targetedInstanceCreation",
+		"crossTenantInterfaceCreation",
 	}
 
 	allProperties := make(map[string]interface{})

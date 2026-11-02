@@ -1,0 +1,15 @@
+---
+tags: ["unreleased", "security", "deployment"]
+---
+
+## KMIP KEK provider — unreleased
+
+`nico-api` can wrap the data-encryption keys of its PostgreSQL credential store with a key held in a KMIP 1.4 server, as an alternative to Vault/OpenBao Transit. A `kmip` provider under `[secrets.kms.providers]` names the server endpoint, the mutual-TLS files, and the server key behind each `kek_id`. The key never leaves the server: `nico-api` sends only the per-record key to the server's `Encrypt` and `Decrypt` operations, and at startup it verifies the protocol version, the operations, each key's state and attributes, and a wrap and unwrap round trip. Rotation and migration from Transit use the existing routing and `nico-admin-cli secrets re-wrap` flow. No KMIP server product is qualified yet; qualification is tracked in [issue #3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253). See [KMIP KEK Provider](../../docs/configuration/kmip-kek-provider.md).
+
+### New and changed configuration
+
+| Setting | Change |
+| --- | --- |
+| `[secrets.kms.providers.<name>]` with `type = "kmip"` | New provider type with `endpoint`, `ca_bundle`, `client_cert`, `client_key`, and `keys`, plus optional `server_name`, `connect_timeout` (`5s`, at most `60s`), and `request_timeout` (`10s`, at most `120s`). |
+| nico-api chart `extraVolumes`, `extraVolumeMounts` | New, empty by default. Mount the Secret holding the KMIP client TLS material, or a file-backed Integrated key. |
+| `helm-prereqs` `NICO_KMIP_CLIENT_DIR` | New, optional. `setup.sh` creates the `nico-system/nico-kmip-client` Secret from `ca.pem`, `client.pem`, and `client.key` in that directory before deploying Core, and preflight checks that a `kmip` provider's TLS paths fall under a mounted Secret that exists, while a path under one of the chart's own mounts, such as the site CA, is accepted as is. The TOML check needs Python 3.11 or later, or the `tomli` package. |

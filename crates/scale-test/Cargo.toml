@@ -1,0 +1,66 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-scale-test"
+description = "Scale test runner: shared framework and test commands, shipped in the machine-a-tron image"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "scale_test"
+
+[features]
+# Fakes for this crate's tests and for test commands built on it.
+test-support = ["dep:axum", "dep:regex", "dep:serde_urlencoded"]
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { optional = true, workspace = true }
+chrono = { features = ["serde"], workspace = true }
+regex = { optional = true, workspace = true }
+reqwest = { default-features = false, features = [
+  "json",
+  "rustls",
+], workspace = true }
+schemars = { workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = { optional = true, workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+
+# [local-dependencies]
+carbide-site-health-probe-api = { path = "../site-health-probe-api", features = [
+  "schema",
+] }
+
+[dev-dependencies]
+axum = { workspace = true }
+carbide-test-support = { path = "../test-support" }
+futures = { features = ["std"], workspace = true }
+regex = { workspace = true }
+serde_urlencoded = { workspace = true }
+tokio = { features = ["test-util"], workspace = true }
+
+[lints]
+workspace = true

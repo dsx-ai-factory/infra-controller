@@ -280,7 +280,7 @@ mod tests {
         let (status, document) = send(&router, Method::GET, "/redfish/v1/Chassis/BMC_0", "").await;
         assert_eq!(status, StatusCode::OK);
         let document: serde_json::Value = serde_json::from_str(&document).unwrap();
-        assert!(document["Actions"]["Oem"]["#NvidiaChassis.AuxPowerReset"].is_null());
+        assert!(!document["Actions"]["Oem"]["#NvidiaChassis.AuxPowerReset"].is_null());
         let (status, body) = send(
             &router,
             Method::POST,

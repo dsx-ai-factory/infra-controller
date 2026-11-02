@@ -97,35 +97,39 @@ Once Site Explorer has explored both host BMCs and DPU BMCs, it matches them int
 
 ### Matching Algorithm
 
-The algorithm has three strategies, tried in order:
+Site Explorer combines PCIe and chassis inventory with configured DPU serials. Hosts with `dpu_policy = "ignore"` skip DPU matching.
 
 **Step 1 — Build DPU serial number map:**
-For each explored DPU endpoint, extract `system.serial_number` and create a map: `DPU serial → explored endpoint`.
+For each explored DPU endpoint, extract its pairing serial number and create a map: `DPU serial → explored endpoint`.
 
-**Step 2 — Primary match via PCIe devices:**
-For each host, iterate through `system.pcie_devices`. For each device where `is_bluefield()` returns true (BF2, BF3, or BF3 Super NIC), look up `pcie_device.serial_number` in the DPU serial map. A match means this DPU is physically installed in this host.
+**Step 2 — Collect PCIe and chassis inventory:**
+Collect devices from `system.pcie_devices` and chassis inventory. A BlueField chassis with a usable serial supplies its own identity; otherwise its network adapters supply the device serials. Trim whitespace, omit missing or blank serials, and deduplicate devices across both sources. Prefer records with a BlueField part number; PCIe wins when both sources supply conflicting BlueField part numbers.
 
-**Step 3 — Fallback match via chassis network adapters:**
-If no BlueField PCIe devices were found (Step 2 count = 0), iterate through `chassis.network_adapters` instead. For each adapter where `is_bluefield_model(part_number)` is true, look up `network_adapter.serial_number` in the DPU serial map.
+**Step 3 — Match inventory devices:**
+Look up each inventory serial in the DPU serial map. A matching explored DPU BMC identifies the device as a DPU even when the host supplies no BlueField part number. Keep the inventory part number when present and use the DPU BMC report when it is missing.
 
-**Step 4 — Final fallback via expected machines manifest:**
-If the explored matches are incomplete, check `expected_machine.fallback_dpu_serial_numbers` for manually specified DPU-to-host associations.
+**Step 4 — Include configured DPU serials:**
+Always consider `expected_machine.fallback_dpu_serial_numbers`, including when host inventory is fully matched. Trim and deduplicate these serials, ignoring blank entries. Resolve them against explored DPU BMCs and combine the resulting matches with inventory matches. A serial present in both sources contributes only one DPU match.
+
+Every configured serial must be discovered and its DPU ready before ingestion. After replacing a DPU (RMA), update or remove its old serial in `fallback_dpu_serial_numbers`. A stale entry blocks ingestion even when every DPU reported by the host has been found and is ready.
 
 ### Validation
 
 Before accepting a pairing, NICo validates:
 
-- **DPU mode**: The DPU must be in DPU mode, not NIC mode. BlueFields in NIC mode are excluded from pairing.
-- **DPU model configuration**: `check_and_configure_dpu_mode()` verifies the DPU is correctly configured for its model. Hosts with misconfigured DPUs are not ingested.
-- **Completeness**: The number of explored DPUs must match the number of BlueField devices the host reports. Incomplete pairings are deferred.
+- **DPU mode**: A successful mode-change request defers ingestion until a later pass. After mode checks succeed, devices reporting NIC mode count toward pairing completeness but are not attached as managed DPUs. A missing Redfish mode does not itself block attachment; supported BF4 devices can pair without reporting DPU or NIC mode.
+- **DPU model configuration**: Site Explorer resolves the target mode from the host's DPU policy and the device part number. Mode changes require a host power cycle, and ingestion waits for the changes to take effect.
+- **Completeness**: Every configured serial must have an explored DPU BMC, and every matched DPU must be ready. Ready matches must also cover the reported DPU count. Configured DPUs can fill unmatched reported slots when host serials are incorrect, without counting those slots twice. Inventory records without usable serials do not add slots. Incomplete pairings are deferred.
 
 ### Ingestion
 
 Once all DPUs are matched and validated, the host enters an "ingestable" state and Site Explorer kickstarts the ingestion process via the ManagedHost state machine.
 
-**Key file:**
+**Key files:**
 
-- `crates/site-explorer/src/lib.rs`: `identify_managed_hosts()` with the complete pairing algorithm
+- `crates/site-explorer/src/endpoint_exploration_report_ext.rs`: inventory collection and serial deduplication
+- `crates/site-explorer/src/host_dpu_matches.rs`: inventory and configured-serial matching, expected DPU count
+- `crates/site-explorer/src/lib.rs`: `configure_host_dpus()` with mode configuration and readiness checks
 
 ## 4. DPU Provisioning
 

@@ -3,7 +3,7 @@
 
 .PHONY: test postgres-up postgres-down ensure-postgres postgres-wait clean check-source-headers fix-source-headers check-command-bundle
 .PHONY: build docker-build docker-build-local
-.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
+.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-cli-commands test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
 .PHONY: validate-openapi preview-openapi generate-client
 .PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen tools-build tools-clean
 .PHONY: pre-commit-install pre-commit-run pre-commit-update
@@ -23,6 +23,7 @@ REVIVE          := go tool revive
 BUILD_DIR := build/binaries
 IMAGE_REGISTRY := localhost:5000
 IMAGE_TAG := latest
+VERSION ?= dev
 DOCKERFILE_DIR := docker/production
 DOCKER_ARCHES := amd64 arm64
 LOCAL_REGISTRY_CONTAINER := nico-build-registry
@@ -227,6 +228,10 @@ test-common:
 test-cert-manager:
 	cd cert-manager && go test -p 1 ./... -count=1
 
+# Public CLI command tests; the interactive TUI has a separate package.
+test-cli-commands:
+	cd cli && go test -p 1 ./pkg -count=1
+
 test-site-workflow:
 	cd site-workflow && go test -p 1 ./... -count=1
 
@@ -308,6 +313,7 @@ docker-build:
 			tag=$(IMAGE_REGISTRY)/$$image:$(IMAGE_TAG)-$$arch; \
 			docker buildx build --platform linux/$$arch --push \
 				--build-arg TARGETOS=linux --build-arg TARGETARCH=$$arch \
+				--build-arg VERSION=$(VERSION) \
 				-t $$tag \
 				-f $(DOCKERFILE_DIR)/Dockerfile.$$image .; \
 			tags="$$tags $$tag"; \

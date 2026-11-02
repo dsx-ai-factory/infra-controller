@@ -84,6 +84,20 @@ tests:
           path: data["nico-overview.json"]
           pattern: '^\{'
 
+  - it: makes extension services selectable in the lifecycle dashboard
+    set:
+      grafanaDashboards.enabled: true
+    documentSelector:
+      path: metadata.name
+      value: nico-system-test-nico-nico-lifecycle
+    asserts:
+      - matchRegex:
+          path: data["nico-lifecycle.json"]
+          pattern: '"query": "([^"]*,)?extension_services(,[^"]*)?"'
+      - matchRegex:
+          path: data["nico-lifecycle.json"]
+          pattern: '"text": "extension_services", "value": "extension_services"'
+
   - it: supports a Grafana namespace and sidecar-specific metadata
     values:
       - fixtures/grafana-custom-values.yaml

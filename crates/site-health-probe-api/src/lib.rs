@@ -299,7 +299,7 @@ pub struct SweepInfo {
 /// `GET /v1/count` reply.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::CountResponse")]
 pub struct CountResponse {
     pub count: u64,
     #[serde(flatten)]
@@ -329,7 +329,7 @@ pub struct UnitsQuery {
 /// `(source, type, id)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::UnitsResponse")]
 pub struct UnitsResponse {
     #[serde(flatten)]
     pub sweep: SweepInfo,
@@ -453,7 +453,7 @@ pub struct ConfigResponse {
 /// binds the site.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::RestSiteBinding")]
 pub struct RestSiteBinding {
     #[serde(flatten)]
     pub read: ReadInfo,
@@ -462,7 +462,7 @@ pub struct RestSiteBinding {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::ConfigNicoApi")]
 pub struct ConfigNicoApi {
     #[serde(flatten)]
     pub read: ReadInfo,
@@ -506,7 +506,7 @@ pub struct SiteExplorerRun {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::ConfigRest")]
 pub struct ConfigRest {
     #[serde(flatten)]
     pub read: ReadInfo,
@@ -687,6 +687,161 @@ pub fn parse_q(raw: &str) -> Result<Vec<f64>, String> {
     Ok(qs)
 }
 
+/// Flat copies of the replies that flatten [`SweepInfo`] or [`ReadInfo`],
+/// read in their place. Serde reads a flattened struct from buffered values,
+/// and serde_json's `arbitrary_precision`, which a workspace build turns on,
+/// buffers a number as a map that no f64 field accepts.
+mod flat {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct CountResponse {
+        count: u64,
+        snapshot_id: String,
+        family: Family,
+        sweep_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        sweep_age_seconds: f64,
+        sweep_interval_seconds: f64,
+    }
+
+    impl From<CountResponse> for super::CountResponse {
+        fn from(r: CountResponse) -> Self {
+            Self {
+                count: r.count,
+                sweep: SweepInfo {
+                    snapshot_id: r.snapshot_id,
+                    family: r.family,
+                    sweep_start: r.sweep_start,
+                    read_at: r.read_at,
+                    sweep_age_seconds: r.sweep_age_seconds,
+                    sweep_interval_seconds: r.sweep_interval_seconds,
+                },
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct UnitsResponse {
+        snapshot_id: String,
+        family: Family,
+        sweep_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        sweep_age_seconds: f64,
+        sweep_interval_seconds: f64,
+        units: Vec<Unit>,
+        missing_ids: Vec<String>,
+        next_cursor: Option<String>,
+    }
+
+    impl From<UnitsResponse> for super::UnitsResponse {
+        fn from(r: UnitsResponse) -> Self {
+            Self {
+                sweep: SweepInfo {
+                    snapshot_id: r.snapshot_id,
+                    family: r.family,
+                    sweep_start: r.sweep_start,
+                    read_at: r.read_at,
+                    sweep_age_seconds: r.sweep_age_seconds,
+                    sweep_interval_seconds: r.sweep_interval_seconds,
+                },
+                units: r.units,
+                missing_ids: r.missing_ids,
+                next_cursor: r.next_cursor,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct RestSiteBinding {
+        read_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        read_age_seconds: f64,
+        read_interval_seconds: f64,
+        last_attempt_error: Option<String>,
+        result: SiteMatch,
+    }
+
+    impl From<RestSiteBinding> for super::RestSiteBinding {
+        fn from(r: RestSiteBinding) -> Self {
+            Self {
+                read: ReadInfo {
+                    read_start: r.read_start,
+                    read_at: r.read_at,
+                    read_age_seconds: r.read_age_seconds,
+                    read_interval_seconds: r.read_interval_seconds,
+                    last_attempt_error: r.last_attempt_error,
+                },
+                result: r.result,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct ConfigNicoApi {
+        read_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        read_age_seconds: f64,
+        read_interval_seconds: f64,
+        last_attempt_error: Option<String>,
+        firmware_targets: Vec<FirmwareTarget>,
+        runtime: RuntimeSettings,
+        site_explorer: Option<SiteExplorerRun>,
+    }
+
+    impl From<ConfigNicoApi> for super::ConfigNicoApi {
+        fn from(r: ConfigNicoApi) -> Self {
+            Self {
+                read: ReadInfo {
+                    read_start: r.read_start,
+                    read_at: r.read_at,
+                    read_age_seconds: r.read_age_seconds,
+                    read_interval_seconds: r.read_interval_seconds,
+                    last_attempt_error: r.last_attempt_error,
+                },
+                firmware_targets: r.firmware_targets,
+                runtime: r.runtime,
+                site_explorer: r.site_explorer,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct ConfigRest {
+        read_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        read_age_seconds: f64,
+        read_interval_seconds: f64,
+        last_attempt_error: Option<String>,
+        tenant_allocation: Option<TenantAllocation>,
+    }
+
+    impl From<ConfigRest> for super::ConfigRest {
+        fn from(r: ConfigRest) -> Self {
+            Self {
+                read: ReadInfo {
+                    read_start: r.read_start,
+                    read_at: r.read_at,
+                    read_age_seconds: r.read_age_seconds,
+                    read_interval_seconds: r.read_interval_seconds,
+                    last_attempt_error: r.last_attempt_error,
+                },
+                tenant_allocation: r.tenant_allocation,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -719,6 +874,8 @@ mod tests {
         T: Serialize + DeserializeOwned + PartialEq + Debug,
     {
         assert_eq!(serde_json::to_value(value).unwrap(), golden);
+        let back: T = serde_json::from_str(&golden.to_string()).unwrap();
+        assert_eq!(&back, value);
         let back: T = serde_json::from_value(golden).unwrap();
         assert_eq!(&back, value);
     }
@@ -1253,6 +1410,53 @@ mod tests {
                 rest: None
             }
         );
+    }
+
+    #[test]
+    fn config_sources_json_golden() {
+        let nico_api = ConfigNicoApi {
+            read: read_info(),
+            firmware_targets: vec![],
+            runtime: RuntimeSettings {
+                max_concurrent_machine_updates_absolute: Some(10),
+                max_concurrent_machine_updates_percent: None,
+                auto_host_firmware_update: Some(true),
+            },
+            site_explorer: None,
+        };
+        let mut golden = read_info_json();
+        golden["firmwareTargets"] = json!([]);
+        golden["runtime"] = json!({
+            "maxConcurrentMachineUpdatesAbsolute": 10,
+            "maxConcurrentMachineUpdatesPercent": null,
+            "autoHostFirmwareUpdate": true,
+        });
+        golden["siteExplorer"] = json!(null);
+        assert_json_golden(&nico_api, golden);
+
+        let rest = ConfigRest {
+            read: read_info(),
+            tenant_allocation: Some(TenantAllocation {
+                tenant: "t1".to_string(),
+                instance_type: "it-1".to_string(),
+                assigned: 4,
+                total: 5,
+                used: 3,
+                unused: 2,
+                unused_usable: 1,
+            }),
+        };
+        let mut golden = read_info_json();
+        golden["tenantAllocation"] = json!({
+            "tenant": "t1",
+            "instanceType": "it-1",
+            "assigned": 4,
+            "total": 5,
+            "used": 3,
+            "unused": 2,
+            "unusedUsable": 1,
+        });
+        assert_json_golden(&rest, golden);
     }
 
     #[test]

@@ -42,6 +42,7 @@ carbide-version = { path = "../version" }
 carbide-utils = { path = "../utils" }
 carbide-machine-validation = { path = "../machine-validation" }
 carbide-libmlx = { path = "../libmlx" }
+carbide-libmlx-model = { path = "../libmlx-model" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 
 chrono = { workspace = true }

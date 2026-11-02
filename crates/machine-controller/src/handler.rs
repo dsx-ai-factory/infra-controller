@@ -82,11 +82,11 @@ use model::machine::nvlink::nvlink_config_synced;
 use model::machine::{
     AttestationMode, BomValidating, BomValidatingContext, CleanupContext, CleanupState,
     ConfigureAstraState, CreateBossVolumeContext, CreateBossVolumeState, DecommissioningState,
-    DpuDiscoveringState, DpuDiscoveringStates, DpuInitNextStateResolver, DpuInitState, DpuMachine,
-    FactoryResetBmcState, FailureCause, FailureDetails, FailureSource, HostMachine,
-    HostPlatformConfigurationState, HostReprovisionState, InitialResetPhase, InstallDpuOsState,
-    InstanceNextStateResolver, InstanceState, LoadSnapshotOptions, LockdownInfo, LockdownState,
-    MAX_FIRMWARE_UPGRADE_RETRIES, Machine, MachineLastRebootRequested,
+    DisableOnboardNicsState, DpuDiscoveringState, DpuDiscoveringStates, DpuInitNextStateResolver,
+    DpuInitState, DpuMachine, FactoryResetBmcState, FailureCause, FailureDetails, FailureSource,
+    HostMachine, HostPlatformConfigurationState, HostReprovisionState, InitialResetPhase,
+    InstallDpuOsState, InstanceNextStateResolver, InstanceState, LoadSnapshotOptions, LockdownInfo,
+    LockdownState, MAX_FIRMWARE_UPGRADE_RETRIES, Machine, MachineLastRebootRequested,
     MachineLastRebootRequestedMode, MachineNextStateResolver, MachineState,
     MachineValidationContext, ManagedHostState, ManagedHostStateSnapshot, MeasuringState,
     NetworkConfigUpdateState, NextStateBFBSupport, PerformPowerOperation, PowerDrainState,
@@ -8437,13 +8437,78 @@ impl StateHandler for HostMachineStateHandler {
                             .map_err(|e| redfish_error("enable_ipmi_over_lan", e))?;
                     }
 
-                    let next_state = ManagedHostState::HostInit {
-                        machine_state: MachineState::WaitingForPlatformConfiguration {
-                            retry_count: 0,
-                        },
+                    let machine_state = if mh_snapshot.has_managed_dpus()
+                        && is_vera_rubin_host(host_redfish_client.as_ref()).await?
+                    {
+                        MachineState::DisableOnboardNics {
+                            disable_onboard_nics_state:
+                                DisableOnboardNicsState::ConfigureOnboardNics { enable: true },
+                        }
+                    } else {
+                        // Other platforms and no-DPU hosts retain their onboard NIC settings.
+                        MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
                     };
 
-                    Ok(StateHandlerOutcome::transition(next_state))
+                    Ok(StateHandlerOutcome::transition(
+                        ManagedHostState::HostInit { machine_state },
+                    ))
+                }
+                MachineState::DisableOnboardNics {
+                    disable_onboard_nics_state,
+                } => {
+                    let next_state = match disable_onboard_nics_state {
+                        DisableOnboardNicsState::ConfigureOnboardNics { enable } => {
+                            let redfish_client = ctx
+                                .services
+                                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
+                                .await?;
+                            let (operation, target) = if *enable {
+                                ("enable_onboard_nics", libredfish::EnabledDisabled::Enabled)
+                            } else {
+                                (
+                                    "disable_onboard_nics",
+                                    libredfish::EnabledDisabled::Disabled,
+                                )
+                            };
+                            redfish_client
+                                .set_enable_onboard_nics(target)
+                                .await
+                                .map_err(|e| redfish_error(operation, e))?;
+                            MachineState::DisableOnboardNics {
+                                disable_onboard_nics_state:
+                                    DisableOnboardNicsState::WaitForConfigToBeApplied {
+                                        onboard_nics_disabled: !enable,
+                                    },
+                            }
+                        }
+                        DisableOnboardNicsState::WaitForConfigToBeApplied {
+                            onboard_nics_disabled,
+                        } => {
+                            if mh_snapshot.host_snapshot.state.version.since_state_change()
+                                < Duration::seconds(10)
+                            {
+                                return Ok(StateHandlerOutcome::wait(
+                                    "Waiting for onboard NIC configuration to be applied"
+                                        .to_string(),
+                                ));
+                            }
+                            if *onboard_nics_disabled {
+                                MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
+                            } else {
+                                MachineState::DisableOnboardNics {
+                                    disable_onboard_nics_state:
+                                        DisableOnboardNicsState::ConfigureOnboardNics {
+                                            enable: false,
+                                        },
+                                }
+                            }
+                        }
+                    };
+                    Ok(StateHandlerOutcome::transition(
+                        ManagedHostState::HostInit {
+                            machine_state: next_state,
+                        },
+                    ))
                 }
                 MachineState::WaitingForPlatformConfiguration { retry_count } => {
                     tracing::info!(
@@ -13218,6 +13283,15 @@ fn handler_restart_dpu(
 
         Ok(())
     }
+}
+
+/// Use libredfish's vendor detection to identify Vera Rubin compute-tray BMCs.
+async fn is_vera_rubin_host(redfish_client: &dyn Redfish) -> Result<bool, StateHandlerError> {
+    redfish_client
+        .get_service_root()
+        .await
+        .map(|root| root.is_vera_rubin())
+        .map_err(|error| redfish_error("get_service_root", error))
 }
 
 pub async fn host_power_state(

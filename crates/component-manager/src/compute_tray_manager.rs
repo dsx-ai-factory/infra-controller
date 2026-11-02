@@ -41,6 +41,7 @@ impl From<bmc_vendor::BMCVendor> for ComputeTrayVendor {
             bmc_vendor::BMCVendor::Supermicro => Self::Supermicro,
             bmc_vendor::BMCVendor::Nvidia => Self::Nvidia,
             bmc_vendor::BMCVendor::LenovoAMI
+            | bmc_vendor::BMCVendor::GigaComputing
             | bmc_vendor::BMCVendor::Liteon
             | bmc_vendor::BMCVendor::Delta
             | bmc_vendor::BMCVendor::Sushy
@@ -208,6 +209,7 @@ mod tests {
 
             "unsupported compute tray vendors" {
                 BMCVendor::LenovoAMI => ComputeTrayVendor::Unknown,
+                BMCVendor::GigaComputing => ComputeTrayVendor::Unknown,
                 BMCVendor::Liteon => ComputeTrayVendor::Unknown,
                 BMCVendor::Delta => ComputeTrayVendor::Unknown,
                 BMCVendor::Sushy => ComputeTrayVendor::Unknown,

@@ -29,18 +29,16 @@ import (
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 )
 
-// ~~~~~ GetAll Interface Handler ~~~~~ //
-
-// GetAllInterfaceHandler is the API Handler for retrieving all Interfaces for an Instance
-type GetAllInterfaceHandler struct {
+// GetAllInstanceInterfaceHandler is the API Handler for retrieving all Interfaces for an Instance.
+type GetAllInstanceInterfaceHandler struct {
 	dbSession *cdb.Session
 	tc        temporalClient.Client
 	cfg       *config.Config
 }
 
-// NewGetAllInterfaceHandler initializes and returns a new handler for retrieving all subnets for an Instance
-func NewGetAllInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllInterfaceHandler {
-	return GetAllInterfaceHandler{
+// NewGetAllInstanceInterfaceHandler initializes an Instance-scoped Interface handler.
+func NewGetAllInstanceInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllInstanceInterfaceHandler {
+	return GetAllInstanceInterfaceHandler{
 		dbSession: dbSession,
 		tc:        tc,
 		cfg:       cfg,
@@ -63,6 +61,59 @@ func NewGetAllInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Param orderBy query string false "Order by field"
 // @Success 200 {object} model.APIInterface
 // @Router /v2/org/{org}/nico/instance/{instance_id}/interface [get]
+func (h GetAllInstanceInterfaceHandler) Handle(c echo.Context) error {
+	instanceID := c.Param("instanceId")
+	delegate := NewGetAllInterfaceHandler(h.dbSession, h.tc, h.cfg, &common.QueryOverride{
+		InstanceIDs:   []string{instanceID},
+		ValueFromPath: true,
+	})
+	return delegate.Handle(c)
+}
+
+// ~~~~~ GetAll Interface Handler ~~~~~ //
+
+// GetAllInterfaceHandler is the API Handler for retrieving Tenant-visible Interfaces.
+type GetAllInterfaceHandler struct {
+	dbSession     *cdb.Session
+	tc            temporalClient.Client
+	cfg           *config.Config
+	queryOverride *common.QueryOverride
+}
+
+// NewGetAllInterfaceHandler initializes an Interface handler. A query override supplies
+// path-scoped values when the Instance endpoint delegates to the general endpoint.
+func NewGetAllInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config, queryOverride ...*common.QueryOverride) GetAllInterfaceHandler {
+	var override *common.QueryOverride
+	if len(queryOverride) > 0 {
+		override = queryOverride[0]
+	}
+	return GetAllInterfaceHandler{
+		dbSession:     dbSession,
+		tc:            tc,
+		cfg:           cfg,
+		queryOverride: override,
+	}
+}
+
+// Handle godoc
+// @Summary Retrieve Tenant-visible Interfaces
+// @Description Retrieve Interfaces visible to the current Tenant
+// @Tags Interface
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param vpcId query string false "Filter by attached VPC ID"
+// @Param crossTenant query boolean false "Filter by whether the Instance and selected VPC or VPC Prefix have different owning Tenants"
+// @Param instanceTenantId query string false "Filter by Instance owning Tenant ID"
+// @Param vpcTenantId query string false "Filter by selected VPC or VPC Prefix owning Tenant ID"
+// @Param status query string false "Filter by status"
+// @Param includeRelation query string false "Related entities to include in response"
+// @Param pageNumber query integer false "Page number of results returned"
+// @Param pageSize query integer false "Number of results per page"
+// @Param orderBy query string false "Order by field"
+// @Success 200 {array} model.APIInterface
+// @Router /v2/org/{org}/nico/interface [get]
 func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Interface", "GetAll", c)
 	if handlerSpan != nil {
@@ -90,8 +141,32 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
 	}
 
-	// Validate pagination request
+	request := model.APIInterfaceGetAllRequest{}
 	pageRequest := pagination.PageRequest{}
+	instanceIDFromPath := gaish.queryOverride != nil && gaish.queryOverride.ValueFromPath
+	knownQueryRequest := any(request)
+	if instanceIDFromPath {
+		knownQueryRequest = struct {
+			Status          *string  `query:"status"`
+			IncludeRelation []string `query:"includeRelation"`
+		}{}
+	}
+	err = common.ValidateKnownQueryParams(c.QueryParams(), knownQueryRequest, pageRequest)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+	err = c.Bind(&request)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding Interface filters")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse Interface filters", nil)
+	}
+	err = request.Validate()
+	if err != nil {
+		logger.Warn().Err(err).Msg("error validating Interface filters")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Interface filters", err)
+	}
+
+	// Validate pagination request
 	err = c.Bind(&pageRequest)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
@@ -117,15 +192,14 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 	// Get status from query param
 	var status *string
 
-	statusQuery := c.QueryParam("status")
-	if statusQuery != "" {
-		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
-		_, ok := cdbm.InterfaceStatusMap[statusQuery]
+	if request.Status != nil {
+		cotel.SetAttribute(handlerSpan, attribute.String("status", *request.Status))
+		_, ok := cdbm.InterfaceStatusMap[*request.Status]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", *request.Status))
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
-		status = &statusQuery
+		status = request.Status
 	}
 
 	// Get Tenant for this org
@@ -138,31 +212,57 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
 	}
 
-	// Get Instance ID from URL param
-	instanceStrID := c.Param("instanceId")
-
-	// Get Instance
-	instance, err := common.GetInstanceFromIDString(ctx, nil, instanceStrID, gaish.dbSession)
-	if err != nil {
-		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
+	instanceIDStrs := []string{}
+	if instanceIDFromPath {
+		instanceIDStrs = gaish.queryOverride.InstanceIDs
+	}
+	var instanceIDs []uuid.UUID
+	for _, instanceIDStr := range instanceIDStrs {
+		instanceID, parseErr := uuid.Parse(instanceIDStr)
+		if parseErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Instance ID: %s specified in request", instanceIDStr), nil)
 		}
-		logger.Error().Err(err).Msg("error retrieving Instance from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Instance ID in URL", nil)
+		instanceIDs = append(instanceIDs, instanceID)
+	}
+	if len(instanceIDs) > 0 {
+		instances, _, getErr := cdbm.NewInstanceDAO(gaish.dbSession).GetAll(ctx, nil, cdbm.InstanceFilterInput{
+			InstanceIDs: instanceIDs,
+		}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+		if getErr != nil {
+			logger.Error().Err(getErr).Msg("error retrieving Instances from DB")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instance specified in request", nil)
+		}
+		instancesByID := make(map[uuid.UUID]cdbm.Instance, len(instances))
+		for _, instance := range instances {
+			instancesByID[instance.ID] = instance
+		}
+		for _, instanceID := range instanceIDs {
+			instance, ok := instancesByID[instanceID]
+			if !ok {
+				return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Instance with ID: %s specified in request", instanceID), nil)
+			}
+			if instance.TenantID != tenant.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Instance: %s specified in request doesn't belong to current Tenant", instanceID), nil)
+			}
+		}
 	}
 
-	// Check if Instance belongs to Tenant
-	if instance.TenantID != tenant.ID {
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Instance does not belong to current Tenant", nil)
-	}
-
-	instanceID := instance.ID
-
-	// Get the instance subnets record from the db
-	ifcDAO := cdbm.NewInterfaceDAO(gaish.dbSession)
-
-	filterInput := cdbm.InterfaceFilterInput{
-		InstanceIDs: []uuid.UUID{instanceID},
+	filterInput := cdbm.InterfaceFilterInput{InstanceIDs: instanceIDs}
+	if !instanceIDFromPath {
+		filterInput.VisibleToTenantID = &tenant.ID
+		filterInput.CrossTenant = request.CrossTenant
+		if request.VpcID != nil {
+			vpcID := uuid.MustParse(*request.VpcID)
+			filterInput.VpcID = &vpcID
+		}
+		if request.InstanceTenantID != nil {
+			instanceTenantID := uuid.MustParse(*request.InstanceTenantID)
+			filterInput.InstanceTenantID = &instanceTenantID
+		}
+		if request.VpcTenantID != nil {
+			vpcTenantID := uuid.MustParse(*request.VpcTenantID)
+			filterInput.VpcTenantID = &vpcTenantID
+		}
 	}
 
 	if status != nil {
@@ -175,17 +275,53 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 		OrderBy: pageRequest.OrderBy,
 	}
 
-	dbInterfaces, total, err := ifcDAO.GetAll(ctx, nil, filterInput, pageInput, qIncludeRelations)
+	requestedRelations := make(map[string]bool, len(qIncludeRelations))
+	for _, relation := range qIncludeRelations {
+		requestedRelations[relation] = true
+	}
+	queryRelations := append([]string{}, qIncludeRelations...)
+	for _, relation := range []string{cdbm.InstanceRelationName, cdbm.VpcRelationName, cdbm.VpcPrefixRelationName} {
+		if !requestedRelations[relation] {
+			queryRelations = append(queryRelations, relation)
+		}
+	}
+
+	dbInterfaces, total, err := cdbm.NewInterfaceDAO(gaish.dbSession).GetAll(ctx, nil, filterInput, pageInput, queryRelations)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving instance Subnet Details from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instance Subnet Details for Instance", nil)
+		logger.Error().Err(err).Msg("error retrieving Interfaces from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Interfaces", nil)
 	}
 
 	// Create response
-	apiInterfaces := []model.APIInterface{}
-	for _, dbins := range dbInterfaces {
-		isubnets := model.NewAPIInterface(&dbins)
-		apiInterfaces = append(apiInterfaces, *isubnets)
+	apiInterfaces := make([]model.APIInterface, 0, len(dbInterfaces))
+	for i := range dbInterfaces {
+		dbInterface := &dbInterfaces[i]
+		if dbInterface.Instance == nil {
+			logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its Instance relation")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
+		}
+
+		switch {
+		case dbInterface.VpcID != nil:
+			if dbInterface.Vpc == nil {
+				logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its VPC relation")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
+			}
+		case dbInterface.VpcPrefixID != nil:
+			if dbInterface.VpcPrefix == nil {
+				logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its VPC Prefix relation")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
+			}
+		}
+
+		apiInterface := model.NewAPIInterface(dbInterface)
+		if !requestedRelations[cdbm.InstanceRelationName] {
+			apiInterface.Instance = nil
+		}
+		if !requestedRelations[cdbm.VpcPrefixRelationName] {
+			apiInterface.VpcPrefix = nil
+		}
+		apiInterfaces = append(apiInterfaces, *apiInterface)
 	}
 
 	// Create pagination response header

@@ -498,24 +498,16 @@ async fn get_manager<C: Callbacks>(
     )
     .date_time(Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string());
     // Bound actions are not emitted by the server schema generator yet.
-    let mut document = model.into_json().patch(json!({
+    let document = model.into_json().patch(json!({
         "Actions": {
-            "#Manager.Reset": {"target": reset_target(&manager_id)}
-        }
-    }));
-    if state
-        .callbacks
-        .as_ref()
-        .is_some_and(|callbacks| callbacks.supports_bmc_factory_reset())
-    {
-        document = document.patch(json!({"Actions": {
+            "#Manager.Reset": {"target": reset_target(&manager_id)},
             "#Manager.ResetToDefaults": {
                 "target": reset_defaults_target(&manager_id),
                 "ResetType@Redfish.AllowableValues": ["ResetAll"],
                 "ResetToDefaultsType@Redfish.AllowableValues": ["ResetAll"]
             }
-        }}));
-    }
+        }
+    }));
     let document = if let Some(oem) = &config.oem {
         document.patch(oem_patch(oem, &manager_id))
     } else {

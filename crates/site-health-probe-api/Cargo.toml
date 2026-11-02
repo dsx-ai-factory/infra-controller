@@ -33,7 +33,8 @@ schemars = { optional = true, workspace = true }
 serde = { features = ["derive"], workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
+# Workspace builds turn this on through api-web, so the tests do too.
+serde_json = { features = ["arbitrary_precision"], workspace = true }
 serde_urlencoded = { workspace = true }
 
 [lints]

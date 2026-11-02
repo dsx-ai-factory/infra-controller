@@ -47,7 +47,7 @@ type TenantAccount struct {
 	Created *time.Time `json:"created,omitempty"`
 	// Date/time when the Tenant Account was last updated
 	Updated *time.Time `json:"updated,omitempty"`
-	// Provider-scoped TargetedInstanceCreation settings for this Tenant Account. Replaces the deprecated tenant-level capabilities.targetedInstanceCreation attribute.  When present on a Tenant Account response, the array always includes one entry with omitted `siteIds` derived from TenantAccount.config, followed by zero or more entries with `siteIds` for per-site overrides that differ from the account default.
+	// Provider-scoped `targetedInstanceCreation` and `crossTenantInterfaceCreation` settings for this Tenant Account. `targetedInstanceCreation` replaces the deprecated tenant-level `capabilities.targetedInstanceCreation` attribute.  The response always begins with one account-default entry whose `siteIds` is empty. Each following entry contains sorted Site IDs whose effective value differs from the account default. A non-null Tenant Site override takes precedence over the account default; a missing override inherits that default.
 	SiteCapabilities []TenantAccountSiteCapability `json:"siteCapabilities,omitempty"`
 }
 

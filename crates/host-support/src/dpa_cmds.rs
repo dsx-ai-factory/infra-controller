@@ -89,6 +89,15 @@ impl TryFrom<DpaCommandPb> for DpaCommand<'static> {
                         "UpdateFirmware requires the typed NIC firmware command path".to_string(),
                     );
                 }
+                Command::ObserveFirmwareUpdate(_) => {
+                    return Err(
+                        "ObserveFirmwareUpdate requires the typed NIC firmware command path"
+                            .to_string(),
+                    );
+                }
+                Command::Lockdown(_) => {
+                    return Err("Lockdown requires the typed NIC firmware command path".to_string());
+                }
             },
         })
     }
@@ -202,6 +211,8 @@ mod tests {
                 format!("apply_firmware_operation:{}", f.profile.is_some())
             }
             Some(C::UpdateFirmware(_)) => "update_firmware".to_string(),
+            Some(C::ObserveFirmwareUpdate(_)) => "observe_firmware_update".to_string(),
+            Some(C::Lockdown(_)) => "lockdown".to_string(),
         }
     }
 
@@ -297,6 +308,28 @@ mod tests {
                     ..Default::default()
                 }) => FailsWith(
                     "UpdateFirmware requires the typed NIC firmware command path".to_string()
+                ),
+            }
+
+            // Observation must never submit work, and no DPA command only
+            // reads a receipt, so conversion must reject it.
+            "observe_firmware_update cannot become a legacy DPA command" {
+                Command::ObserveFirmwareUpdate(fac::MlxDeviceObserveFirmwareUpdate {
+                    operation_id: "operation".into(),
+                    phase_id: "update:1".into(),
+                    ..Default::default()
+                }) => FailsWith(
+                    "ObserveFirmwareUpdate requires the typed NIC firmware command path".to_string()
+                ),
+            }
+
+            // A lock status read or change without its controller state version
+            // and physical identity would bypass the checks the typed path
+            // performs.
+            "lockdown cannot become a legacy DPA command" {
+                Command::Lockdown(Default::default()) => FailsWith(
+                    "Lockdown requires the typed NIC firmware command path"
+                        .to_string()
                 ),
             }
 

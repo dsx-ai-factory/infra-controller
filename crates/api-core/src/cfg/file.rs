@@ -7298,6 +7298,7 @@ path = "credentials.yaml"
                 r#"{{ .Values.sshConsole.serviceName }}.{{ include "nico-api.namespace" . }}.svc.cluster.local:{{ .Values.sshConsole.port }}"#,
                 "ssh-console.nico-system.svc.cluster.local:1079",
             ),
+            ("{{ .Values.tracing.enabled }}", "false"),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);
@@ -7309,7 +7310,11 @@ path = "credentials.yaml"
             .join("\n");
         assert!(
             !config.contains("{{"),
-            "all Helm template expressions must be rendered for this test"
+            "all Helm template expressions must be rendered for this test:\n\t{}",
+            config
+                .lines()
+                .filter(|line| line.contains("{{"))
+                .join("\n\t"),
         );
         config
     }
