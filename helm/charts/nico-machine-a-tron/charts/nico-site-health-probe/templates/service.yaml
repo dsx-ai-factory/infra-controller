@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-{{- $name := include "nico-site-health-probe.name" . }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $name }}-metrics
+  name: {{ include "nico-site-health-probe.metricsService" . }}
   namespace: {{ include "nico-site-health-probe.namespace" . }}
   labels:
     {{- include "nico-site-health-probe.labels" . | nindent 4 }}

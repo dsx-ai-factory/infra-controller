@@ -899,3 +899,362 @@ tests:
       - notMatchRegex:
           path: data["config.yaml"]
           pattern: 'site_id|metrics_store'
+
+  - it: names the scrape job and namespace for /v1/config
+    templates:
+      - templates/configmap.yaml
+      - templates/service.yaml
+    release:
+      namespace: some-release-ns
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '\n  metrics:\n    selector:\n      job: "nico-site-health-probe-metrics"\n      namespace: "some-release-ns"\n    scrape_interval_seconds: 5\n  paging:'
+        template: templates/configmap.yaml
+      # The job is the metrics Service the ServiceMonitor scrapes.
+      - equal:
+          path: metadata.name
+          value: nico-site-health-probe-metrics
+        template: templates/service.yaml
+
+  - it: follows a renamed metrics Service and namespace override in the selector
+    templates:
+      - templates/configmap.yaml
+      - templates/service.yaml
+    set:
+      nameOverride: custom-probe
+      global:
+        namespaceOverride: custom-namespace
+      serviceMonitor:
+        enabled: true
+        interval: 500ms
+      state:
+        enabled: true
+        siteId: site-1
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'selector:\n\s+job: "custom-probe-metrics"\n\s+namespace: "custom-namespace"\n\s+scrape_interval_seconds: 0.5\n'
+        template: templates/configmap.yaml
+      - equal:
+          path: metadata.name
+          value: custom-probe-metrics
+        template: templates/service.yaml
+
+  - it: takes a selector override and the ServiceMonitor cadence
+    template: templates/configmap.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+        interval: 1m
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: site-probe
+            cluster: c1
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'selector:\n\s+cluster: "c1"\n\s+job: "site-probe"\n\s+scrape_interval_seconds: 60\n'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'nico-site-health-probe-metrics'
+
+  - it: declares no metrics store without a ServiceMonitor or external cadence
+    template: templates/configmap.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'selector:|scrape_interval_seconds'
+
+  - it: declares an external scraper with its selector and cadence
+    template: templates/configmap.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: site-probe
+          scrapeInterval: 30s
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'metrics:\n\s+selector:\n\s+job: "site-probe"\n\s+scrape_interval_seconds: 30\n'
+
+  - it: renders no ServiceMonitor for an external scraper
+    template: templates/service-monitor.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: site-probe
+          scrapeInterval: 30s
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: needs a selector for an external scraper
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          scrapeInterval: 30s
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.scrapeInterval needs state.metrics.selector'
+
+  - it: refuses a selector without a scrape cadence
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: site-probe
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector needs serviceMonitor.enabled or state.metrics.scrapeInterval'
+
+  - it: refuses an external cadence beside the ServiceMonitor
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: site-probe
+          scrapeInterval: 30s
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.scrapeInterval is for a scraper other than the ServiceMonitor'
+
+  - it: checks an external cadence against the readers
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: site-probe
+          scrapeInterval: 61s
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.scrapeInterval \(61s\) must be at most half of state.readers.devices.interval \(120s\)'
+
+  - it: refuses a zero external cadence
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: site-probe
+          scrapeInterval: "0"
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.scrapeInterval \(0\) must be positive with state on'
+
+  - it: refuses an unquoted external cadence
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: site-probe
+          scrapeInterval: 30
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.scrapeInterval must be a quoted Prometheus duration'
+
+  - it: refuses a selector label the probe series carry
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            type: host
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector must not set type: the probe''s series carry it'
+
+  - it: refuses a selector value with a control character
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: "a\nb"
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector value of job must not hold control characters'
+
+  - it: refuses a blank selector value
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: " "
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector value of job must not be blank'
+
+  - it: refuses a numeric selector value
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            job: 5
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector value of job must be a string'
+
+  - it: takes a null metrics section
+    template: templates/configmap.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+        metrics: null
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'job: "nico-site-health-probe-metrics"'
+
+  - it: refuses an unquoted zero scrape interval
+    template: templates/service-monitor.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+        interval: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: 'serviceMonitor.interval must be a quoted Prometheus duration, like "5s", not 0'
+
+  - it: rejects a zero scrape interval with state on
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+        interval: "0"
+      state:
+        enabled: true
+        siteId: site-1
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'serviceMonitor.interval \(0\) must be positive with state on'
+
+  - it: rejects a caller-set metric name in the selector
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            __name__: carbide_site_health_probe_units
+            job: site-probe
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector must not set __name__: labels starting with __ are reserved'
+
+  - it: rejects an invalid selector label name
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+      state:
+        enabled: true
+        siteId: site-1
+        metrics:
+          selector:
+            app-name: site-probe
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: 'state.metrics.selector label "app-name" is not a label name'

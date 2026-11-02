@@ -87,6 +87,17 @@ Service, named
 independent of the Helm release name; with `nameOverride` set it is
 `<nameOverride>-metrics`).
 
+With state on and the ServiceMonitor enabled, `/v1/config` tells clients
+where the probe's series are stored: a selector and the scrape interval. The
+selector defaults to `job=<metrics Service>` and `namespace=<release
+namespace>`, the labels the ServiceMonitor's scrape gives the series. Set
+`state.metrics.selector` only when the store relabels them. For a scraper
+other than the ServiceMonitor, set `state.metrics.scrapeInterval` (a quoted
+Prometheus duration) and the selector its series carry; the chart refuses
+one without the other. Label names starting with `__`, the probe's own
+series labels (`type`, `family`, `state` and the rest) and blank values are
+refused. The probe never reads the store itself.
+
 ## Site state readers and the /v1 API
 
 With `state.enabled`, the probe also reads the site's state on a schedule
@@ -165,7 +176,7 @@ unknown parameters are 400. Errors carry
 | `GET /v1/count` | Units matching a filter in the newest complete sweep, with its snapshot ID and sweep times | 400, 422 `unsupported_filter` and `field_unavailable`, 503 `no_complete_sweep` |
 | `GET /v1/units` | Units with state, reason and type fields, 100 per page (max 1,000), cursor paging pinned to one snapshot | As count, 409 `snapshot_expired` |
 | `POST /v1/units/query` | The same, with a JSON body that can ask for up to 10,000 IDs (`missingIds` lists absent ones) | As `/v1/units` |
-| `GET /v1/config` | `restSite`: the REST site checked against the device census (`match`, `mismatch` or `unknown`; always `unknown` with the devices reader off), with its read times. With the devices reader enabled, a nonempty page with controller IDs waits for the first device census. Empty or ID-less pages publish `unknown`. `null` while the REST inventory reader is off, which is not a site match. `nicoApi` and `rest` are `null` until their readers return | 400, 503 while the REST inventory reader is on and waits for its first site check |
+| `GET /v1/config` | `restSite`: the REST site checked against the device census (`match`, `mismatch` or `unknown`; always `unknown` with the devices reader off), with its read times. With the devices reader enabled, a nonempty page with controller IDs waits for the first device census. Empty or ID-less pages publish `unknown`. `null` while the REST inventory reader is off, which is not a site match. `nicoApi` and `rest` are `null` until their readers return. `metrics`, with a declared scrape cadence: the metric contract version, the selector, the scrape interval, the interval of each family an enabled reader sweeps, and the process start time the probe publishes | 400, 503 while the REST inventory reader is on and waits for its first site check |
 
 At shutdown, requests still running after 10 s are cut short with 503 and
 their connections close.
@@ -178,6 +189,10 @@ and instance tests; rack and tray totals are 422 on a site without NICo
 Flow, and the instance total is always 422.
 
 ### State metrics
+
+Names, labels and the filter rules behind `/v1/count` are declared in
+`crates/site-health-probe-api/src/metrics.rs`, shared with clients that read
+the series back.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|

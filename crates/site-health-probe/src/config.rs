@@ -26,9 +26,11 @@
 //! TODO(#5360-followup): progress reporting — publish p50/p95/p99 of machine
 //! progress (e.g. created→ready) during scale tests as gauges from this pod.
 
+use std::collections::BTreeMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
+use carbide_site_health_probe_api::metrics;
 use eyre::eyre;
 use serde::Deserialize;
 use url::Url;
@@ -296,6 +298,19 @@ impl Paging {
     }
 }
 
+/// The metrics store that scrapes this probe, as `/v1/config` names it to
+/// clients that read the probe's series back. The chart fills it from its
+/// ServiceMonitor. The probe never reads the store.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StateMetricsConfig {
+    /// Label equality matchers that select this probe's series and no
+    /// other's, like `{job: <metrics Service>, namespace: <namespace>}`.
+    pub selector: BTreeMap<String, String>,
+    /// How often the store scrapes the probe.
+    pub scrape_interval_seconds: f64,
+}
+
 /// Site state readers and the `/v1` API. Off by default; with it off the
 /// probe runs only the latency probes.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -308,6 +323,7 @@ pub(crate) struct StateConfig {
     pub rest: RestStateConfig,
     pub readers: Readers,
     pub paging: Paging,
+    pub metrics: Option<StateMetricsConfig>,
 }
 
 /// The root configuration.
@@ -555,6 +571,38 @@ impl StateConfig {
                 )),
                 Some(_) => {}
             }
+        }
+
+        if let Some(metrics) = &self.metrics {
+            metrics.validate(&self.readers, errs);
+        }
+    }
+}
+
+impl StateMetricsConfig {
+    fn validate(&self, readers: &Readers, errs: &mut Vec<String>) {
+        for problem in metrics::selector_problems(&self.selector) {
+            errs.push(format!("state.metrics.selector {problem}"));
+        }
+        let scrape = self.scrape_interval_seconds;
+        if !(scrape.is_finite() && scrape > 0.0) {
+            errs.push("state.metrics.scrape_interval_seconds must be positive".to_string());
+            return;
+        }
+        // Every sweep must land in at least two scrapes.
+        if let Some(fastest) = readers
+            .all()
+            .iter()
+            .filter(|(_, reader)| reader.enabled && !reader.interval.is_zero())
+            .map(|(_, reader)| reader.interval.as_secs_f64())
+            .min_by(f64::total_cmp)
+            && scrape * 2.0 > fastest
+        {
+            errs.push(
+                "state.metrics.scrape_interval_seconds must be at most half the fastest reader \
+                 interval"
+                    .to_string(),
+            );
         }
     }
 }
@@ -1142,9 +1190,115 @@ state:
         }
     }
 
+    #[test]
+    fn state_metrics_config() {
+        let cfg = state_with("").expect("loads");
+        assert_eq!(cfg.state.metrics, None, "absent without a declared store");
+        let cfg = state_with(
+            "  metrics: {selector: {job: probe-metrics, namespace: nico-system}, \
+             scrape_interval_seconds: 0.5}\n",
+        )
+        .expect("loads");
+        let metrics = cfg.state.metrics.expect("metrics");
+        assert_eq!(
+            metrics.selector,
+            BTreeMap::from([
+                ("job".to_string(), "probe-metrics".to_string()),
+                ("namespace".to_string(), "nico-system".to_string()),
+            ])
+        );
+        assert_eq!(metrics.scrape_interval_seconds, 0.5);
+        // A scrape exactly half the fastest reader interval fits.
+        state_with("  metrics: {selector: {job: j}, scrape_interval_seconds: 60}\n")
+            .expect("exactly half");
+
+        for (scenario, metrics, want) in [
+            (
+                "empty selector",
+                "{selector: {}, scrape_interval_seconds: 5}",
+                "state.metrics.selector must name at least one label",
+            ),
+            (
+                "caller-set metric name",
+                "{selector: {__name__: x, job: j}, scrape_interval_seconds: 5}",
+                "state.metrics.selector must not set __name__",
+            ),
+            (
+                "reserved label",
+                "{selector: {__address__: x}, scrape_interval_seconds: 5}",
+                "state.metrics.selector must not set __address__",
+            ),
+            (
+                "invalid label name",
+                "{selector: {0job: j}, scrape_interval_seconds: 5}",
+                "state.metrics.selector label \"0job\" is not a label name",
+            ),
+            (
+                "label name with a dash",
+                "{selector: {app-name: j}, scrape_interval_seconds: 5}",
+                "state.metrics.selector label \"app-name\" is not a label name",
+            ),
+            (
+                "empty label value",
+                "{selector: {job: \"\"}, scrape_interval_seconds: 5}",
+                "state.metrics.selector value of job must not be blank",
+            ),
+            (
+                "intrinsic series label",
+                "{selector: {type: host, job: j}, scrape_interval_seconds: 5}",
+                "state.metrics.selector must not set type: the probe's series carry it",
+            ),
+            (
+                "control character in a value",
+                "{selector: {job: \"a\\nb\"}, scrape_interval_seconds: 5}",
+                "state.metrics.selector value of job must not hold control characters",
+            ),
+            (
+                "zero scrape interval",
+                "{selector: {job: j}, scrape_interval_seconds: 0}",
+                "state.metrics.scrape_interval_seconds must be positive",
+            ),
+            (
+                "NaN scrape interval",
+                "{selector: {job: j}, scrape_interval_seconds: .nan}",
+                "state.metrics.scrape_interval_seconds must be positive",
+            ),
+            (
+                "scrape over half a reader interval",
+                "{selector: {job: j}, scrape_interval_seconds: 61}",
+                "state.metrics.scrape_interval_seconds must be at most half the fastest reader",
+            ),
+            (
+                "no selector",
+                "{scrape_interval_seconds: 5}",
+                "parse config",
+            ),
+        ] {
+            let err = state_with(&format!("  metrics: {metrics}\n"))
+                .expect_err(scenario)
+                .to_string();
+            assert!(err.contains(want), "{scenario}: {err:?} lacks {want:?}");
+        }
+    }
+
+    /// The chart refuses the selector labels the probe refuses.
+    #[test]
+    fn chart_series_labels_match_the_contract() {
+        let helpers = include_str!(
+            "../../../helm/charts/nico-machine-a-tron/charts/nico-site-health-probe/templates/_helpers.tpl"
+        );
+        let body = helpers
+            .split_once("{{- define \"nico-site-health-probe.seriesLabels\" -}}")
+            .and_then(|(_, rest)| rest.split_once("{{- end }}"))
+            .map(|(body, _)| body)
+            .expect("the chart defines seriesLabels");
+        let chart: std::collections::BTreeSet<&str> = body.split_whitespace().collect();
+        assert_eq!(chart, metrics::series_labels());
+    }
+
     /// The config.yaml the chart renders with the state section filled in
-    /// (helm template with every state input set). Keep it in step with
-    /// templates/configmap.yaml.
+    /// (helm template with every state input set and the ServiceMonitor on).
+    /// Keep it in step with templates/configmap.yaml.
     const CHART_RENDERED: &str = r#"
 metrics_listen: ":9009"
 api_listen: ":9010"
@@ -1215,6 +1369,11 @@ state:
       enabled: true
       interval: "120s"
       timeout: "600s"
+  metrics:
+    selector:
+      job: "nico-site-health-probe-metrics"
+      namespace: "nico-system"
+    scrape_interval_seconds: 5
   paging:
     keep_seconds: 300
     max_kept_snapshots: 6
@@ -1363,6 +1522,9 @@ state:
         assert!(cfg.state.enabled);
         assert_eq!(cfg.state.rest.provider.org, "provider-org");
         assert_eq!(cfg.api_listen_addr().expect("api").port(), 9010);
+        let metrics = cfg.state.metrics.expect("rendered with a ServiceMonitor");
+        assert_eq!(metrics.selector["job"], "nico-site-health-probe-metrics");
+        assert_eq!(metrics.scrape_interval_seconds, 5.0);
     }
 
     #[test]

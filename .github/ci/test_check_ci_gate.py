@@ -64,6 +64,8 @@ COMPLETE_WORKFLOW = textwrap.dedent(
           - build
         steps:
           - run: true
+      prune-sccache:
+        runs-on: ubuntu-latest
     """
 )
 

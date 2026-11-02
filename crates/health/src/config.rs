@@ -112,6 +112,12 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub endpoint_discovery_interval: Duration,
 
+    /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
+    /// still running when it passes are abandoned. Defaults to 20 seconds and
+    /// must be greater than zero.
+    #[serde(with = "humantime_serde")]
+    pub shutdown_timeout: Duration,
+
     /// BMC proxy URL
     pub bmc_proxy_url: Option<Url>,
 }
@@ -132,6 +138,7 @@ impl Default for Config {
             cache_size: 100,
             bmc_request_concurrency: DEFAULT_BMC_REQUEST_CONCURRENCY,
             endpoint_discovery_interval: Duration::from_secs(300),
+            shutdown_timeout: Duration::from_secs(20),
             bmc_proxy_url: None,
         }
     }
@@ -2839,6 +2846,10 @@ impl Config {
             return Err("endpoint_discovery_interval must be greater than 0".to_string());
         }
 
+        if self.shutdown_timeout.is_zero() {
+            return Err("shutdown_timeout must be greater than 0".to_string());
+        }
+
         if self.bmc_request_concurrency.get() > Semaphore::MAX_PERMITS {
             return Err(format!(
                 "bmc_request_concurrency must not exceed {}",
@@ -3671,6 +3682,13 @@ mac = "00:11:22:33:44:55"
                 Box::new(Config::default()) => Yields(()),
 
                 config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 1,
+                        ..RateLimitConfig::default()
+                    });
+                }) => Yields(()),
+
+                config_with(|config| {
                     config.bmc_request_concurrency =
                         NonZeroUsize::new(Semaphore::MAX_PERMITS)
                             .expect("Tokio supports at least one semaphore permit");
@@ -3745,6 +3763,15 @@ mac = "00:11:22:33:44:55"
                 }) => FailsWith(
                     "bucket_replenish must be greater than 0 when rate limiting is enabled"
                         .to_string()
+                ),
+
+                config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 0,
+                        ..RateLimitConfig::default()
+                    });
+                }) => FailsWith(
+                    "bucket_burst must be greater than 0 when rate limiting is enabled".to_string()
                 ),
 
                 config_with(|config| {

@@ -1906,8 +1906,21 @@ async fn test_failed_state_host_discovery_recovery(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn test_managed_host_version_metrics(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
-    common::api_fixtures::create_managed_host(&env).await;
-    common::api_fixtures::create_managed_host(&env).await;
+    let hosts = [
+        common::api_fixtures::create_managed_host(&env).await,
+        common::api_fixtures::create_managed_host(&env).await,
+    ];
+    for host in &hosts {
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &host.id,
+            5,
+            ManagedHostState::Ready,
+        )
+        .await;
+    }
+    // Metrics describe the snapshot before a transition; collect both Ready hosts.
+    env.run_machine_state_controller_iteration_no_requeue()
+        .await;
 
     assert_eq!(
         env.test_meter
@@ -1921,19 +1934,17 @@ async fn test_managed_host_version_metrics(pool: sqlx::PgPool) {
             .unwrap(),
         r#"{fresh="true"} 0"#
     );
-    // TODO: For some reason the 2nd created Host stays in state `Discovered`
-    // and never becomes ready. Once it does, the test should be updated.
     assert_eq!(
         env.test_meter
             .formatted_metric("carbide_hosts_usable_count")
             .unwrap(),
-        r#"{fresh="true"} 1"#
+        r#"{fresh="true"} 2"#
     );
     assert_eq!(
         env.test_meter
             .formatted_metric("carbide_gpus_usable_count")
             .unwrap(),
-        r#"{fresh="true"} 1"#
+        r#"{fresh="true"} 2"#
     );
     assert_eq!(
         env.test_meter
