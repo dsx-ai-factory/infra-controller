@@ -10,52 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/fsnotify.v1"
 )
-
-func TestIsTemporalCertUpdate(t *testing.T) {
-	root := t.TempDir()
-	clientCert := filepath.Join(root, "client", "tls.crt")
-	files := map[string]bool{clientCert: true}
-	tests := []struct {
-		name  string
-		event fsnotify.Event
-		want  bool
-	}{
-		{
-			name:  "tracked file write",
-			event: fsnotify.Event{Name: clientCert, Op: fsnotify.Write},
-			want:  true,
-		},
-		{
-			name:  "projected Secret generation swap",
-			event: fsnotify.Event{Name: filepath.Join(root, kubernetesSecretDataSymlink), Op: fsnotify.Create},
-			want:  true,
-		},
-		{
-			name:  "projected Secret symlink metadata change",
-			event: fsnotify.Event{Name: filepath.Join(root, kubernetesSecretDataSymlink), Op: fsnotify.Chmod},
-			want:  false,
-		},
-		{
-			name:  "data symlink below the mount root",
-			event: fsnotify.Event{Name: filepath.Join(root, "client", kubernetesSecretDataSymlink), Op: fsnotify.Create},
-			want:  false,
-		},
-		{
-			name:  "projected Secret staging directory",
-			event: fsnotify.Event{Name: filepath.Join(root, "..2026_10_25_00_00_00"), Op: fsnotify.Create},
-			want:  false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isTemporalCertUpdate(tt.event, files, root))
-		})
-	}
-}
 
 // TestWatchCertFilesReloadsEveryProjectedSecretUpdate replays the kubelet
 // atomic writer twice. Each update deletes the versioned directory that the
@@ -74,9 +31,9 @@ func TestWatchCertFilesReloadsEveryProjectedSecretUpdate(t *testing.T) {
 	}
 
 	current := writeGeneration(0)
-	require.NoError(t, os.Symlink(current, filepath.Join(root, kubernetesSecretDataSymlink)))
+	require.NoError(t, os.Symlink(current, filepath.Join(root, computils.KubernetesSecretDataSymlink)))
 	for _, dir := range []string{"ca", "client"} {
-		require.NoError(t, os.Symlink(filepath.Join(kubernetesSecretDataSymlink, dir), filepath.Join(root, dir)))
+		require.NoError(t, os.Symlink(filepath.Join(computils.KubernetesSecretDataSymlink, dir), filepath.Join(root, dir)))
 	}
 
 	caDir, clientDir := filepath.Join(root, "ca")+"/", filepath.Join(root, "client")+"/"
@@ -103,7 +60,7 @@ func TestWatchCertFilesReloadsEveryProjectedSecretUpdate(t *testing.T) {
 		next := writeGeneration(generation)
 		staging := filepath.Join(root, "..data_tmp")
 		require.NoError(t, os.Symlink(next, staging))
-		require.NoError(t, os.Rename(staging, filepath.Join(root, kubernetesSecretDataSymlink)))
+		require.NoError(t, os.Rename(staging, filepath.Join(root, computils.KubernetesSecretDataSymlink)))
 		require.NoError(t, os.RemoveAll(filepath.Join(root, current)))
 		current = next
 
@@ -114,6 +71,7 @@ func TestWatchCertFilesReloadsEveryProjectedSecretUpdate(t *testing.T) {
 		}
 
 		// Drain the remaining events of this update so they can't satisfy the next one.
+		// The kqueue backend reports the `..data` rename more than once.
 		for drained := false; !drained; {
 			select {
 			case <-reloads:
