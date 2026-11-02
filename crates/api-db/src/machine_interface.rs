@@ -39,7 +39,7 @@ use model::machine_interface::InterfaceType;
 use model::machine_interface_address::{InterfaceAssociationType, MachineInterfaceAssociation};
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::{AllocationStrategy, NetworkSegment, NetworkSegmentType};
-use model::predicted_machine_interface::PredictedMachineInterface;
+use model::predicted_machine_interface::{NewPredictedMachineInterface, PredictedMachineInterface};
 use sqlx::{FromRow, PgConnection, PgTransaction};
 
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
@@ -107,6 +107,8 @@ mod allocation_benchmark;
 mod ip_allocator;
 #[cfg(test)]
 mod test_allocation_removal;
+#[cfg(test)]
+mod test_dpu_oob_interface;
 #[cfg(test)]
 mod test_duplicate_mac;
 #[cfg(test)]
@@ -500,6 +502,73 @@ pub async fn find_by_mac_address(
     macaddr: MacAddress,
 ) -> Result<Vec<MachineInterfaceSnapshot>, DatabaseError> {
     find_by(txn, ObjectColumnFilter::One(MacAddressColumn, &macaddr)).await
+}
+
+/// Associates an unowned OOB interface with the supplied DPU or predicts it before DHCP.
+///
+/// Returns `true` when an interface is associated or a prediction is created.
+/// Already-owned interfaces and matching predictions are left unchanged. A prediction
+/// owned by another machine returns [`DatabaseError::AlreadyFoundError`]. All reads
+/// and writes use the caller's transaction.
+pub async fn ensure_dpu_oob_interface_ownership(
+    txn: &mut PgConnection,
+    dpu_machine_id: &MachineId,
+    oob_mac_address: MacAddress,
+) -> DatabaseResult<bool> {
+    let interfaces = find_by_mac_address(&mut *txn, oob_mac_address).await?;
+
+    if let Some(interface) = interfaces.first()
+        && interface.machine_id.is_none()
+    {
+        tracing::info!(
+            machine_interface_id = %interface.id,
+            machine_id = %dpu_machine_id,
+            "Associating machine interface with machine"
+        );
+        associate_interface_with_machine(
+            &interface.id,
+            MachineInterfaceAssociation::Machine(*dpu_machine_id),
+            txn,
+        )
+        .await?;
+        associate_interface_with_dpu_machine(&interface.id, dpu_machine_id, txn).await?;
+        return Ok(true);
+    }
+
+    if interfaces.is_empty() {
+        if let Some(prediction) =
+            crate::predicted_machine_interface::find_by_mac_address(&mut *txn, oob_mac_address)
+                .await?
+        {
+            if prediction.machine_id != *dpu_machine_id {
+                return Err(DatabaseError::AlreadyFoundError {
+                    kind: "PredictedMachineInterface",
+                    id: oob_mac_address.to_string(),
+                });
+            }
+            return Ok(false);
+        }
+
+        crate::predicted_machine_interface::create(
+            NewPredictedMachineInterface {
+                machine_id: dpu_machine_id,
+                mac_address: oob_mac_address,
+                expected_network_segment_type: NetworkSegmentType::Underlay,
+                boot_interface_id: None,
+                primary_interface: true,
+            },
+            txn,
+        )
+        .await?;
+        tracing::info!(
+            machine_id = %dpu_machine_id,
+            mac_address = %oob_mac_address,
+            "Created predicted DPU OOB interface"
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 /// This function returns only an IP for efficiency, we don't need to fetch/deserialize the entire

@@ -1204,65 +1204,19 @@ impl MachineCreator {
             })
         });
 
-        // If machine_interface exists for the DPU and machine_id is not updated, do it now.
         if let Some(oob_net0_mac) = oob_net0_mac {
-            let mi = db::machine_interface::find_by_mac_address(&mut *txn, oob_net0_mac).await?;
-
-            if let Some(interface) = mi.first()
-                && interface.machine_id.is_none()
-            {
-                tracing::info!(
-                    machine_interface_id = %interface.id,
-                    machine_id = %dpu_machine_id,
-                    "Associating machine interface with machine"
-                );
-                db::machine_interface::associate_interface_with_machine(
-                    &interface.id,
-                    MachineInterfaceAssociation::Machine(*dpu_machine_id),
-                    txn,
-                )
-                .await?;
-                db::machine_interface::associate_interface_with_dpu_machine(
-                    &interface.id,
-                    dpu_machine_id,
-                    txn,
-                )
-                .await?;
-                return Ok(true);
-            }
-
-            if mi.is_empty() {
-                if let Some(prediction) =
-                    db::predicted_machine_interface::find_by_mac_address(&mut *txn, oob_net0_mac)
-                        .await?
-                {
-                    if prediction.machine_id != *dpu_machine_id {
-                        return Err(SiteExplorerError::AlreadyFoundError {
-                            kind: "PredictedMachineInterface",
-                            id: oob_net0_mac.to_string(),
-                        });
-                    }
-                    return Ok(false);
+            return db::machine_interface::ensure_dpu_oob_interface_ownership(
+                txn,
+                dpu_machine_id,
+                oob_net0_mac,
+            )
+            .await
+            .map_err(|error| match error {
+                db::DatabaseError::AlreadyFoundError { kind, id } => {
+                    SiteExplorerError::AlreadyFoundError { kind, id }
                 }
-
-                db::predicted_machine_interface::create(
-                    NewPredictedMachineInterface {
-                        machine_id: dpu_machine_id,
-                        mac_address: oob_net0_mac,
-                        expected_network_segment_type: NetworkSegmentType::Underlay,
-                        boot_interface_id: None,
-                        primary_interface: true,
-                    },
-                    txn,
-                )
-                .await?;
-                tracing::info!(
-                    machine_id = %dpu_machine_id,
-                    mac_address = %oob_net0_mac,
-                    "Created predicted DPU OOB interface"
-                );
-                return Ok(true);
-            }
+                error => error.into(),
+            });
         }
 
         Ok(false)
