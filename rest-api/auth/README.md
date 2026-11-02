@@ -225,8 +225,8 @@ Once Keycloak configuration is finalized, the ingress controller for the Keycloa
 | `keycloak.realm` | Keycloak realm name | `nico` |
 | `keycloak.clientID` | OAuth client ID | `nico-cloud` |
 | `keycloak.clientSecretPath` | Path to mounted client secret | `/var/secrets/keycloak/client-secret` |
-| `keycloak.serviceAccount` | Accept client credentials tokens that hold both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested org, as service accounts | `true` |
-| `keycloak.serviceAccountOrg` | The org whose clients can be service accounts. Only a single org in a disconnected NICo Site can have service account privilege, so it is required when `keycloak.serviceAccount` is `true` in disconnected mode. Optional in connected mode | `ncx` |
+| `keycloak.serviceAccount` | Accept client credentials tokens that hold both `PROVIDER_ADMIN` and `TENANT_ADMIN` in an org listed in `keycloak.serviceAccountOrgs`, as service accounts | `true` |
+| `keycloak.serviceAccountOrgs` | The only orgs whose clients can be service accounts. Required when `keycloak.serviceAccount` is `true`. Only a single org in a disconnected NICo Site can have service account privilege, so disconnected mode allows exactly one entry | `[ncx]` |
 
 ### Step 1: Create the Client Secret in Kubernetes
 
@@ -259,7 +259,7 @@ keycloak:
   clientID: nico-cloud
   clientSecretPath: /var/secrets/keycloak/client-secret
   serviceAccount: true
-  serviceAccountOrg: ncx
+  serviceAccountOrgs: [ncx]
 ```
 
 **Key Configuration Notes:**

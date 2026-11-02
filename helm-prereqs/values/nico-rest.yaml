@@ -52,7 +52,7 @@ nico-rest-api:
       clientID: "nico-rest"
       serviceAccount: true
       # The org whose ncx-service client holds both PROVIDER_ADMIN and TENANT_ADMIN.
-      serviceAccountOrg: "ncx"
+      serviceAccountOrgs: ["ncx"]
 
 nico-rest-cert-manager:
   replicaCount: 3

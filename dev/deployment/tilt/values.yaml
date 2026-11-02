@@ -819,7 +819,7 @@ tilt:
           realm: nico-dev
           clientID: nico-api
           serviceAccount: true
-          serviceAccountOrg: test-org
+          serviceAccountOrgs: [test-org]
 
     workflow:
       secrets:

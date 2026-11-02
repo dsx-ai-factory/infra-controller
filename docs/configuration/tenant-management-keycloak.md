@@ -26,7 +26,7 @@ Confirm the deployment is in Keycloak mode and read the values you will need:
 
 ```bash
 kubectl -n nico-rest get configmap nico-rest-api-config \
-  -o jsonpath='{.data.config\.yaml}' | grep -A 8 '^keycloak:'
+  -o jsonpath='{.data.config\.yaml}' | grep -A 9 '^keycloak:'
 ```
 
 A `setup.sh` install reports:
@@ -40,7 +40,8 @@ keycloak:
   externalBaseURL: http://keycloak.nico-rest:8082
   realm: nico
   serviceAccount: true
-  serviceAccountOrg: ncx
+  serviceAccountOrgs:
+  - ncx
 ```
 
 <Warning title="Plain HTTP is for the bundled deployment only">
@@ -72,9 +73,9 @@ inside the cluster.
 
 Any client in the realm can use `client_credentials` tokens, including a Tenant's own
 client. `serviceAccount: true` treats only the client that holds both
-`PROVIDER_ADMIN` and `TENANT_ADMIN` in `serviceAccountOrg`, which is `ncx-service` in
-`ncx` above, as a service account. A disconnected deployment has exactly one service account
-org, a Tenant org cannot assume service account privilege. The chart defaults `serviceAccount` to
+`PROVIDER_ADMIN` and `TENANT_ADMIN` in an org listed in `serviceAccountOrgs`, which is
+`ncx-service` in `ncx` above, as a service account. A disconnected deployment has exactly one
+service account org, a Tenant org cannot assume service account privilege. The chart defaults `serviceAccount` to
 `false`.
 
 If `keycloak.enabled` is `false`, your deployment uses the `issuers` block instead and

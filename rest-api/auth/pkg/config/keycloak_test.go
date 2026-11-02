@@ -25,25 +25,25 @@ var (
 
 func TestNewKeycloakConfig(t *testing.T) {
 	tests := []struct {
-		name              string
-		baseURL           string
-		externalBaseURL   string
-		clientID          string
-		clientSecret      string
-		realm             string
-		serviceAccount    bool
-		serviceAccountOrg string
-		want              *KeycloakConfig
+		name               string
+		baseURL            string
+		externalBaseURL    string
+		clientID           string
+		clientSecret       string
+		realm              string
+		serviceAccount     bool
+		serviceAccountOrgs []string
+		want               *KeycloakConfig
 	}{
 		{
-			name:              "valid complete configuration",
-			baseURL:           "http://localhost:8082",
-			externalBaseURL:   "http://external:8082",
-			clientID:          "test-client",
-			clientSecret:      "test-secret",
-			realm:             "test-realm",
-			serviceAccount:    true,
-			serviceAccountOrg: "test-org",
+			name:               "valid complete configuration",
+			baseURL:            "http://localhost:8082",
+			externalBaseURL:    "http://external:8082",
+			clientID:           "test-client",
+			clientSecret:       "test-secret",
+			realm:              "test-realm",
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"test-org"},
 			want: &KeycloakConfig{
 				BaseURL:         "http://localhost:8082",
 				ExternalBaseURL: "http://external:8082",
@@ -78,7 +78,7 @@ func TestNewKeycloakConfig(t *testing.T) {
 				tt.clientSecret,
 				tt.realm,
 				tt.serviceAccount,
-				tt.serviceAccountOrg,
+				tt.serviceAccountOrgs,
 			)
 
 			assert.Equal(t, tt.want.BaseURL, got.BaseURL)
@@ -92,7 +92,7 @@ func TestNewKeycloakConfig(t *testing.T) {
 			require.NotNil(t, got.jwksConfig)
 			assert.Nil(t, got.jwksConfig.GetJWKS())
 			assert.Equal(t, tt.serviceAccount, got.jwksConfig.ServiceAccount)
-			assert.Equal(t, tt.serviceAccountOrg, got.jwksConfig.ServiceAccountOrg)
+			assert.Equal(t, tt.serviceAccountOrgs, got.jwksConfig.ServiceAccountOrgs)
 		})
 	}
 }
@@ -200,7 +200,7 @@ func TestKeycloakConfig_GetJwksConfig(t *testing.T) {
 			"test-secret",
 			"test-realm",
 			true,
-			"test-org",
+			[]string{"test-org"},
 		)
 
 		jwksConfig, err := keycloakConfig.GetJwksConfig()

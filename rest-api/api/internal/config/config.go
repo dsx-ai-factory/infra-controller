@@ -135,8 +135,8 @@ const (
 	ConfigKeycloakClientSecret = "keycloak.clientSecret"
 	// ConfigKeycloakServiceAccountEnabled is a feature flag for service account support
 	ConfigKeycloakServiceAccountEnabled = "keycloak.serviceAccount"
-	// ConfigKeycloakServiceAccountOrg limits Keycloak service accounts to one org, required in disconnected mode
-	ConfigKeycloakServiceAccountOrg = "keycloak.serviceAccountOrg"
+	// ConfigKeycloakServiceAccountOrgs lists the only orgs whose Keycloak clients can be service accounts
+	ConfigKeycloakServiceAccountOrgs = "keycloak.serviceAccountOrgs"
 
 	// ConfigRateLimiterEnabled is a feature flag for rate limiter
 	ConfigRateLimiterEnabled = "rateLimiter.enabled"
@@ -1169,10 +1169,17 @@ func (c *Config) SetKeycloakServiceAccountEnabled(value bool) {
 	c.v.Set(ConfigKeycloakServiceAccountEnabled, value)
 }
 
-// GetKeycloakServiceAccountOrg gets the org whose Keycloak clients can be service accounts, lowercased
-// to match the org names NICo reads from realm roles
-func (c *Config) GetKeycloakServiceAccountOrg() string {
-	return strings.ToLower(strings.TrimSpace(c.v.GetString(ConfigKeycloakServiceAccountOrg)))
+// GetKeycloakServiceAccountOrgs gets the orgs whose Keycloak clients can be service accounts, lowercased
+// to match the org names NICo reads from realm roles, without empty or repeated entries
+func (c *Config) GetKeycloakServiceAccountOrgs() []string {
+	var orgs []string
+	for _, org := range c.v.GetStringSlice(ConfigKeycloakServiceAccountOrgs) {
+		org = strings.ToLower(strings.TrimSpace(org))
+		if org != "" && !slices.Contains(orgs, org) {
+			orgs = append(orgs, org)
+		}
+	}
+	return orgs
 }
 
 // GetOrInitKeycloakConfig gets the Keycloak configuration
@@ -1197,7 +1204,7 @@ func (c *Config) GetOrInitKeycloakConfig() (*cauth.KeycloakConfig, error) {
 			c.GetKeycloakClientSecret(),
 			c.GetKeycloakRealm(),
 			c.GetKeycloakServiceAccountEnabled(),
-			c.GetKeycloakServiceAccountOrg(),
+			c.GetKeycloakServiceAccountOrgs(),
 		)
 		log.Info().Msg("Keycloak configuration created successfully")
 	}
@@ -1226,9 +1233,15 @@ func (c *Config) ValidateKeycloakConfig() error {
 		return fmt.Errorf("keycloak client secret or client secret path must be specified when Keycloak is enabled")
 	}
 
-	// A disconnected deployment has a single Site, which only one org can claim.
-	if c.GetKeycloakServiceAccountEnabled() && c.GetEnvDisconnected() && c.GetKeycloakServiceAccountOrg() == "" {
-		return fmt.Errorf("keycloak service account org must be specified when service account is enabled in disconnected mode")
+	if c.GetKeycloakServiceAccountEnabled() {
+		orgs := c.GetKeycloakServiceAccountOrgs()
+		if len(orgs) == 0 {
+			return fmt.Errorf("keycloak service account orgs must be specified when service account is enabled")
+		}
+		// A disconnected deployment has a single Site, which only one org can claim.
+		if c.GetEnvDisconnected() && len(orgs) > 1 {
+			return fmt.Errorf("keycloak service account orgs must list exactly one org in disconnected mode")
+		}
 	}
 
 	return nil

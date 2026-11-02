@@ -404,7 +404,7 @@ keycloak:
   clientID: nico-cloud
   clientSecretPath: /var/secrets/keycloak/client-secret
   serviceAccount: true
-  serviceAccountOrg: ncx
+  serviceAccountOrgs: [ncx]
 ```
 
 Key fields:
@@ -415,8 +415,8 @@ Key fields:
 - `realm` is the Keycloak realm.
 - `clientID` is the OAuth client ID.
 - `clientSecretPath` is the file path where the client secret is mounted.
-- `serviceAccount` enables service account features. When set to `true`, a `client_credentials` token that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested org is accepted as a service account for that org. When set to `false`, no token is treated as a service account. Defaults to `false`.
-- `serviceAccountOrg` limits service accounts to one org, compared in lowercase. When set, a client holding both roles in any other org is not a service account. It is required when `serviceAccount` is `true` in disconnected mode, otherwise the API fails to start. A disconnected deployment has a single Site, which only one org can claim. In connected mode it is optional, and leaving it unset allows a service account in every org.
+- `serviceAccount` enables service account features. When set to `true`, a `client_credentials` token that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in an org listed in `serviceAccountOrgs` is accepted as a service account for that org. When set to `false`, no token is treated as a service account. Defaults to `false`.
+- `serviceAccountOrgs` lists the only orgs whose clients can be service accounts, compared in lowercase. A client holding both roles in an org that isn't listed is not a service account. It is required when `serviceAccount` is `true`, otherwise the API fails to start. In disconnected mode it must list exactly one org, since a disconnected deployment has a single Site that only one org can claim.
 
 Any client in the realm can use `client_credentials` tokens. Like a user token, each one needs a role in the requested org, and its roles decide what it can do. Only the service account described above is set up as its org's own Provider and Tenant.
 

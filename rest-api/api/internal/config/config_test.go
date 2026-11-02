@@ -399,7 +399,7 @@ func TestGetOrInitTokenOriginConfig(t *testing.T) {
 		v.Set(ConfigKeycloakClientID, "test-client")
 		v.Set(ConfigKeycloakClientSecret, "test-secret")
 		v.Set(ConfigKeycloakServiceAccountEnabled, true)
-		v.Set(ConfigKeycloakServiceAccountOrg, " NCX ")
+		v.Set(ConfigKeycloakServiceAccountOrgs, []string{" NCX ", "acme", "ncx", ""})
 
 		c := &Config{v: v}
 		tokenOriginConfig := c.GetOrInitTokenOriginConfig()
@@ -409,33 +409,40 @@ func TestGetOrInitTokenOriginConfig(t *testing.T) {
 		require.NotNil(t, jwksConfig)
 		assert.Nil(t, jwksConfig.GetJWKS())
 		assert.True(t, jwksConfig.ServiceAccount)
-		assert.Equal(t, "ncx", jwksConfig.ServiceAccountOrg)
+		assert.Equal(t, []string{"ncx", "acme"}, jwksConfig.ServiceAccountOrgs)
 	})
 }
 
 func TestConfig_ValidateKeycloakConfig(t *testing.T) {
 	tests := []struct {
-		name              string
-		disconnected      bool
-		serviceAccount    bool
-		serviceAccountOrg string
-		wantErr           string
+		name               string
+		disconnected       bool
+		serviceAccount     bool
+		serviceAccountOrgs []string
+		wantErr            string
 	}{
 		{
-			name:              "service account in disconnected mode with an org",
-			disconnected:      true,
-			serviceAccount:    true,
-			serviceAccountOrg: "ncx",
+			name:               "service account in disconnected mode with one org",
+			disconnected:       true,
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx"},
 		},
 		{
-			name:           "service account in disconnected mode without an org",
-			disconnected:   true,
-			serviceAccount: true,
-			wantErr:        "keycloak service account org must be specified",
+			name:               "service account in disconnected mode with two orgs",
+			disconnected:       true,
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx", "acme"},
+			wantErr:            "keycloak service account orgs must list exactly one org in disconnected mode",
 		},
 		{
-			name:           "service account in connected mode without an org",
+			name:               "service account in connected mode with two orgs",
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx", "acme"},
+		},
+		{
+			name:           "service account without orgs",
 			serviceAccount: true,
+			wantErr:        "keycloak service account orgs must be specified",
 		},
 	}
 	for _, tt := range tests {
@@ -448,7 +455,7 @@ func TestConfig_ValidateKeycloakConfig(t *testing.T) {
 			v.Set(ConfigKeycloakClientSecret, "test-secret")
 			v.Set(ConfigEnvDisconnected, tt.disconnected)
 			v.Set(ConfigKeycloakServiceAccountEnabled, tt.serviceAccount)
-			v.Set(ConfigKeycloakServiceAccountOrg, tt.serviceAccountOrg)
+			v.Set(ConfigKeycloakServiceAccountOrgs, tt.serviceAccountOrgs)
 
 			err := (&Config{v: v}).ValidateKeycloakConfig()
 

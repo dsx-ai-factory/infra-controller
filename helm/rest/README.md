@@ -84,7 +84,7 @@ nico-rest-api:
       realm: my-realm
       clientID: my-client
       serviceAccount: true
-      serviceAccountOrg: my-org
+      serviceAccountOrgs: [my-org]
 ```
 
 If `nico-rest-common.enabled=false`, you must pre-create the following resources in the target namespace before install:
