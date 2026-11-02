@@ -23,6 +23,7 @@ use ::rpc::forge::{
     InstanceDpuExtensionServiceConfig, InstanceDpuExtensionServicesConfig,
     ManagedHostNetworkConfigRequest, ManagedHostNetworkStatusRequest,
 };
+use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_instrument::testing::MetricsCapture;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
 use carbide_uuid::machine::{AsMachineId, DpuMachineId};
@@ -285,6 +286,71 @@ async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sql
             "{}",
             case.scenario
         );
+    }
+}
+
+#[crate::sqlx_test]
+async fn test_managed_host_network_config_machine_identity(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let mh = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    let message = ManagedHostNetworkConfigRequest {
+        dpu_machine_id: Some(mh.dpu().id),
+    };
+    let expected = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(message.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+
+    for (scenario, principal, expected_code) in [
+        (
+            "matching DPU",
+            Principal::SpiffeMachineIdentifier(mh.dpu().id.to_string()),
+            tonic::Code::Ok,
+        ),
+        (
+            "sibling DPU",
+            Principal::SpiffeMachineIdentifier(mh.dpu_n(1).id.to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "host credentials",
+            Principal::SpiffeMachineIdentifier(mh.id.to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "malformed machine identity",
+            Principal::SpiffeMachineIdentifier("invalid-machine-id".to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "administrative delegation",
+            Principal::ExternalUser(ExternalUserInfo::new(
+                None,
+                "nico-cli-client".to_string(),
+                None,
+            )),
+            tonic::Code::Ok,
+        ),
+        (
+            "service delegation",
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            tonic::Code::Ok,
+        ),
+    ] {
+        let mut request = tonic::Request::new(message.clone());
+        let mut context = crate::auth::AuthContext::default();
+        context.principals.push(principal);
+        request.extensions_mut().insert(context);
+
+        match env.api.get_managed_host_network_config(request).await {
+            Ok(response) => {
+                assert_eq!(expected_code, tonic::Code::Ok, "{scenario}");
+                assert_eq!(response.into_inner(), expected, "{scenario}");
+            }
+            Err(status) => assert_eq!(status.code(), expected_code, "{scenario}: {status}"),
+        }
     }
 }
 
