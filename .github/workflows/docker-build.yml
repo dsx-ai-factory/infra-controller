@@ -337,15 +337,29 @@ jobs:
       # build and export so an empty or partial directory is never saved under
       # the key. A failed export only skips the save, since the image is
       # already built and pushed by then.
-      - name: Clear sccache directory for the export
+      #
+      # Concurrent main runs that pick up the same Cargo.lock all miss the
+      # restore, but the cache only accepts the first save. A run whose key was
+      # saved while it was building skips the export instead of producing an
+      # archive the save would refuse.
+      - name: Check whether another run saved sccache
+        id: sccache-saved
         if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache-build
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
+          lookup-only: true
+
+      - name: Clear sccache directory for the export
+        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true' && steps.sccache-saved.outputs.cache-hit != 'true'
         env:
           DIR: ${{ steps.sccache-dir.outputs.dir }}
         run: rm -rf "${DIR}" && mkdir -p "${DIR}"
 
       - name: Export sccache directory
         id: sccache-export
-        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true' && steps.sccache-saved.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: docker/build-push-action@v5
         with:
