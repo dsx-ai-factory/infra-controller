@@ -1286,6 +1286,37 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
 }
 
 #[crate::sqlx_test]
+async fn test_record_dpu_network_status_requires_existing_dpu(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let dpu_machine_id: DpuMachineId =
+        "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+            .parse()
+            .unwrap();
+
+    let error = env
+        .api
+        .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
+            dpu_machine_id: Some(dpu_machine_id),
+            dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
+            observed_at: Some(SystemTime::now().into()),
+            network_config_version: Some(ConfigVersion::initial().version_string()),
+            dpu_health: Some(rpc::health::HealthReport {
+                source: "forge-dpu-agent".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(
+        error.message(),
+        format!("machine not found: {dpu_machine_id}")
+    );
+}
+
+#[crate::sqlx_test]
 async fn test_record_dpu_network_status_clears_use_admin_network_changed_for_matching_version(
     pool: sqlx::PgPool,
 ) {
@@ -1405,6 +1436,7 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
     let env = api_fixtures::create_test_env(pool.clone()).await;
     let mh = create_managed_host(&env).await;
     let dpu_machine_id = mh.dpu().id;
+    let network_config_version = "V2-T1".to_string();
 
     // Remove the state-handler queue table so the host wakeup enqueue fails
     // while the status report itself stays healthy.
@@ -1416,12 +1448,19 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
     let metrics = MetricsCapture::start();
     // A never-before-observed network config version registers as a change,
     // which is what prompts the host state-handler wakeup.
-    record_dpu_network_status(
-        &env,
-        dpu_machine_id,
-        Some("wakeup-probe-version".to_string()),
-    )
-    .await;
+    record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version.clone())).await;
+
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_state_handler_wakeup_failures_total",
+            &[("trigger", "dpu_network_status")],
+        ),
+        1.0
+    );
+
+    // The first report committed despite the failed wakeup. Its versions
+    // now match, so another report must not enqueue another host wakeup.
+    record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version)).await;
 
     assert_eq!(
         metrics.counter_delta(

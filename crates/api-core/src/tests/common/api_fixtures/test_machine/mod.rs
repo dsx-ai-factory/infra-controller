@@ -122,7 +122,6 @@ where
         self.api
             .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
                 machine_id: Some(self.id.into()),
-                ..Default::default()
             }))
             .await
             .unwrap()

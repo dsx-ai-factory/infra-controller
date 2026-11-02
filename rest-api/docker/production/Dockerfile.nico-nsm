@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Empty unless CI passes its cached Go module downloads as the `gomodcache`
+# build context, so other builds download every module from the proxy.
+FROM scratch AS gomodcache
+
 # Build stage
 FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 
@@ -25,8 +29,11 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 # Copy SDK go module files, required for maintaining separate go.mod for SDK
 COPY sdk/standard/go.mod ./sdk/standard/
-# Download dependencies
-RUN go mod download
+COPY scripts/go-mod-download.sh ./scripts/
+# Download dependencies. `|` falls back to the regular proxy for anything the
+# cached downloads are missing.
+RUN --mount=type=bind,from=gomodcache,target=/go-mod-download \
+    GOPROXY="file:///go-mod-download|$(go env GOPROXY)" sh scripts/go-mod-download.sh
 
 COPY common/ ./common/
 COPY nvswitch-manager/ ./nvswitch-manager/

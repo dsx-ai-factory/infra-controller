@@ -658,9 +658,10 @@ message FirmwareOperationMissingReceipt {
   string supervisor_instance_id = 1;
 }
 
-// Result for exactly one delivered MlxDeviceUpdateFirmware workflow. Core must
-// correlate all three identifiers with its admitted task before using a receipt.
-// These results never advance legacy DPA ApplyFirmware state.
+// Result for exactly one delivered MlxDeviceUpdateFirmware or
+// MlxDeviceObserveFirmwareUpdate. Core must correlate all three identifiers with
+// its admitted task before using a receipt. These results never advance legacy
+// DPA ApplyFirmware state.
 message MlxDeviceUpdateFirmwareResult {
   // Operation ID from the delivered task; repeated unchanged for errors too.
   string operation_id = 1;
@@ -673,13 +674,43 @@ message MlxDeviceUpdateFirmwareResult {
   oneof result {
     FirmwareOperation receipt = 4;
     MlxDeviceUpdateFirmwareError error = 5;
+    // The supervisor that answered has no receipt for operation_id. Observation
+    // returns this on absence; a guarded update returns it when a different
+    // supervisor instance answers, without submitting there. Either way, an
+    // earlier instance may already have run the operation.
+    FirmwareOperationMissingReceipt missing_receipt = 6;
+  }
+}
+
+// Result for exactly one delivered MlxDeviceLockdown. Core must
+// match all three identifiers with its current request before using the result.
+message MlxDeviceLockdownResult {
+  // Controller state version from the delivered request, repeated unchanged.
+  string controller_state_version = 1;
+  // Exact containing MlxDeviceAction.pci_name from the delivered request.
+  string pci_name = 2;
+  // Physical identity from the delivered request, repeated unchanged.
+  MlxDeviceSelector expected_device = 3;
+  // The lock or unlock completed, or the card was already in that state. This
+  // is not an observed status and does not show which key holds a lock.
+  message Changed {
+  }
+  // Exactly one member is required.
+  oneof result {
+    // Lock status read from the card after its identity matched.
+    StatusReport status_report = 4;
+    Changed changed = 5;
+    // Nonsecret diagnostic for a request that did not complete, including a
+    // card that does not match expected_device. Keys never appear here.
+    string error = 6;
   }
 }
 
 message MlxObservation {
   // Required to identify legacy/non-firmware observations by MAC. Correlated
-  // firmware_operation reports may omit this: their ID identifies the card
-  // within the reporting host without querying a device during a live burn.
+  // firmware_operation and firmware_update_result reports may omit this: their
+  // IDs identify the card within the reporting host without querying a device
+  // during a live burn. A lockdown_result error also omits it.
   MlxDeviceInfo device_info = 1;
   optional LockStatus lock_status = 2;
   optional string profile_name = 3;
@@ -695,10 +726,16 @@ message MlxObservation {
   // Correlated generic NIC workflow result, independent of legacy DPA fields.
   // device_info may be absent: reading a receipt must not probe a live burn.
   // Must not be combined with legacy firmware/profile/lock fields.
-  // Core rejects reports containing this field with FAILED_PRECONDITION until
-  // generic-operation persistence is implemented; no observations in that batch
-  // are stored. See https://github.com/dsx-ai-factory/infra-controller/issues/6677.
+  // Core rejects reports containing this field or lockdown_result with
+  // FAILED_PRECONDITION until generic-operation persistence is implemented; no
+  // observations in that batch are stored. See
+  // https://github.com/dsx-ai-factory/infra-controller/issues/6677.
   MlxDeviceUpdateFirmwareResult firmware_update_result = 7;
+  // Correlated generic lockdown result. The legacy lock_status field belongs to
+  // DPA state, so generic lockdown never reports through it. device_info
+  // accompanies a completed status read or change. Must not be combined with
+  // legacy firmware/profile/lock fields or firmware_update_result.
+  MlxDeviceLockdownResult lockdown_result = 8;
 }
 
 // PublishMlxObservationReportRequest is sent by scout or the agent

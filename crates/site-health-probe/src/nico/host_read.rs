@@ -30,6 +30,10 @@ use crate::gate::CallError;
 /// A value the current host read may not be able to supply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Known<T> {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the compact host read sets known values")
+    )]
     Value(T),
     /// Why the value is unknown.
     Unknown(&'static str),

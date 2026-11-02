@@ -102,6 +102,7 @@ mod tpm_ca;
 mod vpc;
 mod vpc_peering;
 mod vpc_prefix;
+mod vpc_remote;
 // NOTE: the admin web UI tests moved to the `carbide-api-web` crate (alongside the web code they
 // exercise).
 
