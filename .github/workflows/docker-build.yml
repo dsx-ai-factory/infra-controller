@@ -333,10 +333,12 @@ jobs:
 
       # Only main saves, like the other sccache entries: other refs can read
       # main's entry but not each other's. A run whose Cargo.lock matches the
-      # restored entry skips the export and the upload. Gated on a successful
-      # build and export so an empty or partial directory is never saved under
-      # the key. A failed export only skips the save, since the image is
-      # already built and pushed by then.
+      # restored entry skips the export and the upload.
+      #
+      # Every step from here to the save is best-effort and runs only after the
+      # one before it succeeded. A failure skips the save without failing the
+      # job, since the image is already built and pushed by then. It also means
+      # an empty or partial directory is never saved under the key.
       #
       # Concurrent main runs that pick up the same Cargo.lock all miss the
       # restore, but the cache only accepts the first save. A run whose key was
@@ -345,6 +347,7 @@ jobs:
       - name: Check whether another run saved sccache
         id: sccache-saved
         if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache-build
@@ -352,14 +355,16 @@ jobs:
           lookup-only: true
 
       - name: Clear sccache directory for the export
-        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true' && steps.sccache-saved.outputs.cache-hit != 'true'
+        id: sccache-clear
+        if: steps.sccache-saved.outcome == 'success' && steps.sccache-saved.outputs.cache-hit != 'true'
+        continue-on-error: true
         env:
           DIR: ${{ steps.sccache-dir.outputs.dir }}
         run: rm -rf "${DIR}" && mkdir -p "${DIR}"
 
       - name: Export sccache directory
         id: sccache-export
-        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true' && steps.sccache-saved.outputs.cache-hit != 'true'
+        if: steps.sccache-clear.outcome == 'success'
         continue-on-error: true
         uses: docker/build-push-action@v5
         with:
@@ -372,7 +377,7 @@ jobs:
           provenance: false
 
       - name: Save sccache
-        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true' && steps.sccache-export.outcome == 'success'
+        if: steps.sccache-export.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/sccache-build
