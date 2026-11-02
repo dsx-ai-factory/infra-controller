@@ -37,12 +37,10 @@ use model::vpc::{
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
-use super::tenant_prefix_overlap;
+use super::{tenant_prefix_overlap, vni};
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::cfg::file::FnnConfig;
-
-mod vni;
 
 /// `create` checks admission, prepares a VNI, then saves it with the VPC.
 /// Admission is checked again because it can change during provider work.

@@ -94,6 +94,7 @@ mod sku;
 mod spdm;
 mod spx_multiplane;
 mod spx_partition;
+mod spx_partition_remote;
 mod switch;
 mod tenant_identity_config;
 mod tenant_prefix_startup;

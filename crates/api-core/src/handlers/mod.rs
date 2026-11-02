@@ -109,6 +109,7 @@ pub(super) mod tpm_ca;
 pub(super) mod uefi;
 pub(super) mod uefi_credential_rotation;
 mod utils;
+mod vni;
 pub(super) mod vpc;
 pub(super) mod vpc_peering;
 pub(super) mod vpc_prefix;
