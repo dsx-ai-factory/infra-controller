@@ -4113,7 +4113,7 @@ impl NvSwitchManager for RmsBackend {
                     endpoint.bmc_mac,
                     SwitchOrPowerShelfRole::Switch,
                 )
-                .map_err(ComponentManagerError::Internal)?;
+                .map_err(ComponentManagerError::RejectedBeforeDispatch)?;
 
             nodes.push(build_switch_node_info(
                 endpoint,
@@ -9991,6 +9991,28 @@ mod tests {
                 .await
                 .len(),
             1
+        );
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_sdn_reset_rejects_unresolved_target_before_dispatch(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        let endpoints = [make_sw_endpoint(SW_MAC_1), make_sw_endpoint(UNKNOWN_MAC)];
+
+        let error =
+            NvSwitchManager::batch_reset_switch_sdn_factory_default(&backend, &endpoints, None)
+                .await
+                .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ComponentManagerError::RejectedBeforeDispatch(message)
+                if message == RMS_IDENTITY_LOOKUP_ERROR
+        ));
+        assert!(
+            mock.batch_reset_switch_sdn_factory_default_calls()
+                .await
+                .is_empty()
         );
     }
 
