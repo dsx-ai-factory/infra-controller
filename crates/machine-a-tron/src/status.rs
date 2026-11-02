@@ -40,7 +40,9 @@ impl From<HardwareType> for DeviceKind {
     fn from(hardware_type: HardwareType) -> Self {
         match hardware_type {
             HardwareType::NvidiaSwitchNd5200Ld | HardwareType::NvidiaSwitchN5700Ld => Self::Switch,
-            HardwareType::LiteOnPowerShelf | HardwareType::DeltaPowerShelf => Self::PowerShelf,
+            HardwareType::LiteOnPowerShelf
+            | HardwareType::DeltaPowerShelf
+            | HardwareType::DeltaVrnvl72PowerShelf => Self::PowerShelf,
             _ => Self::Machine,
         }
     }

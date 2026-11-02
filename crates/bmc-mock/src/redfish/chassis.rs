@@ -17,10 +17,11 @@
 
 use std::borrow::Cow;
 
-use axum::Router;
 use axum::extract::{Path, State};
-use axum::response::Response;
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use nv_redfish_server_core::AdditionalProperties;
 
 use super::schema::chassis::{Chassis, ChassisRequired, ChassisType};
@@ -28,7 +29,7 @@ use super::schema::resource::Uuid;
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
 use crate::redfish::ModelExt;
-use crate::{Callbacks, http, redfish};
+use crate::{ActionError, Callbacks, ResourceResetType, http, redfish};
 
 pub(super) fn resource<'a>(chassis_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("{}/{chassis_id}", collection().odata_id);
@@ -58,6 +59,14 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
     const LEAK_DETECTOR_ID: &str = "{leak_detector_id}";
     r.route(&collection().odata_id, get(get_chassis_collection::<C>))
         .route(&resource(CHASSIS_ID).odata_id, get(get_chassis::<C>))
+        .route(
+            "/redfish/v1/Chassis/{chassis_id}/ResetActionInfo",
+            get(get_reset_action_info::<C>),
+        )
+        .route(
+            "/redfish/v1/Chassis/{chassis_id}/Actions/Chassis.Reset",
+            post(post_reset_chassis::<C>),
+        )
         .route(
             &redfish::network_adapter::chassis_collection(CHASSIS_ID).odata_id,
             get(get_chassis_network_adapters::<C>),
@@ -130,6 +139,11 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
         )
 }
 
+pub(crate) struct PowerControlConfig {
+    pub(crate) initial_powered_on: bool,
+    pub(crate) allowed_reset_types: Vec<ResourceResetType>,
+}
+
 pub(crate) struct SingleChassisConfig {
     pub(crate) id: Cow<'static, str>,
     pub(crate) serial_number: Option<Cow<'static, str>>,
@@ -150,6 +164,8 @@ pub(crate) struct SingleChassisConfig {
     pub(crate) oem: Option<AdditionalProperties>,
     /// Whether the chassis serves the NVIDIA `AuxPowerReset` AC power cycle action.
     pub(crate) aux_power_reset: bool,
+    /// Optional chassis power protocol. None omits actions and returns 404 for them.
+    pub(crate) power_control: Option<PowerControlConfig>,
 }
 
 impl SingleChassisConfig {
@@ -173,6 +189,7 @@ impl SingleChassisConfig {
             power_supplies: None,
             oem: None,
             aux_power_reset: false,
+            power_control: None,
         }
     }
 }
@@ -317,6 +334,7 @@ async fn get_chassis<C: Callbacks>(
         .then_some(redfish::thermal_subsystem::resource(&chassis_id));
 
     let resource = resource(&chassis_id);
+    let action_resource_path = resource.odata_id.to_string();
     let model = Chassis {
         serial_number: config.serial_number.as_ref().map(|v| Some(v.to_string())),
         manufacturer: config.manufacturer.as_ref().map(|v| Some(v.to_string())),
@@ -341,13 +359,82 @@ async fn get_chassis<C: Callbacks>(
             chassis_type: config.chassis_type,
         })
     };
+    let mut model = model;
+    if let Some(control) = config.power_control.as_ref() {
+        let on = state
+            .callbacks
+            .as_ref()
+            .and_then(|c| c.chassis_power_state())
+            .unwrap_or(control.initial_powered_on);
+        model = model.power_state(if on {
+            super::schema::resource::PowerState::On
+        } else {
+            super::schema::resource::PowerState::Off
+        });
+    }
     let mut document = model.into_json();
     if config.aux_power_reset {
         document = document.patch(redfish::oem::nvidia::chassis::aux_power_reset_action(
             &chassis_id,
         ));
     }
+    if config.power_control.is_some() {
+        document = document.patch(serde_json::json!({"Actions": {"#Chassis.Reset": {
+            "target": format!("{action_resource_path}/Actions/Chassis.Reset"),
+            "@Redfish.ActionInfo": format!("{action_resource_path}/ResetActionInfo")
+        }}}));
+    }
     document.into_ok_response()
+}
+
+async fn get_reset_action_info<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(control) = state
+        .chassis_state
+        .find(&id)
+        .and_then(|c| c.config.power_control.as_ref())
+    else {
+        return http::not_found();
+    };
+    super::action_info::reset(
+        format!("/redfish/v1/Chassis/{id}/ResetActionInfo"),
+        &control.allowed_reset_types,
+    )
+    .into_json()
+    .into_ok_response()
+}
+
+async fn post_reset_chassis<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(control) = state
+        .chassis_state
+        .find(&id)
+        .and_then(|c| c.config.power_control.as_ref())
+    else {
+        return http::not_found();
+    };
+    let Some(reset) = body
+        .get("ResetType")
+        .and_then(|v| serde_json::from_value::<ResourceResetType>(v.clone()).ok())
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !control.allowed_reset_types.contains(&reset) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(callbacks) = state.callbacks.as_ref() else {
+        return http::not_found();
+    };
+    match callbacks.computer_system_reset(reset).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(ActionError::BadRequest(_)) => StatusCode::BAD_REQUEST.into_response(),
+        Err(ActionError::Internal(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn get_chassis_network_adapters<C: Callbacks>(
@@ -561,9 +648,15 @@ async fn get_chassis_power_supply<C: Callbacks>(
     let Some(chassis_state) = state.chassis_state.find(&chassis_id) else {
         return http::not_found();
     };
+    let observed = chassis_state.config.power_control.as_ref().and_then(|_| {
+        state
+            .callbacks
+            .as_ref()
+            .and_then(|c| c.chassis_power_state())
+    });
     chassis_state
         .find_power_supply(&power_supply_id)
-        .map(|v| v.to_json().into_ok_response())
+        .map(|v| v.to_json_with_power_state(observed).into_ok_response())
         .unwrap_or_else(http::not_found)
 }
 

@@ -56,7 +56,9 @@ impl RackMemberRegistration {
                 (Switch, "NVIDIA")
             }
             HardwareType::LiteOnPowerShelf => (PowerShelf, "LiteOn"),
-            HardwareType::DeltaPowerShelf => (PowerShelf, "Delta"),
+            HardwareType::DeltaPowerShelf | HardwareType::DeltaVrnvl72PowerShelf => {
+                (PowerShelf, "Delta")
+            }
             HardwareType::DellPowerEdgeR750
             | HardwareType::DellPowerEdgeR760Bf4
             | HardwareType::NvidiaDgxGb300

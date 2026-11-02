@@ -84,6 +84,14 @@ impl PowerShelfCallbacks {
 }
 
 impl Callbacks for PowerShelfCallbacks {
+    fn chassis_power_state(&self) -> Option<bool> {
+        match self.state.read().unwrap().power_state {
+            PowerState::On => Some(true),
+            PowerState::Off => Some(false),
+            _ => None,
+        }
+    }
+
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
@@ -720,6 +728,46 @@ mod tests {
     use mac_address::MacAddress;
 
     use super::*;
+
+    #[tokio::test]
+    async fn vr_delta_callbacks_publish_actor_power_to_redfish() {
+        let app_context = MachineATronContext::for_test();
+        let config: MachineConfig = toml::from_str(
+            r#"
+hw_type = "delta_vrnvl72_power_shelf"
+host_count = 1
+dpu_per_host_count = 0
+underlay_dhcp_relay_address = "192.0.2.1"
+bmc_dhcp_relay_address = "192.0.2.1"
+"#,
+        )
+        .unwrap();
+        let mac = MacAddress::new([2, 0, 0, 0, 3, 38]);
+        let pool_config = MacAddressPoolConfig::new(mac, 24).unwrap();
+        let mut mac_pool = MacAddressPool::new_pool(pool_config);
+        let mut actor = PowerShelfActor::new(
+            app_context,
+            "vr-delta".into(),
+            Arc::new(config),
+            &mut mac_pool,
+            pool_config,
+        );
+        let (_task, mailbox) = Actor::new();
+        let callbacks = PowerShelfCallbacks {
+            state: actor.live_state.clone(),
+            mailbox,
+        };
+        assert_eq!(
+            crate::status::DeviceKind::from(actor.host_info.hw_type),
+            crate::status::DeviceKind::PowerShelf
+        );
+        actor.set_system_power(ResourceResetType::ForceOff).unwrap();
+        actor.update_live_state();
+        assert_eq!(callbacks.chassis_power_state(), Some(false));
+        actor.set_system_power(ResourceResetType::On).unwrap();
+        actor.update_live_state();
+        assert_eq!(callbacks.chassis_power_state(), Some(true));
+    }
 
     #[tokio::test]
     async fn first_run_offset_waits_for_resume() {

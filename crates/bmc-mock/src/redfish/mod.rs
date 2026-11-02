@@ -101,6 +101,7 @@ pub(crate) mod schema {
 }
 
 pub(crate) mod account_service;
+mod action_info;
 pub(crate) mod assembly;
 pub(crate) mod bios;
 pub(crate) mod boot_option;
@@ -122,6 +123,7 @@ pub(crate) mod network_adapter;
 pub(crate) mod network_device_function;
 pub(crate) mod oem;
 pub(crate) mod pcie_device;
+pub(crate) mod power_equipment;
 mod power_subsystem;
 pub(crate) mod power_supply;
 pub(crate) mod processor;

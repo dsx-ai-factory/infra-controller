@@ -48,10 +48,10 @@ pub struct HostMachineInfo {
     pub nvos_mac_addresses: Vec<MacAddress>,
     pub switch_serial_number: Option<String>,
     pub hw_mac_addr_pool: MacAddressPoolConfig,
-    /// Per-PSU commanded on/off states for a Delta power shelf, reported under
+    /// Per-PSU commanded on/off states for the legacy Delta 810 shelf, reported under
     /// `Oem.deltaenergysystems.Power`. `None` uses the default all-on shelf;
     /// [`crate::test_support::delta_powershelf_bmc_with_psu_power`] sets it to
-    /// model off/mixed shelves. Ignored for non-Delta hardware.
+    /// model off/mixed shelves. Ignored for other hardware profiles.
     pub delta_psu_power: Option<Vec<bool>>,
     /// Initial host firmware versions for the simulated BMC firmware inventory.
     /// When `None` the hardware-type default is used.  machine-a-tron sets this
@@ -91,6 +91,7 @@ impl HardwareTypeExt for HardwareType {
             | HardwareType::NvidiaDgxVr
             | HardwareType::LiteOnPowerShelf
             | HardwareType::DeltaPowerShelf
+            | HardwareType::DeltaVrnvl72PowerShelf
             | HardwareType::NvidiaSwitchNd5200Ld
             | HardwareType::NvidiaSwitchN5700Ld
             | HardwareType::GenericAmi
@@ -240,6 +241,7 @@ impl DpuMachineInfo {
             | HardwareType::SupermicroGb300Nvl => hw::bluefield3::Mode::B3240ColdAisle,
             HardwareType::LiteOnPowerShelf
             | HardwareType::DeltaPowerShelf
+            | HardwareType::DeltaVrnvl72PowerShelf
             | HardwareType::NvidiaSwitchNd5200Ld
             | HardwareType::NvidiaSwitchN5700Ld
             | HardwareType::NvidiaDgxVr
@@ -276,6 +278,7 @@ impl DpuMachineInfo {
             | HardwareType::SupermicroGb300Nvl
             | HardwareType::LiteOnPowerShelf
             | HardwareType::DeltaPowerShelf
+            | HardwareType::DeltaVrnvl72PowerShelf
             | HardwareType::NvidiaSwitchNd5200Ld
             | HardwareType::NvidiaSwitchN5700Ld => {
                 panic!("Bluefield4 DPU is defined for {}", self.hw_type)
@@ -305,6 +308,7 @@ impl DpuMachineInfo {
             | HardwareType::SupermicroGb300Nvl
             | HardwareType::LiteOnPowerShelf
             | HardwareType::DeltaPowerShelf
+            | HardwareType::DeltaVrnvl72PowerShelf
             | HardwareType::NvidiaSwitchNd5200Ld
             | HardwareType::NvidiaSwitchN5700Ld => DpuType::Bluefield3,
             HardwareType::DellPowerEdgeR760Bf4 | HardwareType::NvidiaDgxVr => DpuType::Bluefield4,
@@ -427,6 +431,7 @@ impl HostMachineInfo {
                     hw_type,
                     HardwareType::LiteOnPowerShelf
                         | HardwareType::DeltaPowerShelf
+                        | HardwareType::DeltaVrnvl72PowerShelf
                         | HardwareType::NvidiaSwitchNd5200Ld
                         | HardwareType::NvidiaSwitchN5700Ld
                 ) {
@@ -495,6 +500,7 @@ impl HostMachineInfo {
             | HardwareType::NvidiaDgxVr
             | HardwareType::LiteOnPowerShelf
             | HardwareType::DeltaPowerShelf
+            | HardwareType::DeltaVrnvl72PowerShelf
             | HardwareType::NvidiaDgxH100
             | HardwareType::NvidiaSwitchNd5200Ld
             | HardwareType::NvidiaSwitchN5700Ld
@@ -522,7 +528,9 @@ impl HostMachineInfo {
                 redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase)
             }
             HardwareType::LiteOnPowerShelf => redfish::oem::BmcVendor::LiteOn,
-            HardwareType::DeltaPowerShelf => redfish::oem::BmcVendor::Delta,
+            HardwareType::DeltaPowerShelf | HardwareType::DeltaVrnvl72PowerShelf => {
+                redfish::oem::BmcVendor::Delta
+            }
             HardwareType::NvidiaSwitchNd5200Ld => {
                 redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase)
             }
@@ -547,6 +555,7 @@ impl HostMachineInfo {
             HardwareType::NvidiaDgxVr => Some("VR NVL72"),
             HardwareType::LiteOnPowerShelf => None,
             HardwareType::DeltaPowerShelf => None,
+            HardwareType::DeltaVrnvl72PowerShelf => Some("Power Management Controller"),
             HardwareType::NvidiaSwitchNd5200Ld => Some("P3809"),
             HardwareType::NvidiaSwitchN5700Ld => Some("P3809"),
             HardwareType::NvidiaDgxH100 => Some("AMI Redfish Server"),
@@ -566,6 +575,7 @@ impl HostMachineInfo {
             HardwareType::NvidiaDgxVr => "1.17.0",
             HardwareType::LiteOnPowerShelf => "1.9.0",
             HardwareType::DeltaPowerShelf => "1.9.0",
+            HardwareType::DeltaVrnvl72PowerShelf => "1.17.0",
             HardwareType::NvidiaSwitchNd5200Ld => "1.17.0",
             HardwareType::NvidiaSwitchN5700Ld => "1.17.0",
             HardwareType::NvidiaDgxH100 => "1.11.0",
@@ -586,6 +596,9 @@ impl HostMachineInfo {
             HardwareType::NvidiaDgxVr => self.dgx_vr_nvl().manager_config(),
             HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().manager_config(),
             HardwareType::DeltaPowerShelf => self.delta_power_shelf().manager_config(),
+            HardwareType::DeltaVrnvl72PowerShelf => {
+                self.delta_vrnvl72_power_shelf().manager_config()
+            }
             HardwareType::NvidiaSwitchNd5200Ld => self.nvidia_switch_nd5200_ld().manager_config(),
             HardwareType::NvidiaSwitchN5700Ld => self.nvidia_switch_n5700_ld().manager_config(),
             HardwareType::NvidiaDgxH100 => self.nvidia_dgx_h100().manager_config(),
@@ -616,6 +629,9 @@ impl HostMachineInfo {
             }
             HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().system_config(),
             HardwareType::DeltaPowerShelf => self.delta_power_shelf().system_config(),
+            HardwareType::DeltaVrnvl72PowerShelf => {
+                self.delta_vrnvl72_power_shelf().system_config()
+            }
             HardwareType::NvidiaSwitchNd5200Ld => {
                 self.nvidia_switch_nd5200_ld().system_config(callbacks)
             }
@@ -643,6 +659,9 @@ impl HostMachineInfo {
             HardwareType::NvidiaDgxVr => self.dgx_vr_nvl().chassis_config(),
             HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().chassis_config(),
             HardwareType::DeltaPowerShelf => self.delta_power_shelf().chassis_config(),
+            HardwareType::DeltaVrnvl72PowerShelf => {
+                self.delta_vrnvl72_power_shelf().chassis_config()
+            }
             HardwareType::NvidiaSwitchNd5200Ld => self.nvidia_switch_nd5200_ld().chassis_config(),
             HardwareType::NvidiaSwitchN5700Ld => self.nvidia_switch_n5700_ld().chassis_config(),
             HardwareType::NvidiaDgxH100 => self.nvidia_dgx_h100().chassis_config(),
@@ -668,6 +687,9 @@ impl HostMachineInfo {
             HardwareType::NvidiaDgxVr => self.dgx_vr_nvl().event_service_config(),
             HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().event_service_config(),
             HardwareType::DeltaPowerShelf => self.delta_power_shelf().event_service_config(),
+            HardwareType::DeltaVrnvl72PowerShelf => {
+                self.delta_vrnvl72_power_shelf().event_service_config()
+            }
             HardwareType::NvidiaSwitchNd5200Ld => {
                 self.nvidia_switch_nd5200_ld().event_service_config()
             }
@@ -697,6 +719,9 @@ impl HostMachineInfo {
             HardwareType::NvidiaDgxVr => self.dgx_vr_nvl().update_service_config(),
             HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().update_service_config(),
             HardwareType::DeltaPowerShelf => self.delta_power_shelf().update_service_config(),
+            HardwareType::DeltaVrnvl72PowerShelf => {
+                self.delta_vrnvl72_power_shelf().update_service_config()
+            }
             HardwareType::NvidiaSwitchNd5200Ld => {
                 self.nvidia_switch_nd5200_ld().update_service_config()
             }
@@ -1025,6 +1050,15 @@ impl HostMachineInfo {
         }
     }
 
+    fn delta_vrnvl72_power_shelf(
+        &self,
+    ) -> hw::delta_vrnvl72_power_shelf::DeltaVrnvl72PowerShelf<'_> {
+        hw::delta_vrnvl72_power_shelf::DeltaVrnvl72PowerShelf {
+            bmc_mac_address: self.bmc_mac_address,
+            product_serial_number: Cow::Borrowed(&self.serial),
+        }
+    }
+
     fn delta_power_shelf(&self) -> hw::delta_power_shelf::DeltaPowerShelf<'_> {
         hw::delta_power_shelf::DeltaPowerShelf {
             bmc_mac_address: self.bmc_mac_address,
@@ -1039,7 +1073,10 @@ impl HostMachineInfo {
     /// Whether this host advertises and serves a `/redfish/v1/Systems`
     /// collection. Delta power shelves do not.
     fn exposes_computer_systems(&self) -> bool {
-        !matches!(self.hw_type, HardwareType::DeltaPowerShelf)
+        !matches!(
+            self.hw_type,
+            HardwareType::DeltaPowerShelf | HardwareType::DeltaVrnvl72PowerShelf
+        )
     }
 
     /// What this host says it can attest. `None` for every profile that does
@@ -1196,11 +1233,21 @@ impl MachineInfo {
                 | HardwareType::LenovoGB300Nvl
                 | HardwareType::LiteOnPowerShelf
                 | HardwareType::DeltaPowerShelf
+                | HardwareType::DeltaVrnvl72PowerShelf
                 | HardwareType::NvidiaDgxH100
                 | HardwareType::GenericAmi
                 | HardwareType::HpeProliantDl380aGen11 => false,
             },
             MachineInfo::Dpu(_) => false,
+        }
+    }
+
+    pub(super) fn power_equipment_config(&self) -> Option<redfish::power_equipment::Config> {
+        match self {
+            MachineInfo::Host(host) if host.hw_type == HardwareType::DeltaVrnvl72PowerShelf => {
+                Some(host.delta_vrnvl72_power_shelf().power_equipment_config())
+            }
+            _ => None,
         }
     }
 

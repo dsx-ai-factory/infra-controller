@@ -1,0 +1,329 @@
+{
+  "capture_date": "2026-10-30T08:32:36.516365+00:00",
+  "device": "Delta AHE54V2037A / NVIDIA_PMC",
+  "pmc": "3.3.8",
+  "backup_pmc": "3.3.6",
+  "psu": "04320409",
+  "format": "URI directory/index.json; no leading slash or enclosing vendor directory in archive",
+  "sanitized": true,
+  "read_only": true,
+  "resources": {
+    "/redfish/v1/": {
+      "file": "redfish/v1/index.json",
+      "sha256": "d927a7082cac71de0d628325fa45efcccb5319feb649df4305ee6e7559a922b4"
+    },
+    "/redfish/v1/Chassis": {
+      "file": "redfish/v1/Chassis/index.json",
+      "sha256": "f4b61c094585e555e4bd4394be35b4ebfe44135303557c4496c9caebfbc06a8c"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/index.json",
+      "sha256": "51dd903ae4d0b6e36e3ddaea2753f615409a932da457b7bdf64c11c3ef8d443d"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/EnvironmentMetrics": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/EnvironmentMetrics/index.json",
+      "sha256": "d99460bdefee77c0e57bdcea9aaf8f7ca3fd3d1cce05bbce00386a332caf4071"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/Oem/deltaenergysystems/ACPowerRampRate": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/Oem/deltaenergysystems/ACPowerRampRate/index.json",
+      "sha256": "0195d142ce666d36a43ba653a02a0bda02356ab1f7a815fc59e7fb28ea50bf24"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/Oem/deltaenergysystems/AllSensors": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/Oem/deltaenergysystems/AllSensors/index.json",
+      "sha256": "ff24a28919eaf566a748398941c5b55ae32cdd85934db5892a4d62833ccc609e"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/Oem/deltaenergysystems/PowerBrake": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/Oem/deltaenergysystems/PowerBrake/index.json",
+      "sha256": "50344829b33a959c4e70bec77828ae6e5f3ed853e0cdafbccddac1bbd5644d92"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/index.json",
+      "sha256": "fb0a0927fe53012da872a160b1c428f5da538581b2b23c84877bd79b0842a5a4"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/Batteries": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/Batteries/index.json",
+      "sha256": "b1e5a7723640d92116f2631bd385a2460685b7b6b859529e6395610449fafbd9"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/index.json",
+      "sha256": "0f7f600f84366a4a9f72d78b51723d15ad8dd0a6b47d55641d881344c65f0a11"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/1": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/1/index.json",
+      "sha256": "fec4fc78a94931228f2d6eec058319dcd62419017b010758d45099ba24b13584"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/1/ResetActionInfo": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/1/ResetActionInfo/index.json",
+      "sha256": "2d3641a63f321325650e72de595b09969ce6c43ec149b959803d98b39423b544"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/2": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/2/index.json",
+      "sha256": "873ca47bbe82290f3da412bd52ed7a3e1bff4cf0da896d3d920c1adc3a975ce1"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/2/ResetActionInfo": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/2/ResetActionInfo/index.json",
+      "sha256": "e172d5b7ac35d018d191f7bc3157175d8a531b4e5f780a37d5c451e77808e882"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/3": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/3/index.json",
+      "sha256": "d679ea99d29a974e27a0401b66fe49923158138649b8d69cc25ca58fc1f1c30e"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/3/ResetActionInfo": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/3/ResetActionInfo/index.json",
+      "sha256": "37cb09ee96c7e83bb9b008b8e435eb953cc65adc3bb3ac0c4352b4b02885db1d"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/4": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/4/index.json",
+      "sha256": "b10fa11c7405e05704e7b8e1f0d1665b4be83887b7a16133fba22597a695f89a"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/4/ResetActionInfo": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/4/ResetActionInfo/index.json",
+      "sha256": "a45b8e3051cb6b01b23e3f8c19ab46bd2fab140b890cf9a7aa3a00cab1c07b0a"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/5": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/5/index.json",
+      "sha256": "d47764bc32dcd8305df17ce28cc55ff56ef28c0ab0f4fe639bf267e5afd86910"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/5/ResetActionInfo": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/5/ResetActionInfo/index.json",
+      "sha256": "eb8af0727dd22e40cc5f532d9d2456cfa8cbbd673a4e310f21082e9390a26bb0"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/6": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/6/index.json",
+      "sha256": "235b6fc1fb45c1a67d6f0f994fc6f1e99b90790fe138043f91adda055fb4fa86"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/6/ResetActionInfo": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/6/ResetActionInfo/index.json",
+      "sha256": "bed9ff3432bd525b16069143b16f08f515efde914405568e01675c354b36b42f"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ResetActionInfo": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ResetActionInfo/index.json",
+      "sha256": "a0f701f5948e8a268dd8157be1dbe00939fe181321f696dcb62ced3c11e0f9c1"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/index.json",
+      "sha256": "3878ae52259c8b2f559ab09d28995e9db1ef7f9d143de86ac2e9d3a1966028d6"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/index.json",
+      "sha256": "23d0dfdc3509bdd98968f065d04261bfb84f4c1f6b97397f0a8a2c353e425434"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps1_fan1": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps1_fan1/index.json",
+      "sha256": "f807d48ddd0e7418663a48c23a700dfe1887cde35360f4cd751060b7d0c2cdfd"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps1_fan2": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps1_fan2/index.json",
+      "sha256": "7272214b7ca0f3efb0d6b1fadb63c1ccf243b95a1bcb6c3e0180e9f4aece9eeb"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps1_fan3": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps1_fan3/index.json",
+      "sha256": "754946bbe8b63aa0fd1d277d24be7e813b0a19804467d09c5e8d0eb8a40ce794"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps1_fan4": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps1_fan4/index.json",
+      "sha256": "0b2274e5886a1274de6cd12291e2dc2eae3929677cb85642421e5d57b6e3c2dd"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps2_fan1": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps2_fan1/index.json",
+      "sha256": "5bbf92e22b6ddff405de05d84ccfef651875e2e72b1e006f48698bbfdc1a0437"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps2_fan2": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps2_fan2/index.json",
+      "sha256": "d94c4089b98944b5946ec43714e9ea34c75f2c04e553cd72c87b7f676b460f57"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps2_fan3": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps2_fan3/index.json",
+      "sha256": "fe16634b94f222967093989d3beec72af58757c055a677ae8c6841332764286f"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps2_fan4": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps2_fan4/index.json",
+      "sha256": "cea56ba4237040f2605b61d20682fb8b3daad4fa630d2cd6b3c3e8e5d53b78fd"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps3_fan1": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps3_fan1/index.json",
+      "sha256": "46b92e0150a817c0cda15e3a71b9a5db2a6b946c8ac402eff1f16bf4f5292820"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps3_fan2": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps3_fan2/index.json",
+      "sha256": "e4fd26f995956668a2f3b2770123ea03212e437da161f0b0463579a0181362e9"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps3_fan3": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps3_fan3/index.json",
+      "sha256": "d2bd6097d984498077f6dc9c3301b1b0d2fdf7a3ba55a5ac40fc58dc4354b0f9"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps3_fan4": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps3_fan4/index.json",
+      "sha256": "9ccd8e09b7e3128860c39413413c0bc370396e9f2c19fd297f6cd9109b63ce82"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps4_fan1": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps4_fan1/index.json",
+      "sha256": "39558b9318a0f80f3d3adb9b190d89853b19b303a5e15d7d5f2f3605d8cdc057"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps4_fan2": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps4_fan2/index.json",
+      "sha256": "809beb8c22730205b80ad1a46fab5f117c6440845158e218791d493026e62ae6"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps4_fan3": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps4_fan3/index.json",
+      "sha256": "0b0f5d24e434f08cc635b47f8d24246a4db51e7abb0cc26e577642ab28f5af4f"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps4_fan4": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps4_fan4/index.json",
+      "sha256": "b10fd2419db5b5406810f4be33fd2b51d42bd159d5fa07289ec17e2c297ad4f6"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps5_fan1": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps5_fan1/index.json",
+      "sha256": "080b8e6a53d3788e871007eda9c8ff74b5c3ba447a2af6de4fa07db245436422"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps5_fan2": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps5_fan2/index.json",
+      "sha256": "4079a364c6d93be55cddf9240304e07b232acca890eb7bf18c8ff6ff287cb282"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps5_fan3": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps5_fan3/index.json",
+      "sha256": "5abd27fc4f747113319c93f1af9df2e59ba4246fcd579a36eb37c652206dba33"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps5_fan4": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps5_fan4/index.json",
+      "sha256": "f6f0b389013c854be0a7fca59ddb0654c8da7c8e5b2c70ea99b32a46005c187c"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps6_fan1": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps6_fan1/index.json",
+      "sha256": "bc43704fdf5041b3634aa673ab0c372af540515bcbbf107d7cab12632a42cf36"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps6_fan2": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps6_fan2/index.json",
+      "sha256": "614f9144c44f3ca6414a752ed3261f404fe0b493904ee0022f23eb208eb1dc11"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps6_fan3": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps6_fan3/index.json",
+      "sha256": "1fceb99deea39406b159e82b67dafe655aa14fcdcb93652f7cd80a585bcbe119"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps6_fan4": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/Fans/ps6_fan4/index.json",
+      "sha256": "441cf69d770da4bdea7802daa63779712f7cfddaff9dd4f7e085b82bc8d7e811"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/ThermalMetrics": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/ThermalSubsystem/ThermalMetrics/index.json",
+      "sha256": "eb509906798353348ba33282df49abc249216249e8704d64a16279410db50ae5"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/TrustedComponents": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/TrustedComponents/index.json",
+      "sha256": "2be278b59fec76414cda0a128a9500390d13febb7dc8e68bcaa9adc4168a6f89"
+    },
+    "/redfish/v1/Chassis/PowerShelf_0/TrustedComponents/ERoT_BMC_0": {
+      "file": "redfish/v1/Chassis/PowerShelf_0/TrustedComponents/ERoT_BMC_0/index.json",
+      "sha256": "7738389714d6bf6e093719dea4654021490fba29053d2d5861efcdda020f7991"
+    },
+    "/redfish/v1/ComponentIntegrity": {
+      "file": "redfish/v1/ComponentIntegrity/index.json",
+      "sha256": "89381eb0a1ffbba53ea18a830ad986078fc505c0f549af89790ffd0933dfe6f1"
+    },
+    "/redfish/v1/ComponentIntegrity/ERoT_BMC_0": {
+      "file": "redfish/v1/ComponentIntegrity/ERoT_BMC_0/index.json",
+      "sha256": "92d78aa0f0e9986f4e2b3925b54bd707688d7da61eae2e49694fe1d08ae49ad4"
+    },
+    "/redfish/v1/Managers": {
+      "file": "redfish/v1/Managers/index.json",
+      "sha256": "93b6277e044e44799bc3991cd8ba49093b1e0c4e96f878281d68b46c4d649df4"
+    },
+    "/redfish/v1/Managers/PMC_0": {
+      "file": "redfish/v1/Managers/PMC_0/index.json",
+      "sha256": "b3ca51f7ade80ca0ef67a14acf6969fec3edc5278f92e3e3bb138c5c1c9ee2d1"
+    },
+    "/redfish/v1/Managers/PMC_0/EthernetInterfaces": {
+      "file": "redfish/v1/Managers/PMC_0/EthernetInterfaces/index.json",
+      "sha256": "69ddc2f47b09e2607e0acbdb2d4215dd1fca4b65178dfbffe2a78714226cf2e1"
+    },
+    "/redfish/v1/Managers/PMC_0/EthernetInterfaces/eth0": {
+      "file": "redfish/v1/Managers/PMC_0/EthernetInterfaces/eth0/index.json",
+      "sha256": "f321225f2d16e62a0bf88ed0cb277ca29ce8b48b78dee2db3c4bf2c1ceffee2d"
+    },
+    "/redfish/v1/Managers/PMC_0/ManagerDiagnosticData": {
+      "file": "redfish/v1/Managers/PMC_0/ManagerDiagnosticData/index.json",
+      "sha256": "72c3ba69a8b41e8b7cef5b740ccdd0ec249ab92d54dfc3fcb5c0622e435dc277"
+    },
+    "/redfish/v1/Managers/PMC_0/NetworkProtocol": {
+      "file": "redfish/v1/Managers/PMC_0/NetworkProtocol/index.json",
+      "sha256": "47283420df8d8e12732828cde952f326713eb01bbbb45779fabb9e6250d2dc6b"
+    },
+    "/redfish/v1/Managers/PMC_0/ResetActionInfo": {
+      "file": "redfish/v1/Managers/PMC_0/ResetActionInfo/index.json",
+      "sha256": "7f685d25677058b063c4439020a97cbfe3b0291f7389ea6a6d3443fcdda763bc"
+    },
+    "/redfish/v1/Managers/PMC_0/ResetToDefaultsActionInfo": {
+      "file": "redfish/v1/Managers/PMC_0/ResetToDefaultsActionInfo/index.json",
+      "sha256": "db6eed5edb43632a8bacff5d468a7670fd9a63dea3e8ebf1154d1fb0cdeae878"
+    },
+    "/redfish/v1/PowerEquipment/PowerShelves": {
+      "file": "redfish/v1/PowerEquipment/PowerShelves/index.json",
+      "sha256": "be8d892ad354be897521d5b879dab514e905834f68d19e4ddc5707fe739ab207"
+    },
+    "/redfish/v1/PowerEquipment/PowerShelves/1": {
+      "file": "redfish/v1/PowerEquipment/PowerShelves/1/index.json",
+      "sha256": "86f333e8cac8fa74fcbf44f0df7d66f1b930f58eccfeb7e944509f4e081b79f8"
+    },
+    "/redfish/v1/UpdateService": {
+      "file": "redfish/v1/UpdateService/index.json",
+      "sha256": "85dafc6a8942c858f8a6cd02deb4fdf76c68ef2f5c3308c567e238e8bd562e0a"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/index.json",
+      "sha256": "660c54c17456e6a9310a034dd102b5d8a619087356a583919a8e3dc3098cc5ab"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_ERoT_BMC_0": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_ERoT_BMC_0/index.json",
+      "sha256": "bade46fce34e0987871c4ccfaf474e7cec2f2eb0d9ca4c0518289841e1dcd919"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_PMC_alt": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_PMC_alt/index.json",
+      "sha256": "367e30525bcc0d06eecee010120641a254aa85197d08adeb8f426c37610d28c7"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_PMC_primary": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_PMC_primary/index.json",
+      "sha256": "bde4149eede4b44315c742486bf418fdaa30204141b4bcc68c685ccb6b0bb097"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_PSU_1": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_PSU_1/index.json",
+      "sha256": "f35ce79a70a4e6e32ec0034482893d528eb82f263ee196291852c013219c5eec"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_PSU_2": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_PSU_2/index.json",
+      "sha256": "675fa91709f70ba80aa10982ced5d96c9b3b6a15effdecc29049a9d37e911a28"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_PSU_3": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_PSU_3/index.json",
+      "sha256": "756808dd537887c8b616873c0804f687d701805a456f2273eebdc5d38147a5ec"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_PSU_4": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_PSU_4/index.json",
+      "sha256": "9fc139e9ced4b4af2bcccbac1e64d8313fd743d4059a3c4ac8aea37029c7922f"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_PSU_5": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_PSU_5/index.json",
+      "sha256": "f2d55db61690f34c1ed5125a59cef2f78efb31feea093da14904784ee7933f23"
+    },
+    "/redfish/v1/UpdateService/FirmwareInventory/FW_PSU_6": {
+      "file": "redfish/v1/UpdateService/FirmwareInventory/FW_PSU_6/index.json",
+      "sha256": "96b481ae67f4c76f25267943343cbe037d0c195b5c8eb5b21898622e38cc7aa3"
+    },
+    "/redfish/v1/UpdateService/SimpleUpdateActionInfo": {
+      "file": "redfish/v1/UpdateService/SimpleUpdateActionInfo/index.json",
+      "sha256": "14b39973146769a5d831e8a02f91742109ee525846ddc5ef88e50d22b8ae6ed9"
+    },
+    "/redfish/v1/UpdateService/UpdateServiceCapabilities": {
+      "file": "redfish/v1/UpdateService/UpdateServiceCapabilities/index.json",
+      "sha256": "8952371c8acb6715f4323946569337f35faf7df488de118e2c8304a9edb55d3c"
+    }
+  },
+  "omitted_statuses": {
+    "/redfish/v1/Systems": 404
+  },
+  "limitations": [
+    "Bounded GET crawl; authentication/session collections, certificates, logs, and write action targets excluded",
+    "No physical power action or firmware update was performed",
+    "Unknown/uncaptured resources remain absent; static archive replay is GET-only"
+  ],
+  "archive_sha256": "f4d517f103b15e5da8ea6fc9ea2bd66b616fe4e970c8375a0465fd0cd84729b1"
+}
