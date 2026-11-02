@@ -60,7 +60,6 @@ struct RedfishSimState {
     machine_setup_bios_job_id: Option<String>,
     is_bios_setup: Option<bool>,
     default_lockdown: Option<EnabledDisabled>,
-    lockdown_has_boot_latched_controls: bool,
     boss_controller_id: Option<String>,
     /// Override whether `lockdown_bmc` changes the observed state. `None`
     /// preserves the normal successful behavior; `Some(false)` models a BMC
@@ -333,14 +332,6 @@ impl RedfishSim {
             .values()
             .map(|host| host.lockdown)
             .collect()
-    }
-
-    /// Model a platform with runtime protection that is applied at host boot.
-    pub fn set_lockdown_has_boot_latched_controls(&self, required: bool) {
-        self.state
-            .lock()
-            .unwrap()
-            .lockdown_has_boot_latched_controls = required;
     }
 
     /// Return calls related to platform configuration and UEFI credentials.
@@ -1131,18 +1122,6 @@ impl Redfish for RedfishSimClient {
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state.lockdown = target;
             Ok(())
-        })
-    }
-
-    fn lockdown_has_boot_latched_controls<'a>(
-        &'a self,
-    ) -> libredfish::RedfishFuture<'a, Result<bool, RedfishError>> {
-        Box::pin(async move {
-            Ok(self
-                .state
-                .lock()
-                .unwrap()
-                .lockdown_has_boot_latched_controls)
         })
     }
 
