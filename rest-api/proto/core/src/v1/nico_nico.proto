@@ -1296,6 +1296,18 @@ service Forge {
 
   // Secrets management
   rpc ReWrapSecrets(ReWrapSecretsRequest) returns (ReWrapSecretsResponse);
+
+  // Lists names from this server's loaded fnn.routing_profiles configuration,
+  // sorted lexicographically. All supplied filters must match. No FNN
+  // configuration or no matches returns an empty list. This is site inventory,
+  // not a tenant's permitted profiles, and excludes the inline admin VPC profile.
+  rpc FindRoutingProfileNames(RoutingProfileSearchFilter) returns (RoutingProfileNameList);
+  // Retrieves configured definitions by exact, case-sensitive name. Unknown
+  // names are omitted; duplicates appear once; results are sorted by name.
+  // Empty requests or more than max_find_by_ids names return InvalidArgument.
+  // Each call reads this server's loaded configuration, without a snapshot
+  // guarantee across list and fetch calls or between server replicas.
+  rpc FindRoutingProfilesByNames(RoutingProfilesByNamesRequest) returns (NamedRoutingProfileList);
 }
 
 // Indicates the lifecycle state of a resource that is controlled by a state controller
@@ -12829,4 +12841,67 @@ message HostFirmwareInventoryEntry {
   string service_id = 1;
   string inventory_id = 2;
   optional string version = 3;
+}
+
+// Filters named profile definitions, with AND semantics. Omitted filters match
+// every profile. Scalar filters compare effective defaults, while fetched
+// definitions preserve the configured presence of each property.
+message RoutingProfileSearchFilter {
+  // True returns only internal profiles; false returns only external profiles.
+  // Omit to include both. Profiles whose definition omits internal are external.
+  optional bool internal = 1;
+  // Inclusive minimum access tier; any profile with an access tier value equal to
+  // or numerically higher will be included (aka those profiles with permissions
+  // equal to or less than the permissions of the specified access tier). Profiles
+  // whose definition omits access_tier are treated as tier zero.Omit this filter to
+  // include all tiers. This is a value filter, not tenant authorization.
+  optional uint32 minimum_access_tier = 2;
+}
+
+// Lexicographically sorted names in the loaded fnn.routing_profiles map.
+message RoutingProfileNameList {
+  repeated string names = 1;
+}
+
+message RoutingProfilesByNamesRequest {
+  // One to max_find_by_ids names. The limit counts duplicates before deduplication.
+  repeated string names = 1;
+}
+
+// A configured base definition, before VPC overrides or effective defaults.
+message NamedRoutingProfile {
+  // Exact key in fnn.routing_profiles; names are not an enumeration.
+  string name = 1;
+  // Always populated for a returned profile.
+  NamedRoutingProfileConfig config = 2;
+}
+
+// Values from one fnn.routing_profiles entry. Optional properties preserve
+// unset versus explicit false/zero/empty; these are not resolved VPC policies.
+message NamedRoutingProfileConfig {
+  // Route targets imported by the DPU VRF.
+  common.RouteTargets route_target_imports = 1;
+  // Route targets applied to routes exported by the DPU.
+  common.RouteTargets route_targets_on_exports = 2;
+  // Whether to import the underlay default route into the tenant VRF.
+  optional bool leak_default_route_from_underlay = 3;
+  // Whether to export tenant host routes into the underlay.
+  optional bool leak_tenant_host_routes_to_underlay = 4;
+  // Whether tenant route-leak communities are honored.
+  optional bool tenant_leak_communities_accepted = 5;
+  // Prefixes permitted to leak from the underlay into the tenant VRF.
+  PrefixFilterPolicyEntries accepted_leaks_from_underlay = 6;
+  // Prefixes tenant hosts may advertise as anycast routes.
+  PrefixFilterPolicyEntries allowed_anycast_prefixes = 7;
+  // Internal versus external VPC allocation policy; unset defaults to false.
+  optional bool internal = 8;
+  // Lower values permit broader access; unset defaults to zero.
+  optional uint32 access_tier = 9;
+  // Profile opt-in to tenant prefix reuse; alone does not establish eligibility.
+  bool tenant_prefix_overlap_eligible = 10;
+}
+
+message NamedRoutingProfileList {
+  repeated NamedRoutingProfile profiles = 1;
+
 }

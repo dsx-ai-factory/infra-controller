@@ -91,6 +91,7 @@ pub(super) mod redfish;
 pub(super) mod resource_pool;
 pub(super) mod rms;
 pub(super) mod route_server;
+pub(super) mod routing_profile;
 pub(super) mod scout_stream;
 pub(super) mod secrets;
 pub(super) mod site_explorer;

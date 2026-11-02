@@ -111,6 +111,7 @@ mod redfish;
 mod resource_pool;
 mod rms;
 mod route_server;
+mod routing_profile;
 mod rpc;
 mod scout_stream;
 mod secrets;
@@ -382,6 +383,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::Rack(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ResourcePool(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::RouteServer(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::RoutingProfile(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ScoutStream(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::Secrets(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::Set(cmd) => cmd.dispatch(ctx).await?,
