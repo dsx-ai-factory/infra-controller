@@ -349,11 +349,12 @@ async fn prepare_create(
             .map_err(|e: InvalidTenantOrg| {
                 CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
             })?;
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
         if db::dhcp_option_set::find_by_ids(
-            &mut txn,
+            &mut *txn,
             std::slice::from_ref(id),
             Some(&tenant_org),
-            false,
+            true,
         )
         .await?
         .is_empty()
@@ -531,11 +532,12 @@ pub(crate) async fn update(
             .map_err(|e: InvalidTenantOrg| {
                 CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
             })?;
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
         if db::dhcp_option_set::find_by_ids(
             &mut txn,
             std::slice::from_ref(id),
             Some(&tenant_org),
-            false,
+            true,
         )
         .await?
         .is_empty()

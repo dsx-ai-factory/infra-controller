@@ -1637,11 +1637,12 @@ pub(crate) async fn update_instance_config(
 
     if let Some(ref id) = config.dhcp_option_set_id {
         let tenant_org = &config.tenant.tenant_organization_id;
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
         if db::dhcp_option_set::find_by_ids(
             &mut txn,
             std::slice::from_ref(id),
             Some(tenant_org),
-            false,
+            true,
         )
         .await?
         .pop()

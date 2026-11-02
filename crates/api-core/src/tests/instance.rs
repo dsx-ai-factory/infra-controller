@@ -6616,6 +6616,7 @@ async fn test_batch_allocate_instances_rolls_back_earlier_service_vpc_allocation
                 network: Some(single_interface_network_config(host_segment)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
                     service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                         service_id: service.service_id.clone(),
@@ -15880,6 +15881,7 @@ async fn test_update_instance_with_extension_services(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     nvlink: None,
                     spxconfig: None,
                     dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16141,6 +16143,7 @@ async fn test_update_instance_with_extension_services(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     nvlink: None,
                     spxconfig: None,
                     dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16270,6 +16273,7 @@ async fn test_update_instance_with_extension_services(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     nvlink: None,
                     spxconfig: None,
                     dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16344,6 +16348,7 @@ async fn test_update_instance_with_extension_services(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     nvlink: None,
                     spxconfig: None,
                     dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {

@@ -2291,7 +2291,7 @@ pub(crate) async fn batch_allocate_instances(
         }
     }
 
-    let dhcp_option_set_validations: HashSet<_> = requests
+    let mut dhcp_option_set_validations: Vec<_> = requests
         .iter()
         .filter_map(|r| {
             r.config
@@ -2300,13 +2300,17 @@ pub(crate) async fn batch_allocate_instances(
                 .map(|id| (id, &r.config.tenant.tenant_organization_id))
         })
         .collect();
+    // Lock the sets in ID order so concurrent batches cannot deadlock.
+    dhcp_option_set_validations.sort_by_key(|(id, _)| **id);
+    dhcp_option_set_validations.dedup();
 
     for (id, tenant_org_id) in &dhcp_option_set_validations {
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
         if db::dhcp_option_set::find_by_ids(
             &mut txn,
             std::slice::from_ref(id),
             Some(tenant_org_id),
-            false,
+            true,
         )
         .await?
         .pop()
