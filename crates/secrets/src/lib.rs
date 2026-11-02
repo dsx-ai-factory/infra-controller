@@ -363,4 +363,20 @@ mod tests {
         };
         assert_eq!(reader.get_credentials(&other).await.expect("read"), None);
     }
+
+    #[tokio::test]
+    async fn credential_reader_fails_when_named_vault_cannot_be_built() {
+        // An explicit CA path that does not exist fails regardless of ambient
+        // VAULT_* settings: a named Vault that cannot start fails startup
+        // instead of being dropped from the chain.
+        let config = CredentialConfig {
+            vault: VaultConfig {
+                address: Some("https://vault.example:8200".to_string()),
+                vault_cacert: Some("/nonexistent/vault-ca.crt".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(create_credential_reader_with(&config, None).await.is_err());
+    }
 }
