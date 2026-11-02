@@ -31,6 +31,7 @@ schema = ["dep:schemars"]
 chrono = { features = ["serde"], workspace = true }
 schemars = { optional = true, workspace = true }
 serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # Workspace builds turn this on through api-web, so the tests do too.

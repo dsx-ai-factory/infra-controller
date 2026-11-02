@@ -37,19 +37,6 @@ mod rest;
 mod snapshot;
 mod state;
 mod state_metrics;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the metrics store history moves to the scale test runner"
-    )
-)]
-mod store;
-#[expect(
-    dead_code,
-    reason = "the metrics store history moves to the scale test runner"
-)]
-mod summary;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -163,7 +150,11 @@ async fn run() -> eyre::Result<()> {
         let api_addr = cfg.api_listen_addr()?;
         let listener = bind(api_addr).await.wrap_err("bind the /v1 API")?;
         tracing::info!(api_listen = %listener.local_addr()?, "serving /v1");
-        let router = api::router(api::ApiState::new(Arc::clone(&store), &cfg.state));
+        let router = api::router(api::ApiState::new(
+            Arc::clone(&store),
+            &cfg.state,
+            process_start,
+        ));
         Some(serve_api(
             listener,
             router,
@@ -666,6 +657,7 @@ mod tests {
         let router = api::router(api::ApiState::new(
             Arc::new(state::store::SnapshotStore::new(&cfg.state.paging)),
             &cfg.state,
+            SystemTime::now(),
         ))
         .route(
             "/test/pending",
@@ -734,6 +726,7 @@ mod tests {
         let router = api::router(api::ApiState::new(
             Arc::new(state::store::SnapshotStore::new(&cfg.state.paging)),
             &cfg.state,
+            SystemTime::now(),
         ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -790,6 +783,7 @@ mod tests {
         let router = api::router(api::ApiState::new(
             Arc::new(state::store::SnapshotStore::new(&cfg.state.paging)),
             &cfg.state,
+            SystemTime::now(),
         ))
         .route(
             "/test/large",

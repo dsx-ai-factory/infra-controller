@@ -165,6 +165,18 @@ state:
       enabled: false
       interval: 120s
       timeout: 600s
+  ## /v1/config names the stored series for clients that read them back:
+  ## a selector and the scrape cadence. With serviceMonitor.enabled the
+  ## cadence is serviceMonitor.interval, and the selector defaults to the
+  ## scrape job (the metrics Service) and the release namespace. Override it
+  ## only when the store relabels them, for example {job: site-probe,
+  ## cluster: c1}. For another scraper, set scrapeInterval (a quoted
+  ## Prometheus duration) and the selector its series carry. Labels starting
+  ## with __ and the probe's own series labels (type, family, ...) are
+  ## refused.
+  metrics:
+    selector: {}
+    scrapeInterval: ""
   ## A replaced snapshot that a /v1/units cursor points into stays readable
   ## this long for the paging client. Others are dropped when replaced.
   paging:

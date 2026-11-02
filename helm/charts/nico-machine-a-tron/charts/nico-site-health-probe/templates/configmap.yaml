@@ -96,6 +96,14 @@ data:
           interval: {{ $reader.interval | quote }}
           timeout: {{ $reader.timeout | quote }}
         {{- end }}
+      {{- /* What /v1/config tells clients about the store that scrapes the probe. */}}
+      {{- $cadence := include "nico-site-health-probe.metricsCadence" $ | fromYaml }}
+      {{- if $cadence.value }}
+      metrics:
+        selector:
+          {{- include "nico-site-health-probe.metricsSelector" $ | trim | nindent 10 }}
+        scrape_interval_seconds: {{ include "nico-site-health-probe.promSeconds" $cadence.value }}
+      {{- end }}
       paging:
         keep_seconds: {{ .paging.keepSeconds }}
         max_kept_snapshots: {{ .paging.maxKeptSnapshots }}

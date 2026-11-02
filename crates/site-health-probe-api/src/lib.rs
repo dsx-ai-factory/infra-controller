@@ -18,8 +18,9 @@
 //! Wire types for the site health probe `/v1` HTTP API.
 //!
 //! This crate is the one source of the JSON contract between the probe and
-//! its clients. It holds types only. The `schema` feature also derives
-//! `schemars::JsonSchema` on every type.
+//! its clients. The `schema` feature also derives `schemars::JsonSchema` on
+//! every type. [`metrics`] holds the metric contract: the names, labels and
+//! filter rules of the series the probe publishes.
 //!
 //! Conventions:
 //! - Field names and query parameters are camelCase. Enum values are
@@ -30,8 +31,12 @@
 //!   time or flag means unknown, never 0 or false.
 //! - Times are RFC 3339 UTC. `snapshotId` and `cursor` are opaque strings.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+pub mod metrics;
 
 /// Quantiles `/v1/summary` reports when the request has no `q`.
 pub const DEFAULT_Q: &str = "0.5,0.9,0.95,0.99,0.995,1";
@@ -446,6 +451,30 @@ pub struct ConfigResponse {
     pub rest: Option<ConfigRest>,
     #[serde(default)]
     pub rest_site: Option<RestSiteBinding>,
+    /// Where the probe's series are in the metrics store. Absent when the
+    /// deployment declares no store that scrapes the probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<MetricsInfo>,
+}
+
+/// How a client finds this probe's series in the metrics store that scrapes
+/// it. The probe itself never reads the store.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsInfo {
+    /// The [`metrics::CONTRACT_VERSION`] the probe publishes with.
+    pub contract_version: u32,
+    /// Label equality matchers that select this probe's series. Never empty.
+    pub selector: BTreeMap<String, String>,
+    /// How often the store scrapes the probe, as deployed.
+    pub scrape_interval_seconds: f64,
+    /// The reader interval of each family an enabled reader sweeps. A family
+    /// missing here is not read.
+    pub reader_intervals_seconds: BTreeMap<Family, f64>,
+    /// The value of this process's `process_start_timestamp_seconds`, so a
+    /// client can check the selected series come from this process.
+    pub process_start_seconds: f64,
 }
 
 /// The REST site checked against the NICo device census, with the times of
@@ -1380,6 +1409,7 @@ mod tests {
                 read: read_info(),
                 result: SiteMatch::Match,
             }),
+            metrics: None,
         };
         let mut rest_site = read_info_json();
         rest_site["result"] = json!("match");
@@ -1408,6 +1438,78 @@ mod tests {
             FirstConfigResponse {
                 nico_api: None,
                 rest: None
+            }
+        );
+    }
+
+    fn metrics_info() -> MetricsInfo {
+        MetricsInfo {
+            contract_version: metrics::CONTRACT_VERSION,
+            selector: BTreeMap::from([
+                ("job".to_string(), "probe-metrics".to_string()),
+                ("namespace".to_string(), "nico-system".to_string()),
+            ]),
+            scrape_interval_seconds: 5.0,
+            reader_intervals_seconds: BTreeMap::from([
+                (Family::Host, 120.0),
+                (Family::RestTotals, 60.0),
+            ]),
+            process_start_seconds: 1_761_818_400.25,
+        }
+    }
+
+    #[test]
+    fn config_response_metrics_json_golden() {
+        let reply = ConfigResponse {
+            metrics: Some(metrics_info()),
+            ..ConfigResponse::default()
+        };
+        assert_json_golden(
+            &reply,
+            json!({
+                "nicoApi": null,
+                "rest": null,
+                "restSite": null,
+                "metrics": {
+                    "contractVersion": 1,
+                    "selector": {"job": "probe-metrics", "namespace": "nico-system"},
+                    "scrapeIntervalSeconds": 5.0,
+                    "readerIntervalsSeconds": {"host": 120.0, "rest_totals": 60.0},
+                    "processStartSeconds": 1_761_818_400.25,
+                },
+            }),
+        );
+
+        // Without a declared store the block is left out, so the reply is
+        // the one older probes send.
+        let without = serde_json::to_value(ConfigResponse::default()).unwrap();
+        assert_eq!(
+            without,
+            json!({"nicoApi": null, "rest": null, "restSite": null})
+        );
+
+        // A reply from a probe without the block reads as no metrics.
+        let old: ConfigResponse =
+            serde_json::from_value(json!({"nicoApi": null, "rest": null, "restSite": null}))
+                .unwrap();
+        assert_eq!(old.metrics, None);
+
+        // Clients built before the block ignore it.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldConfigResponse {
+            nico_api: Option<ConfigNicoApi>,
+            rest: Option<ConfigRest>,
+            rest_site: Option<RestSiteBinding>,
+        }
+        let old: OldConfigResponse =
+            serde_json::from_value(serde_json::to_value(&reply).unwrap()).unwrap();
+        assert_eq!(
+            old,
+            OldConfigResponse {
+                nico_api: None,
+                rest: None,
+                rest_site: None
             }
         );
     }
@@ -1621,6 +1723,17 @@ mod tests {
 
         let config = property_names(&schema::<ConfigResponse>());
         assert!(config.contains("restSite"), "ConfigResponse lacks restSite");
+        assert!(config.contains("metrics"), "ConfigResponse lacks metrics");
+        let metrics = property_names(&schema::<MetricsInfo>());
+        for name in [
+            "contractVersion",
+            "selector",
+            "scrapeIntervalSeconds",
+            "readerIntervalsSeconds",
+            "processStartSeconds",
+        ] {
+            assert!(metrics.contains(name), "MetricsInfo lacks {name}");
+        }
         let site = property_names(&schema::<RestSiteBinding>());
         for name in ["result", "readAt", "lastAttemptError"] {
             assert!(site.contains(name), "RestSiteBinding lacks {name}");
