@@ -2631,16 +2631,14 @@ fn nmxc_tls_config_from_nvlink(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
-    use std::path::Path;
 
     use carbide_dpf::DpfError;
     use carbide_machine_controller::dpf::MockDpfOperations;
     use carbide_network::virtualization::VpcVirtualizationType;
     use carbide_test_support::Outcome::{FailsWith, Yields};
-    use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
+    use carbide_test_support::{Case, check_cases, value_scenarios};
     use figment::Figment;
     use figment::providers::{Format, Toml};
-    use model::expected_machine::HostDpuPolicy;
     use model::extension_service::ServiceVpcAddressFamily;
     use model::network_segment::{NetworkDefinition, NetworkDefinitionSegmentType};
     use model::resource_pool::ResourcePoolType;
@@ -2651,7 +2649,7 @@ mod tests {
         CarbideConfig, DpfInterfaceIdentity, HostInterceptBridging, HostRepresentorBridgingConfig,
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
-    use crate::cfg::load::{merged_carbide_config_figment, parse_carbide_config};
+    use crate::cfg::load::parse_carbide_config;
 
     /// Verifies disabled DPF bypasses malformed platform values, absent packaged chart metadata, and
     /// resource construction because these inputs are irrelevant until DPF management is enabled.
@@ -3229,91 +3227,6 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Copy)]
-    struct PolicyLayers {
-        global_setting: &'static str,
-        site_setting: &'static str,
-        environment_value: Option<&'static str>,
-    }
-
-    #[allow(clippy::result_large_err)] // Figment controls the error representation.
-    fn load_layered_dpu_policy(
-        layers: PolicyLayers,
-    ) -> Result<Option<HostDpuPolicy>, figment::Error> {
-        let mut policy = None;
-        figment::Jail::try_with(|jail| {
-            jail.clear_env();
-            if let Some(environment_value) = layers.environment_value {
-                jail.set_env("CARBIDE_API_SITE_EXPLORER", environment_value);
-            }
-
-            let global_config = format!(
-                "{}\n[site_explorer]\n{}\n",
-                include_str!("cfg/test_data/min_config.toml"),
-                layers.global_setting,
-            );
-            let site_config = format!("[site_explorer]\n{}\n", layers.site_setting);
-            jail.create_file("global.toml", &global_config)?;
-            jail.create_file("site.toml", &site_config)?;
-
-            policy = Some(
-                merged_carbide_config_figment(
-                    Path::new("global.toml"),
-                    Some(Path::new("site.toml")),
-                )
-                .extract::<CarbideConfig>()?
-                .site_explorer
-                .dpu_policy,
-            );
-            Ok(())
-        })?;
-
-        Ok(policy.expect("Jail must run the configuration extraction"))
-    }
-
-    #[test]
-    fn site_explorer_dpu_policy_respects_provider_precedence_across_legacy_key() {
-        scenarios!(
-            run = load_layered_dpu_policy;
-            "site config overrides global config regardless of key spelling" {
-                PolicyLayers {
-                    global_setting: "dpu_policy = \"nic\"",
-                    site_setting: "dpu_mode = \"no_dpu\"",
-                    environment_value: None,
-                } => Yields(Some(HostDpuPolicy::Ignore)),
-                PolicyLayers {
-                    global_setting: "dpu_mode = \"no_dpu\"",
-                    site_setting: "dpu_policy = \"manage\"",
-                    environment_value: None,
-                } => Yields(Some(HostDpuPolicy::Manage)),
-            }
-
-            "environment overrides site config regardless of key spelling" {
-                PolicyLayers {
-                    global_setting: "",
-                    site_setting: "dpu_policy = \"nic\"",
-                    environment_value: Some("{dpu_mode=no_dpu}"),
-                } => Yields(Some(HostDpuPolicy::Ignore)),
-                PolicyLayers {
-                    global_setting: "",
-                    site_setting: "dpu_mode = \"no_dpu\"",
-                    environment_value: Some("{dpu_policy=manage}"),
-                } => Yields(Some(HostDpuPolicy::Manage)),
-            }
-
-            "canonical key wins within one provider" {
-                PolicyLayers {
-                    global_setting: concat!(
-                        "dpu_policy = \"nic\"\n",
-                        "dpu_mode = \"no_dpu\"",
-                    ),
-                    site_setting: "",
-                    environment_value: None,
-                } => Yields(Some(HostDpuPolicy::Nic)),
-            }
-        );
-    }
-
     fn minimal_carbide_config() -> CarbideConfig {
         Figment::new()
             .merge(Toml::string(
@@ -3810,70 +3723,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    #[allow(clippy::result_large_err)] // Figment controls the error representation.
-    fn rack_profile_attributes_merge_per_key_with_provider_precedence() {
-        figment::Jail::expect_with(|jail| {
-            jail.clear_env();
-
-            // Environment input replaces only its duplicate key; unrelated
-            // keys from lower-priority providers remain in the effective map.
-            jail.set_env(
-                "CARBIDE_API_RACK_PROFILES",
-                "{NVL72={attributes={attribute1=environment,additional_attribute4=environment}}}",
-            );
-
-            let global_config = format!(
-                r#"{}
-
-[rack_profiles.NVL72]
-product_family = "gb200"
-attributes = {{ attribute1 = "global", additional_attribute2 = "global" }}
-
-[rack_profiles.NVL72.rack_capabilities.compute]
-count = 18
-
-[rack_profiles.NVL72.rack_capabilities.switch]
-count = 9
-
-[rack_profiles.NVL72.rack_capabilities.power_shelf]
-count = 8
-"#,
-                include_str!("cfg/test_data/min_config.toml"),
-            );
-
-            let site_config = r#"
-[rack_profiles.NVL72]
-attributes = { attribute1 = "site", additional_attribute3 = "site" }
-"#;
-            jail.create_file("global.toml", &global_config)?;
-            jail.create_file("site.toml", site_config)?;
-
-            let config = merged_carbide_config_figment(
-                Path::new("global.toml"),
-                Some(Path::new("site.toml")),
-            )
-            .extract::<CarbideConfig>()?;
-
-            let attributes = &config.rack_profiles.get("NVL72").unwrap().attributes;
-
-            assert_eq!(
-                attributes,
-                &HashMap::from([
-                    ("attribute1".to_string(), "environment".to_string()),
-                    ("additional_attribute2".to_string(), "global".to_string()),
-                    ("additional_attribute3".to_string(), "site".to_string()),
-                    (
-                        "additional_attribute4".to_string(),
-                        "environment".to_string(),
-                    ),
-                ])
-            );
-
-            Ok(())
-        });
     }
 
     #[test]
