@@ -21,8 +21,9 @@ use carbide_instrument::emit;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::expected_machine::{
-    BmcIpAllocationType, ExpectedInterface, ExpectedMachine, ExpectedMachineData,
-    ExpectedMachineRequest, HostDpuPolicy, LegacyHostBmcOverrides,
+    BmcIpAllocationType, ExpectedInterface, ExpectedInterfaceIpAllocation, ExpectedInterfaceRole,
+    ExpectedMachine, ExpectedMachineData, ExpectedMachineRequest, HostDpuPolicy,
+    LegacyHostBmcOverrides,
 };
 use regex::Regex;
 use uuid::Uuid;
@@ -180,7 +181,83 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
         .validate(machine.data.bmc_ip_address.is_some())
         .map_err(|msg| CarbideError::InvalidArgument(msg.to_string()))?;
     validate_fixed_addresses(&machine.data)?;
+    validate_control_plane_designation(machine)?;
 
+    Ok(())
+}
+
+/// Rejects a control-plane designation that depends on DHCP to come back.
+///
+/// A control-plane machine must complete a full power-on cycle while the
+/// control plane is down, so NICo has to know each management address up
+/// front. `Fixed` and `Retained` both resolve to an address NICo can push into
+/// the device; `Dynamic` leaves it to a DHCP server that is unavailable in
+/// exactly the outage this designation exists for. Host data interfaces are
+/// unconstrained, because they are not on the path that brings the machine and
+/// its DPU back without NICo.
+///
+/// The Host BMC is judged through `effective_host_bmc`, because
+/// `normalize_host_bmc` deliberately leaves a legacy-only declaration in the
+/// compatibility columns instead of `interfaces`. Walking `interfaces` alone
+/// accepts a Dynamic Host BMC that every runtime reader then honours.
+/// Normalization runs before this check, so both representations agree here.
+///
+/// The DPU roles have no such fallback, and nothing synthesizes them. A DPU MAC
+/// that first appears through DHCP creates its interface with a dynamic lease,
+/// which this check would never see. A designated machine must therefore
+/// declare a `DpuBmc` and a `DpuOs` interface, unless its `dpu_policy` attaches
+/// no DPU.
+fn validate_control_plane_designation(machine: &ExpectedMachine) -> Result<(), CarbideError> {
+    if machine.data.host_lifecycle_profile.control_plane != Some(true) {
+        return Ok(());
+    }
+
+    let host_bmc = machine.effective_host_bmc();
+    if host_bmc.resolved_ip_allocation() == ExpectedInterfaceIpAllocation::Dynamic {
+        return Err(CarbideError::InvalidArgument(format!(
+            "host bmc {}: a control-plane machine requires a fixed or retained \
+             ip_allocation on every {} interface, not dynamic",
+            host_bmc.identity(),
+            host_bmc.role,
+        )));
+    }
+
+    // An undeclared DPU interface never reaches the allocation check below, and
+    // takes a dynamic lease when its MAC first appears through DHCP. Require the
+    // declaration so the designation covers every management address. A machine
+    // that attaches no DPU has nothing to declare.
+    if machine.data.dpu_policy != HostDpuPolicy::Ignore {
+        for required in [ExpectedInterfaceRole::DpuBmc, ExpectedInterfaceRole::DpuOs] {
+            if !machine
+                .data
+                .interfaces
+                .iter()
+                .any(|interface| interface.role == required)
+            {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "a control-plane machine must declare a {required} interface with a fixed or \
+                     retained ip_allocation, because an undeclared one uses dynamic"
+                )));
+            }
+        }
+    }
+
+    for interface in &machine.data.interfaces {
+        if !matches!(
+            interface.role,
+            ExpectedInterfaceRole::DpuBmc | ExpectedInterfaceRole::DpuOs
+        ) {
+            continue;
+        }
+        if interface.resolved_ip_allocation() == ExpectedInterfaceIpAllocation::Dynamic {
+            return Err(CarbideError::InvalidArgument(format!(
+                "interfaces entry {}: a control-plane machine requires a fixed or retained \
+                 ip_allocation on every {} interface, not dynamic",
+                interface.identity(),
+                interface.role,
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -386,6 +463,14 @@ impl TryFrom<rpc::PatchExpectedMachineRequest> for ExpectedMachinePatch {
                     .as_ref()
                     .and_then(|profile| profile.disable_lockdown),
                 "host_lifecycle_profile.disable_lockdown",
+            ),
+            (
+                UpdateField::ControlPlane,
+                patch
+                    .host_lifecycle_profile
+                    .as_ref()
+                    .and_then(|profile| profile.control_plane),
+                "host_lifecycle_profile.control_plane",
             ),
             (
                 UpdateField::DefaultPauseIngestionAndPoweron,
@@ -604,7 +689,13 @@ async fn apply_machine_patch(
     if fields.contains(UpdateField::DisableLockdown) {
         machine.data.host_lifecycle_profile.disable_lockdown = patch
             .host_lifecycle_profile
+            .as_ref()
             .and_then(|profile| profile.disable_lockdown);
+    }
+    if fields.contains(UpdateField::ControlPlane) {
+        machine.data.host_lifecycle_profile.control_plane = patch
+            .host_lifecycle_profile
+            .and_then(|profile| profile.control_plane);
     }
     fields.update_metadata(patch.metadata, &mut machine.data.metadata)?;
     // Match the replacement RPC's validation of the complete metadata.
@@ -1530,6 +1621,251 @@ mod tests {
                     ..Default::default()
                 });
                 (bmc_ip_address, fixed_ip)
+            },
+        );
+    }
+
+    /// The control-plane designation requires an address NICo knows up front on
+    /// every interface that must answer while the control plane is down. The
+    /// rows cover the boundary: the designation off, each constrained role
+    /// resolving to `Dynamic` (explicitly and by default), each constrained
+    /// role resolving away from `Dynamic`, and an unconstrained host NIC.
+    #[test]
+    fn control_plane_designation_requires_non_dynamic_management_addresses() {
+        let mac: MacAddress = "7A:7B:7C:7D:7E:85".parse().unwrap();
+        check_cases(
+            [
+                Case {
+                    scenario: "undesignated machine keeps a dynamic DPU BMC",
+                    input: (None, ExpectedInterfaceRole::DpuBmc, None, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "designation removed keeps a dynamic DPU BMC",
+                    input: (Some(false), ExpectedInterfaceRole::DpuBmc, None, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "host BMC defaults to retained",
+                    input: (Some(true), ExpectedInterfaceRole::HostBmc, None, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "host BMC explicitly dynamic",
+                    input: (
+                        Some(true),
+                        ExpectedInterfaceRole::HostBmc,
+                        Some(ExpectedInterfaceIpAllocation::Dynamic),
+                        false,
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "DPU BMC defaults to dynamic",
+                    input: (Some(true), ExpectedInterfaceRole::DpuBmc, None, false),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "DPU OS defaults to dynamic",
+                    input: (Some(true), ExpectedInterfaceRole::DpuOs, None, false),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "DPU OS with a fixed address",
+                    input: (Some(true), ExpectedInterfaceRole::DpuOs, None, true),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "DPU BMC explicitly retained",
+                    input: (
+                        Some(true),
+                        ExpectedInterfaceRole::DpuBmc,
+                        Some(ExpectedInterfaceIpAllocation::Retained),
+                        false,
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "host data NIC stays unconstrained",
+                    input: (Some(true), ExpectedInterfaceRole::Host, None, false),
+                    expect: Yields(()),
+                },
+            ],
+            |(control_plane, role, ip_allocation, fixed)| {
+                // `normalize_host_bmc` syncs the compatibility columns before
+                // this validator runs, so mirror a Host BMC declaration onto
+                // them here rather than leaving them at their default.
+                let bmc_ip_allocation = if role.is_host_bmc() {
+                    ip_allocation.map_or(BmcIpAllocationType::Auto, Into::into)
+                } else {
+                    BmcIpAllocationType::Auto
+                };
+                validate_control_plane_designation(&ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        bmc_ip_allocation,
+                        // Isolate the allocation rule from the DPU declaration
+                        // requirement, which a separate test covers.
+                        dpu_policy: HostDpuPolicy::Ignore,
+                        host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            control_plane,
+                        },
+                        interfaces: vec![ExpectedInterface {
+                            mac_address: Some(mac),
+                            role,
+                            ip_allocation,
+                            fixed_ip: fixed.then(|| "192.0.2.85".parse().unwrap()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                })
+                .map_err(drop)
+            },
+        );
+    }
+
+    /// A DPU interface that is never declared takes a dynamic lease when its MAC
+    /// first appears through DHCP, which the allocation rule above would never
+    /// see. A designated machine must declare both DPU roles, unless its
+    /// `dpu_policy` attaches no DPU at all.
+    #[test]
+    fn control_plane_designation_requires_declared_dpu_interfaces() {
+        let mac: MacAddress = "7A:7B:7C:7D:7E:87".parse().unwrap();
+        let declare = |roles: &[ExpectedInterfaceRole]| {
+            roles
+                .iter()
+                .map(|role| ExpectedInterface {
+                    mac_address: Some(mac),
+                    role: *role,
+                    ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        check_cases(
+            [
+                Case {
+                    scenario: "managed DPU with both roles declared",
+                    input: (
+                        Some(true),
+                        HostDpuPolicy::Manage,
+                        vec![ExpectedInterfaceRole::DpuBmc, ExpectedInterfaceRole::DpuOs],
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "managed DPU declaring neither role",
+                    input: (Some(true), HostDpuPolicy::Manage, Vec::new()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "managed DPU missing the DPU OS declaration",
+                    input: (
+                        Some(true),
+                        HostDpuPolicy::Manage,
+                        vec![ExpectedInterfaceRole::DpuBmc],
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "managed DPU missing the DPU BMC declaration",
+                    input: (
+                        Some(true),
+                        HostDpuPolicy::Manage,
+                        vec![ExpectedInterfaceRole::DpuOs],
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "NIC-mode DPU still attaches hardware",
+                    input: (Some(true), HostDpuPolicy::Nic, Vec::new()),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "no DPU attached has nothing to declare",
+                    input: (Some(true), HostDpuPolicy::Ignore, Vec::new()),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "undesignated machine is unconstrained",
+                    input: (None, HostDpuPolicy::Manage, Vec::new()),
+                    expect: Yields(()),
+                },
+            ],
+            |(control_plane, dpu_policy, roles)| {
+                validate_control_plane_designation(&ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        dpu_policy,
+                        host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            control_plane,
+                        },
+                        interfaces: declare(&roles),
+                        ..Default::default()
+                    },
+                })
+                .map_err(drop)
+            },
+        );
+    }
+
+    /// A Host BMC declared only through the legacy `bmc_ip_allocation` and
+    /// `bmc_ip_address` columns never reaches `interfaces`, so the designation
+    /// check has to resolve it from the compatibility columns. Without this,
+    /// an explicit legacy `Dynamic` is stored on a control-plane machine.
+    #[test]
+    fn control_plane_designation_checks_legacy_host_bmc_columns() {
+        let mac: MacAddress = "7A:7B:7C:7D:7E:86".parse().unwrap();
+        check_cases(
+            [
+                Case {
+                    scenario: "legacy dynamic host BMC with no interface entry",
+                    input: (Some(true), BmcIpAllocationType::Dynamic, false),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "omitted legacy allocation resolves to retained",
+                    input: (Some(true), BmcIpAllocationType::Auto, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "legacy retained host BMC",
+                    input: (Some(true), BmcIpAllocationType::Retained, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "legacy fixed host BMC with an address",
+                    input: (Some(true), BmcIpAllocationType::Fixed, true),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "undesignated machine keeps a legacy dynamic host BMC",
+                    input: (None, BmcIpAllocationType::Dynamic, false),
+                    expect: Yields(()),
+                },
+            ],
+            |(control_plane, bmc_ip_allocation, addressed)| {
+                validate_control_plane_designation(&ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        bmc_ip_allocation,
+                        bmc_ip_address: addressed.then(|| "192.0.2.86".parse().unwrap()),
+                        dpu_policy: HostDpuPolicy::Ignore,
+                        host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            control_plane,
+                        },
+                        interfaces: Vec::new(),
+                        ..Default::default()
+                    },
+                })
+                .map_err(drop)
             },
         );
     }

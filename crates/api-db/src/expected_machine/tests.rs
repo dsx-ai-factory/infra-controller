@@ -83,6 +83,7 @@ async fn exercise_expected_machine_queries(
             bmc_ip_allocation: BmcIpAllocationType::Fixed,
             host_lifecycle_profile: HostLifecycleProfile {
                 disable_lockdown: Some(true),
+                control_plane: Some(true),
             },
         },
     };

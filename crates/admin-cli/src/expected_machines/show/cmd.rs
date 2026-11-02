@@ -133,6 +133,7 @@ async fn convert_and_print_into_nice_table(
         "Pause On Ingestion",
         "DPF Enabled",
         "Disable Lockdown",
+        "Control Plane",
         "DPU Policy",
     ]);
 
@@ -186,7 +187,14 @@ async fn convert_and_print_into_nice_table(
                 .to_string(),
             expected_machine
                 .host_lifecycle_profile
+                .as_ref()
                 .and_then(|hlp| hlp.disable_lockdown)
+                .unwrap_or_default()
+                .to_string(),
+            expected_machine
+                .host_lifecycle_profile
+                .as_ref()
+                .and_then(|hlp| hlp.control_plane)
                 .unwrap_or_default()
                 .to_string(),
             dpu_policy_display,
@@ -212,10 +220,13 @@ fn dpu_policy_display(dpu_mode: Option<i32>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use carbide_test_support::value_scenarios;
     use rpc::forge::DpuMode;
 
-    use super::dpu_policy_display;
+    use super::{convert_and_print_into_nice_table, dpu_policy_display};
+    use crate::async_write::CapturedOutput;
 
     #[test]
     fn dpu_policy_display_uses_canonical_policy_vocabulary() {
@@ -245,5 +256,78 @@ mod tests {
                 Some(i32::MAX) => "manage".to_string(),
             }
         );
+    }
+
+    /// The rendered table must carry the lifecycle-profile columns and their
+    /// cell values. A machine with a profile shows each stored flag; a machine
+    /// without one falls back to `false` rather than rendering an empty cell.
+    #[tokio::test]
+    async fn table_renders_host_lifecycle_profile_columns() {
+        let machines = ::rpc::forge::ExpectedMachineList {
+            expected_machines: vec![
+                ::rpc::forge::ExpectedMachine {
+                    chassis_serial_number: "SN-SET".into(),
+                    bmc_mac_address: "00:11:22:33:44:55".into(),
+                    host_lifecycle_profile: Some(::rpc::forge::HostLifecycleProfile {
+                        disable_lockdown: Some(true),
+                        control_plane: Some(true),
+                    }),
+                    ..Default::default()
+                },
+                ::rpc::forge::ExpectedMachine {
+                    chassis_serial_number: "SN-UNSET".into(),
+                    bmc_mac_address: "00:11:22:33:44:66".into(),
+                    host_lifecycle_profile: None,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let mut captured = CapturedOutput::new();
+        convert_and_print_into_nice_table(
+            captured.writer(),
+            &machines,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let rendered = String::from_utf8(captured.into_bytes().await).unwrap();
+
+        // Split a rendered row into trimmed cells. prettytable wraps every row
+        // in `|`, so the first and last split parts are empty padding.
+        let cells = |needle: &str| -> Vec<String> {
+            let line = rendered
+                .lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no rendered row containing {needle}"));
+            let parts: Vec<&str> = line.split('|').collect();
+            parts[1..parts.len() - 1]
+                .iter()
+                .map(|cell| cell.trim().to_string())
+                .collect()
+        };
+
+        // Resolve the columns by header, so an inserted column cannot silently
+        // shift the assertions onto a neighbouring boolean cell.
+        let headers = cells("Serial Number");
+        let lockdown = headers
+            .iter()
+            .position(|header| header == "Disable Lockdown")
+            .expect("Disable Lockdown column");
+        let control_plane = headers
+            .iter()
+            .position(|header| header == "Control Plane")
+            .expect("Control Plane column");
+
+        let set = cells("SN-SET");
+        assert_eq!(set[lockdown], "true");
+        assert_eq!(set[control_plane], "true");
+
+        // No stored profile renders the default rather than an empty cell.
+        let unset = cells("SN-UNSET");
+        assert_eq!(unset[lockdown], "false");
+        assert_eq!(unset[control_plane], "false");
     }
 }

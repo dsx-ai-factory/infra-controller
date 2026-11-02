@@ -1047,6 +1047,19 @@ pub struct HostLifecycleProfile {
     /// If unset or false, preserve the default behavior of locking down the server after configuring the BIOS.
     #[serde(default)]
     pub disable_lockdown: Option<bool>,
+    /// If true, designate this machine as a control-plane machine. After
+    /// completion of
+    /// <https://github.com/dsx-ai-factory/infra-controller/issues/7568>, NICo
+    /// keeps its management addresses usable while the control plane is down,
+    /// so the machine and its DPU can complete a full power-on cycle without
+    /// NICo. The machine must declare a `DpuBmc` and a `DpuOs` interface, and
+    /// the host BMC and both DPU interfaces must resolve to a `Fixed` or
+    /// `Retained` allocation; see
+    /// [`ExpectedInterface::resolved_ip_allocation`]. A machine whose
+    /// `dpu_policy` attaches no DPU declares neither. If unset or false, the
+    /// machine has no control-plane designation.
+    #[serde(default)]
+    pub control_plane: Option<bool>,
 }
 
 impl HostLifecycleProfile {
@@ -1054,7 +1067,7 @@ impl HostLifecycleProfile {
     /// specify any profile value. Used by the UPDATE path to send SQL `NULL`
     /// so that `COALESCE` preserves the existing DB row.
     pub fn is_empty(&self) -> bool {
-        self.disable_lockdown.is_none()
+        self.disable_lockdown.is_none() && self.control_plane.is_none()
     }
 }
 
@@ -1771,11 +1784,27 @@ mod tests {
 
         let hlp = HostLifecycleProfile {
             disable_lockdown: Some(true),
+            control_plane: None,
         };
         assert!(!hlp.is_empty());
 
         let hlp = HostLifecycleProfile {
             disable_lockdown: Some(false),
+            control_plane: None,
+        };
+        assert!(!hlp.is_empty());
+
+        // Either field alone must defeat `is_empty`, otherwise the UPDATE path
+        // sends SQL NULL and `COALESCE` silently drops the requested write.
+        let hlp = HostLifecycleProfile {
+            disable_lockdown: None,
+            control_plane: Some(true),
+        };
+        assert!(!hlp.is_empty());
+
+        let hlp = HostLifecycleProfile {
+            disable_lockdown: None,
+            control_plane: Some(false),
         };
         assert!(!hlp.is_empty());
     }

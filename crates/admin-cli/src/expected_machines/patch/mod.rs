@@ -50,10 +50,12 @@ impl Run for Args {
                 self.bmc_retain_credentials,
                 self.dpu_policy,
                 self.bmc_ip_allocation,
-                self.disable_lockdown
-                    .map(|dl| ::rpc::forge::HostLifecycleProfile {
-                        disable_lockdown: Some(dl),
-                    }),
+                (self.disable_lockdown.is_some() || self.control_plane.is_some()).then_some(
+                    ::rpc::forge::HostLifecycleProfile {
+                        disable_lockdown: self.disable_lockdown,
+                        control_plane: self.control_plane,
+                    },
+                ),
                 self.interfaces,
             )
             .await?;
