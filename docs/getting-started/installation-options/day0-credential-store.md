@@ -2,7 +2,7 @@
 
 This guide is the Day 0 reference for choosing where NICo keeps the credentials it manages: BMC and UEFI passwords, switch accounts, factory defaults, and similar material. Vault is the default. A new site can instead keep them in Postgres, encrypted per credential, from the first boot, which removes Vault from the credential path. This page covers what a new site configures once; [Secrets Storage](../../configuration/secrets-storage.md) is the full reference for the `[secrets]` section, the migration of an existing site, and key rotation.
 
-Vault remains installed either way. It issues certificates through the `vault-nico-issuer` ClusterIssuer, and the Vault connection settings in the `nico-api` chart stay required.
+Vault remains installed either way. It issues certificates through the `vault-nico-issuer` ClusterIssuer and, with the chart's default certificate settings, the machine and UFM certificates that `nico-api` requests, so the Vault connection settings in the `nico-api` chart stay required. For the settings that make them required, refer to [How It Works](../../configuration/secrets-storage.md#how-it-works) in Secrets Storage.
 
 ---
 

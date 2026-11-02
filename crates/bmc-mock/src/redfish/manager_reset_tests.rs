@@ -278,7 +278,7 @@ async fn unsupported_backend_cannot_reset_accounts_or_sessions() {
     let manager_path = state.manager.primary_odata_id().unwrap();
     let manager = body(request(&router, "GET", &manager_path, "", None).await).await;
     assert!(!manager["Actions"]["#Manager.Reset"].is_null());
-    assert!(manager["Actions"]["#Manager.ResetToDefaults"].is_null());
+    assert!(!manager["Actions"]["#Manager.ResetToDefaults"].is_null());
     let response = request(
         &router,
         "POST",
@@ -674,10 +674,6 @@ struct QueuedReset {
     sender: mpsc::UnboundedSender<(DeviceEffect, oneshot::Sender<Result<(), ActionError>>)>,
 }
 impl Callbacks for QueuedReset {
-    fn supports_bmc_factory_reset(&self) -> bool {
-        true
-    }
-
     async fn computer_system_reset(&self, _: ResourceResetType) -> Result<(), ActionError> {
         Ok(())
     }

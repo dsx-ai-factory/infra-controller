@@ -342,12 +342,7 @@ async fn get_chassis<C: Callbacks>(
         })
     };
     let mut document = model.into_json();
-    if config.aux_power_reset
-        && state
-            .callbacks
-            .as_ref()
-            .is_some_and(|callbacks| callbacks.supports_aux_power_cycle())
-    {
+    if config.aux_power_reset {
         document = document.patch(redfish::oem::nvidia::chassis::aux_power_reset_action(
             &chassis_id,
         ));

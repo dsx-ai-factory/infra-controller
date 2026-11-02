@@ -6,7 +6,7 @@ This design specifies the implementation contract for [P01: execution, ownership
 
 The contracts below guide the implementation across the planned PRs. The Existing Boundaries section records the baseline at revision `b4075867e725d272e41710adac394bce0e469e35`; later sections identify the work that implements each contract. Adding allocation records does not move allocations between backends or enable remote pool selection.
 
-The [shared operations and startup prerequisite](https://github.com/dsx-ai-factory/infra-controller/issues/8297) provides typed allocation, ownership lookup, cleanup, registration, and API-owned recovery tasks. VPC callers still require Integrated allocation. [VPC adoption](https://github.com/dsx-ai-factory/infra-controller/issues/7140) follows separately.
+The [shared operations and startup prerequisite](https://github.com/dsx-ai-factory/infra-controller/issues/8297) provides typed allocation, ownership lookup, cleanup, registration, and API-owned recovery tasks. [VPC adoption](https://github.com/dsx-ai-factory/infra-controller/issues/7140) uses them for VPC creation and deletion through the API. VPCs created at startup from configuration still require Integrated allocation until [configured VPC creation](https://github.com/dsx-ai-factory/infra-controller/issues/8432) adopts the shared operations. Routing-profile changes and inactive VNI release also require Integrated allocation, and prefix-overlap admission still reads only Integrated VNIs.
 
 The release boundaries are:
 
@@ -462,7 +462,7 @@ The minimum evidence and later implementation owners are:
 
 Later PRs must inventory retained tests before adding cases. Put each proof at the narrowest layer that exercises its distinct failure boundary. An in-memory protocol probe does not substitute for SQL fencing, restart persistence, caller rollback, or a real gRPC provider.
 
-[P02](https://github.com/dsx-ai-factory/infra-controller/issues/7131) establishes the standalone library. P03, P04, and P06 implement configuration, protocol, and persistence against this contract. [P27](https://github.com/dsx-ai-factory/infra-controller/issues/7180) then routes Integrated VPC allocation and release through P03's resolved per-pool dependencies. The [shared operations prerequisite](https://github.com/dsx-ai-factory/infra-controller/issues/8297) supplies the allocation interface and API startup lifecycle. P11 adopts them in VPC callers for the gated Remote integration. Revisit estimates after the P07 and P11 production-path proofs, before parallel consumer work depends on untested assumptions.
+[P02](https://github.com/dsx-ai-factory/infra-controller/issues/7131) establishes the standalone library. P03, P04, and P06 implement configuration, protocol, and persistence against this contract. [P27](https://github.com/dsx-ai-factory/infra-controller/issues/7180) then routes Integrated VPC allocation and release through P03's resolved per-pool dependencies. The [shared operations prerequisite](https://github.com/dsx-ai-factory/infra-controller/issues/8297) supplies the allocation interface and API startup lifecycle. P11 adopts them in API VPC creation and deletion for the gated Remote integration, and [configured VPC creation](https://github.com/dsx-ai-factory/infra-controller/issues/8432) follows. Revisit estimates after the P07 and P11 production-path proofs, before parallel consumer work depends on untested assumptions.
 
 The v2.5 task identifiers used here are planning identifiers, not GitHub issue numbers:
 

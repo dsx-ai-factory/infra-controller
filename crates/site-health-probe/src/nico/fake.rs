@@ -374,6 +374,7 @@ impl FakeNico {
 
     /// Forgets the calls logged so far, for long tests that only need the
     /// log of the latest sweep.
+    #[expect(dead_code, reason = "the memory soak tests use it")]
     pub(crate) fn clear_calls(&self) {
         self.starts.lock().unwrap().clear();
     }

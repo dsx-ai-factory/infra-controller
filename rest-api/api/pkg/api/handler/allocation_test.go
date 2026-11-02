@@ -2857,30 +2857,37 @@ func TestAllocationHandler_Delete(t *testing.T) {
 	}
 
 	cases := []struct {
-		name          string
-		providerGrant bool
-		siteOverride  *bool
-		revokeGrant   bool
+		name                     string
+		providerGrant            bool
+		siteOverride             *bool
+		crossTenantProviderGrant bool
+		crossTenantSiteOverride  *bool
+		revokeGrant              bool
 	}{
 		{name: "last allocation preserves provider grant", providerGrant: true},
 		{name: "last allocation preserves site grant", siteOverride: cutil.GetPtr(true)},
 		{name: "last allocation preserves site denial overriding provider grant", providerGrant: true, siteOverride: cutil.GetPtr(false)},
 		{name: "last allocation removes association after provider grant is revoked", providerGrant: true, revokeGrant: true},
+		{name: "last allocation preserves cross-Tenant site grant", crossTenantSiteOverride: cutil.GetPtr(true)},
+		{name: "last allocation preserves cross-Tenant site denial overriding provider grant", crossTenantProviderGrant: true, crossTenantSiteOverride: cutil.GetPtr(false)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tenant := common.TestBuildTenant(t, dbSession, tc.name, uuid.NewString(), tnu)
-			var account *cdbm.TenantAccount
-			if tc.providerGrant {
-				account = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
-			} else {
-				account = common.TestBuildTenantAccount(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
-			}
-			ts := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: tc.siteOverride}, tnu)
+			account := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu, cdbm.TenantAccountConfig{
+				TargetedInstanceCreation:     tc.providerGrant,
+				CrossTenantInterfaceCreation: tc.crossTenantProviderGrant,
+			})
+			ts := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{
+				TargetedInstanceCreation:     tc.siteOverride,
+				CrossTenantInterfaceCreation: tc.crossTenantSiteOverride,
+			}, tnu)
 			allocation := common.TestBuildAllocation(t, dbSession, site, tenant, tc.name, tnu)
 			if tc.revokeGrant {
+				accountConfig := account.Config
+				accountConfig.TargetedInstanceCreation = false
 				_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
-					TenantAccountID: account.ID, Config: &cdbm.TenantAccountConfig{TargetedInstanceCreation: false},
+					TenantAccountID: account.ID, Config: &accountConfig,
 				})
 				require.NoError(t, err)
 			}
@@ -2906,6 +2913,12 @@ func TestAllocationHandler_Delete(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.siteOverride, remaining.Config.TargetedInstanceCreation)
+			assert.Equal(t, tc.crossTenantSiteOverride, remaining.Config.CrossTenantInterfaceCreation)
+			if tc.crossTenantSiteOverride != nil {
+				crossTenantAllowed, err := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tenant, site.ID)
+				require.NoError(t, err)
+				assert.Equal(t, *tc.crossTenantSiteOverride, crossTenantAllowed)
+			}
 		})
 	}
 }

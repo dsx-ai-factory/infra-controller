@@ -650,10 +650,6 @@ mod recovery_tests {
     );
 
     impl Callbacks for ResetCallbacks {
-        fn supports_bmc_factory_reset(&self) -> bool {
-            true
-        }
-
         async fn computer_system_reset(&self, _: ResourceResetType) -> Result<(), ActionError> {
             Ok(())
         }

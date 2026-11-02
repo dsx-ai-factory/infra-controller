@@ -868,6 +868,8 @@ impl<'a> MockExploredHost<'a> {
         self.test_env.run_ib_fabric_monitor_iteration().await;
         host_uefi_setup(self.test_env, host_machine_id).await;
 
+        // Requeued transitions can pass BOM validation while we wait for lockdown.
+        // Recognize validation here so its completion is driven below.
         let stop_state = self
             .test_env
             .run_machine_state_controller_iteration_until_state_condition(
@@ -885,6 +887,7 @@ impl<'a> MockExploredHost<'a> {
                                     },
                                 },
                             } | ManagedHostState::BomValidating { .. }
+                                | ManagedHostState::Validation { .. }
                         )
                 },
             )

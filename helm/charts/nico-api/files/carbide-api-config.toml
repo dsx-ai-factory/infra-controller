@@ -297,6 +297,9 @@ rack_capabilities.compute = { name = "GB200", vendor = "WIWYNN", count = 18 }
 rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
 rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
 
+[tracing]
+enabled = {{ .Values.tracing.enabled }}
+
 [observability.per_object_state_metrics]
 enabled = {{ .Values.service.perObjectStateMetrics.enabled }}
 listen_address = "[::]:{{ .Values.service.perObjectStateMetrics.port }}"

@@ -313,18 +313,6 @@ impl BmcResetUpdate {
 
 /// Backend operations for one BMC, selected by the router's concrete callback type.
 pub trait Callbacks: Send + Sync + 'static {
-    /// Whether this backend models BMC factory reset through [`Self::device_effect`].
-    /// Only supporting backends advertise `Manager.ResetToDefaults`.
-    fn supports_bmc_factory_reset(&self) -> bool {
-        false
-    }
-
-    /// Whether this backend models an auxiliary power cycle through [`Self::device_effect`].
-    /// Only supporting backends advertise NVIDIA `AuxPowerReset`.
-    fn supports_aux_power_cycle(&self) -> bool {
-        false
-    }
-
     fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,

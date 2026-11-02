@@ -1077,6 +1077,7 @@ impl forge_agent_control_response::Action {
             Self::MachineValidation(_) => "MACHINE_VALIDATION",
             Self::MlxAction(_) => "MLX_ACTION",
             Self::FirmwareUpgrade(_) => "FIRMWARE_UPGRADE",
+            Self::MlxDeviceInfoReport(_) => "MLX_DEVICE_INFO_REPORT",
         }
     }
 }

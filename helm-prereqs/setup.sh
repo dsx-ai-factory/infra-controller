@@ -130,6 +130,14 @@
 #   NICO_RMS_NGC_API_KEY   NGC API key for the rms-pull-secret. Required with
 #                          the default (entitlement-gated) image repo.
 #                          Default: $REGISTRY_PULL_SECRET
+#   NICO_KMIP_CLIENT_DIR   Directory holding ca.pem, client.pem, and client.key
+#                          for the opt-in KMIP KEK provider. When set, setup
+#                          creates or updates Secret nico-system/nico-kmip-client
+#                          from those files once the Core deployment is
+#                          confirmed, before Phase 6 installs it, for nico-api
+#                          to mount through extraVolumes; see README.md →
+#                          "Opting in to the KMIP KEK provider". Rejected with
+#                          --skip-core.
 #
 # Usage:
 #   export KUBECONFIG=/path/to/kubeconfig
@@ -290,6 +298,13 @@ if "${_BMC_V0_VALIDATE_RESTORE_XTRACE}"; then
     set -x
 fi
 unset _BMC_V0_VALIDATE_RESTORE_XTRACE
+
+# The KMIP client Secret exists only for the Core deployment of this run.
+if "${SKIP_CORE}" && [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+    echo "Error: NICO_KMIP_CLIENT_DIR cannot be used with --skip-core." >&2
+    echo "  Unset the variable or install NICo Core." >&2
+    exit 1
+fi
 
 # Reject the retired DPF source knobs, but only when DPF is being installed so
 # a stale env file does not abort a --skip-dpf run.
@@ -465,6 +480,11 @@ _BMC_V0_BOOTSTRAP_SECRET_KEY="credentials.yaml"
 _BMC_V0_BOOTSTRAP_PURPOSE="bmc-site-wide-root-v0"
 _BMC_V0_BOOTSTRAP_ENABLED=false
 _CORE_VALUES_INSPECTOR_CHART="${SCRIPT_DIR}/internal/core-values-inspector"
+# Secret that nico-api mounts for the opt-in KMIP KEK provider. setup.sh
+# creates it from NICO_KMIP_CLIENT_DIR with exactly these keys and marks it
+# with the managed-by label, so a rerun never overwrites an operator's Secret.
+_KMIP_CLIENT_SECRET_NAME="nico-kmip-client"
+_KMIP_CLIENT_SECRET_FILES=(ca.pem client.pem client.key)
 
 _append_bmc_v0_core_values() {
     NICO_CORE_CMD+=(
@@ -620,6 +640,92 @@ _prepare_bmc_v0_bootstrap_secret() {
         set -x
     fi
     return "${_prepare_rc}"
+}
+
+_create_kmip_client_secret() {
+    local _dir="$1"
+    local _file=""
+    local _existing=""
+    local _label=""
+    local _resource_version=""
+    local _tab=$'\t'
+    local _verb="create"
+    local _err_file=""
+    local _reason=""
+    local _from_file_args=()
+
+    if [[ ! -d "${_dir}" ]]; then
+        echo "Error: NICO_KMIP_CLIENT_DIR='${_dir}' is not a directory." >&2
+        return 1
+    fi
+    for _file in "${_KMIP_CLIENT_SECRET_FILES[@]}"; do
+        if [[ ! -s "${_dir}/${_file}" || ! -r "${_dir}/${_file}" ]]; then
+            echo "Error: NICO_KMIP_CLIENT_DIR='${_dir}' has no readable, non-empty ${_file}." >&2
+            echo "  setup.sh loads ${_KMIP_CLIENT_SECRET_FILES[*]} (the CA bundle, client certificate chain, and client key) into Secret nico-system/${_KMIP_CLIENT_SECRET_NAME}." >&2
+            return 1
+        fi
+        _from_file_args+=(--from-file="${_file}=${_dir}/${_file}")
+    done
+
+    # Reduce the existing Secret to its ownership label and resource version
+    # inside the pipeline: a traced assignment of the whole object would print
+    # the base64 key under --debug. Absent Secret: empty output; present:
+    # "present<TAB><label><TAB><resourceVersion>".
+    if ! _existing="$(kubectl get secret "${_KMIP_CLIENT_SECRET_NAME}" \
+            -n nico-system --ignore-not-found -o json | \
+        jq -r '"present\t" + (.metadata.labels["app.kubernetes.io/managed-by"] // "") +
+            "\t" + (.metadata.resourceVersion // "")')"; then
+        echo "Error: could not inspect Secret nico-system/${_KMIP_CLIENT_SECRET_NAME}." >&2
+        return 1
+    fi
+    if [[ -n "${_existing}" ]]; then
+        _label="${_existing#*${_tab}}"
+        _resource_version="${_label#*${_tab}}"
+        _label="${_label%%${_tab}*}"
+        if [[ "${_label}" != "helm-prereqs" ]]; then
+            echo "Error: Secret nico-system/${_KMIP_CLIENT_SECRET_NAME} exists but is not managed by setup.sh." >&2
+            echo "  Unset NICO_KMIP_CLIENT_DIR to keep managing it yourself, or delete it so setup.sh can create it." >&2
+            return 1
+        fi
+        if [[ -z "${_resource_version}" ]]; then
+            echo "Error: could not inspect Secret nico-system/${_KMIP_CLIENT_SECRET_NAME}: it reports no resource version." >&2
+            return 1
+        fi
+        echo "Updating Secret nico-system/${_KMIP_CLIENT_SECRET_NAME} from ${_dir}..."
+    else
+        echo "Creating Secret nico-system/${_KMIP_CLIENT_SECRET_NAME} from ${_dir}..."
+    fi
+    # kubectl reads the files itself, so key material never appears on a
+    # command line or in --debug tracing. Create or replace rather than
+    # apply: apply would copy the key into the last-applied-configuration
+    # annotation and echoes the attempted patch when the server rejects it.
+    # A replacement carries the resource version inspected above, so the
+    # server answers with a conflict if the Secret changed in between; without
+    # it, kubectl would fetch the current version and overwrite the Secret.
+    # kubectl's diagnostics are not relayed, since a rejected object could
+    # carry the key; only the server's reason code is reported.
+    if [[ -n "${_existing}" ]]; then
+        _verb="replace"
+    fi
+    _err_file="$(mktemp -t nico-kmip-secret.XXXXXX)"
+    if ! kubectl create secret generic "${_KMIP_CLIENT_SECRET_NAME}" \
+            -n nico-system "${_from_file_args[@]}" --dry-run=client -o json | \
+        jq --arg rv "${_resource_version}" \
+            '.metadata.labels = ((.metadata.labels // {}) +
+                {"app.kubernetes.io/managed-by": "helm-prereqs"})
+            | if $rv == "" then . else .metadata.resourceVersion = $rv end' | \
+        kubectl "${_verb}" -f - 2>"${_err_file}"; then
+        _reason="$(sed -n -E 's/^Error from server \(([A-Za-z]+)\).*/\1/p' "${_err_file}" | head -n 1)"
+        rm -f "${_err_file}"
+        echo "Error: could not ${_verb} Secret nico-system/${_KMIP_CLIENT_SECRET_NAME}${_reason:+ (kubectl reported ${_reason})}." >&2
+        if [[ "${_reason}" == "Conflict" ]]; then
+            echo "  The Secret changed after setup.sh inspected it; rerun setup.sh to re-check it." >&2
+        elif [[ -z "${_reason}" ]]; then
+            echo "  kubectl failed without a server reason; its output is withheld because a rejected object could carry the key. Run 'kubectl -n nico-system get secret ${_KMIP_CLIENT_SECRET_NAME}' to check cluster access." >&2
+        fi
+        return 1
+    fi
+    rm -f "${_err_file}"
 }
 
 _current_core_uses_setup_bmc_v0_secret() {
@@ -1889,6 +1995,14 @@ else
         echo ""
     fi
     if [[ "${_reply:-Y}" =~ ^[Yy]$ ]]; then
+        # Create the client TLS Secret for the opt-in KMIP KEK provider once
+        # the operator has accepted the deployment, so a declined run leaves
+        # the Secret a running nico-api mounts untouched. nico-api mounts it
+        # through extraVolumes and validates the provider at startup, so it
+        # must exist before the Core helm install below.
+        if [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+            _create_kmip_client_secret "${NICO_KMIP_CLIENT_DIR}"
+        fi
         if "${INSTALL_DPF}"; then
             # Do not inspect or persist the bootstrap credential until the
             # operator has accepted the Core deployment. A declined DPF run

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	apiHandler "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -43,7 +44,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"tenant":                    5,
 		"tenant-account":            5,
 		"site":                      6,
-		"vpc":                       9,
+		"vpc":                       10,
 		"vpcpeering":                4,
 		"vpcprefix":                 5,
 		"ip-block":                  6,
@@ -80,7 +81,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"run":                       8,
 		"domain":                    6,
 		"rack":                      16,
-		"tray":                      12,
+		"tray":                      13,
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
@@ -160,6 +161,15 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, rackHealthReportPath)
 			assertRouteExists(t, got, http.MethodPut, rackHealthReportPath)
 			assertRouteExists(t, got, http.MethodDelete, rackHealthReportPath+"/:source")
+			trayPowerPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/power"
+			assertRouteExists(t, got, http.MethodGet, trayPowerPath)
+			assertRouteExists(t, got, http.MethodPatch, trayPowerPath)
+			// Verify the read route uses the power-state handler, not the power mutation handler.
+			for _, route := range got {
+				if route.Method == http.MethodGet && route.Path == trayPowerPath {
+					assert.IsType(t, apiHandler.GetTrayPowerStateHandler{}, route.Handler)
+				}
+			}
 			trayHealthReportPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/health-report"
 			assertRouteExists(t, got, http.MethodGet, trayHealthReportPath)
 			assertRouteExists(t, got, http.MethodPut, trayHealthReportPath)
@@ -190,6 +200,7 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, vpcRoutingProfilePath)
 			assertRouteExists(t, got, http.MethodPatch, vpcRoutingProfilePath)
 			assertRouteExists(t, got, http.MethodPost, vpcRoutingProfilePath+"/release-inactive-vni")
+			assertRouteExists(t, got, http.MethodGet, "/org/:orgName/"+cfg.GetAPIName()+"/interface")
 
 			machineAdminPath := "/org/:orgName/" + cfg.GetAPIName() + "/machine/:id"
 			dpuPath := "/org/:orgName/" + cfg.GetAPIName() + "/dpu"

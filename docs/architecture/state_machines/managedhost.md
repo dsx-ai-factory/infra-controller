@@ -212,6 +212,24 @@ stateDiagram-v2
 
 ## Host Initialization State Details (HostInitState)
 
+`DisableOnboardNics` applies only to Vera Rubin hosts with managed DPUs. Other
+SKUs do not support disabling onboard NICs through the BMC and skip this state.
+After enabling IPMI over LAN, eligible hosts enter `DisableOnboardNics`.
+The controller enables onboard NICs, waits at least ten seconds, disables them,
+and waits at least ten more seconds before platform configuration. Each wait uses
+its persisted substate-entry timestamp, so controller restarts preserve progress.
+Libredfish checks that host power is On before writing. Setter errors, including
+power-state failures, leave the configure substate
+in place for retry. No AUX-cycle delay is required. The waits allow settings to
+apply, but they do not verify physical NIC state through boot options.
+
+Hosts without managed DPUs, including hosts whose DPUs are ignored or operated in
+NIC mode, skip this sequence and retain their onboard NIC settings. The existing
+no-DPU paths into platform configuration remain unchanged.
+For Vera Rubin hosts that skip `DisableOnboardNics` and keep onboard NICs enabled,
+`machine_setup_status` reports "not done" with a `HostManagementNetworkAccess` diff
+expecting `Disabled`, which is expected for these configurations.
+
 Shows host initialization including boot order and UEFI setup:
 
 ```mermaid
@@ -251,6 +269,12 @@ stateDiagram-v2
     }
 
     state "EnableIpmiOverLan" as HI_EnableIpmiOverLan
+    state "DisableOnboardNics" as HI_DisableOnboardNics {
+        state "ConfigureOnboardNics(enable=true)" as HI_DON_Enable
+        state "WaitForConfigToBeApplied(onboard_nics_disabled=false)" as HI_DON_WaitEnabled
+        state "ConfigureOnboardNics(enable=false)" as HI_DON_Disable
+        state "WaitForConfigToBeApplied(onboard_nics_disabled=true)" as HI_DON_WaitDisabled
+    }
     state "WaitingForPlatformConfiguration" as HI_WaitingForPlatformConfiguration
     state "WaitingForBiosJob" as HI_WaitingForBiosJob {
         state "HandleBiosJobFailure" as HI_WBJ_HandleBiosJobFailure
@@ -269,7 +293,16 @@ stateDiagram-v2
     Failed --> HI_M_WaitingForMeasurements
     Failed --> HI_SBO_SetBootOrder : BiosSetupFailed AND is_bios_setup ok
 
-    HI_EnableIpmiOverLan --> HI_WaitingForPlatformConfiguration : Enable IPMI over LAN access
+    HI_EnableIpmiOverLan --> HI_DON_Enable : IPMI configured, Vera Rubin with managed DPUs
+    HI_EnableIpmiOverLan --> HI_WaitingForPlatformConfiguration : IPMI configured, other SKU or no managed DPUs
+    HI_DON_Enable --> HI_DON_WaitEnabled : Host On, enable write succeeds
+    HI_DON_WaitEnabled --> HI_DON_Disable : At least 10 seconds since state entry
+    HI_DON_Disable --> HI_DON_WaitDisabled : Host On, disable write succeeds
+    HI_DON_WaitDisabled --> HI_WaitingForPlatformConfiguration : At least 10 seconds since state entry
+    HI_DON_Enable --> HI_DON_Enable : Host not On or write fails (retry)
+    HI_DON_Disable --> HI_DON_Disable : Host not On or write fails (retry)
+    HI_DON_WaitEnabled --> HI_DON_WaitEnabled : Less than 10 seconds (wait)
+    HI_DON_WaitDisabled --> HI_DON_WaitDisabled : Less than 10 seconds (wait)
     HI_WaitingForPlatformConfiguration --> HI_PollingBiosSetup : Call machine setup/Restart Host
     HI_WaitingForPlatformConfiguration --> HI_WaitingForBiosJob : Dell BIOS job scheduled
     HI_WaitingForBiosJob --> HI_PollingBiosSetup : BIOS job completed

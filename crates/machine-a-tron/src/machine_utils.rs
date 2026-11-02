@@ -64,7 +64,6 @@ pub(super) async fn forge_agent_control(
         .forge_api_client
         .forge_agent_control(ForgeAgentControlRequest {
             machine_id: Some(machine_id),
-            capabilities: Vec::new(),
         })
         .await
     {

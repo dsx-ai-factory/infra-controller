@@ -71,6 +71,13 @@ jobs:
     if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' && needs.validate-charts.result == 'success' && !contains(github.ref, 'pull-request/') }}
     runs-on: linux-amd64-cpu4
     strategy:
+      # NGC answers an upload with HTTP 409 while another upload to the same
+      # namespace is updating its chart index, and the CLI reports that as
+      # "already exists". One chart at a time keeps this matrix from colliding
+      # with itself, and `fail-fast: false` lets the other charts publish when
+      # one of them fails.
+      fail-fast: false
+      max-parallel: 1
       matrix:
         chart:
           - helm/rest/nico-rest
@@ -108,10 +115,8 @@ jobs:
           echo "chart_path=${prepared_chart_dir}" >> "${GITHUB_OUTPUT}"
 
       - name: Package and push Helm chart to NGC
-        id: publish_helm
-        continue-on-error: true
         if: ${{ inputs.ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
           chart-version: ${{ inputs.chart_version }}
@@ -120,15 +125,4 @@ jobs:
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_STG_TOKEN }}
           ngc-path: ${{ inputs.ngc_path }}
           ngc-duplicate: verify
-
-      - name: Retry package and push Helm chart to NGC
-        if: ${{ steps.publish_helm.outcome == 'failure' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
-        with:
-          chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
-          chart-version: ${{ inputs.chart_version }}
-          app-version: ${{ inputs.app_version }}
-          lint: 'false'
-          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_STG_TOKEN }}
-          ngc-path: ${{ inputs.ngc_path }}
-          ngc-duplicate: verify
+          retries: 3
