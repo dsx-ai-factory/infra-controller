@@ -173,6 +173,8 @@ func testReplaceAllExpectedRackGroupsHandlerConcurrentRequests(t *testing.T) {
 		request := args.Get(3).(grpcproxy.Request)
 		require.Equal(t, corev1.Forge_ReplaceAllExpectedRackGroups_FullMethodName, request.FullMethod)
 		require.NoError(t, protojson.Unmarshal(request.RequestJSON, &coreRequest))
+		require.Len(t, coreRequest.ExpectedRackGroups, 1)
+		require.Empty(t, coreRequest.ExpectedRackGroups[0].GetProtocol())
 		second, secondErr = invoke(ctx, "group-b")
 	}).Return(run, nil).Once()
 	t.Cleanup(func() {
@@ -184,7 +186,7 @@ func testReplaceAllExpectedRackGroupsHandlerConcurrentRequests(t *testing.T) {
 		body, marshalErr := json.Marshal(apim.APIReplaceAllExpectedRackGroupsRequest{
 			SiteID: site.ID.String(),
 			ExpectedRackGroups: []*apim.APIExpectedRackGroupCreateRequest{{
-				SiteID: site.ID.String(), RackGroupID: rackGroupID, Topology: "topology", Protocol: "NVLINK_V6",
+				SiteID: site.ID.String(), RackGroupID: rackGroupID, Topology: "topology",
 				Racks: []apim.APIExpectedRackGroupRack{},
 			}},
 		})
@@ -217,6 +219,8 @@ func testReplaceAllExpectedRackGroupsHandlerConcurrentRequests(t *testing.T) {
 	require.NoError(t, session.DB.NewSelect().Model(&stored).Where("site_id = ?", site.ID).Scan(ctx))
 	require.Len(t, stored, 1)
 	require.Equal(t, "group-a", stored[0].RackGroupID)
+	require.Nil(t, stored[0].Protocol)
+	require.Nil(t, response[0].Protocol)
 	require.Len(t, coreRequest.ExpectedRackGroups, 1)
 	require.Equal(t, "group-a", coreRequest.ExpectedRackGroups[0].GetRackGroupId().GetId())
 }
@@ -240,6 +244,9 @@ func (*rackGroupConcurrentInsertHook) AfterQuery(context.Context, *bun.QueryEven
 func testRackGroupMutation(t *testing.T, workflowName string) {
 	t.Helper()
 	scenarios := []string{"success", "workflow failure", "request canceled", "deadline", "workflow timeout", "foreign site", "commit conflict"}
+	if workflowName == "CreateExpectedRackGroup" {
+		scenarios = append(scenarios, "missing protocol")
+	}
 	if workflowName == "UpdateExpectedRackGroup" {
 		scenarios = append(scenarios, "null labels")
 	}
@@ -257,7 +264,11 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 			_, err := session.DB.NewInsert().Model(user).Exec(ctx)
 			require.NoError(t, err)
 			dao := cdbm.NewExpectedRackGroupDAO(session)
-			original, err := dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "original", Topology: "old", Racks: []cdbm.ExpectedRackGroupRack{{RackID: "rack", Members: []cdbm.ExpectedRackGroupMember{}}}, Name: "old-name", Labels: map[string]string{"key": "value"}, CreatedBy: user.ID})
+			var protocol *string
+			if workflowName == "UpdateExpectedRackGroup" && scenario == "success" {
+				protocol = cutil.GetPtr("NVLINK_V6")
+			}
+			original, err := dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "original", Topology: "old", Protocol: protocol, Racks: []cdbm.ExpectedRackGroupRack{{RackID: "rack", Members: []cdbm.ExpectedRackGroupMember{}}}, Name: "old-name", Labels: map[string]string{"key": "value"}, CreatedBy: user.ID})
 			require.NoError(t, err)
 			if scenario == "commit conflict" {
 				_, err = session.DB.ExecContext(ctx, "ALTER TABLE expected_rack_group ADD CONSTRAINT expected_rack_group_group_id_site_id_key UNIQUE (rack_group_id, site_id) DEFERRABLE INITIALLY DEFERRED")
@@ -319,11 +330,19 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 						require.Equal(t, "rack-01", wire.Racks[0].GetRackId().GetId())
 						require.Equal(t, "Switch", wire.Racks[0].Members[0].Type)
 						require.Empty(t, wire.Racks[1].Members)
+						if scenario == "missing protocol" {
+							require.Empty(t, wire.GetProtocol())
+						}
 					}
 					if workflowName == "UpdateExpectedRackGroup" {
 						wire := &corev1.ExpectedRackGroup{}
 						require.NoError(t, protojson.Unmarshal(request.RequestJSON, wire))
 						require.Equal(t, "old", wire.Topology, "omitted topology must survive PATCH")
+						if original.Protocol == nil {
+							require.Empty(t, wire.GetProtocol())
+						} else {
+							require.Equal(t, *original.Protocol, wire.GetProtocol(), "omitted protocol must survive PATCH")
+						}
 						require.Empty(t, wire.Metadata.Name)
 						require.Empty(t, wire.Racks)
 						if scenario == "null labels" {
@@ -372,6 +391,9 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 				method, body, status = http.MethodDelete, "", http.StatusNoContent
 				handle = NewDeleteAllExpectedRackGroupsHandler(session, pool, cfg).Handle
 			}
+			if scenario == "missing protocol" {
+				body = strings.Replace(body, `,"protocol":"NVLINK_V6"`, "", 1)
+			}
 			c, rec := rackGroupValidationContext(method, body)
 			c.SetRequest(c.Request().WithContext(requestCtx))
 			c.Set("user", user)
@@ -394,7 +416,7 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 				require.NoError(t, readErr)
 				require.Equal(t, 1, count)
 				require.Equal(t, "concurrent", rows[0].Topology)
-			} else if scenario != "success" && scenario != "null labels" {
+			} else if scenario != "success" && scenario != "null labels" && scenario != "missing protocol" {
 				wantStatus := http.StatusInternalServerError
 				if scenario == "request canceled" || scenario == "workflow timeout" {
 					wantStatus = http.StatusGatewayTimeout
@@ -413,6 +435,10 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 					require.NoError(t, err)
 					require.Equal(t, response.Topology, stored.Topology)
 					require.Equal(t, response.Name, stored.Name)
+					require.Equal(t, response.Protocol, stored.Protocol)
+					if scenario == "missing protocol" {
+						require.Nil(t, stored.Protocol)
+					}
 					require.Equal(t, response.Racks, apim.NewAPIExpectedRackGroup(stored).Racks)
 					if workflowName == "CreateExpectedRackGroup" {
 						require.Len(t, rows, 2)
@@ -452,6 +478,7 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 								require.NoError(t, json.Unmarshal(readRec.Body.Bytes(), &readResponse))
 							}
 							require.Equal(t, response.Racks, readResponse.Racks)
+							require.Equal(t, response.Protocol, readResponse.Protocol)
 						}
 					} else {
 						require.Len(t, rows, 1)

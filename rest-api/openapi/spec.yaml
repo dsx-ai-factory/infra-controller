@@ -32235,7 +32235,7 @@ components:
           type:
             - string
             - 'null'
-          description: Rack fabric protocol. Null only for declarations created before protocol became required.
+          description: Rack fabric protocol, or null when unspecified.
         racks:
           type: array
           description: Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
@@ -32310,10 +32310,10 @@ components:
           maxLength: 128
           description: External group-level NVLink topology identifier, non-blank and at most 128 characters.
         protocol:
-          type: string
+          type: [string, 'null']
           minLength: 1
           maxLength: 128
-          description: Rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+          description: Optional rack fabric protocol, non-blank and at most 128 characters when supplied. Omission or null leaves it unspecified and disables protocol-specific topology normalization. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -32344,7 +32344,6 @@ components:
         - siteId
         - rackGroupId
         - topology
-        - protocol
     ExpectedRackGroupList:
       title: ExpectedRackGroupList
       type: object
@@ -32464,7 +32463,7 @@ components:
             - 'null'
           minLength: 1
           maxLength: 128
-          description: Optional replacement rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+          description: Optional replacement rack fabric protocol, non-blank and at most 128 characters. Omission or null preserves the stored protocol, including an unspecified value. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
