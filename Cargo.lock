@@ -3802,6 +3802,7 @@ dependencies = [
 name = "carbide-test-support"
 version = "0.0.0"
 dependencies = [
+ "figment",
  "tokio",
  "tracing",
  "tracing-subscriber",

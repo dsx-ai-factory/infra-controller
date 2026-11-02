@@ -129,7 +129,7 @@ test-support = []
 axum = { workspace = true, features = ["http2"] }
 bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
-carbide-test-support = { path = "../test-support" }
+carbide-test-support = { path = "../test-support", features = ["figment"] }
 criterion = { workspace = true }
 figment = { workspace = true, features = ["test"] }
 rcgen = { workspace = true }

@@ -59,7 +59,7 @@ url = { features = ["serde"], workspace = true }
 
 [dev-dependencies]
 axum-server = { features = ["tls-rustls"], workspace = true }
-carbide-test-support = { path = "../test-support" }
+carbide-test-support = { path = "../test-support", features = ["figment"] }
 figment = { features = ["test"], workspace = true }
 mac_address = { workspace = true }
 rcgen = { workspace = true }

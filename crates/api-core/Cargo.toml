@@ -240,7 +240,7 @@ carbide-site-explorer = { path = "../site-explorer", features = [
   "test-support",
 ] }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
-carbide-test-support = { path = "../test-support" }
+carbide-test-support = { path = "../test-support", features = ["figment"] }
 carbide-utils = { path = "../utils", features = ["test-support"] }
 prometheus-text-parser = { path = "../prometheus-text-parser" }
 state-controller = { path = "../state-controller", features = ["test-support"] }

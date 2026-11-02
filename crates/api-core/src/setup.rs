@@ -2637,6 +2637,7 @@ mod tests {
     use carbide_machine_controller::dpf::MockDpfOperations;
     use carbide_network::virtualization::VpcVirtualizationType;
     use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::jail_env::remove_prefixed_env;
     use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
     use figment::Figment;
     use figment::providers::{Format, Toml};
@@ -3242,7 +3243,7 @@ mod tests {
     ) -> Result<Option<HostDpuPolicy>, figment::Error> {
         let mut policy = None;
         figment::Jail::try_with(|jail| {
-            jail.clear_env();
+            remove_prefixed_env(jail, "CARBIDE_API_");
             if let Some(environment_value) = layers.environment_value {
                 jail.set_env("CARBIDE_API_SITE_EXPLORER", environment_value);
             }
@@ -3816,7 +3817,7 @@ mod tests {
     #[allow(clippy::result_large_err)] // Figment controls the error representation.
     fn rack_profile_attributes_merge_per_key_with_provider_precedence() {
         figment::Jail::expect_with(|jail| {
-            jail.clear_env();
+            remove_prefixed_env(jail, "CARBIDE_API_");
 
             // Environment input replaces only its duplicate key; unrelated
             // keys from lower-priority providers remain in the effective map.

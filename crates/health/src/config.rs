@@ -3080,6 +3080,7 @@ where
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
+    use carbide_test_support::jail_env::remove_prefixed_env;
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
 
     use super::*;
@@ -4463,10 +4464,10 @@ reload_interval = "30s"
     #[allow(clippy::result_large_err)] // Figment controls the error representation.
     fn test_load_defaults() {
         let mut config = None;
-        // Jail clears inherited configuration and serializes this load with tests that
-        // temporarily modify process-global environment variables.
+        // Jail serializes this load with tests that temporarily modify process-global
+        // environment variables.
         figment::Jail::expect_with(|jail| {
-            jail.clear_env();
+            remove_prefixed_env(jail, "CARBIDE_HEALTH__");
             config = Some(Config::load(None).expect("should load defaults"));
             Ok(())
         });
@@ -4528,7 +4529,7 @@ reload_interval = "30s"
             let mut actual_url = None;
 
             figment::Jail::expect_with(|jail| {
-                jail.clear_env();
+                remove_prefixed_env(jail, "CARBIDE_HEALTH__");
                 jail.create_file("health.toml", &file_config)?;
 
                 for name in environment_names {
@@ -5296,7 +5297,7 @@ interface_paths = [["state", "oper-status"], ["phy-diag", "state", "raw-ber"]]
     #[allow(clippy::result_large_err)] // Figment controls the error representation.
     fn malformed_enabled_sections_fail_configuration_loading() {
         figment::Jail::expect_with(|jail| {
-            jail.clear_env();
+            remove_prefixed_env(jail, "CARBIDE_HEALTH__");
 
             let valid = r#"
 [collectors.nvue.gnmi]

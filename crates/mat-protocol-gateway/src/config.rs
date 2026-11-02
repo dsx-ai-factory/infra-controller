@@ -330,6 +330,8 @@ fn default_rms_request_timeout() -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::jail_env::remove_prefixed_env;
+
     use super::*;
 
     #[test]
@@ -475,10 +477,9 @@ mod tests {
     #[test]
     #[allow(clippy::result_large_err)] // Figment controls the error representation.
     fn load_applies_file_then_environment_and_forces_ufm_enabled() {
-        // Jail clears inherited configuration and serializes this test with others that modify
-        // process-global environment variables.
+        // Jail serializes this test with others that modify process-global environment variables.
         figment::Jail::expect_with(|jail| {
-            jail.clear_env();
+            remove_prefixed_env(jail, ENV_PREFIX);
             jail.create_file(
                 "gateway.toml",
                 r#"
@@ -521,7 +522,7 @@ mod tests {
     #[allow(clippy::result_large_err)] // Figment controls the error representation.
     fn load_without_a_file_uses_defaults_but_a_missing_named_file_fails() {
         figment::Jail::expect_with(|jail| {
-            jail.clear_env();
+            remove_prefixed_env(jail, ENV_PREFIX);
 
             assert_eq!(GatewayConfig::load(None).unwrap(), GatewayConfig::default());
 

@@ -207,6 +207,8 @@
 //! reach for it directly only when a case needs a fully hand-written body that
 //! neither a macro nor [`Case::check`] can express.
 
+#[cfg(feature = "figment")]
+pub mod jail_env;
 pub mod query_counter;
 
 use std::fmt::Debug;
