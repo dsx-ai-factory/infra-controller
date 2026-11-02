@@ -794,6 +794,67 @@ tests:
       - failedTemplate:
           errorPattern: 'state.nicoApi.hostRead must be auto, full or compact, not "fast"'
 
+  - it: keeps the nico-api config reader off by default
+    template: templates/configmap.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'nico_config:\n\s+enabled: false\n\s+interval: "60s"\n\s+timeout: "120s"'
+
+  - it: requires the admin cert for the nico-api config reader alone
+    # The failure surfaces through deployment.yaml, whose config-checksum
+    # annotation renders the configmap first.
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        readers:
+          devices:
+            enabled: false
+            interval: 120s
+            timeout: 600s
+          nicoConfig:
+            enabled: true
+            interval: 60s
+            timeout: 120s
+    asserts:
+      - failedTemplate:
+          errorPattern: nicoApiClientCert.existingSecret is required while a nico-api state reader is on
+
+  - it: checks the host read only for the devices reader
+    template: templates/configmap.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        nicoApi:
+          hostRead: auto
+        readers:
+          devices:
+            enabled: false
+            interval: 120s
+            timeout: 600s
+          nicoConfig:
+            enabled: true
+            interval: 30s
+            timeout: 60s
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'nico_config:\n\s+enabled: true\n\s+interval: "30s"\n\s+timeout: "60s"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'devices:\n\s+enabled: false'
+
   - it: requires the REST target while the REST reader is on
     # The failure surfaces through deployment.yaml, whose config-checksum
     # annotation renders the configmap first.

@@ -168,6 +168,12 @@ state:
       enabled: false
       interval: 120s
       timeout: 600s
+    ## nico-api's update caps, pass interval and firmware targets, for the
+    ## firmware tests. Uses the nico-api settings above.
+    nicoConfig:
+      enabled: false
+      interval: 60s
+      timeout: 120s
   ## /v1/config names the stored series for clients that read them back:
   ## a selector and the scrape cadence. With serviceMonitor.enabled the
   ## cadence is serviceMonitor.interval, and the selector defaults to the

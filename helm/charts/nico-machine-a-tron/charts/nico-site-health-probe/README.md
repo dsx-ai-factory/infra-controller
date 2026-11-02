@@ -111,15 +111,15 @@ calls per second, a deadline per call, and back-off on pushback (429, 503,
 |---|---|---|---|
 | `devices` | nico-api | 120 s, 600 s timeout | Censuses and by-ID records of hosts, DPUs, switches, power shelves, racks and instances; expected records; open host firmware requests |
 | `rest_inventory` | nico-rest-api | 120 s | Site totals (machine, rack, tray) and a site check, as the provider |
+| `nico_config` | nico-api | 60 s, 120 s timeout, off by default | The update manager's caps and pass interval, and the firmware target of every configured component with its explicit start flag |
 
 The provider instance total is unavailable because the REST API has no
 provider-scoped instance count. Other supported totals are collected
 independently of that capability.
 
-Firmware targets, update limits, the tenant's allocation and the tenant's
-instances are read once the firmware and instance tests need them (issues
-8154 and 8152). Until then their filters answer 422 `field_unavailable`, and
-`/v1/config` serves them as `null`.
+The tenant's allocation and the tenant's instances are read once the
+instance tests need them (issue 8152). Until then their filters answer 422
+`field_unavailable`, and `/v1/config` serves them as `null`.
 
 Each reader publishes one immutable snapshot per count family. A family is
 replaced only by a complete sweep: a failed or unresolved read keeps its last
@@ -137,8 +137,9 @@ user (`nicoApiClientCert.existingSecret`, keys `ca.crt`, `tls.crt`,
 `FindMachinesByIds` and `FindHostStatesByIds`. REST identities take client
 credentials, a bearer token in a Secret, or a token file.
 
-The nico-api reader runs by default once state is on; the REST reader stays
-off until its inputs exist. Hosts are read with the compact host read
+The devices reader runs by default once state is on. The config reader stays
+off until a firmware test needs it, the REST reader until its inputs exist.
+Hosts are read with the compact host read
 (`FindHostStatesByIds`) under the default `state.nicoApi.hostRead: auto`.
 On a nico-api without it (`UNIMPLEMENTED`) the probe warns once ("falling
 back to full host read", with the code) and reads `FindMachinesByIds` until it
@@ -202,7 +203,7 @@ unknown parameters are 400. Errors carry
 | `GET /v1/count` | Units matching a filter in the newest complete sweep, with its snapshot ID and sweep times | 400, 422 `unsupported_filter` and `field_unavailable`, 503 `no_complete_sweep` |
 | `GET /v1/units` | Units with state, reason and type fields, 100 per page (max 1,000), cursor paging pinned to one snapshot | As count, 409 `snapshot_expired` |
 | `POST /v1/units/query` | The same, with a JSON body that can ask for up to 10,000 IDs (`missingIds` lists absent ones) | As `/v1/units` |
-| `GET /v1/config` | `restSite`: the REST site checked against the device census (`match`, `mismatch` or `unknown`; always `unknown` with the devices reader off), with its read times. With the devices reader enabled, a nonempty page with controller IDs waits for the first device census. Empty or ID-less pages publish `unknown`. `null` while the REST inventory reader is off, which is not a site match. `nicoApi` and `rest` are `null` until their readers return. `metrics`, with a declared scrape cadence: the metric contract version, the selector, the scrape interval, the interval of each family an enabled reader sweeps, and the process start time the probe publishes | 400, 503 while the REST inventory reader is on and waits for its first site check |
+| `GET /v1/config` | `restSite`: the REST site checked against the device census (`match`, `mismatch` or `unknown`; always `unknown` with the devices reader off), with its read times. With the devices reader enabled, a nonempty page with controller IDs waits for the first device census. Empty or ID-less pages publish `unknown`. `null` while the REST inventory reader is off, which is not a site match. `nicoApi`: the update manager's settings and the firmware targets, selected by the exact `vendor`, `model` and `component` given, from the newest good config read, with its read times and the newest failed attempt's error. `nicoApi` and `rest` are `null` until their readers return. `metrics`, with a declared scrape cadence: the metric contract version, the selector, the scrape interval, the interval of each family an enabled reader sweeps, and the process start time the probe publishes | 400, 503 while the REST inventory reader is on and waits for its first site check |
 
 At shutdown, requests still running after 10 s are cut short with 503 and
 their connections close.

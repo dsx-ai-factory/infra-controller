@@ -38,10 +38,9 @@ use crate::snapshot::{
     AnySnapshot, CensusView, FailureKind, FamilySnapshot, Reader, SnapshotSink, UnitsData,
 };
 
-/// Every family the readers publish. The firmware config, tenant
-/// allocation and tenant instance families wait for their tests (#8154,
-/// #8152).
-pub(crate) const ALL_FAMILIES: [Family; 10] = [
+/// Every family the readers publish. The tenant allocation and tenant
+/// instance families wait for their tests (#8152).
+pub(crate) const ALL_FAMILIES: [Family; 11] = [
     Family::Host,
     Family::Dpu,
     Family::Switch,
@@ -52,6 +51,7 @@ pub(crate) const ALL_FAMILIES: [Family; 10] = [
     Family::HostFirmwareRequests,
     Family::RestTotals,
     Family::RestSiteMatch,
+    Family::ConfigNicoApi,
 ];
 
 /// Families whose units `/v1/units` pages through.

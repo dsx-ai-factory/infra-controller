@@ -320,12 +320,10 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                 }
             }
         }
-        // Read by no reader until the firmware and instance tests (#8154,
-        // #8152).
-        Family::RestInstances
-        | Family::RestTenantInstances
-        | Family::ConfigNicoApi
-        | Family::ConfigRest => {}
+        // Served by `/v1/config` only.
+        Family::ConfigNicoApi => {}
+        // Read by no reader until the instance tests (#8152).
+        Family::RestInstances | Family::RestTenantInstances | Family::ConfigRest => {}
     }
 }
 
@@ -481,10 +479,8 @@ fn reader_of(family: Family) -> Option<Reader> {
         | Family::Expected
         | Family::HostFirmwareRequests => Some(Reader::Devices),
         Family::RestTotals | Family::RestSiteMatch => Some(Reader::RestInventory),
-        Family::RestInstances
-        | Family::RestTenantInstances
-        | Family::ConfigNicoApi
-        | Family::ConfigRest => None,
+        Family::ConfigNicoApi => Some(Reader::NicoConfig),
+        Family::RestInstances | Family::RestTenantInstances | Family::ConfigRest => None,
     }
 }
 
