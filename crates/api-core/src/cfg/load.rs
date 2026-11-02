@@ -399,6 +399,7 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Reject endpoints with embedded secrets before tracing the configuration.
     config.validate_resource_pool_backends()?;
     config.api_admission_control.validate()?;
+    config.validate_admission_covers_cert_manager()?;
     config
         .firmware_global
         .downloads
