@@ -50,6 +50,8 @@ use crate::tests::common::api_fixtures::TestEnvOverrides;
 use crate::tests::common::api_fixtures::site_explorer::MockExploredHost;
 use crate::tests::common::rpc_builder::{DhcpDiscovery, VpcCreationRequest};
 
+mod authentication;
+
 async fn set_use_admin_network_changed(
     env: &api_fixtures::TestEnv,
     dpu_machine_id: DpuMachineId,
