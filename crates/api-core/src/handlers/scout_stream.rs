@@ -330,6 +330,7 @@ mod tests {
                 max_work_in_flight_per_client: 1,
                 max_pending_per_client: 1,
                 pending_timeout: SCOUT_STREAM_INIT_TIMEOUT + Duration::from_secs(1),
+                max_execution_time: Duration::from_secs(120),
                 client_idle_timeout: Duration::from_secs(60),
                 service_limits: Default::default(),
             },
