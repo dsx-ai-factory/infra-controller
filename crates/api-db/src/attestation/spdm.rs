@@ -82,6 +82,7 @@ pub async fn insert_device_attestations(
 }
 
 /// Requests cancellation while preserving the deadline of any earlier request.
+/// Returns `NotFoundError` if the job has no device rows.
 pub async fn cancel_attestation_job(
     txn: &mut PgConnection,
     job_id: &uuid::Uuid,
@@ -91,12 +92,20 @@ pub async fn cancel_attestation_job(
         SET cancelled_at = COALESCE(cancelled_at, $2)
         WHERE job_id = $1
         "#;
-    sqlx::query(query)
+    let result = sqlx::query(query)
         .bind(job_id)
         .bind(current_time)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
+
+    // A job exists only through its device rows.
+    if result.rows_affected() == 0 {
+        return Err(DatabaseError::NotFoundError {
+            kind: "SPDM Attestation Job",
+            id: job_id.to_string(),
+        });
+    }
 
     Ok(())
 }
@@ -878,6 +887,52 @@ mod tests {
     use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn cancel_attestation_job_requires_device_rows(pool: sqlx::PgPool) -> eyre::Result<()> {
+        let mut txn = pool.begin().await?;
+        let job_id = uuid::Uuid::new_v4();
+
+        // A missing job must identify the resource that could not be cancelled.
+        assert!(matches!(
+            cancel_attestation_job(&mut txn, &job_id).await,
+            Err(DatabaseError::NotFoundError { kind: "SPDM Attestation Job", id })
+                if id == job_id.to_string()
+        ));
+
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x73; 32],
+            MachineType::Host,
+        );
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+        // Multiple device rows still represent one successfully cancelled job.
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation
+             (machine_id, device_id, nonce, state, job_id, started_at)
+             SELECT $1, device_id, gen_random_uuid(), $2, $3, now()
+             FROM unnest(ARRAY['GPU_0', 'GPU_1']) AS devices(device_id)",
+        )
+        .bind(machine_id)
+        .bind(sqlx::types::Json(SpdmAttestationState::FetchMetadata))
+        .bind(job_id)
+        .execute(&mut *txn)
+        .await?;
+
+        cancel_attestation_job(&mut txn, &job_id).await?;
+        let cancelled_devices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM spdm_machine_devices_attestation
+             WHERE job_id = $1 AND cancelled_at IS NOT NULL",
+        )
+        .bind(job_id)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(cancelled_devices, 2);
+        Ok(())
+    }
 
     /// A requested device without evidence must not disappear from the machine's status.
     #[crate::sqlx_test]

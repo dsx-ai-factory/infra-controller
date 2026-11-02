@@ -143,7 +143,7 @@ async fn execute(client: &FakeClient, format: OutputFormat, flags: &[&str]) -> (
 
 #[tokio::test]
 async fn machine_table_follows_pages_and_prints_populated_and_empty_cells() {
-    let mut ids = vec![machine(1), machine(2), machine(3)];
+    let mut ids = [machine(1), machine(2), machine(3)];
     ids.sort();
     let statuses = ids
         .iter()
