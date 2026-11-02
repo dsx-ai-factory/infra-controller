@@ -582,44 +582,132 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 	})
 }
 
+func TestAPIBMCInfo_FromProto(t *testing.T) {
+	cases := []struct {
+		name    string
+		machine *corev1.Machine
+		want    APIBMCInfo
+	}{
+		{
+			name: "nil machine clears reused receiver",
+		},
+		{
+			name:    "missing BMC messages clear reused receiver",
+			machine: &corev1.Machine{},
+		},
+		{
+			name: "endpoint without status clears old versions",
+			machine: &corev1.Machine{
+				Bmc: &corev1.BmcEndpoint{
+					Ip:  cutil.GetPtr("192.0.2.10"),
+					Mac: cutil.GetPtr("02:00:00:00:00:10"),
+				},
+			},
+			want: APIBMCInfo{
+				IP:  cutil.GetPtr("192.0.2.10"),
+				Mac: cutil.GetPtr("02:00:00:00:00:10"),
+			},
+		},
+		{
+			name: "status without endpoint clears old addresses",
+			machine: &corev1.Machine{
+				Status: &corev1.MachineStatus{
+					BmcStatus: &corev1.BmcStatus{
+						Version:         cutil.GetPtr("new-version"),
+						FirmwareVersion: cutil.GetPtr("new-firmware"),
+					},
+				},
+			},
+			want: APIBMCInfo{
+				Version:          cutil.GetPtr("new-version"),
+				FirmwareRevision: cutil.GetPtr("new-firmware"),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := APIBMCInfo{
+				IP:               cutil.GetPtr("192.0.2.99"),
+				Mac:              cutil.GetPtr("02:00:00:00:00:99"),
+				Version:          cutil.GetPtr("old-version"),
+				FirmwareRevision: cutil.GetPtr("old-firmware"),
+			}
+			info.FromProto(tc.machine)
+			assert.Equal(t, tc.want, info)
+		})
+	}
+}
+
 func TestAPIMachineMetadata_FromProto(t *testing.T) {
-	t.Run("missing machine clears metadata", func(t *testing.T) {
-		metadata := APIMachineMetadata{
-			DMIData:              &APIDMIData{},
-			BMCInfo:              &APIBMCInfo{},
-			GPUs:                 []APIMachineGPUInfo{{}},
-			NetworkInterfaces:    []APIMachineNetworkInterface{{}},
-			InfiniBandInterfaces: []APIMachineInfiniBandInterface{{}},
-			LifecycleState:       &APIMachineLifecycleState{},
-			LldpNeighbors:        []APIMachineLldpNeighbor{{}},
-		}
+	cases := []struct {
+		name               string
+		machine            *corev1.Machine
+		wantLifecycleState *APIMachineLifecycleState
+		wantJSON           string
+	}{
+		{
+			name: "missing machine clears metadata",
+			wantJSON: `{
+				"dmiData": null,
+				"bmcInfo": null,
+				"gpus": [],
+				"networkInterfaces": [],
+				"infinibandInterfaces": [],
+				"lifecycleState": null,
+				"lldpNeighbors": []
+			}`,
+		},
+		{
+			name:               "missing BMC data remains null",
+			machine:            &corev1.Machine{},
+			wantLifecycleState: &APIMachineLifecycleState{},
+			wantJSON: `{
+				"dmiData": null,
+				"bmcInfo": null,
+				"gpus": [],
+				"networkInterfaces": [],
+				"infinibandInterfaces": [],
+				"lifecycleState": {
+					"value": "",
+					"isAboveSLA": false,
+					"updated": null,
+					"slaSeconds": 0
+				},
+				"lldpNeighbors": []
+			}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := APIMachineMetadata{
+				DMIData:              &APIDMIData{},
+				BMCInfo:              &APIBMCInfo{},
+				GPUs:                 []APIMachineGPUInfo{{}},
+				NetworkInterfaces:    []APIMachineNetworkInterface{{}},
+				InfiniBandInterfaces: []APIMachineInfiniBandInterface{{}},
+				LifecycleState:       &APIMachineLifecycleState{},
+				LldpNeighbors:        []APIMachineLldpNeighbor{{}},
+			}
 
-		metadata.FromProto(nil)
+			metadata.FromProto(tc.machine)
 
-		assert.Nil(t, metadata.DMIData)
-		assert.Nil(t, metadata.BMCInfo)
-		assert.NotNil(t, metadata.GPUs)
-		assert.Empty(t, metadata.GPUs)
-		assert.NotNil(t, metadata.NetworkInterfaces)
-		assert.Empty(t, metadata.NetworkInterfaces)
-		assert.NotNil(t, metadata.InfiniBandInterfaces)
-		assert.Empty(t, metadata.InfiniBandInterfaces)
-		assert.Nil(t, metadata.LifecycleState)
-		assert.NotNil(t, metadata.LldpNeighbors)
-		assert.Empty(t, metadata.LldpNeighbors)
+			assert.Nil(t, metadata.DMIData)
+			assert.Nil(t, metadata.BMCInfo)
+			assert.NotNil(t, metadata.GPUs)
+			assert.Empty(t, metadata.GPUs)
+			assert.NotNil(t, metadata.NetworkInterfaces)
+			assert.Empty(t, metadata.NetworkInterfaces)
+			assert.NotNil(t, metadata.InfiniBandInterfaces)
+			assert.Empty(t, metadata.InfiniBandInterfaces)
+			assert.Equal(t, tc.wantLifecycleState, metadata.LifecycleState)
+			assert.NotNil(t, metadata.LldpNeighbors)
+			assert.Empty(t, metadata.LldpNeighbors)
 
-		payload, err := json.Marshal(metadata)
-		require.NoError(t, err)
-		assert.JSONEq(t, `{
-		"dmiData": null,
-		"bmcInfo": null,
-		"gpus": [],
-		"networkInterfaces": [],
-		"infinibandInterfaces": [],
-		"lifecycleState": null,
-		"lldpNeighbors": []
-	}`, string(payload))
-	})
+			payload, err := json.Marshal(metadata)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.wantJSON, string(payload))
+		})
+	}
 	t.Run("BMC split fields", func(t *testing.T) {
 		cases := []struct {
 			name   string
