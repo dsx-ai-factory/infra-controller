@@ -37,7 +37,8 @@ pub struct BmcState<C: Callbacks> {
     pub(crate) oem_state: redfish::oem::State,
     pub manager: Arc<ManagerState>,
     pub system_state: Arc<SystemState<C>>,
-    pub(crate) chassis_state: Arc<ChassisState>,
+    /// Chassis resources and their application-published power observations.
+    pub chassis_state: Arc<ChassisState>,
     pub(crate) power_equipment: Option<Arc<redfish::power_equipment::Config>>,
     pub update_service_state: Arc<UpdateServiceState>,
     pub account_service_state: Arc<AccountServiceState>,

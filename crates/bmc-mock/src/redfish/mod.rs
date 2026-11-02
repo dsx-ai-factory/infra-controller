@@ -101,7 +101,6 @@ pub(crate) mod schema {
 }
 
 pub(crate) mod account_service;
-mod action_info;
 pub(crate) mod assembly;
 pub(crate) mod bios;
 pub(crate) mod boot_option;

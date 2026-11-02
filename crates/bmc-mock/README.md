@@ -51,28 +51,11 @@ Use relay addresses belonging to the test site's declared networks. This adds
 individual shelves; it does not introduce a full Vera Rubin rack layout.
 The profile omits `Systems`, exposes `PowerEquipment/PowerShelves`, and advertises
 `Chassis.Reset` with `On`, `ForceOn`, and `ForceOff`. It deliberately does not
-invent the legacy Delta OEM `TurnOnPSUs`/`TurnOffPSUs` actions. The power callback
-drives the shelf actor, and reads report its current chassis/PSU commanded state.
+invent the legacy Delta OEM `TurnOnPSUs`/`TurnOffPSUs` actions. A dedicated chassis
+reset callback drives the shelf actor. The actor publishes its current On/Off state
+through `BmcState::chassis_state.set_powered_on`; chassis and PSU reads use that
+resource-owned observation.
 Individual PSU reset and hardware-specific firmware activation are not modeled.
-
-`delta_vrnvl72_3_3_8.tar.gz` is a separate, sanitized GET snapshot in the existing
-Redfish mockup archive format: `redfish/v1/.../index.json`, without an enclosing
-vendor directory. It contains 77 successful responses captured read-only on
-29–30 October 2026. The observed `/Systems` HTTP 404 is preserved by omitting
-that resource. The adjacent manifest records resource hashes, versions, capture
-scope, and exclusions. IP/MAC addresses, hostnames, serials, and UUIDs are synthetic;
-account/session collections, certificates, logs, and write targets were excluded.
-
-For static replay, run from the repository root:
-
-```bash
-cargo run -p bmc-mock -- \
-  --targz crates/bmc-mock/delta_vrnvl72_3_3_8.tar.gz --port 8126
-```
-
-Archive replay is GET-only and does not implement authentication or mutable
-power. Use the generated hardware profile for Machine-a-tron actor behavior;
-use the archive to inspect the recorded resource tree and firmware quirks.
 
 ## Build the libvirt image
 

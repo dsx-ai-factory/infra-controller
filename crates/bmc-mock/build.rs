@@ -49,7 +49,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "NvidiaMetricReport.v1_0_0.NvidiaMetricReport",
         "NvidiaChassis.v1_4_0.NvidiaCBCChassis",
         "NvidiaComputerSystem.v1_0_0.NvidiaComputerSystem",
-        "ActionInfo.ActionInfo",
         "Assembly.Assembly",
         "Assembly.v1_3_0.AssemblyData",
         "Bios.Bios",

@@ -126,6 +126,7 @@ pub use rack_info::RackInfo;
 /// BMC account state and the credential snapshot type used to persist and
 /// restore rotated passwords across a mock rebuild.
 pub use redfish::account_service::AccountServiceState;
+pub use redfish::chassis::ChassisState;
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
@@ -353,10 +354,16 @@ pub trait Callbacks: Send + Sync + 'static {
         std::future::ready(Ok(()))
     }
 
-    /// Current externally owned chassis power: `Some(true)` is on, `Some(false)` is off.
-    /// Returning `None` leaves the hardware profile's initial power observation intact.
-    fn chassis_power_state(&self) -> Option<bool> {
-        None
+    /// Accepts a reset of the configured chassis into the backend's execution path.
+    /// The owning application publishes resulting chassis and PSU observations through
+    /// [`ChassisState::set_powered_on`]. The default rejects unsupported chassis resets.
+    fn chassis_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        std::future::ready(Err(ActionError::BadRequest(eyre::eyre!(
+            "bmc-mock: backend does not support chassis reset {reset_type:?}"
+        ))))
     }
 
     fn state_refresh_indication(&self);

@@ -36,9 +36,9 @@ use crate::mac_address_pool::{
 use crate::machine_info::DpuSettings;
 use crate::redfish::computer_system::SystemState;
 use crate::{
-    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo, HardwareType,
-    HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY,
-    ResourceResetType,
+    ActionError, BmcState, Callbacks, ChassisState, CombinedServer, DeviceEffect, DpuMachineInfo,
+    HardwareType, HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions,
+    POWER_CYCLE_DELAY, ResourceResetType,
 };
 
 pub mod axum_http_client;
@@ -53,7 +53,7 @@ pub struct TestCallbacks {
     pub(crate) refresh_count: AtomicUsize,
     command_received: Notify,
     actor: Mutex<Option<TestActorHandle>>,
-    chassis_power: Mutex<Option<bool>>,
+    pub(crate) chassis_commands: Mutex<Vec<ResourceResetType>>,
 }
 
 #[derive(Debug)]
@@ -69,9 +69,16 @@ impl Drop for TestActorHandle {
 }
 
 #[derive(Debug)]
+enum ResetTarget {
+    ComputerSystem,
+    Chassis,
+}
+
+#[derive(Debug)]
 enum TestMessage {
     Reset {
         reset_type: ResourceResetType,
+        target: ResetTarget,
         reply: oneshot::Sender<Result<(), ActionError>>,
     },
     DeviceEffect {
@@ -91,18 +98,23 @@ struct TestActor {
     /// before it cannot publish `On` afterwards.
     cycle_generation: u64,
     state: Weak<SystemState<TestCallbacks>>,
+    chassis: Weak<ChassisState>,
     callbacks: Weak<TestCallbacks>,
 }
 
 impl TestActor {
     fn publish(&mut self, power_state: PowerState) {
         self.power_state = power_state;
-        if let Some(callbacks) = self.callbacks.upgrade() {
-            *callbacks.chassis_power.lock().unwrap() = match power_state {
-                PowerState::On => Some(true),
-                PowerState::Off => Some(false),
-                _ => None,
-            };
+        if let Some(chassis) = self.chassis.upgrade() {
+            match power_state {
+                PowerState::On => {
+                    chassis.set_powered_on(true);
+                }
+                PowerState::Off => {
+                    chassis.set_powered_on(false);
+                }
+                _ => {}
+            }
         }
         if let Some(state) = self.state.upgrade() {
             state.set_power_state(power_state);
@@ -113,6 +125,7 @@ impl TestActor {
         &mut self,
         mailbox: &ActorMailbox<TestMessage>,
         reset_type: ResourceResetType,
+        target: ResetTarget,
     ) -> Result<(), ActionError> {
         if self.power_cycle_pending {
             return Err(ActionError::BadRequest(eyre::eyre!(
@@ -144,7 +157,10 @@ impl TestActor {
             UnsupportedValue => {}
         }
         if let Some(callbacks) = self.callbacks.upgrade() {
-            callbacks.commands.lock().unwrap().push(reset_type);
+            match target {
+                ResetTarget::ComputerSystem => callbacks.commands.lock().unwrap().push(reset_type),
+                ResetTarget::Chassis => callbacks.chassis_commands.lock().unwrap().push(reset_type),
+            }
             callbacks.command_received.notify_one();
         }
         Ok(())
@@ -183,8 +199,12 @@ impl ActorCallbacks<TestMessage> for TestActor {
         message: TestMessage,
     ) -> ActorResult {
         match message {
-            TestMessage::Reset { reset_type, reply } => {
-                let result = self.reset(mailbox, reset_type);
+            TestMessage::Reset {
+                reset_type,
+                target,
+                reply,
+            } => {
+                let result = self.reset(mailbox, reset_type, target);
                 reply.send(result).ok();
             }
             TestMessage::DeviceEffect { effect, reply } => {
@@ -238,6 +258,7 @@ pub(crate) fn create_test_bmc(
         power_cycle_pending: false,
         cycle_generation: 0,
         state: Arc::downgrade(&state.system_state),
+        chassis: Arc::downgrade(&state.chassis_state),
         callbacks: Arc::downgrade(&callbacks),
     };
     backend.publish(config.power_state);
@@ -266,14 +287,11 @@ impl TestCallbacks {
     }
 }
 
-impl Callbacks for TestCallbacks {
-    fn chassis_power_state(&self) -> Option<bool> {
-        *self.chassis_power.lock().unwrap()
-    }
-
-    async fn computer_system_reset(
+impl TestCallbacks {
+    async fn reset(
         &self,
         reset_type: ResourceResetType,
+        target: ResetTarget,
     ) -> Result<(), ActionError> {
         let (reply, response) = oneshot::channel();
         let mailbox = self
@@ -284,11 +302,28 @@ impl Callbacks for TestCallbacks {
             .map(|actor| actor.mailbox.clone())
             .ok_or_else(|| ActionError::Internal(eyre::eyre!("test power actor is not running")))?;
         mailbox
-            .send(TestMessage::Reset { reset_type, reply })
+            .send(TestMessage::Reset {
+                reset_type,
+                target,
+                reply,
+            })
             .map_err(|error| ActionError::Internal(error.into()))?;
         response
             .await
             .map_err(|error| ActionError::Internal(error.into()))?
+    }
+}
+
+impl Callbacks for TestCallbacks {
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        self.reset(reset_type, ResetTarget::ComputerSystem).await
+    }
+
+    async fn chassis_reset(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.reset(reset_type, ResetTarget::Chassis).await
     }
 
     async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
@@ -571,16 +606,6 @@ pub async fn delta_vrnvl72_powershelf_bmc() -> TestBmcHandle {
         MachineRouterOptions::default(),
     ))
     .await
-}
-
-/// GET-only replay of the sanitized VR Delta PMC 3.3.8 capture.
-/// Authentication and mutable power behavior are not emulated by the archive router.
-#[cfg(test)]
-pub(crate) fn recorded_delta_vrnvl72_3_3_8_router() -> Router {
-    let archive_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("delta_vrnvl72_3_3_8.tar.gz");
-    crate::tar_router::tar_router(crate::tar_router::TarGzOption::Disk(&archive_path), None)
-        .expect("recorded VR Delta archive must be readable")
 }
 
 /// Delta power shelf whose PSUs report the given per-bay on/off states under

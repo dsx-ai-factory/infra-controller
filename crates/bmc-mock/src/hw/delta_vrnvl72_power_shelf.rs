@@ -131,14 +131,18 @@ impl DeltaVrnvl72PowerShelf<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
+    use axum::response::Response;
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
     use crate::test_support::{TestBmcConfig, create_test_bmc, host_info};
-    use crate::{HardwareType, MachineRouterOptions};
+    use crate::{ActionError, Callbacks, HardwareType, MachineRouterOptions, ResourceResetType};
 
     async fn get(router: &Router, path: &str) -> (StatusCode, Value) {
         let response = router
@@ -151,8 +155,37 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    async fn post(router: &Router, path: &str, payload: &str) -> Response {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(payload.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn assert_power(router: &Router, on: bool) {
+        let chassis = get(router, "/redfish/v1/Chassis/PowerShelf_0").await.1;
+        assert_eq!(chassis["PowerState"], if on { "On" } else { "Off" });
+        for bay in 1..=6 {
+            let psu = get(
+                router,
+                &format!("/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/{bay}"),
+            )
+            .await
+            .1;
+            assert_eq!(psu["Oem"]["deltaenergysystems"]["Power"], on, "bay {bay}");
+        }
+    }
+
     #[tokio::test]
-    async fn vr_delta_profile_matches_capture_identity_firmware_and_action_layout() {
+    async fn vr_delta_profile_exposes_inventory_and_supported_actions() {
         let (router, _) = create_test_bmc(
             &host_info(HardwareType::DeltaVrnvl72PowerShelf),
             TestBmcConfig::default(),
@@ -160,7 +193,6 @@ mod tests {
             false,
             MachineRouterOptions::default(),
         );
-        let captured = crate::test_support::recorded_delta_vrnvl72_3_3_8_router();
         let root = get(&router, "/redfish/v1").await.1;
         assert!(root.get("Systems").is_none());
         assert!(root.get("PowerEquipment").is_some());
@@ -168,31 +200,47 @@ mod tests {
             get(&router, "/redfish/v1/Systems").await.0,
             StatusCode::NOT_FOUND
         );
-        for path in [
-            "/redfish/v1/Managers/PMC_0",
-            "/redfish/v1/Chassis/PowerShelf_0",
+        for (path, expected) in [
+            (
+                "/redfish/v1/Managers/PMC_0",
+                json!({"Id":"PMC_0","FirmwareVersion":"3.3.8"}),
+            ),
+            (
+                "/redfish/v1/Chassis/PowerShelf_0",
+                json!({
+                    "Id":"PowerShelf_0", "Model":"AHE54V2037A", "Manufacturer":"DELTA",
+                    "PartNumber":"ECD68000089-B"
+                }),
+            ),
         ] {
             let (status, actual) = get(&router, path).await;
             assert_eq!(status, StatusCode::OK);
-            let recorded = get(&captured, path).await.1;
-            for key in if path.contains("Managers") {
-                vec!["Id", "FirmwareVersion"]
-            } else {
-                vec!["Id", "Model", "Manufacturer"]
-            } {
-                assert_eq!(actual[key], recorded[key], "{path} {key}");
+            for (key, value) in expected.as_object().unwrap() {
+                assert_eq!(&actual[key], value, "{path} {key}");
             }
         }
         let inventory = get(&router, "/redfish/v1/UpdateService/FirmwareInventory")
             .await
             .1;
         assert_eq!(inventory["Members@odata.count"], 9);
+        let mut versions = std::collections::BTreeMap::new();
         for member in inventory["Members"].as_array().unwrap() {
-            let path = member["@odata.id"].as_str().unwrap();
-            let actual = get(&router, path).await.1;
-            let recorded = get(&captured, path).await.1;
-            assert_eq!(actual["Version"], recorded["Version"], "{path}");
+            let actual = get(&router, member["@odata.id"].as_str().unwrap()).await.1;
+            versions.insert(
+                actual["Id"].as_str().unwrap().to_owned(),
+                actual["Version"].as_str().unwrap().to_owned(),
+            );
         }
+        assert_eq!(versions.remove("FW_PMC_primary").as_deref(), Some("3.3.8"));
+        assert_eq!(versions.remove("FW_PMC_alt").as_deref(), Some("3.3.6"));
+        assert_eq!(versions.remove("FW_ERoT_BMC_0").as_deref(), Some("1206"));
+        for bay in 1..=6 {
+            assert_eq!(
+                versions.remove(&format!("FW_PSU_{bay}")).as_deref(),
+                Some("04320409")
+            );
+        }
+        assert!(versions.is_empty());
         let shelf = get(&router, "/redfish/v1/PowerEquipment/PowerShelves/1")
             .await
             .1;
@@ -200,13 +248,17 @@ mod tests {
         assert_eq!(shelf["Manufacturer"], "DELTA");
         assert_eq!(shelf["FirmwareVersion"], "3.3.8");
         assert!(shelf.pointer("/Oem/deltaenergysystems/Actions").is_none());
-        let info = get(&router, "/redfish/v1/Chassis/PowerShelf_0/ResetActionInfo")
-            .await
-            .1;
+        let chassis = get(&router, "/redfish/v1/Chassis/PowerShelf_0").await.1;
+        let reset = &chassis["Actions"]["#Chassis.Reset"];
         assert_eq!(
-            info["Parameters"][0]["AllowableValues"],
+            reset["target"],
+            "/redfish/v1/Chassis/PowerShelf_0/Actions/Chassis.Reset"
+        );
+        assert_eq!(
+            reset["ResetType@Redfish.AllowableValues"],
             json!(["On", "ForceOn", "ForceOff"])
         );
+        assert!(reset.get("@Redfish.ActionInfo").is_none());
         assert_eq!(
             get(&router, "/redfish/v1/PowerEquipment/PowerShelves/missing")
                 .await
@@ -216,7 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chassis_power_updates_all_psus_and_rejects_unadvertised_resets() {
+    async fn chassis_reset_updates_all_psus_and_rejects_unadvertised_resets() {
         let (router, state) = create_test_bmc(
             &host_info(HardwareType::DeltaVrnvl72PowerShelf),
             TestBmcConfig::default(),
@@ -230,53 +282,127 @@ mod tests {
             ("GracefulShutdown", StatusCode::BAD_REQUEST, false),
             ("On", StatusCode::NO_CONTENT, true),
         ] {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/redfish/v1/Chassis/PowerShelf_0/Actions/Chassis.Reset")
-                        .header("Content-Type", "application/json")
-                        .body(Body::from(json!({"ResetType": reset}).to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let response = post(
+                &router,
+                "/redfish/v1/Chassis/PowerShelf_0/Actions/Chassis.Reset",
+                &json!({"ResetType": reset}).to_string(),
+            )
+            .await;
             assert_eq!(response.status(), status, "{reset}");
-            let chassis = get(&router, "/redfish/v1/Chassis/PowerShelf_0").await.1;
-            assert_eq!(chassis["PowerState"], if on { "On" } else { "Off" });
-            for bay in 1..=6 {
-                let psu = get(
-                    &router,
-                    &format!("/redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/{bay}"),
-                )
-                .await
-                .1;
-                assert_eq!(psu["Oem"]["deltaenergysystems"]["Power"], on);
-            }
+            assert_power(&router, on).await;
         }
+        let callbacks = state.callbacks.as_ref().unwrap();
         assert_eq!(
-            state
-                .callbacks
-                .as_ref()
-                .unwrap()
-                .commands
-                .lock()
-                .unwrap()
-                .len(),
-            2
+            callbacks.chassis_commands.lock().unwrap().as_slice(),
+            [ResourceResetType::ForceOff, ResourceResetType::On]
+        );
+        assert!(
+            callbacks.commands.lock().unwrap().is_empty(),
+            "chassis reset must not dispatch computer-system reset"
         );
     }
 
     #[tokio::test]
+    async fn published_chassis_observation_updates_reads_without_reset() {
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::DeltaVrnvl72PowerShelf),
+            TestBmcConfig::default(),
+            "vr-delta".into(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        assert!(state.chassis_state.set_powered_on(false));
+        assert_power(&router, false).await;
+        let callbacks = state.callbacks.as_ref().unwrap();
+        assert!(callbacks.commands.lock().unwrap().is_empty());
+        assert!(callbacks.chassis_commands.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reset_validation_checks_resource_before_payload() {
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::DeltaVrnvl72PowerShelf),
+            TestBmcConfig::default(),
+            "vr-delta".into(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        for (chassis, payload, expected) in [
+            ("missing", "{", StatusCode::NOT_FOUND),
+            ("PowerShelf_0", "{", StatusCode::BAD_REQUEST),
+            ("PowerShelf_0", "{}", StatusCode::BAD_REQUEST),
+        ] {
+            let response = post(
+                &router,
+                &format!("/redfish/v1/Chassis/{chassis}/Actions/Chassis.Reset"),
+                payload,
+            )
+            .await;
+            assert_eq!(response.status(), expected, "{chassis} {payload}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(
+                serde_json::from_slice::<Value>(&body)
+                    .unwrap()
+                    .get("error")
+                    .is_some()
+            );
+        }
+        assert_power(&router, true).await;
+        assert!(
+            state
+                .callbacks
+                .as_ref()
+                .unwrap()
+                .chassis_commands
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chassis_callback_rejects_without_computer_reset_fallback() {
+        #[derive(Default)]
+        struct ComputerResetOnly(AtomicUsize);
+        impl Callbacks for ComputerResetOnly {
+            async fn computer_system_reset(
+                &self,
+                _reset: ResourceResetType,
+            ) -> Result<(), ActionError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn state_refresh_indication(&self) {}
+        }
+        let callbacks = Arc::new(ComputerResetOnly::default());
+        let (router, _) = crate::machine_router(
+            &host_info(HardwareType::DeltaVrnvl72PowerShelf),
+            callbacks.clone(),
+            "unsupported-backend".into(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let response = post(
+            &router,
+            "/redfish/v1/Chassis/PowerShelf_0/Actions/Chassis.Reset",
+            r#"{"ResetType":"ForceOff"}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(callbacks.0.load(Ordering::SeqCst), 0);
+        assert_power(&router, true).await;
+    }
+
+    #[tokio::test]
     async fn legacy_delta_does_not_gain_vr_power_capabilities() {
-        let (router, _) = create_test_bmc(
+        let (router, state) = create_test_bmc(
             &host_info(HardwareType::DeltaPowerShelf),
             TestBmcConfig::default(),
             "legacy-delta".into(),
             false,
             MachineRouterOptions::default(),
         );
+        assert!(!state.chassis_state.set_powered_on(false));
         let root = get(&router, "/redfish/v1").await.1;
         assert!(root.get("PowerEquipment").is_none());
         assert_eq!(
@@ -287,9 +413,13 @@ mod tests {
         assert_eq!(legacy["Model"], "810");
         assert!(legacy.get("Actions").is_none());
         assert_eq!(
-            get(&router, "/redfish/v1/Chassis/chassis/ResetActionInfo")
-                .await
-                .0,
+            post(
+                &router,
+                "/redfish/v1/Chassis/chassis/Actions/Chassis.Reset",
+                "{"
+            )
+            .await
+            .status(),
             StatusCode::NOT_FOUND
         );
     }
