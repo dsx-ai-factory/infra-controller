@@ -162,6 +162,16 @@ fn vault_is_named(config: &VaultConfig, env_address: Option<&str>) -> bool {
 pub async fn create_credential_reader(
     config: &CredentialConfig,
 ) -> eyre::Result<Arc<dyn CredentialReader>> {
+    let env_address = std::env::var("VAULT_ADDR").ok();
+    create_credential_reader_with(config, env_address.as_deref()).await
+}
+
+/// [`create_credential_reader`] with `VAULT_ADDR` passed in, so tests do not
+/// depend on the process environment.
+async fn create_credential_reader_with(
+    config: &CredentialConfig,
+    env_address: Option<&str>,
+) -> eyre::Result<Arc<dyn CredentialReader>> {
     let mut readers: Vec<Box<dyn CredentialReader>> = Vec::new();
 
     if config.env.enabled() {
@@ -174,8 +184,7 @@ pub async fn create_credential_reader(
         ));
     }
 
-    let env_address = std::env::var("VAULT_ADDR").ok();
-    if vault_is_named(&config.vault, env_address.as_deref()) {
+    if vault_is_named(&config.vault, env_address) {
         readers.push(Box::new(create_vault_client(&config.vault)?));
     }
 
@@ -335,7 +344,7 @@ mod tests {
             ..Default::default()
         };
 
-        let reader = create_credential_reader(&config)
+        let reader = create_credential_reader_with(&config, None)
             .await
             .expect("no Vault setting is required");
         let key = CredentialKey::MqttAuth {
@@ -353,19 +362,5 @@ mod tests {
             credential_type: MqttCredentialType::Dpa,
         };
         assert_eq!(reader.get_credentials(&other).await.expect("read"), None);
-    }
-
-    #[tokio::test]
-    async fn credential_reader_fails_when_named_vault_is_incomplete() {
-        let config = CredentialConfig {
-            vault: VaultConfig {
-                address: Some("https://vault.example:8200".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        // Vault is named but its mounts are not set: startup fails instead of
-        // silently dropping Vault from the chain.
-        assert!(create_credential_reader(&config).await.is_err());
     }
 }

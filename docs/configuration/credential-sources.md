@@ -180,7 +180,7 @@ Otherwise it consults, in order, the [environment source](#environment-source), 
 | File | `CARBIDE_CREDENTIALS_FILE_ENABLED=true` and `CARBIDE_CREDENTIALS_FILE_PATH` |
 | Vault | `VAULT_ADDR` |
 
-The consumer builds a Vault client only when `VAULT_ADDR` is set. When it is set, the consumer also requires `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, `VAULT_PKI_ROLE_NAME`, and either a Kubernetes service-account token or `VAULT_TOKEN`; an incomplete Vault configuration fails startup instead of dropping Vault from the chain. If `auth_mode` requires a credential and no source supplies it, startup fails with `Missing MQTT credentials`.
+The consumer builds a Vault client only when `VAULT_ADDR` is set. When it is set, the consumer also requires `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, `VAULT_PKI_ROLE_NAME`, a Vault root CA bundle (`VAULT_CACERT`, default `/var/run/secrets/forge-roots/ca.crt`), and either a Kubernetes service-account token or `VAULT_TOKEN`; an incomplete Vault configuration fails startup instead of dropping Vault from the chain. If `auth_mode` requires a credential and no source supplies it, startup fails with `Missing MQTT credentials`.
 
 To run without Vault, create a Secret whose key holds the file in the [File Source](#file-source) format, and set `credentials.secretName` and `credentials.key` in the `nico-dsx-exchange-consumer` chart. The chart mounts the whole Secret as a directory and sets both file variables. Sites that keep Vault set the `VAULT_*` variables through the chart's `extraEnv`, mount the Vault CA through `extraVolumes` and `extraVolumeMounts`, and change nothing else.
 

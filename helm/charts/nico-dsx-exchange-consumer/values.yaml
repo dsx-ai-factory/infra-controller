@@ -59,7 +59,8 @@ credentials:
 
 ## Extra container environment, volumes, and mounts. A Vault-backed credential
 ## source sets VAULT_ADDR, VAULT_KV_MOUNT_LOCATION, VAULT_PKI_MOUNT_LOCATION,
-## VAULT_PKI_ROLE_NAME, and VAULT_TOKEN here, and mounts the Vault CA.
+## VAULT_PKI_ROLE_NAME, and VAULT_TOKEN here, and mounts the Vault CA bundle
+## that VAULT_CACERT names (default /var/run/secrets/forge-roots/ca.crt).
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
