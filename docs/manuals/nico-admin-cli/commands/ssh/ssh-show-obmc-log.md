@@ -4,7 +4,7 @@
 
 ## NAME
 
-nico-admin-cli-ssh-show-obmc-log - Show the DPUs BMCs OBMC log
+nico-admin-cli-ssh-show-obmc-log - Show the DPU's BMC's OBMC log
 
 ## SYNOPSIS
 
@@ -16,7 +16,7 @@ nico-admin-cli ssh show-obmc-log [--extended]
 
 ## DESCRIPTION
 
-Show the DPUs BMCs OBMC log
+Show the DPU's BMC's OBMC log
 
 ## OPTIONS
 
@@ -40,7 +40,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<BMC_IP_ADDRESS>`
 

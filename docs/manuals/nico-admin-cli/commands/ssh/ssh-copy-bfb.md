@@ -4,7 +4,7 @@
 
 ## NAME
 
-nico-admin-cli-ssh-copy-bfb - Copy BFB to the DPU BMCs RSHIM
+nico-admin-cli-ssh-copy-bfb - Copy BFB to the DPU BMC's RSHIM
 
 ## SYNOPSIS
 
@@ -16,7 +16,7 @@ nico-admin-cli ssh copy-bfb [--extended] [--sort-by]
 
 ## DESCRIPTION
 
-Copy BFB to the DPU BMCs RSHIM
+Copy BFB to the DPU BMC's RSHIM
 
 ## OPTIONS
 
@@ -40,7 +40,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<BMC_IP_ADDRESS>`
 
