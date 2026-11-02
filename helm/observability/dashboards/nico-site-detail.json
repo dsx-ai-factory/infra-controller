@@ -12449,7 +12449,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Objects the explorer created in the last pass.",
+      "description": "Machines and power shelves created in the last Site Explorer run, and whether machine creation is enabled (1) or disabled (0).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -12553,13 +12553,13 @@
           },
           "editorMode": "code",
           "expr": "max(${metric_prefix}_site_explorer_create_machines{job=~\"$job\"})",
-          "legendFormat": "machines queued for creation",
+          "legendFormat": "machine creation enabled (1=yes, 0=no)",
           "range": true,
           "instant": false,
           "refId": "C"
         }
       ],
-      "title": "Inventory created",
+      "title": "Site Explorer creation",
       "type": "timeseries",
       "id": 133
     },

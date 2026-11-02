@@ -22,7 +22,7 @@ import (
 // checks if the BatchInstanceCreateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &BatchInstanceCreateRequest{}
 
-// BatchInstanceCreateRequest Request data to batch create multiple Instances with topology-optimized machine allocation. Explicit interface `ipAddress` values are not supported in batch requests.
+// BatchInstanceCreateRequest Request data to batch create multiple Instances with topology-optimized machine allocation. Explicit interface `ipAddress` values are not supported in batch requests.  The primary `vpcId` must be owned by the Instance Tenant. Shared non-primary Interfaces may select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant only when the caller is a Tenant Admin and the Tenant has effective `crossTenantInterfaceCreation` capability at the Site. Cross-Tenant Subnets remain unsupported, and the capability grants no cross-Tenant discovery or CRUD access. The primary physical Interface rules are the same as single Instance create. Instance-level Network Security Group policy takes precedence on all Interfaces, including cross-Tenant VPC Interfaces.
 type BatchInstanceCreateRequest struct {
 	// Prefix for instance names. Instances will be named with this prefix followed by a random 6-character suffix (e.g., \"worker\" becomes \"worker-abc123\")
 	NamePrefix string `json:"namePrefix"`
@@ -36,9 +36,9 @@ type BatchInstanceCreateRequest struct {
 	InstanceTypeId string `json:"instanceTypeId"`
 	// Optional exact-match selector applied to Machine labels during placement. Property names are arbitrary Machine label keys rather than predefined selector fields. Every supplied key/value pair must match (AND semantics). An omitted or empty object does not restrict placement. The selector constrains placement only; it is not persisted on the created Instances.  A non-empty object requires the Tenant to have effective `targetedInstanceCreation` capability for the selected Site; otherwise the request is rejected with 403. Selection occurs before topology optimization. When `topologyOptimized` is true, all selected Machines must both match the selector and belong to the same NVLink domain. If too few matching Machines are available, the request is rejected with 409.
 	MachineLabelSelector map[string]string `json:"machineLabelSelector,omitempty"`
-	// ID of the VPC the Instances should belong to
+	// ID of the Tenant-owned primary VPC the Instances should belong to
 	VpcId string `json:"vpcId"`
-	// IDs of additional VPCs the Instances should attach to through non-primary interfaces. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, must be valid UUIDs, and must not include the primary `vpcId`.
+	// IDs of additional VPCs every Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
 	SecondaryVpcIds []string `json:"secondaryVpcIds,omitempty"`
 	// User data applied to all instances. Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
 	UserData NullableString `json:"userData,omitempty"`
@@ -46,7 +46,7 @@ type BatchInstanceCreateRequest struct {
 	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
 	// Power profile to apply to every Instance in the batch. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
-	// ID of a Network Security Group to attach to all instances
+	// ID of a Network Security Group to attach to all Instances. This Instance-level policy takes precedence over VPC-level policy on every Interface.
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
 	// Override iPXE script specified in OS, must be specified if Operating System is not specified
 	IpxeScript NullableString `json:"ipxeScript,omitempty"`
@@ -56,7 +56,7 @@ type BatchInstanceCreateRequest struct {
 	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
 	// Key-value objects to be applied to all instances (shared across all instances)
 	Labels map[string]string `json:"labels,omitempty"`
-	// Interface configuration shared across all instances. At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Each batch member is resolved independently and may use a different prefix. Only one network can be attached over a physical interface. Interface `ipAddress` is not supported for batch instance creation requests. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.
+	// Interface configuration shared across all Instances. At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. A non-primary VPC-backed Interface may select a same-Site Ready FNN VPC or VPC Prefix owned by another Tenant only with effective `crossTenantInterfaceCreation`; cross-Tenant Subnets are never supported. Each batch member is resolved independently and may use a different prefix. The primary physical Interface must select the primary VPC. Only one network can be attached over a physical interface. Interface `ipAddress` is not supported for batch instance creation requests. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.
 	Interfaces []InterfaceCreateRequest `json:"interfaces,omitempty"`
 	// When true, asks NICo to auto-resolve each Instance's network interfaces from the host's underlay (HostInband) network segments. Intended for instances on zero-DPU hosts (or hosts with their DPU in NIC mode). When true: (1) the target VPC's `networkVirtualizationType` MUST be `FLAT`, (2) `interfaces` MUST be empty or omitted, and (3) `secondaryVpcIds` MUST be empty or omitted.
 	AutoNetwork *bool `json:"autoNetwork,omitempty"`

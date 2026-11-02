@@ -16,9 +16,9 @@
  */
 
 //! Per-API call gates. Every call the probe makes to one API (nico-api,
-//! nico-rest-api, the metrics store) passes that API's gate, so whatever mix
-//! of readers and latency probes is running, the API never sees more than one
-//! probe call in flight or calls started faster than the configured rate.
+//! nico-rest-api) passes that API's gate, so whatever mix of readers and
+//! latency probes is running, the API never sees more than one probe call in
+//! flight or calls started faster than the configured rate.
 //! Pushback (429, 503, RESOURCE_EXHAUSTED, UNAVAILABLE) widens the spacing
 //! until a call succeeds.
 
@@ -159,7 +159,7 @@ impl CallGate {
         }
     }
 
-    /// The API this gate guards ("nico-api", "nico-rest-api", "metrics-store").
+    /// The API this gate guards ("nico-api", "nico-rest-api").
     pub(crate) fn api(&self) -> &'static str {
         self.api
     }
@@ -321,7 +321,6 @@ impl Drop for InFlight<'_> {
 pub(crate) struct Gates {
     pub nico_api: Arc<CallGate>,
     pub rest: Arc<CallGate>,
-    pub metrics_store: Arc<CallGate>,
 }
 
 impl Gates {
@@ -337,13 +336,12 @@ impl Gates {
         Self {
             nico_api: gate("nico-api"),
             rest: gate("nico-rest-api"),
-            metrics_store: gate("metrics-store"),
         }
     }
 
     /// Counts the calls of every gate in `calls`.
     pub(crate) fn count_calls(&self, calls: &Counter<u64>) {
-        for gate in [&self.nico_api, &self.rest, &self.metrics_store] {
+        for gate in [&self.nico_api, &self.rest] {
             gate.count_calls(calls.clone());
         }
     }

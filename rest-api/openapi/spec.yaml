@@ -114,7 +114,7 @@ tags:
     description: |-
       Tenant Account connects a Tenant with an Infrastructure Provider. It represents/contains any information pertaining to their relationship.
 
-      Provider Admins configure TargetedInstanceCreation for a Tenant using the `siteCapabilities` attribute. An entry with empty or omitted `siteIds` configures the Tenant Account default; entries with `siteIds` configure Tenant Site overrides.
+      Provider Admins configure `targetedInstanceCreation` and `crossTenantInterfaceCreation` for a Tenant using the `siteCapabilities` attribute. An entry with empty or omitted `siteIds` configures Tenant Account defaults; entries with `siteIds` configure Tenant Site overrides. Each capability is replaced independently.
 
       Deprecation history:
 
@@ -809,7 +809,9 @@ paths:
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     siteCapabilities:
-                      - targetedInstanceCreation: true
+                      - siteIds: []
+                        targetedInstanceCreation: true
+                        crossTenantInterfaceCreation: false
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '403':
@@ -879,7 +881,9 @@ paths:
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     siteCapabilities:
-                      - targetedInstanceCreation: true
+                      - siteIds: []
+                        targetedInstanceCreation: true
+                        crossTenantInterfaceCreation: false
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '400':
@@ -893,7 +897,7 @@ paths:
 
         Tenant Admins may accept an invitation sent by an Infrastructure Provider by supplying `tenantContactId`.
 
-        Provider Admins may replace `siteCapabilities` to configure the Tenant Account default and overrides for specific Sites. When `siteCapabilities` is sent, it must be non-empty, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Requests containing both `tenantContactId` and `siteCapabilities` are rejected with 400.
+        Provider Admins may replace one or more capabilities through `siteCapabilities` to configure the Tenant Account default and overrides for specific Sites. When `siteCapabilities` is sent, it must be non-empty, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Requests containing both `tenantContactId` and `siteCapabilities` are rejected with 400.
 
         Org must have a Tenant entity whose ID matches the `tenantId` of the Tenant Account object when accepting an invite. User must have authorization role with `TENANT_ADMIN` suffix to accept; `PROVIDER_ADMIN` suffix to update `siteCapabilities`. Tenant Admins can only update a Tenant Account that has `Invited` status.
       requestBody:
@@ -909,6 +913,7 @@ paths:
                   siteCapabilities:
                     - siteIds: []
                       targetedInstanceCreation: true
+                      crossTenantInterfaceCreation: true
         description: Tenant invite acceptance or Provider Admin site capability update.
     delete:
       summary: Delete Tenant Account
@@ -3300,7 +3305,7 @@ paths:
       description: |-
         Delete a specific VPC by ID.
 
-        Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
+        Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Instance checks include direct and prefix-derived Interface attachments owned by other Tenants. Delete those dependent resources first.
 
         First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
@@ -3383,6 +3388,147 @@ paths:
                   labels:
                     region: us-west-1
                     env: dev
+  '/v2/org/{org}/nico/interface':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Tenant organization
+    get:
+      summary: Retrieve Tenant-visible Interfaces
+      operationId: get-all-interfaces
+      tags:
+        - Interface
+      description: |-
+        Retrieve current, non-deleted REST Interfaces visible to the caller's Tenant. Results include all Interfaces on the caller's Instances, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
+
+        `vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant: true` returns only Interfaces whose Instance and selected VPC or VPC Prefix have different owning Tenants; `false` returns only matching ownership. `instanceTenantId` filters by the Tenant that owns the consuming Instance, and `vpcTenantId` filters by the Tenant that owns the selected VPC or VPC Prefix. Filters compose and may produce an empty result. A valid but inaccessible `vpcId`, `instanceTenantId`, or `vpcTenantId` returns an empty list rather than disclosing resource existence.
+
+        The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. No cross-Tenant creation capability is required to list visible Interfaces. A cross-Tenant result includes non-null `instanceTenantId` and `vpcTenantId`; both are null when the owners match. The response uses the complete Interface representation, including addresses and routing data. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
+
+        Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
+      responses:
+        '200':
+          description: Interfaces visible to the current Tenant
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Interface'
+              examples:
+                direct-and-prefix:
+                  value:
+                    - id: 07cd865e-5512-4fe9-8063-8f4c8f442b1a
+                      vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                      vpcPrefixId: null
+                      instanceId: 37804b21-0a00-4668-81cb-af9e1b07ad3e
+                      instanceTenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                      vpcTenantId: 34f5c98e-f430-457b-a812-92637d0c6fd0
+                      device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
+                      deviceInstance: 1
+                      isPhysical: true
+                      virtualFunctionId: null
+                      macAddress: '02:00:00:00:00:01'
+                      ipAddresses:
+                        - 192.0.2.10
+                      ipPrefixes:
+                        - 192.0.2.0/24
+                      status: Ready
+                      created: '2019-08-24T14:15:22Z'
+                      updated: '2019-08-24T14:15:22Z'
+                    - id: fa84f327-cad4-458b-94b7-c320cdf48d4d
+                      vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                      vpcPrefixId: 915443b6-d164-48d4-89dd-041968e1f9d7
+                      instanceId: bba44e11-facc-4d7f-a2b5-ffdca3935b8b
+                      instanceTenantId: 34f5c98e-f430-457b-a812-92637d0c6fd0
+                      vpcTenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                      device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
+                      deviceInstance: 0
+                      isPhysical: false
+                      virtualFunctionId: 1
+                      status: Provisioning
+                      created: '2019-08-24T14:16:22Z'
+                      updated: '2019-08-24T14:17:22Z'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":2,"orderBy":"CREATED_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: vpcId
+          description: Filter by the selected VPC or the parent VPC of an explicitly selected VPC Prefix
+        - schema:
+            type: boolean
+          in: query
+          name: crossTenant
+          description: Filter by whether the Instance and selected VPC or VPC Prefix have different owning Tenants
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: instanceTenantId
+          description: Filter by the Tenant that owns the consuming Instance, within the caller's visibility boundary
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: vpcTenantId
+          description: Filter by the Tenant that owns the selected VPC or VPC Prefix, within the caller's visibility boundary
+        - schema:
+            $ref: '#/components/schemas/InterfaceStatus'
+          in: query
+          name: status
+          description: Filter Interfaces by status
+        - schema:
+            type: string
+            enum:
+              - Instance
+              - Subnet
+              - VpcPrefix
+          in: query
+          name: includeRelation
+          description: Related entity to expand; repeat the parameter to request multiple relations.
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            default: CREATED_ASC
+            enum:
+              - STATUS_ASC
+              - STATUS_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
+          in: query
+          name: orderBy
+          description: Ordering for pagination query; defaults to `CREATED_ASC`
   '/v2/org/{org}/nico/vpc/{vpcId}/routing-profile':
     parameters:
       - schema:
@@ -8389,6 +8535,8 @@ paths:
                       interfaces:
                         - id: 64d2028c-ae87-4069-a624-66089d957ef9
                           instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                          instanceTenantId: null
+                          vpcTenantId: null
                           subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                           isPhysical: true
                           device: null
@@ -8500,6 +8648,8 @@ paths:
                       interfaces:
                         - id: 07cd865e-5512-4fe9-8063-8f4c8f442b1a
                           instanceId: 37804b21-0a00-4668-81cb-af9e1b07ad3e
+                          instanceTenantId: null
+                          vpcTenantId: null
                           vpcPrefixId: 915443b6-d164-48d4-89dd-041968e1f9d7
                           isPhysical: true
                           virtualFunctionId: null
@@ -8586,6 +8736,8 @@ paths:
                       interfaces:
                         - id: fa84f327-cad4-458b-94b7-c320cdf48d4d
                           instanceId: bba44e11-facc-4d7f-a2b5-ffdca3935b8b
+                          instanceTenantId: null
+                          vpcTenantId: null
                           vpcPrefixId: 915443b6-d164-48d4-89dd-041968e1f9d7
                           isPhysical: true
                           device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
@@ -8599,6 +8751,8 @@ paths:
                           updated: '2019-08-24T14:15:22Z'
                         - id: fa84f327-cad4-458b-94b7-c320cdf48d4d
                           instanceId: bba44e11-facc-4d7f-a2b5-ffdca3935b8b
+                          instanceTenantId: null
+                          vpcTenantId: null
                           vpcPrefixId: 56944877-3bc0-48c9-8290-21f9e0e31eca
                           isPhysical: true
                           device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
@@ -8808,6 +8962,8 @@ paths:
                     interfaces:
                       - id: 64d2028c-ae87-4069-a624-66089d957ef9
                         instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                        instanceTenantId: null
+                        vpcTenantId: null
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         isPhysical: true
                         virtualFunctionId: null
@@ -8878,6 +9034,8 @@ paths:
                     interfaces:
                       - id: 64d2028c-ae87-4069-a624-66089d957ef9
                         instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                        instanceTenantId: null
+                        vpcTenantId: null
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         isPhysical: true
                         virtualFunctionId: null
@@ -9310,6 +9468,8 @@ paths:
                     interfaces:
                       - id: 64d2028c-ae87-4069-a624-66089d957ef9
                         instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                        instanceTenantId: null
+                        vpcTenantId: null
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         isPhysical: true
                         virtualFunctionId: null
@@ -9491,6 +9651,8 @@ paths:
                     interfaces:
                       - id: 64d2028c-ae87-4069-a624-66089d957ef9
                         instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                        instanceTenantId: null
+                        vpcTenantId: null
                         subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                         isPhysical: true
                         virtualFunctionId: null
@@ -9762,6 +9924,8 @@ paths:
                   value:
                     - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                       instanceId: 64d2028c-ae87-4069-a624-66089d957ef9
+                      instanceTenantId: null
+                      vpcTenantId: null
                       subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
                       isPhysical: true
                       virtualFunctionId: null
@@ -9773,6 +9937,8 @@ paths:
                       updated: '2019-08-24T14:15:22Z'
                     - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                       instanceId: d57b373a-5a59-4fa4-b080-50e9a1095aeb
+                      instanceTenantId: null
+                      vpcTenantId: null
                       vpcPrefixId: 26be5f71-3d51-487b-a940-6513c7725cfd
                       isPhysical: true
                       virtualFunctionId: null
@@ -16190,6 +16356,69 @@ paths:
         in: path
         required: true
         description: Component ID or component MAC address
+    get:
+      summary: Get Tray power state
+      operationId: get-tray-power-state
+      description: |-
+        Read actual power, stored desired policy, tracked power actions, and outstanding power tasks for a compute tray, NVLink switch, or power shelf. Accepts the same component ID or BMC/PMC MAC selector as tray inventory. These passive reads retrieve state without issuing power commands.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix in that Org. The Site must belong to that Provider and have the `flow` capability enabled.
+
+        Each section is independent: a failed hardware read does not hide desired policy or outstanding work. A successful `Unknown` hardware observation differs from a null state with an error. Desired policy applies to compute trays; managed switches and shelves report `NotApplicable`. Observations, stored policy, actions and tasks can describe different instants; a `Running` task does not prove hardware dispatch or correlate to an `Active` action.
+
+        Live observations are supported by the Core Redfish compute reader and by RMS for compute trays, switches, and shelves. Standalone hosts (no rack association and no MNNVL capability) use Core's direct Redfish reader; rack-scale hosts use the configured compute reader. Switches and shelves use their configured readers. NSM, PSM, and mock backends report `Unsupported` for live observations; policy, actions, and Flow tasks remain independently available.
+
+        All response fields are present. Null indicates unavailable or inapplicable information as documented on each field; successful empty `actions` and `tasks` lists are arrays with a null `actionsError` or `tasksError`. More than 256 outstanding power tasks across the rack makes `operations.tasks` unavailable with `operations.tasksError: LimitExceeded`, before filtering for this tray. The separate waiting-context limit is 256 nonterminal tasks of all types across the rack; exceeding it sets `waitingContext.error` to `LimitExceeded` while retaining the power tasks.
+
+        Component and rack IDs are external inventory identifiers. Task targets use identities from retained inventory, including soft-deleted rows, at read time; they are not historical copies saved with the task. A component can have moved racks since the task was recorded. A task's unavailable target metadata sets its `rackId` and `targets` to null and reports `targetsError`, preserving the task's other fields and other task rows. Missing metadata from a service or proxy reports `Unsupported`. A successful empty selection is `targets: []` with `targetsError: null`. Internal hardware UUIDs are never substituted for external IDs.
+
+        Flow also limits the encoded proxy response to 1,991,680 bytes; this is not an HTTP response-body limit. When that allowance is exceeded, Flow first clears nonempty waiting-context lists that have no error and sets their `waitingContext.error` to `LimitExceeded`, retaining the power tasks. Empty contexts and existing context errors are unchanged. If the response still exceeds the allowance, successful external target results become null `rackId` and `targets` with `targetsError: LimitExceeded`; missing metadata and existing target errors are unchanged. If the response remains too large, Flow removes the complete task section and reports `operations.tasksError: LimitExceeded`. Target selections are never truncated. If the remaining encoded response is still too large, the request fails with HTTP 429.
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the tray.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tray power state, including independently unavailable sections.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrayPowerState'
+        '400':
+          description: The Org has no Infrastructure Provider, the site selector is invalid, missing, or names a site that does not exist, the component selector is empty, or the selected component type does not support power state reads.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: No tray matches the component ID or MAC address.
+          $ref: '#/components/responses/GenericHttpError'
+        '412':
+          description: Flow is disabled for the Site, or the selector matches multiple trays.
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: The encoded Flow proxy response still exceeds 1,991,680 bytes after the task section is removed. Retrying an unchanged response cannot resolve this limit.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal or dependency failure, including an inventory read deadline reported by Flow.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Flow service or site-agent proxy does not implement the power state read.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned a response without tray power state.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: The Site's Flow service or inventory is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The proxy execution timed out, or the REST caller stopped waiting for it. A deadline reported by Flow itself can instead return HTTP 500.
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Tray
     patch:
       summary: Power control a Tray
       operationId: power-control-tray
@@ -20769,7 +20998,9 @@ components:
               created: '2019-08-24T14:15:22Z'
               updated: '2019-08-24T14:15:22Z'
           siteCapabilities:
-            - targetedInstanceCreation: true
+            - siteIds: []
+              targetedInstanceCreation: true
+              crossTenantInterfaceCreation: false
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
       properties:
@@ -20830,38 +21061,53 @@ components:
         siteCapabilities:
           type: array
           description: |-
-            Provider-scoped TargetedInstanceCreation settings for this Tenant Account. Replaces the deprecated tenant-level capabilities.targetedInstanceCreation attribute.
+            Provider-scoped `targetedInstanceCreation` and `crossTenantInterfaceCreation` settings for this Tenant Account. `targetedInstanceCreation` replaces the deprecated tenant-level `capabilities.targetedInstanceCreation` attribute.
 
-            When present on a Tenant Account response, the array always includes one entry with omitted `siteIds` derived from TenantAccount.config, followed by zero or more entries with `siteIds` for per-site overrides that differ from the account default.
+            The response always begins with one account-default entry whose `siteIds` is empty. Each following entry contains sorted Site IDs whose effective value differs from the account default. A non-null Tenant Site override takes precedence over the account default; a missing override inherits that default.
           minItems: 1
           items:
             $ref: '#/components/schemas/TenantAccountSiteCapability'
     TenantAccountSiteCapability:
       title: TenantAccountSiteCapability
       type: object
-      description: |-
-        TargetedInstanceCreation capability for the Tenant Account default or an explicit Site list.
-
-        Update payloads must satisfy all of the following when siteCapabilities is sent on PATCH:
-        - the siteCapabilities array must contain at least one entry
-        - exactly one entry must omit siteIds or provide an empty siteIds array
-        - each siteId may appear at most once across all entries
-        - every provided siteId must be a valid Site UUID
-        - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
-
-        PATCH uses replace semantics: previously configured per-site overrides whose siteId is omitted from the new payload are cleared.
+      description: Effective Tenant capabilities returned for the Tenant Account default or a group of Sites.
       required:
+        - siteIds
         - targetedInstanceCreation
+        - crossTenantInterfaceCreation
       properties:
         siteIds:
           type: array
-          description: Sites to configure. An omitted or empty array identifies the Tenant Account default entry. Each value must be a valid Site UUID, may appear only once across all siteCapabilities entries in the same request, and must be owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
+          description: Empty for the account-default entry; otherwise the sorted Sites whose effective capability values match this entry.
           items:
             type: string
             format: uuid
         targetedInstanceCreation:
           type: boolean
           description: Whether TargetedInstanceCreation is enabled for the Tenant Account default or listed Sites. When true, Tenant Admins with a Ready Tenant Account on the Site's Infrastructure Provider may create Instances by Machine ID and perform related privileged actions on that Site.
+        crossTenantInterfaceCreation:
+          type: boolean
+          description: Whether cross-Tenant Interface creation is enabled for the Tenant Account default or listed Sites. When true, non-primary Instance Interfaces may select another Tenant's VPC or VPC Prefix on that Site.
+    TenantAccountSiteCapabilityUpdate:
+      title: TenantAccountSiteCapabilityUpdate
+      type: object
+      description: |-
+        Partial capability replacement entry.
+
+        An omitted or empty `siteIds` identifies the single required account-default entry. Every entry must provide at least one recognized capability. A Site entry may specify only capabilities present in the account-default entry.
+      properties:
+        siteIds:
+          type: array
+          description: Sites to configure. An omitted or empty array identifies the account-default entry. Each UUID may appear only once in the request and must identify a Site owned by the Tenant Account's Infrastructure Provider.
+          items:
+            type: string
+            format: uuid
+        targetedInstanceCreation:
+          type: boolean
+          description: Replacement value for TargetedInstanceCreation.
+        crossTenantInterfaceCreation:
+          type: boolean
+          description: Replacement value for cross-Tenant Interface creation.
     TenantAccountStatus:
       title: TenantAccountStatus
       type: string
@@ -20904,15 +21150,17 @@ components:
         Tenant Admins may accept an invite via `tenantContactId` only.
         Requests containing both fields are rejected with 400.
 
-        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
+        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Each entry must provide at least one recognized capability. Capabilities included in the account-default entry are replaced independently; omitted capabilities preserve their existing defaults and overrides. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
       examples:
         - tenantContactId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
         - siteCapabilities:
             - siteIds: []
               targetedInstanceCreation: true
+              crossTenantInterfaceCreation: true
             - siteIds:
                 - 3fa85f64-5717-4562-b3fc-2c963f66afa6
               targetedInstanceCreation: false
+              crossTenantInterfaceCreation: false
       properties:
         tenantContactId:
           type: string
@@ -20922,18 +21170,19 @@ components:
           type: array
           minItems: 1
           description: |-
-            Provider Admin replace payload for TargetedInstanceCreation configuration. Required to be non-empty when sent.
-
-            PATCH uses replace semantics: previously configured per-site overrides whose siteId is omitted from the new payload are cleared.
+            Provider Admin replacement payload for Tenant capability configuration. Required to be non-empty when sent.
 
             Server validation rules:
             - must contain at least one entry
             - must contain exactly one entry with omitted or empty siteIds
+            - every entry must specify at least one recognized capability
+            - a Site entry may specify only capabilities included in the account-default entry
+            - each capability included in the account-default entry is replaced independently; omitted capabilities remain unchanged
             - must not repeat any siteId across entries
             - every provided siteId must be a valid Site UUID
             - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
           items:
-            $ref: '#/components/schemas/TenantAccountSiteCapability'
+            $ref: '#/components/schemas/TenantAccountSiteCapabilityUpdate'
     Site:
       title: Site
       type: object
@@ -24809,6 +25058,8 @@ components:
           interfaces:
             - id: 64d2028c-ae87-4069-a624-66089d957ef9
               instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+              instanceTenantId: null
+              vpcTenantId: null
               subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
               isPhysical: true
               virtualFunctionId: null
@@ -24907,6 +25158,8 @@ components:
           interfaces:
             - id: 64d2028c-ae87-4069-a624-66089d957ef9
               instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+              instanceTenantId: null
+              vpcTenantId: null
               vpcPrefixId: 000bc42b-f946-472e-83d4-ddf7e365e148
               isPhysical: true
               virtualFunctionId: null
@@ -25152,6 +25405,12 @@ components:
     InstanceCreateRequest:
       title: InstanceCreateRequest
       type: object
+      description: |-
+        Request data to create an Instance.
+
+        The primary `vpcId` must be owned by the Instance Tenant. Additional Interfaces may select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant only when the caller is a Tenant Admin and the Instance Tenant has effective `crossTenantInterfaceCreation` capability at the Instance Site. The capability does not authorize cross-Tenant Subnet selectors or grant cross-Tenant VPC or VPC Prefix discovery or CRUD access.
+
+        The primary physical Interface must select the primary `vpcId`, directly or through one of its VPC Prefixes. When device metadata is present, the primary physical Interface is the PF with `deviceInstance: 0`; a VF with `deviceInstance: 0` is not primary. Legacy requests without device metadata use the first physical Interface. Instance-level Network Security Group policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
       examples:
         - name: spark-monitor-1
           description: Node for monitoring Spark
@@ -25284,7 +25543,6 @@ components:
           sshKeyGroupIds:
             - a7bf2f9c-12f0-4673-be47-12be6d9e16c8
           allowUnhealthyMachine: true
-      description: Request data to create Instance
       properties:
         name:
           type: string
@@ -25321,11 +25579,11 @@ components:
         vpcId:
           type: string
           format: uuid
-          description: ID of the VPC the Instance should belong to
+          description: ID of the primary VPC the Instance belongs to. It must be owned by the Instance Tenant.
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: IDs of additional VPCs the Instance should attach to through non-primary interfaces. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, must be valid UUIDs, and must not include the primary `vpcId`.
+          description: IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
@@ -25350,7 +25608,7 @@ components:
           type:
             - string
             - 'null'
-          description: 'ID of the desired Network Security Group to attach to the Instance'
+          description: ID of the desired Network Security Group to attach to the Instance. Instance-level policy takes precedence over VPC-level policy on every Interface, including Interfaces attached to another Tenant's VPC.
         ipxeScript:
           type:
             - string
@@ -25367,7 +25625,7 @@ components:
           description: 'User-defined key-value labels'
         interfaces:
           type: array
-          description: 'At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Only one network can be attached over a physical interface. If only one Subnet is specified, it will be attached over a physical interface regardless of `isPhysical`. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
+          description: 'At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. A non-primary VPC-backed Interface may select a same-Site Ready FNN VPC or VPC Prefix owned by another Tenant only with effective `crossTenantInterfaceCreation`; cross-Tenant Subnets are never supported. The primary physical Interface must select the Instance Tenant-owned primary VPC. Only one network can be attached over a physical interface. If only one Subnet is specified, it will be attached over a physical interface regardless of `isPhysical`. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
           items:
             $ref: '#/components/schemas/InterfaceCreateRequest'
         autoNetwork:
@@ -25410,7 +25668,10 @@ components:
     BatchInstanceCreateRequest:
       title: BatchInstanceCreateRequest
       type: object
-      description: Request data to batch create multiple Instances with topology-optimized machine allocation. Explicit interface `ipAddress` values are not supported in batch requests.
+      description: |-
+        Request data to batch create multiple Instances with topology-optimized machine allocation. Explicit interface `ipAddress` values are not supported in batch requests.
+
+        The primary `vpcId` must be owned by the Instance Tenant. Shared non-primary Interfaces may select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant only when the caller is a Tenant Admin and the Tenant has effective `crossTenantInterfaceCreation` capability at the Site. Cross-Tenant Subnets remain unsupported, and the capability grants no cross-Tenant discovery or CRUD access. The primary physical Interface rules are the same as single Instance create. Instance-level Network Security Group policy takes precedence on all Interfaces, including cross-Tenant VPC Interfaces.
       examples:
         - namePrefix: gpu-worker
           count: 4
@@ -25496,11 +25757,11 @@ components:
         vpcId:
           type: string
           format: uuid
-          description: ID of the VPC the Instances should belong to
+          description: ID of the Tenant-owned primary VPC the Instances should belong to
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: IDs of additional VPCs the Instances should attach to through non-primary interfaces. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, must be valid UUIDs, and must not include the primary `vpcId`.
+          description: IDs of additional VPCs every Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
@@ -25526,7 +25787,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: ID of a Network Security Group to attach to all instances
+          description: ID of a Network Security Group to attach to all Instances. This Instance-level policy takes precedence over VPC-level policy on every Interface.
         ipxeScript:
           type:
             - string
@@ -25543,7 +25804,7 @@ components:
           description: 'Key-value objects to be applied to all instances (shared across all instances)'
         interfaces:
           type: array
-          description: 'Interface configuration shared across all instances. At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Each batch member is resolved independently and may use a different prefix. Only one network can be attached over a physical interface. Interface `ipAddress` is not supported for batch instance creation requests. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
+          description: 'Interface configuration shared across all Instances. At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. A non-primary VPC-backed Interface may select a same-Site Ready FNN VPC or VPC Prefix owned by another Tenant only with effective `crossTenantInterfaceCreation`; cross-Tenant Subnets are never supported. Each batch member is resolved independently and may use a different prefix. The primary physical Interface must select the primary VPC. Only one network can be attached over a physical interface. Interface `ipAddress` is not supported for batch instance creation requests. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
           items:
             $ref: '#/components/schemas/InterfaceCreateRequest'
         autoNetwork:
@@ -25589,6 +25850,12 @@ components:
     InstanceUpdateRequest:
       title: InstanceUpdateRequest
       type: object
+      description: |-
+        Request data to update an Instance.
+
+        A complete `interfaces` replacement may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant on a non-primary Interface only while the Instance Tenant has effective `crossTenantInterfaceCreation` capability at the Site. Revoking the capability does not detach existing Interfaces: an update without `interfaces`, an unchanged complete `interfaces` replacement, an `interfaces` replacement that removes cross-Tenant Interfaces, and Instance deletion remain allowed. Adding a cross-Tenant Interface, retargeting one to another cross-Tenant VPC or VPC Prefix, or changing its identity returns 403 after revocation.
+
+        The Tenant-owned primary VPC and primary physical Interface rules remain enforced, and cross-Tenant Subnets remain unsupported. The capability does not grant cross-Tenant VPC or VPC Prefix discovery or CRUD access. Instance-level Network Security Group policy continues to take precedence over VPC-level policy on all Interfaces.
       examples:
         - name: spark-monitor-1
           description: Spark Monitor Node 1
@@ -25659,7 +25926,6 @@ components:
         - triggerReboot: true
           rebootWithCustomIpxe: true
           applyUpdatesOnReboot: true
-      description: Request data to update Instance
       properties:
         name:
           type:
@@ -25709,7 +25975,7 @@ components:
           type:
             - string
             - 'null'
-          description: 'ID of the Network Security Group to attach to the Instance'
+          description: ID of the Network Security Group to attach to the Instance. This Instance-level policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
         powerProfile:
           type:
             - string
@@ -25736,13 +26002,13 @@ components:
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: IDs of additional VPCs the Instance should attach to through non-primary interfaces. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, must be valid UUIDs, and must not include the primary `vpcId`.
+          description: Complete IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
         interfaces:
           type: array
-          description: 'Complete updated Interface configuration for the Instance. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
+          description: 'Complete updated Interface configuration for the Instance. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Adding or retargeting a cross-Tenant Interface requires effective `crossTenantInterfaceCreation`; unchanged and removed cross-Tenant Interfaces do not. Cross-Tenant Subnets remain unsupported, and the primary physical Interface must still select the Instance Tenant-owned primary VPC. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
           items:
             $ref: '#/components/schemas/InterfaceCreateRequest'
         autoNetwork:
@@ -25760,7 +26026,7 @@ components:
             - array
             - 'null'
           maxItems: 64
-          description: 'Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Removing attachments from a running Instance immediately stops SpectrumX traffic on the detached NICs, but the guest may retain their IPv4 addresses and routes until the DHCP lease issued by the DOCA Weave DHCP agent expires (1 hour by default). NICo does not set this lease duration. Addresses and routes may remain longer if the guest DHCP client does not honor lease expiry. Replacing attachments on a running Instance, such as moving a NIC to a Partition with a different VNI, may leave the guest using its old address until DHCP renewal. Renew DHCP or restart networking on the affected NICs after replacing attachments.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
@@ -25826,9 +26092,18 @@ components:
     Interface:
       title: Interface
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - instanceTenantId
+        - vpcTenantId
+      required:
+        - instanceTenantId
+        - vpcTenantId
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           instanceId: 64d2028c-ae87-4069-a624-66089d957ef9
+          instanceTenantId: null
+          vpcTenantId: null
           subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
           isPhysical: true
           virtualFunctionId: null
@@ -25840,6 +26115,8 @@ components:
           updated: '2019-08-24T14:15:22Z'
         - id: 94c4c8c0-c3c4-4a52-9518-3e165b1de036
           instanceId: 371ddf80-a7ff-4ff6-9a37-0557cec8b9be
+          instanceTenantId: f97df110-f4de-492e-8849-4a6af68026b0
+          vpcTenantId: 34f5c98e-f430-457b-a812-92637d0c6fd0
           vpcPrefixId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
           requestedIpAddress: 10.0.0.191
           isPhysical: true
@@ -25854,6 +26131,8 @@ components:
           updated: '2019-08-24T14:15:22Z'
         - id: 4c53d2f4-2a51-4ac5-90c9-87ad215c5091
           instanceId: 371ddf80-a7ff-4ff6-9a37-0557cec8b9be
+          instanceTenantId: null
+          vpcTenantId: null
           vpcId: bdd3d1af-b4a8-4675-a59c-56548716ef45
           ipFamilies:
             - IPv4
@@ -25870,6 +26149,8 @@ components:
           updated: '2019-08-24T14:15:22Z'
         - id: 45d89d4f-2dde-4fc5-a20d-9f96faa4e9fa
           instanceId: 371ddf80-a7ff-4ff6-9a37-0557cec8b9be
+          instanceTenantId: null
+          vpcTenantId: null
           vpcPrefixId: d89d8cc6-d66e-4bf2-bf62-40238837cc90
           requestedIpAddress: 10.0.0.193
           isPhysical: false
@@ -25884,6 +26165,8 @@ components:
           updated: '2019-08-24T14:15:22Z'
         - id: 236ee9d1-5f61-4aaa-abf3-0f72693e1189
           instanceId: 371ddf80-a7ff-4ff6-9a37-0557cec8b9be
+          instanceTenantId: null
+          vpcTenantId: null
           vpcPrefixId: d5dd56e2-1b0b-4913-927e-b5896d7aca7b
           requestedIpAddress: 10.0.0.195
           isPhysical: true
@@ -25907,6 +26190,20 @@ components:
           type: string
           description: 'ID of the associated Instance'
           format: uuid
+        instanceTenantId:
+          type:
+            - string
+            - 'null'
+          description: ID of the Tenant that owns the associated Instance when it differs from the selected VPC or VPC Prefix owner; null when the owners match
+          format: uuid
+          readOnly: true
+        vpcTenantId:
+          type:
+            - string
+            - 'null'
+          description: ID of the Tenant that owns the selected VPC or VPC Prefix when it differs from the Instance owner; null when the owners match
+          format: uuid
+          readOnly: true
         subnetId:
           type:
             - string
@@ -26044,6 +26341,8 @@ components:
         If the VPC specified in the request has FNN virtualization type, all interfaces must specify either `vpcPrefixId` or `vpcId`.
 
         If the VPC has Ethernet network virtualization type then all interfaces must specify Subnet.
+
+        On Instance create, update, and batch create, a non-primary Interface may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant only when the consuming Tenant has effective `crossTenantInterfaceCreation`. Cross-Tenant Subnet selectors are unsupported. The primary physical Interface must select the consuming Tenant's primary VPC; with device metadata this is the PF whose `deviceInstance` is `0`, while legacy requests use the first PF.
       properties:
         subnetId:
           type: string
@@ -26051,11 +26350,11 @@ components:
           format: uuid
         vpcPrefixId:
           type: string
-          description: 'ID of the VPC Prefix to attach to the Interface'
+          description: ID of the explicit VPC Prefix to attach to the Interface. A VPC Prefix ID owned by another Tenant must be obtained out of band and requires effective `crossTenantInterfaceCreation`.
           format: uuid
         vpcId:
           type: string
-          description: ID of the VPC from which the Controller should select a prefix. `ipFamilies` must also be specified, and `ipAddress` cannot be specified.
+          description: ID of the VPC from which the Controller should select a prefix. `ipFamilies` must also be specified, and `ipAddress` cannot be specified. A VPC ID owned by another Tenant must be obtained out of band and requires effective `crossTenantInterfaceCreation`.
           format: uuid
         ipFamilies:
           type: array
@@ -27205,6 +27504,550 @@ components:
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
             maintenance.
+    TrayPowerState:
+      title: TrayPowerState
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - id
+        - rackId
+      description: Power information for one tray, using external inventory identifiers. Readable by MAC before a managed
+        component ID exists; unavailable IDs are null without an internal UUID or MAC fallback.
+      required:
+        - id
+        - type
+        - rackId
+        - actual
+        - desired
+        - operations
+      properties:
+        id:
+          type:
+          - string
+          - 'null'
+          description: External inventory component ID, matching the tray's ID. Null until the inventory member has a
+            managed Core identity or when the service or proxy does not supply the ID.
+        type:
+          type: string
+          description: Tray type; `Unknown` is reserved for an unrecognized service value.
+          enum:
+          - Compute
+          - NVSwitch
+          - PowerShelf
+          - Unknown
+        rackId:
+          type:
+          - string
+          - 'null'
+          description: External inventory ID of the tray's assigned rack, including a retained soft-deleted rack.
+            Null without rack assignment, when its external identity cannot be read, or when the service or proxy
+            does not supply the ID.
+        actual:
+          $ref: '#/components/schemas/PowerObservation'
+        desired:
+          $ref: '#/components/schemas/PowerPolicy'
+        operations:
+          $ref: '#/components/schemas/PowerOperations'
+      example:
+        id: null
+        type: NVSwitch
+        rackId: rack-01
+        actual:
+          state: null
+          source: null
+          observed: null
+          error: NotLinked
+        desired:
+          status: Unavailable
+          state: null
+          error: NotLinked
+        operations:
+          actions: []
+          actionsError: NotLinked
+          tasks: []
+          tasksError: null
+    PowerObservation:
+      title: PowerObservation
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - state
+        - source
+        - observed
+        - error
+      description: A live hardware observation or a categorized failure. Explicit `Unknown` is a successful observation.
+        An observation state this API cannot represent reports `Unsupported`. A present observation without a required
+        state or error outcome reports `InvalidResponse`.
+      required:
+        - state
+        - source
+        - observed
+        - error
+      properties:
+        state:
+          type:
+          - string
+          - 'null'
+          description: Observed state, or null if the read failed or the service cannot represent the state.
+          enum:
+          - Unknown
+          - 'On'
+          - 'Off'
+          - PoweringOn
+          - PoweringOff
+          - Paused
+          - Reset
+          - null
+        source:
+          type:
+          - string
+          - 'null'
+          description: Selected hardware reader. Null before backend selection or when the source is unavailable.
+          enum:
+          - Redfish
+          - RMS
+          - null
+        observed:
+          type:
+          - string
+          - 'null'
+          description: NICo receipt time, not a device timestamp; null without an observation.
+          format: date-time
+        error:
+          $ref: '#/components/schemas/PowerReadError'
+      example:
+        state: 'On'
+        source: RMS
+        observed: '2026-10-07T18:00:02Z'
+        error: null
+    PowerPolicy:
+      title: PowerPolicy
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - state
+        - error
+      description: Stored compute policy, independent of hardware reads. `Unavailable` means the policy or managed target
+        was not found; it does not prove an intentionally absent policy.
+        A policy status or state this API cannot represent reports `Unsupported`. An `Available` policy without a required
+        state reports `InvalidResponse`.
+      required:
+        - status
+        - state
+        - error
+      properties:
+        status:
+          type: string
+          description: '`Available` includes disabled power management. `NotApplicable` applies to managed switches and shelves.
+            `Unavailable` also accompanies section errors.'
+          enum:
+          - Available
+          - Unavailable
+          - NotApplicable
+        state:
+          type:
+          - string
+          - 'null'
+          description: Stored policy when `Available`; null otherwise. `PowerManagerDisabled` is a policy, not missing information.
+          enum:
+          - 'On'
+          - 'Off'
+          - PowerManagerDisabled
+          - null
+        error:
+          $ref: '#/components/schemas/PowerReadError'
+      example:
+        status: NotApplicable
+        state: null
+        error: null
+    PowerOperations:
+      title: PowerOperations
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - actionsError
+        - tasksError
+      description: Tracked maintenance actions and outstanding power tasks, without an inferred relationship between
+        them. Each list is read separately and has its own error, so one list can be unavailable while the other is
+        returned.
+      required:
+        - actions
+        - actionsError
+        - tasks
+        - tasksError
+      properties:
+        actions:
+          type: array
+          description: At most two explicit tracked power-maintenance actions, `Active` before `Pending`. Empty with a null
+            `actionsError` means no tracked maintenance; direct power dispatch and power steps inside other workflows are
+            not tracked here. Always empty when `actionsError` is set.
+          items:
+            $ref: '#/components/schemas/PowerAction'
+        actionsError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Why `actions` couldn't be read, or null when the read succeeded. It never describes an individual
+            action.
+        tasks:
+          type: array
+          description: Outstanding power tasks for the current Flow rack that explicitly select this tray, plus tasks
+            selecting a shelf in this tray's current rack that can affect this tray. Ordered by creation time then task
+            UUID ascending. Former-rack tasks and execution reports are excluded; non-power tasks appear only as brief
+            waiting-context references. Always empty when `tasksError` is set.
+          items:
+            $ref: '#/components/schemas/PowerTask'
+        tasksError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Why `tasks` couldn't be read, or null when the read succeeded. It never describes an individual
+            task; each task reports its own `status` and `targetsError`. A missing rack makes the list unavailable. More
+            than 256 outstanding power tasks across the rack, before filtering for this tray, reports `LimitExceeded`. To
+            fit the encoded proxy response allowance, Flow removes optional waiting-context references first, then
+            external target information with a per-task `targetsError` of `LimitExceeded`. If the response is still too
+            large, `tasks` is emptied and this reports `LimitExceeded`; refer to the endpoint description.
+      example:
+        actions: []
+        actionsError: null
+        tasks: []
+        tasksError: null
+    PowerAction:
+      title: PowerAction
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - requested
+        - initiator
+        - graceful
+        - chassisId
+      description: Saved Core maintenance; no stable action ID, Flow task correlation ID or execution-start time is
+        available.
+      required:
+        - status
+        - operation
+        - requested
+        - initiator
+        - graceful
+        - chassisId
+      properties:
+        status:
+          type: string
+          description: '`Active` means admitted maintenance, not hardware dispatch. `Pending` is a distinct saved request,
+            without a promise of admission. `Unknown` represents an unrecognized service value.'
+          enum:
+          - Active
+          - Pending
+          - Unknown
+        operation:
+          type: string
+          description: Recorded operation. `Reset` does not preserve the original graceful/forced/AC-cycle distinction.
+          enum:
+          - PowerOn
+          - PowerOff
+          - Reset
+          - ChassisReset
+          - Unknown
+        requested:
+          type:
+          - string
+          - 'null'
+          description: Saved submission time, not admission/start time; null for legacy admitted requests without metadata.
+          format: date-time
+        initiator:
+          type:
+          - string
+          - 'null'
+          description: Saved initiator, including an explicitly empty string; null when unavailable.
+        graceful:
+          type:
+          - boolean
+          - 'null'
+          description: 'Present for `PowerOff` only: true is graceful, false is forced. Null for other operations.'
+        chassisId:
+          type:
+          - string
+          - 'null'
+          description: Recorded Redfish chassis identifier for `ChassisReset`, otherwise null.
+      example:
+        status: Active
+        operation: PowerOff
+        requested: '2026-10-07T18:00:02Z'
+        initiator: admin
+        graceful: true
+        chassisId: null
+    PowerTask:
+      title: PowerTask
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - rackId
+        - targets
+        - targetsError
+        - created
+        - updated
+        - started
+        - waitingContext
+      description: Power task metadata with external target identities from retained inventory at read time, including
+        soft-deleted rows. An identity lookup failure leaves the task's other fields and other task rows available.
+      required:
+        - id
+        - rackId
+        - operation
+        - overrideReadinessCheck
+        - targets
+        - targetsError
+        - status
+        - created
+        - updated
+        - started
+        - relevance
+        - waitingContext
+      properties:
+        id:
+          type: string
+          description: Flow-generated task UUID, usable with the existing task APIs.
+          format: uuid
+        rackId:
+          type:
+          - string
+          - 'null'
+          description: External inventory ID of the task's recorded rack. Null together with targets when targetsError
+            is non-null; never falls back to an internal rack UUID.
+        operation:
+          type: string
+          description: Requested Flow power operation, kept separate from the operation Core stores.
+          enum:
+          - PowerOn
+          - ForcePowerOn
+          - PowerOff
+          - ForcePowerOff
+          - Restart
+          - ForceRestart
+          - WarmReset
+          - ColdReset
+          - Unknown
+        overrideReadinessCheck:
+          type: boolean
+          description: Whether the task bypasses the component readiness gate when it executes.
+        targets:
+          x-go-required-nullable: true
+          type:
+          - array
+          - 'null'
+          description: Complete recorded selection grouped by type, using external inventory IDs available at read time.
+            Null with targetsError when any external target metadata is unavailable; an empty array with no error means
+            an explicitly empty selection. Groups follow Flow's component-type name order; IDs retain recorded UUID order,
+            including repeated external IDs. IDs are not sorted by their external values or deduplicated across types.
+          items:
+            $ref: '#/components/schemas/PowerTaskTargetGroup'
+        targetsError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Null when rackId and the complete target selection are available. Missing metadata reports
+            `Unsupported`; missing, empty, or purged inventory identities report `NotLinked`. Malformed metadata reports
+            `InvalidResponse`; lookup failures retain their error category. `LimitExceeded` means the recorded target
+            identifiers alone exceed the proxy response allowance, or external metadata was removed to meet that allowance.
+            Any error makes rackId and targets null, without removing the task or returning a partial selection.
+        status:
+          type: string
+          description: '`Pending` includes Flow `Waiting` and admitted `Pending`; `Running` does not prove hardware dispatch.
+            `Unknown` represents an unrecognized service value.'
+          enum:
+          - Pending
+          - Running
+          - Unknown
+          - Succeeded
+          - Failed
+          - Terminated
+        created:
+          type:
+          - string
+          - 'null'
+          description: Task creation time; null if the service did not supply a usable timestamp.
+          format: date-time
+        updated:
+          type:
+          - string
+          - 'null'
+          description: Last recorded task update time; null if unavailable.
+          format: date-time
+        started:
+          type:
+          - string
+          - 'null'
+          description: Recorded execution start; null until recorded.
+          format: date-time
+        relevance:
+          type: string
+          description: '`Selected` means a recorded target; `RackAffected` means the task selects a shelf in this tray''s
+            current rack and can affect this tray without selecting it.'
+          enum:
+          - Selected
+          - RackAffected
+          - Unknown
+        waitingContext:
+          oneOf:
+          - $ref: '#/components/schemas/PowerTaskWaitingContext'
+          - type: 'null'
+          description: Present for every Flow `Waiting` task, which reports public status `Pending`, and null for every
+            other task. When an older service doesn't supply the context, both lists are empty and `error` is
+            `Unsupported`. Neither list establishes a definitive blocker, queue position or future execution order.
+      example:
+        id: 550e8400-e29b-41d4-a716-446655440000
+        rackId: rack-01
+        operation: PowerOn
+        overrideReadinessCheck: false
+        targets:
+        - type: Compute
+          componentIds:
+          - z-compute
+          - a-compute
+        targetsError: null
+        status: Pending
+        created: '2026-10-07T18:00:02Z'
+        updated: '2026-10-07T18:00:02Z'
+        started: null
+        relevance: Selected
+        waitingContext:
+          activeConflicts:
+          - id: 02583c20-fb2a-4ee2-ae39-ed621ed7be3b
+            type: FirmwareControl
+            status: Running
+          earlierWaiting: []
+          error: null
+    PowerTaskTargetGroup:
+      title: PowerTaskTargetGroup
+      type: object
+      description: One recorded component-type selection expressed as external IDs from retained inventory at read time,
+        including soft-deleted rows. These IDs are not historical copies saved with the task.
+      required:
+        - type
+        - componentIds
+      properties:
+        type:
+          type: string
+          description: Recorded component type. A mixed task can select component types beyond those supported as the
+            requested power tray.
+          enum:
+          - CDU
+          - Compute
+          - NVSwitch
+          - PowerShelf
+          - TORSwitch
+          - UMS
+        componentIds:
+          type: array
+          description: External inventory component IDs in recorded selection order. A component can have moved racks
+            since the task was recorded. Repeated IDs remain present; IDs are not sorted by external value.
+          items:
+            type: string
+            description: External inventory component ID; never an internal hardware UUID fallback.
+      example:
+        type: Compute
+        componentIds:
+        - z-compute
+        - a-compute
+    PowerTaskWaitingContext:
+      title: PowerTaskWaitingContext
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - error
+      description: Scheduling context evaluated once per rack. Present empty lists with no error mean evaluation succeeded
+        with no matching work. Neither list establishes a definitive blocker, queue position or future execution order.
+        More than 256 nonterminal tasks of all types across the rack makes this context unavailable with `LimitExceeded`
+        while retaining primary power tasks. This count limit is independent of the rack power-task limit.
+        The encoded proxy response allowance can also clear nonempty context lists and set the context error to
+        `LimitExceeded` before removing external target information or primary power tasks. Empty contexts and existing
+        context errors are unchanged; refer to the endpoint description for the fallback order.
+      required:
+        - activeConflicts
+        - earlierWaiting
+        - error
+      properties:
+        activeConflicts:
+          type: array
+          description: '`Pending` or `Running` tasks that conflict under the current scheduler rule, ordered by creation
+            time then UUID.'
+          items:
+            $ref: '#/components/schemas/TaskSummary'
+        earlierWaiting:
+          type: array
+          description: All strictly earlier `Waiting` tasks in this rack, ordered by creation time then UUID. They can
+            delay promotion without directly conflicting with this task.
+          items:
+            $ref: '#/components/schemas/TaskSummary'
+        error:
+          $ref: '#/components/schemas/PowerReadError'
+      example:
+        activeConflicts:
+        - id: 550e8400-e29b-41d4-a716-446655440000
+          type: FirmwareControl
+          status: Running
+        earlierWaiting: []
+        error: null
+    TaskSummary:
+      title: TaskSummary
+      type: object
+      description: Brief metadata for an active conflicting task or an earlier waiting task, including non-power tasks;
+        no reports or targets are exposed here.
+      required:
+        - id
+        - type
+        - status
+      properties:
+        id:
+          type: string
+          description: Flow-generated task UUID.
+          format: uuid
+        type:
+          type: string
+          description: Task type, which can be non-power work such as `BringUp`. `Unknown` represents an unrecognized
+            service value.
+          enum:
+          - PowerControl
+          - FirmwareControl
+          - BringUp
+          - Decommission
+          - InjectExpectation
+          - Unknown
+        status:
+          type: string
+          description: Public task status; Flow `Waiting` maps to `Pending`.
+          enum:
+          - Pending
+          - Running
+          - Unknown
+          - Succeeded
+          - Failed
+          - Terminated
+      example:
+        id: 550e8400-e29b-41d4-a716-446655440000
+        type: FirmwareControl
+        status: Running
+    PowerReadError:
+      title: PowerReadError
+      type:
+        - string
+        - 'null'
+      description: Null on success. `NotLinked` means a required managed identity, rack assignment, or retained external
+        inventory identity is absent; `NotConfigured` means no provider client; `Unsupported` includes services or proxies
+        that omit a section, external target metadata or waiting context, or observation states and policy statuses or states this API cannot
+        represent. `InvalidResponse` means unusable dependency data, including a present observation without a required
+        outcome or an `Available` policy without a required state.
+        Other categories distinguish missing managed targets, disabled readers, unavailable endpoints or credentials,
+        missing observations, deadlines, read failures and exceeded limits.
+      enum:
+        - NotLinked
+        - NotConfigured
+        - Unsupported
+        - DeadlineExceeded
+        - ReadFailed
+        - InvalidResponse
+        - LimitExceeded
+        - NotFound
+        - Disabled
+        - EndpointUnavailable
+        - CredentialsUnavailable
+        - NoObservation
+        - null
+      example: Unsupported
     BatchUpdateTrayPowerStateRequest:
       title: BatchUpdateTrayPowerStateRequest
       type: object

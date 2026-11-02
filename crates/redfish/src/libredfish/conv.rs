@@ -164,12 +164,12 @@ pub fn bmc_vendor(r: libredfish::model::service_root::RedfishVendor) -> BMCVendo
         RedfishVendor::Hpe => BMCVendor::Hpe,
         RedfishVendor::Lenovo => BMCVendor::Lenovo,
         RedfishVendor::LenovoAMI | RedfishVendor::LenovoGB300 => BMCVendor::LenovoAMI,
+        RedfishVendor::GigaComputingAMI => BMCVendor::GigaComputing,
         RedfishVendor::LiteOnPowerShelf => BMCVendor::Liteon,
         RedfishVendor::DeltaPowerShelf => BMCVendor::Delta,
         RedfishVendor::Supermicro => BMCVendor::Supermicro,
         RedfishVendor::Sushy => BMCVendor::Sushy,
-        // NICo has no dedicated Giga Computing vendor category.
-        RedfishVendor::GigaComputingAMI | RedfishVendor::Unknown => BMCVendor::Unknown,
+        RedfishVendor::Unknown => BMCVendor::Unknown,
     }
 }
 
@@ -225,11 +225,11 @@ mod tests {
                 RedfishVendor::Lenovo => BMCVendor::Lenovo,
                 RedfishVendor::LenovoAMI => BMCVendor::LenovoAMI,
                 RedfishVendor::LenovoGB300 => BMCVendor::LenovoAMI,
+                RedfishVendor::GigaComputingAMI => BMCVendor::GigaComputing,
                 RedfishVendor::LiteOnPowerShelf => BMCVendor::Liteon,
                 RedfishVendor::DeltaPowerShelf => BMCVendor::Delta,
                 RedfishVendor::Supermicro => BMCVendor::Supermicro,
                 RedfishVendor::Sushy => BMCVendor::Sushy,
-                RedfishVendor::GigaComputingAMI => BMCVendor::Unknown,
                 RedfishVendor::Unknown => BMCVendor::Unknown,
             }
         );

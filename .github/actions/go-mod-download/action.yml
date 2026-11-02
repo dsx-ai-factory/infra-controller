@@ -1,0 +1,56 @@
+name: Download REST Go modules
+description: >-
+  Restores the REST module downloads cached for the current `rest-api/go.sum`,
+  runs `go mod download` with retries, and saves the downloads on a cache miss.
+
+# Only the downloaded zips are cached, not the extracted modules, and Go reads
+# them back through a `file://` GOPROXY entry. Keep the cache path, key, and
+# restore key in sync with the image build in
+# `.github/workflows/rest-build-push-service.yml`, which restores the same entry
+# for the Dockerfiles.
+
+runs:
+  using: composite
+  steps:
+    # After a `go.sum` change, the restore key falls back to the newest entry
+    # for an earlier `go.sum`, so only the modules that changed are downloaded.
+    - name: Restore Go module downloads
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/rest-go-mod-download
+        key: rest-go-mod-download-${{ hashFiles('rest-api/go.sum') }}
+        restore-keys: rest-go-mod-download-
+
+    - name: Download Go modules
+      shell: bash
+      working-directory: rest-api
+      run: |
+        set -euo pipefail
+        cache_dir="${HOME}/.cache/rest-go-mod-download"
+        mkdir -p "${cache_dir}"
+        # `|` falls back to the regular proxies on any error from the cached
+        # downloads, not only on a missing module.
+        GOPROXY="file://${cache_dir}|$(go env GOPROXY)" ./scripts/go-mod-download.sh
+
+    # Every caller runs the full `go mod download` above first, so whichever
+    # job saves the entry saves the complete module set. The directory is
+    # emptied first because a fallback restore holds an earlier `go.sum`'s
+    # versions, and carrying them forward would grow the entry on every change.
+    - name: Collect Go module downloads
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: rest-api
+      run: |
+        set -euo pipefail
+        cache_dir="${HOME}/.cache/rest-go-mod-download"
+        rm -rf "${cache_dir}"
+        mkdir -p "${cache_dir}"
+        cp -R "$(go env GOMODCACHE)/cache/download/." "${cache_dir}/"
+
+    - name: Save Go module downloads
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/rest-go-mod-download
+        key: rest-go-mod-download-${{ hashFiles('rest-api/go.sum') }}

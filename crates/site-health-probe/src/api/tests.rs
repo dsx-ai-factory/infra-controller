@@ -951,7 +951,7 @@ async fn rest_site_from_the_inventory_reader_without_upstream_text() {
             provider_org: "provider-org".to_string(),
             site_id: "site-1".to_string(),
         },
-        Arc::clone(&h.store) as Arc<dyn crate::snapshot::CensusView>,
+        Some(Arc::clone(&h.store) as Arc<dyn crate::snapshot::CensusView>),
         Arc::clone(&h.store) as Arc<dyn SnapshotSink>,
         SystemTime::now(),
     );

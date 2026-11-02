@@ -46,12 +46,16 @@ nico-api:
       readOnly: true
 ```
 
+`defaultMode: 0400` keeps the client key readable by root only, the user `nico-api` runs as in the release image and the chart. Remove it before running `nico-api` as a non-root user: a root-owned `0400` file is unreadable to any other user.
+
 ```bash
 kubectl -n nico-system create secret generic nico-kmip-client \
   --from-file=ca.pem=./kmip-ca.pem \
   --from-file=client.pem=./nico-api-kmip.pem \
   --from-file=client.key=./nico-api-kmip.key
 ```
+
+In the reference installation, `helm-prereqs/setup.sh` creates this Secret from a directory named by `NICO_KMIP_CLIENT_DIR`. Its preflight verifies that each of the three paths configured below lies under a chart-provided mount or under a mounted Secret that exists and has the key the path reads. For details, refer to [Opting in to the KMIP KEK provider](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#opting-in-to-the-kmip-kek-provider).
 
 The files are read again on every new connection, so a renewed certificate takes effect at the next reconnect without a restart. The provider reconnects after a connection failure and before reusing a connection that has been idle for 30 seconds, so a renewed certificate is picked up within that time once traffic pauses. A connection in continuous use keeps the identity it was opened with until then or until `nico-api` restarts.
 

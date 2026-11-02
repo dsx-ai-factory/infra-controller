@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use carbide_api_core::bootstrap::acquire_vault_import_work_lock;
 use carbide_api_core::cfg::file::{
-    BmcSiteWideRootSource, CarbideConfig, CredentialBackend, ImportSource, ProviderConfig,
-    SecretsConfig, UfmCredentialSource,
+    BmcSiteWideRootSource, CarbideConfig, CertBackendKind, CredentialBackend, ImportSource,
+    ProviderConfig, SecretsConfig, UfmCredentialSource,
 };
 use carbide_api_core::secrets::{PostgresCredentialManager, SecretRouting, SecretsContext};
 use carbide_kmip::KmipClientConfig;
@@ -103,9 +103,29 @@ pub(crate) async fn setup_resources(
     cancel_token: &CancellationToken,
 ) -> eyre::Result<RuntimeResources> {
     let vault_config = vault_config_for_site(&credential_config.vault, carbide_config);
+    let credential_store = std::env::var("CARBIDE_CREDENTIAL_STORE").ok();
+    let credential_store = credential_store.as_deref().unwrap_or("vault");
 
-    // One vault client serves every credential vault role below.
-    let vault_client = create_vault_client(&vault_config)?;
+    // One vault client serves every credential vault role below. It is built
+    // before anything else whenever a setting names it, so missing Vault
+    // connection settings still fail the boot here; a site whose settings
+    // name no shared Vault needs none.
+    let vault_settings = shared_vault_settings(carbide_config, credential_store);
+    let vault_client = if vault_settings.is_empty() {
+        None
+    } else {
+        Some(create_vault_client(&vault_config).wrap_err_with(|| {
+            format!(
+                "vault connection settings are required by {}",
+                vault_settings.join(", ")
+            )
+        })?)
+    };
+    let shared_vault = || {
+        vault_client.clone().ok_or_else(|| {
+            eyre::eyre!("a setting uses the shared vault client that shared_vault_settings omits")
+        })
+    };
 
     // Certificate vending is selected independently of the credential store.
     // SharedVault (the default) reuses `vault_client` (no second client or token
@@ -119,7 +139,7 @@ pub(crate) async fn setup_resources(
     };
     let vault_provider = || -> eyre::Result<Arc<dyn CertificateProvider>> {
         let cert_config = carbide_config.certificates.to_certificate_config()?;
-        create_certificate_provider(&cert_config, &vault_client, spiffe.clone())
+        create_certificate_provider(&cert_config, vault_client.as_ref(), spiffe.clone())
     };
     let certificate_provider: Arc<dyn CertificateProvider> =
         if let Some(config) = carbide_config.certificates.cert_manager_config()? {
@@ -244,7 +264,7 @@ pub(crate) async fn setup_resources(
                 },
                 &routing,
                 kms.as_ref(),
-                &vault_client,
+                shared_vault()?.as_ref(),
                 cancel_token,
             )
             .await?;
@@ -254,28 +274,25 @@ pub(crate) async fn setup_resources(
         // backends in the operator's chosen order (first match wins). The write
         // target is the single backend `writer` names. (`backends` was
         // validated at the top of this branch, before any side effects.)
-        let backend_readers =
-            secrets_config
-                .backends
-                .iter()
-                .map(|backend| -> Box<dyn CredentialReader> {
-                    match backend {
-                        CredentialBackend::Postgres => Box::new(pg_manager.clone()),
-                        CredentialBackend::Vault => Box::new(vault_client.clone()),
-                    }
-                });
+        let backend_readers = secrets_config
+            .backends
+            .iter()
+            .map(|backend| -> eyre::Result<Box<dyn CredentialReader>> {
+                Ok(match backend {
+                    CredentialBackend::Postgres => Box::new(pg_manager.clone()),
+                    CredentialBackend::Vault => Box::new(shared_vault()?),
+                })
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
         let chain = local_overrides.into_iter().chain(backend_readers).collect();
         let writer: Arc<dyn CredentialWriter> = match secrets_config.writer {
-            CredentialBackend::Vault => vault_client.clone(),
+            CredentialBackend::Vault => shared_vault()?,
             CredentialBackend::Postgres => pg_manager,
         };
         (writer, chain, Some(SecretsContext { routing, kms }))
     } else {
-        let store: Arc<dyn CredentialManager> = match std::env::var("CARBIDE_CREDENTIAL_STORE")
-            .as_deref()
-            .unwrap_or("vault")
-        {
-            "vault" => vault_client,
+        let store: Arc<dyn CredentialManager> = match credential_store {
+            "vault" => shared_vault()?,
             "memory" => Arc::new(MemoryCredentialStore::default()),
             other => {
                 return Err(eyre::eyre!(
@@ -319,6 +336,42 @@ fn vault_config_for_site(vault: &VaultConfig, carbide_config: &CarbideConfig) ->
         config.spiffe_machine_base_path = Some(trust.spiffe_machine_base_path.clone());
     }
     config
+}
+
+/// Names every setting that stores, imports, or issues through the shared
+/// credential Vault client. Startup builds that client, and so needs the Vault
+/// connection settings, exactly when this is non-empty. `import_from = "vault"`
+/// counts even after the import has completed, so the requirement follows from
+/// the configuration alone.
+fn shared_vault_settings(
+    carbide_config: &CarbideConfig,
+    credential_store: &str,
+) -> Vec<&'static str> {
+    let mut settings = Vec::new();
+    match &carbide_config.secrets {
+        Some(secrets) => {
+            if secrets.backends.contains(&CredentialBackend::Vault) {
+                settings.push("[secrets] backends");
+            }
+            if secrets.writer == CredentialBackend::Vault {
+                settings.push("[secrets] writer");
+            }
+            if secrets.import_from == Some(ImportSource::Vault) {
+                settings.push("[secrets] import_from");
+            }
+        }
+        None if credential_store == "vault" => {
+            settings.push("the vault credential store (no [secrets] section)");
+        }
+        None => {}
+    }
+    let certificates = &carbide_config.certificates;
+    if !(certificates.use_cert_manager && certificates.use_cert_manager_ufm)
+        && certificates.backend == CertBackendKind::SharedVault
+    {
+        settings.push("[certificates] backend");
+    }
+    settings
 }
 
 /// Configure and create a postgres connection pool
@@ -928,7 +981,10 @@ async fn is_import_complete(db_pool: &PgPool) -> eyre::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use carbide_secrets::credentials::{CredentialKey, Credentials};
+    use serial_test::serial;
 
     use super::*;
 
@@ -995,6 +1051,158 @@ mod tests {
                     .is_ok(),
                 expected_ok,
                 "{name}"
+            );
+        }
+    }
+
+    /// `[secrets]` backends, writer, and import source, or `None` for no section.
+    type SecretsSelection = Option<(
+        Vec<CredentialBackend>,
+        CredentialBackend,
+        Option<ImportSource>,
+    )>;
+    /// `[certificates]` `use_cert_manager`, `use_cert_manager_ufm`, and `backend`.
+    type CertificatesSelection = (bool, bool, CertBackendKind);
+
+    const CERT_MANAGER: CertificatesSelection = (true, true, CertBackendKind::SharedVault);
+    const DEDICATED_VAULT: CertificatesSelection = (false, false, CertBackendKind::DedicatedVault);
+    const SHARED_VAULT_FOR_UFM: CertificatesSelection = (true, false, CertBackendKind::SharedVault);
+
+    fn vault_selection_config(
+        secrets: SecretsSelection,
+        (use_cert_manager, use_cert_manager_ufm, backend): CertificatesSelection,
+    ) -> CarbideConfig {
+        let mut config = carbide_api_core::test_support::default_config::get();
+        config.secrets = secrets.map(|(backends, writer, import_from)| SecretsConfig {
+            kms: carbide_api_core::cfg::file::KmsConfig {
+                active: "local".to_string(),
+                providers: Default::default(),
+            },
+            routing: [("/".to_string(), "kek".to_string())].into(),
+            backends,
+            writer,
+            import_from,
+            import_approach: Default::default(),
+        });
+        config.certificates.use_cert_manager = use_cert_manager;
+        config.certificates.use_cert_manager_ufm = use_cert_manager_ufm;
+        config.certificates.backend = backend;
+        config
+    }
+
+    #[test]
+    fn shared_vault_settings_name_each_setting_that_selects_it() {
+        use CredentialBackend::{Postgres, Vault};
+
+        carbide_test_support::value_scenarios!(
+            run = |(secrets, certificates, credential_store): (SecretsSelection, CertificatesSelection, &str)| {
+                shared_vault_settings(&vault_selection_config(secrets, certificates), credential_store)
+            };
+            "settings that name no shared vault select none" {
+                (Some((vec![Postgres], Postgres, None)), CERT_MANAGER, "vault") => Vec::<&str>::new(),
+                (Some((vec![Postgres], Postgres, None)), DEDICATED_VAULT, "vault") => Vec::<&str>::new(),
+                (None, CERT_MANAGER, "memory") => Vec::<&str>::new(),
+            }
+            "each setting that names the shared vault is reported" {
+                (Some((vec![Vault, Postgres], Postgres, None)), CERT_MANAGER, "vault") => vec!["[secrets] backends"],
+                (Some((vec![Postgres], Vault, None)), CERT_MANAGER, "vault") => vec!["[secrets] writer"],
+                (Some((vec![Postgres], Postgres, Some(ImportSource::Vault))), CERT_MANAGER, "vault") => vec!["[secrets] import_from"],
+                (None, CERT_MANAGER, "vault") => vec!["the vault credential store (no [secrets] section)"],
+                (Some((vec![Postgres], Postgres, None)), SHARED_VAULT_FOR_UFM, "vault") => vec!["[certificates] backend"],
+            }
+        );
+    }
+
+    /// Restores an environment variable's prior value when dropped.
+    struct EnvironmentVariableGuard {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvironmentVariableGuard {
+        /// Removes an environment variable and records its prior value.
+        fn remove(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            if previous.is_some() {
+                // SAFETY: callers mark tests `#[serial]` to avoid concurrent
+                // reads or mutations of this process-wide state.
+                unsafe {
+                    std::env::remove_var(name);
+                }
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvironmentVariableGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                // SAFETY: this restores the value `remove` cleared in a
+                // `#[serial]` test, including while unwinding from a panic.
+                unsafe {
+                    std::env::set_var(self.name, value);
+                }
+            }
+        }
+    }
+
+    // The zero acquire timeout fails the database step without touching the
+    // network, and the shared Vault's CA file is missing, so each error shows
+    // which check ran first: a site that names no shared Vault gets past the
+    // Vault settings it lacks, and `import_from = "vault"` fails on them before
+    // the database could report a completed import. The CA lookup falls back to
+    // `VAULT_CACERT`, so the test clears it; otherwise a shell with the other
+    // `VAULT_*` variables set would build the client.
+    #[tokio::test]
+    #[serial]
+    async fn startup_checks_shared_vault_settings_only_when_named() {
+        use CredentialBackend::Postgres;
+
+        let _vault_cacert = EnvironmentVariableGuard::remove("VAULT_CACERT");
+        let certificate_vault_ca =
+            tempfile::NamedTempFile::new().expect("create the certificate vault CA file");
+        let dedicated_vault = carbide_api_core::cfg::file::DedicatedVaultSettings {
+            address: "https://certificate-vault.invalid:8200".to_string(),
+            pki_mount_location: "pki".to_string(),
+            pki_role_name: "machine".to_string(),
+            token: Some("certificate-vault-token".to_string()),
+            vault_cacert: Some(certificate_vault_ca.path().display().to_string()),
+            namespace: None,
+        };
+        let credential_config = CredentialConfig {
+            vault: VaultConfig {
+                vault_cacert: Some("/nonexistent/vault-ca.crt".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (scenario, secrets, expected_error) in [
+            (
+                "no setting names the shared vault",
+                Some((vec![Postgres], Postgres, None)),
+                "database_pool_acquire_timeout",
+            ),
+            (
+                "import_from = vault is checked before the database",
+                Some((vec![Postgres], Postgres, Some(ImportSource::Vault))),
+                "vault connection settings are required by [secrets] import_from",
+            ),
+        ] {
+            let mut config = vault_selection_config(secrets, DEDICATED_VAULT);
+            config.certificates.dedicated_vault = Some(dedicated_vault.clone());
+            config.database_pool_acquire_timeout = std::time::Duration::ZERO;
+            let error = setup_resources(
+                &config,
+                &credential_config,
+                &mut JoinSet::new(),
+                &CancellationToken::new(),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{scenario}: startup must stop at its first failing check"));
+            assert!(
+                format!("{error:#}").contains(expected_error),
+                "{scenario}: got {error:#}"
             );
         }
     }

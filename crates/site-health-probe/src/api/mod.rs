@@ -17,9 +17,9 @@
 
 //! The `/v1` HTTP API, on its own port. Counts, units and config are
 //! answered from the snapshot store in memory; nothing here calls a site
-//! API. Summaries and the store status read the metrics store. The wire
-//! types and their JSON are `carbide-site-health-probe-api`.
+//! API. The wire types and their JSON are `carbide-site-health-probe-api`.
 
+pub(crate) mod closable;
 pub(crate) mod spec;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,6 +41,7 @@ use carbide_site_health_probe_api::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::api::spec::{Capabilities, Need, SeriesSpec, series_spec, units_listing};
 use crate::config::{HostReadMode, StateConfig};
@@ -223,6 +224,34 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/v1/config", get(config))
         .fallback(not_found)
         .with_state(Arc::new(state))
+}
+
+/// `router` with every request cut short once `cancel` fires, its body
+/// extraction included: a 503, and the connection closes after it.
+pub(crate) fn cancellable(router: Router, cancel: CancellationToken) -> Router {
+    router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    response = next.run(request) => response,
+                    () = cancel.cancelled() => {
+                        let mut response = ApiError::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            ErrorCode::Internal,
+                            None,
+                            "the probe is shutting down".to_string(),
+                        )
+                        .into_response();
+                        response
+                            .headers_mut()
+                            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                        response
+                    }
+                }
+            }
+        },
+    ))
 }
 
 async fn not_found() -> ApiError {

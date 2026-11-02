@@ -26,7 +26,7 @@ use rpc::forge::ValidateTenantPublicKeyRequest;
 use rpc::forge_api_client::ForgeApiClient;
 use russh::keys::ssh_key::AuthorizedKeys;
 use russh::keys::{Certificate, PublicKey, PublicKeyBase64};
-use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
+use russh::server::{Auth, ChannelOpenHandle, Msg, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet, Pty};
 use tokio::sync::oneshot;
 use tonic::Code;
@@ -317,9 +317,10 @@ impl russh::server::Handler for Handler {
     async fn auth_publickey(
         &mut self,
         machine_string: &str,
-        public_key: &PublicKey,
+        public_key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         use HandlerError::*;
+        let public_key = public_key.public_key;
         tracing::trace!(peer_address = self.peer_addr, "auth_publickey");
 
         // Authentication flow:
