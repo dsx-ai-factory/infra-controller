@@ -4343,6 +4343,7 @@ mod test {
                     observed_at,
                 }),
                 fabric_interfaces: Vec::new(),
+                accepted_lldp_snapshot_fingerprint: None,
             }),
             dpu_agent_health_report: Some(HealthReport {
                 source: HealthReport::DPU_AGENT_SOURCE.to_string(),
