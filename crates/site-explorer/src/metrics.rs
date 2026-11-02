@@ -955,7 +955,7 @@ impl SiteExplorerInstruments {
                 .u64_observable_gauge(
                     "carbide_endpoint_exploration_machines_explored_overall_count",
                 )
-                .with_description("Number of machines explored, by expectation and machine type")
+                .with_description("Number of BMC endpoint records, by expectation and machine type")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         for ((expected, machine_type), &count) in metrics
