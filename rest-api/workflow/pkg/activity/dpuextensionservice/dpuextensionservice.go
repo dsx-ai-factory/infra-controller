@@ -412,17 +412,6 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 		}
 		tenant := &tenants[0]
 
-		hasSiteAccess, accessErr := cdbm.TenantHasSiteAccess(ctx, transaction, mde.dbSession, tenant, site.ID)
-		if accessErr != nil {
-			return nil, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to validate Tenant access to Site, DB error: %w", accessErr)
-		}
-
-		if !hasSiteAccess {
-			logger.Warn().Msgf("unable to create DPU Extension Service found on Site: Tenant for org %s does not have access to Site", org)
-
-			return nil, nil
-		}
-
 		// Serialize recovery names per Tenant so concurrent inventory pages cannot choose
 		// the same fallback name.
 		lockErr := transaction.TryAcquireAdvisoryLock(
