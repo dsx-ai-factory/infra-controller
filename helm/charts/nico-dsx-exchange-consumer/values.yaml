@@ -46,6 +46,24 @@ env:
   RUST_BACKTRACE: "full"
   RUST_LIB_BACKTRACE: "0"
 
+## MQTT credential source. The consumer reads the MQTT credential from the
+## environment, then a file, then Vault, and needs one only when its
+## mqtt.auth.auth_mode is not none. To supply it without Vault, set secretName
+## and key to a Secret whose key holds the file described in
+## docs/configuration/credential-sources.md. Both are required together.
+## Leave both empty to configure no file source.
+credentials:
+  secretName: ""
+  key: ""
+  mountPath: /var/run/secrets/nico-credentials
+
+## Extra container environment, volumes, and mounts. A Vault-backed credential
+## source sets VAULT_ADDR, VAULT_KV_MOUNT_LOCATION, VAULT_PKI_MOUNT_LOCATION,
+## VAULT_PKI_ROLE_NAME, and VAULT_TOKEN here, and mounts the Vault CA.
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
 livenessProbe:
   httpGet:
     port: 9009

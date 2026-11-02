@@ -168,6 +168,32 @@ backend because the local-file schema has no versioned BMC root key.
 
 Sites that enabled the file source before `[credentials.file]` existed use `CARBIDE_CREDENTIALS_FILE_ENABLED=true` and `CARBIDE_CREDENTIALS_FILE_PATH`, default `secrets.yaml`. They keep working after an upgrade with the same behavior. When both are configured, `[credentials.file]` wins. Because `ufm_source` defaults to `local_first`, an existing site's environment or file UFM entry keeps overriding the backend after an upgrade, and nothing changes silently.
 
+## DSX Exchange Consumer Credential
+
+The `dsx-exchange-consumer` service reads its MQTT credential, `mqtt_auth_by_credential_type.DsxExchangeConsumer`, only when `mqtt.auth.auth_mode` is `basic_auth` or `oauth2`. With `auth_mode = none` it reads no credential and needs no environment, file, or Vault setting.
+
+Otherwise it consults, in order, the [environment source](#environment-source), the [file source](#file-source), and Vault. These settings select the sources:
+
+| Source | Selected by |
+| --- | --- |
+| Environment | `CARBIDE_CREDENTIALS_ENV_ENABLED=true` |
+| File | `CARBIDE_CREDENTIALS_FILE_ENABLED=true` and `CARBIDE_CREDENTIALS_FILE_PATH` |
+| Vault | `VAULT_ADDR` |
+
+The consumer builds a Vault client only when `VAULT_ADDR` is set. When it is set, the consumer also requires `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, `VAULT_PKI_ROLE_NAME`, and either a Kubernetes service-account token or `VAULT_TOKEN`; an incomplete Vault configuration fails startup instead of dropping Vault from the chain. If `auth_mode` requires a credential and no source supplies it, startup fails with `Missing MQTT credentials`.
+
+To run without Vault, create a Secret whose key holds the file in the [File Source](#file-source) format, and set `credentials.secretName` and `credentials.key` in the `nico-dsx-exchange-consumer` chart. The chart mounts the whole Secret as a directory and sets both file variables. Sites that keep Vault set the `VAULT_*` variables through the chart's `extraEnv`, mount the Vault CA through `extraVolumes` and `extraVolumeMounts`, and change nothing else.
+
+Rotation takes effect as follows:
+
+| `auth_mode` | Source | Rotation |
+| --- | --- | --- |
+| `oauth2` | File | The watcher reloads the file. The consumer re-reads the credential at its next token fetch, so a rotated Secret applies without a restart. |
+| `oauth2` | Environment or Vault | Restart the consumer. |
+| `basic_auth` | Any | Restart the consumer; it reads the credential once at startup. |
+
+A failed file reload is reported by `carbide_static_credential_watcher_failures_total`; the consumer keeps the last valid snapshot.
+
 ## Helm Values
 
 The `nico-api` chart renders `[credentials]` from these values and never renders credential content into a ConfigMap or values output:
