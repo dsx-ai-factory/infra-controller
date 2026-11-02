@@ -27,9 +27,6 @@ const (
 	MetricTemporalConnSucc = "temporal_connection_succeeded"
 	// MetricTemporalConnStatus - Metric Temporal Conn Status
 	MetricTemporalConnStatus = "temporal_connection_status"
-	// Kubernetes projects Secret keys through the ..data symlink and atomically
-	// replaces that symlink on updates.
-	kubernetesSecretDataSymlink = "..data"
 )
 
 // Init - initialize the workflow orchestrator
@@ -130,26 +127,14 @@ func newCertWatcher(root string, dirs []string) (*fsnotify.Watcher, error) {
 	}
 
 	for _, dir := range append([]string{root}, dirs...) {
-		if err := w.Add(dir); err != nil {
+		err = w.Add(dir)
+		if err != nil {
 			w.Close()
 			return nil, err
 		}
 	}
 
 	return w, nil
-}
-
-// isTemporalCertUpdate reports whether event changes a watched cert file or
-// swaps in a new Kubernetes Secret data directory under root.
-func isTemporalCertUpdate(event fsnotify.Event, files map[string]bool, root string) bool {
-	eventPath := filepath.Clean(event.Name)
-	if files[eventPath] {
-		return true
-	}
-
-	return event.Op&fsnotify.Create != 0 &&
-		filepath.Dir(eventPath) == filepath.Clean(root) &&
-		filepath.Base(eventPath) == kubernetesSecretDataSymlink
 }
 
 // watchCertFiles calls reload for every cert update until w is closed.
@@ -177,7 +162,7 @@ func watchCertFiles(w *fsnotify.Watcher, root string, files map[string]bool, rel
 				return
 			}
 
-			if !isTemporalCertUpdate(e, files, root) {
+			if !computils.IsProjectedSecretUpdate(e, files, root) {
 				continue
 			}
 			reload()
