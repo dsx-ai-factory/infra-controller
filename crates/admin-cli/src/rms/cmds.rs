@@ -19,20 +19,11 @@ use std::sync::Arc;
 
 use librms::RmsApi;
 
-use crate::rms::args::{FirmwareInventory, PowerOnSequence, PowerState};
+use crate::rms::args::{FirmwareInventory, PowerState};
 
 /// Print the RMS node inventory as JSON.
 pub(super) async fn list_node_inventory(rms_client: &Arc<dyn RmsApi>) -> eyre::Result<()> {
     let response = rms_client.list_node_inventory().await?;
-    println!("{}", serde_json::to_string_pretty(&response)?);
-    Ok(())
-}
-
-pub(super) async fn power_on_sequence(
-    args: PowerOnSequence,
-    rms_client: &Arc<dyn RmsApi>,
-) -> eyre::Result<()> {
-    let response = rms_client.get_rack_power_on_sequence(args.into()).await?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }

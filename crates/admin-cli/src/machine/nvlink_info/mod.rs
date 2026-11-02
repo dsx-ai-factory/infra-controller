@@ -31,7 +31,7 @@ impl Run for Args {
                 cmd::handle_nvlink_info_show(args, &ctx.api_client).await?;
             }
             Args::Populate(args) => {
-                cmd::handle_nvlink_info_populate(args, ctx.config.format, &ctx.api_client).await?;
+                cmd::handle_nvlink_info_populate(args)?;
             }
         }
         Ok(())

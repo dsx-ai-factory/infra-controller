@@ -92,7 +92,7 @@ fn event_context() -> EventContext {
         addr: BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             port: Some(443),
-            mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+            mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
         },
         collector_type: "sensor_collector",
         labels: Default::default(),
@@ -131,6 +131,7 @@ fn metric_events(
             let reading = 20.0 + ((idx % 90) as f64);
 
             let mut metric = MetricSample {
+                semantics: carbide_health::sink::MetricSemantics::Gauge,
                 key: sensor_name.clone(),
                 name: "hw_sensor".to_string(),
                 metric_type: "temperature".to_string(),
@@ -272,7 +273,7 @@ fn rack_event_contexts(rack_id: &str, tray_count: usize) -> Vec<EventContext> {
                 addr: BmcAddr {
                     ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, (idx + 1) as u8)),
                     port: Some(443),
-                    mac: MacAddress::from_str(&mac).unwrap(),
+                    mac: Some(MacAddress::from_str(&mac).unwrap()),
                 },
                 collector_type: "sensor_collector",
                 labels: Default::default(),

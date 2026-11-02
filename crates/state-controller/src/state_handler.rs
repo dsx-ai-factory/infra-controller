@@ -154,6 +154,8 @@ pub enum StateHandlerOutcome<S> {
     Wait {
         /// The reason we're waiting
         reason: String,
+        /// Schedules the committed Wait again without waiting for a periodic scan when true.
+        requeue_immediately: bool,
         source_ref: &'static Location<'static>,
         txn: Option<PgTransaction<'static>>,
     },
@@ -189,10 +191,12 @@ impl<S> StateHandlerOutcome<S> {
         match self {
             Self::Wait {
                 reason,
+                requeue_immediately,
                 source_ref,
                 txn: _,
             } => Self::Wait {
                 reason,
+                requeue_immediately,
                 source_ref,
                 txn: transaction,
             },
@@ -240,8 +244,44 @@ impl<S> StateHandlerOutcome<S> {
     pub fn wait(reason: String) -> Self {
         StateHandlerOutcome::Wait {
             reason,
+            requeue_immediately: false,
             source_ref: Location::caller(),
             txn: None,
+        }
+    }
+
+    /// Returns a Wait that schedules another iteration after its outcome transaction commits so
+    /// successful idempotent writes can continue before the periodic scan.
+    #[track_caller]
+    pub fn wait_and_requeue(reason: String) -> Self {
+        StateHandlerOutcome::Wait {
+            reason,
+            requeue_immediately: true,
+            source_ref: Location::caller(),
+            txn: None,
+        }
+    }
+
+    /// Marks a Wait for immediate scheduling when `condition` is true while leaving transitions and
+    /// failures unchanged so callers preserve their original classifications after a successful
+    /// idempotent write.
+    pub fn requeue_if_waiting(self, condition: bool) -> Self {
+        if !condition {
+            return self;
+        }
+        match self {
+            Self::Wait {
+                reason,
+                source_ref,
+                txn,
+                ..
+            } => Self::Wait {
+                reason,
+                requeue_immediately: true,
+                source_ref,
+                txn,
+            },
+            outcome => outcome,
         }
     }
 
@@ -308,6 +348,14 @@ impl<S> std::fmt::Display for StateHandlerOutcome<S> {
 /// Error type for handling a Machine State
 #[derive(Debug, thiserror::Error)]
 pub enum StateHandlerError {
+    /// A conditional write rejected the snapshot used by this iteration.
+    /// The processor discards uncommitted writes and queues a fresh pass without
+    /// recording a transition or an operational error.
+    #[error("controller iteration invalidated at {source_ref}")]
+    IterationInvalidated {
+        /// The call site that required the rejected write to apply.
+        source_ref: &'static std::panic::Location<'static>,
+    },
     #[error("unable to perform database transaction: {0}")]
     TransactionError(#[source] Box<sqlx::Error>),
     #[error("failed to advance state: {0}")]
@@ -386,6 +434,7 @@ impl StateHandlerError {
     /// many metric dimensions.
     pub fn metric_label(&self) -> &'static str {
         match self {
+            StateHandlerError::IterationInvalidated { .. } => "iteration_invalidated",
             StateHandlerError::TransactionError(_) => "transaction_error",
             StateHandlerError::GenericError(_) => "generic_error",
             StateHandlerError::FirmwareUpdateError(_) => "firware_update_error",

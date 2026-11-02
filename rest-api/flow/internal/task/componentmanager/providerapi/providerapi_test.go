@@ -21,6 +21,52 @@ func (p testProvider) Name() string {
 	return p.name
 }
 
+type closeableTestProvider struct {
+	testProvider
+	closed bool
+	err    error
+}
+
+func (p *closeableTestProvider) Close() error {
+	p.closed = true
+	return p.err
+}
+
+func TestProviderRegistry_Close(t *testing.T) {
+	for name, tc := range map[string]struct{ fail, nilRegistry bool }{
+		"successful cleanup":            {},
+		"cleanup continues after error": {fail: true},
+		"nil registry":                  {nilRegistry: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if tc.nilRegistry {
+				var registry *ProviderRegistry
+				require.NoError(t, registry.Close())
+				return
+			}
+			registry := NewProviderRegistry()
+			first := &closeableTestProvider{testProvider: testProvider{name: "first"}}
+			second := &closeableTestProvider{testProvider: testProvider{name: "second"}}
+			if tc.fail {
+				first.err = errors.New("close failed")
+			}
+			require.NoError(t, registry.Register(first))
+			require.NoError(t, registry.Register(second))
+			require.NoError(t, registry.Register(testProvider{name: "no resources"}))
+			err := registry.Close()
+			if tc.fail {
+				require.ErrorIs(t, err, first.err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.True(t, first.closed)
+			assert.True(t, second.closed)
+			assert.Empty(t, registry.List())
+			require.NoError(t, registry.Close())
+		})
+	}
+}
+
 type testProviderConfig struct {
 	name string
 }
@@ -30,7 +76,7 @@ func (c testProviderConfig) Name() string {
 }
 
 func (c testProviderConfig) NewProvider(context.Context) (Provider, error) {
-	return testProvider{name: c.name}, nil
+	return testProvider(c), nil
 }
 
 type testProviderConfigDecoder struct {
@@ -42,7 +88,7 @@ func (d testProviderConfigDecoder) Name() string {
 }
 
 func (d testProviderConfigDecoder) DefaultConfig() ProviderConfig {
-	return testProviderConfig{name: d.name}
+	return testProviderConfig(d)
 }
 
 func (d testProviderConfigDecoder) DecodeYAML(raw yaml.Node) (ProviderConfig, error) {

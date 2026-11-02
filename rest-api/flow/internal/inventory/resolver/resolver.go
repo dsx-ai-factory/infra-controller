@@ -143,6 +143,24 @@ func (r *Resolver) RackByID(
 	)
 }
 
+// RackByExternalID returns the canonical rack for one external inventory ID.
+func (r *Resolver) RackByExternalID(
+	ctx context.Context,
+	externalID string,
+	withComponents bool,
+) (*rack.Rack, error) {
+	if externalID == "" {
+		return nil, unresolvableError("rack external id is required")
+	}
+
+	return r.rackByIdentifier(
+		ctx,
+		identifier.Identifier{ExternalID: externalID},
+		withComponents,
+		fmt.Sprintf("rack external id %q", externalID),
+	)
+}
+
 // RackByName returns the canonical rack for one inventory name.
 func (r *Resolver) RackByName(
 	ctx context.Context,

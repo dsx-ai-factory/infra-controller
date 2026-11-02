@@ -20,7 +20,9 @@ REPO_ROOT = { script = [
 ] }
 PKG_VERSION = { script = [
   "if [ -n \"$VERSION\" ]; then echo \"$VERSION\" | sed 's/^v//'; else v=$(git describe --tags --first-parent --always --long | sed 's/^v//'); case \"$v\" in [0-9]*) echo \"$v\" ;; *) echo \"0.0.0-$v\" ;; esac; fi",
-], condition = { env_not_set = ["PKG_VERSION"] } }
+], condition = { env_not_set = [
+  "PKG_VERSION",
+] } }
 FORGE_CA_PATH = { value = "${REPO_ROOT}/dev/forge_prodroot.pem" }
 
 # Where mkosi keeps downloaded distro packages. Without this mkosi re-downloads
@@ -28,7 +30,15 @@ FORGE_CA_PATH = { value = "${REPO_ROOT}/dev/forge_prodroot.pem" }
 # in CI. Purely a download cache -- mkosi still revalidates package metadata, so
 # a stale entry cannot silently change what lands in the image. CI persists this
 # across runs with actions/cache; locally it just makes rebuilds faster.
-MKOSI_PACKAGE_CACHE_DIR = { value = "${REPO_ROOT}/pxe/.mkosi-package-cache", condition = { env_not_set = ["MKOSI_PACKAGE_CACHE_DIR"] } }
+MKOSI_PACKAGE_CACHE_DIR = { value = "${REPO_ROOT}/pxe/.mkosi-package-cache", condition = { env_not_set = [
+  "MKOSI_PACKAGE_CACHE_DIR",
+] } }
+
+# Generated inputs for each profile, layered over its tracked mkosi.extra/ with
+# --extra-tree.
+MKOSI_STAGE = { value = "${REPO_ROOT}/pxe/.mkosi-stage", condition = { env_not_set = [
+  "MKOSI_STAGE",
+] } }
 
 # BlueField Bundle (BFB) Version
 # NOTE: Update `crates/api/src/cfg/file.rs` to set the DOCA BFB component versions (BMC, NIC, CEC fw)
@@ -76,10 +86,11 @@ condition = { env_not_set = ["SA_ENABLEMENT"] }
 # place the required packages in pxe/debs before running this task.
 description = "Stages files required for nvssh into the mkosi image for installation in postinst script"
 script = '''
-  cp -R ${REPO_ROOT}/pxe/nvinit_setup mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
-  cp -R ${REPO_ROOT}/pxe/debs/libnss-exec_0.2.0-1_amd64.deb mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
-  cp -R ${REPO_ROOT}/pxe/nvinit_setup mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
-  cp -R ${REPO_ROOT}/pxe/debs/libnss-exec_0.2.0-1_arm64.deb mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
+  mkdir -p ${MKOSI_STAGE}/scout-oss-x86_64/build-output/ ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
+  cp -R ${REPO_ROOT}/pxe/nvinit_setup ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
+  cp -R ${REPO_ROOT}/pxe/debs/libnss-exec_0.2.0-1_amd64.deb ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
+  cp -R ${REPO_ROOT}/pxe/nvinit_setup ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
+  cp -R ${REPO_ROOT}/pxe/debs/libnss-exec_0.2.0-1_arm64.deb ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
 '''
 
 [tasks.test-disk-imaging]
@@ -91,17 +102,19 @@ args = ["${REPO_ROOT}/pxe/common_files/disk_imaging_test.sh"]
 description = "Copies the disk_imaging.sh script to the qcow profile directories"
 dependencies = ["test-disk-imaging"]
 script = '''
-  cp ${REPO_ROOT}/pxe/common_files/disk_imaging.sh ${REPO_ROOT}/pxe/mkosi.profiles/qcow-imager/mkosi.extra/opt/forge/disk_imaging.sh
-  cp ${REPO_ROOT}/pxe/common_files/disk_imaging.sh ${REPO_ROOT}/pxe/mkosi.profiles/qcow-imager-aarch64/mkosi.extra/opt/forge/disk_imaging.sh
+  mkdir -p ${MKOSI_STAGE}/qcow-imager/opt/forge/ ${MKOSI_STAGE}/qcow-imager-aarch64/opt/forge/
+  cp ${REPO_ROOT}/pxe/common_files/disk_imaging.sh ${MKOSI_STAGE}/qcow-imager/opt/forge/disk_imaging.sh
+  cp ${REPO_ROOT}/pxe/common_files/disk_imaging.sh ${MKOSI_STAGE}/qcow-imager-aarch64/opt/forge/disk_imaging.sh
 '''
 
 [tasks.build-qcow-imager-x86]
 category = "qcow-imager"
 description = "Build qcow-imager.efi for x86_64 only (without scout/BFB); output: static/blobs/internal/x86_64/qcow-imager.efi"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "stage-disk_imaging-script",
   "mkosi-build-qcow-imager",
   "mkosi-copy-qcow-imager-to-webroot-x86_64",
@@ -112,9 +125,10 @@ dependencies = [
 category = "qcow-imager"
 description = "Build qcow-imager.efi for aarch64 only (without scout/BFB); output: static/blobs/internal/aarch64/qcow-imager.efi"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "stage-disk_imaging-script",
   "mkosi-build-qcow-imager-aarch64",
   "mkosi-copy-qcow-imager-to-webroot-aarch64",
@@ -126,41 +140,42 @@ description = "Copies the Scout loader helpers to the scout loader profile direc
 script = '''
   set -e
 
-  cp ${REPO_ROOT}/pxe/common_files/scout-loader-rclocal ${REPO_ROOT}/pxe/mkosi.profiles/scout-loader-aarch64/mkosi.extra/etc/rc.local
-  cp ${REPO_ROOT}/pxe/common_files/scout-loader-rclocal ${REPO_ROOT}/pxe/mkosi.profiles/scout-loader-x86_64/mkosi.extra/etc/rc.local
+  mkdir -p ${MKOSI_STAGE}/scout-loader-aarch64/etc/ ${MKOSI_STAGE}/scout-loader-x86_64/etc/
+  cp ${REPO_ROOT}/pxe/common_files/scout-loader-rclocal ${MKOSI_STAGE}/scout-loader-aarch64/etc/rc.local
+  cp ${REPO_ROOT}/pxe/common_files/scout-loader-rclocal ${MKOSI_STAGE}/scout-loader-x86_64/etc/rc.local
 
-  mkdir -p ${REPO_ROOT}/pxe/mkosi.profiles/scout-loader-aarch64/mkosi.extra/opt/forge/
-  cp ${REPO_ROOT}/pxe/common_files/forge-scout-network.sh ${REPO_ROOT}/pxe/mkosi.profiles/scout-loader-aarch64/mkosi.extra/opt/forge/
+  mkdir -p ${MKOSI_STAGE}/scout-loader-aarch64/opt/forge/
+  cp ${REPO_ROOT}/pxe/common_files/forge-scout-network.sh ${MKOSI_STAGE}/scout-loader-aarch64/opt/forge/
 
-  mkdir -p ${REPO_ROOT}/pxe/mkosi.profiles/scout-loader-x86_64/mkosi.extra/opt/forge/
-  cp ${REPO_ROOT}/pxe/common_files/forge-scout-network.sh ${REPO_ROOT}/pxe/mkosi.profiles/scout-loader-x86_64/mkosi.extra/opt/forge/
+  mkdir -p ${MKOSI_STAGE}/scout-loader-x86_64/opt/forge/
+  cp ${REPO_ROOT}/pxe/common_files/forge-scout-network.sh ${MKOSI_STAGE}/scout-loader-x86_64/opt/forge/
 '''
 
 [tasks.stage-scout-update-check]
 description = "Copies the scout-update script and systemd files to build-output"
 script = '''
   # OSS scout profiles
-  mkdir -p ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.sh ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.service ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.timer ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
+  mkdir -p ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.sh ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.service ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.timer ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
 
-  mkdir -p ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.sh ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.service ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.timer ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
+  mkdir -p ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.sh ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.service ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/check-scout-updates.timer ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
 '''
 
 [tasks.stage-scout-module-loader]
 description = "Copies the Scout helper scripts to build-output"
 script = '''
-  mkdir -p ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/load_modules.sh ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/forge-scout-network.sh ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output/
+  mkdir -p ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/load_modules.sh ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/forge-scout-network.sh ${MKOSI_STAGE}/scout-oss-aarch64/build-output/
 
-  mkdir -p ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/load_modules.sh ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
-  cp ${REPO_ROOT}/pxe/common_files/forge-scout-network.sh ${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output/
+  mkdir -p ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/load_modules.sh ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
+  cp ${REPO_ROOT}/pxe/common_files/forge-scout-network.sh ${MKOSI_STAGE}/scout-oss-x86_64/build-output/
 '''
 
 [tasks.build-boot-artifacts-x86-host]
@@ -231,11 +246,7 @@ run_task = "internal-bfb-aarch64-sa"
 [tasks.ipxe-aarch64-sa]
 category = "iPXE Kernel"
 description = "Build iPXE kernel for aarch64 (EFI) for SA builds"
-dependencies = [
-  "ipxe-config",
-  "ipxe-patch-mlnx",
-  "ipxe-install-efi-aarch64",
-]
+dependencies = ["ipxe-config", "ipxe-patch-mlnx", "ipxe-install-efi-aarch64"]
 
 
 [tasks.build-boot-artifacts-bfb]
@@ -273,8 +284,9 @@ dependencies = [
 [tasks.create-ephemeral-image-x86-host-ci]
 category = "Ephemeral Image"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "copy-forge-scout-x86_64",
   "copy-forge-prod-root-ca-x86_64",
   "stage-disk_imaging-script",
@@ -295,9 +307,10 @@ dependencies = [
 [tasks.create-ephemeral-image-x86-host]
 category = "Ephemeral Image"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "copy-forge-scout-x86_64",
   "copy-forge-dev-root-ca-x86_64",
   "stage-disk_imaging-script",
@@ -318,8 +331,9 @@ dependencies = [
 [tasks.create-ephemeral-image-arm-host-ci]
 category = "Ephemeral Image"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "copy-forge-scout-aarch64",
   "copy-forge-prod-root-ca-aarch64",
   "stage-disk_imaging-script",
@@ -340,9 +354,10 @@ dependencies = [
 [tasks.create-ephemeral-image-arm-host]
 category = "Ephemeral Image"
 dependencies = [
-  "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "copy-forge-scout-aarch64",
   "copy-forge-dev-root-ca-aarch64",
   "stage-disk_imaging-script",
@@ -379,49 +394,39 @@ script = '''
   mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/apt/pool/base/f/forge-scout"
   mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/x86_64"
   mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/apt/dists/focal/main/binary-amd64"
-  mkdir -p "${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-x86_64/mkosi.extra/build-output"
-  mkdir -p "${REPO_ROOT}/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/build-output"
 '''
 
 [tasks.copy-forge-prod-root-ca-x86_64]
 condition = { env_not_set = ["SA_ENABLEMENT"] }
 category = "Copy Forge Root CA in CI"
-command = "cp"
-args = [
-  "-f",
-  "${FORGE_CA_PATH}",
-  "mkosi.profiles/scout-oss-x86_64/mkosi.extra/opt/forge/forge_root.pem",
-]
+script = '''
+  mkdir -p ${MKOSI_STAGE}/scout-oss-x86_64/opt/forge
+  cp -f ${FORGE_CA_PATH} ${MKOSI_STAGE}/scout-oss-x86_64/opt/forge/forge_root.pem
+'''
 
 [tasks.copy-forge-prod-root-ca-aarch64]
 condition = { env_not_set = ["SA_ENABLEMENT"] }
 category = "Copy Forge Root CA in CI"
-command = "cp"
-args = [
-  "-f",
-  "${FORGE_CA_PATH}",
-  "mkosi.profiles/scout-oss-aarch64/mkosi.extra/opt/forge/forge_root.pem",
-]
+script = '''
+  mkdir -p ${MKOSI_STAGE}/scout-oss-aarch64/opt/forge
+  cp -f ${FORGE_CA_PATH} ${MKOSI_STAGE}/scout-oss-aarch64/opt/forge/forge_root.pem
+'''
 
 [tasks.copy-forge-dev-root-ca-x86_64]
 condition = { env_not_set = ["SA_ENABLEMENT"] }
 category = "Copy Forge Root CA"
-command = "cp"
-args = [
-  "-f",
-  "${REPO_ROOT}/dev/certs/forge_developer_local_only_root_cert_pem",
-  "mkosi.profiles/scout-oss-x86_64/mkosi.extra/opt/forge/forge_root.pem",
-]
+script = '''
+  mkdir -p ${MKOSI_STAGE}/scout-oss-x86_64/opt/forge
+  cp -f ${REPO_ROOT}/dev/certs/forge_developer_local_only_root_cert_pem ${MKOSI_STAGE}/scout-oss-x86_64/opt/forge/forge_root.pem
+'''
 
 [tasks.copy-forge-dev-root-ca-aarch64]
 condition = { env_not_set = ["SA_ENABLEMENT"] }
 category = "Copy Forge Root CA"
-command = "cp"
-args = [
-  "-f",
-  "${REPO_ROOT}/dev/certs/forge_developer_local_only_root_cert_pem",
-  "mkosi.profiles/scout-oss-aarch64/mkosi.extra/opt/forge/forge_root.pem",
-]
+script = '''
+  mkdir -p ${MKOSI_STAGE}/scout-oss-aarch64/opt/forge
+  cp -f ${REPO_ROOT}/dev/certs/forge_developer_local_only_root_cert_pem ${MKOSI_STAGE}/scout-oss-aarch64/opt/forge/forge_root.pem
+'''
 
 [tasks.test-stage-bootstrap-ca]
 category = "Copy DPU bootstrap CA"
@@ -437,9 +442,9 @@ args = ["${REPO_ROOT}/pxe/common_files/runtime-bootstrap-ca_test.sh"]
 category = "Copy Forge Scout locally"
 script = '''
   PROFILE="scout-oss-x86_64"
-  mkdir -p mkosi.profiles/${PROFILE}/mkosi.extra/build-output
+  mkdir -p ${MKOSI_STAGE}/${PROFILE}/build-output
   cp ${REPO_ROOT}/target/debs/forge-scout_${PKG_VERSION}_amd64.deb \
-  mkosi.profiles/${PROFILE}/mkosi.extra/build-output/forge-scout.deb
+  ${MKOSI_STAGE}/${PROFILE}/build-output/forge-scout.deb
 '''
 dependencies = ["mkdir-static"]
 
@@ -447,16 +452,22 @@ dependencies = ["mkdir-static"]
 category = "Copy Forge Scout locally"
 script = '''
   PROFILE="scout-oss-aarch64"
-  mkdir -p mkosi.profiles/${PROFILE}/mkosi.extra/build-output
+  mkdir -p ${MKOSI_STAGE}/${PROFILE}/build-output
   cp ${REPO_ROOT}/target/debs/forge-scout_${PKG_VERSION}_arm64.deb \
-  mkosi.profiles/${PROFILE}/mkosi.extra/build-output/forge-scout.deb
+  ${MKOSI_STAGE}/${PROFILE}/build-output/forge-scout.deb
 '''
 dependencies = ["mkdir-static"]
 
 [tasks.mkosi-clean-qcow-imager]
 category = "Ephemeral Image"
 command = "${REPO_ROOT}/pxe/mkosi/bin/mkosi"
-args = ["--profile", "qcow-imager", "--output-dir=${MKOSI_BUILD_TMP}", "clean"]
+args = [
+  "--profile",
+  "qcow-imager",
+  "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
+  "clean",
+]
 
 [tasks.mkosi-clean-qcow-imager-aarch64]
 category = "Ephemeral Image"
@@ -465,6 +476,7 @@ args = [
   "--profile",
   "qcow-imager-aarch64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -475,6 +487,7 @@ args = [
   "--profile",
   "scout-oss-x86_64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -485,6 +498,7 @@ args = [
   "--profile",
   "scout-loader-x86_64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -495,6 +509,7 @@ args = [
   "--profile",
   "scout-oss-aarch64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -505,19 +520,9 @@ args = [
   "--profile",
   "scout-loader-aarch64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
-
-[tasks.mkosi-remove-zypper-from-debian-tools]
-category = "Ephemeral Image"
-description = "Remove zypper from the debian-tools image, as it's been removed from the repo"
-script = '''
-if [ -f ${REPO_ROOT}/pxe/mkosi/mkosi/resources/mkosi-tools/mkosi.conf.d/10-debian-kali-ubuntu/mkosi.conf ]; then
-  sed -i '/zypper/d' ${REPO_ROOT}/pxe/mkosi/mkosi/resources/mkosi-tools/mkosi.conf.d/10-debian-kali-ubuntu/mkosi.conf
-elif [ -f ${REPO_ROOT}/pxe/mkosi/mkosi/resources/mkosi-tools/mkosi.conf.d/10-debian-ubuntu/mkosi.conf ]; then
-  sed -i '/zypper/d' ${REPO_ROOT}/pxe/mkosi/mkosi/resources/mkosi-tools/mkosi.conf.d/10-debian-ubuntu/mkosi.conf
-fi
-'''
 
 [tasks.mkosi-generate-build-tmpdir]
 category = "Ephemeral Image"
@@ -528,16 +533,36 @@ tmp_name = replace ${tmp_name.stdout} "\n" ""
 set_env MKOSI_BUILD_TMP ${tmp_name}
 '''
 
+[tasks.mkosi-remove-legacy-inputs]
+category = "Ephemeral Image"
+description = "Removes inputs that earlier builds generated inside mkosi.profiles/"
+script = '''
+  git -C "${REPO_ROOT}" clean -fdxq -- \
+    'pxe/mkosi.profiles/*/mkosi.extra/build-output/' \
+    'pxe/mkosi.profiles/qcow-imager*/mkosi.extra/opt/forge/disk_imaging.sh' \
+    'pxe/mkosi.profiles/scout-loader-*/mkosi.extra/etc/rc.local' \
+    'pxe/mkosi.profiles/scout-loader-*/mkosi.extra/opt/forge/' \
+    'pxe/mkosi.profiles/scout-oss-*/mkosi.extra/opt/forge/forge-scout' \
+    'pxe/mkosi.profiles/scout-oss-*/mkosi.extra/opt/forge/forge_root.pem'
+'''
+
+[tasks.mkosi-reset-stage]
+category = "Ephemeral Image"
+description = "Removes inputs staged by a previous build"
+script = '''
+  rm -rf "${MKOSI_STAGE:?}"
+'''
+
 # `depmod` on our runners is in `/sbin`, so add to PATH
-# Note: mkosi v25 uses built-in sandboxing via Linux namespaces (not bwrap)
+# Note: mkosi v26 uses built-in sandboxing via Linux namespaces (not bwrap)
 # which should work on GitHub Actions managed runners.
 [tasks.mkosi-build-scout-x86_64]
 category = "Ephemeral Image"
 script = '''
   PROFILE="scout-oss-x86_64"
   export PATH=${PATH}:/sbin
-  mkdir -p "${MKOSI_PACKAGE_CACHE_DIR}"
-  ${REPO_ROOT}/pxe/mkosi/bin/mkosi -E PKG_VERSION="${PKG_VERSION}" --profile ${PROFILE} --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --with-network build
+  mkdir -p "${MKOSI_PACKAGE_CACHE_DIR}" "${MKOSI_STAGE}/${PROFILE}"
+  ${REPO_ROOT}/pxe/mkosi/bin/mkosi -E PKG_VERSION="${PKG_VERSION}" --profile ${PROFILE} --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --extra-tree=${MKOSI_STAGE}/${PROFILE} build
 '''
 
 [tasks.mkosi-build-scout-loader-x86_64]
@@ -545,7 +570,7 @@ category = "Ephemeral Image"
 command = "/bin/bash"
 args = [
   "-c",
-  "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile scout-loader-x86_64 --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} build",
+  "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} ${MKOSI_STAGE}/scout-loader-x86_64 && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile scout-loader-x86_64 --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --extra-tree=${MKOSI_STAGE}/scout-loader-x86_64 build",
 ]
 
 [tasks.mkosi-build-scout-aarch64]
@@ -553,8 +578,8 @@ category = "Ephemeral Image"
 script = '''
   PROFILE="scout-oss-aarch64"
   export PATH=${PATH}:/sbin
-  mkdir -p "${MKOSI_PACKAGE_CACHE_DIR}"
-  ${REPO_ROOT}/pxe/mkosi/bin/mkosi -E PKG_VERSION="${PKG_VERSION}" --profile ${PROFILE} --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} build
+  mkdir -p "${MKOSI_PACKAGE_CACHE_DIR}" "${MKOSI_STAGE}/${PROFILE}"
+  ${REPO_ROOT}/pxe/mkosi/bin/mkosi -E PKG_VERSION="${PKG_VERSION}" --profile ${PROFILE} --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --extra-tree=${MKOSI_STAGE}/${PROFILE} build
 '''
 
 [tasks.mkosi-build-scout-loader-aarch64]
@@ -562,7 +587,7 @@ category = "Ephemeral Image"
 command = "/bin/bash"
 args = [
   "-c",
-  "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile scout-loader-aarch64 --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} build",
+  "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} ${MKOSI_STAGE}/scout-loader-aarch64 && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile scout-loader-aarch64 --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --extra-tree=${MKOSI_STAGE}/scout-loader-aarch64 build",
 ]
 
 [tasks.mkosi-build-qcow-imager]
@@ -570,7 +595,7 @@ category = "Ephemeral Image"
 command = "/bin/bash"
 args = [
   "-c",
-  "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile qcow-imager --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} build",
+  "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} ${MKOSI_STAGE}/qcow-imager && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile qcow-imager --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --extra-tree=${MKOSI_STAGE}/qcow-imager build",
 ]
 
 [tasks.mkosi-build-qcow-imager-aarch64]
@@ -578,7 +603,7 @@ category = "Ephemeral Image"
 command = "/bin/bash"
 args = [
   "-c",
-  "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile qcow-imager-aarch64 --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} build",
+  "export PATH=${PATH}:/sbin && mkdir -p ${MKOSI_PACKAGE_CACHE_DIR} ${MKOSI_STAGE}/qcow-imager-aarch64 && ${REPO_ROOT}/pxe/mkosi/bin/mkosi --profile qcow-imager-aarch64 --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --extra-tree=${MKOSI_STAGE}/qcow-imager-aarch64 build",
 ]
 
 [tasks.mkosi-copy-qcow-imager-to-webroot-x86_64]
@@ -688,6 +713,19 @@ script = '''
     OUT=$(patch -p1 --forward -i "${PATCH}") || echo "${OUT}" | grep "Skipping patch" -q || (echo "$OUT" && false)
 '''
 
+[tasks.ipxe-patch-http-ipv6-source]
+category = "iPXE Kernel"
+description = "Patch iPXE to support an explicit IPv6 source for HTTP requests"
+cwd = "${REPO_ROOT}/pxe/ipxe/upstream"
+script = '''
+    IPXE_HTTP_SOURCE_PATCH="${REPO_ROOT}/pxe/ipxe/local/0004-http-ipv6-source.patch"
+    if patch --batch --dry-run -p1 --reverse --forward -i "${IPXE_HTTP_SOURCE_PATCH}" >/dev/null; then
+      echo "HTTP IPv6 source patch is already applied"
+    else
+      patch --batch -p1 --forward -i "${IPXE_HTTP_SOURCE_PATCH}"
+    fi
+'''
+
 [tasks.ipxe-install-efi-x86_64]
 category = "iPXE Kernel"
 description = "Copy the x86_64 EFI iPXE kernel to the boot controller static files directory"
@@ -700,20 +738,12 @@ dependencies = ["ipxe-build-efi-x86_64"]
 [tasks.ipxe-aarch64]
 category = "iPXE Kernel"
 description = "Build iPXE kernel for aarch64 (EFI) and move to the carbide static webroot"
-dependencies = [
-  "ipxe-config",
-  "ipxe-patch-mlnx",
-  "ipxe-install-efi-aarch64",
-]
+dependencies = ["ipxe-config", "ipxe-patch-mlnx", "ipxe-install-efi-aarch64"]
 
 [tasks.ipxe-aarch64-ci]
 category = "iPXE Kernel"
 description = "Build iPXE kernel for aarch64 (EFI) and move to the carbide static webroot"
-dependencies = [
-  "ipxe-config",
-  "ipxe-patch-mlnx",
-  "ipxe-install-efi-aarch64-ci",
-]
+dependencies = ["ipxe-config", "ipxe-patch-mlnx", "ipxe-install-efi-aarch64-ci"]
 
 [tasks.ipxe-install-efi-aarch64]
 category = "iPXE Kernel"
@@ -738,6 +768,7 @@ dependencies = ["ipxe-build-efi-aarch64-ci"]
 [tasks.ipxe-build-efi-x86_64]
 category = "iPXE Kernel"
 description = "Build the x86_64 EFI iPXE kernel"
+dependencies = ["ipxe-patch-http-ipv6-source"]
 script = '''
   LD_ARG=""
   if [ -n "${SA_ENABLEMENT}" ]; then
@@ -759,6 +790,7 @@ cwd = "ipxe/upstream/src"
 [tasks.ipxe-build-efi-aarch64]
 category = "iPXE Kernel"
 description = "Build the aarch64 EFI iPXE kernel on aarch64 gitlab runner"
+dependencies = ["ipxe-patch-http-ipv6-source"]
 script = '''
   if [ -n "${SA_ENABLEMENT}" ]; then
     docker run --rm -u $(id -u):$(id -g) \
@@ -805,6 +837,7 @@ cwd = "ipxe/upstream/src"
 [tasks.ipxe-build-efi-aarch64-ci]
 category = "iPXE Kernel"
 description = "Build the aarch64 EFI iPXE kernel on aarch64 gitlab runner"
+dependencies = ["ipxe-patch-http-ipv6-source"]
 command = "make"
 args = [
   "-j",
@@ -1079,19 +1112,21 @@ args = ["-R", "${REPO_ROOT}/pxe/nvinit_setup", "${BUILD_LOCATION}"]
 
 [tasks.bfb-add-scout-to-bfb-ci]
 category = "iPXE Kernel"
-description = "Add the scout to the BFB"
+description = "Add Scout and its firmware supervisor to the BFB"
 command = "cp"
 args = [
   "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-scout",
+  "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor",
   "${BUILD_LOCATION}",
 ]
 
 [tasks.bfb-add-scout-to-bfb]
 category = "iPXE Kernel"
-description = "Add the scout to the BFB"
+description = "Add Scout and its firmware supervisor to the BFB"
 command = "cp"
 args = [
   "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/forge-scout",
+  "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor",
   "${BUILD_LOCATION}",
 ]
 dependencies = [

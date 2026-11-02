@@ -14,11 +14,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
@@ -47,7 +50,12 @@ func New(c Config) (*Client, error) {
 		creds = insecure.NewCredentials()
 	}
 
-	conn, err := grpc.NewClient(c.Target(), grpc.WithTransportCredentials(creds))
+	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	if cotel.TransportEnabled() {
+		dialOptions = append(dialOptions, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+	}
+
+	conn, err := grpc.NewClient(c.Target(), dialOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -660,10 +668,15 @@ func (c *Client) executePowerControl(
 			Forced:     false,
 		})
 
-	case pb.PowerControlOp_POWER_CONTROL_OP_FORCE_RESTART, pb.PowerControlOp_POWER_CONTROL_OP_COLD_RESET:
+	case pb.PowerControlOp_POWER_CONTROL_OP_FORCE_RESTART:
 		rsp, err = c.client.PowerResetRack(ctx, &pb.PowerResetRackRequest{
 			TargetSpec: targetSpec,
 			Forced:     true,
+		})
+
+	case pb.PowerControlOp_POWER_CONTROL_OP_COLD_RESET:
+		rsp, err = c.client.ACPowerCycleRack(ctx, &pb.ACPowerCycleRackRequest{
+			TargetSpec: targetSpec,
 		})
 
 	default:
@@ -1099,18 +1112,7 @@ func (c *Client) PatchComponent(
 		req.FirmwareVersion = opts.FirmwareVersion
 	}
 
-	if opts.SlotID != nil || opts.TrayIndex != nil || opts.HostID != nil {
-		req.Position = &pb.RackPosition{}
-		if opts.SlotID != nil {
-			req.Position.SlotId = *opts.SlotID
-		}
-		if opts.TrayIndex != nil {
-			req.Position.TrayIdx = *opts.TrayIndex
-		}
-		if opts.HostID != nil {
-			req.Position.HostId = *opts.HostID
-		}
-	}
+	req.Position, req.UpdateMask = componentPositionPatch(opts)
 
 	if opts.Description != nil {
 		req.Description = opts.Description
@@ -1133,6 +1135,28 @@ func (c *Client) PatchComponent(
 	}
 
 	return componentFromProto(rsp.Component), nil
+}
+
+func componentPositionPatch(opts PatchComponentOpts) (*pb.RackPosition, *fieldmaskpb.FieldMask) {
+	if opts.SlotID == nil && opts.TrayIndex == nil && opts.HostID == nil {
+		return nil, nil
+	}
+
+	position := &pb.RackPosition{}
+	mask := &fieldmaskpb.FieldMask{}
+	if opts.SlotID != nil {
+		position.SlotId = *opts.SlotID
+		mask.Paths = append(mask.Paths, "position.slot_id")
+	}
+	if opts.TrayIndex != nil {
+		position.TrayIdx = *opts.TrayIndex
+		mask.Paths = append(mask.Paths, "position.tray_idx")
+	}
+	if opts.HostID != nil {
+		position.HostId = *opts.HostID
+		mask.Paths = append(mask.Paths, "position.host_id")
+	}
+	return position, mask
 }
 
 // ========================================

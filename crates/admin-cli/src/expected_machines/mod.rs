@@ -39,42 +39,7 @@ pub(crate) enum Cmd {
     Add(add::Args),
     #[clap(about = "Delete expected machine")]
     Delete(delete::Args),
-    /// Patch expected machine (partial update, preserves unprovided fields).
-    ///
-    /// Only the fields provided in the command will be updated. All other fields remain unchanged.
-    ///
-    /// Examples:
-    ///   # Update only SKU, preserve all other fields including metadata
-    ///   nico-admin-cli expected-machine patch --bmc-mac-address 1a:1b:1c:1d:1e:1f --sku-id new_sku
-    ///
-    ///   # Update only labels, preserve name and description
-    ///   nico-admin-cli expected-machine patch --bmc-mac-address 1a:1b:1c:1d:1e:1f \
-    ///     --sku-id sku123 --label env:prod --label team:platform
-    #[clap(verbatim_doc_comment)]
     Patch(patch::Args),
-    /// Update expected machine from JSON file (full replacement, consistent with API).
-    ///
-    /// All fields from the JSON file will completely replace the existing record.
-    /// This allows clearing metadata fields by providing empty values.
-    ///
-    /// Example json file:
-    ///    {
-    ///        "bmc_mac_address": "1a:1b:1c:1d:1e:1f",
-    ///        "bmc_username": "user",
-    ///        "bmc_password": "pass",
-    ///        "chassis_serial_number": "sample_serial-1",
-    ///        "fallback_dpu_serial_numbers": ["MT020100000003"],
-    ///        "metadata": {
-    ///            "name": "MyMachine",
-    ///            "description": "My Machine",
-    ///            "labels": [{"key": "ABC", "value": "DEF"}]
-    ///        },
-    ///        "sku_id": "sku_id_123"
-    ///    }
-    ///
-    /// Usage:
-    ///   nico-admin-cli expected-machine update --filename machine.json
-    #[clap(verbatim_doc_comment)]
     Update(update::Args),
     /// Replace all entries in the expected machines table with the entries from an inputted json file.
     ///

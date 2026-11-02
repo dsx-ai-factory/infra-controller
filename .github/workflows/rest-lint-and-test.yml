@@ -12,7 +12,7 @@ defaults:
     working-directory: rest-api
 
 env:
-  GO_VERSION: "1.26.4"
+  GO_VERSION: "1.27.3"
 
 jobs:
   style:
@@ -26,7 +26,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -38,7 +38,7 @@ jobs:
           python-version: '3.10'
 
       - name: Download dependencies
-        run: go mod download
+        uses: ./.github/actions/go-mod-download
 
       - name: Run revive
         run: |
@@ -60,6 +60,9 @@ jobs:
       - name: Check REST command bundle contract
         run: make check-command-bundle
 
+      - name: Test local nico-api address configuration
+        run: python3 -B scripts/test_local_core_address.py
+
   lint-go:
     name: Lint Go
     runs-on: linux-amd64-cpu8
@@ -71,14 +74,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
           cache-dependency-path: rest-api/go.sum
 
       - name: Download dependencies
-        run: go mod download
+        uses: ./.github/actions/go-mod-download
 
       - name: Run go vet
         run: go vet ./...
@@ -86,7 +89,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: v2.14.0
           args: --timeout=10m --issues-exit-code=0 ./...
           working-directory: rest-api
 
@@ -94,6 +97,8 @@ jobs:
     name: Lint OpenAPI
     runs-on: linux-amd64-cpu4
     continue-on-error: false
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -104,6 +109,9 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '24'
+
+      - name: Test NVSwitch registration form
+        run: node --test nvswitch-manager/cmd/ui_registration_test.mjs
 
       - name: Install Redocly CLI
         run: npm install -g @redocly/cli@latest
@@ -132,7 +140,7 @@ jobs:
           echo "Comparing OpenAPI changes against merge-base ${MERGE_BASE}"
 
       - name: Check OpenAPI breaking changes
-        uses: oasdiff/oasdiff-action/breaking@a8c7f0e5649d20d623edb5b38446d3ab3d82d43c
+        uses: oasdiff/oasdiff-action/breaking@3e9d440d37f468355457604348009f50e0cddbf3
         with:
           base: '${{ steps.openapi-base.outputs.merge_base }}:rest-api/openapi/spec.yaml'
           revision: ':rest-api/openapi/spec.yaml'
@@ -140,44 +148,6 @@ jobs:
           # Allowlist reviewed one-time API contract corrections; see the
           # referenced ignore file for each accepted breaking-change report.
           err-ignore: 'rest-api/openapi/oasdiff-breaking-changes-ignore.txt'
-
-  check-generated-files:
-    name: Check Generated Files
-    runs-on: linux-amd64-cpu4
-    continue-on-error: false
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      # The SDK is verified by regeneration in check-generated-sdk. Diffing the Redoc
-      # bundle would cost a doc toolchain install, so it stays a path heuristic.
-      - name: Check OpenAPI docs are up to date
-        run: |
-          BASE="origin/main"
-          if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
-            echo "Base branch $BASE not found, skipping check."
-            exit 0
-          fi
-
-          CHANGED=$(git diff --name-only "$BASE"...HEAD)
-
-          if echo "$CHANGED" | grep -q '^rest-api/openapi/spec.yaml$'; then
-            if ! echo "$CHANGED" | grep -q '^rest-api/docs/index.html$'; then
-              echo "::error::rest-api/openapi/spec.yaml was modified but rest-api/docs/index.html was not updated. Please run: make publish-openapi"
-              exit 1
-            fi
-            echo "✓ rest-api/openapi/spec.yaml changed and rest-api/docs/index.html was also updated."
-          else
-            echo "✓ rest-api/openapi/spec.yaml not changed, skipping docs check."
-          fi
 
   check-generated-sdk:
     name: Check Generated SDK
@@ -192,7 +162,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -232,11 +202,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
           cache-dependency-path: rest-api/go.sum
+
+      - name: Download dependencies
+        uses: ./.github/actions/go-mod-download
 
       - name: Regenerate protobuf code
         run: make core-proto
@@ -257,6 +230,7 @@ jobs:
           - api
           - auth
           - cert-manager
+          - cli-commands
           - common
           - db
           - flow
@@ -287,11 +261,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
           cache-dependency-path: rest-api/go.sum
+
+      - name: Download dependencies
+        uses: ./.github/actions/go-mod-download
 
       - name: Run unit tests for ${{ matrix.module }}
         working-directory: .

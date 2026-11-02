@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 const (
@@ -63,16 +65,15 @@ func CreateExpectedMachine(ctx workflow.Context, request *corev1.ExpectedMachine
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -108,16 +109,15 @@ func UpdateExpectedMachine(ctx workflow.Context, request *corev1.ExpectedMachine
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -143,17 +143,19 @@ func CreateExpectedMachines(ctx workflow.Context, request *corev1.BatchExpectedM
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		// Longer timeout for batch operations since they process multiple machines
-		StartToCloseTimeout: 5 * time.Minute,
+		// A batch takes longer on Site than a single write. It still shares the
+		// ladder, because the REST caller waits no longer for a batch. A batch that
+		// cannot finish inside the budget needs an async contract, not a budget that
+		// outlives its caller.
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -190,17 +192,19 @@ func UpdateExpectedMachines(ctx workflow.Context, request *corev1.BatchExpectedM
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		// Longer timeout for batch operations since they process multiple machines
-		StartToCloseTimeout: 5 * time.Minute,
+		// A batch takes longer on Site than a single write. It still shares the
+		// ladder, because the REST caller waits no longer for a batch. A batch that
+		// cannot finish inside the budget needs an async contract, not a budget that
+		// outlives its caller.
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -227,16 +231,15 @@ func DeleteExpectedMachine(ctx workflow.Context, request *corev1.ExpectedMachine
 
 	logger.Info().Msg("starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

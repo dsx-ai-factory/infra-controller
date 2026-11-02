@@ -6,7 +6,7 @@ For the original tenant release path, see [Release Instance for Full Repair](rel
 
 ## Audience and Access
 
-The caller needs tenant admin access for the dedicated repair tenant and the repair tenant must have targeted instance creation enabled. The repair tenant also needs access to the site, VPC, operating system, and network resources used for repair instances.
+The caller needs tenant admin access for the dedicated repair tenant, and the repair tenant must have effective targeted instance creation at the site being repaired. A Provider Admin grants that on the repair tenant's tenant account; see [Granting Targeted Instance Creation](../../configuration/tenant_management.md#granting-targeted-instance-creation) for what makes it effective. The repair tenant also needs access to the site, VPC, operating system, and network resources used for repair instances.
 
 The repair tenant release path uses `isRepairTenant: true`. The REST API only accepts this flag from tenants with targeted instance creation capability.
 
@@ -83,7 +83,7 @@ Confirm these preconditions:
 - The machine has `tenant-reported-issue` and `repair-request` overrides if the repair tenant release is expected to route the machine automatically back to the ready pool or repair-failed handling.
 - The repair tenant has targeted instance creation capability.
 - The repair tenant has site access and can see the target machine.
-- The machine controller state is still provisionable. `allowUnhealthyMachine: true` can target machines that are not normal-allocation ready, but it does not bypass missing machines, already-assigned machines, or controller states that cannot provision an instance.
+- The machine controller state is still provisionable. `allowUnhealthyMachine: true` can target machines that are not normal-allocation ready, but it does not bypass missing machines, already-assigned machines, controller states that cannot provision an instance, or [started DPU reprovisioning requests](../../operations/firmware-updates/dpu-firmware.md#eligibility-and-scheduling).
 
 When auto-repair is disabled, the original tenant release applies `tenant-reported-issue` but not `repair-request`. In that case, provider operations must either manually add `repair-request` before the repair tenant workflow or manually clear the resolved `tenant-reported-issue` after a successful repair. Without `repair-request`, a successful repair tenant release with no new issue does not clear `tenant-reported-issue`.
 
@@ -314,7 +314,7 @@ Provider tooling can also inspect the lower-level health overrides described in 
 
 | Error | Meaning | Action |
 |---|---|---|
-| `Tenant does not have capability to create Instances using specific Machine ID` | The repair tenant is missing targeted instance creation. | Enable targeted instance creation for the repair tenant or use the correct repair tenant. |
+| `Tenant does not have capability to create Instances using specific Machine ID` | Targeted instance creation is not effective for the repair tenant at this site: the capability is unset, the tenant account is not `Ready`, or a site override disables it. | Have a Provider Admin [grant the capability](../../configuration/tenant_management.md#granting-targeted-instance-creation) on the repair tenant's account, or use the correct repair tenant. |
 | `Machine is not in Ready state, but it can be provisioned by setting allowUnhealthyMachine to true` | The machine can be targeted for repair but the create request omitted `allowUnhealthyMachine`. | Add `allowUnhealthyMachine: true` and retry. |
 | `Machine is assigned to an Instance` | The machine is still assigned elsewhere. | Confirm the original tenant release completed before claiming the machine. |
 | `Tenant does not have capability to set IsRepairTenant` | The release caller is not a targeted-instance-capable tenant. | Release from the repair tenant or use a properly privileged tenant. |

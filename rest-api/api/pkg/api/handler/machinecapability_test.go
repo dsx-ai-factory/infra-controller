@@ -14,8 +14,8 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -77,7 +77,7 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 	common.TestBuildMachineCapability(t, dbSession, &m4.ID, nil, cdbm.MachineCapabilityTypeInfiniBand, "MT28908 Family [ConnectX-7]", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceType("")), nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type args struct {
 		siteID          *uuid.UUID
@@ -109,6 +109,8 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 		wantCount           *int
 		wantDeviceType      *cdbm.MachineCapabilityDeviceType
 		wantInactiveDevices []int
+		wantFirstType       *cdbm.MachineCapabilityType
+		wantOrderBy         *string
 	}{
 		{
 			name: "success retrieving all distinct Machine Capabilities from a Site",
@@ -119,6 +121,31 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 			user:          ipu,
 			wantRespCode:  http.StatusOK,
 			wantRespCount: 6,
+			wantFirstType: cutil.GetPtr(cdbm.MachineCapabilityTypeCPU),
+			wantOrderBy:   cutil.GetPtr("TYPE_ASC"),
+		},
+		{
+			name: "success retrieving Machine Capabilities ordered by type descending",
+			org:  ipOrg,
+			args: args{
+				siteID:  cutil.GetPtr(st1.ID),
+				orderBy: cutil.GetPtr("TYPE_DESC"),
+			},
+			user:          ipu,
+			wantRespCode:  http.StatusOK,
+			wantRespCount: 6,
+			wantFirstType: cutil.GetPtr(cdbm.MachineCapabilityTypeStorage),
+			wantOrderBy:   cutil.GetPtr("TYPE_DESC"),
+		},
+		{
+			name: "reject ordering distinct Machine Capabilities by creation time",
+			org:  ipOrg,
+			args: args{
+				siteID:  cutil.GetPtr(st1.ID),
+				orderBy: cutil.GetPtr("CREATED_ASC"),
+			},
+			user:         ipu,
+			wantRespCode: http.StatusBadRequest,
 		},
 		{
 			name: "success retrieving & filtering by Capability type",
@@ -283,7 +310,6 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 				ec.Set("user", tt.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gamch.Handle(ec)
@@ -293,11 +319,23 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 			if tt.wantRespCode != rec.Code {
 				t.Logf("response body: %s", rec.Body.String())
 			}
+			if rec.Code != http.StatusOK {
+				return
+			}
 
 			resp := []model.APIMachineCapability{}
 			err = json.Unmarshal(rec.Body.Bytes(), &resp)
 			assert.Nil(t, err)
 			assert.Equal(t, tt.wantRespCount, len(resp))
+			if tt.wantFirstType != nil && assert.NotEmpty(t, resp) {
+				assert.Equal(t, *tt.wantFirstType, resp[0].Type)
+			}
+			if tt.wantOrderBy != nil {
+				pageResp := pagination.PageResponse{}
+				err = json.Unmarshal([]byte(rec.Header().Get(pagination.ResponseHeaderName)), &pageResp)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantOrderBy, pageResp.OrderBy)
+			}
 
 			for _, r := range resp {
 				if tt.wantType != nil {

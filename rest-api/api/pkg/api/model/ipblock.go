@@ -4,6 +4,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -52,9 +53,11 @@ type APIIPBlockCreateRequest struct {
 	ProtocolVersion string `json:"protocolVersion"`
 }
 
-// Validate ensure the values passed in request are acceptable
-func (ipbcr APIIPBlockCreateRequest) Validate() error {
-	err := validation.ValidateStruct(&ipbcr,
+// Validate checks the request and normalizes `Prefix` on success. The database
+// compares prefixes as text, so equivalent IPv6 spellings must use the same
+// compressed, lowercase form before duplicate checks and persistence.
+func (ipbcr *APIIPBlockCreateRequest) Validate() error {
+	err := validation.ValidateStruct(ipbcr,
 		validation.Field(&ipbcr.Name,
 			validation.Required.Error(validationErrorStringLength),
 			validation.By(util.ValidateNameCharacters),
@@ -81,7 +84,7 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 	// Validate ipv4
 	if ipbcr.ProtocolVersion == cdbm.IPBlockProtocolVersionV4 {
 		// Validate PrefixLength
-		err := validation.ValidateStruct(&ipbcr,
+		err := validation.ValidateStruct(ipbcr,
 			validation.Field(&ipbcr.PrefixLength,
 				validation.Min(IPv4BlockSizeMin).Error(validationErrorIPv4BlockSizeMin),
 				validation.Max(IPv4BlockSizeMax).Error(validationErrorIPv4BlockSizeMax)),
@@ -90,7 +93,7 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 			return err
 		}
 
-		err = validation.ValidateStruct(&ipbcr,
+		err = validation.ValidateStruct(ipbcr,
 			validation.Field(&ipbcr.Prefix,
 				validationis.IPv4.Error(validationErrorInvalidIPv4Address)),
 		)
@@ -101,7 +104,7 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 	// validate ipv6
 	if ipbcr.ProtocolVersion == cdbm.IPBlockProtocolVersionV6 {
 		// Validate PrefixLength
-		err := validation.ValidateStruct(&ipbcr,
+		err := validation.ValidateStruct(ipbcr,
 			validation.Field(&ipbcr.PrefixLength,
 				validation.Min(IPv6BlockSizeMin).Error(validationErrorIPv6BlockSizeMin),
 				validation.Max(IPv6BlockSizeMax).Error(validationErrorIPv6BlockSizeMax)),
@@ -111,7 +114,7 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 		}
 
 		// Validate ipv6 prefix
-		err = validation.ValidateStruct(&ipbcr,
+		err = validation.ValidateStruct(ipbcr,
 			validation.Field(&ipbcr.Prefix,
 				validationis.IPv6.Error(validationErrorInvalidIPv6Address)),
 		)
@@ -121,13 +124,17 @@ func (ipbcr APIIPBlockCreateRequest) Validate() error {
 	}
 
 	prefixWithLength := netip.MustParsePrefix(fmt.Sprintf("%s/%d", ipbcr.Prefix, ipbcr.PrefixLength))
-	maskedPrefix := prefixWithLength.Masked().Addr()
-	if maskedPrefix.String() != ipbcr.Prefix {
+	if ipbcr.ProtocolVersion == cdbm.IPBlockProtocolVersionV4 && !prefixWithLength.Addr().Is4() {
+		return validation.Errors{"prefix": errors.New(validationErrorInvalidIPv4Address)}
+	}
+	networkAddr := prefixWithLength.Masked().Addr()
+	if prefixWithLength.Addr() != networkAddr {
 		return validation.Errors{
-			"prefix": fmt.Errorf("prefix should have %d right most bits zeroed to match block size, e.g. %s", ipbcr.PrefixLength, maskedPrefix.String()),
+			"prefix": fmt.Errorf("prefix should have %d right most bits zeroed to match block size, e.g. %s", ipbcr.PrefixLength, networkAddr.String()),
 		}
 	}
 
+	ipbcr.Prefix = networkAddr.String()
 	return nil
 }
 
@@ -169,6 +176,8 @@ type APIIPBlock struct {
 	InfrastructureProvider *APIInfrastructureProviderSummary `json:"infrastructureProvider,omitempty"`
 	// TenantID is the ID of the Tenant
 	TenantID *string `json:"tenantId"`
+	// Managed is true for provider fabric/root/overlay and allocated blocks, false for tenant-created blocks.
+	Managed bool `json:"managed"`
 	// Tenant is the summary of the tenant
 	Tenant *APITenantSummary `json:"tenant,omitempty"`
 	// RoutingType is the routingType of the IPBlock
@@ -200,6 +209,7 @@ func NewAPIIPBlock(dbipb *cdbm.IPBlock, dbsds []cdbm.StatusDetail, dbpu *ipam.Us
 		SiteID:                   dbipb.SiteID.String(),
 		InfrastructureProviderID: dbipb.InfrastructureProviderID.String(),
 		TenantID:                 util.GetUUIDPtrToStrPtr(dbipb.TenantID),
+		Managed:                  dbipb.Managed,
 		RoutingType:              dbipb.RoutingType,
 		Prefix:                   dbipb.Prefix,
 		PrefixLength:             dbipb.PrefixLength,
@@ -245,6 +255,8 @@ type APIIPBlockSummary struct {
 	ID string `json:"id"`
 	// Name of the IPBlock, only lowercase characters, digits, hyphens and cannot begin/end with hyphen
 	Name string `json:"name"`
+	// Managed distinguishes provider-managed blocks from tenant-created blocks.
+	Managed bool `json:"managed"`
 	// RoutingType is the routingType of the IPBlock
 	RoutingType string `json:"routingType"`
 	// Prefix is the prefix of the network in CIDR notation
@@ -260,6 +272,7 @@ func NewAPIIPBlockSummary(dbipb *cdbm.IPBlock) *APIIPBlockSummary {
 	ipb := APIIPBlockSummary{
 		ID:           dbipb.ID.String(),
 		Name:         dbipb.Name,
+		Managed:      dbipb.Managed,
 		RoutingType:  dbipb.RoutingType,
 		Prefix:       dbipb.Prefix,
 		PrefixLength: dbipb.PrefixLength,

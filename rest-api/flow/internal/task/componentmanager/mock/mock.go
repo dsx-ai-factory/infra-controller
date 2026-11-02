@@ -168,7 +168,7 @@ func (m *Manager) GetPowerStatus(
 	time.Sleep(m.delay)
 
 	result := make(map[string]operations.PowerStatus)
-	for _, componentID := range target.ComponentIDs {
+	for _, componentID := range target.Identifiers {
 		result[componentID] = operations.PowerStatusOn
 	}
 
@@ -232,9 +232,9 @@ func (m *Manager) GetBringUpStatus(
 
 	result := make(
 		map[string]operations.MachineBringUpState,
-		len(target.ComponentIDs),
+		len(target.Identifiers),
 	)
-	for _, id := range target.ComponentIDs {
+	for _, id := range target.Identifiers {
 		result[id] = operations.MachineBringUpStateMachineCreated
 	}
 	return result, nil
@@ -253,7 +253,7 @@ func (m *Manager) GetFirmwareStatus(
 	time.Sleep(m.delay)
 
 	result := make(map[string]operations.FirmwareUpdateStatus)
-	for _, componentID := range target.ComponentIDs {
+	for _, componentID := range target.Identifiers {
 		result[componentID] = operations.FirmwareUpdateStatus{
 			ComponentID: componentID,
 			State:       operations.FirmwareUpdateStateCompleted,

@@ -71,20 +71,22 @@ A drifted host becomes eligible only after the relevant gates pass:
 | Host state | With `firmware_global.instance_updates_manual_tagging = true`, automatic selection is limited to unassigned hosts in `Ready`. When false, assigned hosts can also be selected. Unassigned hosts are considered first. |
 | Existing work | A host with an existing reprovisioning request is not selected again. Machines already in maintenance or another update workflow count against the shared budget. |
 | Explicit start | When the model has `explicit_start_needed = true`, the current time must be inside that machine's firmware update window. |
-| Site capacity | `machine_updater.max_concurrent_machine_updates_absolute` defines the usable site-wide update ceiling. Machines already in maintenance consume this budget. |
+| Site capacity | `machine_updater.max_concurrent_machine_updates_absolute` and `machine_updater.max_concurrent_machine_updates_percent` determine the site-wide update ceiling as described below. Machines already in maintenance consume this budget. |
 
 Automatic machine updates do not start when both concurrency limits are
 unset, because the resulting update ceiling is zero. Machine Update Manager
 runs every `machine_update_run_interval` seconds; the default is 300 seconds.
 
-> **Current limitation:**
-> `machine_updater.max_concurrent_machine_updates_percent` is intended to set a
-> percentage-based ceiling and account for unhealthy hosts. The current
-> implementation passes the total and unhealthy host counts to that calculation
-> in reverse, so setting the percentage option reduces the calculated ceiling
-> to zero. Until that is corrected, configure
-> `machine_updater.max_concurrent_machine_updates_absolute` and leave the
-> percentage option unset.
+`machine_updater.max_concurrent_machine_updates_percent` sets a ceiling based on
+the total number of managed hosts. NICo rounds the percentage of that count up
+to a whole host, then subtracts unhealthy hosts without going below zero. If
+`machine_updater.max_concurrent_machine_updates_absolute` is also set, it caps
+this remaining ceiling. Hosts already in update workflows consume slots from
+the resulting ceiling before NICo starts more updates.
+
+When the percentage is unset, NICo uses the absolute limit directly. A zero or
+negative percentage disables automatic machine updates even if the absolute
+limit is positive.
 
 When a host is selected, NICo creates a host reprovisioning request. The
 managed-host state machine then adds the `host-fw-update` health report. This
@@ -345,6 +347,59 @@ Refer to [Core Metrics](../../observability/core_metrics.md) for the common metr
 labels and collection endpoint.
 
 ## Failures and recovery
+
+### Full-lockdown recovery rollout
+
+Lenovo GB300 BMC updates can leave BIOS USB lockdown open after BMC-only
+locking. Full-policy restoration and its restart are limited to an explored
+BMC report with vendor `LenovoAMI` and model `HG635N_V2`. Missing or unsupported
+identity leaves the host unavailable without issuing this full-policy restart.
+
+New recovery entries are disabled by default. First upgrade **every API and
+controller that reads machine state**, with the new key omitted. Wait until
+all older processes have stopped. Only then enable this SITE setting:
+
+```toml
+[machine_state_controller]
+full_lockdown_recovery_enabled = true
+```
+
+An older binary cannot decode `RestoreFullLockdown`, which can fail a whole
+machine snapshot read. Older readers also ignore recovery metadata on
+`LockHost`, losing its deadline and strict security check. The flag is a
+writer gate, not automatic version negotiation or rollback protection.
+
+Before rolling back to older code:
+
+1. Set the flag to `false` on every writer and drain processes using the old
+   configuration. Supported recovery already in progress continues.
+1. With the supporting binary still running, let recovery finish. Expired or
+   unsupported recovery needs operator repair. Do not erase state to bypass
+   security verification. The following read-only query must return no rows:
+
+   ```sql
+   SELECT id, controller_state
+   FROM machines
+   WHERE controller_state->>'state' = 'bootconfiguring'
+     AND (
+       controller_state->'boot_config_state'->>'state' = 'restorefulllockdown'
+       OR (
+         controller_state->'boot_config_state'->>'state' = 'lockhost'
+         AND controller_state->'boot_config_state'->>'recovery' IS NOT NULL
+       )
+     );
+   ```
+
+1. Stop state writers and recheck before starting old code. Remove the new
+   config key because older configuration readers reject unknown fields.
+   Keep state-history records intact.
+
+Recovery has one persisted 90-minute deadline across all stages. Expiry keeps
+the host unavailable and stops further recovery writes and restarts. Polling
+does not start another policy/reboot cycle. External effects may repeat if a
+state commit fails, so this is not an exactly-once guarantee.
+
+### Firmware execution failures
 
 Transient upload failures and interrupted asynchronous uploads return to
 firmware checking and are attempted again. A failed Scout result, failed local

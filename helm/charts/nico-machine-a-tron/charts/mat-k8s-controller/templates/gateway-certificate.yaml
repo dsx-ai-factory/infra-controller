@@ -1,0 +1,34 @@
+{{- if and .Values.enabled .Values.gateway.enabled }}
+{{- $name := include "mat-k8s-controller.gateway.fullname" . }}
+{{- $namespace := include "mat-k8s-controller.namespace" . }}
+{{- $global := .Values.global | default dict }}
+{{- $cert := required "gateway.enabled needs global.certificate, which the nico-machine-a-tron parent chart provides" $global.certificate }}
+{{- $trustDomain := required "gateway.enabled needs global.spiffe.trustDomain, which the nico-machine-a-tron parent chart provides" ($global.spiffe | default dict).trustDomain }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name }}-certificate
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "mat-k8s-controller.labels" . | nindent 4 }}
+spec:
+  duration: {{ $cert.duration }}
+  renewBefore: {{ $cert.renewBefore }}
+  # A common name is limited to 64 characters, which the Service FQDN can
+  # exceed; the resolvable names are carried in dnsNames.
+  commonName: {{ $name }}
+  dnsNames:
+    - {{ printf "%s.%s.svc.cluster.local" $name $namespace }}
+    - {{ printf "%s.%s.svc" $name $namespace }}
+    - {{ printf "%s.%s" $name $namespace }}
+  uris:
+    - {{ printf "spiffe://%s/%s/sa/%s" $trustDomain $namespace (include "mat-k8s-controller.serviceAccountName" .) }}
+  privateKey:
+    algorithm: {{ $cert.privateKey.algorithm }}
+    size: {{ $cert.privateKey.size }}
+  issuerRef:
+    kind: {{ $cert.issuerRef.kind }}
+    name: {{ $cert.issuerRef.name }}
+    group: {{ $cert.issuerRef.group }}
+  secretName: {{ $name }}-tls
+{{- end }}

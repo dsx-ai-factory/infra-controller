@@ -37,7 +37,7 @@ func (ibpcr *APIInfiniBandPartitionCreateRequest) Validate() error {
 		validation.Field(&ibpcr.Name,
 			validation.Required.Error(validationErrorStringLength),
 			validation.By(util.ValidateNameCharacters),
-			validation.Length(2, 256).Error(validationErrorStringLength)),
+			validation.Length(cdbm.InfiniBandPartitionNameMinLength, cdbm.InfiniBandPartitionNameMaxLength).Error(validationErrorStringLength)),
 		validation.Field(&ibpcr.Description,
 			validation.When(ibpcr.Description != nil,
 				validation.Length(0, 1024).Error(validationErrorDescriptionStringLength)),
@@ -89,7 +89,7 @@ func (ibpur *APIInfiniBandPartitionUpdateRequest) Validate() error {
 		validation.Field(&ibpur.Name,
 			validation.When(ibpur.Name != nil, validation.Required.Error(validationErrorStringLength)),
 			validation.When(ibpur.Name != nil, validation.By(util.ValidateNameCharacters)),
-			validation.When(ibpur.Name != nil, validation.Length(2, 256).Error(validationErrorStringLength))),
+			validation.When(ibpur.Name != nil, validation.Length(cdbm.InfiniBandPartitionNameMinLength, cdbm.InfiniBandPartitionNameMaxLength).Error(validationErrorStringLength))),
 		validation.Field(&ibpur.Description,
 			validation.When(ibpur.Description != nil, validation.Length(0, 1024).Error(validationErrorDescriptionStringLength)),
 		),
@@ -151,7 +151,7 @@ type APIInfiniBandPartition struct {
 	// EnableSharp indicates if sharp enable on the IB partition or not
 	EnableSharp *bool `json:"enableSharp"`
 	// Labels is the labels of the InfiniBand Partition
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Status is the status o the InfiniBand Partition
 	Status cdbm.InfiniBandPartitionStatus `json:"status"`
 	// StatusHistory is the status detail records for the InfiniBand Partition over time
@@ -175,7 +175,7 @@ func NewAPIInfiniBandPartition(dibp *cdbm.InfiniBandPartition, dbsds []cdbm.Stat
 		ServiceLevel:  dibp.ServiceLevel,
 		RateLimit:     dibp.RateLimit,
 		Mtu:           dibp.Mtu,
-		Labels:        dibp.Labels,
+		Labels:        APILabels(dibp.Labels),
 		EnableSharp:   dibp.EnableSharp,
 		Status:        dibp.Status,
 		Created:       dibp.Created,

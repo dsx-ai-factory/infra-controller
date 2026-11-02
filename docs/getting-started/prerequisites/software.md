@@ -69,7 +69,7 @@ ESO syncs secrets from Vault into Kubernetes Secret objects.
 
 | Component | Validated Version |
 |---|---|
-| Zalando Postgres Operator | v1.10.1 |
+| Zalando Postgres Operator | v1.11.0 |
 | Spilo-15 image | 3.0-p1 (Postgres 15) |
 
 PostgreSQL stores all NICo system state in the `nico_system_nico` database. Only the API Service reads from and writes to it.

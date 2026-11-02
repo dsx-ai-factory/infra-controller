@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -12,8 +13,11 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
@@ -30,6 +34,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "ok when all required fields are provided",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -41,6 +46,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "ok when required fields and optional fields are provided",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -55,6 +61,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "error when BmcMacAddress is missing",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
@@ -64,6 +71,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "error when SwitchSerialNumber is missing",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
@@ -73,6 +81,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "error when BmcMacAddress is wrong length (too short)",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				BmcMacAddress:      "00:11:22:33:44",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
@@ -83,6 +92,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "error when SwitchSerialNumber is empty",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
@@ -90,47 +100,73 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC username (max 16 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username exceeds 255 characters",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
 			},
 			expectErr: false,
 		},
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 17)),
-				DefaultBmcPassword: &validPassword,
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
+				SwitchSerialNumber: validSwitchSerial,
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when BMC password is 256 characters (over limit)",
+			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				SwitchSerialNumber: validSwitchSerial,
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC password (max 20 characters)
 		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is 128 multibyte characters",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 20)),
 				SwitchSerialNumber: validSwitchSerial,
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 128)),
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "ok when BMC password is 255 multibyte characters",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
-				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 21)),
 				SwitchSerialNumber: validSwitchSerial,
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 255)),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when BMC password is 256 multibyte characters",
+			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: validSwitchSerial,
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr: true,
 		},
@@ -138,6 +174,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "ok when switch serial number is exactly 32 characters",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -149,6 +186,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "error when switch serial number is 33 characters (over limit)",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
@@ -159,6 +197,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "ok when optional fields are empty",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &emptyString,
@@ -171,6 +210,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "error when SiteID is empty string",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -182,6 +222,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "ok when SiteID is valid UUID",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -193,6 +234,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "error when SiteID is invalid UUID",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "not-a-valid-uuid",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -204,6 +246,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "error when SiteID is partially valid UUID",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -214,8 +257,20 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		},
 		// BmcIpAddress validation tests
 		{
+			desc: "error when BmcIpAddress is unspecified",
+			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: validSwitchSerial,
+				BmcIpAddress:       cutil.GetPtr("0.0.0.0"),
+			},
+			expectErr: true,
+		},
+		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -228,6 +283,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "valid IPv6 BmcIpAddress",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -240,6 +296,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "invalid BmcIpAddress",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -252,6 +309,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "empty BmcIpAddress (pointer set, value empty)",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -264,6 +322,7 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 		{
 			desc: "nil BmcIpAddress (default)",
 			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
@@ -273,88 +332,138 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
-		// NvosMacAddresses validation tests
+		// NvosInterfaces validation tests
 		{
-			desc: "ok when NvosMacAddresses entries are valid MACs",
+			desc: "ok when NvosInterfaces entries are valid MACs",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:77"}},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is not a MAC",
+			desc: "error when NvosInterfaces entry is not a MAC",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "not-a-mac"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "not-a-mac"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is empty",
+			desc: "error when NvosInterfaces entry MAC is empty",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{""},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: ""}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "ok when NvosMacAddresses is an empty list",
+			desc: "error when NvosInterfaces is an empty list",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{},
+				NvosInterfaces:     APINvosInterfaces{},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when only deprecated NvosMacAddresses is provided",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: &validPassword,
+				SwitchSerialNumber: validSwitchSerial,
+				NvosMacAddresses:   json.RawMessage(`["invalid", "invalid"]`),
+			},
+			expectErr: true,
+		},
+		{
+			desc: "structured NVOS field is accepted alongside ignored legacy data",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: &validPassword,
+				SwitchSerialNumber: validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}},
+				NvosMacAddresses:   json.RawMessage(`{"ignored":true}`),
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when NvosMacAddresses has duplicate entries",
+			desc: "error when NvosInterfaces has duplicate MACs",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:66"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:66"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entries duplicate across separator styles",
+			desc: "error when NvosInterfaces MACs duplicate across separator styles",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00-11-22-33-44-66"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00-11-22-33-44-66"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is not in the published 6-octet format",
+			desc: "error when NvosInterfaces entry MAC is not in the published 6-octet format",
 			obj: APIExpectedSwitchCreateRequest{
 				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
 				BmcMacAddress:      "00:11:22:33:44:55",
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: &validPassword,
 				SwitchSerialNumber: validSwitchSerial,
-				NvosMacAddresses:   []string{"0011.2233.4455"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "0011.2233.4455"}},
+			},
+			expectErr: true,
+		},
+		// primary-marker validation tests
+		{
+			desc: "ok when a single NvosInterfaces entry is marked primary",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: &validPassword,
+				SwitchSerialNumber: validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:77", IsPrimary: true}},
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when more than one NvosInterfaces entry is marked primary",
+			obj: APIExpectedSwitchCreateRequest{
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				DefaultBmcUsername: &validUsername,
+				DefaultBmcPassword: &validPassword,
+				SwitchSerialNumber: validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66", IsPrimary: true}, {MacAddress: "00:11:22:33:44:77", IsPrimary: true}},
 			},
 			expectErr: true,
 		},
@@ -373,13 +482,14 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 func TestNewAPIExpectedSwitch(t *testing.T) {
 	bmcIP := "192.168.1.10"
 	dbES := &cdbm.ExpectedSwitch{
-		BmcMacAddress:      "00:11:22:33:44:55",
-		SwitchSerialNumber: "SWITCH123",
-		BmcIpAddress:       &bmcIP,
-		NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:77"},
-		Labels:             map[string]string{"env": "test", "zone": "us-west-1"},
-		Created:            cdb.GetCurTime(),
-		Updated:            cdb.GetCurTime(),
+		BmcMacAddress:         "00:11:22:33:44:55",
+		SwitchSerialNumber:    "SWITCH123",
+		BmcIpAddress:          &bmcIP,
+		NvosMacAddresses:      []string{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+		NvosPrimaryMacAddress: cutil.GetPtr("00:11:22:33:44:77"),
+		Labels:                map[string]string{"env": "test", "zone": "us-west-1"},
+		Created:               cdb.GetCurTime(),
+		Updated:               cdb.GetCurTime(),
 	}
 
 	tests := []struct {
@@ -400,8 +510,12 @@ func TestNewAPIExpectedSwitch(t *testing.T) {
 			assert.Equal(t, tc.dbObj.BmcMacAddress, got.BmcMacAddress)
 			assert.Equal(t, tc.dbObj.SwitchSerialNumber, got.SwitchSerialNumber)
 			assert.Equal(t, tc.dbObj.BmcIpAddress, got.BmcIpAddress)
-			assert.Equal(t, APINvosMacAddresses(tc.dbObj.NvosMacAddresses), got.NvosMacAddresses)
-			assert.Equal(t, map[string]string(tc.dbObj.Labels), got.Labels)
+			assert.Equal(t, APINvosInterfaces{
+				{MacAddress: "00:11:22:33:44:66", IsPrimary: false},
+				{MacAddress: "00:11:22:33:44:77", IsPrimary: true},
+			}, got.NvosInterfaces)
+			assert.Equal(t, APINvosMacAddresses{"00:11:22:33:44:66", "00:11:22:33:44:77"}, got.NvosMacAddresses)
+			assert.Equal(t, APILabels(tc.dbObj.Labels), got.Labels)
 			assert.Equal(t, tc.dbObj.Created, got.Created)
 			assert.Equal(t, tc.dbObj.Updated, got.Updated)
 		})
@@ -423,6 +537,14 @@ func TestNewAPIExpectedSwitchWithNilFields(t *testing.T) {
 	assert.Equal(t, dbES.BmcMacAddress, got.BmcMacAddress)
 	assert.Equal(t, dbES.SwitchSerialNumber, got.SwitchSerialNumber)
 	assert.Nil(t, got.Labels)
+	assert.Empty(t, got.NvosInterfaces)
+	assert.NotNil(t, got.NvosInterfaces)
+	assert.Empty(t, got.NvosMacAddresses)
+	assert.NotNil(t, got.NvosMacAddresses)
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"nvosInterfaces":[]`)
+	assert.Contains(t, string(encoded), `"nvosMacAddresses":[]`)
 }
 
 func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
@@ -436,6 +558,16 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 		obj       APIExpectedSwitchUpdateRequest
 		expectErr bool
 	}{
+		{
+			desc:      "empty NVOS pair",
+			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr(""), NvOsPassword: cutil.GetPtr("")},
+			expectErr: true,
+		},
+		{
+			desc:      "valid NVOS pair without BMC update",
+			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr("admin"), NvOsPassword: cutil.GetPtr("secret")},
+			expectErr: false,
+		},
 		{
 			desc: "ok when all fields are provided",
 			obj: APIExpectedSwitchUpdateRequest{
@@ -490,6 +622,7 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				DefaultBmcUsername: &emptyString,
+				DefaultBmcPassword: &validPassword,
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: true,
@@ -499,49 +632,60 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				DefaultBmcPassword: &emptyString,
+				DefaultBmcUsername: &validUsername,
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: true,
 		},
-		// Boundary tests for BMC username (max 16 characters)
 		{
-			desc: "ok when BMC username is exactly 16 characters",
+			desc: "ok when BMC username exceeds 255 characters",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 16)),
+				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 256)),
 				DefaultBmcPassword: &validPassword,
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
+		// Boundary tests for BMC password (max 255 characters)
 		{
-			desc: "error when BMC username is 17 characters (over limit)",
-			obj: APIExpectedSwitchUpdateRequest{
-				SwitchSerialNumber: &validSwitchSerial,
-				DefaultBmcUsername: cutil.GetPtr(strings.Repeat("a", 17)),
-				DefaultBmcPassword: &validPassword,
-				Labels:             map[string]string{"env": "test"},
-			},
-			expectErr: true,
-		},
-		// Boundary tests for BMC password (max 20 characters)
-		{
-			desc: "ok when BMC password is exactly 20 characters",
+			desc: "ok when BMC password is exactly 255 characters",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 20)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 255)),
 				Labels:             map[string]string{"env": "test"},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when BMC password is 21 characters (over limit)",
+			desc: "error when BMC password is 256 characters (over limit)",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
 				DefaultBmcUsername: &validUsername,
-				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 21)),
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				Labels:             map[string]string{"env": "test"},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "ok when BMC password is 128 multibyte characters",
+			obj: APIExpectedSwitchUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 128)),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "ok when BMC password is 255 multibyte characters",
+			obj: APIExpectedSwitchUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 255)),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when BMC password is 256 multibyte characters",
+			obj: APIExpectedSwitchUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr: true,
 		},
@@ -567,6 +711,14 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		// BmcIpAddress validation tests
+		{
+			desc: "error when BmcIpAddress is limited broadcast",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				BmcIpAddress:       cutil.GetPtr("255.255.255.255"),
+			},
+			expectErr: true,
+		},
 		{
 			desc: "valid IPv4 BmcIpAddress",
 			obj: APIExpectedSwitchUpdateRequest{
@@ -597,7 +749,7 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 				SwitchSerialNumber: &validSwitchSerial,
 				BmcIpAddress:       &emptyString,
 			},
-			expectErr: true,
+			expectErr: false,
 		},
 		{
 			desc: "nil BmcIpAddress (default)",
@@ -607,60 +759,85 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
-		// NvosMacAddresses validation tests
+		// NvosInterfaces validation tests
 		{
-			desc: "ok when NvosMacAddresses entries are valid MACs",
+			desc: "ok when NvosInterfaces entries are valid MACs",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:77"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:77"}},
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is not a MAC",
+			desc: "error when NvosInterfaces entry is not a MAC",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"not-a-mac"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "not-a-mac"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is empty",
+			desc: "error when NvosInterfaces entry MAC is empty",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{""},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: ""}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "ok when NvosMacAddresses is an empty list",
+			desc: "error when NvosInterfaces is an explicit empty list",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{},
+				NvosInterfaces:     APINvosInterfaces{},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "ok when deprecated NvosMacAddresses is provided",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				NvosMacAddresses:   json.RawMessage(`["invalid", "invalid"]`),
 			},
 			expectErr: false,
 		},
 		{
-			desc: "error when NvosMacAddresses has duplicate entries",
+			desc: "structured NVOS field is accepted alongside ignored legacy data",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00:11:22:33:44:66"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}},
+				NvosMacAddresses:   json.RawMessage(`{"ignored":true}`),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when NvosInterfaces has duplicate MACs",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00:11:22:33:44:66"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entries duplicate across separator styles",
+			desc: "error when NvosInterfaces MACs duplicate across separator styles",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"00:11:22:33:44:66", "00-11-22-33-44-66"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66"}, {MacAddress: "00-11-22-33-44-66"}},
 			},
 			expectErr: true,
 		},
 		{
-			desc: "error when NvosMacAddresses entry is not in the published 6-octet format",
+			desc: "error when NvosInterfaces entry MAC is not in the published 6-octet format",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
-				NvosMacAddresses:   []string{"0011.2233.4455"},
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "0011.2233.4455"}},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when more than one NvosInterfaces entry is marked primary",
+			obj: APIExpectedSwitchUpdateRequest{
+				SwitchSerialNumber: &validSwitchSerial,
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "00:11:22:33:44:66", IsPrimary: true}, {MacAddress: "00:11:22:33:44:77", IsPrimary: true}},
 			},
 			expectErr: true,
 		},
@@ -708,7 +885,7 @@ func TestNewAPIExpectedSwitchEdgeCases(t *testing.T) {
 
 		got := NewAPIExpectedSwitch(dbES)
 		assert.NotNil(t, got)
-		assert.Equal(t, map[string]string(dbES.Labels), got.Labels)
+		assert.Equal(t, APILabels(dbES.Labels), got.Labels)
 		assert.Equal(t, "cloud-api", got.Labels["app.kubernetes.io/name"])
 	})
 
@@ -798,4 +975,56 @@ func TestNewAPIExpectedSwitchWithSite(t *testing.T) {
 		assert.NotNil(t, apiES)
 		assert.Nil(t, apiES.Site)
 	})
+}
+
+func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantPaths []string
+	}{
+		{name: "omitted fields preserve Core state", body: `{}`},
+		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"nvOsUsername":null,"nvOsPassword":null,"labels":null}`},
+		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{}}`, wantPaths: []string{"metadata.labels"}},
+		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
+		{name: "BMC username leaves the password unselected", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":null}`, wantPaths: []string{"bmc_username"}},
+		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},
+		{name: "BMC pair is selected together", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_username", "bmc_password"}},
+		{name: "NVOS username leaves the password unselected", body: `{"nvOsUsername":"admin","nvOsPassword":null}`, wantPaths: []string{"nvos_username"}},
+		{name: "NVOS password leaves the username unselected", body: `{"nvOsPassword":"secret"}`, wantPaths: []string{"nvos_password"}},
+		{name: "NVOS pair leaves BMC unchanged", body: `{"nvOsUsername":"admin","nvOsPassword":"secret"}`, wantPaths: []string{"nvos_username", "nvos_password"}},
+		{name: "nvos interfaces select a single path", body: `{"nvosInterfaces":[{"macAddress":"00:11:22:33:44:66","isPrimary":true}]}`, wantPaths: []string{"nvos_interfaces"}},
+		{name: "deprecated empty MAC list is ignored", body: `{"nvosMacAddresses":[]}`},
+		{name: "deprecated nonempty MAC list is ignored", body: `{"nvosMacAddresses":["00:11:22:33:44:66"]}`},
+		{name: "deprecated arbitrary JSON is ignored", body: `{"nvosMacAddresses":{"ignored":true}}`},
+		{name: "structured field wins over legacy content", body: `{"nvosMacAddresses":["invalid"],"nvosInterfaces":[{"macAddress":"00:11:22:33:44:66","isPrimary":true}]}`, wantPaths: []string{"nvos_interfaces"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var request APIExpectedSwitchUpdateRequest
+			require.NoError(t, json.Unmarshal([]byte(test.body), &request))
+			require.NoError(t, request.Validate())
+			patch := request.ToProto(&cdbm.ExpectedSwitch{SlotID: cutil.GetPtr(int32(0))})
+			encoded, err := protojson.Marshal(patch)
+			require.NoError(t, err)
+			var decoded corev1.PatchExpectedSwitchRequest
+			require.NoError(t, protojson.Unmarshal(encoded, &decoded))
+			require.NotNil(t, decoded.UpdateMask)
+			assert.ElementsMatch(t, test.wantPaths, decoded.GetUpdateMask().GetPaths())
+			if request.SlotID != nil {
+				labels := decoded.GetExpectedSwitch().GetMetadata().GetLabels()
+				require.Len(t, labels, 1)
+				assert.Equal(t, "slot_id", labels[0].GetKey())
+				assert.Equal(t, "0", labels[0].GetValue())
+			}
+			if request.DefaultBmcUsername != nil {
+				assert.Equal(t, *request.DefaultBmcUsername, decoded.GetExpectedSwitch().GetBmcUsername())
+			}
+			if request.DefaultBmcPassword != nil {
+				assert.Equal(t, *request.DefaultBmcPassword, decoded.GetExpectedSwitch().GetBmcPassword())
+			}
+			assert.Equal(t, request.NvOsUsername, decoded.GetExpectedSwitch().NvosUsername)
+			assert.Equal(t, request.NvOsPassword, decoded.GetExpectedSwitch().NvosPassword)
+		})
+	}
 }

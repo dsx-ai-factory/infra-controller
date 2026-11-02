@@ -22,6 +22,8 @@ use forge_tls::default as tls_default;
 use libmlx::device::cmd::device::args::DeviceAction;
 use libmlx::lockdown::cmd::args::LockdownAction;
 
+use crate::nic_firmware_preflight::FirmwareAction;
+
 #[derive(ValueEnum, Clone, Debug, Copy, PartialEq)]
 pub(crate) enum Mode {
     Service,
@@ -83,6 +85,13 @@ pub(crate) struct Options {
     default_value_t = tls_default::CLIENT_KEY.to_string(),
     )]
     pub(crate) client_key: String,
+
+    #[clap(
+        long,
+        help = "Absolute, normalized container-visible base directory for Machine Validation plugin input and output files ('.' and '..' are not allowed)",
+        default_value = machine_validation::DEFAULT_PLUGIN_CONTRACT_DIR
+    )]
+    pub(crate) machine_validation_plugin_contract_dir: String,
 
     // Combined with discovery_retries_max, the default of 60
     // seconds worth of discovery_retry_secs provides for 1
@@ -176,6 +185,14 @@ pub(crate) enum MlxAction {
     Device(MlxDevice),
     #[clap(about = "Mellanox lockdown operations.")]
     Lockdown(MlxLockdown),
+    #[clap(about = "Read-only NIC firmware inspection.")]
+    Firmware(MlxFirmware),
+}
+
+#[derive(Parser, Clone)]
+pub(crate) struct MlxFirmware {
+    #[command(subcommand)]
+    pub(crate) action: FirmwareAction,
 }
 
 #[derive(Parser, Clone)]

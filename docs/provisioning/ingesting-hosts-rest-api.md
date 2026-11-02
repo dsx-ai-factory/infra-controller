@@ -8,7 +8,7 @@ Make sure the following are in place before you begin:
 
 1. NICo is deployed and the REST API service is reachable at a known URL.
 1. You have `nicocli` installed (`make nico-cli` from the infra-controller repo) and a working config under `~/.nico/`. For setup, authentication, and config conventions, see the [Quick Start Guide](../getting-started/quick-start.md) and the nicocli reference guide.
-1. You hold the `PROVIDER_ADMIN` role in the org you are operating in. Tenant Admins with `targetedInstanceCreation` capability can also register Expected Machines, but the canonical path is provider-side.
+1. You hold the `PROVIDER_ADMIN` role in the org you are operating in. Tenant Admins with [effective targeted instance creation](../configuration/tenant_management.md#granting-targeted-instance-creation) at the site can also register Expected Machines, but the canonical path is provider-side.
 1. DHCP requests from all managed host BMC networks have been forwarded to the NICo DHCP service.
 1. For every host you plan to register, you have:
    - The MAC address of the host BMC
@@ -28,7 +28,7 @@ nicocli user get
 
 An Expected Machine pre-registers a physical machine so NICo can authenticate to it on discovery and accept it for ingestion. Each Expected Machine carries the factory default BMC credentials NICo uses for first contact, plus identifying information (chassis serial, optional rack/SKU metadata).
 
-The Expected Machine endpoints are scoped per-org per-site. All requests require `PROVIDER_ADMIN` (or `TENANT_ADMIN` with `targetedInstanceCreation`).
+The Expected Machine endpoints are scoped per-org per-site. All requests require `PROVIDER_ADMIN`, or `TENANT_ADMIN` with [effective targeted instance creation](../configuration/tenant_management.md#granting-targeted-instance-creation) at that site.
 
 ### Single Machine
 
@@ -66,7 +66,7 @@ Optional flags add metadata or pre-allocate resources:
 | ---- | ------- |
 | `--bmc-ip-address` | Pre-allocate a reserved BMC IP (IPv4 or IPv6) instead of letting DHCP assign one |
 | `--rack-id` | Associate with a rack identifier |
-| `--sku-id` | Associate with a SKU |
+| `--sku-id` | Assign an existing SKU from the Site selected by `--site-id` to the host when it is discovered; refer to [Assign a SKU through the expected machine](sku-validation.md#assign-a-sku-through-the-expected-machine) for validation and omission behavior |
 | `--manufacturer`, `--model`, `--firmware-version`, `--name`, `--description` | Free-text hardware metadata |
 | `--slot-id`, `--tray-idx`, `--host-id` | Physical placement within a rack/tray |
 
@@ -97,6 +97,8 @@ unset NICO_PASSWORD
 ```
 
 `fallbackDPUSerialNumbers` is JSON-only (no flag form) and is needed for DGX-H100 or other machines where the NetworkAdapter serial number is not available in the host Redfish.
+
+During DPU matching, every nonempty serial in `fallbackDPUSerialNumbers` must be discovered and its DPU ready before ingestion, even when host inventory is fully matched. After replacing a DPU (RMA), update or remove its old serial from this list; stale entries block ingestion. See [DPU-host pairing](../architecture/redfish_workflow.md#3-dpu-host-pairing).
 
 `hostLifecycleProfile` is also JSON-only. Set `disableLockdown` to `true` only when the host must remain unlocked during lifecycle management. When the profile is omitted or `disableLockdown` is `false`, NICo applies UEFI lockdown during `HostInit`.
 
@@ -266,6 +268,10 @@ nicocli expected-machine batch-update --data-file updates.json
 ```
 
 Where `updates.json` is a JSON array of `ExpectedMachineUpdateRequest` objects. Each entry must include the `id` field identifying which Expected Machine to update; other fields are merged onto the existing record.
+
+All items must supply the same set of fields, except that `bmcIpAddress` can be omitted or null to preserve that
+machine's address. To update `skuId`, supply it in every item; the values can differ. To preserve all SKU
+associations, omit `skuId` or set it to `null` in every item.
 
 ### Export
 

@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
+use carbide_dpf::types::DpuServiceInterfaceTemplateType;
+use carbide_machine_controller::handler::is_bf4_dmi_product;
 use carbide_network::ip::IpAddressFamily;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::extension_service::ExtensionServiceId;
@@ -41,21 +43,26 @@ use ipnetwork::IpNetwork;
 use itertools::Itertools;
 use model::ConfigValidationError;
 use model::dpa_interface::{DpaInterface, DpaSearchConfig};
+use model::expected_machine::ExpectedMachine;
 use model::extension_service::{
-    ExtensionService, ExtensionServiceLifecycleState, ExtensionServiceType,
+    DpuTarget, ExtensionService, ExtensionServiceDeploymentType, ExtensionServiceLifecycleState,
+    ExtensionServiceType,
 };
 use model::hardware_info::InfinibandInterface;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IbMembership};
 use model::ib_partition::PartitionKey;
 use model::instance::NewInstance;
 use model::instance::config::InstanceConfig;
-use model::instance::config::extension_services::InstanceExtensionServicesConfig;
+use model::instance::config::extension_services::{
+    InstanceExtensionServicesConfig, RequestedInstanceExtensionServicesConfig,
+};
 use model::instance::config::infiniband::InstanceInfinibandConfig;
 use model::instance::config::network::{
     InstanceInterfaceIpFamilyMode, InstanceNetworkConfig, InterfaceFunctionId, Ipv6InterfaceConfig,
     NetworkDetails,
 };
 use model::instance::config::spx::{InstanceSpxConfig, SpxAttachmentType};
+use model::instance::nic_firmware::NicFirmwareAllocationTarget;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot, NotAllocatableReason,
@@ -100,6 +107,8 @@ fn build_requested_linknet_prefix(
 }
 use crate::{CarbideError, CarbideResult};
 
+pub(crate) mod service_vpc;
+
 async fn validate_zero_dpu_auto_vpc(
     txn: &mut PgConnection,
     vpc_id: VpcId,
@@ -143,19 +152,71 @@ async fn validate_zero_dpu_auto_vpc(
     Ok(vpc)
 }
 
-/// Rejects instance VFs that DPF did not materialize from the configured replacement topology.
+/// Source of the tenant-facing VF inventory provisioned for a managed host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InstanceVfInventorySource {
+    HbnRepresentors,
+    DpfInterceptTopology,
+    Bf4AstraStatic,
+}
+
+/// Reports whether the persisted expected-machine declaration selects Astra for BF4 provisioning.
 ///
-/// DPF topology replaces the static PF/VF ServiceInterface inventory, making exact membership
-/// authoritative. Pre-DPF bridging is only a sparse provisioning override, not an inventory;
-/// omitting a representor does not remove it from the provisioned hardware population. The pre-DPF
-/// and static DPF paths therefore retain their historical admission behavior. DPF startup owns
-/// normalization of the raw topology, so this request-time gate only projects its already-validated
-/// VF identities from immutable runtime configuration.
-pub(crate) fn validate_instance_vfs_against_dpf_topology(
+/// DPF provisioning uses an exact `CX9` NIC-type match, so admission must use that same declaration
+/// instead of DPA-interface rows whose creation also depends on site enablement flags.
+pub(crate) fn expected_machine_declares_cx9(expected_machine: Option<&ExpectedMachine>) -> bool {
+    expected_machine.is_some_and(|expected_machine| {
+        expected_machine
+            .data
+            .interfaces
+            .iter()
+            .any(|interface| interface.nic_type.as_deref() == Some("CX9"))
+    })
+}
+
+/// Selects configured DPF topology before using BF4-and-CX9 classification for the topology-free fallback.
+pub(crate) fn instance_vf_inventory_source(
+    mh_snapshot: &ManagedHostStateSnapshot,
+    config: &CarbideConfig,
+    expected_machine_has_cx9: bool,
+) -> InstanceVfInventorySource {
+    if !mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
+        return InstanceVfInventorySource::HbnRepresentors;
+    }
+
+    // Configured topology is authoritative for every DPF profile, regardless of hardware classification.
+    if dpf_topology_vf_ids(config).is_some() {
+        return InstanceVfInventorySource::DpfInterceptTopology;
+    }
+
+    let all_dpus_are_bf4 = !mh_snapshot.dpu_snapshots.is_empty()
+        && mh_snapshot.dpu_snapshots.iter().all(|dpu| {
+            dpu.status
+                .hardware_info
+                .as_ref()
+                .and_then(|hardware_info| hardware_info.dmi_data.as_ref())
+                .is_some_and(|dmi_data| is_bf4_dmi_product(&dmi_data.product_name))
+        });
+
+    // Only topology-free Astra needs a distinct static fallback.
+    if expected_machine_has_cx9 && all_dpus_are_bf4 {
+        InstanceVfInventorySource::Bf4AstraStatic
+    } else {
+        InstanceVfInventorySource::DpfInterceptTopology
+    }
+}
+
+/// Rejects instance VFs that are absent from the effective DPU interface inventory.
+///
+/// Every DPF profile uses configured intercept topology when present. Topology-free Astra uses its
+/// static provisioned inventory, while other topology-free DPF profiles retain historical behavior.
+/// A non-DPF host follows `hbn_reps`, capped by the configured hardware VF population.
+pub(crate) fn validate_instance_vfs_against_effective_dpu_inventory(
     network: &InstanceNetworkConfig,
     config: &CarbideConfig,
+    inventory_source: InstanceVfInventorySource,
 ) -> CarbideResult<()> {
-    validate_vf_ids_against_dpf_topology(
+    validate_vf_ids_against_effective_dpu_inventory(
         network
             .interfaces
             .iter()
@@ -164,15 +225,85 @@ pub(crate) fn validate_instance_vfs_against_dpf_topology(
                 InterfaceFunctionId::Virtual { id } => Some(*id),
             }),
         config,
+        inventory_source,
     )
 }
 
-/// Applies exact topology membership to an already structurally validated VF sequence.
-fn validate_vf_ids_against_dpf_topology(
+/// Returns whether a wire request asks NICo to choose every VF identity.
+///
+/// Mixed explicit and omitted VF identities are rejected during RPC conversion, so finding one
+/// omitted virtual identity is sufficient for requests that successfully convert.
+pub(crate) fn requests_implicit_vf_allocation(config: &rpc::InstanceConfig) -> bool {
+    config.network.as_ref().is_some_and(|network| {
+        network.interfaces.iter().any(|interface| {
+            interface.function_type() == rpc::InterfaceFunctionType::Virtual
+                && interface.virtual_function_id.is_none()
+        })
+    })
+}
+
+/// Replaces the RPC converter's sequential placeholder IDs with the host's effective VF IDs.
+///
+/// VF allocation remains independent for each device locator, matching the RPC converter's
+/// historical behavior. Topology-free non-Astra DPF hosts retain their sequential placeholders.
+pub(crate) fn assign_implicit_instance_vfs_from_effective_dpu_inventory(
+    network: &mut InstanceNetworkConfig,
+    config: &CarbideConfig,
+    inventory_source: InstanceVfInventorySource,
+) -> CarbideResult<()> {
+    let Some(selected_vfs) = effective_instance_vf_ids(config, inventory_source)? else {
+        return Ok(());
+    };
+    let selected_vfs = selected_vfs.into_iter().collect_vec();
+    let mut next_vf_index_by_device = HashMap::new();
+
+    for interface in &mut network.interfaces {
+        if !matches!(&interface.function_id, InterfaceFunctionId::Virtual { .. }) {
+            continue;
+        }
+
+        let device_locator = interface.device_locator.clone();
+        let next_vf_index = next_vf_index_by_device
+            .entry(device_locator.clone())
+            .or_insert(0usize);
+        let Some(selected_vf) = selected_vfs.get(*next_vf_index).copied() else {
+            let device = device_locator
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "the default device".to_string());
+            let inventory = match inventory_source {
+                InstanceVfInventorySource::HbnRepresentors => "configured instance VF inventory",
+                InstanceVfInventorySource::DpfInterceptTopology => {
+                    "configured DPF intercept-bridging topology"
+                }
+                InstanceVfInventorySource::Bf4AstraStatic => "BF4 Astra static VF inventory",
+            };
+            return Err(ConfigValidationError::InvalidValue(format!(
+                "cannot implicitly allocate {} virtual functions for {device}; the {inventory} exposes only {}",
+                *next_vf_index + 1,
+                selected_vfs.len(),
+            ))
+            .into());
+        };
+
+        let InterfaceFunctionId::Virtual { id } = &mut interface.function_id else {
+            unreachable!("the interface function was checked above");
+        };
+        *id = selected_vf;
+        *next_vf_index += 1;
+    }
+
+    Ok(())
+}
+
+/// Applies exact effective-inventory membership to an already structurally validated VF sequence.
+fn validate_vf_ids_against_effective_dpu_inventory(
     vf_ids: impl IntoIterator<Item = u8>,
     config: &CarbideConfig,
+    inventory_source: InstanceVfInventorySource,
 ) -> CarbideResult<()> {
-    let Some(selected_vfs) = dpf_topology_vf_ids(config) else {
+    let Some(selected_vfs) = effective_instance_vf_ids(config, inventory_source)? else {
+        // Non-Astra DPF without a replacement topology retains its historical admission behavior.
         return Ok(());
     };
 
@@ -180,21 +311,123 @@ fn validate_vf_ids_against_dpf_topology(
         .into_iter()
         .find(|vf_id| !selected_vfs.contains(vf_id))
     {
-        return Err(ConfigValidationError::InvalidValue(format!(
-            "virtual function VF{unselected_vf} is not selected by the configured DPF intercept-bridging topology"
-        ))
-        .into());
+        let message = match inventory_source {
+            InstanceVfInventorySource::HbnRepresentors => format!(
+                "virtual function VF{unselected_vf} is not available in the configured instance VF inventory"
+            ),
+            InstanceVfInventorySource::DpfInterceptTopology => format!(
+                "virtual function VF{unselected_vf} is not selected by the configured DPF intercept-bridging topology"
+            ),
+            InstanceVfInventorySource::Bf4AstraStatic => format!(
+                "virtual function VF{unselected_vf} is not available in the BF4 Astra static VF inventory"
+            ),
+        };
+        return Err(ConfigValidationError::InvalidValue(message).into());
     }
 
     Ok(())
 }
 
-/// Returns the exact topology VF population, or `None` when legacy admission remains in effect.
-fn dpf_topology_vf_ids(config: &CarbideConfig) -> Option<BTreeSet<u8>> {
-    if !config.dpf.enabled {
-        return None;
+/// Returns the authoritative VF inventory, or `None` for topology-free DPF compatibility mode.
+fn effective_instance_vf_ids(
+    config: &CarbideConfig,
+    inventory_source: InstanceVfInventorySource,
+) -> CarbideResult<Option<BTreeSet<u8>>> {
+    match inventory_source {
+        InstanceVfInventorySource::HbnRepresentors => configured_instance_vf_ids(config).map(Some),
+        InstanceVfInventorySource::DpfInterceptTopology => Ok(dpf_topology_vf_ids(config)),
+        InstanceVfInventorySource::Bf4AstraStatic => Ok(Some(bf4_astra_instance_vf_ids())),
+    }
+}
+
+/// Returns the tenant VFs from the same static interface inventory provisioned for BF4 Astra.
+fn bf4_astra_instance_vf_ids() -> BTreeSet<u8> {
+    carbide_dpf::sdk::build_dpu_interfaces_vec()
+        .into_iter()
+        .filter(|interface| {
+            interface.pf_id == 0
+                && matches!(&interface.iface_type, DpuServiceInterfaceTemplateType::Vf)
+        })
+        .filter_map(|interface| u8::try_from(interface.vf_id).ok())
+        .collect()
+}
+
+/// Default instance VF count when no representor selection is configured.
+const DEFAULT_INSTANCE_VF_COUNT: u8 = 14;
+
+const PF0_VF_SELECTOR_PREFIX: &str = "pf0vf";
+
+/// Returns the configured tenant-facing VF IDs, capped by the hardware VF count.
+fn configured_instance_vf_ids(config: &CarbideConfig) -> CarbideResult<BTreeSet<u8>> {
+    let representors = config
+        .vmaas_config
+        .as_ref()
+        .and_then(|vmaas_config| vmaas_config.hbn_reps.as_deref())
+        // The PXE template omits an empty value, so HBN applies the same fallback as `None`.
+        .filter(|representors| !representors.is_empty());
+
+    let mut selected_vfs = match representors {
+        Some(representors) => instance_vf_ids_from_representors(representors)?,
+        None => (0..DEFAULT_INSTANCE_VF_COUNT).collect(),
+    };
+
+    selected_vfs.retain(|vf_id| u32::from(*vf_id) < config.dpu_config.num_of_vfs);
+    Ok(selected_vfs)
+}
+
+/// Extracts tenant-facing PF0 VF IDs from a comma-separated representor list.
+fn instance_vf_ids_from_representors(representors: &str) -> CarbideResult<BTreeSet<u8>> {
+    let mut selected_vfs = BTreeSet::new();
+
+    for representor in representors.split(',') {
+        if representor.is_empty()
+            || representor
+                .chars()
+                .any(|character| character.is_ascii_whitespace())
+        {
+            return Err(invalid_vf_selector(representor));
+        }
+
+        let Some(vf_selector) = representor.strip_prefix(PF0_VF_SELECTOR_PREFIX) else {
+            // Other HBN endpoints do not select tenant VFs from PF0.
+            continue;
+        };
+
+        let Some((start, end_representor)) = vf_selector.split_once('-') else {
+            selected_vfs.insert(
+                vf_selector
+                    .parse::<u8>()
+                    .map_err(|_| invalid_vf_selector(representor))?,
+            );
+            continue;
+        };
+        let Some(end) = end_representor.strip_prefix(PF0_VF_SELECTOR_PREFIX) else {
+            return Err(invalid_vf_selector(representor));
+        };
+        let start = start
+            .parse::<u8>()
+            .map_err(|_| invalid_vf_selector(representor))?;
+        let end = end
+            .parse::<u8>()
+            .map_err(|_| invalid_vf_selector(representor))?;
+        if start > end {
+            return Err(invalid_vf_selector(representor));
+        }
+        selected_vfs.extend(start..=end);
     }
 
+    Ok(selected_vfs)
+}
+
+fn invalid_vf_selector(representor: &str) -> CarbideError {
+    ConfigValidationError::InvalidValue(format!(
+        "invalid PF0 VF selector `{representor}` in `hbn_reps`; expected `pf0vfN` or an inclusive `pf0vfN-pf0vfM` range"
+    ))
+    .into()
+}
+
+/// Returns the exact topology VF population, or `None` when no topology is configured.
+fn dpf_topology_vf_ids(config: &CarbideConfig) -> Option<BTreeSet<u8>> {
     let topology = config.vmaas_config.as_ref()?.bridging.as_ref()?;
     Some(
         topology
@@ -253,6 +486,12 @@ pub(crate) struct InstanceAllocationRequest {
     /// Desired configuration of the instance
     pub(crate) config: InstanceConfig,
 
+    /// Caller VPC selections retained until NICo allocates the attachment's service interfaces.
+    pub(crate) requested_extension_services: RequestedInstanceExtensionServicesConfig,
+
+    /// Whether NICo must replace converter-assigned VF placeholders with effective inventory IDs.
+    pub(crate) implicit_vf_allocation: bool,
+
     pub(crate) metadata: Metadata,
 
     /// Allow allocation on unhealthy machines
@@ -279,11 +518,19 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
                 CarbideError::from(RpcDataConversionError::InvalidInstanceTypeId(e.value()))
             })?;
 
-        let config = request
+        let mut rpc_config = request
             .config
             .ok_or(RpcDataConversionError::MissingArgument("config"))?;
 
-        let mut config = InstanceConfig::try_from(config)?;
+        let implicit_vf_allocation = requests_implicit_vf_allocation(&rpc_config);
+        let requested_extension_services = rpc_config
+            .dpu_extension_services
+            .take()
+            .map(RequestedInstanceExtensionServicesConfig::try_from)
+            .transpose()?
+            .unwrap_or_default();
+        let mut config = InstanceConfig::try_from(rpc_config)?;
+        config.extension_services = requested_extension_services.clone().into_new_attachments();
         // Empty power-policy values are clear sentinels only on update. During
         // creation there is no association to clear, so persist them as unset.
         config.power_profile = normalize_created_power_profile(config.power_profile);
@@ -306,6 +553,8 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
             instance_type_id,
             machine_id: machine_id.into(),
             config,
+            requested_extension_services,
+            implicit_vf_allocation,
             metadata,
             allow_unhealthy_machine,
         })
@@ -314,7 +563,6 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
 
 /// The initial candidate attempt plus one retry after an overlap conflict.
 const PREFIX_ALLOCATION_TOTAL_ATTEMPTS: usize = 2;
-const NETWORK_PREFIX_OVERLAP_CONSTRAINT: &str = "network_prefixes_prefix_excl";
 
 /// Address-family component of a canonical allocation group.
 ///
@@ -427,11 +675,9 @@ struct PrefixAllocationWork {
     automatic: bool,
 }
 
-/// Per-request mutable network config and tenant organization used for VPC
-/// ownership checks.
+/// Per-request mutable network config.
 struct NetworkAllocationTarget<'a> {
     network_config: &'a mut InstanceNetworkConfig,
-    tenant_organization_id: &'a TenantOrganizationId,
 }
 
 /// Owned discovery results used by synchronous allocation planning.
@@ -444,7 +690,7 @@ struct PrefixAllocationContext {
     explicit_prefixes: HashMap<VpcPrefixId, VpcPrefix>,
     // Active-at-discovery candidates frozen by VPC/family in ascending ID order.
     automatic_candidates: BTreeMap<(VpcId, AllocationAddressFamily), Arc<[VpcPrefixId]>>,
-    // Referenced VPCs verified to exist for ownership and capability checks.
+    // Referenced VPCs verified to exist for capability checks.
     vpcs: HashMap<VpcId, model::vpc::Vpc>,
 }
 
@@ -512,7 +758,7 @@ fn is_network_prefix_overlap_conflict(error: &CarbideError) -> bool {
         CarbideError::DBError(db::AnnotatedSqlxError {
             source: sqlx::Error::Database(database_error),
             ..
-        }) if database_error.constraint() == Some(NETWORK_PREFIX_OVERLAP_CONSTRAINT)
+        }) if db::network_prefix::is_overlap_constraint(database_error.constraint())
     )
 }
 
@@ -825,7 +1071,7 @@ async fn load_prefix_allocation_context(
         db::vpc_prefix::find_allocation_candidates(txn, &automatic_candidate_vpc_ids).await?
     };
 
-    // Load every referenced VPC once for ownership and capability validation.
+    // Load every referenced VPC once for capability validation.
     let mut referenced_vpc_ids = automatic_vpc_ids.clone();
     referenced_vpc_ids.extend(explicit_prefixes.values().map(|prefix| prefix.vpc_id));
     let referenced_vpc_ids = referenced_vpc_ids.into_iter().collect_vec();
@@ -916,12 +1162,6 @@ fn plan_prefix_allocations(
                 })?;
                 target_vpc_ids.insert(vpc.id);
 
-                if vpc.config.tenant_organization_id != target.tenant_organization_id.to_string() {
-                    return Err(CarbideError::FailedPrecondition(format!(
-                        "VPC `{}` is not owned by tenant `{}`",
-                        vpc.id, target.tenant_organization_id,
-                    )));
-                }
                 if vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
                     return Err(CarbideError::FailedPrecondition(format!(
                         "automatic VPC-prefix selection requires an FNN VPC; VPC `{}` uses {}",
@@ -1021,15 +1261,6 @@ fn plan_prefix_allocations(
                 ))
             })?;
             target_vpc_ids.insert(primary_vpc.id);
-            if primary_vpc.config.tenant_organization_id
-                != target.tenant_organization_id.to_string()
-            {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "VPC prefix `{primary_prefix_id}` belongs to VPC `{}`, which is not owned by tenant `{}`",
-                    primary_vpc.id, target.tenant_organization_id,
-                )));
-            }
-
             let primary_family =
                 AllocationAddressFamily::from_network(primary_prefix.config.prefix);
             let primary_allocation_prefix_len = instance_prefix_len(
@@ -1346,23 +1577,20 @@ async fn allocate_networks(
         };
         plan_prefix_allocations(targets, &context)?
     };
+    if !works.is_empty() {
+        // Lock `instance_addresses` before VPC-prefix rows so host allocation, service-VPC
+        // activation, and network-segment deletion use one database lock order.
+        db::instance_address::lock_table_for_allocation(txn).await?;
+    }
     execute_prefix_allocations(targets, txn, works).await
 }
 
 /// Allocates generated network resources for one instance network config.
 pub(crate) async fn allocate_network(
     network_config: &mut InstanceNetworkConfig,
-    tenant_organization_id: &TenantOrganizationId,
     txn: &mut PgConnection,
 ) -> CarbideResult<()> {
-    allocate_networks(
-        &mut [NetworkAllocationTarget {
-            network_config,
-            tenant_organization_id,
-        }],
-        txn,
-    )
-    .await
+    allocate_networks(&mut [NetworkAllocationTarget { network_config }], txn).await
 }
 
 pub(crate) fn allocate_ib_port_guid(
@@ -1548,9 +1776,28 @@ pub(crate) async fn allocate_instance(
         .ok_or_else(|| CarbideError::internal("instance allocation returned no result".to_string()))
 }
 
+/// Rejects SPX allocation and legacy attachment edits when a tenant profile is selected.
+/// Remove this guard when tenant firmware preparation is implemented by
+/// https://github.com/dsx-ai-factory/infra-controller/issues/6686.
+///
+/// Missing tenant rows and unset profiles are allowed. Snapshot-backed edits
+/// use their frozen requirement and bindings instead of this live lookup.
+pub(crate) async fn validate_tenant_nic_firmware_preparation(
+    txn: &mut PgConnection,
+    tenant_organization_id: &TenantOrganizationId,
+) -> CarbideResult<()> {
+    let config = db::tenant::find_nic_firmware_config(txn, tenant_organization_id).await?;
+    if config.is_some_and(|config| config.profile_id.is_some()) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "tenant {tenant_organization_id} requires NIC firmware preparation for SPX attachments, which is not supported"
+        )));
+    }
+    Ok(())
+}
+
 /// Loads and locks the extension-service rows and their live versions for
-/// `service_ids`, keyed by service ID. Soft-deleted services and versions are
-/// left out, so a missing entry reads as "does not exist" to callers.
+/// `service_ids`, keyed by service ID. Service rows include soft-deleted records so validation can
+/// distinguish deletion from absence, while versions remain active-only.
 #[allow(clippy::type_complexity)]
 pub(crate) async fn load_extension_services(
     txn: &mut db::Transaction<'_>,
@@ -1562,7 +1809,7 @@ pub(crate) async fn load_extension_services(
     ),
     CarbideError,
 > {
-    let services = extension_service::find_by_ids(txn, service_ids, false, true)
+    let services = extension_service::find_by_ids(txn, service_ids, true, true)
         .await?
         .into_iter()
         .map(|service| (service.id, service))
@@ -1583,6 +1830,7 @@ pub(crate) async fn load_extension_services(
 pub(crate) fn validate_instance_extension_services(
     machine_id: HostMachineId,
     is_dpf_managed_host: bool,
+    has_resolvable_primary_dpu: bool,
     extension_services: &InstanceExtensionServicesConfig,
     services: &HashMap<ExtensionServiceId, ExtensionService>,
     versions: &HashMap<ExtensionServiceId, Vec<ConfigVersion>>,
@@ -1601,12 +1849,37 @@ pub(crate) fn validate_instance_extension_services(
     }
 
     for config in &active_services {
-        let service = services.get(&config.service_id).ok_or_else(|| {
-            CarbideError::FailedPrecondition(format!(
-                "extension service {} does not exist",
+        let service =
+            services
+                .get(&config.service_id)
+                .ok_or_else(|| CarbideError::NotFoundError {
+                    kind: "extension service",
+                    id: config.service_id.to_string(),
+                })?;
+
+        if service.deleted.is_some() {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "extension service {} is deleted",
+                config.service_id
+            )));
+        }
+
+        // Baseline services are deployed to all DPUs at creation time
+        // and never participate in instance attachment.
+        if service.deployment_type == ExtensionServiceDeploymentType::Baseline {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "baseline extension service {} is deployed independently of instance attachment",
                 config.service_id,
-            ))
-        })?;
+            )));
+        }
+
+        // Existing attachments may terminate or survive unrelated writes, but a new networked
+        // attachment must pass the binary's address-family implementation check.
+        if !service.service_vpc_interfaces.is_empty()
+            && !existing_active_service_ids.contains(&config.service_id)
+        {
+            service_vpc::validate_implementation_support(service)?;
+        }
 
         // A service type can only be attached to the host model able to
         // reconcile it. DPF Helm services use DPUDevice labels and never reach
@@ -1625,6 +1898,17 @@ pub(crate) fn validate_instance_extension_services(
                 )));
             }
             _ => {}
+        }
+
+        if service.service_type == ExtensionServiceType::DpfHelmChart
+            && config.dpu_target == Some(DpuTarget::Primary)
+            && !existing_active_service_ids.contains(&config.service_id)
+            && !has_resolvable_primary_dpu
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DPF helm chart extension service {} with PRIMARY target requires host {machine_id} to have a primary attached DPU",
+                config.service_id,
+            )));
         }
 
         // A DPF Helm chart service is only reconcilable while its DPUService
@@ -1688,9 +1972,17 @@ fn not_allocatable_error(
         NotAllocatableReason::PendingInstanceCreation => CarbideError::InvalidArgument(format!(
             "could not create instance on machine {machine_id}. machine is already used by another instance creation request",
         )),
+        NotAllocatableReason::PendingDecommission => CarbideError::FailedPrecondition(format!(
+            "machine {machine_id} has a pending decommission request"
+        )),
         NotAllocatableReason::PendingBootConfiguration => {
             CarbideError::FailedPrecondition(format!(
                 "machine {machine_id} has a pending boot configuration; retry after it has been applied"
+            ))
+        }
+        NotAllocatableReason::DpuReprovisioningStarted => {
+            CarbideError::FailedPrecondition(format!(
+                "machine {machine_id} has started DPU reprovisioning; retry after it has completed"
             ))
         }
         NotAllocatableReason::NoDpuSnapshots => {
@@ -1706,11 +1998,13 @@ fn not_allocatable_error(
 ///
 /// ## Flow:
 /// 1. Validate machine types and metadata (in-memory)
-/// 2. Batch query machines (FOR UPDATE), load snapshots, validate usability
-/// 3. Validate shared resources: NSG, extension services, OS images, IB partitions, DPA
-/// 4. Network allocation + config validation (sequential)
-/// 5. Batch persist instances, process configs (IPs, IB GUIDs), batch update
-/// 6. Load final instances, assemble snapshots, commit
+/// 2. Reject applicable tenant NIC firmware requirements and check allocation limits
+/// 3. Batch query machines (FOR UPDATE), load snapshots, validate usability
+/// 4. Validate shared resources: NSG, extension services, OS images, IB partitions, DPA
+/// 5. Network allocation + config validation (sequential)
+/// 6. Batch persist instances, process configs (IPs, IB GUIDs), batch update
+/// 7. Capture batch firmware inputs, reject unsupported preparation, persist snapshots
+/// 8. Load final instances, assemble snapshots, commit
 pub(crate) async fn batch_allocate_instances(
     api: &Api,
     mut requests: Vec<InstanceAllocationRequest>,
@@ -1745,6 +2039,26 @@ pub(crate) async fn batch_allocate_instances(
 
     // Start a single transaction for all allocations
     let mut txn = api.txn_begin().await?;
+    if requests
+        .iter()
+        .any(|request| request.config.network.auto_config.is_none())
+    {
+        // Take the overlap lock before Machine, NSG, or prefix locks so a
+        // waiting allocation reads the policy committed by the prior writer.
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    }
+
+    // Preserve unsupported-preparation error precedence before allocation work.
+    // The final capture rechecks tenant input after every attachment is bound.
+    let spx_tenants: Vec<_> = requests
+        .iter()
+        .filter(|request| !request.config.spxconfig.spx_attachments.is_empty())
+        .map(|request| request.config.tenant.tenant_organization_id.clone())
+        .unique()
+        .collect();
+    for tenant_organization_id in spx_tenants {
+        validate_tenant_nic_firmware_preparation(txn.as_mut(), &tenant_organization_id).await?;
+    }
 
     // ==== Phase 2: Check against allocations for tenants in requests ====
 
@@ -1887,6 +2201,17 @@ pub(crate) async fn batch_allocate_instances(
             .unwrap_or_default();
     }
 
+    // Admission must classify Astra from the same persisted CX9 declaration as DPF provisioning.
+    let expected_machine_bmc_macs = snapshot_map
+        .values()
+        .filter(|snapshot| snapshot.host_snapshot.config.dpf.used_for_ingestion)
+        .filter_map(|snapshot| snapshot.host_snapshot.status.bmc_info.mac)
+        .unique()
+        .collect_vec();
+    let expected_machines_by_bmc =
+        db::expected_machine::find_many_by_bmc_mac_address(&mut txn, &expected_machine_bmc_macs)
+            .await?;
+
     // Verify all snapshots were loaded and validate usability
     for request in &requests {
         let machine_id = request.machine_id;
@@ -1898,7 +2223,12 @@ pub(crate) async fn batch_allocate_instances(
             })?;
 
         if let Err(e) = mh_snapshot.is_usable_as_instance(request.allow_unhealthy_machine) {
-            if matches!(&e, NotAllocatableReason::PendingBootConfiguration) {
+            if matches!(
+                &e,
+                NotAllocatableReason::PendingBootConfiguration
+                    | NotAllocatableReason::DpuReprovisioningStarted
+                    | NotAllocatableReason::PendingDecommission
+            ) {
                 tracing::info!(
                     %machine_id,
                     error = %e,
@@ -1959,13 +2289,27 @@ pub(crate) async fn batch_allocate_instances(
     if !service_ids.is_empty() {
         let (services, versions) = load_extension_services(&mut txn, &service_ids).await?;
 
-        for request in &requests {
+        for request in &mut requests {
+            for config in &mut request.config.extension_services.service_configs {
+                if let Some(service) = services.get(&config.service_id) {
+                    config.dpu_target = service.dpu_target;
+                }
+            }
             let mh_snapshot = snapshot_map
                 .get(&request.machine_id)
                 .expect("requested managed-host snapshot was validated above");
             validate_instance_extension_services(
                 request.machine_id,
                 mh_snapshot.host_snapshot.config.dpf.used_for_ingestion,
+                mh_snapshot
+                    .host_snapshot
+                    .primary_attached_dpu_machine_id()
+                    .is_some_and(|primary_dpu| {
+                        mh_snapshot
+                            .dpu_snapshots
+                            .iter()
+                            .any(|dpu| dpu.id == primary_dpu)
+                    }),
                 &request.config.extension_services,
                 &services,
                 &versions,
@@ -2054,14 +2398,8 @@ pub(crate) async fn batch_allocate_instances(
     {
         let mut network_allocation_targets = requests
             .iter_mut()
-            .map(|request| {
-                let InstanceConfig {
-                    network, tenant, ..
-                } = &mut request.config;
-                NetworkAllocationTarget {
-                    network_config: network,
-                    tenant_organization_id: &tenant.tenant_organization_id,
-                }
+            .map(|request| NetworkAllocationTarget {
+                network_config: &mut request.config.network,
             })
             .collect_vec();
         allocate_networks(&mut network_allocation_targets, &mut txn).await?;
@@ -2071,7 +2409,7 @@ pub(crate) async fn batch_allocate_instances(
     let mut processed_requests: Vec<(InstanceAllocationRequest, ManagedHostStateSnapshot)> =
         Vec::with_capacity(request_count);
 
-    for request in requests {
+    for mut request in requests {
         let machine_id = request.machine_id;
         let mh_snapshot = snapshot_map
             .remove(&machine_id)
@@ -2079,8 +2417,27 @@ pub(crate) async fn batch_allocate_instances(
                 kind: "machine",
                 id: machine_id.to_string(),
             })?;
+        let expected_machine = mh_snapshot
+            .host_snapshot
+            .status
+            .bmc_info
+            .mac
+            .and_then(|bmc_mac| expected_machines_by_bmc.get(&bmc_mac));
+        let vf_inventory_source = instance_vf_inventory_source(
+            &mh_snapshot,
+            &api.runtime_config,
+            expected_machine_declares_cx9(expected_machine),
+        );
 
-        // Validate config (after network allocation sets network_segment_id)
+        if request.implicit_vf_allocation {
+            assign_implicit_instance_vfs_from_effective_dpu_inventory(
+                &mut request.config.network,
+                &api.runtime_config,
+                vf_inventory_source,
+            )?;
+        }
+
+        // Validate config (after network allocation sets network_segment_id and implicit VFs)
         request.config.validate(
             true,
             api.runtime_config
@@ -2089,7 +2446,11 @@ pub(crate) async fn batch_allocate_instances(
                 .map(|vc| vc.allow_instance_vf)
                 .unwrap_or(true),
         )?;
-        validate_instance_vfs_against_dpf_topology(&request.config.network, &api.runtime_config)?;
+        validate_instance_vfs_against_effective_dpu_inventory(
+            &request.config.network,
+            &api.runtime_config,
+            vf_inventory_source,
+        )?;
         validate_instance_interface_routing_profiles(
             &mut txn,
             &request.config.network,
@@ -2235,6 +2596,15 @@ pub(crate) async fn batch_allocate_instances(
             }
         }
 
+        if mh_snapshot.has_managed_dpus() {
+            crate::handlers::tenant_prefix_overlap::validate_instance_network(
+                api,
+                txn.as_mut(),
+                &request.config,
+                None,
+            )
+            .await?;
+        }
         processed_requests.push((request, mh_snapshot));
     }
 
@@ -2265,6 +2635,31 @@ pub(crate) async fn batch_allocate_instances(
 
     let _persisted_instances = db::instance::batch_persist(new_instances, &mut txn).await?;
 
+    // Allocate normalized service addresses only after their Instance foreign key exists; the
+    // surrounding creation transaction keeps attachments and every endpoint invisible until commit.
+    for (request, mh_snapshot) in &mut processed_requests {
+        let expected_machine_has_cx9 = expected_machine_declares_cx9(
+            mh_snapshot
+                .host_snapshot
+                .status
+                .bmc_info
+                .mac
+                .and_then(|bmc_mac| expected_machines_by_bmc.get(&bmc_mac)),
+        );
+        request.config.network = service_vpc::allocate_for_instance(
+            api,
+            &mut txn,
+            request.instance_id,
+            &request.config.extension_services,
+            &request.requested_extension_services,
+            &request.config.network,
+            mh_snapshot,
+            expected_machine_has_cx9,
+            None,
+        )
+        .await?;
+    }
+
     // ==== Phase 7: Process configs (IPs, inband interfaces, IB GUIDs) ====
     // These need to be done per-instance but we collect results for batch update
     // Tuple format: (instance_id, expected_version, config)
@@ -2288,6 +2683,7 @@ pub(crate) async fn batch_allocate_instances(
         ConfigVersion,
         model::instance::config::spx::InstanceSpxConfig,
     )> = Vec::with_capacity(request_count);
+    let mut firmware_targets = HashMap::with_capacity(request_count);
 
     for (request, mh_snapshot) in &processed_requests {
         let instance_id = request.instance_id;
@@ -2334,8 +2730,10 @@ pub(crate) async fn batch_allocate_instances(
             request.config.nvlink.clone(),
         ));
 
-        let updated_spx_config = allocate_spx_port_mac(&request.config.spxconfig, mh_snapshot)?;
+        let (updated_spx_config, targets) =
+            allocate_spx_port_mac(&request.config.spxconfig, mh_snapshot)?;
         spx_config_updates.push((instance_id, spx_config_version, updated_spx_config));
+        firmware_targets.insert(instance_id, targets);
     }
 
     // ==== Phase 8: Batch update configs ====
@@ -2378,6 +2776,35 @@ pub(crate) async fn batch_allocate_instances(
         .collect();
     db::instance::batch_update_spx_config(&mut txn, &spx_refs, false).await?;
 
+    // Finish Phase 8 by freezing firmware inputs after every attachment is bound.
+    // Retain Machine locks through commit as required by
+    // db::instance::nic_firmware::capture.
+    let instance_ids: Vec<_> = processed_requests
+        .iter()
+        .map(|(request, _)| request.instance_id)
+        .collect();
+    let firmware_snapshots =
+        db::instance::nic_firmware::capture(txn.as_mut(), &instance_ids).await?;
+    for (instance_id, mut snapshot) in firmware_snapshots {
+        snapshot.targets = firmware_targets.remove(&instance_id).ok_or_else(|| {
+            CarbideError::internal(format!(
+                "NIC firmware bindings for instance {instance_id} were not found"
+            ))
+        })?;
+        if !snapshot.targets.is_empty()
+            && snapshot
+                .tenant
+                .as_ref()
+                .is_some_and(|tenant| tenant.profile_id.is_some())
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "tenant {} requires NIC firmware preparation for SPX attachments, which is not supported",
+                snapshot.tenant_organization_id
+            )));
+        }
+        db::instance::nic_firmware::persist(txn.as_mut(), instance_id, &snapshot).await?;
+    }
+
     // ==== Phase 9: Load final instances ====
     let machine_id_refs: Vec<&HostMachineId> = processed_requests
         .iter()
@@ -2412,7 +2839,9 @@ pub(crate) async fn batch_allocate_instances(
     Ok(snapshots)
 }
 
-/// Batch validate SPX partition ownership for multiple (partition_id, tenant_id) pairs
+/// Validates SPX ownership and locks the partitions for attachment admission.
+/// Keep the transaction open through the instance writes, as required by
+/// `db::spx_partition::find_active_for_share`.
 pub(crate) async fn batch_validate_spx_partition_ownership(
     txn: &mut PgConnection,
     validations: &[(SpxPartitionId, &TenantOrganizationId)],
@@ -2422,19 +2851,10 @@ pub(crate) async fn batch_validate_spx_partition_ownership(
         return Ok(());
     }
 
-    // Batch query all unique partitions
-    let unique_partition_ids: Vec<_> = validations
-        .iter()
-        .map(|(id, _)| *id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let partition_ids: Vec<_> = validations.iter().map(|(id, _)| *id).collect();
 
-    let partitions = db::spx_partition::find_by(
-        txn,
-        ObjectColumnFilter::List(db::spx_partition::IdColumn, &unique_partition_ids),
-    )
-    .await?;
+    // Lock the complete batch before persisting any instance attachments.
+    let partitions = db::spx_partition::find_active_for_share(txn, &partition_ids).await?;
 
     let partition_map: HashMap<_, _> = partitions.into_iter().map(|p| (p.id, p)).collect();
 
@@ -2519,25 +2939,33 @@ pub(crate) async fn validate_ib_partition_ownership(
     batch_validate_ib_partition_ownership(txn, &validations).await
 }
 
+/// Validates SPX ownership while holding admission locks through this transaction.
+/// The caller must persist the instance configuration before committing it.
+/// Update validation keeps its existing errors, which differ from batch allocation.
 pub(crate) async fn validate_spx_partition_ownership(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     instance_tenant: &TenantOrganizationId,
     spxcfg: &InstanceSpxConfig,
 ) -> Result<(), CarbideError> {
+    let partition_ids: Vec<_> = spxcfg
+        .spx_attachments
+        .iter()
+        .map(|attachment| attachment.spx_partition_id)
+        .collect();
+    let partitions: HashMap<_, _> =
+        db::spx_partition::find_active_for_share(txn.as_mut(), &partition_ids)
+            .await?
+            .into_iter()
+            .map(|partition| (partition.id, partition))
+            .collect();
+
     for attachment in &spxcfg.spx_attachments {
         let partition_id = attachment.spx_partition_id;
-
-        let partition = db::spx_partition::find_by(
-            txn.as_mut(),
-            ObjectColumnFilter::List(db::spx_partition::IdColumn, &[partition_id]),
-        )
-        .await?;
-        if partition.len() != 1 {
+        let Some(spx_partition) = partitions.get(&partition_id) else {
             return Err(CarbideError::InvalidArgument(format!(
                 "SPX partition {partition_id} is not found",
             )));
-        }
-        let spx_partition = &partition[0];
+        };
         if spx_partition.tenant_organization_id != *instance_tenant {
             return Err(CarbideError::InvalidArgument(format!(
                 "SPX partition {partition_id} is not owned by the tenant {instance_tenant}",
@@ -2557,26 +2985,32 @@ pub(crate) fn sort_spx_by_slot(
     sorted_spx_hw_info_vec.sort_by(|a, b| a.pci_name.cmp(&b.pci_name));
 
     for spx in sorted_spx_hw_info_vec {
-        if let Some(device) = &spx.device_description.clone() {
-            let entry: &mut Vec<DpaInterface> = spx_hw_map.entry(device.clone()).or_default();
-            entry.push(spx);
-        } else {
-            tracing::info!(
+        let Some(device) = spx
+            .device_description
+            .clone()
+            .filter(|device| !device.is_empty())
+        else {
+            tracing::debug!(
                 spx = ?spx,
-                "SPX device description is missing",
+                "SpectrumX device description is missing or empty",
             );
-        }
+            continue;
+        };
+
+        let entry: &mut Vec<DpaInterface> = spx_hw_map.entry(device).or_default();
+        entry.push(spx);
     }
 
     spx_hw_map
 }
 
-/// Allocate SPX port MAC addresses
+/// Binds SPX attachments to DPA rows and returns the selected rows' firmware evidence.
 pub(crate) fn allocate_spx_port_mac(
     spx_config: &InstanceSpxConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
-) -> CarbideResult<InstanceSpxConfig> {
+) -> CarbideResult<(InstanceSpxConfig, Vec<NicFirmwareAllocationTarget>)> {
     let mut updated_spx_config = spx_config.clone();
+    let mut targets = Vec::with_capacity(spx_config.spx_attachments.len());
 
     tracing::debug!(
         dpa_interface_snapshot_count = mh_snapshot.dpa_interface_snapshots.len(),
@@ -2619,6 +3053,10 @@ pub(crate) fn allocate_spx_port_mac(
         if let Some(sorted_spxs) = spx_hw_map.get_mut(&spx_attachment.device) {
             if let Some(spx_interface) = sorted_spxs.get(spx_attachment.device_instance as usize) {
                 spx_attachment.mac_address = Some(spx_interface.mac_address.to_string());
+                targets.push(NicFirmwareAllocationTarget::from_binding(
+                    spx_attachment.clone(),
+                    spx_interface,
+                ));
                 sorted_spxs.remove(spx_attachment.device_instance as usize);
             } else {
                 tracing::error!(
@@ -2644,16 +3082,242 @@ pub(crate) fn allocate_spx_port_mac(
         }
     }
 
-    Ok(updated_spx_config)
+    Ok((updated_spx_config, targets))
 }
 
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
+    use carbide_uuid::dpa_interface::DpaInterfaceId;
+    use config_version::Versioned;
+    use model::dpa_interface::{
+        DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType,
+    };
+    use model::instance::config::extension_services::InstanceExtensionServiceConfig;
     use model::instance::config::infiniband::InstanceIbInterfaceConfig;
+    use model::instance::config::spx::InstanceSpxAttachment;
+    use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
+
+    /// Builds physical attachment intent without a MAC; the mapper owns binding.
+    fn spx_attachment(device: &str, device_instance: u32) -> InstanceSpxAttachment {
+        InstanceSpxAttachment {
+            device: device.to_string(),
+            device_instance,
+            mac_address: None,
+            spx_partition_id: SpxPartitionId::new(),
+            attachment_type: SpxAttachmentType::Physical,
+            attachment_vf: None,
+            attachment_ovs: None,
+        }
+    }
+
+    /// Builds distinct DPA rows grouped by device label and ordered by PCI locator.
+    fn spx_interface(
+        machine_id: HostMachineId,
+        device: &str,
+        pci_name: &str,
+        mac_address: &str,
+    ) -> DpaInterface {
+        let now = chrono::Utc::now();
+        DpaInterface {
+            id: DpaInterfaceId::new(),
+            machine_id,
+            mac_address: mac_address.parse().unwrap(),
+            pci_name: pci_name.to_string(),
+            underlay_ip: None,
+            overlay_ip: None,
+            created: now,
+            updated: now,
+            deleted: None,
+            controller_state: Versioned::new(
+                DpaInterfaceControllerState::Ready,
+                ConfigVersion::initial(),
+            ),
+            last_hb_time: now,
+            controller_state_outcome: None,
+            network_config: Versioned::new(
+                DpaInterfaceNetworkConfig::default(),
+                ConfigVersion::initial(),
+            ),
+            card_state: None,
+            device_info: None,
+            device_info_ts: None,
+            mlxconfig_profile: None,
+            history: Vec::new(),
+            device_description: Some(device.to_string()),
+            interface_type: DpaInterfaceType::Svpc,
+        }
+    }
+
+    /// An error after a successful binding must reject the entire mapper result,
+    /// not expose the evidence accumulated before the failing attachment.
+    #[test]
+    fn spx_binding_rejects_errors_after_a_valid_attachment() {
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = vec![
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:cc:00.0",
+                "02:11:22:33:44:55",
+            ),
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-8",
+                "0000:dd:00.0",
+                "02:11:22:33:44:66",
+            ),
+        ];
+
+        check_cases(
+            [
+                // An absent hardware group must not be skipped after earlier success.
+                Case {
+                    scenario: "unknown device after a successful binding",
+                    input: ("unknown-device", 0),
+                    expect: FailsWith(format!(
+                        "no SPX device with name unknown-device in machine {machine_id}"
+                    )),
+                },
+                // A known group with no requested index must not yield partial bindings.
+                Case {
+                    scenario: "missing index after a successful binding",
+                    input: ("NVIDIA ConnectX-8", 1),
+                    expect: FailsWith("SPX device NVIDIA ConnectX-8 has no instance 1".to_string()),
+                },
+            ],
+            |(device, device_instance)| {
+                let config = InstanceSpxConfig {
+                    spx_attachments: vec![
+                        spx_attachment("NVIDIA ConnectX-7", 0),
+                        spx_attachment(device, device_instance),
+                    ],
+                };
+                allocate_spx_port_mac(&config, &snapshot)
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        CarbideError::InvalidArgument(message) => message,
+                        error => panic!("unexpected mapper error: {error}"),
+                    })
+            },
+        );
+    }
+
+    /// Sorting and consuming rows must preserve each returned attachment's pairing
+    /// with its exact selected row, including when hardware input order differs.
+    #[test]
+    fn spx_binding_targets_follow_mapper_order_and_selected_rows() {
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = vec![
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:dd:00.0",
+                "02:11:22:33:44:66",
+            ),
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:cc:00.0",
+                "02:11:22:33:44:55",
+            ),
+        ];
+        let config = InstanceSpxConfig {
+            spx_attachments: vec![
+                spx_attachment("NVIDIA ConnectX-7", 0),
+                spx_attachment("NVIDIA ConnectX-7", 1),
+            ],
+        };
+
+        let (bound, targets) = allocate_spx_port_mac(&config, &snapshot).unwrap();
+        let expected = InstanceSpxConfig {
+            spx_attachments: vec![
+                InstanceSpxAttachment {
+                    mac_address: Some("02:11:22:33:44:66".to_string()),
+                    ..config.spx_attachments[1].clone()
+                },
+                InstanceSpxAttachment {
+                    mac_address: Some("02:11:22:33:44:55".to_string()),
+                    ..config.spx_attachments[0].clone()
+                },
+            ],
+        };
+        assert_eq!(bound, expected);
+        assert_eq!(targets.len(), bound.spx_attachments.len());
+        for ((target, attachment), interface) in targets
+            .iter()
+            .zip(&bound.spx_attachments)
+            .zip(&snapshot.dpa_interface_snapshots)
+        {
+            assert_eq!(&target.attachment, attachment);
+            assert_eq!(target.dpa_interface_id, interface.id);
+            assert_eq!(target.machine_id, interface.machine_id);
+            assert_eq!(target.mac_address, interface.mac_address);
+            assert_eq!(target.pci_name, interface.pci_name);
+        }
+    }
+
+    /// Verifies request conversion retains service-VPC selections and assigns an attachment ID
+    /// because atomic admission needs both values after referenced services are locked.
+    #[test]
+    fn service_vpc_selection_survives_request_conversion_for_atomic_admission() {
+        // Build an otherwise valid allocation that requests a service VPC.
+        let requested_vpc = VpcId::new();
+        let request = rpc::InstanceAllocationRequest {
+            machine_id: Some(
+                "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+                    .parse()
+                    .expect("valid host machine ID"),
+            ),
+            config: Some(rpc::InstanceConfig {
+                os: Some(rpc::InstanceOperatingSystemConfig {
+                    phone_home_enabled: false,
+                    run_provisioning_instructions_on_every_boot: false,
+                    user_data: None,
+                    variant: Some(rpc::instance_operating_system_config::Variant::Ipxe(
+                        rpc::InlineIpxe {
+                            ipxe_script: String::new(),
+                        },
+                    )),
+                }),
+                tenant: Some(rpc::TenantConfig {
+                    tenant_organization_id: "test-tenant".to_string(),
+                    tenant_keyset_ids: vec![],
+                    hostname: None,
+                }),
+                dpu_extension_services: Some(rpc::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
+                        service_id: ExtensionServiceId::new().to_string(),
+                        version: ConfigVersion::initial().to_string(),
+                        service_vpc_ids: vec![requested_vpc], // Request conversion must retain the selected VPC.
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Convert wire intent before the referenced service rows and allocation prerequisites are available.
+        let converted = InstanceAllocationRequest::try_from(request)
+            .expect("well-formed service-VPC selection converts");
+
+        // The coordinator receives the exact VPC selection and assigned attachment ID that later
+        // allocation persists with its service-interface records.
+        assert_eq!(
+            converted.requested_extension_services.service_configs[0].service_vpc_ids,
+            vec![requested_vpc]
+        );
+        assert!(
+            converted.config.extension_services.service_configs[0]
+                .id
+                .is_some()
+        );
+    }
 
     /// Test-specific helper that builds one allocated physical IB interface.
     fn ib_interface(partition_id: IBPartitionId, guid: Option<&str>) -> InstanceIbInterfaceConfig {
@@ -2827,91 +3491,468 @@ mod tests {
         );
     }
 
-    /// Verifies instance admission uses exact topology membership without changing legacy mode.
+    /// Verifies exact DPF topology membership without changing topology-free admission because
+    /// accepted instance VFs must match the ServiceInterfaces provisioned for each DPF profile.
     #[test]
-    fn instance_vf_admission_follows_dpf_topology() {
+    fn instance_vf_admission_follows_effective_dpu_inventory() {
         #[derive(Clone, Copy)]
         enum InventoryMode {
-            Topology(&'static [u8]),
-            Static,
-            DpfDisabled(&'static [u8]),
+            DpfTopology(&'static [u8]),
+            DpfWithoutTopology,
+            Bf4AstraWithoutTopology,
+            NonDpf(&'static [u8]),
         }
 
         value_scenarios!(
             run = |(mode, requested_vfs)| {
-                let config = match mode {
-                    InventoryMode::Topology(vf_ids) => {
-                        crate::test_support::default_config::with_dpf_intercept_topology(vf_ids)
-                    }
-                    InventoryMode::Static => {
-                        let mut config = crate::test_support::default_config::get();
-                        config.dpf.enabled = true;
-                        config.vmaas_config = None;
-                        config
-                    }
-                    InventoryMode::DpfDisabled(vf_ids) => {
+                let (config, inventory_source) = match mode {
+                    InventoryMode::DpfTopology(vf_ids) => {
                         let mut config =
                             crate::test_support::default_config::with_dpf_intercept_topology(vf_ids);
+                        // The host's observed provisioning path, not the current site flag, owns
+                        // admission behavior.
                         config.dpf.enabled = false;
-                        config
+                        (config, InstanceVfInventorySource::DpfInterceptTopology)
                     }
+                    InventoryMode::DpfWithoutTopology => {
+                        let mut config = crate::test_support::default_config::get();
+                        // Remove the configured intercept inventory so this exercises non-Astra DPF's
+                        // topology-free compatibility branch.
+                        config.vmaas_config = None;
+                        (config, InstanceVfInventorySource::DpfInterceptTopology)
+                    }
+                    InventoryMode::Bf4AstraWithoutTopology => {
+                        let mut config = crate::test_support::default_config::get();
+                        // Remove the configured intercept inventory so Astra must synthesize its topology-free
+                        // static VF inventory.
+                        config.vmaas_config = None;
+                        (config, InstanceVfInventorySource::Bf4AstraStatic)
+                    }
+                    InventoryMode::NonDpf(vf_ids) => (
+                        crate::test_support::default_config::with_dpf_intercept_topology(vf_ids),
+                        InstanceVfInventorySource::HbnRepresentors,
+                    ),
                 };
-                validate_vf_ids_against_dpf_topology(requested_vfs, &config).is_ok()
+                validate_vf_ids_against_effective_dpu_inventory(
+                    requested_vfs,
+                    &config,
+                    inventory_source,
+                )
+                .is_ok()
             };
             "selected sparse VF" {
                 // An explicitly selected sparse VF is addressable.
-                (InventoryMode::Topology(&[7]), vec![7]) => true,
+                (InventoryMode::DpfTopology(&[7]), vec![7]) => true,
             }
 
             "unselected sparse VF" {
                 // VF0 must not pass merely because the hardware provisions it.
-                (InventoryMode::Topology(&[7]), vec![0]) => false,
+                (InventoryMode::DpfTopology(&[7]), vec![0]) => false,
             }
 
             "all requested VFs selected" {
                 // Multiple requested VFs must each belong to the replacement inventory.
-                (InventoryMode::Topology(&[4, 7]), vec![4, 7]) => true,
+                (InventoryMode::DpfTopology(&[4, 7]), vec![4, 7]) => true,
             }
 
             "one requested VF omitted" {
                 // One unselected VF rejects the complete network configuration.
-                (InventoryMode::Topology(&[4, 7]), vec![4, 6]) => false,
+                (InventoryMode::DpfTopology(&[4, 7]), vec![4, 6]) => false,
             }
 
             "PF-only topology" {
                 // A valid PF-only topology deliberately exposes no instance VFs.
-                (InventoryMode::Topology(&[]), vec![0]) => false,
+                (InventoryMode::DpfTopology(&[]), vec![0]) => false,
             }
 
-            "static compatibility mode" {
-                // DPF without a replacement topology retains the historical admission behavior.
-                (InventoryMode::Static, vec![0]) => true,
+            "DPF without topology retains compatibility behavior" {
+                // Non-Astra DPF keeps boolean-only admission when no replacement inventory exists.
+                (InventoryMode::DpfWithoutTopology, vec![14]) => true,
             }
 
-            "DPF disabled" {
-                // Legacy non-DPF VMaaS configuration remains outside this DPF admission gate.
-                (InventoryMode::DpfDisabled(&[7]), vec![0]) => true,
+            "topology-free BF4 Astra retains its static inventory" {
+                // Static VF13 remains available when no replacement inventory is configured.
+                (InventoryMode::Bf4AstraWithoutTopology, vec![13]) => true,
             }
+
+            "topology-free BF4 Astra rejects VF14" {
+                // Astra's compatibility inventory ends at VF13 rather than allowing every typed VF.
+                (InventoryMode::Bf4AstraWithoutTopology, vec![14]) => false,
+            }
+
+            "non-DPF host ignores the configured DPF topology" {
+                // Legacy provisioning follows HBN defaults rather than DPF-only selections.
+                (InventoryMode::NonDpf(&[7]), vec![0]) => true,
+            }
+
+            "non-DPF host admits the final default HBN VF" {
+                // VF13 remains the upper edge of the topology-free HBN fallback.
+                (InventoryMode::NonDpf(&[7]), vec![13]) => true,
+            }
+
+            "non-DPF host rejects the first absent default HBN VF" {
+                // VF14 distinguishes the fallback boundary from unrestricted boolean admission.
+                (InventoryMode::NonDpf(&[7]), vec![14]) => false,
+            }
+        );
+
+        // Keep the operator-facing failure tied to the same effective inventory boundary.
+        let error = validate_vf_ids_against_effective_dpu_inventory(
+            [14],
+            &crate::test_support::default_config::get(),
+            InstanceVfInventorySource::HbnRepresentors,
+        )
+        .expect_err("VF14 must be absent from the configured instance VF inventory");
+        assert_eq!(
+            error.to_string(),
+            "invalid configuration: invalid value: virtual function VF14 is not available in the configured instance VF inventory"
+        );
+    }
+
+    fn implicit_vf_network(device_instances: &[u32]) -> InstanceNetworkConfig {
+        rpc::InstanceNetworkConfig {
+            interfaces: device_instances
+                .iter()
+                .map(|device_instance| rpc::InstanceInterfaceConfig {
+                    function_type: rpc::InterfaceFunctionType::Virtual as i32,
+                    network_segment_id: Some(NetworkSegmentId::new()),
+                    device: Some("pf0".to_string()),
+                    device_instance: *device_instance,
+                    virtual_function_id: None,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+        .try_into()
+        .unwrap()
+    }
+
+    #[test]
+    fn implicit_instance_vfs_follow_sparse_effective_inventory_per_device() {
+        let mut config = crate::test_support::default_config::get();
+        config.dpu_config.num_of_vfs = 16;
+        config
+            .vmaas_config
+            .as_mut()
+            .expect("the default test configuration includes VMaaS")
+            .hbn_reps = Some("pf0hpf,pf0vf2,pf0vf5,pf1hpf".to_string());
+        let mut network = implicit_vf_network(&[0, 0, 1]);
+
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut network,
+            &config,
+            InstanceVfInventorySource::HbnRepresentors,
+        )
+        .unwrap();
+
+        assert_eq!(
+            network
+                .interfaces
+                .iter()
+                .filter_map(|interface| match &interface.function_id {
+                    InterfaceFunctionId::Physical {} => None,
+                    InterfaceFunctionId::Virtual { id } => Some(*id),
+                })
+                .collect_vec(),
+            vec![2, 5, 2],
+        );
+    }
+
+    /// Verifies implicit VF exhaustion names the authoritative inventory because operators must
+    /// distinguish configured topology capacity from the static fallback.
+    #[test]
+    fn implicit_instance_vf_allocation_reports_effective_inventory_exhaustion() {
+        // Each case pairs a complete site configuration with its persisted inventory
+        // classification.
+        struct ExhaustionInput {
+            config: CarbideConfig,
+            inventory_source: InstanceVfInventorySource,
+        }
+
+        // One selected HBN VF drives exhaustion; the remaining defaults keep the site config valid.
+        let mut hbn_config = crate::test_support::default_config::get();
+        hbn_config.dpu_config.num_of_vfs = 16;
+        hbn_config
+            .vmaas_config
+            .as_mut()
+            .expect("the default test configuration includes interface selection")
+            .hbn_reps = Some("pf0hpf,pf0vf2,pf1hpf".to_string());
+
+        // One selected topology VF drives the configured DPF boundary; the helper supplies valid defaults.
+        let topology_config =
+            crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
+
+        check_values(
+            [
+                // The HBN path keeps its established diagnostic while sharing the exhaustion
+                // operation.
+                Check {
+                    scenario: "configured HBN inventory",
+                    input: ExhaustionInput {
+                        config: hbn_config,
+                        inventory_source: InstanceVfInventorySource::HbnRepresentors,
+                    },
+                    expect: "invalid configuration: invalid value: cannot implicitly allocate 2 virtual functions for pf0/0; the configured instance VF inventory exposes only 1".to_string(),
+                },
+                // The DPF path must name its configured topology instead of a fallback inventory.
+                Check {
+                    scenario: "configured DPF intercept topology",
+                    input: ExhaustionInput {
+                        config: topology_config,
+                        inventory_source: InstanceVfInventorySource::DpfInterceptTopology,
+                    },
+                    expect: "invalid configuration: invalid value: cannot implicitly allocate 2 virtual functions for pf0/0; the configured DPF intercept-bridging topology exposes only 1".to_string(),
+                },
+            ],
+            |ExhaustionInput {
+                 config,
+                 inventory_source,
+             }| {
+                // Two requests for one device exhaust either one-entry inventory.
+                let mut network = implicit_vf_network(&[0, 0]);
+                assign_implicit_instance_vfs_from_effective_dpu_inventory(
+                    &mut network,
+                    &config,
+                    inventory_source,
+                )
+                .expect_err("one selected VF cannot satisfy two implicit VF requests")
+                .to_string()
+            },
         );
     }
 
     #[test]
-    fn pending_boot_configuration_has_a_safe_allocation_error() {
+    fn topology_free_dpf_keeps_legacy_implicit_vf_ids() {
+        let mut config = crate::test_support::default_config::get();
+        config.vmaas_config = None;
+        let mut network = implicit_vf_network(&[0, 0]);
+
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut network,
+            &config,
+            InstanceVfInventorySource::DpfInterceptTopology,
+        )
+        .unwrap();
+
+        assert_eq!(
+            network
+                .interfaces
+                .iter()
+                .filter_map(|interface| match &interface.function_id {
+                    InterfaceFunctionId::Physical {} => None,
+                    InterfaceFunctionId::Virtual { id } => Some(*id),
+                })
+                .collect_vec(),
+            vec![0, 1],
+        );
+    }
+
+    /// Verifies implicit allocation selects the sparse configured DPF inventory because the public API must not allocate a VF absent from its DPF ServiceInterfaces.
+    #[test]
+    fn implicit_vfs_follow_dpf_intercept_topology() {
+        // Configure VF14 as the only tenant VF and start from the converter's placeholder ID.
+        let config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
+        let mut network = implicit_vf_network(&[0]);
+
+        // Resolve the implicit identity through the topology shared by every DPF profile.
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut network,
+            &config,
+            InstanceVfInventorySource::DpfInterceptTopology,
+        )
+        .unwrap();
+
+        // The sparse topology identity must replace the sequential placeholder.
+        assert_eq!(
+            network
+                .interfaces
+                .iter()
+                .filter_map(|interface| match &interface.function_id {
+                    InterfaceFunctionId::Physical {} => None,
+                    InterfaceFunctionId::Virtual { id } => Some(*id),
+                })
+                .collect_vec(),
+            vec![14],
+        );
+    }
+
+    #[test]
+    fn instance_vf_inventory_follows_hbn_reps_and_num_of_vfs() {
+        check_cases(
+            [
+                Case {
+                    scenario: "omitted selection uses HBN fallback",
+                    input: (16, None),
+                    expect: Yields((0..DEFAULT_INSTANCE_VF_COUNT).collect()),
+                },
+                Case {
+                    scenario: "empty selection uses HBN fallback",
+                    input: (16, Some("")),
+                    expect: Yields((0..DEFAULT_INSTANCE_VF_COUNT).collect()),
+                },
+                Case {
+                    scenario: "blank selection is rejected",
+                    input: (16, Some("  \t")),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "individual PF0 VFs are selected",
+                    input: (16, Some("pf0hpf,pf0vf0,pf0vf2,pf1hpf")),
+                    expect: Yields(vec![0, 2]),
+                },
+                Case {
+                    scenario: "inclusive PF0 VF ranges are expanded",
+                    input: (16, Some("pf0hpf,pf0vf0-pf0vf2,pf0vf13,pf1hpf")),
+                    expect: Yields(vec![0, 1, 2, 13]),
+                },
+                Case {
+                    scenario: "hardware VF population caps HBN selection",
+                    input: (2, Some("pf0vf0-pf0vf3")),
+                    expect: Yields(vec![0, 1]),
+                },
+                Case {
+                    scenario: "non-PF0-VF endpoints select no tenant VFs",
+                    input: (16, Some("pf0hpf,pf1hpf,pf1vf0-pf1vf13")),
+                    expect: Yields(vec![]),
+                },
+                Case {
+                    scenario: "malformed VF ID is rejected",
+                    input: (16, Some("pf0vfx")),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "malformed range end is rejected",
+                    input: (16, Some("pf0vf0-pf0vfx")),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "descending range is rejected",
+                    input: (16, Some("pf0vf2-pf0vf0")),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "undocumented whitespace separator is rejected",
+                    input: (16, Some("pf0vf0 pf0vf1")),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "whitespace around a comma is rejected",
+                    input: (16, Some("pf0vf0, pf0vf1")),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "empty list entry is rejected",
+                    input: (16, Some("pf0vf0,,pf0vf1")),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "VF ID outside the parser range is rejected",
+                    input: (126, Some("pf0vf256")),
+                    expect: Fails,
+                },
+            ],
+            |(num_of_vfs, hbn_reps)| {
+                let mut config = crate::test_support::default_config::get();
+                config.dpf.enabled = false;
+                config.dpu_config.num_of_vfs = num_of_vfs;
+                config
+                    .vmaas_config
+                    .as_mut()
+                    .expect("the default test configuration includes VMaaS")
+                    .hbn_reps = hbn_reps.map(str::to_owned);
+                configured_instance_vf_ids(&config)
+                    .map(|vf_ids| vf_ids.into_iter().collect())
+                    .map_err(drop)
+            },
+        );
+    }
+
+    #[test]
+    fn allocation_preconditions_have_retryable_errors() {
         let machine_id: carbide_uuid::machine::StableHostMachineId =
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
                 .parse()
                 .unwrap();
 
-        assert!(matches!(
-            not_allocatable_error(
-                machine_id,
-                NotAllocatableReason::PendingBootConfiguration,
-            ),
-            CarbideError::FailedPrecondition(message)
-                if message
-                    == format!(
+        check_cases(
+            [
+                Case {
+                    scenario: "pending boot configuration requires convergence",
+                    input: NotAllocatableReason::PendingBootConfiguration,
+                    expect: Yields(format!(
                         "machine {machine_id} has a pending boot configuration; retry after it has been applied"
-                    )
+                    )),
+                },
+                Case {
+                    scenario: "started DPU reprovisioning requires completion",
+                    input: NotAllocatableReason::DpuReprovisioningStarted,
+                    expect: Yields(format!(
+                        "machine {machine_id} has started DPU reprovisioning; retry after it has completed"
+                    )),
+                },
+            ],
+            |reason| match not_allocatable_error(machine_id, reason) {
+                CarbideError::FailedPrecondition(message) => Ok(message),
+                error => Err(error.to_string()),
+            },
+        );
+    }
+
+    /// Verifies instance attachment rejects baseline services before checking
+    /// targets or versions, because these services already deploy to all DPUs.
+    #[test]
+    fn baseline_extension_service_cannot_be_attached_to_an_instance() {
+        // Build a valid baseline registration and a matching active attachment request.
+        let service_id = ExtensionServiceId::new();
+        let version = ConfigVersion::initial();
+        let extension_services = InstanceExtensionServicesConfig {
+            service_configs: vec![InstanceExtensionServiceConfig {
+                id: Some(uuid::Uuid::new_v4()),
+                service_id,
+                version,
+                dpu_target: None,
+                removed: None,
+            }],
+        };
+        let now = chrono::Utc::now();
+        let services = HashMap::from([(
+            service_id,
+            ExtensionService {
+                id: service_id,
+                service_type: ExtensionServiceType::DpfHelmChart,
+                deployment_type: ExtensionServiceDeploymentType::Baseline,
+                dpu_target: None,
+                name: "baseline-service".to_string(),
+                tenant_organization_id: "best_org".parse().unwrap(),
+                description: String::new(),
+                service_vpc_interfaces: vec![],
+                version_ctr: 1,
+                status: Default::default(),
+                created: now,
+                updated: now,
+                deleted: None,
+            },
+        )]);
+        let machine_id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+            .parse()
+            .expect("valid host machine ID");
+
+        // Baseline rejection must take precedence over missing version and target data.
+        let error = validate_instance_extension_services(
+            machine_id,
+            true,
+            true,
+            &extension_services,
+            &services,
+            &HashMap::new(),
+            &HashSet::new(),
+        )
+        .expect_err("baseline services must remain independent of instance attachment");
+        assert!(matches!(
+            error,
+            CarbideError::FailedPrecondition(message)
+                if message.contains("deployed independently of instance attachment")
         ));
     }
 }

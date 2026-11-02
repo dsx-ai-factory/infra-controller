@@ -23,7 +23,8 @@ use sqlx::{FromRow, Row};
 use crate::bmc_info::BmcInfo;
 use crate::hardware_info::HardwareInfo;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, carbide_macros::DbTable)]
+#[db_table(name = "machine_topologies")]
 pub struct MachineTopology {
     pub machine_id: MachineId,
     /// Topology data that is stored in json format in the database column

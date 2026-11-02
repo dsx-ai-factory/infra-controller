@@ -4,46 +4,49 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"go.opentelemetry.io/otel/attribute"
+	tclient "go.temporal.io/sdk/client"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
-	"go.opentelemetry.io/otel/attribute"
-	tclient "go.temporal.io/sdk/client"
 )
 
 // ~~~~~ GetAll Handler ~~~~~ //
 
 // GetAllSkuHandler is the API Handler for getting all SKUs
 type GetAllSkuHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllSkuHandler initializes and returns a new handler for getting all SKUs
 func NewGetAllSkuHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetAllSkuHandler {
 	return GetAllSkuHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -62,7 +65,7 @@ func NewGetAllSkuHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.
 // @Success 200 {object} []model.APISku
 // @Router /v2/org/{org}/nico/sku [get]
 func (gash GetAllSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "SKU", c, gash.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "SKU", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -180,19 +183,17 @@ func (gash GetAllSkuHandler) Handle(c echo.Context) error {
 
 // GetSkuHandler is the API Handler for retrieving SKU
 type GetSkuHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetSkuHandler initializes and returns a new handler to retrieve SKU
 func NewGetSkuHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetSkuHandler {
 	return GetSkuHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -208,7 +209,7 @@ func NewGetSkuHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Con
 // @Success 200 {object} model.APISku
 // @Router /v2/org/{org}/nico/sku/{id} [get]
 func (gsh GetSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "SKU", c, gsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "SKU", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -229,7 +230,7 @@ func (gsh GetSkuHandler) Handle(c echo.Context) error {
 
 	logger = logger.With().Str("SKU ID", skuID).Logger()
 
-	gsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sku_id", skuID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sku_id", skuID))
 
 	// Get SKU from DB by ID
 	skuDAO := cdbm.NewSkuDAO(gsh.dbSession)
@@ -244,7 +245,7 @@ func (gsh GetSkuHandler) Handle(c echo.Context) error {
 
 	// Get Site for the SKU
 	siteDAO := cdbm.NewSiteDAO(gsh.dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, sku.SiteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, sku.SiteID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for SKU, DB error", nil)
@@ -284,17 +285,15 @@ func (gsh GetSkuHandler) Handle(c echo.Context) error {
 
 // CreateSkuHandler creates one SKU on a Site's Core service.
 type CreateSkuHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateSkuHandler initializes and returns a new CreateSkuHandler.
 func NewCreateSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateSkuHandler {
 	return CreateSkuHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -310,7 +309,7 @@ func NewCreateSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateSkuHa
 // @Success 201 {object} model.APISku
 // @Router /v2/org/{org}/nico/sku [post]
 func (csh CreateSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Create", c, csh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -431,17 +430,15 @@ func (csh CreateSkuHandler) Handle(c echo.Context) error {
 
 // UpdateSkuHandler partially updates one SKU on a Site's Core service.
 type UpdateSkuHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewUpdateSkuHandler returns a new UpdateSkuHandler.
 func NewUpdateSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) UpdateSkuHandler {
 	return UpdateSkuHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -458,7 +455,7 @@ func NewUpdateSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) UpdateSkuHa
 // @Success 200 {object} model.APISku
 // @Router /v2/org/{org}/nico/sku/{id} [patch]
 func (ush UpdateSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Update", c, ush.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -467,7 +464,7 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 	if skuID == "" {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU ID must be specified", nil)
 	}
-	ush.tracerSpan.SetAttribute(handlerSpan, attribute.String("sku_id", skuID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sku_id", skuID))
 
 	apiReq := model.APISkuUpdateRequest{}
 	err := c.Bind(&apiReq)
@@ -505,49 +502,113 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
-	var response corev1.SkuList
-	apiErr = common.ExecuteCoreGRPC(
-		ctx,
-		stc,
-		corev1.Forge_FindSkusByIds_FullMethodName,
-		&corev1.SkusByIdsRequest{Ids: []string{skuID}},
-		&response,
-		siteID,
-	)
-	if apiErr == nil && len(response.Skus) != 1 {
-		apiErr = cutil.NewAPIError(http.StatusNotFound, "Could not find SKU with the specified ID", nil)
-	}
-	if apiErr != nil {
-		logAPIError(logger, apiErr, "failed to retrieve SKU before update")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-	}
+	// All Core calls share one wait budget. Keep DB work on the request context
+	// so exhausting that budget after a completed update does not prevent saving it.
+	rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
 
 	apiReq.SkuID = skuID
 
-	updatedSKU := &corev1.Sku{}
-	if apiReq.Components == nil {
-		updatedSKU = apiReq.ApplyMetadataToProto(response.Skus[0])
-		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("updating SKU metadata via Core proxy")
-		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_UpdateSkuMetadata_FullMethodName, apiReq.ToMetadataProto(), nil, siteID)
-		if apiErr != nil {
-			logAPIError(logger, apiErr, "failed to update SKU metadata via Core proxy")
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	coreSKU := &corev1.Sku{}
+	useComponentReplacement := false
+	if apiReq.Components != nil {
+		if rpcCtx.Err() != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU update timed out before Core could apply it", nil)
 		}
-	} else {
-		updatedReq := apiReq.ToReplacementProto(response.Skus[0])
-		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("updating SKU via Core proxy")
-		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceSku_FullMethodName, updatedReq, updatedSKU, siteID)
+		var buildInfo structpb.Struct
+		apiErr = common.ExecuteCoreGRPC(rpcCtx, stc, corev1.Forge_Version_FullMethodName, &corev1.VersionRequest{}, &buildInfo, siteID)
 		if apiErr != nil {
-			logAPIError(logger, apiErr, "failed to update SKU via Core proxy")
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+			// Discovery is read-only, so a failed probe can still use
+			// `FindSkusByIds` and `ReplaceSku` while the request is live.
+			logger.Warn().Err(apiErr.Diagnosis()).Msg("failed to check SKU component replacement support")
+		} else {
+			// A Site Agent that knows this capability's name also has the RPC
+			// in its compiled registry. Older agents emit a number, which keeps
+			// full replacement. Decoding into `BuildInfo` loses that distinction.
+			capabilities := buildInfo.GetFields()["capabilities"].GetListValue().GetValues()
+			useComponentReplacement = slices.ContainsFunc(capabilities, func(capability *structpb.Value) bool {
+				return capability.GetStringValue() == corev1.BuildCapability_BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS.String()
+			})
 		}
 	}
 
-	if updatedSKU == nil || updatedSKU.Id == "" {
+	if rpcCtx.Err() != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU update timed out before Core could apply it", nil)
+	}
+	var method string
+	if useComponentReplacement {
+		method = corev1.Forge_ReplaceSkuComponents_FullMethodName
+		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("replacing SKU components via Core proxy")
+		apiErr = common.ExecuteCoreGRPC(rpcCtx, stc, method, apiReq.ToComponentReplacementProto(), coreSKU, siteID)
+		if apiErr != nil && skuComponentReplacementRejected(apiErr) {
+			// During an upgrade the probe and update can reach different Agent or
+			// Core versions. Only a rejection before dispatch permits `ReplaceSku`;
+			// any other failure may follow a completed update.
+			logger.Warn().Err(apiErr.Diagnosis()).Msg("SKU component replacement rejected before dispatch; using full replacement")
+			useComponentReplacement = false
+		}
+	}
+	if !useComponentReplacement {
+		if rpcCtx.Err() != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU update timed out before Core could apply it", nil)
+		}
+		// `UpdateSkuMetadata` returns no record, so metadata updates need this
+		// snapshot. Full replacement also needs it to fill in omitted metadata.
+		var response corev1.SkuList
+		apiErr = common.ExecuteCoreGRPC(
+			rpcCtx,
+			stc,
+			corev1.Forge_FindSkusByIds_FullMethodName,
+			&corev1.SkusByIdsRequest{Ids: []string{skuID}},
+			&response,
+			siteID,
+		)
+		if apiErr == nil && len(response.Skus) != 1 {
+			apiErr = cutil.NewAPIError(http.StatusNotFound, "Could not find SKU with the specified ID", nil)
+		}
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to retrieve SKU before update")
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		if rpcCtx.Err() != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU update timed out before Core could apply it", nil)
+		}
+
+		if apiReq.Components == nil {
+			coreSKU = response.Skus[0]
+			method = corev1.Forge_UpdateSkuMetadata_FullMethodName
+			logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("updating SKU metadata via Core proxy")
+			apiErr = common.ExecuteCoreGRPC(rpcCtx, stc, method, apiReq.ToMetadataProto(), nil, siteID)
+		} else {
+			method = corev1.Forge_ReplaceSku_FullMethodName
+			logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("replacing full SKU via Core proxy")
+			apiErr = common.ExecuteCoreGRPC(rpcCtx, stc, method, apiReq.ToReplacementProto(response.Skus[0]), coreSKU, siteID)
+		}
+	}
+	if apiErr != nil {
+		logger.Error().Str("method", method).Err(apiErr.Diagnosis()).Msg("failed to update SKU via Core proxy")
+		if method == corev1.Forge_ReplaceSkuComponents_FullMethodName && apiErr.Code == http.StatusNotFound {
+			// Keep the response callers received when the preceding Find failed.
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find SKU with the specified ID", nil)
+		}
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+
+	if coreSKU == nil || coreSKU.Id == "" {
 		err = errors.New("cannot persist an empty Core SKU")
 	} else {
 		projected := &cdbm.SKU{}
-		projected.FromProto(updatedSKU, savedSKU.SiteID)
+		projected.FromProto(coreSKU, savedSKU.SiteID)
+		// Component replacement uses metadata from Core's response, preserving
+		// the saved device type when Core omits it.
+		description := &projected.Description
+		deviceType := projected.DeviceType
+		if apiReq.Components == nil {
+			// Another writer may have changed omitted metadata since the Core read.
+			// Save only supplied metadata; nonmetadata still refreshes from Core.
+			description = apiReq.Description
+			deviceType = apiReq.DeviceType
+		}
 
 		err = cdb.WithTx(ctx, ush.dbSession, func(tx *cdb.Tx) error {
 			err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(projected.ID), nil)
@@ -576,11 +637,13 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 				associatedMachineIDs = []string{}
 			}
 			createdMatches := projected.Created.IsZero() || existing.Created.Equal(projected.Created)
-			if createdMatches && existing.Description == projected.Description &&
+			descriptionMatches := description == nil || existing.Description == *description
+			deviceTypeMatches := deviceType == nil || reflect.DeepEqual(existing.DeviceType, deviceType)
+			if createdMatches && descriptionMatches && deviceTypeMatches &&
 				existing.SchemaVersion == projected.SchemaVersion &&
 				existing.Components.Equal(components) &&
-				reflect.DeepEqual(existing.DeviceType, projected.DeviceType) &&
 				reflect.DeepEqual(existing.AssociatedMachineIds, associatedMachineIDs) {
+				savedSKU = existing
 				return nil
 			}
 
@@ -588,13 +651,13 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 			if !createdMatches {
 				created = &projected.Created
 			}
-			_, err = skuDAO.Update(ctx, tx, cdbm.SkuUpdateInput{
+			savedSKU, err = skuDAO.Update(ctx, tx, cdbm.SkuUpdateInput{
 				SkuID:                projected.ID,
 				Created:              created,
-				Description:          &projected.Description,
+				Description:          description,
 				SchemaVersion:        &projected.SchemaVersion,
 				Components:           components,
-				DeviceType:           projected.DeviceType,
+				DeviceType:           deviceType,
 				AssociatedMachineIds: associatedMachineIDs,
 			})
 			return err
@@ -606,22 +669,28 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "SKU was updated in Core but failed to update REST DB", nil)
 	}
 
-	return c.JSON(http.StatusOK, model.NewAPISkuFromProto(updatedSKU, siteID))
+	// Keep Core's Created nanoseconds and leave it unset when Core omits it.
+	// REST can retain a device type that Core omitted, so use the saved value.
+	apiResponse := model.NewAPISkuFromProto(coreSKU, siteID)
+	apiResponse.DeviceType = savedSKU.DeviceType
+	if apiReq.Components == nil {
+		// `UpdateSkuMetadata` returns no SKU, so use the description we saved.
+		apiResponse.Description = savedSKU.Description
+	}
+	return c.JSON(http.StatusOK, apiResponse)
 }
 
 // DeleteSkuHandler deletes one unused SKU from a Site's Core service.
 type DeleteSkuHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteSkuHandler returns a new DeleteSkuHandler.
 func NewDeleteSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteSkuHandler {
 	return DeleteSkuHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -636,7 +705,7 @@ func NewDeleteSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteSkuHa
 // @Success 204
 // @Router /v2/org/{org}/nico/sku/{id} [delete]
 func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Delete", c, dsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -646,7 +715,7 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU ID must be specified", nil)
 	}
 
-	dsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sku_id", skuID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sku_id", skuID))
 
 	skuDAO := cdbm.NewSkuDAO(dsh.dbSession)
 	savedSKU, err := skuDAO.Get(ctx, nil, skuID)

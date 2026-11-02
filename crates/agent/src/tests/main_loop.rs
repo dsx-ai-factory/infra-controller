@@ -17,6 +17,269 @@
 
 use super::*;
 
+#[path = "fmds_routing.rs"]
+mod fmds_routing;
+
+/// Astra failures must retract readiness without replacing an earlier
+/// HBN/DHCP diagnostic in the shared network status.
+#[test]
+fn astra_status_reporting_maps_results_and_preserves_network_errors() {
+    use carbide_test_support::value_scenarios;
+
+    #[derive(Debug)]
+    struct Row {
+        configured: bool,
+        result: eyre::Result<rpc::AstraConfigStatus>,
+        previous_error: Option<&'static str>,
+    }
+
+    let config = rpc::AstraConfig::default();
+    let ready_status = rpc::AstraConfigStatus {
+        astra_attachments_status: vec![rpc::AstraAttachmentStatus {
+            mac_address: "02:00:00:00:00:01".to_string(),
+            vni: 42,
+            revision: "V2-T100".to_string(),
+            status: Some(rpc::AstraStatus {
+                phase: rpc::AstraPhase::PhaseReady.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    value_scenarios!(run = |row: Row| {
+        // HBN/DHCP can record an error before Astra reconciliation runs.
+        let mut status_out = rpc::DpuNetworkStatus {
+            network_config_error: row.previous_error.map(str::to_string),
+            ..Default::default()
+        };
+
+        set_astra_config_status(
+            row.configured.then_some(&config),
+            row.result,
+            &mut status_out,
+        );
+        (status_out.astra_config_status, status_out.network_config_error)
+    };
+        "absent configuration leaves Astra status absent" {
+            Row {
+                configured: false,
+                result: Ok(rpc::AstraConfigStatus::default()),
+                previous_error: None,
+            } => (None, None),
+        }
+        "successful reconciliation preserves its observations" {
+            Row {
+                configured: true,
+                result: Ok(ready_status.clone()),
+                previous_error: None,
+            } => (Some(ready_status.clone()), None),
+        }
+        "successful reconciliation keeps an earlier network error" {
+            Row {
+                configured: true,
+                result: Ok(ready_status.clone()),
+                previous_error: Some("HBN update failed"),
+            } => (Some(ready_status), Some("HBN update failed".to_string())),
+        }
+        // Core retracts old readiness for an explicit empty report; an omitted
+        // report would leave those observations unchanged after failure.
+        "failed reconciliation reports no ready attachments" {
+            Row {
+                configured: true,
+                result: Err(eyre::eyre!("astra list failed")),
+                previous_error: None,
+            } => (
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
+                Some("astra list failed".to_string()),
+            ),
+        }
+        "an earlier network error keeps its diagnostic" {
+            Row {
+                configured: true,
+                result: Err(eyre::eyre!("astra list failed")),
+                previous_error: Some("HBN update failed"),
+            } => (
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
+                Some("HBN update failed".to_string()),
+            ),
+        }
+    );
+}
+
+/// IPv6 tenant prefixes must produce replies from FMDS's configured endpoint,
+/// not its link-local address, without changing IPv4 or enabling IPv6 by default.
+#[test]
+fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
+    use forge_dpu_agent_utils::FMDS_IPV6_GATEWAY;
+
+    let mut config = comparison_network_config();
+    config.tenant_interfaces = vec![comparison_interface("metadata-host", 274, 1001)];
+    // A routing-only loopback has no tenant subnet and must not create a reply route.
+    config.tenant_interfaces[0]
+        .addresses
+        .push(rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            tenant_vrf_loopback_ip: Some("2001:db8:ffff::1".to_string()),
+            ..Default::default()
+        });
+    let prefixes = fmds_tenant_routes(&config).expect("tenant prefixes");
+    assert_eq!(
+        prefixes,
+        vec![
+            "10.0.0.0/24".parse::<IpNetwork>().expect("IPv4 prefix"),
+            "2001:db8::/127".parse::<IpNetwork>().expect("IPv6 prefix"),
+        ]
+    );
+
+    // The link-local address comes first, as it can on a real interface. IPv4
+    // deliberately differs from the default to protect its existing override.
+    let mut interfaces: Vec<IpInterface> = serde_json::from_value(serde_json::json!([{
+        "ifindex": 7, "ifname": "fmds0", "flags": ["UP"], "mtu": 1500,
+        "qdisc": "noqueue", "operstate": "UP", "group": "default",
+        "address": "02:00:00:00:00:07", "broadcast": "ff:ff:ff:ff:ff:ff",
+        "addr_info": [
+            {"family": "inet6", "local": "fe80::7", "prefixlen": 64,
+             "scope": "link", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32},
+            {"family": "inet", "local": "169.254.169.250", "prefixlen": 29,
+             "scope": "global", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32},
+            {"family": "inet6", "local": "fd00:76b9::254", "prefixlen": 127,
+             "scope": "global", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32}
+        ]
+    }]))
+    .expect("observed interface");
+    let gateway = Ipv6Network::new(FMDS_IPV6_GATEWAY, 127).expect("metadata peer");
+    let routes = fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+        .expect("dual-stack reply routes");
+    assert_eq!(routes.len(), 2);
+    assert_eq!(
+        routes[0].prefsrc,
+        Some("169.254.169.250".parse().expect("IPv4 source"))
+    );
+    assert_eq!(
+        routes[0].gateway,
+        Some("169.254.169.253".parse().expect("IPv4 peer"))
+    );
+    assert_eq!(routes[1].dst, prefixes[1]);
+    assert_eq!(routes[1].prefsrc, Some(IpAddr::V6(FMDS_IPV6_ADDRESS)));
+    assert_eq!(routes[1].gateway, Some(IpAddr::V6(FMDS_IPV6_GATEWAY)));
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.dev.as_deref() == Some("fmds0"))
+    );
+
+    // An IPv6 tenant does not itself enable metadata transport on older deployments.
+    assert_eq!(
+        fmds_reply_routes("fmds0", &interfaces, &prefixes, None).expect("IPv4-only opt-out"),
+        vec![routes[0].clone()],
+    );
+
+    // Omitting IPv4 on the metadata link must retain the old skip behavior,
+    // independently of whether the tenant configuration still lists IPv4.
+    interfaces[0]
+        .addr_info
+        .retain(|address| address.local.is_ipv6());
+    assert_eq!(
+        fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+            .expect("IPv6-only metadata link"),
+        vec![routes[1].clone()],
+    );
+
+    // An explicitly enabled endpoint must be installed before acknowledging the
+    // routes; falling back to the remaining link-local address would hide failure.
+    interfaces[0]
+        .addr_info
+        .retain(|address| address.local != IpAddr::V6(FMDS_IPV6_ADDRESS));
+    let error = fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+        .expect_err("missing enabled metadata source");
+    assert!(
+        error
+            .to_string()
+            .contains("fmds0 has no metadata source address for 2001:db8::/127")
+    );
+}
+
+#[test]
+fn ipv6_only_network_requires_dhcp_acceptance() {
+    for (scenario, loopback, dhcp_changed, expected_error) in [
+        (
+            "missing primary loopback",
+            "",
+            None,
+            Some("missing loopback IP"),
+        ),
+        ("IPv6-only accepted", "2001:db8::1", Some(true), None),
+        (
+            "IPv6-only already applied",
+            "2001:db8::1",
+            Some(false),
+            None,
+        ),
+        (
+            "IPv6 primary rejection",
+            "2001:db8::1",
+            None,
+            Some("IPv6-only network update is waiting for DHCP"),
+        ),
+        ("legacy independent update", "192.0.2.10", None, None),
+        (
+            "malformed primary",
+            "not-an-address",
+            Some(true),
+            Some("invalid primary loopback IP: not-an-address"),
+        ),
+    ] {
+        let mut config = comparison_network_config();
+        config.managed_host_config.as_mut().unwrap().loopback_ip = loopback.to_string();
+        let dhcp_result = dhcp_changed.ok_or_else(|| eyre::eyre!("injected DHCP rejection"));
+        let result = require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result);
+        match expected_error {
+            Some(expected) => assert!(
+                format!("{:#}", result.expect_err(scenario)).contains(expected),
+                "{scenario}"
+            ),
+            None => assert!(result.is_ok(), "{scenario}: {result:?}"),
+        }
+    }
+}
+
+/// A failed stop must not prevent secondary-admin isolation, while DPUs that
+/// configure DHCP must still wait for acceptance before applying IPv6 networking.
+#[test]
+fn dhcp_stop_failure_does_not_block_secondary_admin_isolation() {
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::scenarios;
+
+    scenarios!(run = |(is_primary_dpu, use_admin_network)| {
+        let mut config = comparison_network_config();
+        config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
+        config.is_primary_dpu = is_primary_dpu;
+        config.use_admin_network = use_admin_network;
+        let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
+
+        require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result).map_err(drop)
+    };
+        // Only this role stops DHCP instead of applying a replacement config.
+        "secondary admin" { (false, true) => Yields(()) }
+        // Neither being secondary nor using the admin network alone bypasses it.
+        "secondary tenant" { (false, false) => Fails }
+        "primary admin" { (true, true) => Fails }
+    );
+}
+
 /// Builds a routing profile with multiple entries in each set-like
 /// collection used by the fingerprint tests.
 fn comparison_routing_profile() -> rpc::RoutingProfile {
@@ -24,21 +287,25 @@ fn comparison_routing_profile() -> rpc::RoutingProfile {
         route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_001,
-                vni: 101,
+                vni: Some(101),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_002,
-                vni: 102,
+                vni: Some(102),
+                vni_self: false,
             },
         ],
         route_targets_on_exports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_003,
-                vni: 103,
+                vni: Some(103),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_004,
-                vni: 104,
+                vni: Some(104),
+                vni_self: false,
             },
         ],
         leak_default_route_from_underlay: false,
@@ -121,7 +388,7 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
         mtu: Some(9_000),
         ipv6_interface_config: Some(rpc::FlatInterfaceIpv6Config {
             ip: "2001:db8::1".to_string(),
-            interface_prefix: "2001:db8::/127".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
             svi_ip: Some("2001:db8::".to_string()),
         }),
         vpc_routing_profile: Some(comparison_routing_profile()),
@@ -135,7 +402,15 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
                 },
             ],
         }),
-        addresses: vec![],
+        addresses: vec![rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            ip: "2001:db8::1".to_string(),
+            interface_prefix: "2001:db8::1/128".to_string(),
+            prefix: "2001:db8::/127".to_string(),
+            gateway: None,
+            svi_ip: Some("2001:db8::".to_string()),
+            tenant_vrf_loopback_ip: None,
+        }],
         network_security_group: Some(rpc::FlatInterfaceNetworkSecurityGroupConfig {
             id: format!("nsg-{id}"),
             version: "nsg-v1".to_string(),
@@ -164,6 +439,8 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
 /// ordering comparison cases.
 fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
     ManagedHostNetworkConfigResponse {
+        service_interfaces: vec![],
+        service_vpc_slot_inventory: None,
         asn: 65_000,
         dhcp_servers: vec!["10.10.0.1".to_string(), "10.10.0.2".to_string()],
         vni_device: "vxlan48".to_string(),
@@ -187,6 +464,10 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         deprecated_deny_prefixes: vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()],
         deny_prefixes: vec!["100.64.0.0/10".to_string(), "169.254.0.0/16".to_string()],
         site_fabric_prefixes: vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()],
+        site_fabric_null_routes: Some(::rpc::common::StringList {
+            items: vec!["10.0.0.0/8".to_string(), "10.2.0.0/24".to_string()],
+        }),
+        vpc_peer_vnis_authoritative: true,
         vpc_isolation_behavior: rpc::VpcIsolationBehaviorType::VpcIsolationMutual.into(),
         stateful_acls_enabled: true,
         ntp_servers: vec!["10.40.0.1".to_string(), "10.40.0.2".to_string()],
@@ -197,16 +478,19 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         datacenter_asn: 65_100,
         common_internal_route_target: Some(::rpc::common::RouteTarget {
             asn: 65_200,
-            vni: 5_000,
+            vni: Some(5_000),
+            vni_self: false,
         }),
         additional_route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_201,
-                vni: 5_001,
+                vni: Some(5_001),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_202,
-                vni: 5_002,
+                vni: Some(5_002),
+                vni_self: false,
             },
         ],
         network_security_policy_overrides: vec![
@@ -231,8 +515,7 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
 }
 
 /// Selects the unchanged baseline or one response mutation used to verify the
-/// HBN skip decision. The address-list case intentionally remains a match
-/// because HBN does not consume the list and the fingerprint excludes it.
+/// HBN skip decision.
 #[derive(Clone, Copy, Debug)]
 enum RenderedInputChange {
     Unchanged,
@@ -241,10 +524,14 @@ enum RenderedInputChange {
     ManagedHostLoopback,
     DenyPrefix,
     SiteFabricPrefix,
+    SiteFabricNullRoute,
     AdminInterfaceVni,
+    AdminIpv6Prefix,
     TenantInterfaceVni,
     TenantInterfaceIp,
-    TenantInterfaceAddresses,
+    TenantIpv6Prefix,
+    TenantIpv6Mode,
+    TenantIpv6Removal,
     TenantVpcPrefix,
     TenantPeerPrefix,
     TenantPeerVni,
@@ -277,6 +564,12 @@ impl RenderedInputChange {
                     .site_fabric_prefixes
                     .push("192.168.0.0/16".to_string());
             }
+            Self::SiteFabricNullRoute => config
+                .site_fabric_null_routes
+                .as_mut()
+                .expect("comparison fixture has FNN null routes")
+                .items
+                .push("192.168.0.0/16".to_string()),
             Self::AdminInterfaceVni => {
                 config
                     .admin_interface
@@ -284,32 +577,31 @@ impl RenderedInputChange {
                     .expect("comparison fixture has an admin interface")
                     .vni += 1;
             }
+            Self::AdminIpv6Prefix => {
+                config
+                    .admin_interface
+                    .as_mut()
+                    .expect("comparison fixture has an admin interface")
+                    .addresses[0]
+                    .prefix = "2001:db8:1::/64".to_string();
+            }
             Self::TenantInterfaceVni => config.tenant_interfaces[1].vni += 1,
             Self::TenantInterfaceIp => {
                 config.tenant_interfaces[1].ip = Some("10.0.0.99".to_string());
             }
-            Self::TenantInterfaceAddresses => {
-                config.tenant_interfaces[1].addresses = vec![
-                    rpc::InterfaceAddressConfig {
-                        address_family: rpc::AddressFamily::V4.into(),
-                        ip: "10.0.0.2".to_string(),
-                        interface_prefix: "10.0.0.0/31".to_string(),
-                        prefix: "10.0.0.0/24".to_string(),
-                        gateway: Some("10.0.0.1/24".to_string()),
-                        svi_ip: Some("10.0.0.1".to_string()),
-                        tenant_vrf_loopback_ip: Some("10.0.0.3".to_string()),
-                    },
-                    rpc::InterfaceAddressConfig {
-                        address_family: rpc::AddressFamily::V6.into(),
-                        ip: "2001:db8::1".to_string(),
-                        interface_prefix: "2001:db8::/127".to_string(),
-                        prefix: "2001:db8::/64".to_string(),
-                        gateway: None,
-                        svi_ip: Some("2001:db8::".to_string()),
-                        tenant_vrf_loopback_ip: None,
-                    },
-                ];
+            Self::TenantIpv6Prefix => {
+                let address = &mut config.tenant_interfaces[1].addresses[0];
+                address.ip = "2001:db8:1::1".to_string();
+                address.interface_prefix = "2001:db8:1::1/128".to_string();
+                address.prefix = "2001:db8:1::/127".to_string();
             }
+            Self::TenantIpv6Mode => {
+                let address = &mut config.tenant_interfaces[1].addresses[0];
+                address.ip.clear();
+                address.interface_prefix = "2001:db8::/64".to_string();
+                address.prefix = "2001:db8::/64".to_string();
+            }
+            Self::TenantIpv6Removal => config.tenant_interfaces[1].addresses.clear(),
             Self::TenantVpcPrefix => {
                 config.tenant_interfaces[1]
                     .vpc_prefixes
@@ -403,6 +695,14 @@ fn current_network_version_detects_rendered_input_changes() {
 
     value_scenarios!(run = |change| {
         let mut config = comparison_network_config();
+        if matches!(change, RenderedInputChange::AdminIpv6Prefix) {
+            config.use_admin_network = true;
+            config
+                .admin_interface
+                .as_mut()
+                .expect("comparison fixture has an admin interface")
+                .is_l2_segment = true;
+        }
         let mut current = CurrentNetworkVersion::default();
         current.update_from(&config, None);
         change.apply(&mut config);
@@ -419,13 +719,22 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::ManagedHostLoopback => false,
             RenderedInputChange::DenyPrefix => false,
             RenderedInputChange::SiteFabricPrefix => false,
+            RenderedInputChange::SiteFabricNullRoute => false,
             RenderedInputChange::NetworkVirtualizationType => false,
             RenderedInputChange::PrimaryDpu => false,
         }
         "interface rendering inputs" {
             RenderedInputChange::AdminInterfaceVni => false,
+            // Admin prefix replacement changes the SVI VRR/RA desired state.
+            RenderedInputChange::AdminIpv6Prefix => false,
             RenderedInputChange::TenantInterfaceVni => false,
             RenderedInputChange::TenantInterfaceIp => false,
+            // Prefix replacement must replace the advertised desired state.
+            RenderedInputChange::TenantIpv6Prefix => false,
+            // Stateful-to-SLAAC replacement changes the rendered M/A flags.
+            RenderedInputChange::TenantIpv6Mode => false,
+            // IPv6 removal must withdraw the complete RA/RDNSS stanza.
+            RenderedInputChange::TenantIpv6Removal => false,
             RenderedInputChange::TenantVpcPrefix => false,
             RenderedInputChange::TenantPeerPrefix => false,
             RenderedInputChange::TenantPeerVni => false,
@@ -434,10 +743,23 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::NetworkSecurityGroup => false,
             RenderedInputChange::NetworkSecurityPolicyOverride => false,
         }
-        "family-neutral address list is not an HBN rendering input" {
-            RenderedInputChange::TenantInterfaceAddresses => true,
-        }
     );
+}
+
+/// FNN L2 rendering derives the SVI's IPv6 VRR address from the authoritative
+/// V6 prefix, so a Core-side dual-write must invalidate an otherwise-current
+/// agent fingerprint during a rolling upgrade.
+#[test]
+fn current_network_version_tracks_l2_ipv6_gateway_prefix() {
+    let mut config = comparison_network_config();
+    config.tenant_interfaces[1].is_l2_segment = true;
+
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config, None);
+
+    config.tenant_interfaces[1].addresses[0].prefix = "2001:db8:1::/127".to_string();
+
+    assert!(!current.matches_versions_from(&config, None));
 }
 
 /// `SetLikeInputReordering` lists the response collections this test
@@ -447,6 +769,7 @@ enum SetLikeInputReordering {
     DhcpServers,
     RouteServers,
     SiteFabricPrefixes,
+    SiteFabricNullRoutes,
     AdminInterfaceVpcPrefixes,
     TenantVpcPrefixes,
     TenantPeerPrefixes,
@@ -467,6 +790,12 @@ impl SetLikeInputReordering {
             Self::DhcpServers => config.dhcp_servers.reverse(),
             Self::RouteServers => config.route_servers.reverse(),
             Self::SiteFabricPrefixes => config.site_fabric_prefixes.reverse(),
+            Self::SiteFabricNullRoutes => config
+                .site_fabric_null_routes
+                .as_mut()
+                .expect("comparison fixture has FNN null routes")
+                .items
+                .reverse(),
             Self::AdminInterfaceVpcPrefixes => config
                 .admin_interface
                 .as_mut()
@@ -543,6 +872,7 @@ fn current_network_version_ignores_set_like_input_order() {
             SetLikeInputReordering::DhcpServers => true,
             SetLikeInputReordering::RouteServers => true,
             SetLikeInputReordering::SiteFabricPrefixes => true,
+            SetLikeInputReordering::SiteFabricNullRoutes => true,
             SetLikeInputReordering::AdditionalRouteTargets => true,
             SetLikeInputReordering::TopLevelRoutingProfileRouteTargets => true,
             SetLikeInputReordering::NetworkSecurityPolicyOverrides => true,
@@ -658,6 +988,7 @@ enum NonHbnInputChange {
     DeprecatedDhcpFlag,
     DeprecatedDenyPrefixes,
     NtpServers,
+    Dhcpv6ServerPreference,
     HostInterfaceId,
     ExtensionServices,
     AstraConfig,
@@ -679,6 +1010,7 @@ impl NonHbnInputChange {
                 .deprecated_deny_prefixes
                 .push("192.0.2.0/24".to_string()),
             Self::NtpServers => config.ntp_servers.push("10.40.0.3".to_string()),
+            Self::Dhcpv6ServerPreference => config.dhcpv6_server_preference = Some(0),
             Self::HostInterfaceId => {
                 config.host_interface_id = Some("7340b4f5-1721-4dd3-8fc3-9f91a4c29f61".to_string());
             }
@@ -690,7 +1022,17 @@ impl NonHbnInputChange {
                         ..Default::default()
                     });
             }
-            Self::AstraConfig => config.astra_config = Some(rpc::AstraConfig::default()),
+            Self::AstraConfig => {
+                config.astra_config = Some(rpc::AstraConfig {
+                    multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                        logical_ifname: "eth_r2_p6".to_string(),
+                        cfg_maintenance_mode: Some(false),
+                        revision: "V2-T1791792000000000".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+            }
             Self::AdminNetworkTransition => config.use_admin_network_changed = Some(true),
         }
     }
@@ -721,6 +1063,8 @@ fn current_network_version_ignores_non_hbn_inputs() {
             NonHbnInputChange::InstancePayload => true,
             NonHbnInputChange::HostInterfaceId => true,
             NonHbnInputChange::NtpServers => true,
+            // DHCP is reconciled independently before the HBN skip decision.
+            NonHbnInputChange::Dhcpv6ServerPreference => true,
             NonHbnInputChange::DeprecatedDenyPrefixes => true,
             NonHbnInputChange::DeprecatedDhcpFlag => true,
         }
@@ -808,4 +1152,47 @@ async fn test_get_fabric_interfaces_data() {
     // should pass on any Linux host with real hardware or a virtualized PCI
     // network interface.
     // assert!(fabric_interfaces_data.len() > 0);
+}
+
+#[test]
+fn multiplane_delivery_preserves_optional_mode_without_attachments() {
+    use prost::Message;
+    for mode in [None, Some(true), Some(false)] {
+        let response = ManagedHostNetworkConfigResponse {
+            astra_config: Some(rpc::AstraConfig {
+                astra_attachments: Vec::new(),
+                is_attachment_config_present: Some(false),
+                is_maintenance_config_present: Some(true),
+                multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                    logical_ifname: "eth_r2_p6".to_string(),
+                    cfg_maintenance_mode: mode,
+                    reference: Some("https://tickets.example.com/SPX-42".to_string()),
+                    revision: "V2-T1791792000000000".to_string(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let received =
+            ManagedHostNetworkConfigResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+        let configuration = received.astra_config.unwrap();
+        assert!(configuration.astra_attachments.is_empty());
+        assert_eq!(configuration.is_attachment_config_present, Some(false));
+        assert_eq!(configuration.is_maintenance_config_present, Some(true));
+        assert_eq!(
+            configuration.multiplane_interfaces[0].cfg_maintenance_mode,
+            mode
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].logical_ifname,
+            "eth_r2_p6"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].revision,
+            "V2-T1791792000000000"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].reference.as_deref(),
+            Some("https://tickets.example.com/SPX-42")
+        );
+    }
 }

@@ -20,6 +20,7 @@
 // different locations: local filesystem, HTTPS, and SSH.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use forge_ssh::ssh_client::{AuthConfig, HostKeyVerification, SshClientConfig};
 use tokio::io::AsyncWriteExt;
@@ -27,6 +28,10 @@ use tracing;
 
 use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{FirmwareError, FirmwareResult};
+
+// Administrative network limit per artifact, matching the long firmware-command
+// budget. It includes connection, authentication, and the complete response.
+const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 // FirmwareSource represents a firmware binary location. Supported
 // source types are local filesystem, HTTPS, and SSH/SCP.
@@ -75,12 +80,19 @@ impl FirmwareSource {
         })
     }
 
-    // from_url parses a URL string into a FirmwareSource. The URL
-    // prefix determines the source type:
-    //   - "https://" or "http://"  -> Http
-    //   - "ssh://[user@]host:path" -> Ssh (SCP-style colon separator)
-    //   - "file://path"            -> Local (strips the prefix)
-    //   - anything else            -> Local (treated as a filesystem path)
+    /// `from_url` parses a URL string into a `FirmwareSource`. The URL
+    /// prefix determines the source type:
+    ///
+    /// - `https://` or `http://` -> `Http`
+    /// - `ssh://[user@]host:path` -> `Ssh` (SCP-style colon separator)
+    /// - `file://path` -> `Local` (strips the prefix)
+    /// - anything else -> `Local` (treated as a filesystem path)
+    ///
+    /// IPv6 SSH hosts use brackets: `ssh://user@[2001:db8::1]:path`.
+    /// SSH sources use port 22. An omitted username uses the `USER` environment
+    /// variable, falling back to `LOGNAME` and then `root` when unavailable.
+    /// Remote paths may be absolute or relative and preserve colons and `@`.
+    /// Empty hosts or paths, or a missing host/path separator, return an error.
     pub fn from_url(url: &str) -> FirmwareResult<Self> {
         if url.starts_with("https://") || url.starts_with("http://") {
             Ok(Self::http(url))
@@ -130,17 +142,52 @@ impl FirmwareSource {
         self
     }
 
-    // resolve resolves the firmware to a local file path, downloading
-    // or copying as necessary. The work_dir is used as a staging area
-    // for any files that need to be fetched from remote sources.
+    /// `resolve` returns a local file path, downloading remote artifacts into
+    /// `work_dir`. Each HTTP or SSH transfer has one 30-minute network deadline,
+    /// including connection, authentication, and the complete response, without
+    /// retries. Local disk writes finish outside that deadline because Tokio
+    /// filesystem work can continue after its future is dropped.
     pub async fn resolve(&self, work_dir: &Path) -> FirmwareResult<PathBuf> {
         match self {
             Self::Local { path } => resolve_local(path).await,
             Self::Http { url, credentials } => {
-                resolve_http(url, credentials.as_ref(), work_dir).await
+                resolve_http(
+                    url,
+                    credentials.as_ref(),
+                    work_dir,
+                    SOURCE_TRANSFER_TIMEOUT,
+                    reqwest::redirect::Policy::default(),
+                )
+                .await
             }
-            Self::Ssh(ssh_source) => resolve_ssh(ssh_source, work_dir, None).await,
+            Self::Ssh(ssh_source) => {
+                resolve_ssh(ssh_source, work_dir, None, SOURCE_TRANSFER_TIMEOUT).await
+            }
         }
+    }
+
+    /// Checked updates accept only unauthenticated HTTP(S), with no redirects.
+    /// Reuse the legacy transfer deadline and file-writing path, but never let
+    /// a redirect change the source policy established at admission.
+    pub(super) async fn resolve_for_update(&self, work_dir: &Path) -> FirmwareResult<PathBuf> {
+        let Self::Http {
+            url,
+            credentials: None,
+        } = self
+        else {
+            return Err(FirmwareError::ConfigError(
+                "firmware updates require unauthenticated HTTP(S) sources".into(),
+            ));
+        };
+        super::config::validate_update_source(url)?;
+        resolve_http(
+            url,
+            None,
+            work_dir,
+            SOURCE_TRANSFER_TIMEOUT,
+            reqwest::redirect::Policy::none(),
+        )
+        .await
     }
 
     // description returns a human-readable description of the
@@ -175,6 +222,8 @@ async fn resolve_http(
     url: &str,
     credentials: Option<&Credentials>,
     work_dir: &Path,
+    transfer_timeout: Duration,
+    redirects: reqwest::redirect::Policy,
 ) -> FirmwareResult<PathBuf> {
     // Extract filename from URL, falling back to a generic name.
     let filename = url::Url::parse(url)
@@ -196,7 +245,11 @@ async fn resolve_http(
 
     // Build the HTTP request with optional credentials. The `reqwest-tracing` middleware injects
     // the current span's W3C trace context into the outgoing request (#2438).
-    let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new())
+    let client = reqwest::Client::builder()
+        .redirect(redirects)
+        .build()
+        .map_err(|error| FirmwareError::HttpError(error.to_string()))?;
+    let client = reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::default())
         .build();
     let mut request = client.get(url);
@@ -213,23 +266,28 @@ async fn resolve_http(
         };
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| FirmwareError::HttpError(format!("Failed to download from {url}: {e}")))?;
+    let bytes = tokio::time::timeout(transfer_timeout, async {
+        let response = request
+            .send()
+            .await
+            .map_err(|e| FirmwareError::HttpError(format!("Failed to download from {url}: {e}")))?;
 
-    if !response.status().is_success() {
-        return Err(FirmwareError::HttpError(format!(
-            "HTTP {} from {url}",
-            response.status(),
-        )));
-    }
+        if !response.status().is_success() {
+            return Err(FirmwareError::HttpError(format!(
+                "HTTP {} from {url}",
+                response.status(),
+            )));
+        }
 
-    // Stream the response body to disk.
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| FirmwareError::HttpError(format!("Failed to read response body: {e}")))?;
+        response
+            .bytes()
+            .await
+            .map_err(|e| FirmwareError::HttpError(format!("Failed to read response body: {e}")))
+    })
+    .await
+    .map_err(|_| FirmwareError::SourceTransferTimeout {
+        timeout: transfer_timeout,
+    })??;
 
     let mut file = tokio::fs::File::create(&dest_path)
         .await
@@ -261,6 +319,7 @@ async fn resolve_ssh(
     ssh_source: &SshSource,
     work_dir: &Path,
     known_hosts_file: Option<&Path>,
+    transfer_timeout: Duration,
 ) -> FirmwareResult<PathBuf> {
     let SshSource {
         host,
@@ -295,22 +354,27 @@ async fn resolve_ssh(
         None => HostKeyVerification::DefaultKnownHostsFile,
     };
 
-    let client = SshClientConfig {
-        host,
-        port: *port,
-        username,
-        auth: auth.as_ref(),
-        host_key_verification,
-    }
-    .make_authenticated_client()
-    .await?;
-
     // Transfer the file over SSH using base64 encoding. Base64 keeps the
     // command output text-safe before we decode it back to bytes locally.
     // Use `cat | base64` for portability across Linux (coreutils) and
     // macOS (BSD). Positional file args and the -w0 flag are not portable.
     let command = format!("cat {} | base64", shell_escape(remote_path));
-    let result = client.execute_ssh_command(&command).await?;
+    let result = tokio::time::timeout(transfer_timeout, async {
+        let client = SshClientConfig {
+            host,
+            port: *port,
+            username,
+            auth: auth.as_ref(),
+            host_key_verification,
+        }
+        .make_authenticated_client()
+        .await?;
+        client.execute_ssh_command(&command).await
+    })
+    .await
+    .map_err(|_| FirmwareError::SourceTransferTimeout {
+        timeout: transfer_timeout,
+    })??;
 
     if result.exit_status != 0 {
         return Err(FirmwareError::CommandFailed(format!(
@@ -365,15 +429,31 @@ fn credential_type_name(cred: &Credentials) -> &'static str {
 //   ssh://user@host:relative/path   -> relative path from home dir
 //   ssh://user@host:/absolute/path  -> absolute path
 //
+// IPv6 hosts use brackets, as in `ssh://user@[2001:db8::1]:path`.
+// Return the host without brackets for the SSH client's socket lookup.
+//
 // User defaults to the current user if omitted.
 fn parse_ssh_url(url: &str) -> FirmwareResult<(String, String, String)> {
     let stripped = url
         .strip_prefix("ssh://")
         .ok_or_else(|| FirmwareError::ConfigError(format!("Not an SSH URL: '{url}'")))?;
 
-    let (host_part, remote_path) = stripped.split_once(':').ok_or_else(|| {
+    // An `@` after the first colon belongs to the path, not the username.
+    let (username, host_and_path) = match stripped.split_once('@') {
+        Some((username, host_and_path)) if !username.contains(':') => {
+            (username.to_string(), host_and_path)
+        }
+        _ => (whoami().unwrap_or_else(|| "root".to_string()), stripped),
+    };
+
+    let (host, remote_path) = if let Some(bracketed) = host_and_path.strip_prefix('[') {
+        bracketed.split_once("]:")
+    } else {
+        host_and_path.split_once(':')
+    }
+    .ok_or_else(|| {
         FirmwareError::ConfigError(format!(
-            "SSH URL must use ssh://[user@]host:path format, got: '{url}'"
+            "SSH URL must use ssh://[user@]host:path format (bracket IPv6 hosts), got: '{url}'"
         ))
     })?;
 
@@ -383,22 +463,13 @@ fn parse_ssh_url(url: &str) -> FirmwareResult<(String, String, String)> {
         )));
     }
 
-    let (username, host) = if let Some((user, h)) = host_part.split_once('@') {
-        (user.to_string(), h.to_string())
-    } else {
-        (
-            whoami().unwrap_or_else(|| "root".to_string()),
-            host_part.to_string(),
-        )
-    };
-
     if host.is_empty() {
         return Err(FirmwareError::ConfigError(format!(
             "SSH URL missing host: '{url}'"
         )));
     }
 
-    Ok((host, username, remote_path.to_string()))
+    Ok((host.to_string(), username, remote_path.to_string()))
 }
 
 // whoami returns the current username, if available.
@@ -425,8 +496,135 @@ mod tests {
     use russh::keys::ssh_key::LineEnding;
     use russh::keys::ssh_key::rand_core::UnwrapErr;
     use tempfile::tempdir;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinSet;
 
     use super::*;
+
+    /// Checked downloads reject the redirect itself, while the public legacy
+    /// resolver must still follow it and preserve the destination's bytes.
+    #[tokio::test]
+    async fn download_redirect_policy_preserves_legacy_and_rejects_checked_updates() {
+        #[derive(Clone, Copy, Debug)]
+        enum Submission {
+            Legacy,
+            Checked,
+        }
+
+        for submission in [Submission::Legacy, Submission::Checked] {
+            let directory = tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/image.bin", listener.local_addr().unwrap());
+            let (stop, stopped) = oneshot::channel();
+            let mut server = JoinSet::new();
+            server.spawn(async move {
+                tokio::pin!(stopped);
+                let mut requests = 0;
+                loop {
+                    let (stream, _) = tokio::select! {
+                        _ = &mut stopped => return requests,
+                        accepted = listener.accept() => accepted.unwrap(),
+                    };
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    requests += 1;
+                    let response = if requests == 1 {
+                        b"HTTP/1.1 302 Found\r\nLocation: /redirected.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nimage".as_slice()
+                    };
+                    stream.get_mut().write_all(response).await.unwrap();
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let source = FirmwareSource::http(url);
+                let result = match submission {
+                    Submission::Legacy => source.resolve(directory.path()).await,
+                    Submission::Checked => source.resolve_for_update(directory.path()).await,
+                };
+                stop.send(()).unwrap();
+                let requests = server.join_next().await.unwrap().unwrap();
+                match submission {
+                    Submission::Legacy => {
+                        let path = result.expect("legacy download follows redirects");
+                        assert_eq!(std::fs::read(path).unwrap(), b"image");
+                        assert_eq!(requests, 2);
+                    }
+                    Submission::Checked => {
+                        let error = result.expect_err("checked download rejects redirects");
+                        let FirmwareError::HttpError(message) = error else {
+                            panic!("expected HTTP redirect rejection, got {error:?}");
+                        };
+                        assert!(message.starts_with("HTTP 302"), "{message}");
+                        assert_eq!(requests, 1);
+                        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{submission:?} redirect handling exceeds watchdog"));
+        }
+    }
+
+    /// A successful response header must not leave an unfinished body unbounded.
+    #[tokio::test]
+    async fn http_transfer_deadline_includes_the_response_body() {
+        let directory = tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/image.bin", listener.local_addr().unwrap());
+        let (ready, body_started) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let mut server = JoinSet::new();
+        server.spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            stream
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\npartial image")
+                .await
+                .unwrap();
+            stream.get_mut().flush().await.unwrap();
+            ready.send(()).unwrap();
+            released.await.unwrap();
+        });
+
+        let transfer_timeout = Duration::from_secs(1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let transfer = resolve_http(&url, None, directory.path(), transfer_timeout, reqwest::redirect::Policy::default());
+            tokio::pin!(transfer);
+            tokio::select! {
+                started = body_started => started.unwrap(),
+                result = &mut transfer => panic!("transfer finished before the body was held: {result:?}"),
+            }
+            assert!(matches!(
+                transfer.await,
+                Err(FirmwareError::SourceTransferTimeout { timeout })
+                    if timeout == transfer_timeout
+            ));
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+            release.send(()).unwrap();
+            server.join_next().await.unwrap().unwrap();
+        })
+        .await
+        .expect("the transfer deadline settles an incomplete HTTP body");
+    }
 
     #[tokio::test]
     async fn resolve_ssh_fetches_firmware_from_russh_server()
@@ -474,8 +672,13 @@ mod tests {
             )),
         };
 
-        let resolved_path =
-            resolve_ssh(&ssh_source, &work_dir, Some(known_hosts_path.as_path())).await?;
+        let resolved_path = resolve_ssh(
+            &ssh_source,
+            &work_dir,
+            Some(known_hosts_path.as_path()),
+            SOURCE_TRANSFER_TIMEOUT,
+        )
+        .await?;
 
         assert_eq!(resolved_path, work_dir.join("mlx-fw.bin"));
         assert_eq!(tokio::fs::read(resolved_path).await?, firmware);
@@ -600,32 +803,41 @@ mod coverage_tests {
         .await;
     }
 
-    // parse_ssh_url splits an SCP-style ssh:// URL into (host, username,
-    // remote_path). We project to (host, remote_path) so the assertion stays
-    // whoami-independent even on the default-user rows. Rejection rows use Fails
-    // (ConfigError is not PartialEq).
+    // Check the host, username, and remote path. The default username comes
+    // from the test's environment. Compare error text because FirmwareError
+    // is not PartialEq.
     #[test]
     fn parse_ssh_url_splits_components() {
+        let default_user = whoami().unwrap_or_else(|| "root".to_string());
+
         scenarios!(
-            run = |url| {
-                parse_ssh_url(url)
-                    .map(|(host, _user, path)| (host, path))
-                    .map_err(drop)
-            };
+            run = |url| parse_ssh_url(url).map_err(|error| error.to_string());
             "user, host, absolute path" {
-                "ssh://deploy@host.example:/abs/fw.bin" => Yields(("host.example".to_string(), "/abs/fw.bin".to_string())),
+                "ssh://deploy@host.example:/abs/fw.bin" => Yields(("host.example".to_string(), "deploy".to_string(), "/abs/fw.bin".to_string())),
             }
 
             "user, host, relative path" {
-                "ssh://deploy@host.example:rel/fw.bin" => Yields(("host.example".to_string(), "rel/fw.bin".to_string())),
+                "ssh://deploy@host.example:rel/fw.bin" => Yields(("host.example".to_string(), "deploy".to_string(), "rel/fw.bin".to_string())),
             }
 
             "no user, host, absolute path" {
-                "ssh://host.example:/abs/fw.bin" => Yields(("host.example".to_string(), "/abs/fw.bin".to_string())),
+                "ssh://host.example:/abs/fw.bin" => Yields(("host.example".to_string(), default_user.clone(), "/abs/fw.bin".to_string())),
+            }
+
+            "user, bracketed IPv6 host, relative path" {
+                "ssh://deploy@[2001:db8::1]:rel/fw.bin" => Yields(("2001:db8::1".to_string(), "deploy".to_string(), "rel/fw.bin".to_string())),
+            }
+
+            "no user, bracketed IPv6 host, absolute path" {
+                "ssh://[2001:db8::1]:/abs/fw.bin" => Yields(("2001:db8::1".to_string(), default_user.clone(), "/abs/fw.bin".to_string())),
             }
 
             "path containing a colon keeps the rest after the first colon" {
-                "ssh://host.example:/abs:with:colons" => Yields(("host.example".to_string(), "/abs:with:colons".to_string())),
+                "ssh://host.example:/abs:with:colons" => Yields(("host.example".to_string(), default_user.clone(), "/abs:with:colons".to_string())),
+            }
+
+            "an at sign in the path is not a username separator" {
+                "ssh://host.example:/fw@release.bin" => Yields(("host.example".to_string(), default_user.clone(), "/fw@release.bin".to_string())),
             }
 
             "not an ssh URL (missing prefix)" {
@@ -636,8 +848,16 @@ mod coverage_tests {
                 "ssh://hostonly" => Fails,
             }
 
+            "IPv6 host missing the colon after the closing bracket" {
+                "ssh://[2001:db8::1]/abs/fw.bin" => FailsWith("configuration error: SSH URL must use ssh://[user@]host:path format (bracket IPv6 hosts), got: 'ssh://[2001:db8::1]/abs/fw.bin'".to_string()),
+            }
+
             "empty remote path" {
                 "ssh://deploy@host.example:" => Fails,
+            }
+
+            "empty bracketed host" {
+                "ssh://[]:/abs/fw.bin" => Fails,
             }
 
             "empty host with a user" {

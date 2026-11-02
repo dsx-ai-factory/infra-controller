@@ -232,6 +232,7 @@ mod tests {
 
         let metric = CollectorEvent::Metric(
             crate::sink::MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "redfish@127.0.0.1:443".to_string(),
                 name: "tcp_port".to_string(),
                 metric_type: "reachable".to_string(),

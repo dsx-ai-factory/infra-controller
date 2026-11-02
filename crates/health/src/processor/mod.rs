@@ -43,6 +43,7 @@ pub trait EventProcessor: Send + Sync {
 struct PendingEvent<'a> {
     event: Cow<'a, CollectorEvent>,
     blocked_processors: Vec<bool>,
+    is_event_record: bool,
 }
 
 pub struct EventProcessingPipeline {
@@ -98,6 +99,7 @@ impl EventProcessingPipeline {
                 queue.push_back(PendingEvent {
                     event: Cow::Owned(event),
                     blocked_processors: next_blocked_processors,
+                    is_event_record: false,
                 });
             }
         }
@@ -109,18 +111,49 @@ impl DataSink for EventProcessingPipeline {
         "event_processing_pipeline"
     }
 
+    fn prune_metrics(
+        &self,
+        context: &EventContext,
+        metric_type: Option<&str>,
+        labels: &[crate::metrics::MetricLabel],
+        unit: Option<&str>,
+        label_names: Option<&[&str]>,
+    ) {
+        self.sink
+            .prune_metrics(context, metric_type, labels, unit, label_names);
+    }
+
+    fn prune_metric_key(&self, context: &EventContext, key: &str, metric_type: &str, unit: &str) {
+        self.sink.prune_metric_key(context, key, metric_type, unit);
+    }
+
     fn try_handle_event(
         &self,
         context: &EventContext,
         event: &CollectorEvent,
     ) -> Result<(), HealthError> {
+        self.try_handle_classified_event(context, event, false)
+    }
+
+    fn try_handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        is_event_record: bool,
+    ) -> Result<(), HealthError> {
         let mut queue = VecDeque::from(vec![PendingEvent {
             event: Cow::Borrowed(event),
             blocked_processors: vec![false; self.processors.len()],
+            is_event_record,
         }]);
 
         while let Some(current) = queue.pop_front() {
-            self.sink.try_handle_event(context, &current.event)?;
+            self.sink.try_handle_classified_event(
+                context,
+                &current.event,
+                current.is_event_record,
+            )?;
+
             self.next_events(
                 context,
                 &current.event,
@@ -165,6 +198,43 @@ mod tests {
         }
     }
 
+    struct PruneCountingSink(Arc<AtomicUsize>);
+
+    impl DataSink for PruneCountingSink {
+        fn sink_type(&self) -> &'static str {
+            "prune_counting_sink"
+        }
+
+        fn prune_metrics(
+            &self,
+            _context: &EventContext,
+            _metric_type: Option<&str>,
+            _labels: &[crate::metrics::MetricLabel],
+            _unit: Option<&str>,
+            _label_names: Option<&[&str]>,
+        ) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn prune_metric_key(
+            &self,
+            _context: &EventContext,
+            _key: &str,
+            _metric_type: &str,
+            _unit: &str,
+        ) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn try_handle_event(
+            &self,
+            _context: &EventContext,
+            _event: &CollectorEvent,
+        ) -> Result<(), HealthError> {
+            Ok(())
+        }
+    }
+
     struct SelfReemittingProcessor {
         counter: Arc<AtomicUsize>,
     }
@@ -190,7 +260,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "test",
             metadata: None,
@@ -217,6 +287,7 @@ mod tests {
 
         let event = CollectorEvent::Metric(
             crate::sink::MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "k".to_string(),
                 name: "n".to_string(),
                 metric_type: "gauge".to_string(),
@@ -231,5 +302,27 @@ mod tests {
 
         assert_eq!(processor_counter.load(Ordering::SeqCst), 1);
         assert_eq!(sink_counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn processor_pipeline_forwards_metric_pruning() {
+        let processor_counter = Arc::new(AtomicUsize::new(0));
+        let prune_counter = Arc::new(AtomicUsize::new(0));
+
+        let metrics_manager =
+            Arc::new(MetricsManager::new("test").expect("should create metrics manager"));
+
+        let pipeline = EventProcessingPipeline::new(
+            vec![Arc::new(SelfReemittingProcessor {
+                counter: processor_counter,
+            })],
+            Arc::new(PruneCountingSink(prune_counter.clone())),
+            metrics_manager,
+        );
+
+        pipeline.prune_metrics(&context(), Some("temperature"), &[], None, None);
+        pipeline.prune_metric_key(&context(), "reading", "temperature", "celsius");
+
+        assert_eq!(prune_counter.load(Ordering::SeqCst), 2);
     }
 }

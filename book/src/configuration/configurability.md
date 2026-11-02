@@ -55,25 +55,28 @@ requires touching a CRD or a sibling system, it is layer 4.
 - `global.imagePullSecrets` — list of Secret names mounted into pods that pull from authenticated registries.
 - `global.certificate.duration`, `.renewBefore`, `.privateKey.algorithm`, `.privateKey.size`, `.issuerRef.{kind,name,group}` — cert-manager Certificate spec applied to every SPIFFE cert the chart issues. Default `ClusterIssuer` is `vault-nico-issuer`.
 - `global.spiffe.trustDomain` — SPIFFE trust domain stamped into every cert's SAN. Default `nico.local`.
-- One `<subchart>.enabled` flag per subchart.
+- One `<subchart>.enabled` flag per *optional* subchart - core components have
+  no such flag; they're unconditional dependencies in `helm/Chart.yaml` and
+  cannot be disabled. A leftover `<core-chart>.enabled` key is ignored.
 
 See [`helm/README.md`](../../../helm/README.md#configuration) for the full list.
 
-### Enabled-by-default vs opt-in subcharts
+### Mandatory vs opt-in subcharts
 
-| Subchart | Default | Reason for default |
-|----------|---------|--------------------|
-| `nico-api` | on | Core API; required. |
-| `nico-bmc-proxy` | on | Authenticating Redfish proxy. |
-| `nico-dhcp` | on | DHCP for PXE boot — DPUs need it to come up. |
-| `nico-dns` | on | Authoritative DNS for managed machines and VPCs. |
-| `nico-dsx-exchange-consumer` | off | Optional MQTT event consumer; requires a broker. |
-| `nico-flow` | off | Umbrella dependency only; `setup.sh` installs Flow as a separate release by default. |
-| `nico-hardware-health` | on | Hardware health collector. |
-| `nico-ntp` | on | chrony NTP servers; DPU pre-ingestion needs synced clocks. |
-| `nico-pxe` | on | HTTP PXE boot server. |
-| `nico-ssh-console-rs` | on | SSH console proxy to BMCs. |
-| `unbound` | off | Recursive DNS for the DPU `.forge` compatibility zone; only needed when external DNS does not serve those records. |
+| Subchart | Mandatory? | Reason |
+|----------|------------|--------|
+| `nico-api` | Yes | Core API. |
+| `nico-bmc-proxy` | Yes | Authenticating Redfish proxy. |
+| `nico-dhcp` | Yes | DHCP for PXE boot - DPUs need it to come up. |
+| `nico-dns` | Yes | Authoritative DNS for managed machines and VPCs. |
+| `nico-hardware-health` | Yes | Hardware health collector. |
+| `nico-pxe` | Yes | HTTP PXE boot server. |
+| `nico-ssh-console-rs` | Yes | SSH console proxy to BMCs. |
+| `nico-flow` | Yes, within the REST install | Not an umbrella dependency; `setup.sh` phase 7h installs it as a separate release from `helm/nico-flow` whenever REST is installed. It has no skip flag of its own and is skipped only with all of REST by `--skip-rest`. |
+| `nico-dsx-exchange-consumer` | No (`enabled`, default on) | Optional MQTT event consumer; requires a broker. |
+| `nico-ntp` | No (`enabled`, default on) | chrony NTP servers; DPU pre-ingestion needs synced clocks. |
+| `unbound` | No (`enabled`, default off) | Recursive DNS for the DPU `.forge` compatibility zone; only needed when external DNS does not serve those records. |
+| `nico-machine-a-tron` | No (`enabled`, default off) | Mock machine simulator for dev and test environments; never enable in production. |
 
 ### Per-service tuning knobs (common pattern)
 
@@ -145,9 +148,9 @@ sections and which page in this guide owns the deep dive.
 
 ### Site identity
 
-`sitename`, `initial_domain_name`, `asn`, `datacenter_asn`,
-`vpc_isolation_behavior`, `vpc_peering_policy`,
-`max_concurrent_machine_updates`. Set once at install time.
+`sitename`, `initial_domain_name`, `asn`, `datacenter_asn`, `vpc_isolation_behavior`, `vpc_peering_policy`, `vpc_peering_policy_on_existing`, `max_concurrent_machine_updates`. Set once at install time.
+
+The `mixed` value for either VPC peering policy is deprecated. NICo logs a startup warning and treats it as `exclusive`. ETV and FNN VPCs are not compatible peers. Creation requests for that pair return `InvalidArgument` under every policy. Stored ETV/FNN peering rows remain discoverable and removable but contribute neither ETV peer-prefix ACL permits nor FNN peer-VNI route-target imports. `vpc_peering_policy_on_existing = "none"` disables both mechanisms for every stored peering.
 
 ### IP and VNI pools
 
@@ -157,22 +160,39 @@ The API allocates from these pools when creating instances, VPCs, etc.
 
 ### Networks
 
-`[networks.<name>]` — one block per L3 segment. Fields: `type` (`admin` |
-`underlay`), `prefix`, `gateway`, `mtu`, `reserve_first`. The `admin` network
-is mandatory and must have a non-empty `prefix` and `gateway` — `nico-api`
-crashes at startup if either is missing.
+Each `[networks.<name>]` block defines one L3 segment to create at startup, with
+`type` (`admin`, `underlay`, or `hostinband`), `prefix`, `mtu`, and `reserve_first`.
+Definitions support IPv4-only, IPv6-only, or both address families (dual-stack).
+A gateway is required whenever an IPv4 prefix is present. IPv6-only admin
+networking requires a configured FNN site and compatible Core and DPU-agent
+builds. Retain IPv4 DPU loopback addresses and IPv4 VXLAN tunnel endpoints. This
+does not restrict the address families of physical underlay segments. Non-FNN
+admin networking requires an IPv4 prefix and gateway. Editing the network
+definitions does not update an existing segment. Refer to
+[Initial Network Configuration](../../../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration)
+for FNN settings, `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility
+requirements.
 
 ### Tenant traffic policy
 
-`site_fabric_prefixes` (CIDRs allowed for tenant-to-tenant traffic) and
-`deny_prefixes` (CIDRs tenant instances must not reach — typically OOB,
-management, control-plane). `deny_prefixes` generates iptables DROP rules
-and NVUE ACL policies on DPUs.
+`site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
+
+`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. Inherited roots are reduced to their minimal exact union.
+
+An explicit list is authoritative. Under mutual isolation, it must cover every retained tenant root with an equal or broader route. Creation rejects a new tenant root without coverage. Startup and every FNN DPU configuration response, including Admin-only responses, check every retained tenant root. Unused roots and roots in `Deleting` still count, even with tenant overlap disabled. An empty list disables the routes and cannot support tenant roots under mutual isolation. Open isolation does not require coverage or enforce `max_site_prefix_isolation_rules`, because it installs no isolation rules. Explicit CIDRs use their network address and exact duplicates are removed. Parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route.
+
+The anonymous `Version` RPC does not add tenant-managed roots or check their coverage; it keeps its existing operator-route output. Its `RuntimeConfig.site_fabric_null_routes` field is not a complete DPU route inventory. Use `GetManagedHostNetworkConfig` to inspect the tenant-inclusive FNN response, with RBAC enforced. If an override blocks startup or FNN configuration serving, restore a covering override or omit `site_fabric_null_routes`, then restart the affected Core replicas. Requesting deletion does not bypass the check, and recovery does not require manual database edits.
+
+FNN installs the routes with administrative distance 250 in each VPC VRF. An authorized route wins only when it is at least as specific as the applicable blackhole. Do not combine an effective `/0` null route with `leak_default_route_from_underlay = true` for the same address family. The imported default has a better administrative distance than the equal-prefix blackhole.
+
+`deny_prefixes` identifies CIDRs tenant instances must not reach—typically OOB, management, or control-plane networks—and generates iptables DROP rules and NVUE ACL policies on DPUs. Open isolation installs neither the FNN blackhole routes nor the ETV isolation ACLs.
 
 ### DHCP, route servers, and BGP
 
-`dhcp_servers`, `route_servers`, `enable_route_servers`,
+`dhcp_servers`, `dhcpv6_server_preference`, `route_servers`, `enable_route_servers`,
 `bgp_leaf_session_password`, `common_tenant_host_asn`.
+
+`dhcpv6_server_preference` accepts `0` through `255`. It is omitted by default, which leaves the option absent and uses the protocol preference of zero. The canonical option-emission and rolling-upgrade contract is in the [Core configuration reference](../../../crates/api-core/src/cfg/README.md).
 
 ### Optional capability toggles
 
@@ -194,7 +214,6 @@ explicitly enabled in the TOML.
 | `[vmaas_config]` | VM system integration / VM-aware traffic intercept | Requires `public_prefixes`. |
 | `[rms]` | Rack Manager Service (mTLS connectivity to external RMS) | |
 | `[dpf]` | DPU Platform Framework — Kubernetes DPU workload deployment | Requires the DPF operator deployed in-cluster (`helm-prereqs/setup.sh` installs it by default; `--skip-dpf` to opt out). |
-| `rack_management_enabled` | Standalone infrastructure manager mode (GB200/GB300/VR144) | Top-level boolean, not a sub-section. |
 
 For RMS component-manager backends, NICo builds RMS node descriptors from rack
 profiles. Each descriptor contains three attributes:
@@ -228,9 +247,11 @@ field.
 NICo trims outer whitespace from `product_family` and vendor values and requires
 both to be non-empty. It does not validate either value against a fixed list.
 RMS determines whether each role/vendor/product-family combination is supported
-when a request is made. See
-[Supported RMS descriptor combinations](../../../docs/configuration/component-manager-rms.md#supported-rms-descriptor-combinations),
-including VRNVL72.
+when a request is made. Refer to the
+[Hardware Compatibility List](https://docs.nvidia.com/rms/documentation/reference/hardware-compatibility-list)
+as a compatibility reference. The list includes hardware under development, and
+inclusion does not imply qualification, certification, or support. Confirm
+support for each combination against the deployed RMS release.
 
 For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
@@ -276,7 +297,7 @@ vendor = "LiteOn"
 count = 8
 ```
 
-Example: GB300 rack with Lenovo compute trays and Delta power shelves:
+Example: GB300 rack with NVIDIA compute trays and Delta power shelves:
 
 ```toml
 [component_manager]
@@ -289,7 +310,7 @@ product_family = "gb300"
 rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72_GB300.rack_capabilities.compute]
-vendor = "Lenovo"
+vendor = "NVIDIA"
 count = 18
 
 [rack_profiles.NVL72_GB300.rack_capabilities.switch]
@@ -360,6 +381,13 @@ and `failure_retry_time` knobs:
 
 Defaults are reasonable; touch these only when you have a specific timing
 constraint.
+
+`[machine_state_controller.controller] max_concurrency` (default 10) caps how
+many machine handlers run at the same time. Raise it for large sites, since time
+to `ready` scales with hosts divided by this value. Values of 80 to 120 suited a
+250-rack site, and higher values slowed ingestion because the handlers contend
+for the admin network segment lock. The nico-api chart exposes it as
+`machineStateController.maxConcurrency`.
 
 ### Host health thresholds
 
@@ -469,7 +497,12 @@ for the complete Helm guidance.
 (used by `nico-bmc-proxy` and other authenticating proxies). The example
 ACL set in
 [`helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml`](../../../helm/charts/nico-bmc-proxy/files/carbide-bmc-proxy.toml)
-is the reference.
+is the reference. `nico-bmc-proxy` also takes `[[class]]` tables that group
+requests by method, path, and caller, and set how long it waits on a BMC for
+each group and how many it sends at a time, and an `[admission]` table that
+limits the requests it sends to each BMC; see
+[`crates/bmc-proxy/README.md` → `class`](../../../crates/bmc-proxy/README.md#class)
+and [`admission`](../../../crates/bmc-proxy/README.md#admission).
 
 ### DPU configuration — `[dpu_config]`
 
@@ -710,8 +743,8 @@ These don't fit any sub-section but show up in production tuning:
 | Field | Default | When to touch |
 |-------|---------|---------------|
 | `max_database_connections` | `1000` | Drop when running multiple `nico-api` replicas to avoid saturating Postgres `max_connections`. |
-| [`api_admission_control`](#api-admission-control--api_admission_control) | enabled | Fair per-client scheduling for gRPC and admin business requests. See the dedicated section for configuration and service overrides. |
-| `max_find_by_ids` | `100` | Increase if scripts paginate batch lookups; raise the API-side limit to match the client. |
+| [`api_admission_control`](#api-admission-control--api_admission_control) | enabled | Fair per-client scheduling for gRPC and admin business requests. The nico-api chart exposes `enabled` as `apiAdmissionControl.enabled`. See the dedicated section for configuration and service overrides. |
+| `max_find_by_ids` | `100` | Maximum IDs per batch lookup and card selections per `SetMachineNicFirmwareConfig` request. Omitted card selections preserve saved entries; a supplied list must fit this limit. |
 | `compute_allocation_enforcement` | `WarnOnly` | Switch to `Enforce` once tenant compute pools are sized correctly — flips over-allocation from a warning to a refusal. |
 | `bmc_session_lockout_threshold` | `3` | Number of consecutive 401/403s from a BMC before NICo stops session-token logins for that BMC. Raise on environments with flaky BMC firmware. |
 | `bmc_max_sessions_per_caller` | `4` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Size to the caller's replica count plus headroom; values below 1 are treated as 1. |
@@ -754,7 +787,9 @@ Service overrides are keyed by the exact SPIFFE service identifier (for
 example, `scout`), and may give trusted internal services a different share
 without exceeding the global bounds. Tune the global and per-client limits
 after scale testing. Set `enabled = false` only as a rollback escape hatch.
-For field-level defaults and validation rules, see
+The nico-api chart exposes it as `apiAdmissionControl.enabled` (default
+`true`). A site config overlay that sets the same key takes precedence over
+the chart value. For field-level defaults and validation rules, see
 [`ApiAdmissionControlConfig`](../../../crates/api-core/src/cfg/README.md#apiadmissioncontrolconfig).
 
 ### FNN routing profiles and prefix filters
@@ -800,8 +835,8 @@ advertised. Both are documented field-by-field in
 
 `[ib_config]` toggles InfiniBand support fleet-wide; `[ib_fabrics.<name>]`
 defines a specific UFM-managed fabric. Currently exactly one fabric is
-supported. Required fields: UFM endpoint, credentials (username + password,
-or token), MGMT IB subnet, GUID prefix. See
+supported. Required fields: UFM endpoint, credentials (a token or a client
+certificate), MGMT IB subnet, GUID prefix. See
 [`crates/api-core/src/cfg/README.md` → NicoConfig](../../../crates/api-core/src/cfg/README.md#nicoconfig-top-level).
 
 ### Operator dev / debug knobs
@@ -847,7 +882,7 @@ through Kubernetes Secrets and ConfigMaps wired by `helm-prereqs`:
 | `vault-cluster-keys` / `vaultunsealkeys` / `vaultroottoken` | Secret | Vault init job | Vault auto-unseal on pod restart |
 | `nico-roots` | Secret | ESO-synced from Vault PKI | Every workload that needs the SPIFFE root |
 | `imagepullsecret` / `nvcr-nico-dev` | dockerconfigjson | `setup.sh` (from `REGISTRY_PULL_SECRET`) | Every pod that pulls from authenticated registries |
-| `ssh-host-key` | Secret | `helm-prereqs` pre-install Job | `nico-ssh-console-rs` (mounted as `ssh_host_ed25519_key`) |
+| `ssh-host-key` | Secret | `bootstrap_ssh_host_key.sh` during `setup.sh` prerequisite setup | `nico-ssh-console-rs` (mounted as `ssh_host_ed25519_key`) |
 | `azure-sso-nico-web-client-secret` | Secret | **operator-supplied** (manual, optional) | `nico-api` when `[auth.web].auth_type = "oauth2"` (`CARBIDE_WEB_OAUTH2_CLIENT_SECRET` env) |
 | `site-root` | cert-manager Certificate | `helm-prereqs` (self-signed bootstrap) | Vault PKI bootstrap chain |
 
@@ -1024,6 +1059,7 @@ overrides.
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
 | `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |
 | `firmware_directory` | auto-detect (`/opt/nico/firmware` then `/opt/carbide/firmware`) | Where firmware binaries live on the API pod. Override to pin one location explicitly. |
+| `downloads` | See linked defaults | [Firmware download settings](https://docs.nvidia.com/infra-controller/documentation/operations-day-2/firmware-updates/configure-firmware-versions#firmware-downloads): worker, HTTP timeout, and response-size limits for each Core process. Requires a supporting Core build as described in the linked reference. |
 | `host_firmware_upgrade_retry_interval` | `60m` | Backoff between retries on failed host upgrades. |
 | `instance_updates_manual_tagging` | `true` | Require explicit instance tagging before instance-attached firmware upgrades fire. |
 | `no_reset_retries` | `false` | Disable retry logic after BMC resets during firmware ops. |
@@ -1047,12 +1083,27 @@ images when a machine in the model joins. See
 
 ### Rack profile firmware object: `[rack_profiles.<name>]`
 
-A rack profile can define a `firmware_object` block for one firmware-object JSON
-document. NICo uses the document as the default firmware input during rack
-ingestion. The block contains a `url` and an optional `fetch_timeout`, which
-accepts duration strings such as `30s` and `60s` and defaults to `30s`. Use
-seconds for this request timeout, although the parser accepts other duration
-units such as milliseconds (`ms`), minutes (`m`), and hours (`h`).
+A rack profile can define a `firmware_object` block that references one
+firmware-object JSON document. NICo uses the document as the default input for
+rack compute-tray pre-ingestion and for rack firmware and switch NVOS image
+updates during rack maintenance. For a profile with switches, the document must
+include an NVOS image whose firmware type matches `rack_hardware_class`. NICo
+requests `prod` when `rack_hardware_class` is omitted. RMS records an
+asynchronous update failure when the document does not contain the required
+image.
+
+The block contains a `url` and an optional `fetch_timeout`, which accepts
+duration strings such as `30s` and `60s` and defaults to `30s`. Use seconds for
+this request timeout, although the parser accepts other duration units such as
+milliseconds (`ms`), minutes (`m`), and hours (`h`). Without the block, NICo
+skips compute-tray pre-ingestion updates and both automatic rack maintenance
+update phases. An explicit maintenance request can supply a firmware object
+instead. If no firmware object is available while a selected switch is in
+`WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase. The optional `access_token_credential` names a stored firmware artifact
+access token used by compute-tray pre-ingestion. When omitted, NICo sends the
+RMS no-auth sentinel.
 
 ---
 
@@ -1088,6 +1139,8 @@ NvLink partitioning via NMX-C is gated on `[nvlink_config]`:
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+partition_monitor_max_concurrent_groups = 16 # racks or chassis reconciled in parallel per pass, documented range 1 to 256, larger values are accepted with a startup warning
+partition_monitor_full_check_interval = "10m" # racks and chassis whose inputs are unchanged and whose instances are synced are skipped between full checks, GPU health on them refreshes at this interval, "0s" checks every pass
 nmxc_endpoint = "https://nmxc.example.com"
 # Plus auth + retry settings — see the canonical reference.
 ```
@@ -1126,19 +1179,31 @@ override:
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `envConfig.DB_ADDR` | `postgres.postgres.svc.cluster.local` | Postgres host (the REST-side cluster, separate from NICo Core's). |
-| `envConfig.DB_DATABASE` | `elektratest` | Database name. |
+| `envConfig.DB_ADDR` | `nico-pg-cluster.postgres.svc.cluster.local` | Postgres host (`nico-pg-cluster`, shared with NICo REST and NICo Core). |
+| `envConfig.DB_DATABASE` | `nico_rest` | Database name. |
 | `envConfig.DEV_MODE` | `"true"` | **Production must set to `"false"`.** |
 | `envConfig.NICO_SEC_OPT` | `"2"` | Security mode: `0` insecure, `1` TLS, `2` mTLS. Production requires `2`. |
 | `CLUSTER_ID` | — (set by `setup.sh`) | Site UUID (`NICO_SITE_UUID`). |
 | `TEMPORAL_SUBSCRIBE_NAMESPACE` | — (set by `setup.sh`) | Temporal namespace; must match `CLUSTER_ID`. |
 
+### Flow runtime settings - `flowConfig`
+
+Flow reads `/etc/flow/flowconfig.yaml`, which the `nico-flow` chart renders
+from its `flowConfig` values (inventory sync interval, leak detection
+interval, and the two job toggles). Defaults equal Flow's built-in
+defaults, and changing a value rolls the Flow pod. See the
+[chart README](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/nico-flow)
+for the value table and an override example.
+
 ### REST-side PostgreSQL
 
-NICo REST runs its own simple StatefulSet Postgres in the `nico-rest`
-namespace (not the HA Patroni cluster used by NICo Core). It hosts the
-Temporal, Keycloak (when enabled), and site-manager databases. The
-StatefulSet is templated by `setup.sh` and configurable via `nico-rest.yaml`.
+The NICo REST database, `nico_rest`, lives on `nico-pg-cluster` in the
+`postgres` namespace, next to the NICo Core databases. The Temporal and
+Keycloak databases live there too, unless `temporal.useHaPostgres` or
+`keycloak.useHaPostgres` in `helm-prereqs/values.yaml` keeps a Site on the
+deprecated standalone `postgres` StatefulSet. Refer to
+[Consolidating Temporal/Keycloak onto nico-pg-cluster](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#consolidating-temporalkeycloak-onto-nico-pg-cluster)
+for these values and the migration guide.
 
 ### Temporal
 
@@ -1174,7 +1239,6 @@ Orchestrates the full install in phases. Skip flags:
 | `-y` | Non-interactive — accept all prompts. |
 | `--skip-core` | Skip the NICo Core install (prereqs + REST only). |
 | `--skip-rest` | Skip the entire NICo REST stack (Core only). |
-| `--skip-flow` | Skip the NICo Flow phase inside REST. |
 | `--core-values <file>` | Use a site-specific values file instead of `helm-prereqs/values/nico-core.yaml`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after NICo Core deploys (for per-site resources not managed by the chart). |
@@ -1312,7 +1376,7 @@ helm template nico ./helm -f helm-prereqs/values/nico-core.yaml --set global.ima
 - **NICo Core log level**: set `RUST_LOG` via `nico-api.extraEnv` (`info`, `debug`, `trace`; default `info`). Same pattern for every Rust workload.
 - **Structured logging**: `nico-api` emits JSON to stdout — collect with any cluster logging stack.
 - **Prometheus metrics**: every chart exposes `/metrics`; ServiceMonitor CRDs are off by default and gated behind `<chart>.serviceMonitor.enabled`.
-- **Metric prefix migration**: existing dashboards reference `carbide_*`. Set `alt_metric_prefix = "nico"` in siteConfig to emit `nico_*` aliases alongside without breaking the legacy names.
+- **Metric prefix migration**: existing dashboards reference `carbide_*`. Set `alt_metric_prefix = "nico_"` in siteConfig to emit `nico_*` aliases alongside without breaking the legacy names.
 - **SSH session logs**: opt-in via `nico-ssh-console-rs.lokiLogCollector.enabled` — see *Layer 4* above.
 
 ### Backup and restore
@@ -1420,13 +1484,6 @@ service. To ship metrics elsewhere:
 - **Tempo / Jaeger** (traces): NICo emits structured logs but does not currently emit distributed traces; tracing is a roadmap item.
 - **Loki** (logs): the SSH-console sidecar pattern (`nico-ssh-console-rs.lokiLogCollector.enabled`) is the only built-in log-shipper. For other services, use a cluster-wide Promtail / Vector / OTel-collector DaemonSet against pod stdout.
 
-### Profiler endpoint
-
-`nico-api` listens on port `1081` for pprof-style runtime profiling. The
-endpoint is disabled by default in production builds; enable via
-`nico-api.extraEnv` (`RUST_PROFILER=1`) and protect with a NetworkPolicy
-before exposing.
-
 ### nico-cli configuration
 
 The `nico-cli` (operator CLI) reads its config from
@@ -1454,14 +1511,14 @@ on or off.
 | Component | Layer | Knob | Default | When to enable |
 |-----------|-------|------|---------|----------------|
 | `nico-ntp` | Helm | `nico-ntp.enabled` | on | Leave on unless upstream NTP is reachable from the provisioning network. |
-| `nico-dsx-exchange-consumer` | Helm | `nico-dsx-exchange-consumer.enabled` | off | Enable when the site has an MQTT broker and you want BMS metadata + managed-host events. |
-| `nico-flow` | Helm | `nico-flow.enabled` | off | Leave off in the umbrella; `setup.sh` installs Flow as a separate release by default. |
+| `nico-dsx-exchange-consumer` | Helm | `nico-dsx-exchange-consumer.enabled` | on | Disable when the site has no MQTT broker; provides BMS metadata + managed-host events. |
 | `unbound` | Helm | `unbound.enabled` | off | Enable when DPUs need the `.forge` compatibility zone and no external DNS serves it. |
+| `nico-machine-a-tron` | Helm | `nico-machine-a-tron.enabled` | off | Dev and test only; simulates machines against the API. Never enable in production. |
 | SSH-console Loki sidecar | Helm | `nico-ssh-console-rs.lokiLogCollector.enabled` | off | Enable when shipping SSH session logs to Loki. |
 | ServiceMonitor (per chart) | Helm | `<chart>.serviceMonitor.enabled` | off | Enable when the Prometheus Operator is installed. |
 | Hardware-health telemetry | Helm | `nico-hardware-health.telemetryServiceMonitor.enabled` | off | Enable for per-machine sensor metrics (temperature, power, fans). |
 | IB Fabric Monitor | siteConfig | `[ib_config].enabled` | off | Sites running InfiniBand fabrics managed by UFM. |
-| NvLink Monitor | siteConfig | `[nvlink_config].enabled` | off | GB200/GB300 sites using NMX-C for NvLink partitioning. |
+| NvLink Monitor | siteConfig | `[nvlink_config].enabled` | off | GB200/GB300/VR sites using NMX-C for NvLink partitioning. |
 | DSX Exchange Event Bus | siteConfig | `[dsx_exchange_event_bus]` present | off | Pairs with the `nico-dsx-exchange-consumer` chart. Requires MQTT broker. |
 | DPA (Cluster Interconnect) | siteConfig | `[dpa_config].enabled` | off | East-west Ethernet cluster networking; requires MQTT broker. |
 | FNN (L3 VPC overlay) | siteConfig | `[fnn]` present | off | Tenant VPC networking via VXLAN; needs `routing_profiles` and route targets. |
@@ -1470,7 +1527,6 @@ on or off.
 | Machine Identity (SPIFFE JWT-SVID) | siteConfig | `[machine_identity].enabled` | off | Per-org JWT signing for machine identity tokens. See [Day 0](../../../docs/getting-started/installation-options/day0-machine-identity.md) and [Day 1](../../../docs/configuration/machine_identity.md) docs. |
 | Machine Validation | siteConfig | `[machine_validation_config].enabled` | off | Pre-ingestion validation tests. |
 | SPDM | siteConfig | `[spdm].enabled` | off | Hardware attestation via NRAS. |
-| Rack Management | siteConfig | `rack_management_enabled = true` | off | Standalone infrastructure manager mode (GB200/GB300/VR144). |
 | Site Explorer machine auto-creation | siteConfig | `[site_explorer].create_machines` | on | Disable for manual-onboarding environments. |
 | Site Explorer switch / power shelf auto-creation | siteConfig | `[site_explorer].create_switches` / `[site_explorer].create_power_shelves` | on | Ingests only declared hardware (`expected_switches` / `expected_power_shelves` records). Disable to pause switch or power shelf ingestion site-wide. |
 | Firmware autoupdate | siteConfig | `[firmware_global].autoupdate` | off | Enable once the fleet's firmware baseline is stable. |
@@ -1514,7 +1570,7 @@ These are intentional compatibility surfaces, not bugs.
 | **DSX** | Datacenter Sensor eXchange. MQTT-based event bus for BMS metadata and managed-host state. Configured via `[dsx_exchange_event_bus]`. |
 | **ESO** | External Secrets Operator. Syncs secrets from Vault into Kubernetes Secrets. |
 | **FMDS** | Fleet Management Data Service. Tenant-facing API surfaced by `nico-api` (site identity is exposed here via `sitename`). |
-| **FNN** | Fabric Network Numbering / L3 VPC overlay. Tenant VPC networking via VXLAN. Configured via `[fnn]`. |
+| **FNN** | Forge Native Networking / L3 VPC overlay. Tenant VPC networking over VXLAN. Configured through `[fnn]`. |
 | **FRR** | Free Range Routing. Linux routing daemon used inside DPUs for BGP. ASN configured via the top-level `asn` field. |
 | **HGX** | NVIDIA HGX baseboard (H100/H200/GB200 GPU systems). Has its own BMC reachable via `nico-bmc-proxy`. |
 | **IPMI** | Intelligent Platform Management Interface. Legacy OOB management protocol; `dpu_ipmi_tool_impl` selects prod vs fake implementations. |

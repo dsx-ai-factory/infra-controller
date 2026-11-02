@@ -965,6 +965,7 @@ func (atro APITaskRunOperation) ToProto() *flowv1.OperationRunOperation {
 		TargetVersion:          &atro.Firmware.Version,
 		SubTargets:             atro.Firmware.SubTargets,
 		OverrideReadinessCheck: atro.Firmware.OverrideReadinessCheck,
+		OverrideVersionCheck:   atro.Firmware.OverrideVersionCheck,
 	}
 	if atro.Firmware.RuleID != nil && *atro.Firmware.RuleID != "" {
 		fw.RuleId = &flowv1.UUID{Id: *atro.Firmware.RuleID}
@@ -990,6 +991,7 @@ type APITaskRunFirmwareOperation struct {
 	Version                string   `json:"version"`
 	RuleID                 *string  `json:"ruleId"`
 	OverrideReadinessCheck bool     `json:"overrideReadinessCheck"`
+	OverrideVersionCheck   bool     `json:"overrideVersionCheck"`
 	SubTargets             []string `json:"subTargets"`
 }
 

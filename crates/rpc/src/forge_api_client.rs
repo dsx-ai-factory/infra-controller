@@ -43,8 +43,8 @@ pub enum ExpectedSwitchUpdateField {
     /// Switch serial number.
     SwitchSerialNumber,
 
-    /// NVOS MAC addresses.
-    NvosMacAddresses,
+    /// NVOS ethernet ports (MAC plus primary flag).
+    NvosInterfaces,
 
     /// NVOS username.
     NvosUsername,
@@ -80,7 +80,7 @@ impl Display for ExpectedSwitchUpdateField {
             Self::BmcUsername => "bmc_username",
             Self::BmcPassword => "bmc_password",
             Self::SwitchSerialNumber => "switch_serial_number",
-            Self::NvosMacAddresses => "nvos_mac_addresses",
+            Self::NvosInterfaces => "nvos_interfaces",
             Self::NvosUsername => "nvos_username",
             Self::NvosPassword => "nvos_password",
             Self::MetadataName => "metadata.name",
@@ -102,7 +102,7 @@ impl FromStr for ExpectedSwitchUpdateField {
             "bmc_username" => Ok(Self::BmcUsername),
             "bmc_password" => Ok(Self::BmcPassword),
             "switch_serial_number" => Ok(Self::SwitchSerialNumber),
-            "nvos_mac_addresses" => Ok(Self::NvosMacAddresses),
+            "nvos_interfaces" => Ok(Self::NvosInterfaces),
             "nvos_username" => Ok(Self::NvosUsername),
             "nvos_password" => Ok(Self::NvosPassword),
             "metadata.name" => Ok(Self::MetadataName),
@@ -123,26 +123,28 @@ pub fn expected_switch_update_mask(
 ) -> Vec<ExpectedSwitchUpdateField> {
     let mut fields = Vec::new();
 
-    if !switch.bmc_username.is_empty() || !switch.bmc_password.is_empty() {
-        fields.extend([
-            ExpectedSwitchUpdateField::BmcUsername,
-            ExpectedSwitchUpdateField::BmcPassword,
-        ]);
+    if !switch.bmc_username.is_empty() {
+        fields.push(ExpectedSwitchUpdateField::BmcUsername);
+    }
+
+    if !switch.bmc_password.is_empty() {
+        fields.push(ExpectedSwitchUpdateField::BmcPassword);
     }
 
     if !switch.switch_serial_number.is_empty() {
         fields.push(ExpectedSwitchUpdateField::SwitchSerialNumber);
     }
 
-    if !switch.nvos_mac_addresses.is_empty() {
-        fields.push(ExpectedSwitchUpdateField::NvosMacAddresses);
+    if !switch.nvos_interfaces.is_empty() {
+        fields.push(ExpectedSwitchUpdateField::NvosInterfaces);
     }
 
-    if switch.nvos_username.is_some() || switch.nvos_password.is_some() {
-        fields.extend([
-            ExpectedSwitchUpdateField::NvosUsername,
-            ExpectedSwitchUpdateField::NvosPassword,
-        ]);
+    if switch.nvos_username.is_some() {
+        fields.push(ExpectedSwitchUpdateField::NvosUsername);
+    }
+
+    if switch.nvos_password.is_some() {
+        fields.push(ExpectedSwitchUpdateField::NvosPassword);
     }
 
     if let Some(metadata) = &switch.metadata {
@@ -209,7 +211,8 @@ impl ForgeApiClient {
     }
 
     /// Applies the named `ExpectedSwitch` fields without replacing omitted fields.
-    pub async fn patch_expected_switch(
+    /// Uses the legacy update RPC and metadata header for CLI compatibility.
+    pub async fn update_expected_switch_with_mask(
         &self,
         switch: crate::protos::forge::ExpectedSwitch,
         update_mask: &[ExpectedSwitchUpdateField],
@@ -394,6 +397,38 @@ mod tests {
                     expect: Vec::new(),
                 },
                 Check {
+                    scenario: "bmc_username does not select its partner",
+                    input: ExpectedSwitch {
+                        bmc_username: "replacement".to_string(),
+                        ..Default::default()
+                    },
+                    expect: vec![Field::BmcUsername],
+                },
+                Check {
+                    scenario: "bmc_password does not select its partner",
+                    input: ExpectedSwitch {
+                        bmc_password: "replacement".to_string(),
+                        ..Default::default()
+                    },
+                    expect: vec![Field::BmcPassword],
+                },
+                Check {
+                    scenario: "nvos_username does not select its partner",
+                    input: ExpectedSwitch {
+                        nvos_username: Some("replacement".to_string()),
+                        ..Default::default()
+                    },
+                    expect: vec![Field::NvosUsername],
+                },
+                Check {
+                    scenario: "nvos_password does not select its partner",
+                    input: ExpectedSwitch {
+                        nvos_password: Some("replacement".to_string()),
+                        ..Default::default()
+                    },
+                    expect: vec![Field::NvosPassword],
+                },
+                Check {
                     scenario: "paired credentials",
                     input: ExpectedSwitch {
                         bmc_username: "bmc-admin".to_string(),
@@ -413,7 +448,10 @@ mod tests {
                     scenario: "switch endpoint fields",
                     input: ExpectedSwitch {
                         switch_serial_number: "serial".to_string(),
-                        nvos_mac_addresses: vec!["00:11:22:33:44:55".to_string()],
+                        nvos_interfaces: vec![crate::protos::forge::ExpectedNvosInterface {
+                            mac_address: "00:11:22:33:44:55".to_string(),
+                            is_primary: true,
+                        }],
                         bmc_ip_address: "192.0.2.1".to_string(),
                         nvos_ip_address: Some("192.0.2.2".to_string()),
                         bmc_retain_credentials: Some(true),
@@ -421,7 +459,7 @@ mod tests {
                     },
                     expect: vec![
                         Field::SwitchSerialNumber,
-                        Field::NvosMacAddresses,
+                        Field::NvosInterfaces,
                         Field::BmcIpAddress,
                         Field::NvosIpAddress,
                         Field::BmcRetainCredentials,

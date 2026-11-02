@@ -11,11 +11,13 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 const (
@@ -85,17 +87,14 @@ type AuditEntryDAO interface {
 type AuditEntrySQLDAO struct {
 	dbSession *db.Session
 	AuditEntryDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates an AuditEntry from the given parameters
-func (aed AuditEntrySQLDAO) Create(ctx context.Context, tx *db.Tx, input AuditEntryCreateInput) (*AuditEntry, error) {
+func (aed AuditEntrySQLDAO) Create(ctx context.Context, tx *db.Tx, input AuditEntryCreateInput) (_ *AuditEntry, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, daoSpan := aed.tracerSpan.CreateChildInCurrentContext(ctx, "AuditEntryDAO.Create")
-	if daoSpan != nil {
-		defer daoSpan.End()
-		aed.tracerSpan.SetAttribute(daoSpan, "endpoint", input.Endpoint)
-	}
+	ctx, daoSpan := cotel.StartSpan(ctx, "AuditEntryDAO.Create")
+	defer func() { cotel.EndSpan(daoSpan, retErr) }()
+	cotel.SetAttribute(daoSpan, attribute.String("endpoint", input.Endpoint))
 
 	entry := &AuditEntry{
 		ID:          uuid.New(),
@@ -127,13 +126,11 @@ func (aed AuditEntrySQLDAO) Create(ctx context.Context, tx *db.Tx, input AuditEn
 	return aed.GetByID(ctx, tx, entry.ID)
 }
 
-func (aed AuditEntrySQLDAO) Update(ctx context.Context, tx *db.Tx, input AuditEntryUpdateInput) (*AuditEntry, error) {
+func (aed AuditEntrySQLDAO) Update(ctx context.Context, tx *db.Tx, input AuditEntryUpdateInput) (_ *AuditEntry, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, daoSpan := aed.tracerSpan.CreateChildInCurrentContext(ctx, "AuditEntryDAO.Update")
-	if daoSpan != nil {
-		defer daoSpan.End()
-		aed.tracerSpan.SetAttribute(daoSpan, "id", input.ID.String())
-	}
+	ctx, daoSpan := cotel.StartSpan(ctx, "AuditEntryDAO.Update")
+	defer func() { cotel.EndSpan(daoSpan, retErr) }()
+	cotel.SetAttribute(daoSpan, attribute.String("id", input.ID.String()))
 
 	var updatedFields []string
 
@@ -144,19 +141,17 @@ func (aed AuditEntrySQLDAO) Update(ctx context.Context, tx *db.Tx, input AuditEn
 	if input.StatusMessage != nil {
 		entry.StatusMessage = *input.StatusMessage
 		updatedFields = append(updatedFields, "status_message")
-		aed.tracerSpan.SetAttribute(daoSpan, "status_message", *input.StatusMessage)
+		cotel.SetAttribute(daoSpan, attribute.String("status_message", *input.StatusMessage))
 	}
 
 	if input.Body != nil {
 		entry.Body = input.Body
 		updatedFields = append(updatedFields, "body")
-		aed.tracerSpan.SetAttribute(daoSpan, "body", input.Body)
 	}
 
 	if input.ExtraData != nil {
 		entry.ExtraData = input.ExtraData
 		updatedFields = append(updatedFields, "extra_data")
-		aed.tracerSpan.SetAttribute(daoSpan, "extra_data", input.ExtraData)
 	}
 
 	if len(updatedFields) > 0 {
@@ -168,13 +163,11 @@ func (aed AuditEntrySQLDAO) Update(ctx context.Context, tx *db.Tx, input AuditEn
 	return aed.GetByID(ctx, tx, entry.ID)
 }
 
-func (aed AuditEntrySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (*AuditEntry, error) {
+func (aed AuditEntrySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *AuditEntry, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, daoSpan := aed.tracerSpan.CreateChildInCurrentContext(ctx, "AuditEntryDAO.GetByID")
-	if daoSpan != nil {
-		defer daoSpan.End()
-		aed.tracerSpan.SetAttribute(daoSpan, "id", id.String())
-	}
+	ctx, daoSpan := cotel.StartSpan(ctx, "AuditEntryDAO.GetByID")
+	defer func() { cotel.EndSpan(daoSpan, retErr) }()
+	cotel.SetAttribute(daoSpan, attribute.String("id", id.String()))
 
 	entry := &AuditEntry{}
 
@@ -190,12 +183,10 @@ func (aed AuditEntrySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID
 	return entry, nil
 }
 
-func (aed AuditEntrySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AuditEntryFilterInput, page paginator.PageInput) ([]AuditEntry, int, error) {
+func (aed AuditEntrySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AuditEntryFilterInput, page paginator.PageInput) (_ []AuditEntry, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, daoSpan := aed.tracerSpan.CreateChildInCurrentContext(ctx, "AuditEntryDAO.GetAll")
-	if daoSpan != nil {
-		defer daoSpan.End()
-	}
+	ctx, daoSpan := cotel.StartSpan(ctx, "AuditEntryDAO.GetAll")
+	defer func() { cotel.EndSpan(daoSpan, retErr) }()
 
 	var entries []AuditEntry
 
@@ -203,12 +194,11 @@ func (aed AuditEntrySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AuditE
 
 	if filter.OrgName != nil {
 		query = query.Where("ae.org_name = ?", *filter.OrgName)
-		aed.tracerSpan.SetAttribute(daoSpan, "org_name", *filter.OrgName)
+		cotel.SetAttribute(daoSpan, attribute.String("org_name", *filter.OrgName))
 	}
 	if filter.FailedOnly != nil {
 		if *filter.FailedOnly {
 			query = query.Where("ae.status_code >= ?", http.StatusBadRequest)
-			aed.tracerSpan.SetAttribute(daoSpan, "failedOnly", *filter.FailedOnly)
 		}
 	}
 
@@ -238,7 +228,6 @@ func (aed AuditEntrySQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AuditE
 
 func NewAuditEntryDAO(dbSession *db.Session) AuditEntryDAO {
 	return &AuditEntrySQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

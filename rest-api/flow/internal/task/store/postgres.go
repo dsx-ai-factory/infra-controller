@@ -7,17 +7,26 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/errors"
 )
@@ -184,6 +193,122 @@ func (s *PostgresStore) ListTasks(
 	return results, total, nil
 }
 
+// ListPowerTasksForRack reads complete, typed power intent without resolving
+// targets against inventory. Missing inventory must not erase recorded UUIDs.
+func (s *PostgresStore) ListPowerTasksForRack(
+	ctx context.Context,
+	rackID uuid.UUID,
+) ([]taskdef.PowerTaskDetails, error) {
+	rows, err := model.ListPowerTasksForRack(ctx, s.idb(ctx), rackID)
+	if err != nil {
+		var limitErr *taskcommon.PowerTaskLimitError
+		if stderrors.As(err, &limitErr) {
+			return nil, limitErr
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Record enough to locate a failed read without logging scan errors
+		// that may quote stored JSON or database error details.
+		event := log.Error().Ctx(ctx).
+			Str("rack_id", rackID.String()).
+			Str("failure_stage", "database_read").
+			Str("error_type", fmt.Sprintf("%T", err))
+		var pgErr *pgconn.PgError
+		if stderrors.As(err, &pgErr) {
+			event = event.Str("sqlstate", pgErr.Code)
+		}
+		event.Msg("Failed to read outstanding power tasks")
+		return nil, errors.GRPCErrorInternal("failed to read outstanding power tasks")
+	}
+
+	results := make([]taskdef.PowerTaskDetails, 0, len(rows))
+	for _, row := range rows {
+		converted, err := powerTaskDetailsFromDAO(row)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, converted)
+	}
+	return results, nil
+}
+
+// powerTaskDetailsFromDAO validates stored power intent before exposing it to
+// callers. In particular, unknown actions must not use CodeString's fallback.
+func powerTaskDetailsFromDAO(row model.Task) (taskdef.PowerTaskDetails, error) {
+	logger := log.With().Str("rack_id", row.RackID.String()).Str("task_id", row.ID.String()).Logger()
+	decoded, err := operations.New(row.Type, row.Information)
+	if err != nil {
+		logger.Error().Str("failure_stage", "operation_decode").
+			Str("error_type", fmt.Sprintf("%T", err)).Msg("Failed to decode stored power operation")
+		return taskdef.PowerTaskDetails{}, errors.GRPCErrorInternal(fmt.Sprintf("power task %s has invalid operation data", row.ID))
+	}
+	power, ok := decoded.(*operations.PowerControlTaskInfo)
+	if !ok {
+		logger.Error().Str("failure_stage", "operation_type").
+			Str("decoded_type", fmt.Sprintf("%T", decoded)).Msg("Stored task does not contain a power operation")
+		return taskdef.PowerTaskDetails{}, errors.GRPCErrorInternal(fmt.Sprintf("task %s is not a power task", row.ID))
+	}
+	err = power.Validate()
+	if err != nil {
+		logger.Error().Str("failure_stage", "operation_validation").
+			Str("error_type", fmt.Sprintf("%T", err)).Msg("Stored power operation failed validation")
+		return taskdef.PowerTaskDetails{}, errors.GRPCErrorInternal(fmt.Sprintf("power task %s has an invalid action", row.ID))
+	}
+
+	// This private conversion owns the query rows. Sort and deduplicate their
+	// target slices in place while retaining empty groups as recorded.
+	for componentType, ids := range row.Attributes.ComponentsByType {
+		operation.SortComponentUUIDs(ids)
+		row.Attributes.ComponentsByType[componentType] = slices.Compact(ids)
+	}
+
+	return taskdef.PowerTaskDetails{
+		ID:         row.ID,
+		RackID:     row.RackID,
+		Operation:  *power,
+		Attributes: row.Attributes,
+		Status:     row.Status,
+		CreatedAt:  row.CreatedAt,
+		UpdatedAt:  row.UpdatedAt,
+		StartedAt:  row.StartedAt,
+	}, nil
+}
+
+// ListTaskContextForRack reads nearby work without decoding operation payloads.
+func (s *PostgresStore) ListTaskContextForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	rows, err := model.ListTaskContextForRack(ctx, s.idb(ctx), rackID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var limitErr *taskcommon.TaskContextLimitError
+		if stderrors.As(err, &limitErr) {
+			return nil, limitErr
+		}
+		// Scan errors can quote stored attributes. Keep the diagnostic fields
+		// useful for locating the failed read without exposing stored values.
+		event := log.Error().Ctx(ctx).
+			Str("rack_id", rackID.String()).
+			Str("failure_stage", "database_read").
+			Str("error_type", fmt.Sprintf("%T", err))
+		var pgErr *pgconn.PgError
+		if stderrors.As(err, &pgErr) {
+			event = event.Str("sqlstate", pgErr.Code)
+		}
+		event.Msg("Failed to read task context")
+		return nil, errors.GRPCErrorInternal("failed to read task context")
+	}
+	result := make([]taskdef.TaskContextMetadata, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, taskdef.TaskContextMetadata{
+			ID: row.ID, RackID: row.RackID, Type: row.Type,
+			Attributes: row.Attributes, Status: row.Status, CreatedAt: row.CreatedAt,
+		})
+	}
+	return result, nil
+}
+
 // ListNonTerminalTasksForRacks returns Waiting, Pending, and Running tasks for
 // the requested racks.
 func (s *PostgresStore) ListNonTerminalTasksForRacks(
@@ -211,6 +336,89 @@ func (s *PostgresStore) ListNonTerminalTasksForRacks(
 	return results, nil
 }
 
+// LatestLeakageShutdownTaskStatuses returns one newest leakage-triggered
+// forced-shutdown Task status per requested component. The component predicate
+// uses the existing task attributes GIN index; the lateral expansion identifies
+// which requested component each matching Task targets.
+func (s *PostgresStore) LatestLeakageShutdownTaskStatuses(
+	ctx context.Context,
+	componentIDs []uuid.UUID,
+) (map[uuid.UUID]taskcommon.TaskStatus, error) {
+	statuses := make(map[uuid.UUID]taskcommon.TaskStatus)
+	componentIDs = normalizedUUIDs(componentIDs)
+	if len(componentIDs) == 0 {
+		return statuses, nil
+	}
+
+	type componentTaskStatus struct {
+		ComponentID uuid.UUID             `bun:"component_id"`
+		Status      taskcommon.TaskStatus `bun:"status"`
+	}
+
+	rows := make([]componentTaskStatus, 0, len(componentIDs))
+	err := s.idb(ctx).NewSelect().
+		TableExpr("task AS t").
+		ColumnExpr("DISTINCT ON (target.component_id) target.component_id::uuid AS component_id").
+		ColumnExpr("t.status").
+		Join("JOIN event_action_executions AS eae ON eae.id = t.trigger_id").
+		Join("JOIN events AS e ON e.id = eae.event_id").
+		Join("CROSS JOIN LATERAL jsonb_each(COALESCE(t.attributes->'components_by_type', '{}'::jsonb)) AS target_group(component_type, component_ids)").
+		Join("CROSS JOIN LATERAL jsonb_array_elements_text(target_group.component_ids) AS target(component_id)").
+		Where("t.trigger_type = ?", operation.TriggerTypeEventRuleExecution).
+		Where("e.event_type = ?", leakage.TypeHardwareLeakDetected).
+		Where("t.type = ?", taskcommon.TaskTypePowerControl).
+		Where("t.information->>'operation' = ?", strconv.Itoa(int(operations.PowerOperationForcePowerOff))).
+		Where("target.component_id IN (?)", bun.In(uuidStrings(componentIDs))).
+		Where("?", bun.Safe(taskComponentsAnyPredicate(componentIDs))).
+		OrderExpr("target.component_id, t.created_at DESC, t.id DESC").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, errors.GRPCErrorInternal(err.Error())
+	}
+	for _, row := range rows {
+		statuses[row.ComponentID] = row.Status
+	}
+
+	return statuses, nil
+}
+
+func normalizedUUIDs(ids []uuid.UUID) []uuid.UUID {
+	unique := make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		if id != uuid.Nil {
+			unique[id] = struct{}{}
+		}
+	}
+
+	result := make([]uuid.UUID, 0, len(unique))
+	for id := range unique {
+		result = append(result, id)
+	}
+	slices.SortFunc(result, func(a, b uuid.UUID) int {
+		return strings.Compare(a.String(), b.String())
+	})
+	return result
+}
+
+func uuidStrings(ids []uuid.UUID) []string {
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
+	return result
+}
+
+func taskComponentsAnyPredicate(ids []uuid.UUID) string {
+	predicates := make([]string, len(ids))
+	for i, id := range ids {
+		predicates[i] = fmt.Sprintf(
+			`t.attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath`,
+			id.String(),
+		)
+	}
+	return "(" + strings.Join(predicates, " OR ") + ")"
+}
+
 // UpdateScheduledTask updates task scheduling information.
 func (s *PostgresStore) UpdateScheduledTask(
 	ctx context.Context,
@@ -224,18 +432,23 @@ func (s *PostgresStore) UpdateScheduledTask(
 	return nil
 }
 
-// UpdateTaskStatus persists status, message, and (optionally) the report
-// snapshot. The report carried in arg is treated as authoritative: when
-// non-empty it replaces the stored document, when empty the stored
-// document is left untouched (the underlying model omits the report
-// column from the UPDATE in that case). No read-modify-write is performed,
-// so concurrent transitions cannot lose updates.
+// UpdateTaskStatus persists status and message, plus optional report and queue
+// deadline changes. Finished statuses clear the queue deadline; otherwise nil
+// optional values leave their stored columns untouched. No read-modify-write is
+// performed, so concurrent transitions cannot lose updates.
 func (s *PostgresStore) UpdateTaskStatus(
 	ctx context.Context,
 	arg *taskdef.TaskStatusUpdate,
 ) error {
 	taskDao := &model.Task{ID: arg.ID}
-	err := taskDao.UpdateTaskStatus(ctx, s.idb(ctx), arg.Status, arg.Message, arg.Report)
+	err := taskDao.UpdateTaskStatus(
+		ctx,
+		s.idb(ctx),
+		arg.Status,
+		arg.Message,
+		arg.Report,
+		arg.QueueExpiresAt,
+	)
 	if err != nil {
 		return errors.GRPCErrorInternal(err.Error())
 	}

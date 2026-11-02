@@ -20,11 +20,13 @@
 use std::sync::Arc;
 
 use carbide_uuid::network::NetworkSegmentId;
+use db::ConditionalWrite;
+use db::resource_pool::ResourcePoolAllocationNotOwned;
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentDeletionState, NetworkSegmentType,
 };
-use model::resource_pool::ResourcePool;
+use model::resource_pool::{OwnerType, ResourcePool};
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -92,13 +94,10 @@ impl NetworkSegmentStateHandler {
         ctx.metrics.seg_id = state.id.to_string();
         ctx.metrics.prefix = metric_prefix.prefix.to_string();
 
-        let total = metric_prefix.prefix.size();
-
-        let total_cnt: u32 = match total {
-            ipnetwork::NetworkSize::V4(nf) => nf,
-            ipnetwork::NetworkSize::V6(_n128) => 0,
+        ctx.metrics.total_ips = match metric_prefix.prefix.size() {
+            ipnetwork::NetworkSize::V4(count) => count as usize,
+            ipnetwork::NetworkSize::V6(count) => usize::try_from(count).unwrap_or(usize::MAX),
         };
-        ctx.metrics.total_ips = total_cnt as usize;
     }
 }
 
@@ -181,12 +180,34 @@ impl StateHandler for NetworkSegmentStateHandler {
                     }
                     NetworkSegmentDeletionState::DBDelete => {
                         let mut txn = ctx.services.db_pool.begin().await?;
+                        // Free or reassigned values leave this segment nothing to release.
                         if let Some(vni) = state.status.vni.take() {
-                            db::resource_pool::release(&self.pool_vni, &mut txn, vni).await?;
+                            match db::resource_pool::release(
+                                &self.pool_vni,
+                                &mut txn,
+                                vni,
+                                OwnerType::NetworkSegment,
+                                &state.config.name,
+                            )
+                            .await?
+                            {
+                                ConditionalWrite::Applied(())
+                                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+                            }
                         }
                         if let Some(vlan_id) = state.status.vlan_id.take() {
-                            db::resource_pool::release(&self.pool_vlan_id, &mut txn, vlan_id)
-                                .await?;
+                            match db::resource_pool::release(
+                                &self.pool_vlan_id,
+                                &mut txn,
+                                vlan_id,
+                                OwnerType::NetworkSegment,
+                                &state.config.name,
+                            )
+                            .await?
+                            {
+                                ConditionalWrite::Applied(())
+                                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+                            }
                         }
                         tracing::info!(
                             network_segment_id = %segment_id,

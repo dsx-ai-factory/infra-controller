@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::DbTable;
 use chrono::{DateTime, Utc};
 use model::site_explorer::SiteExplorerLastRun;
 use sqlx::{FromRow, PgConnection};
@@ -24,7 +25,8 @@ use crate::{DatabaseError, DatabaseResult};
 
 const LAST_RUN_ID: i16 = 1;
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "site_explorer_run_status")]
 struct DbSiteExplorerLastRun {
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
@@ -57,16 +59,19 @@ impl From<DbSiteExplorerLastRun> for SiteExplorerLastRun {
 
 /// Fetches metadata for the latest site explorer run.
 pub async fn fetch(db: impl DbReader<'_>) -> DatabaseResult<Option<SiteExplorerLastRun>> {
-    let query = "SELECT started_at, finished_at, success, error, failure_category, endpoint_explorations, endpoint_explorations_success, endpoint_explorations_failed, last_successful_finished_at, last_failed_finished_at
+    let query = format!(
+        "SELECT {}
     FROM site_explorer_run_status
-    WHERE id = $1";
+    WHERE id = $1",
+        DbSiteExplorerLastRun::db_table_columns()
+    );
 
-    sqlx::query_as::<_, DbSiteExplorerLastRun>(query)
+    sqlx::query_as::<_, DbSiteExplorerLastRun>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(LAST_RUN_ID)
         .fetch_optional(db)
         .await
         .map(|run| run.map(Into::into))
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Replaces metadata for the latest site explorer run.
@@ -130,4 +135,37 @@ ON CONFLICT (id) DO UPDATE SET
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use model::site_explorer::SiteExplorerLastRun;
+
+    #[crate::sqlx_test]
+    async fn fetch_decodes_complete_run_record(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let finished_at = "2026-01-02T03:04:05Z".parse()?;
+        let expected = SiteExplorerLastRun {
+            started_at: "2026-01-02T03:00:00Z".parse()?,
+            finished_at,
+            success: false,
+            error: Some("endpoint exploration failed".to_string()),
+            failure_category: Some("missing_credentials".to_string()),
+            endpoint_explorations: 7,
+            endpoint_explorations_success: 5,
+            endpoint_explorations_failed: 2,
+            last_successful_finished_at: Some("2026-01-02T02:00:00Z".parse()?),
+            last_failed_finished_at: Some(finished_at),
+        };
+
+        super::upsert(txn.as_mut(), &expected).await?;
+        let actual = super::fetch(txn.as_mut())
+            .await?
+            .expect("stored site explorer run status");
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
 }

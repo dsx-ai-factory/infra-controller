@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -34,6 +35,33 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 				Id: "test-machine-id",
 			},
 			Status: &corev1.MachineStatus{
+				LldpNeighbors: []*corev1.InterfaceLldp{
+					{
+						MacAddress: "02:00:00:00:01:b0",
+						Lldp: &corev1.LldpSwitchData{
+							Name:            "leaf-switch-01",
+							LocalPort:       "p0",
+							IpAddress:       []string{"10.0.2.194"},
+							IdType:          "mac",
+							IdValue:         "02:00:00:00:01:d4",
+							RemotePortType:  "ifname",
+							RemotePortValue: "swp1",
+						},
+					},
+					nil,
+					{
+						MacAddress: "02:00:00:00:01:b1",
+						Lldp: &corev1.LldpSwitchData{
+							Name:      "peer-dpu-01",
+							LocalPort: "p1",
+							MedInventory: &corev1.LldpMedInventory{
+								Serial:       cutil.GetPtr("SN0000000003"),
+								Manufacturer: cutil.GetPtr("https://www.mellanox.com"),
+								Model:        cutil.GetPtr("BlueField-3 DPU"),
+							},
+						},
+					},
+				},
 				DpuAgentVersion: cutil.GetPtr("1.0.0"),
 				DiscoveryInfo: &corev1.DiscoveryInfo{
 					DmiData: &corev1.DmiData{
@@ -119,12 +147,13 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 	}
 
 	hostMachineID := "test-host-machine-id"
-	dpuMachine := APIDpuMachine{}
-	dpuMachine.FromProto(protoDpuMachine, APIDpuMachineProtoContext{
+	protoContext := APIDpuMachineProtoContext{
 		HostMachineID:            hostMachineID,
 		SiteID:                   site.ID,
 		InfrastructureProviderID: site.InfrastructureProviderID,
-	})
+	}
+	dpuMachine := APIDpuMachine{}
+	dpuMachine.FromProto(protoDpuMachine, protoContext)
 
 	assert.Equal(t, "test-machine-id", dpuMachine.ID)
 	// HostMachineID must be the host Machine ID from the context, not the DPU's own ID.
@@ -155,6 +184,106 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 	assert.Equal(t, maxUint32, dpuMachine.DpuNetworkConfig.AdminInterface.VpcVni)
 	assert.Equal(t, []uint32{maxUint32}, dpuMachine.DpuNetworkConfig.AdminInterface.VpcPeerVnis)
 	assert.Equal(t, maxUint32, *dpuMachine.DpuNetworkConfig.AdminInterface.Mtu)
+
+	// LLDP neighbors come from MachineStatus; a nil entry is skipped.
+	require.Len(t, dpuMachine.LldpNeighbors, 2)
+	assert.Equal(t, "02:00:00:00:01:b0", dpuMachine.LldpNeighbors[0].MacAddress)
+	assert.Equal(t, "leaf-switch-01", dpuMachine.LldpNeighbors[0].Name)
+	assert.Equal(t, "p0", dpuMachine.LldpNeighbors[0].LocalPort)
+	assert.Equal(t, []string{"10.0.2.194"}, dpuMachine.LldpNeighbors[0].IpAddresses)
+	assert.Equal(t, "mac", dpuMachine.LldpNeighbors[0].ChassisIdType)
+	assert.Equal(t, "02:00:00:00:01:d4", dpuMachine.LldpNeighbors[0].ChassisIdValue)
+	assert.Equal(t, "ifname", dpuMachine.LldpNeighbors[0].RemotePortType)
+	assert.Equal(t, "swp1", dpuMachine.LldpNeighbors[0].RemotePortValue)
+	assert.Nil(t, dpuMachine.LldpNeighbors[0].MedInventory)
+	// LLDP-MED inventory is carried through when the neighbor advertises it.
+	medNeighbor := dpuMachine.LldpNeighbors[1]
+	assert.Equal(t, "peer-dpu-01", medNeighbor.Name)
+	assert.Equal(t, []string{}, medNeighbor.IpAddresses)
+	require.NotNil(t, medNeighbor.MedInventory)
+	assert.Equal(t, cutil.GetPtr("SN0000000003"), medNeighbor.MedInventory.Serial)
+	assert.Equal(t, cutil.GetPtr("https://www.mellanox.com"), medNeighbor.MedInventory.Manufacturer)
+	assert.Equal(t, cutil.GetPtr("BlueField-3 DPU"), medNeighbor.MedInventory.Model)
+
+	populatedNetworkConfig := proto.Clone(protoDpuMachine.DpuNetworkConfig).(*corev1.ManagedHostNetworkConfigResponse)
+	populatedNetworkConfig.DhcpServers = []string{"10.0.0.2"}
+	populatedNetworkConfig.TenantInterfaces = []*corev1.FlatInterfaceConfig{
+		{
+			VlanId: 100,
+		},
+	}
+	populatedNetworkConfig.RouteServers = []string{"10.0.0.3"}
+	populatedNetworkConfig.DeprecatedDenyPrefixes = []string{"10.0.1.0/24"}
+	populatedNetworkConfig.DenyPrefixes = []string{"10.0.2.0/24"}
+	populatedNetworkConfig.SiteFabricPrefixes = []string{"10.0.3.0/24"}
+	populatedNetworkConfig.AnycastSitePrefixes = []string{"10.0.4.0/24"}
+
+	tests := []struct {
+		name        string
+		protoConfig *corev1.ManagedHostNetworkConfigResponse
+		check       func(*testing.T, *APIDpuNetworkConfig)
+	}{
+		{
+			name:        "empty collections serialize as arrays",
+			protoConfig: protoDpuMachine.DpuNetworkConfig,
+			check: func(t *testing.T, networkConfig *APIDpuNetworkConfig) {
+				encodedNetworkConfig, err := json.Marshal(networkConfig)
+				require.NoError(t, err)
+
+				var networkConfigResponse map[string]interface{}
+				err = json.Unmarshal(encodedNetworkConfig, &networkConfigResponse)
+				require.NoError(t, err)
+
+				for _, field := range []string{
+					"dhcpServers",
+					"tenantInterfaces",
+					"routeServers",
+					"deprecatedDenyPrefixes",
+					"denyPrefixes",
+					"siteFabricPrefixes",
+					"anycastSitePrefixes",
+				} {
+					assert.Equal(t, []interface{}{}, networkConfigResponse[field])
+				}
+			},
+		},
+		{
+			name:        "populated collections are preserved",
+			protoConfig: populatedNetworkConfig,
+			check: func(t *testing.T, networkConfig *APIDpuNetworkConfig) {
+				assert.Equal(t, []string{"10.0.0.2"}, networkConfig.DhcpServers)
+				require.Len(t, networkConfig.TenantInterfaces, 1)
+				assert.Equal(t, uint32(100), networkConfig.TenantInterfaces[0].VlanID)
+				assert.Equal(t, []string{"10.0.0.3"}, networkConfig.RouteServers)
+				assert.Equal(t, []string{"10.0.1.0/24"}, networkConfig.DeprecatedDenyPrefixes)
+				assert.Equal(t, []string{"10.0.2.0/24"}, networkConfig.DenyPrefixes)
+				assert.Equal(t, []string{"10.0.3.0/24"}, networkConfig.SiteFabricPrefixes)
+				assert.Equal(t, []string{"10.0.4.0/24"}, networkConfig.AnycastSitePrefixes)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testProtoDpuMachine := proto.Clone(protoDpuMachine).(*corev1.DpuMachine)
+			testProtoDpuMachine.DpuNetworkConfig = test.protoConfig
+			dpuMachine := APIDpuMachine{}
+			dpuMachine.FromProto(testProtoDpuMachine, protoContext)
+			test.check(t, dpuMachine.DpuNetworkConfig)
+		})
+	}
+}
+
+func TestAPIDpuMachineFromProtoClearsMissingHealth(t *testing.T) {
+	ctx := APIDpuMachineProtoContext{}
+	dpu := APIDpuMachine{}
+	dpu.FromProto(&corev1.DpuMachine{Machine: &corev1.Machine{
+		Status: &corev1.MachineStatus{Health: &corev1.HealthReport{}},
+	}}, ctx)
+	assert.NotNil(t, dpu.Health)
+
+	dpu.FromProto(&corev1.DpuMachine{Machine: &corev1.Machine{}}, ctx)
+	assert.Nil(t, dpu.Health)
 }
 
 // TestAPIDpuMachine_FromProto_NilMachine guards against a panic when a
@@ -291,10 +420,11 @@ func TestAPIDpuMachine_ZeroValueJSON(t *testing.T) {
 		"interfaces":               nil,
 		"softwareComponents":       nil,
 		"health":                   nil,
-		"labels":                   nil,
+		"labels":                   map[string]interface{}{},
 		"state":                    "",
 		"dpuNetworkConfig":         nil,
 		"lastRebooted":             nil,
 		"placementInRack":          nil,
+		"lldpNeighbors":            nil,
 	}, response)
 }

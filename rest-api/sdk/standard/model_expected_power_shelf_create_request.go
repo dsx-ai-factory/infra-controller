@@ -34,7 +34,7 @@ type ExpectedPowerShelfCreateRequest struct {
 	DefaultBmcPassword NullableString `json:"defaultBmcPassword,omitempty"`
 	// Serial number of the Expected Power Shelf
 	ShelfSerialNumber string `json:"shelfSerialNumber"`
-	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
 	BmcIpAddress NullableString `json:"bmcIpAddress,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
@@ -632,7 +632,7 @@ func (o *ExpectedPowerShelfCreateRequest) GetLabels() map[string]string {
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, nil otherwise
+// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *ExpectedPowerShelfCreateRequest) GetLabelsOk() (map[string]string, bool) {
 	if o == nil || IsNil(o.Labels) {

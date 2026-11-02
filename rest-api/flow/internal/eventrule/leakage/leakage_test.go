@@ -110,6 +110,22 @@ func TestAffectedComponentIDs(t *testing.T) {
 			want: []uuid.UUID{belowID, sourceID},
 		},
 		{
+			name: "explicit slot zero remains below a positive source",
+			components: []component.Component{
+				inventoryComponent(sourceID, rackID, 10),
+				inventoryComponent(belowID, rackID, 0),
+			},
+			want: []uuid.UUID{belowID, sourceID},
+		},
+		{
+			name: "source at explicit slot zero selects only itself",
+			components: []component.Component{
+				inventoryComponent(sourceID, rackID, 0),
+				inventoryComponent(belowID, rackID, 1),
+			},
+			want: []uuid.UUID{sourceID},
+		},
+		{
 			name: "source absent",
 			components: []component.Component{
 				inventoryComponent(belowID, rackID, 1),

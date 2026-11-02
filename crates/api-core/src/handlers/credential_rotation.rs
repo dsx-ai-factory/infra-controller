@@ -32,6 +32,8 @@ use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials, NicLockdownIkm,
 };
 use carbide_switch_controller::io::SwitchStateControllerIO;
+use db::ConditionalWrite::{Applied, NotApplied};
+use db::credential_rotation::RotationTargetNotCurrent;
 use mac_address::MacAddress;
 use model::switch::SwitchSearchFilter;
 use state_controller::io::StateControllerIO;
@@ -261,12 +263,16 @@ pub(crate) async fn rotate_credential(
         }
     };
 
-    let staged = staged.ok_or_else(|| {
-        CarbideError::ConcurrentModificationError(
-            "credential rotation",
-            format!("the site-wide target for {rotation_type:?} changed during this rotation"),
-        )
-    })?;
+    let staged = match staged {
+        Applied(staged) => staged,
+        NotApplied(RotationTargetNotCurrent) => {
+            return Err(CarbideError::ConcurrentModificationError(
+                "credential rotation",
+                format!("the site-wide target for {rotation_type:?} changed during this rotation"),
+            )
+            .into());
+        }
+    };
 
     if rotation_type == RotationType::Nvos {
         enqueue_nvos_rotation_switches(&mut txn).await?;

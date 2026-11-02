@@ -23,11 +23,11 @@ pub mod nmxc_model {
     include!(concat!(env!("OUT_DIR"), "/nmx_c.rs"));
 }
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::time::Duration;
 
+use carbide_client_cache::{ClientCache, TlsMaterialEvent};
 use http::Uri;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::debug;
@@ -111,8 +111,9 @@ impl Endpoint {
 /// for mutual TLS. `ca_cert_path` adds an extra CA bundle for verifying the server (system roots
 /// are still used unless configured otherwise by tonic).
 ///
-/// `authority` sets the TLS server name (SNI / certificate verification hostname). If unset, the
-/// host portion of the gRPC endpoint URL is used.
+/// `authority` sets the TLS server name (SNI / certificate verification hostname).
+/// A non-empty value overrides the endpoint host. If absent or empty, the endpoint
+/// host is used without IPv6 brackets.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NmxcTlsConfig {
     pub ca_cert_path: Option<PathBuf>,
@@ -122,43 +123,34 @@ pub struct NmxcTlsConfig {
 }
 
 impl NmxcTlsConfig {
-    /// True when any of the TLS material files on disk was modified after
-    /// `created`, i.e. a channel created at that time no longer reflects the
-    /// certificates a fresh connect would load. A file whose modification time
-    /// cannot be read (e.g. it was removed) does not mark the channel stale:
-    /// the cached channel keeps serving until newer readable material appears,
-    /// since rebuilding on that alone would tear down a working channel
-    /// mid-rotation. A future-dated modification time (writer clock skew)
-    /// keeps this returning true, which is bounded: every acquisition then
-    /// connects fresh, the pre-cache behavior.
-    async fn material_newer_than(&self, created: SystemTime) -> bool {
-        let paths = [
+    /// The configured TLS material files. A cached channel is rebuilt once any
+    /// of them is newer than it, unless another is unreadable, such as one
+    /// missing mid-rotation.
+    fn material_paths(&self) -> Vec<PathBuf> {
+        [
             &self.ca_cert_path,
             &self.client_cert_path,
             &self.client_key_path,
-        ];
-        for path in paths.into_iter().flatten() {
-            let modified = tokio::fs::metadata(path).await.and_then(|m| m.modified());
-            let mtime = match modified {
-                Ok(mtime) => mtime,
-                Err(e) => {
-                    tracing::debug!(
-                        path = %path.display(),
-                        error = %e,
-                        "could not read NMX-C TLS material mtime; keeping the cached channel"
-                    );
-                    continue;
-                }
-            };
-            if mtime > created {
-                tracing::info!(
-                    path = %path.display(),
-                    "NMX-C TLS material changed on disk; rebuilding the channel to pick it up"
-                );
-                return true;
-            }
-        }
-        false
+        ]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect()
+    }
+}
+
+/// Logs the channel cache's TLS material observations in NMX-C terms.
+fn log_tls_material_event(event: TlsMaterialEvent<'_>) {
+    match event {
+        TlsMaterialEvent::Unreadable { path, error } => tracing::debug!(
+            path = %path.display(),
+            %error,
+            "could not read NMX-C TLS material mtime; keeping the cached channel"
+        ),
+        TlsMaterialEvent::Newer { path } => tracing::info!(
+            path = %path.display(),
+            "NMX-C TLS material changed on disk; rebuilding the channel to pick it up"
+        ),
     }
 }
 
@@ -179,12 +171,18 @@ impl Default for NmxcClientPoolBuilder {
 
 impl NmxcClientPoolBuilder {
     pub fn build(self) -> Result<NmxcClientPool, NmxcError> {
-        Ok(NmxcClientPool::with_connector(Arc::new(
-            TlsChannelConnector {
+        let tls_material = self
+            .tls
+            .as_ref()
+            .map(NmxcTlsConfig::material_paths)
+            .unwrap_or_default();
+        Ok(NmxcClientPool::with_connector(
+            Arc::new(TlsChannelConnector {
                 timeout: self.timeout,
                 tls: self.tls,
-            },
-        )))
+            }),
+            tls_material,
+        ))
     }
 
     pub fn timeout(mut self, timeout: Duration) -> Self {
@@ -198,20 +196,14 @@ impl NmxcClientPoolBuilder {
     }
 }
 
-/// Establishes the tonic [`Channel`] used to talk to one NMX-C endpoint, and
-/// decides when a previously established one has gone stale.
+/// Establishes the tonic [`Channel`] used to talk to one NMX-C endpoint.
 ///
 /// The production connector ([`TlsChannelConnector`]) performs the TCP(+TLS)
-/// connect, reading TLS material from disk on every call, and considers a
-/// channel stale once newer TLS material appears on disk. Tests inject a
+/// connect, reading TLS material from disk on every call. Tests inject a
 /// counting connector to observe how often channels are (re)built.
 #[async_trait::async_trait]
 trait ChannelConnector: Send + Sync + std::fmt::Debug {
     async fn connect(&self, endpoint: &Endpoint) -> Result<Channel, NmxcError>;
-
-    /// True when a channel created at `created` should be discarded and
-    /// rebuilt instead of reused.
-    async fn is_stale(&self, created: SystemTime) -> bool;
 }
 
 /// The production [`ChannelConnector`]: connects eagerly with the pool's
@@ -222,23 +214,13 @@ struct TlsChannelConnector {
     tls: Option<NmxcTlsConfig>,
 }
 
-/// Connected channels by endpoint URI, each with its creation time, shared by
-/// all clones of a pool.
-type ChannelCache = Arc<Mutex<HashMap<String, (Channel, SystemTime)>>>;
-
-fn lock_channels(
-    channels: &ChannelCache,
-) -> MutexGuard<'_, HashMap<String, (Channel, SystemTime)>> {
-    // The critical sections only look up / insert / remove map entries, so a
-    // poisoned lock leaves the map usable; recover it instead of propagating
-    // the panic into fabric-protocol paths.
-    channels.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 #[derive(Clone, Debug)]
 pub struct NmxcClientPool {
     connector: Arc<dyn ChannelConnector>,
-    channels: ChannelCache,
+    /// The configured TLS material files, watched for rotation.
+    tls_material: Vec<PathBuf>,
+    /// Connected channels by endpoint URI, shared by all clones of a pool.
+    channels: Arc<ClientCache<String, (), Channel>>,
 }
 
 impl NmxcClientPool {
@@ -246,16 +228,16 @@ impl NmxcClientPool {
         NmxcClientPoolBuilder::default()
     }
 
-    fn with_connector(connector: Arc<dyn ChannelConnector>) -> Self {
+    fn with_connector(connector: Arc<dyn ChannelConnector>, tls_material: Vec<PathBuf>) -> Self {
         Self {
             connector,
-            channels: Arc::new(Mutex::new(HashMap::new())),
+            tls_material,
+            channels: Arc::new(ClientCache::new(log_tls_material_event)),
         }
     }
 
     pub async fn create_client(&self, endpoint: Endpoint) -> Result<Box<dyn Nmxc>, NmxcError> {
-        let uri = endpoint.uri.to_string();
-        let channel = self.channel_for(&endpoint, &uri).await?;
+        let channel = self.channel_for(&endpoint).await?;
         let client = NmxControllerClient::new(trace_propagation::TraceInjectService::new(channel))
             .max_decoding_message_size(usize::MAX);
         Ok(Box::new(NmxcApi::new(client)))
@@ -267,45 +249,35 @@ impl NmxcClientPool {
     /// tonic channels multiplex requests and re-establish dropped connections
     /// lazily, so one channel per endpoint serves any number of clients across
     /// calls and monitor ticks, self-healing dropped connections along the way.
-    /// The connector's staleness check rebuilds the channel once the TLS
-    /// material on disk changes (the same policy as the repo's gRPC clients),
-    /// so certificate rotations are picked up without a restart.
+    /// [`ClientCache::get_or_build`] rebuilds the channel once a configured
+    /// TLS material file on disk is newer than it, so certificate rotations
+    /// are picked up without a restart. While another file is unreadable,
+    /// such as one missing mid-rotation, it keeps the cached channel instead.
     ///
     /// Concurrent misses for the same URI may each connect, last insert wins --
     /// a benign duplicate handshake. The steady-state caller is a serial
     /// monitor loop -- admin RPCs can also race in here, at worst repeating a
     /// handshake -- so per-URI in-flight serialization would be machinery
     /// without a workload.
-    async fn channel_for(&self, endpoint: &Endpoint, uri: &str) -> Result<Channel, NmxcError> {
-        let cached = lock_channels(&self.channels).get(uri).cloned();
-        if let Some((channel, created)) = cached {
-            if !self.connector.is_stale(created).await {
-                return Ok(channel);
-            }
-            // Newer TLS material on disk: discard the stale entry and connect
-            // fresh below.
-            lock_channels(&self.channels).remove(uri);
-        }
-
-        // Timestamp before connecting: the connect reads TLS material from
-        // disk, so material rewritten while we connect still counts as newer
-        // than `created` and triggers one more (benign) rebuild.
-        let created = SystemTime::now();
-        let channel = self.connector.connect(endpoint).await?;
-        lock_channels(&self.channels).insert(uri.to_string(), (channel.clone(), created));
-        Ok(channel)
+    async fn channel_for(&self, endpoint: &Endpoint) -> Result<Channel, NmxcError> {
+        self.channels
+            .get_or_build(
+                endpoint.uri.to_string().as_str(),
+                (),
+                &self.tls_material,
+                || self.connector.connect(endpoint),
+            )
+            .await
     }
 }
 
 impl TlsChannelConnector {
-    async fn build_https_tls_config(
-        &self,
-        uri: &Uri,
-        t: &NmxcTlsConfig,
-    ) -> Result<ClientTlsConfig, NmxcError> {
+    async fn build_https_tls_config(&self, uri: &Uri) -> Result<ClientTlsConfig, NmxcError> {
+        let default_tls = NmxcTlsConfig::default();
+        let tls = self.tls.as_ref().unwrap_or(&default_tls);
         let mut config = ClientTlsConfig::new();
 
-        if let Some(ref path) = t.ca_cert_path {
+        if let Some(ref path) = tls.ca_cert_path {
             let pem = tokio::fs::read(path).await.map_err(|e| {
                 NmxcError::InvalidEndpoint(format!(
                     "read NMX-C TLS CA cert {}: {e}",
@@ -315,7 +287,7 @@ impl TlsChannelConnector {
             config = config.ca_certificate(Certificate::from_pem(pem));
         }
 
-        match (&t.client_cert_path, &t.client_key_path) {
+        match (&tls.client_cert_path, &tls.client_key_path) {
             (Some(cert_path), Some(key_path)) => {
                 let cert = tokio::fs::read(cert_path).await.map_err(|e| {
                     NmxcError::InvalidEndpoint(format!(
@@ -339,11 +311,11 @@ impl TlsChannelConnector {
             }
         }
 
-        let domain = t
-            .authority
-            .clone()
-            .or_else(|| uri.host().map(|h| h.to_string()))
-            .filter(|s| !s.is_empty());
+        let domain = tls.authority.clone().filter(|s| !s.is_empty()).or_else(|| {
+            // uri.host() retains IPv6 brackets; a TLS server name needs the bare address.
+            uri.host()
+                .map(|host| host.trim_matches(['[', ']']).to_string())
+        });
         if let Some(d) = domain {
             config = config.domain_name(d);
         }
@@ -371,10 +343,7 @@ impl ChannelConnector for TlsChannelConnector {
                 .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
                 .keep_alive_timeout(KEEP_ALIVE_TIMEOUT);
 
-            let tls_config = match &self.tls {
-                Some(t) => self.build_https_tls_config(uri, t).await?,
-                None => ClientTlsConfig::new(),
-            };
+            let tls_config = self.build_https_tls_config(uri).await?;
             endpoint_builder
                 .tls_config(tls_config)
                 .map_err(|e| NmxcError::InvalidEndpoint(e.to_string()))?
@@ -392,14 +361,6 @@ impl ChannelConnector for TlsChannelConnector {
 
         debug!(endpoint = %endpoint.uri, "Connected to NMX-C");
         Ok(channel)
-    }
-
-    async fn is_stale(&self, created: SystemTime) -> bool {
-        // Without TLS there is no on-disk material to outdate a channel.
-        match self.tls.as_ref() {
-            Some(tls) => tls.material_newer_than(created).await,
-            None => false,
-        }
     }
 }
 
@@ -503,27 +464,21 @@ pub trait Nmxc: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
+
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{Case, check_cases_async};
 
     use super::*;
 
     /// A [`ChannelConnector`] that counts connects and hands out lazy channels,
-    /// so tests observe channel (re)builds without a live NMX-C server. Its
-    /// staleness policy is the production one, driven by the optional TLS
-    /// paths.
+    /// so tests observe channel (re)builds without a live NMX-C server.
     #[derive(Debug, Default)]
     struct CountingConnector {
         connects: AtomicUsize,
-        tls: Option<NmxcTlsConfig>,
     }
 
     impl CountingConnector {
-        fn with_tls(tls: NmxcTlsConfig) -> Self {
-            Self {
-                connects: AtomicUsize::new(0),
-                tls: Some(tls),
-            }
-        }
-
         fn connect_count(&self) -> usize {
             self.connects.load(Ordering::SeqCst)
         }
@@ -538,19 +493,82 @@ mod tests {
                 .connect_lazy();
             Ok(channel)
         }
+    }
 
-        async fn is_stale(&self, created: SystemTime) -> bool {
-            match self.tls.as_ref() {
-                Some(tls) => tls.material_newer_than(created).await,
-                None => false,
-            }
-        }
+    #[tokio::test]
+    async fn https_tls_accepts_endpoint_hosts_and_preserves_authority_precedence() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "IPv6 without custom TLS configuration",
+                    input: ("https://[2001:db8::1]:50051", None),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "IPv6 with custom TLS configuration and no authority",
+                    input: (
+                        "https://[2001:db8::1]:50051",
+                        Some(NmxcTlsConfig::default()),
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "IPv6 with an empty authority uses the endpoint host",
+                    input: (
+                        "https://[2001:db8::1]:50051",
+                        Some(NmxcTlsConfig {
+                            authority: Some(String::new()),
+                            ..NmxcTlsConfig::default()
+                        }),
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "IPv4 endpoint",
+                    input: ("https://192.0.2.1:50051", None),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "hostname endpoint",
+                    input: ("https://nmxc.example:50051", None),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "invalid explicit authority is not replaced by the endpoint host",
+                    input: (
+                        "https://[2001:db8::1]:50051",
+                        Some(NmxcTlsConfig {
+                            authority: Some("invalid server name".to_string()),
+                            ..NmxcTlsConfig::default()
+                        }),
+                    ),
+                    expect: Fails,
+                },
+            ],
+            |(url, tls)| async move {
+                let uri: Uri = url.parse().expect("endpoint URI");
+                let connector = TlsChannelConnector {
+                    timeout: DEFAULT_TIMEOUT,
+                    tls,
+                };
+                let config = connector
+                    .build_https_tls_config(&uri)
+                    .await
+                    .expect("TLS configuration");
+
+                tonic::transport::Endpoint::from(uri)
+                    .tls_config(config)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn same_endpoint_reuses_cached_channel() {
         let connector = Arc::new(CountingConnector::default());
-        let pool = NmxcClientPool::with_connector(connector.clone());
+        let pool = NmxcClientPool::with_connector(connector.clone(), Vec::new());
         let endpoint = Endpoint::new("http://127.0.0.1:50051").expect("endpoint");
 
         pool.create_client(endpoint.clone())
@@ -568,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn distinct_endpoints_connect_separately() {
         let connector = Arc::new(CountingConnector::default());
-        let pool = NmxcClientPool::with_connector(connector.clone());
+        let pool = NmxcClientPool::with_connector(connector.clone(), Vec::new());
 
         pool.create_client(Endpoint::new("http://127.0.0.1:50051").expect("endpoint"))
             .await
@@ -584,49 +602,78 @@ mod tests {
         );
     }
 
+    /// Each TLS material file the configuration names is watched: rotating any
+    /// one of them rebuilds the cached channel.
     #[tokio::test]
     async fn newer_tls_material_on_disk_rebuilds_the_channel() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let cert_path = dir.path().join("client-cert.pem");
-        std::fs::write(&cert_path, "cert material v1").expect("write cert");
+        check_cases_async(
+            [
+                Case {
+                    scenario: "rotated CA certificate",
+                    input: "ca.pem",
+                    expect: Yields((1, 2)),
+                },
+                Case {
+                    scenario: "rotated client certificate",
+                    input: "client-cert.pem",
+                    expect: Yields((1, 2)),
+                },
+                Case {
+                    scenario: "rotated client key",
+                    input: "client-key.pem",
+                    expect: Yields((1, 2)),
+                },
+            ],
+            // Connect counts before `rotated` changes, and after.
+            |rotated| async move {
+                let dir = tempfile::tempdir().expect("temp dir");
+                for file in ["ca.pem", "client-cert.pem", "client-key.pem"] {
+                    std::fs::write(dir.path().join(file), "material v1")
+                        .expect("write TLS material");
+                }
+                let tls = NmxcTlsConfig {
+                    ca_cert_path: Some(dir.path().join("ca.pem")),
+                    client_cert_path: Some(dir.path().join("client-cert.pem")),
+                    client_key_path: Some(dir.path().join("client-key.pem")),
+                    authority: None,
+                };
+                // Build through the public builder so its TLS material handoff
+                // is covered; only the connector is swapped for the counting
+                // fixture.
+                let connector = Arc::new(CountingConnector::default());
+                let pool = NmxcClientPool {
+                    connector: connector.clone(),
+                    ..NmxcClientPool::builder()
+                        .tls(tls)
+                        .build()
+                        .map_err(|error| error.to_string())?
+                };
+                let endpoint = Endpoint::new("http://127.0.0.1:50051").expect("endpoint");
 
-        let connector = Arc::new(CountingConnector::with_tls(NmxcTlsConfig {
-            client_cert_path: Some(cert_path.clone()),
-            ..NmxcTlsConfig::default()
-        }));
-        let pool = NmxcClientPool::with_connector(connector.clone());
-        let endpoint = Endpoint::new("http://127.0.0.1:50051").expect("endpoint");
+                pool.create_client(endpoint.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                pool.create_client(endpoint.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let before_rotation = connector.connect_count();
 
-        pool.create_client(endpoint.clone())
-            .await
-            .expect("first client");
-        pool.create_client(endpoint.clone())
-            .await
-            .expect("second client");
-        assert_eq!(
-            connector.connect_count(),
-            1,
-            "unchanged TLS material keeps the cached channel"
-        );
+                // Give the file a modification time strictly after the cached
+                // channel's creation. An explicit future timestamp avoids
+                // depending on the filesystem's mtime resolution.
+                std::fs::File::options()
+                    .write(true)
+                    .open(dir.path().join(rotated))
+                    .expect("open TLS material")
+                    .set_modified(SystemTime::now() + Duration::from_secs(60))
+                    .expect("set TLS material mtime");
 
-        // Rotate the certificate: give the file a modification time strictly
-        // after the cached channel's creation. An explicit future timestamp
-        // avoids depending on the filesystem's mtime resolution.
-        let rotated = SystemTime::now() + Duration::from_secs(60);
-        std::fs::File::options()
-            .write(true)
-            .open(&cert_path)
-            .expect("open cert")
-            .set_modified(rotated)
-            .expect("set cert mtime");
-
-        pool.create_client(endpoint)
-            .await
-            .expect("client after rotation");
-        assert_eq!(
-            connector.connect_count(),
-            2,
-            "AFTER: newer TLS material on disk rebuilds the channel"
-        );
+                pool.create_client(endpoint)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>((before_rotation, connector.connect_count()))
+            },
+        )
+        .await;
     }
 }

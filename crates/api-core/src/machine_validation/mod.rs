@@ -24,8 +24,8 @@ use std::sync::Arc;
 use carbide_machine_controller::config::machine_validation::MachineValidationConfig;
 use carbide_utils::managed_loop::{self, LoopManager};
 use carbide_utils::periodic_timer::PeriodicTimer;
-use db::ObjectColumnFilter;
-use db::machine_validation::StateColumn;
+use db::machine_validation::{StateColumn, ValidationNotActive};
+use db::{ConditionalWrite, ObjectColumnFilter};
 use model::machine::{FailureCause, FailureDetails, FailureSource};
 use model::machine_validation::{
     MachineValidation, MachineValidationRunItem, MachineValidationRunItemState,
@@ -160,12 +160,10 @@ impl MachineValidationManager {
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
     ) -> io::Result<()> {
-        if self.config.enabled {
-            join_set
-                .build_task()
-                .name("machine_validation_manager")
-                .spawn(async move { self.run(cancel_token).await })?;
-        }
+        join_set
+            .build_task()
+            .name("machine_validation_manager")
+            .spawn(async move { self.run(cancel_token).await })?;
         Ok(())
     }
 
@@ -173,7 +171,11 @@ impl MachineValidationManager {
         let timer = PeriodicTimer::new(self.config.run_interval);
         loop {
             let tick = timer.tick();
-            let result = self.run_single_iteration().await;
+            let result = if self.config.enabled {
+                self.run_single_iteration().await
+            } else {
+                self.cleanup_attempt_logs().await
+            };
             managed_loop::record_iteration(LoopManager::MachineValidationManager, &result);
 
             tokio::select! {
@@ -192,6 +194,8 @@ impl MachineValidationManager {
         let mut metrics = MachineValidationMetrics::new();
         let now = chrono::Utc::now();
         let heartbeat_stale_timeout = heartbeat_stale_timeout(self.config.stale_run_timeout);
+
+        self.cleanup_attempt_logs().await?;
 
         // Each reconciliation phase gets its own transaction. PostgreSQL
         // keeps row locks until commit, so sharing a transaction would let a
@@ -226,8 +230,13 @@ impl MachineValidationManager {
         )
         .filter(|attempt| attempt.last_heartbeat_at.is_some())
         {
-            if let Some(completion) =
-                reconcile_stale_attempt(txn.as_pgconn(), stale_attempt, now).await?
+            if let Some(completion) = reconcile_stale_attempt(
+                txn.as_pgconn(),
+                stale_attempt,
+                heartbeat_stale_timeout,
+                now,
+            )
+            .await?
             {
                 metrics.stale_validation += 1;
                 completions.push(completion);
@@ -301,6 +310,27 @@ impl MachineValidationManager {
         txn.commit().await?;
         completions.into_iter().for_each(carbide_instrument::emit);
 
+        Ok(())
+    }
+
+    async fn cleanup_attempt_logs(&self) -> CarbideResult<()> {
+        // Attempt logs are diagnostic data. Sweep a bounded batch each pass so
+        // retention never turns into an unbounded delete transaction.
+        const ATTEMPT_LOG_CLEANUP_BATCH_SIZE: i64 = 1_000;
+        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let removed = db::machine_validation_execution::delete_expired_attempt_log_chunks(
+            txn.as_pgconn(),
+            self.config.attempt_logs.retention,
+            ATTEMPT_LOG_CLEANUP_BATCH_SIZE,
+        )
+        .await?;
+        txn.commit().await?;
+        if removed > 0 {
+            tracing::info!(
+                removed_attempt_log_chunks = removed,
+                "Removed expired machine validation attempt log chunks"
+            );
+        }
         Ok(())
     }
 }
@@ -399,7 +429,10 @@ async fn reconcile_terminal_run_items(
         status,
     )
     .await?;
-    Ok(completed.then(|| MachineValidationCompleted {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
+        return Ok(None);
+    }
+    Ok(Some(MachineValidationCompleted {
         outcome: MachineValidationOutcome::Passed,
         cause: MachineValidationFailureCause::None,
         machine_id: validation.machine_id,
@@ -420,6 +453,7 @@ fn run_item_is_terminal(run_item: &MachineValidationRunItem) -> bool {
 async fn reconcile_stale_attempt(
     txn: &mut sqlx::PgConnection,
     stale_attempt: db::machine_validation_execution::StaleMachineValidationAttempt,
+    heartbeat_stale_timeout: std::time::Duration,
     now: chrono::DateTime<chrono::Utc>,
 ) -> CarbideResult<Option<MachineValidationCompleted>> {
     let error_message = format!(
@@ -441,17 +475,19 @@ async fn reconcile_stale_attempt(
         return Ok(None);
     }
 
-    let Some(validation_id) = db::machine_validation_execution::mark_attempt_stale_if_active(
-        txn,
-        &stale_attempt.attempt_id,
-        now,
-        &error_message,
-    )
-    .await?
+    let ConditionalWrite::Applied(validation_id) =
+        db::machine_validation_execution::mark_attempt_stale_if_active(
+            txn,
+            &stale_attempt.attempt_id,
+            heartbeat_stale_timeout,
+            now,
+            &error_message,
+        )
+        .await?
     else {
         tracing::debug!(
             attempt_id = %stale_attempt.attempt_id,
-            "skipping stale machine validation attempt because it is no longer active"
+            "skipping machine validation attempt because it no longer meets the timeout conditions"
         );
         return Ok(None);
     };
@@ -485,7 +521,7 @@ async fn complete_active_validation_as_failed(
     )
     .await?;
 
-    if !completed {
+    if let ConditionalWrite::NotApplied(ValidationNotActive) = completed {
         return Ok(None);
     }
 
@@ -610,7 +646,10 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_uuid::machine::MachineId;
-    use carbide_uuid::machine_validation::MachineValidationId;
+    use carbide_uuid::machine_validation::{
+        MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
+    };
+    use model::machine_validation::MachineValidationAttemptState;
 
     use super::*;
 
@@ -633,6 +672,112 @@ mod tests {
             duration_to_complete,
             last_heartbeat_at: None,
         }
+    }
+
+    #[crate::sqlx_test]
+    async fn stale_attempt_reconciliation_preserves_a_heartbeat_committed_after_selection(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let now: chrono::DateTime<chrono::Utc> = "2026-09-16T12:00:00Z".parse()?;
+        let old_heartbeat = now - chrono::Duration::seconds(120);
+        let heartbeat_timeout = MachineValidationConfig::MIN_STALE_RUN_TIMEOUT;
+        let validation_id = MachineValidationId::new();
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let run_item_id = MachineValidationRunItemId::new();
+        let attempt_id = MachineValidationAttemptId::new();
+        let mut txn = pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO machine_validation (
+                id, machine_id, start_time, name, context, total, completed,
+                state, duration_to_complete, last_heartbeat_at
+            ) VALUES ($1, $2, $3, 'heartbeat test', 'OnDemand', 1, 0, 'InProgress', 1200, $3)",
+        )
+        .bind(validation_id)
+        .bind(machine_id)
+        .bind(old_heartbeat)
+        .execute(txn.as_mut())
+        .await?;
+        sqlx::query(
+            "INSERT INTO machine_validation_run_items (
+                id, run_id, test_id, display_name, context, state, order_index,
+                attempt, timeout_seconds, started_at, last_heartbeat_at
+            ) VALUES ($1, $2, 'test', 'test', 'OnDemand', 'Running', 0, 1, 1200, $3, $3)",
+        )
+        .bind(run_item_id)
+        .bind(validation_id)
+        .bind(old_heartbeat)
+        .execute(txn.as_mut())
+        .await?;
+        sqlx::query(
+            "INSERT INTO machine_validation_attempts (
+                id, run_item_id, attempt_number, state, started_at, last_heartbeat_at
+            ) VALUES ($1, $2, 1, 'Running', $3, $3)",
+        )
+        .bind(attempt_id)
+        .bind(run_item_id)
+        .bind(old_heartbeat)
+        .execute(txn.as_mut())
+        .await?;
+        txn.commit().await?;
+
+        let mut monitor_txn = pool.begin().await?;
+        let selected = db::machine_validation_execution::find_stale_active_attempts(
+            monitor_txn.as_mut(),
+            heartbeat_timeout,
+            now,
+        )
+        .await?;
+        assert_eq!(selected.len(), 1);
+        let selected = selected.into_iter().next().expect("one stale attempt");
+        assert_eq!(selected.attempt_id, attempt_id);
+
+        // The API can commit a heartbeat after selection but before the
+        // monitor acquires the parent run lock. Reuse that snapshot below.
+        let mut heartbeat_txn = pool.begin().await?;
+        assert_eq!(
+            db::machine_validation_execution::record_heartbeat(
+                heartbeat_txn.as_mut(),
+                &validation_id,
+                None,
+                Some(&attempt_id),
+                None,
+                now,
+            )
+            .await?,
+            ConditionalWrite::Applied(())
+        );
+        heartbeat_txn.commit().await?;
+
+        let completion =
+            reconcile_stale_attempt(monitor_txn.as_mut(), selected, heartbeat_timeout, now).await?;
+        assert!(completion.is_none());
+        monitor_txn.commit().await?;
+
+        let run = db::machine_validation::find_by_id(&pool, &validation_id).await?;
+        assert_eq!(
+            run.status.expect("the run has a persisted status").state,
+            MachineValidationState::InProgress,
+        );
+        assert_eq!(run.last_heartbeat_at, Some(now));
+        assert_eq!(run.end_time, None);
+        let items =
+            db::machine_validation_execution::find_run_items_by_run_id(&pool, &validation_id)
+                .await?;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].state, MachineValidationRunItemState::Running);
+        assert_eq!(items[0].last_heartbeat_at, Some(now));
+        assert_eq!(items[0].ended_at, None);
+        assert_eq!(items[0].failure_reason, None);
+        let attempt =
+            db::machine_validation_execution::find_attempt_by_id(&pool, &attempt_id).await?;
+        assert_eq!(attempt.state, MachineValidationAttemptState::Running);
+        assert_eq!(attempt.last_heartbeat_at, Some(now));
+        assert_eq!(attempt.ended_at, None);
+        assert_eq!(attempt.failure_classification, None);
+        assert_eq!(attempt.stderr_summary, None);
+
+        Ok(())
     }
 
     #[test]

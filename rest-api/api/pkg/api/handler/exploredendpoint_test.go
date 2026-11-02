@@ -17,6 +17,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -29,9 +31,11 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 func TestGetAllExploredEndpointHandler_Handle(t *testing.T) {
+	const machineID = "fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g"
 	tests := []struct {
 		name               string
 		roles              []string
@@ -39,6 +43,7 @@ func TestGetAllExploredEndpointHandler_Handle(t *testing.T) {
 		extraQuery         string
 		rawQuery           string
 		ids                *corev1.ExploredEndpointIdList
+		proxyError         error
 		endpoints          *corev1.ExploredEndpointList
 		expectFindByIDs    bool
 		expectFindByIDVals []string
@@ -48,6 +53,7 @@ func TestGetAllExploredEndpointHandler_Handle(t *testing.T) {
 		wantOrderBy        string
 		wantAddresses      []string
 		wantProxyCalls     int
+		wantMachineID      string
 	}{
 		{
 			name:         "success returns page of endpoints",
@@ -135,9 +141,45 @@ func TestGetAllExploredEndpointHandler_Handle(t *testing.T) {
 			wantProxyCalls:     2,
 		},
 		{
+			name:         "forwards machine filter and paginates returned IDs",
+			roles:        []string{authz.ProviderAdminRole},
+			injectSiteID: true,
+			extraQuery:   "machineId=" + machineID + "&pageNumber=2&pageSize=1&orderBy=ID_DESC",
+			ids:          &corev1.ExploredEndpointIdList{EndpointIds: []string{"2001:db8::3", "2001:db8::1", "2001:db8::2"}},
+			endpoints: &corev1.ExploredEndpointList{
+				Endpoints: []*corev1.ExploredEndpoint{{Address: "2001:db8::2"}},
+			},
+			expectFindByIDs:    true,
+			expectFindByIDVals: []string{"2001:db8::2"},
+			wantStatus:         http.StatusOK,
+			wantCount:          1,
+			wantTotal:          3,
+			wantOrderBy:        exploredEndpointOrderByIDDesc,
+			wantAddresses:      []string{"2001:db8::2"},
+			wantProxyCalls:     2,
+			wantMachineID:      machineID,
+		},
+		{
+			name:         "rejects empty machine filter",
+			roles:        []string{authz.ProviderAdminRole},
+			injectSiteID: true,
+			extraQuery:   "machineId=",
+			wantStatus:   http.StatusBadRequest,
+		},
+		{
+			name:           "rejects malformed machine filter from Core",
+			roles:          []string{authz.ProviderAdminRole},
+			injectSiteID:   true,
+			extraQuery:     "machineId=not-a-machine-id",
+			proxyError:     swe.WrapErr(status.Error(codes.InvalidArgument, "invalid machine ID")),
+			wantStatus:     http.StatusBadRequest,
+			wantProxyCalls: 1,
+		},
+		{
 			name:         "rejects non provider admin",
 			roles:        nil,
 			injectSiteID: true,
+			extraQuery:   "machineId=" + machineID,
 			wantStatus:   http.StatusForbidden,
 		},
 		{
@@ -188,11 +230,11 @@ func TestGetAllExploredEndpointHandler_Handle(t *testing.T) {
 				}
 			}
 
-			if tt.ids != nil {
-				fixture.expectProxyResponse(t, tt.ids)
+			if tt.ids != nil || tt.proxyError != nil {
+				fixture.expectProxyResponse(t, tt.ids, tt.proxyError)
 			}
 			if tt.expectFindByIDs {
-				fixture.expectProxyResponse(t, tt.endpoints)
+				fixture.expectProxyResponse(t, tt.endpoints, nil)
 			}
 
 			rec := fixture.request(t, query)
@@ -201,6 +243,12 @@ func TestGetAllExploredEndpointHandler_Handle(t *testing.T) {
 
 			if tt.wantStatus != http.StatusOK {
 				return
+			}
+			var filter corev1.ExploredEndpointSearchFilter
+			require.NoError(t, protojson.Unmarshal(fixture.proxiedReqs[0].RequestJSON, &filter))
+			assert.Equal(t, tt.wantMachineID, filter.GetMachineId())
+			if tt.wantMachineID == "" {
+				assert.Nil(t, filter.MachineId)
 			}
 
 			var resp []*model.APIExploredEndpoint
@@ -241,12 +289,12 @@ func TestGetAllExploredEndpointHandler_Handle(t *testing.T) {
 
 		var gotAll []string
 		for pageIndex, wantPage := range wantPages {
-			fixture.expectProxyResponse(t, &corev1.ExploredEndpointIdList{EndpointIds: allIDs})
+			fixture.expectProxyResponse(t, &corev1.ExploredEndpointIdList{EndpointIds: allIDs}, nil)
 			endpoints := make([]*corev1.ExploredEndpoint, 0, len(wantPage))
 			for _, address := range wantPage {
 				endpoints = append(endpoints, &corev1.ExploredEndpoint{Address: address})
 			}
-			fixture.expectProxyResponse(t, &corev1.ExploredEndpointList{Endpoints: endpoints})
+			fixture.expectProxyResponse(t, &corev1.ExploredEndpointList{Endpoints: endpoints}, nil)
 
 			rec := fixture.request(t, fmt.Sprintf("/?siteId=%s&pageNumber=%d&pageSize=2", fixture.siteID, pageIndex+1))
 			require.Equal(t, http.StatusOK, rec.Code)
@@ -317,19 +365,19 @@ func newGetAllExploredEndpointHandlerFixture(t *testing.T, roles []string) *getA
 	}
 }
 
-func (f *getAllExploredEndpointHandlerFixture) expectProxyResponse(t *testing.T, resp proto.Message) {
+func (f *getAllExploredEndpointHandlerFixture) expectProxyResponse(t *testing.T, resp proto.Message, proxyError error) {
 	t.Helper()
 
 	wrun := &tmocks.WorkflowRun{}
 	wrun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-		if resp == nil {
+		if proxyError != nil {
 			return
 		}
 		out := args.Get(1).(*grpcproxy.Response)
 		responseJSON, err := protojson.Marshal(resp)
 		require.NoError(t, err)
 		out.ResponseJSON = responseJSON
-	}).Return(nil).Once()
+	}).Return(proxyError).Once()
 
 	f.tsc.On(
 		"ExecuteWorkflow",

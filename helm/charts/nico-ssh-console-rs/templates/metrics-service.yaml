@@ -8,6 +8,7 @@ metadata:
     app: {{ include "nico-ssh-console-rs.name" . }}
     app.kubernetes.io/metrics: {{ include "nico-ssh-console-rs.name" . }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-ssh-console-rs.selectorLabels" . | nindent 4 }}
   ports:

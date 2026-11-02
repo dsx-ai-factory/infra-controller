@@ -28,6 +28,10 @@ pub(crate) struct GenericAmi<'a> {
 }
 
 impl GenericAmi<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "Self";
         redfish::manager::Config {
@@ -49,14 +53,14 @@ impl GenericAmi<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "Self";
 
-        let boot_opt_builder = |id: &str, kind| {
-            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
+        let boot_opt_builder = |id: &str| {
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id))
                 .boot_option_reference(id)
         };
         let boot_options = self
@@ -77,9 +81,9 @@ impl GenericAmi<'_> {
             )))
             .enumerate()
             .map(|(index, (display_name, kind))| {
-                boot_opt_builder(&format!("Boot{index:04X}"), kind)
+                boot_opt_builder(&format!("Boot{index:04X}"))
                     .display_name(&display_name)
-                    .build()
+                    .build(kind)
             })
             .collect::<Vec<_>>();
         redfish::computer_system::Config {
@@ -101,9 +105,13 @@ impl GenericAmi<'_> {
                 processors: None,
                 memory: None,
                 base_bios: Some(
-                    redfish::bios::builder(&redfish::bios::resource(system_id))
-                        .attributes(json!({"EndlessBoot":""}))
-                        .build(),
+                    redfish::bios::builder(&redfish::bios::resource(system_id)).with_attributes(
+                        json!({
+                            "EndlessBoot": "",
+                            "KCSACP": "Allow All",
+                            "USB000": "Enabled",
+                        }),
+                    ),
                 ),
                 serial_console: None,
                 secure_boot_available: false,
@@ -123,7 +131,7 @@ impl GenericAmi<'_> {
                     &redfish::pcie_device::chassis_resource(chassis_id, &pcie_device_id),
                     nic,
                 )
-                .status(redfish::resource::Status::Ok)
+                .status(redfish::resource::Status::Ok.into())
                 .build()
             })
             .collect();
@@ -131,7 +139,7 @@ impl GenericAmi<'_> {
         redfish::chassis::ChassisConfig {
             chassis: vec![redfish::chassis::SingleChassisConfig {
                 id: chassis_id.into(),
-                chassis_type: "Component".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::Component,
                 pcie_devices: Some(pcie_devices),
                 ..redfish::chassis::SingleChassisConfig::defaults()
             }],
@@ -151,7 +159,7 @@ impl GenericAmi<'_> {
                 redfish::software_inventory::builder(
                     &redfish::software_inventory::firmware_inventory_resource(id),
                 )
-                .version(version)
+                .version(*version)
                 .build()
             })
             .collect(),

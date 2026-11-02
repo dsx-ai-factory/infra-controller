@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -74,56 +75,34 @@ func writePEM(t *testing.T, path, pemType string, der []byte) {
 	require.NoError(t, pem.Encode(f, &pem.Block{Type: pemType, Bytes: der}))
 }
 
-func TestTLSConfig(t *testing.T) {
-	t.Run("CERTDIR set with valid certs", func(t *testing.T) {
-		dir := generateTestCerts(t)
-		t.Setenv("CERTDIR", dir)
-
-		tlsConfig, source, err := TLSConfig()
-		require.NoError(t, err)
-		assert.Equal(t, dir, source)
-		assert.NotNil(t, tlsConfig)
-	})
-
-	t.Run("CERTDIR set but no certs present", func(t *testing.T) {
-		t.Setenv("CERTDIR", t.TempDir())
-
-		tlsConfig, source, err := TLSConfig()
-		assert.ErrorIs(t, err, ErrNotPresent)
-		assert.NotEmpty(t, source)
-		assert.Nil(t, tlsConfig)
-	})
-
-	t.Run("CERTDIR not set falls back to default path", func(t *testing.T) {
-		t.Setenv("CERTDIR", "")
-
-		tlsConfig, source, err := TLSConfig()
-		assert.ErrorIs(t, err, ErrNotPresent)
-		assert.Equal(t, defaultCertDir, source)
-		assert.Nil(t, tlsConfig)
-	})
-}
-
-func TestServerTLSConfig(t *testing.T) {
-	t.Run("CERTDIR set with valid certs", func(t *testing.T) {
-		dir := generateTestCerts(t)
-		t.Setenv("CERTDIR", dir)
-
-		tlsConfig, source, err := ServerTLSConfig()
-		require.NoError(t, err)
-		assert.Equal(t, dir, source)
-		assert.NotEmpty(t, tlsConfig.Certificates)
-		assert.NotNil(t, tlsConfig.ClientCAs)
-	})
-
-	t.Run("CERTDIR set but no certs present", func(t *testing.T) {
-		t.Setenv("CERTDIR", t.TempDir())
-
-		tlsConfig, source, err := ServerTLSConfig()
-		assert.ErrorIs(t, err, ErrNotPresent)
-		assert.NotEmpty(t, source)
-		assert.Nil(t, tlsConfig)
-	})
+func TestDynamicTLSConfig(t *testing.T) {
+	for _, name := range []string{"valid CERTDIR", "missing files", "default directory"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if name == "valid CERTDIR" {
+				dir = generateTestCerts(t)
+			}
+			if name == "default directory" {
+				dir = ""
+			}
+			t.Setenv("CERTDIR", dir)
+			cfg, source, dynamic, err := DynamicTLSConfig()
+			if dynamic != nil {
+				defer dynamic.Close()
+			}
+			if name != "valid CERTDIR" {
+				require.ErrorIs(t, err, ErrNotPresent)
+				assert.Nil(t, cfg)
+				if name == "default directory" {
+					assert.Equal(t, defaultCertDir, source)
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, dir, source)
+			assert.NotNil(t, cfg.GetClientCertificate)
+		})
+	}
 }
 
 func TestIsTLSAvailable(t *testing.T) {
@@ -221,35 +200,45 @@ func TestIsTLSAvailable(t *testing.T) {
 	})
 }
 
-func TestResolveServer(t *testing.T) {
-	t.Run("explicit paths used when set returns server config", func(t *testing.T) {
-		dir := generateTestCerts(t)
-		c := pkgcerts.Config{
-			CACert:  filepath.Join(dir, defaultCACert),
-			TLSCert: filepath.Join(dir, defaultCertFile),
-			TLSKey:  filepath.Join(dir, defaultKeyFile),
-		}
-
-		tlsConfig, source, err := ResolveServer(c)
-		require.NoError(t, err)
-		assert.Equal(t, c.CACert, source)
-		assert.NotEmpty(t, tlsConfig.Certificates) // server config
-		assert.NotNil(t, tlsConfig.ClientCAs)      // server config
-		assert.Nil(t, tlsConfig.RootCAs)           // not client config
-	})
-
-	t.Run("empty config falls back to env/default", func(t *testing.T) {
-		t.Setenv("CERTDIR", t.TempDir()) // empty dir → ErrNotPresent
-
-		_, _, err := ResolveServer(pkgcerts.Config{})
-		assert.ErrorIs(t, err, ErrNotPresent)
-	})
-
-	t.Run("partial config returns validation error", func(t *testing.T) {
-		c := pkgcerts.Config{CACert: "ca.crt"} // missing tls-cert and tls-key
-
-		_, _, err := ResolveServer(c)
-		require.Error(t, err)
-		assert.NotErrorIs(t, err, ErrNotPresent)
-	})
+func TestResolveDynamicServer(t *testing.T) {
+	for _, name := range []string{"explicit paths", "CERTDIR fallback", "missing files", "partial configuration"} {
+		t.Run(name, func(t *testing.T) {
+			dir := generateTestCerts(t)
+			t.Setenv("CERTDIR", dir)
+			c := pkgcerts.Config{}
+			if name == "explicit paths" {
+				c = pkgcerts.Config{CACert: filepath.Join(dir, defaultCACert), TLSCert: filepath.Join(dir, defaultCertFile), TLSKey: filepath.Join(dir, defaultKeyFile)}
+				t.Setenv("CERTDIR", t.TempDir())
+			}
+			if name == "missing files" {
+				t.Setenv("CERTDIR", t.TempDir())
+			}
+			if name == "partial configuration" {
+				c.CACert = "ca.crt"
+			}
+			cfg, source, dynamic, err := ResolveDynamicServer(c)
+			if dynamic != nil {
+				defer dynamic.Close()
+			}
+			if name == "missing files" {
+				require.ErrorIs(t, err, ErrNotPresent)
+				return
+			}
+			if name == "partial configuration" {
+				require.EqualError(t, err, "ca-cert, tls-cert, and tls-key must all be provided together")
+				return
+			}
+			require.NoError(t, err)
+			if name == "explicit paths" {
+				assert.Equal(t, c.CACert, source)
+			} else {
+				assert.Equal(t, dir, source)
+			}
+			current, err := cfg.GetConfigForClient(nil)
+			require.NoError(t, err)
+			assert.NotEmpty(t, current.Certificates)
+			assert.Equal(t, tls.RequireAndVerifyClientCert, current.ClientAuth)
+			assert.NotNil(t, current.ClientCAs)
+		})
+	}
 }

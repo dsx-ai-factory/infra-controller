@@ -10,6 +10,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedmachine"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedpowershelf"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedrack"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedrackgroup"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedswitch"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/flowgrpc"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/infinibandpartition"
@@ -23,6 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/operatingsystem"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/site"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/sku"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/spectrumxpartition"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/sshkeygroup"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/subnet"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/tenant"
@@ -75,6 +77,11 @@ func (m *Manager) VpcPrefix() *vpcprefix.API {
 // VpcPeering - Add vpcpeering manager instance here
 func (m *Manager) VpcPeering() *vpcpeering.API {
 	return vpcpeering.NewVpcPeeringManager(m.Data.EB, m.API, m.Conf)
+}
+
+// SpectrumXPartition - Add spectrumxpartition manager instance here
+func (m *Manager) SpectrumXPartition() *spectrumxpartition.API {
+	return spectrumxpartition.NewSpectrumXPartitionManager(m.Data.EB, m.API, m.Conf)
 }
 
 // Carbide manager instance here
@@ -145,6 +152,11 @@ func (m *Manager) ExpectedPowerShelf() *expectedpowershelf.API {
 // ExpectedRack - Add ExpectedRack Manager instance here
 func (m *Manager) ExpectedRack() *expectedrack.API {
 	return expectedrack.NewExpectedRackManager(m.Data.EB, m.API, m.Conf)
+}
+
+// ExpectedRackGroup - Add ExpectedRackGroup Manager instance here
+func (m *Manager) ExpectedRackGroup() *expectedrackgroup.API {
+	return expectedrackgroup.NewExpectedRackGroupManager(m.Data.EB, m.API, m.Conf)
 }
 
 // ExpectedSwitch - Add ExpectedSwitch Manager instance here

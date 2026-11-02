@@ -77,6 +77,7 @@ impl NmxcDomainStateProcessor {
         let (successes, alerts) = match health {
             NmxControllerHealth::Healthy => (
                 vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::NmxControllerHealth,
                     target: None,
                 }],
@@ -85,6 +86,7 @@ impl NmxcDomainStateProcessor {
             NmxControllerHealth::Unhealthy | NmxControllerHealth::UnhealthyDbCorrupted => (
                 Vec::new(),
                 vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::NmxControllerHealth,
                     target: None,
                     message: format!("NMX-C controller health is {}", health.as_str_name()),
@@ -141,12 +143,13 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: None,
-                mac: MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC address"),
+                mac: Some(MacAddress::from_str("00:11:22:33:44:55").expect("valid MAC address")),
             },
             collector_type: "nmxc",
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: None,
-                serial: "SW-001".to_string(),
+                serial: Some("SW-001".to_string()),
                 slot_number: None,
                 tray_index: None,
                 nvlink_domain_uuid: Some(DOMAIN_UUID.parse().expect("valid domain ID")),

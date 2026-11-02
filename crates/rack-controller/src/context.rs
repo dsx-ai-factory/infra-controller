@@ -21,9 +21,9 @@ use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_rack_controller::config::RackConfig;
 use carbide_rack_controller::metrics::RackMetrics;
 use carbide_secrets::credentials::CredentialManager;
-use component_manager::NvosUpdateManager;
 use component_manager::component_manager::ComponentManager;
-use librms::RmsApi;
+use component_manager::config::SwitchMtlsService;
+use component_manager::{NvosUpdateManager, RackFirmwareUpdateManager};
 use sqlx::PgPool;
 use state_controller::state_handler::StateHandlerContextObjects;
 
@@ -36,8 +36,7 @@ pub struct RackStateHandlerContextObjects {}
 #[derive(Clone)]
 pub struct RackStateHandlerServices {
     pub db_pool: PgPool,
-    /// Rack Manager Service client
-    pub rms_client: Option<Arc<dyn RmsApi>>,
+
     // TODO: probably this is not the best place for config. But this
     // field is introduced during refactoring. In original code it was
     // full CarbideConfig.
@@ -45,14 +44,17 @@ pub struct RackStateHandlerServices {
 
     /// Backend-neutral rack NVOS update operations.
     pub nvos_update_manager: Option<Arc<dyn NvosUpdateManager>>,
+
+    /// Backend-neutral rack firmware-object update operations.
+    pub rack_firmware_update_manager: Option<Arc<dyn RackFirmwareUpdateManager>>,
+
     pub credential_manager: Arc<dyn CredentialManager>,
     /// Component manager used for switch operations during rack maintenance.
     pub component_manager: Option<Arc<ComponentManager>>,
 
-    /// Switch mTLS services sourced from
-    /// `[rack_state_controller].nmx_cluster_switch_mtls_services`. Unread:
-    /// rack maintenance does not configure switch certificates.
-    pub nmx_cluster_switch_mtls_services: Vec<i32>,
+    /// Explicit services selected by
+    /// `[switch_state_controller].switch_mtls_services`.
+    pub switch_mtls_services: Vec<SwitchMtlsService>,
 
     /// Fetches SOT firmware-object documents selected by rack profiles.
     pub firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,

@@ -212,6 +212,8 @@ pub(crate) async fn show_discovered_managed_host(
 
         Args::ManagedHost(managed_host_info) => {
             if let Some(address) = managed_host_info.address {
+                // Match the API's `IpAddr::to_string()` representation.
+                let address = address.to_string();
                 let exploration_report = get_exploration_report_for_bmc_address(
                     &address,
                     api_client,
@@ -256,6 +258,8 @@ pub(crate) async fn show_discovered_managed_host(
         }
         Args::Endpoint(endpoint_info) => {
             if let Some(address) = endpoint_info.address {
+                // Match the API's `IpAddr::to_string()` representation.
+                let address = address.to_string();
                 let exploration_report = get_exploration_report_for_bmc_address(
                     &address,
                     api_client,
@@ -443,6 +447,7 @@ fn convert_endpoints_to_nice_table(endpoints: &[ExploredEndpoint]) -> Box<Table>
         "Pre-ingestion State",
         "Serial Number",
         "Last Exploration Error",
+        "Exploration Pause",
     ];
 
     table.set_titles(Row::new(
@@ -529,6 +534,11 @@ fn endpoint_to_row(endpoint: &ExploredEndpoint) -> Row {
                 .unwrap_or_default(),
         ),
         Cell::new(error_segmented.as_str()),
+        Cell::new(if endpoint.exploration_paused_for_dpf {
+            "DPU provisioning; resumes after all suppressions clear"
+        } else {
+            ""
+        }),
     ])
 }
 
@@ -556,6 +566,9 @@ async fn display_endpoint(
         report.as_ref().map(|x| x.machine_id()).unwrap_or_default()
     ]);
     table.add_row(row!["Preingestion State", endpoint.preingestion_state]);
+    table.add_row(row!["Exploration Pause", if endpoint.exploration_paused_for_dpf {
+        "DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared"
+    } else { "" }]);
     let last_error = report
         .as_ref()
         .map(|report| report.last_exploration_error_display())

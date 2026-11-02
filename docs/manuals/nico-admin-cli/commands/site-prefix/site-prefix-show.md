@@ -1,6 +1,6 @@
 # `nico-admin-cli site-prefix show`
 
-_[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **show**_
+*[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **show***
 
 ## NAME
 
@@ -8,11 +8,13 @@ nico-admin-cli-site-prefix-show - List SitePrefixes or show one by ID
 
 ## SYNOPSIS
 
-**nico-admin-cli site-prefix show** \[**--tenant-organization-id**\]
-\[**--authority**\] \[**--routing-scope**\] \[**--lifecycle-state**\]
-\[**--prefix**\] \[**--contains**\] \[**--contained-by**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
-\[*SITE_PREFIX_ID*\]
+```text
+nico-admin-cli site-prefix show [--tenant-organization-id]
+[--authority] [--routing-scope] [--lifecycle-state]
+[--prefix] [--contains] [--contained-by]
+[--extended] [--sort-by] [-h|--help]
+[SITE_PREFIX_ID]
+```
 
 ## DESCRIPTION
 
@@ -20,71 +22,78 @@ List SitePrefixes or show one by ID
 
 ## OPTIONS
 
-**--tenant-organization-id** *\<TENANT_ORGANIZATION_ID\>*  
+`--tenant-organization-id <TENANT_ORGANIZATION_ID>`
+
 Return tenant-managed SitePrefixes owned by this tenant
 
-**--authority** *\<AUTHORITY\>*  
-Filter by management authority\
+`--authority <AUTHORITY>`
 
-\
+Filter by management authority
+
 *Possible values:*
 
-- operator-managed
+> - operator-managed
+>
+> - tenant-managed
 
-- tenant-managed
+`--routing-scope <ROUTING_SCOPE>`
 
-**--routing-scope** *\<ROUTING_SCOPE\>*  
-Filter by routing scope\
+Filter by routing scope
 
-\
 *Possible values:*
 
-- datacenter-only
+> - datacenter-only
 
-**--lifecycle-state** *\<LIFECYCLE_STATE\>*  
-Filter by lifecycle state\
+`--lifecycle-state <LIFECYCLE_STATE>`
 
-\
+Filter by lifecycle state
+
 *Possible values:*
 
-- provisioning
+> - provisioning
+>
+> - ready
+>
+> - deleting
+>
+> - error
 
-- ready
+`--prefix <CIDR>`
 
-- deleting
-
-- error
-
-**--prefix** *\<CIDR\>*  
 Return every SitePrefix with this exact CIDR
 
-**--contains** *\<CIDR\>*  
+`--contains <CIDR>`
+
 Return SitePrefixes that contain this prefix
 
-**--contained-by** *\<CIDR\>*  
+`--contained-by <CIDR>`
+
 Return SitePrefixes contained by this prefix
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
-\[*SITE_PREFIX_ID*\]  
+[*SITE_PREFIX_ID*]
+
 SitePrefix ID to show; omit to search inventory
 
 ## Examples
@@ -100,4 +109,4 @@ nico-admin-cli site-prefix show --contains 10.0.8.0/24 --lifecycle-state ready
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**Related:** [Network commands](../../network.md) · [CLI reference index](../../README.md)

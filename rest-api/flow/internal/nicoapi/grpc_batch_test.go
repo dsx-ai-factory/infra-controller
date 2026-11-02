@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,17 +34,44 @@ type recordingForgeClient struct {
 	switchDelay       time.Duration
 	shelfIDDelay      time.Duration
 	shelfDelay        time.Duration
+	rackIDDelay       time.Duration
+	rackDelay         time.Duration
 	versionRequests   []*corev1.VersionRequest
 	machineSearches   []*corev1.MachineSearchConfig
 	machineIDs        []string
 	switchIDs         []string
 	shelfIDs          []string
+	rackIDs           []string
+	rackHealth        map[string]*corev1.HealthReport
 	switchResponseIDs []string
 	machineBatches    [][]string
 	switchBatches     [][]string
 	shelfBatches      [][]string
+	rackBatches       [][]string
+	rackSearches      []*corev1.RackSearchFilter
 	failCall          int
 	omitID            string
+}
+
+func (c *recordingForgeClient) FindRackIds(
+	ctx context.Context,
+	request *corev1.RackSearchFilter,
+	_ ...grpc.CallOption,
+) (*corev1.RackIdList, error) {
+	c.mu.Lock()
+	c.rackSearches = append(c.rackSearches, request)
+	delay := c.rackIDDelay
+	ids := slices.Clone(c.rackIDs)
+	c.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	return &corev1.RackIdList{RackIds: stringsToRackIds(ids)}, nil
 }
 
 func (c *recordingForgeClient) Version(
@@ -194,6 +222,7 @@ func (c *recordingForgeClient) FindSwitchesByIds(
 				ControllerState: "state-" + id,
 				NvosInfo:        &corev1.SwitchNvosInfo{Ip: &nvosIP},
 				BmcInfo:         &corev1.BmcInfo{Mac: &bmcMAC},
+				Status:          &corev1.SwitchStatus{Health: &corev1.HealthReport{Source: "health-" + id}},
 			})
 		}
 	}
@@ -232,10 +261,52 @@ func (c *recordingForgeClient) FindPowerShelvesByIds(
 				RackId:          &corev1.RackId{Id: "rack-" + id},
 				ControllerState: "state-" + id,
 				BmcInfo:         &corev1.BmcInfo{Mac: &bmcMAC},
+				Status:          &corev1.PowerShelfStatus{Health: &corev1.HealthReport{Source: "health-" + id}},
 			})
 		}
 	}
 	return &corev1.PowerShelfList{PowerShelves: shelves}, nil
+}
+
+func (c *recordingForgeClient) FindRacksByIds(
+	ctx context.Context,
+	request *corev1.RacksByIdsRequest,
+	_ ...grpc.CallOption,
+) (*corev1.RackList, error) {
+	batch := protoIDsToStrings(request.GetRackIds())
+	c.mu.Lock()
+	c.rackBatches = append(c.rackBatches, batch)
+	failed := c.failCall == len(c.rackBatches)
+	omitID := c.omitID
+	delay := c.rackDelay
+	health := c.rackHealth
+	c.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if failed {
+		return nil, errors.New("injected rack lookup failure")
+	}
+
+	racks := make([]*corev1.Rack, 0, len(batch))
+	for _, id := range batch {
+		if id != omitID {
+			rackHealth := health[id]
+			if rackHealth == nil {
+				rackHealth = &corev1.HealthReport{Source: "health-" + id}
+			}
+			racks = append(racks, &corev1.Rack{
+				Id:          &corev1.RackId{Id: id},
+				RackGroupId: &corev1.RackGroupId{Id: "group-" + id},
+				Status:      &corev1.RackStatus{Health: rackHealth},
+			})
+		}
+	}
+	return &corev1.RackList{Racks: racks}, nil
 }
 
 func newRecordingGRPCClient(fake *recordingForgeClient) *grpcClient {
@@ -256,6 +327,107 @@ func stringsToPowerShelfIds(ids []string) []*corev1.PowerShelfId {
 		result = append(result, &corev1.PowerShelfId{Id: id})
 	}
 	return result
+}
+
+func stringsToRackIds(ids []string) []*corev1.RackId {
+	result := make([]*corev1.RackId, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, &corev1.RackId{Id: id})
+	}
+
+	return result
+}
+
+func TestGrpcClient_GetLeakingRackIds(t *testing.T) {
+	rackLeak := &corev1.HealthReport{Alerts: []*corev1.HealthProbeAlert{{
+		Classifications: []string{classificationRackLeak},
+	}}}
+	nonRackLeak := &corev1.HealthReport{Alerts: []*corev1.HealthProbeAlert{{
+		Classifications: []string{"TrayLeak", "PreventAllocations"},
+	}}}
+
+	tests := []struct {
+		name        string
+		fake        *recordingForgeClient
+		grpcTimeout time.Duration
+		want        []string
+		wantErr     string
+		wantBatches [][]string
+	}{
+		{
+			name: "selects RackLeak classification and honors batch limit",
+			fake: &recordingForgeClient{
+				runtimeConfig: &corev1.RuntimeConfig{MaxFindByIds: 2},
+				rackIDs:       []string{"rack-3", "rack-1", "rack-2"},
+				rackHealth: map[string]*corev1.HealthReport{
+					"rack-1": rackLeak,
+					"rack-2": nonRackLeak,
+					"rack-3": rackLeak,
+				},
+			},
+			want:        []string{"rack-1", "rack-3"},
+			wantBatches: [][]string{{"rack-3", "rack-1"}, {"rack-2"}},
+		},
+		{
+			name: "gives ID and detail RPCs independent timeouts",
+			fake: &recordingForgeClient{
+				rackIDs:     []string{"rack-1"},
+				rackIDDelay: 120 * time.Millisecond,
+				rackDelay:   120 * time.Millisecond,
+				rackHealth:  map[string]*corev1.HealthReport{"rack-1": rackLeak},
+			},
+			grpcTimeout: 200 * time.Millisecond,
+			want:        []string{"rack-1"},
+			wantBatches: [][]string{{"rack-1"}},
+		},
+		{
+			name: "empty ID snapshot avoids detail lookup",
+			fake: &recordingForgeClient{},
+			want: []string{},
+		},
+		{
+			name: "preserves leaking racks from incomplete detail snapshot",
+			fake: &recordingForgeClient{
+				rackIDs: []string{"rack-1", "rack-2"},
+				omitID:  "rack-2",
+				rackHealth: map[string]*corev1.HealthReport{
+					"rack-1": rackLeak,
+				},
+			},
+			want:        []string{"rack-1"},
+			wantBatches: [][]string{{"rack-1", "rack-2"}},
+		},
+		{
+			name: "returns detail RPC failure",
+			fake: &recordingForgeClient{
+				rackIDs:  []string{"rack-1"},
+				failCall: 1,
+			},
+			wantErr:     "injected rack lookup failure",
+			wantBatches: [][]string{{"rack-1"}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newRecordingGRPCClient(test.fake)
+			if test.grpcTimeout > 0 {
+				client.grpcTimeout = test.grpcTimeout
+			}
+
+			got, err := client.GetLeakingRackIds(context.Background())
+
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				require.Nil(t, got)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, test.want, got)
+			}
+			require.Len(t, test.fake.rackSearches, 1)
+			require.Equal(t, test.wantBatches, test.fake.rackBatches)
+		})
+	}
 }
 
 func TestGrpcClient_GetMachines(t *testing.T) {
@@ -465,6 +637,14 @@ func TestGrpcClient_ByIDLookupsHonorCoreBatchLimit(t *testing.T) {
 			batchCalls: func(fake *recordingForgeClient) [][]string { return fake.switchBatches },
 		},
 		{
+			name: "switch runtime statuses",
+			invoke: func(ctx context.Context, client *grpcClient, ids []string) (int, error) {
+				values, err := client.FindSwitchRuntimeStatuses(ctx, ids)
+				return len(values), err
+			},
+			batchCalls: func(fake *recordingForgeClient) [][]string { return fake.switchBatches },
+		},
+		{
 			name: "switch NVOS IPs",
 			invoke: func(ctx context.Context, client *grpcClient, ids []string) (int, error) {
 				values, err := client.FindSwitchNvosIPs(ctx, ids)
@@ -496,6 +676,22 @@ func TestGrpcClient_ByIDLookupsHonorCoreBatchLimit(t *testing.T) {
 			},
 			batchCalls: func(fake *recordingForgeClient) [][]string { return fake.shelfBatches },
 		},
+		{
+			name: "power shelf runtime statuses",
+			invoke: func(ctx context.Context, client *grpcClient, ids []string) (int, error) {
+				values, err := client.FindPowerShelfRuntimeStatuses(ctx, ids)
+				return len(values), err
+			},
+			batchCalls: func(fake *recordingForgeClient) [][]string { return fake.shelfBatches },
+		},
+		{
+			name: "rack health reports",
+			invoke: func(ctx context.Context, client *grpcClient, ids []string) (int, error) {
+				values, err := client.FindRackHealthReports(ctx, ids)
+				return len(values), err
+			},
+			batchCalls: func(fake *recordingForgeClient) [][]string { return fake.rackBatches },
+		},
 	}
 
 	for _, test := range tests {
@@ -513,6 +709,131 @@ func TestGrpcClient_ByIDLookupsHonorCoreBatchLimit(t *testing.T) {
 			assert.Equal(t, expectedBatches, test.batchCalls(fake))
 			require.Len(t, fake.versionRequests, 1)
 			assert.True(t, fake.versionRequests[0].GetDisplayConfig())
+		})
+	}
+}
+
+func TestGrpcClient_FindRackGroupIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ids     []string
+		omit    string
+		delay   time.Duration
+		want    map[string]string
+		wantErr bool
+	}{
+		{name: "empty"},
+		{name: "persisted group and undiscovered rack", ids: []string{"present", "missing"}, omit: "missing", want: map[string]string{"present": "group-present"}},
+		{name: "whole sequence budget prevents call starvation", ids: []string{"a", "b", "c"}, delay: 20 * time.Millisecond, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &recordingForgeClient{omitID: tc.omit, rackDelay: tc.delay, runtimeConfig: &corev1.RuntimeConfig{MaxFindByIds: 1}}
+			client := newRecordingGRPCClient(fake)
+			if tc.delay > 0 {
+				client.grpcTimeout = 30 * time.Millisecond
+			}
+			got, err := client.FindRackGroupIDs(t.Context(), tc.ids)
+			if tc.wantErr {
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				assert.Nil(t, got)
+				assert.Less(t, len(fake.rackBatches), len(tc.ids))
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestGrpcClient_RuntimeHealthReports(t *testing.T) {
+	tests := []struct {
+		name   string
+		invoke func(context.Context, *grpcClient) (*types.HealthReport, error)
+	}{
+		{
+			name: "switch",
+			invoke: func(ctx context.Context, client *grpcClient) (*types.HealthReport, error) {
+				values, err := client.FindSwitchRuntimeStatuses(ctx, []string{"resource-1"})
+				return values["resource-1"].Health, err
+			},
+		},
+		{
+			name: "power shelf",
+			invoke: func(ctx context.Context, client *grpcClient) (*types.HealthReport, error) {
+				values, err := client.FindPowerShelfRuntimeStatuses(ctx, []string{"resource-1"})
+				return values["resource-1"].Health, err
+			},
+		},
+		{
+			name: "rack",
+			invoke: func(ctx context.Context, client *grpcClient) (*types.HealthReport, error) {
+				values, err := client.FindRackHealthReports(ctx, []string{"resource-1"})
+				return values["resource-1"], err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			report, err := test.invoke(context.Background(), newRecordingGRPCClient(&recordingForgeClient{}))
+
+			require.NoError(t, err)
+			require.NotNil(t, report)
+			assert.Equal(t, "health-resource-1", report.Source)
+		})
+	}
+}
+
+func TestGrpcClient_RuntimeLookupsAllowMissingResources(t *testing.T) {
+	tests := []struct {
+		name   string
+		invoke func(context.Context, *grpcClient, []string) (map[string]string, error)
+	}{
+		{
+			name: "switch",
+			invoke: func(ctx context.Context, client *grpcClient, ids []string) (map[string]string, error) {
+				statuses, err := client.FindSwitchRuntimeStatuses(ctx, ids)
+				result := make(map[string]string, len(statuses))
+				for id, status := range statuses {
+					result[id] = status.Health.Source
+				}
+				return result, err
+			},
+		},
+		{
+			name: "power shelf",
+			invoke: func(ctx context.Context, client *grpcClient, ids []string) (map[string]string, error) {
+				statuses, err := client.FindPowerShelfRuntimeStatuses(ctx, ids)
+				result := make(map[string]string, len(statuses))
+				for id, status := range statuses {
+					result[id] = status.Health.Source
+				}
+				return result, err
+			},
+		},
+		{
+			name: "rack",
+			invoke: func(ctx context.Context, client *grpcClient, ids []string) (map[string]string, error) {
+				reports, err := client.FindRackHealthReports(ctx, ids)
+				result := make(map[string]string, len(reports))
+				for id, report := range reports {
+					result[id] = report.Source
+				}
+				return result, err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &recordingForgeClient{omitID: "missing"}
+
+			result, err := test.invoke(
+				context.Background(), newRecordingGRPCClient(fake), []string{"present", "missing"},
+			)
+
+			require.NoError(t, err)
+			assert.Equal(t, map[string]string{"present": "health-present"}, result)
 		})
 	}
 }
@@ -735,6 +1056,15 @@ func TestValidateByIDsResponse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateByIDsPartialResponse(t *testing.T) {
+	require.NoError(t, validateByIDsPartialResponse(
+		[]string{"a", "missing"}, []string{"a"}, "FindByIds",
+	))
+	require.ErrorContains(t, validateByIDsPartialResponse(
+		[]string{"a"}, []string{"unexpected"}, "FindByIds",
+	), "FindByIds returned unrequested ID: unexpected")
 }
 
 func TestGrpcClient_ByIDLookupsRejectInvalidReturnedIdentitiesBeforeProjection(t *testing.T) {

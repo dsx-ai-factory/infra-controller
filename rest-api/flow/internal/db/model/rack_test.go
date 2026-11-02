@@ -15,6 +15,8 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 type testRack struct {
@@ -259,4 +261,79 @@ func TestGetRacksByIDsIncludingDeleted(t *testing.T) {
 	includingDeleted, err := GetRacksByIDsIncludingDeleted(ctx, pool.DB, ids, false)
 	require.NoError(t, err)
 	require.Len(t, includingDeleted, 2)
+}
+
+func TestGetRackOperationStatuses(t *testing.T) {
+	ctx := context.Background()
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("Skipping integration test: no DB environment specified")
+	}
+
+	dbConf, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	pool, err := utils.UnitTestDB(ctx, t, dbConf)
+	require.NoError(t, err)
+
+	racks := []Rack{
+		{Name: "ready-rack"},
+		{Name: "error-rack"},
+		{Name: "missing-status-rack"},
+		{Name: "empty-rack"},
+		{Name: "deleted-component-rack"},
+	}
+	for i := range racks {
+		require.NoError(t, racks[i].Create(ctx, pool.DB))
+	}
+
+	component := func(rackIndex int, name string, componentType devicetypes.ComponentType, phase *types.Phase) Component {
+		var status *types.ComponentOperationStatus
+		if phase != nil {
+			status = &types.ComponentOperationStatus{Phase: *phase}
+		}
+		return Component{
+			Name:   name,
+			Type:   devicetypes.ComponentTypeToString(componentType),
+			RackID: racks[rackIndex].ID,
+			Status: status,
+		}
+	}
+	phase := func(value types.Phase) *types.Phase { return &value }
+	components := []Component{
+		component(0, "ready", devicetypes.ComponentTypeCompute, phase(types.PhaseReady)),
+		// Unsupported component types do not participate in rack operability.
+		component(0, "tor", devicetypes.ComponentTypeToRSwitch, nil),
+		component(1, "ready", devicetypes.ComponentTypeCompute, phase(types.PhaseReady)),
+		component(1, "error", devicetypes.ComponentTypeNVSwitch, phase(types.PhaseError)),
+		component(2, "missing", devicetypes.ComponentTypePowerShelf, nil),
+		component(4, "ready", devicetypes.ComponentTypeCompute, phase(types.PhaseReady)),
+		component(4, "deleted-error", devicetypes.ComponentTypeNVSwitch, phase(types.PhaseError)),
+	}
+	for i := range components {
+		require.NoError(t, components[i].Create(ctx, pool.DB))
+	}
+	require.NoError(t, components[len(components)-1].Delete(ctx, pool.DB))
+
+	rackIDs := make([]uuid.UUID, 0, len(racks))
+	for i := range racks {
+		rackIDs = append(rackIDs, racks[i].ID)
+	}
+	got, err := GetRackOperationStatuses(ctx, pool.DB, rackIDs)
+	require.NoError(t, err)
+
+	cases := []struct {
+		name      string
+		rackIndex int
+		want      types.Phase
+	}{
+		{name: "unsupported component excluded", rackIndex: 0, want: types.PhaseReady},
+		{name: "error precedes ready", rackIndex: 1, want: types.PhaseError},
+		{name: "missing status", rackIndex: 2, want: types.PhaseUnknown},
+		{name: "no supported components", rackIndex: 3, want: types.PhaseUnknown},
+		{name: "deleted component excluded", rackIndex: 4, want: types.PhaseReady},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, got[racks[tc.rackIndex].ID])
+		})
+	}
 }

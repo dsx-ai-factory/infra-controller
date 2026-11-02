@@ -16,6 +16,12 @@
  */
 
 mod firmware {
+    #[cfg(target_os = "linux")]
+    mod cli_fixture;
     mod test_config;
     mod test_credentials;
+    #[cfg(target_os = "linux")]
+    mod test_flash_cli;
+    #[cfg(target_os = "linux")]
+    mod test_signal_cli;
 }

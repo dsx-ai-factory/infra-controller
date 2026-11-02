@@ -66,6 +66,14 @@ mod metrics;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_api_server;
 mod tls;
+mod tracing_setup;
+
+/// Fixtures that register the DHCP certificate-expiry gauge and alias without
+/// starting the Kea hook.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use crate::metrics::metrics_setup_with_certificate_expiry;
+}
 
 static CONFIG: Lazy<RwLock<CarbideDhcpContext>> =
     Lazy::new(|| RwLock::new(CarbideDhcpContext::default()));
@@ -94,7 +102,7 @@ struct CarbideDhcpContext {
 
 // The request/drop/reply counters are `carbide-instrument` events declared in
 // `metrics.rs` and resolve from the global meter; this struct holds only the
-// state the certificate-expiry gauge reports.
+// state reported by the certificate-expiry gauge and its alias.
 #[derive(Debug, Clone)]
 struct CarbideDhcpMetrics {
     forge_client_config: ForgeClientConfig,
@@ -373,7 +381,7 @@ pub unsafe extern "C" fn hook_set_config_ntp_servers_ipv6(servers: *const c_char
     }
 }
 
-/// Take the optional IPv6 provisioning-server address reserved for future DHCPv6 boot options.
+/// Take the optional IPv6 provisioning-server address for DHCPv6 HTTP boot URLs.
 ///
 /// # Safety
 /// Function is unsafe as it dereferences a raw pointer given to it. Caller is responsible
@@ -410,16 +418,25 @@ pub unsafe extern "C" fn hook_set_config_provisioning_server_ipv6(
     }
 }
 
-/// Set whether DHCPv6 rapid-commit rendering is enabled.
-///
-/// Rapid commit stays disabled by default for this milestone; the setter is
-/// present so the Kea parameter is validated and ready for the later gate.
+/// Set whether DHCPv6 rapid commit is enabled.
 #[unsafe(no_mangle)]
 pub extern "C" fn hook_set_config_rapid_commit_v6(enabled: bool) {
-    if enabled {
-        log::warn!("DHCPv6 rapid-commit is configured but remains disabled for this milestone");
+    match CONFIG.write() {
+        Ok(mut config) => config.rapid_commit_v6 = enabled,
+        Err(error) => log::error!("failed to set DHCPv6 rapid-commit configuration: {error}"),
     }
-    CONFIG.write().unwrap().rapid_commit_v6 = false;
+}
+
+/// Return whether DHCPv6 rapid commit is enabled.
+#[unsafe(no_mangle)]
+pub extern "C" fn hook_get_config_rapid_commit_v6() -> bool {
+    CONFIG
+        .read()
+        .map(|config| config.rapid_commit_v6)
+        .unwrap_or_else(|error| {
+            log::error!("failed to read DHCPv6 rapid-commit configuration: {error}");
+            false
+        })
 }
 
 /// Take the config parameter from Kea and configure it as our metrics endpoint.

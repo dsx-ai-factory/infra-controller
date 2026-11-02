@@ -32,6 +32,9 @@ ZSTD_ERR="/tmp/rootfs.zstd.err"
 CPIO_ERR="/tmp/rootfs.cpio.err"
 MOUNT_ERR="/tmp/rootfs.mount.err"
 
+NEXTROOT_CLOUD_CFG_DIR="/run/nextroot/etc/cloud/cloud.cfg.d"
+NEXTROOT_CLOUD_NETWORK_CFG="${NEXTROOT_CLOUD_CFG_DIR}/99-forge-network.cfg"
+
 send_msg() {
 	for dest in ${OUTCONSOLE}
 	do
@@ -226,6 +229,12 @@ then
         prepare_rootfs "${newrootfsurl}"
         if (( $? == 0 ))
         then
+          if ! /opt/forge/forge-scout-network.sh handoff /run/nextroot
+          then
+            send_msg "LOADER: Failed to prepare Scout networking in new root; retrying"
+            sleep 1
+            continue
+          fi
           cp "${ROOTFS_INFO_TMP}" "${ROOTFS_INFO_FILE}"
           measure_rootfs
           DONE=1
@@ -243,10 +252,40 @@ then
           sleep 1
       fi
     done
-    
+
+    send_msg "LOADER: Disabling cloud-init network configuration in new root"
+    if mkdir -p "${NEXTROOT_CLOUD_CFG_DIR}" &&
+       printf '%s\n' \
+         'network:' \
+         '  config: disabled' > "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" &&
+       chmod 0644 "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" &&
+       mv -f "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" "${NEXTROOT_CLOUD_NETWORK_CFG}"
+    then
+      send_msg "LOADER: Disabled cloud-init network configuration in new root"
+    else
+      rm -f "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp"
+      send_msg "LOADER: Failed to disable cloud-init network configuration; continuing"
+    fi
+
     send_msg "LOADER: Cleaning up & switching"
     rm -f "${ROOTFS_DIGEST_FILE}" "${ROOTFS_DIGEST_FIFO}" "${ROOTFS_INFO_TMP}"
     # We need this so that subsequent reboots don't call soft-reboot and put us in a loop
     echo "export SYSTEMCTL_SKIP_AUTO_SOFT_REBOOT=1" >>/run/nextroot/etc/environment
+
+    send_msg "LOADER: Closing D-Bus before soft reboot"
+    if systemctl stop dbus.service dbus.socket
+    then
+      send_msg "LOADER: D-Bus socket closed"
+    else
+      send_msg "LOADER: Failed to close D-Bus socket; continuing"
+    fi
+
     systemctl soft-reboot
+elif [ -x /opt/forge/forge-scout-network.sh ]
+then
+    # Early policy also applies when the loader is kept as a debug image.
+    # Restore broad networking here if its selected NIC never becomes usable.
+    send_msg "LOADER: Checking boot NIC while staying in debug image"
+    /opt/forge/forge-scout-network.sh ||
+        send_msg "LOADER: Scout NIC filtering incomplete; staying in debug image"
 fi

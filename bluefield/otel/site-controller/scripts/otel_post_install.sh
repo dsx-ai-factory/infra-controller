@@ -44,8 +44,34 @@ if ! jq -e '
     exit 1
 fi
 
-OOB_IP=$(sudo ip -json addr show oob_net0  | jq -r '.[].addr_info[] | select(.family == "inet").local')
-EXPECTED_HOSTNAME="$(echo $OOB_IP | tr . -).$SITE.$DOMAIN"
+# Prefer IPv4 and match the hostname format used by `nico-api` IP-based naming.
+# Temporary or unusable addresses must not rename the DPU.
+HOST_LABEL=$(sudo ip -json addr show oob_net0 | jq -r '
+    [.[].addr_info[] | select(
+        (.family == "inet" or .family == "inet6") and .scope == "global" and
+        .temporary != true and .tentative != true and
+        .dadfailed != true and .deprecated != true
+    )] | .[].local
+' | python3 -c '
+import ipaddress
+import sys
+
+addresses = [ipaddress.ip_address(line.strip()) for line in sys.stdin]
+if addresses:
+    address = min(addresses, key=lambda ip: (ip.version, int(ip)))
+    print(address.exploded.replace(".", "-").replace(":", "-"))
+')
+if [[ -z "$HOST_LABEL" ]]; then
+    echo "no usable address found on oob_net0" >&2
+    exit 1
+fi
+
+EXPECTED_HOSTNAME="$HOST_LABEL.$SITE.$DOMAIN"
+# `hostnamectl` can truncate names beyond Linux's static hostname limit.
+if (( ${#EXPECTED_HOSTNAME} > 64 )); then
+    echo "hostname exceeds Linux's 64-character limit: $EXPECTED_HOSTNAME" >&2
+    exit 1
+fi
 ACTUAL_HOSTNAME=$(hostname)
 SCRIPT_DIR=/usr/local/sbin
 

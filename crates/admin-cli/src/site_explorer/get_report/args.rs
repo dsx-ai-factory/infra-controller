@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::net::IpAddr;
+
 use clap::{ArgGroup, Parser};
 
 #[derive(Parser, Debug, PartialEq)]
@@ -60,7 +62,7 @@ Show only endpoints not yet paired to a managed host:
 ")]
 pub(crate) struct EndpointInfo {
     #[clap(help = "BMC IP address of Endpoint.")]
-    pub(crate) address: Option<String>,
+    pub(crate) address: Option<IpAddr>,
 
     #[clap(
         short,
@@ -99,7 +101,7 @@ Filter managed hosts by vendor:
 ")]
 pub(crate) struct ManagedHostInfo {
     #[clap(help = "BMC IP address of host or DPU")]
-    pub(super) address: Option<String>,
+    pub(super) address: Option<IpAddr>,
 
     #[clap(
         short,

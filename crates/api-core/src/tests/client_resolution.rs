@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::machine::PredictedHostMachineId;
 use common::api_fixtures::{
     TEST_RMS_RACK_PROFILE_ID, TestEnv, TestEnvOverrides, create_managed_host,
     create_managed_host_with_config, create_test_env, create_test_env_with_overrides,
@@ -22,7 +23,11 @@ use common::api_fixtures::{
 };
 use ipnetwork::IpNetwork;
 use model::expected_machine::ExpectedMachineData;
+use model::instance::config::network::{
+    InstanceNetworkConfig, InstanceNetworkConfigUpdate, InterfaceFunctionId,
+};
 use model::machine::{InstanceState, ManagedHostState, SpdmMeasuringState};
+use model::machine_interface::InterfaceType;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
 use tonic::{Code, IntoRequest};
@@ -30,11 +35,10 @@ use tonic::{Code, IntoRequest};
 use crate::CarbideError;
 use crate::handlers::resolve_machine_interface_for_test;
 use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
+use crate::test_support::mac_address_pool::DPU_OOB_MAC_ADDRESS_POOL;
 use crate::test_support::network_segment::{FIXTURE_TENANT_ORG_ID, create_default_flat_vpc};
 use crate::tests::common;
-use crate::tests::common::api_fixtures::instance::{
-    default_os_config, default_tenant_config, single_interface_network_config,
-};
+use crate::tests::common::api_fixtures::instance::default_os_config;
 use crate::tests::common::api_fixtures::network_segment::{
     FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY,
     create_host_inband_network_segment,
@@ -121,38 +125,42 @@ async fn test_resolve_machine_interface_via_direct_admin_ip(pool: sqlx::PgPool) 
     assert_eq!(resolved.id, expected_interface_id);
 }
 
-// A client_ip that maps to a tenant-allocated instance_address (rather
-// than a machine_interface_addresses entry) should resolve to the
-// host's admin machine_interface via instance -> host_machine_id ->
-// host_interfaces. This is the "PXE-booting an assigned host over its
-// tenant network" path that the find_by_ip fallback was added for.
+// Tenant addresses use their configured PF. A VF or an allocation without
+// matching configuration keeps the host's primary-interface fallback.
 #[crate::sqlx_test]
 async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
-    let mh = create_managed_host(&env).await;
+    let mh =
+        create_managed_host_with_config(&env, env.managed_host_config().with_dpu_count(2)).await;
 
     let mut txn = env.pool.begin().await.unwrap();
-    let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[mh.host().id])
-        .await
-        .unwrap();
-    let expected_interface_id = interfaces[&mh.host().id][0].id;
+    let host = mh.host().db_machine(&mut txn).await;
+    let expected_interface_id = host
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| interface.primary_interface)
+        .expect("managed host must have a primary interface")
+        .id;
+    let secondary_dpu = host
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| {
+            !interface.primary_interface && interface.attached_dpu_machine_id.is_some()
+        })
+        .and_then(|interface| interface.attached_dpu_machine_id)
+        .expect("two-DPU host must have a secondary interface");
+    let secondary_locator = host.get_device_locator_for_dpu_id(&secondary_dpu).unwrap();
     txn.rollback().await.unwrap();
 
-    let config = rpc::InstanceConfig {
-        tenant: Some(default_tenant_config()),
-        os: Some(default_os_config()),
-        network: Some(single_interface_network_config(segment_id)),
-        infiniband: None,
-        network_security_group_id: None,
-        dpu_extension_services: None,
-        nvlink: None,
-        spxconfig: None,
-        power_profile: None,
-    };
-    let tinstance = mh.instance_builer(&env).config(config).build().await;
+    let tinstance = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
 
-    // Look up the tenant IP carbide-api allocated to the instance.
     let mut txn = env.pool.begin().await.unwrap();
     let instance_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
         txn.as_mut(),
@@ -165,15 +173,243 @@ async fn test_resolve_machine_interface_via_instance_address(pool: sqlx::PgPool)
         panic!("instance should have one tenant address on the segment")
     };
     let tenant_ip = inst_addr.address;
-
-    let resolved = resolve_machine_interface_for_test(txn.as_mut(), tenant_ip)
-        .await
-        .expect("tenant IP should resolve to the host's admin machine_interface");
+    let network = tinstance.db_instance(&mut txn).await.config.network;
+    assert!(network.interfaces[0].device_locator.is_none());
     txn.rollback().await.unwrap();
 
-    // The resolved interface is the host's admin interface -- the same one
-    // we'd have hit if the request had come in on the admin IP directly.
-    assert_eq!(resolved.id, expected_interface_id);
+    let mut secondary_pf = network.clone();
+    secondary_pf.interfaces[0].device_locator = Some(secondary_locator);
+    let mut secondary_vf = secondary_pf.clone();
+    secondary_vf.interfaces[0].function_id = InterfaceFunctionId::Virtual { id: 1 };
+    let pending = InstanceNetworkConfigUpdate {
+        old_config: secondary_pf,
+        new_config: network.clone(),
+    };
+
+    // Keep the allocated address live while changing the persisted descriptions.
+    // A retained old PF must participate even after the new primary config is live.
+    for (case, network, pending, expected) in [
+        (
+            "omitted PF locator",
+            network.clone(),
+            None,
+            Ok(expected_interface_id),
+        ),
+        (
+            "sole VF on secondary",
+            secondary_vf,
+            None,
+            Ok(expected_interface_id),
+        ),
+        (
+            "owner without matching config",
+            InstanceNetworkConfig::default(),
+            None,
+            Ok(expected_interface_id),
+        ),
+        (
+            "retained old PF conflicts with live primary",
+            network,
+            Some(pending),
+            Err(Code::FailedPrecondition),
+        ),
+    ] {
+        sqlx::query(
+            "UPDATE instances SET network_config = $1, update_network_config_request = $2 WHERE id = $3",
+        )
+        .bind(sqlx::types::Json(network))
+        .bind(pending.map(sqlx::types::Json))
+        .bind(tinstance.id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+        let mut txn = env.pool.begin().await.unwrap();
+        let resolved = resolve_machine_interface_for_test(txn.as_mut(), tenant_ip)
+            .await
+            .map(|interface| interface.id)
+            .map_err(|error| {
+                let status = tonic::Status::from(error);
+                assert!(
+                    status
+                        .message()
+                        .contains("conflicting retained interface configurations"),
+                    "{case}: {status}"
+                );
+                status.code()
+            });
+        txn.rollback().await.unwrap();
+        assert_eq!(resolved, expected, "{case}");
+    }
+}
+
+#[crate::sqlx_test]
+async fn test_domainless_dpu_cloud_init_rejects_custom_override(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Allowing host discovery without a domain must not let a custom override
+    // bypass the domain requirement for DPU provisioning.
+    let env = create_test_env(pool).await;
+    let dpu_id =
+        common::api_fixtures::dpu::create_dpu_machine(&env, &env.managed_host_config()).await;
+
+    let mut txn = env.pool.begin().await?;
+    let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[dpu_id]).await?;
+    let [interface] = interfaces[&dpu_id].as_slice() else {
+        panic!("fixture DPU must have one non-BMC interface")
+    };
+    assert_eq!(interface.machine_id, Some(dpu_id.into()));
+    assert!(interface.domain_id.is_some());
+    let interface_id = interface.id;
+    let client_ip = interface.addresses[0];
+    let custom_user_data = "#cloud-config\ncustom-user-data";
+
+    db::machine_boot_override::create(
+        txn.as_mut(),
+        interface_id,
+        None,
+        Some(custom_user_data.to_string()),
+    )
+    .await?
+    .expect("fixture must install the custom cloud-init override");
+    txn.commit().await?;
+
+    let cloud_init = env
+        .api
+        .get_cloud_init_instructions(
+            rpc::forge::CloudInitInstructionsRequest {
+                ip: client_ip.to_string(),
+            }
+            .into_request(),
+        )
+        .await?
+        .into_inner();
+    assert_eq!(
+        cloud_init.custom_cloud_init.as_deref(),
+        Some(custom_user_data)
+    );
+    let domain = cloud_init.discovery_instructions.unwrap().domain.unwrap();
+    let Some(rpc::forge::pxe_domain::Domain::NewDomain(domain)) = domain.domain else {
+        panic!("DPU discovery must return its domain")
+    };
+    assert_eq!(domain.id, interface.domain_id);
+
+    sqlx::query("UPDATE machine_interfaces SET domain_id = NULL WHERE id = $1")
+        .bind(interface_id)
+        .execute(&env.pool)
+        .await?;
+
+    let status = env
+        .api
+        .get_cloud_init_instructions(
+            rpc::forge::CloudInitInstructionsRequest {
+                ip: client_ip.to_string(),
+            }
+            .into_request(),
+        )
+        .await
+        .expect_err("a custom override must not bypass the DPU domain requirement");
+    assert_eq!(status.code(), Code::Internal);
+    assert_eq!(
+        status.message(),
+        format!(
+            "internal error: machine interface did not have an associated domain {interface_id}"
+        )
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_domainless_cloud_init_requires_owned_host_data(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let dpu_id = common::api_fixtures::dpu::create_dpu_machine(&env, &host_config).await;
+    let host_interface_id =
+        common::api_fixtures::host::host_discover_dhcp(&env, &host_config, &dpu_id).await;
+    let unowned_interface_id = common::api_fixtures::dpu::dpu_discover_dhcp(
+        &env,
+        &DPU_OOB_MAC_ADDRESS_POOL.allocate().to_string(),
+    )
+    .await;
+
+    let mut txn = env.pool.begin().await?;
+    let host = db::machine_interface::find_one(txn.as_mut(), host_interface_id).await?;
+    let predicted_host_id = PredictedHostMachineId::try_from(host.machine_id.unwrap())?;
+    assert_eq!(host.interface_type, InterfaceType::Data);
+    let bmc_interfaces =
+        db::machine_interface::find_by_mac_address(txn.as_mut(), host_config.bmc_mac_address)
+            .await?;
+    let [bmc] = bmc_interfaces.as_slice() else {
+        panic!("fixture must have one host BMC interface")
+    };
+    assert_eq!(bmc.machine_id, host.machine_id);
+    assert_eq!(bmc.interface_type, InterfaceType::Bmc);
+    let unowned = db::machine_interface::find_one(txn.as_mut(), unowned_interface_id).await?;
+    assert_eq!(unowned.machine_id, None);
+    assert_eq!(unowned.interface_type, InterfaceType::Data);
+
+    let custom_user_data = "#cloud-config\nhost-discovery-override";
+    db::machine_boot_override::create(
+        txn.as_mut(),
+        host.id,
+        None,
+        Some(custom_user_data.to_string()),
+    )
+    .await?
+    .expect("fixture must install the host cloud-init override");
+    txn.commit().await?;
+
+    for (case, interface, expected_metadata_id) in [
+        ("predicted host Data", &host, Some(predicted_host_id)),
+        ("host BMC", bmc, None),
+        ("unowned Data", &unowned, None),
+    ] {
+        sqlx::query("UPDATE machine_interfaces SET domain_id = NULL WHERE id = $1")
+            .bind(interface.id)
+            .execute(&env.pool)
+            .await?;
+        let response = env
+            .api
+            .get_cloud_init_instructions(
+                rpc::forge::CloudInitInstructionsRequest {
+                    ip: interface.addresses[0].to_string(),
+                }
+                .into_request(),
+            )
+            .await;
+
+        if let Some(expected_metadata_id) = expected_metadata_id {
+            let cloud_init = response.expect(case).into_inner();
+            assert_eq!(
+                cloud_init.custom_cloud_init.as_deref(),
+                Some(custom_user_data)
+            );
+            let discovery = cloud_init.discovery_instructions.expect(case);
+            assert_eq!(discovery.domain, None);
+            assert_eq!(
+                discovery.machine_interface.expect(case).id,
+                Some(interface.id)
+            );
+            assert_eq!(
+                cloud_init.metadata.expect(case).instance_id,
+                expected_metadata_id.to_string()
+            );
+        } else {
+            let status = response.expect_err(case);
+            assert_eq!(status.code(), Code::Internal, "{case}");
+            assert_eq!(
+                status.message(),
+                format!(
+                    "internal error: machine interface did not have an associated domain {}",
+                    interface.id
+                ),
+                "{case}"
+            );
+        }
+    }
+    Ok(())
 }
 
 // A client_ip that isn't in either table should NotFound cleanly.

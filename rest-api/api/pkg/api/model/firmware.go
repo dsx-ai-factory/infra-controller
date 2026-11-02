@@ -4,7 +4,10 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
@@ -28,7 +31,7 @@ type APIUpdateFirmwareRequest struct {
 	// flow/pkg/common/firmwarecomponents for the resolution logic and
 	// helpers like SupportedNICoNVSwitchNames.
 	// Empty/nil means "update the default targets" for the
-	// compute-tray-internal targets. When non-empty, requires Version.
+	// compute-tray-internal targets.
 	//
 	// On compute trays, the special target "dpu" requests DPU
 	// reprovisioning on each matched host. Unlike every other target,
@@ -50,6 +53,9 @@ type APIUpdateFirmwareRequest struct {
 	// rack-scoped components) are reported as not ready by their persisted
 	// status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// OverrideVersionCheck requests that the component backend apply firmware
+	// without enforcing version-based skip or downgrade decisions.
+	OverrideVersionCheck bool `json:"overrideVersionCheck"`
 }
 
 // Validate validates the firmware update request
@@ -62,7 +68,7 @@ func (r *APIUpdateFirmwareRequest) Validate() error {
 	if err != nil {
 		return err
 	}
-	return validateFirmwareTargets(r.Targets, r.Version)
+	return validateFirmwareTargets(r.Targets)
 }
 
 // APIFirmwareAuthenticationData selects one shared firmware download
@@ -70,6 +76,40 @@ func (r *APIUpdateFirmwareRequest) Validate() error {
 type APIFirmwareAuthenticationData struct {
 	Shared       *string                                    `json:"shared"`
 	PerComponent *APIPerComponentFirmwareAuthenticationData `json:"perComponent"`
+}
+
+// UnknownFirmwareAuthenticationFieldError identifies fields forbidden by the
+// closed firmware authentication-data schemas.
+type UnknownFirmwareAuthenticationFieldError struct {
+	Path   string
+	Fields []string
+}
+
+// Error returns a credential-free description suitable for a client response.
+func (e *UnknownFirmwareAuthenticationFieldError) Error() string {
+	quotedFields := make([]string, 0, len(e.Fields))
+	for _, field := range e.Fields {
+		quotedFields = append(quotedFields, fmt.Sprintf("%q", field))
+	}
+	if len(quotedFields) == 1 {
+		return fmt.Sprintf("%s contains unknown field %s", e.Path, quotedFields[0])
+	}
+	return fmt.Sprintf("%s contains unknown fields: %s", e.Path, strings.Join(quotedFields, ", "))
+}
+
+// UnmarshalJSON rejects fields outside the public authentication-data schema.
+func (a *APIFirmwareAuthenticationData) UnmarshalJSON(data []byte) error {
+	if err := rejectUnknownFirmwareAuthenticationFields(
+		data,
+		"authenticationData",
+		"shared",
+		"perComponent",
+	); err != nil {
+		return err
+	}
+
+	type firmwareAuthenticationData APIFirmwareAuthenticationData
+	return json.Unmarshal(data, (*firmwareAuthenticationData)(a))
 }
 
 // Validate requires exactly one authentication-data representation.
@@ -104,6 +144,46 @@ type APIPerComponentFirmwareAuthenticationData struct {
 	Compute    *string `json:"compute"`
 	NVSwitch   *string `json:"nvswitch"`
 	PowerShelf *string `json:"powershelf"`
+}
+
+// UnmarshalJSON rejects fields outside the supported firmware tray types.
+func (a *APIPerComponentFirmwareAuthenticationData) UnmarshalJSON(data []byte) error {
+	if err := rejectUnknownFirmwareAuthenticationFields(
+		data,
+		"authenticationData.perComponent",
+		"compute",
+		"nvswitch",
+		"powershelf",
+	); err != nil {
+		return err
+	}
+
+	type perComponentFirmwareAuthenticationData APIPerComponentFirmwareAuthenticationData
+	return json.Unmarshal(data, (*perComponentFirmwareAuthenticationData)(a))
+}
+
+func rejectUnknownFirmwareAuthenticationFields(data []byte, path string, knownFields ...string) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
+	known := make(map[string]struct{}, len(knownFields))
+	for _, field := range knownFields {
+		known[field] = struct{}{}
+	}
+
+	unknown := make([]string, 0)
+	for field := range fields {
+		if _, ok := known[field]; !ok {
+			unknown = append(unknown, field)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return &UnknownFirmwareAuthenticationFieldError{Path: path, Fields: unknown}
 }
 
 // ToProto preserves whether each optional per-component value was provided.
@@ -158,6 +238,9 @@ type APIBatchRackFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// OverrideVersionCheck applies the firmware version-check override to every
+	// task spawned by this batch. See APIUpdateFirmwareRequest for semantics.
+	OverrideVersionCheck bool `json:"overrideVersionCheck"`
 }
 
 // Validate checks required fields.
@@ -179,7 +262,7 @@ type APIBatchTrayFirmwareUpdateRequest struct {
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
 	// Targets, when non-empty, restricts the update to a subset of
 	// firmware sub-parts within each matched tray. Same semantics as the
-	// single-tray variant. When non-empty, requires Version.
+	// single-tray variant.
 	Targets []string `json:"targets"`
 	// RuleID, when set, pins every task spawned by this batch to the named
 	// Operation Rule.
@@ -187,6 +270,9 @@ type APIBatchTrayFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// OverrideVersionCheck applies the firmware version-check override to every
+	// task spawned by this batch. See APIUpdateFirmwareRequest for semantics.
+	OverrideVersionCheck bool `json:"overrideVersionCheck"`
 }
 
 // Validate checks required fields and filter constraints.
@@ -204,14 +290,13 @@ func (r *APIBatchTrayFirmwareUpdateRequest) Validate() error {
 			return err
 		}
 	}
-	return validateFirmwareTargets(r.Targets, r.Version)
+	return validateFirmwareTargets(r.Targets)
 }
 
-// validateFirmwareTargets enforces the cross-field constraint that a
-// firmware-target subset selection is only meaningful when a target version
-// is also supplied. Per-tray-type name validation is delegated to Flow,
-// where the mapping from string to component-manager enum lives.
-func validateFirmwareTargets(targets []string, version *string) error {
+// validateFirmwareTargets rejects empty target names. Per-tray-type name
+// validation is delegated to Flow, where the mapping from string to
+// component-manager enum lives.
+func validateFirmwareTargets(targets []string) error {
 	if len(targets) == 0 {
 		return nil
 	}
@@ -219,9 +304,6 @@ func validateFirmwareTargets(targets []string, version *string) error {
 		if t == "" {
 			return fmt.Errorf("targets must not contain empty strings")
 		}
-	}
-	if version == nil || *version == "" {
-		return fmt.Errorf("targets requires version to be set")
 	}
 	return nil
 }

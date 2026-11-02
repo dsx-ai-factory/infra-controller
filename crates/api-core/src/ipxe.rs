@@ -26,8 +26,8 @@ use db::{self};
 use mac_address::MacAddress;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
-    DpuInitState, FailureCause, FailureDetails, HostReprovisionState, InstanceState,
-    ManagedHostState, MeasuringState, ReprovisionState, ValidationState,
+    DpuInitState, FailureCause, FailureDetails, InstanceState, ManagedHostState, MeasuringState,
+    ReprovisionState, ValidationState,
 };
 use sqlx::PgConnection;
 
@@ -307,6 +307,23 @@ exit ||
 "#
             )
         };
+        let exit_instructions_dpu = |machine_id: MachineId,
+                                     interface_id: MachineInterfaceId,
+                                     state: &ManagedHostState|
+         -> String {
+            format!(
+                r#"
+echo Machine ID: {machine_id}
+echo Interface ID: {interface_id}
+echo Current state: {state}
+echo This state assumes an OS is provisioned and will exit into the OS in 5 seconds. To re-run iPXE instructions and OS installation, trigger a reboot request with flag rebootWithCustomIpxe/boot_with_custom_ipxe set. ||
+sleep 5 ||
+sanboot --no-describe --drive 0x80 ||
+sanboot --no-describe --drive 0x81 ||
+exit ||
+"#
+            )
+        };
 
         static UNKNOWN_HOST_INSTRUCTIONS: &str = r#"
 echo this is an unknown host interface, not PXE booting ||
@@ -440,7 +457,7 @@ exit ||
                             ));
                         }
                         _ => {
-                            return Ok(exit_instructions(
+                            return Ok(exit_instructions_dpu(
                                 machine_id,
                                 target.interface_id,
                                 machine.current_state(),
@@ -449,7 +466,7 @@ exit ||
                     }
                 }
                 _ => {
-                    return Ok(exit_instructions(
+                    return Ok(exit_instructions_dpu(
                         machine_id,
                         target.interface_id,
                         machine.current_state(),
@@ -504,7 +521,8 @@ exit ||
             | ManagedHostState::Validation {
                 validation_state: ValidationState::MachineValidation { .. },
             }
-            | ManagedHostState::WaitingForCleanup { .. } => Self::get_pxe_instruction_for_arch(
+            | ManagedHostState::WaitingForCleanup { .. }
+            | ManagedHostState::HostReprovision { .. } => Self::get_pxe_instruction_for_arch(
                 target.arch,
                 target.interface_id,
                 interface.mac_address,
@@ -642,16 +660,6 @@ exit ||
 
                 _ => error_instructions(machine_id, target.interface_id, machine.current_state()),
             },
-            ManagedHostState::HostReprovision {
-                reprovision_state: HostReprovisionState::WaitingForManualUpgrade { .. },
-                ..
-            } => PxeInstructions::get_pxe_instruction_for_arch(
-                target.arch,
-                target.interface_id,
-                interface.mac_address,
-                console,
-                machine.id.machine_type(),
-            ),
             x => error_instructions(machine_id, target.interface_id, x),
         };
 

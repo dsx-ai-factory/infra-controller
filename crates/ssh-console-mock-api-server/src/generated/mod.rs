@@ -27,6 +27,13 @@ pub(super) mod common;
 )]
 #[allow(non_snake_case, unknown_lints, clippy::all)]
 #[rustfmt::skip]
+pub(super) mod console_log;
+#[allow(
+    unreachable_pub,
+    reason = "tonic_prost_build emits public items in this generated module"
+)]
+#[allow(non_snake_case, unknown_lints, clippy::all)]
+#[rustfmt::skip]
 mod dns;
 #[allow(
     unreachable_pub,

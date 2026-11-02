@@ -18,6 +18,9 @@
 pub(super) mod args;
 pub(super) mod cmd;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) use args::Args;
 
 use crate::cfg::run::Run;

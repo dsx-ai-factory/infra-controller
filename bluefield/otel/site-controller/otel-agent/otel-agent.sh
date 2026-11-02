@@ -139,12 +139,8 @@ fi
 
 mkdir -p "$STATE_DIR"
 
-CARBIDE_API_IP_ADDR=$(getent hosts "$CARBIDE_API" | awk '{print $1}') || true
-
-if [[ -z "$CARBIDE_API_IP_ADDR" ]]; then
-    echo "Failed to resolve $CARBIDE_API" >&2
-    exit 1
-fi
+# `getent hosts` can omit IPv4 answers for a dual-stack name.
+CARBIDE_API_IP_ADDR=$(python3 "${TEMPLATE%/*}/resolve_host.py" "$CARBIDE_API")
 
 BUILD_DIR=$(mktemp -d /tmp/otel-agent-build.XXXXXX)
 SAVED_IMAGE=$(mktemp /tmp/otel-agent-image.XXXXXX.tar)
@@ -253,8 +249,7 @@ fi
 
 # Generate and verify the container config and install it in /etc/kubelet.d where
 # crictl will pick it up and run it automatically.
-sed "s|\${CARBIDE_API_IP_ADDR}|${CARBIDE_API_IP_ADDR}|g" "$TEMPLATE" > "$GENERATED_YAML"
-python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$GENERATED_YAML"
+python3 "${TEMPLATE%/*}/render_pod.py" "$TEMPLATE" "$CARBIDE_API" "$CARBIDE_API_IP_ADDR" > "$GENERATED_YAML"
 install -m 0644 "$GENERATED_YAML" "$OTEL_AGENT_CONFIG"
 
 # Wait for `crictl ps` to show the container

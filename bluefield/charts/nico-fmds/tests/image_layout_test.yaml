@@ -70,7 +70,7 @@ tests:
           path: spec.template.spec.initContainers[0].command[2]
           pattern: '/opt/forge/machine_cert\.key'
 
-  - it: should fall back to /opt/nico and nico_root.pem when overrides cleared
+  - it: should fall back to /opt/forge and forge_root.pem when overrides cleared
     set:
       image:
         repository: test
@@ -83,17 +83,17 @@ tests:
           content:
             name: nico-certs
             hostPath:
-              path: /opt/nico
+              path: /opt/forge
               type: DirectoryOrCreate
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --root-ca=/opt/nico/nico_root.pem
+          content: --root-ca=/opt/forge/forge_root.pem
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --client-cert=/opt/nico/machine_cert.pem
+          content: --client-cert=/opt/forge/machine_cert.pem
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: '/opt/nico/nico_root\.pem'
+          pattern: '/opt/forge/forge_root\.pem'
 
   - it: should accept a custom certsDir + rootCaFile pair
     set:

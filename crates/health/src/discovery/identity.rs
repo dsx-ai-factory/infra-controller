@@ -66,7 +66,7 @@ pub(super) async fn ensure_primary_system_uuid(endpoint: &BmcEndpoint) -> Result
                 .map(|system| {
                     let raw = system.raw();
                     SystemIdentity {
-                        id: raw.base.id.clone(),
+                        id: raw.id.clone(),
                         uuid: raw.uuid.flatten(),
                         bios_version: raw.bios_version.clone().flatten(),
                     }

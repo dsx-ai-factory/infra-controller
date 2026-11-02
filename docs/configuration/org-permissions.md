@@ -2,7 +2,7 @@
 
 NICo does not maintain its own user directory. Identity, org membership, and role assignments are all managed in the upstream identity provider. The REST API reads role claims from the authentication token on every request. Adding or removing a user is done in the identity provider, not through nicocli.
 
-NICo accepts tokens from any OIDC-compatible IdP. The bundled dev Keycloak (deployed by `setup.sh` and documented in the [Quick Start Guide](../getting-started/quick-start.md)) is the recommended starting point and the reference implementation for IdP wiring -- you can use it as-is for evaluation, or model your production IdP setup after it. Configure additional or replacement IdPs via the `issuers` block in `nico-rest-api`'s config; see the [Reference Installation](../getting-started/installation-options/reference-install.md) guide for the configuration surface and the claim mappings NICo expects (org name, display name, role claim).
+NICo accepts tokens from any OIDC-compatible IdP. The bundled dev Keycloak (deployed by `setup.sh` and documented in the [Quick Start Guide](../getting-started/quick-start.md)) is the recommended starting point and the reference implementation for IdP wiring. You can use it as-is for evaluation, or model your production IdP setup after it. Configure additional or replacement IdPs via the `issuers` block in `nico-rest-api`'s config; refer to [Authentication and Authorization](/rest-api-reference/authentication-and-authorization) for the configuration surface, the claim mappings NICo expects (org name, display name, role claim), and the validation rules that apply before rollout.
 
 ## Roles
 
@@ -22,7 +22,7 @@ A single user can hold roles in multiple orgs simultaneously. On dev/service-acc
 2. Assign the `TENANT_ADMIN` role at the org level.
 3. Have the user authenticate with nicocli and verify: `nicocli user get`
 
-The exact steps depend on your IdP. For the bundled dev Keycloak, this is realm administration in the Keycloak admin console -- create the user, add them to the realm group that maps to the tenant org, and assign the role. See the [Quick Start Guide](../getting-started/quick-start.md) for the realm layout.
+The exact steps depend on your IdP. For Keycloak, NICo reads org membership from realm roles named `<orgName>:<ROLE>`, so "add the user to the org" means assigning that realm role, either directly or through a group whose role mapping includes it. [Tenant Management with Keycloak](tenant-management-keycloak.md) has the commands. See the [Quick Start Guide](../getting-started/quick-start.md) for the bundled realm layout.
 
 ## Adding a Provider Admin
 
@@ -30,11 +30,11 @@ The exact steps depend on your IdP. For the bundled dev Keycloak, this is realm 
 2. Assign the `PROVIDER_ADMIN` role.
 3. Verify: `nicocli user get`
 
-Same caveat as above -- this is an IdP admin task, not a nicocli operation.
+Same caveat as above, this is an IdP admin task, not a nicocli operation.
 
 ## Verifying Your Identity
 
-```
+```bash
 nicocli user get
 ```
 
@@ -53,7 +53,7 @@ Example response for a human user:
 
 Service accounts have empty `email`/`firstName`/`lastName`. Human users have those populated from the IdP.
 
-This endpoint does not return role information directly -- roles are in the token and validated server-side. Confirm which roles you hold by attempting role-gated operations: `nicocli allocation list` requires Provider Admin; `nicocli tenant current` requires Tenant Admin.
+This endpoint does not return role information directly, roles are in the token and validated server-side. Confirm which roles you hold by attempting role-gated operations: `nicocli allocation list` requires Provider Admin; `nicocli tenant current` requires Tenant Admin.
 
 If your deployment is configured for service-account auth, use `nicocli service-account current` to retrieve the current org's service-account status, including the auto-created provider and tenant IDs.
 
@@ -63,7 +63,7 @@ NICo does not expose a "list users in this tenant" endpoint. Use the IdP's admin
 
 For audit purposes, NICo's audit log records which user performed each operation:
 
-```
+```bash
 nicocli tui
 > audit list
 ```

@@ -24,6 +24,7 @@ use carbide_switch_controller::context::SwitchStateHandlerServices;
 use carbide_switch_controller::handler::SwitchStateHandler;
 use carbide_switch_controller::io::SwitchStateControllerIO;
 use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
+use carbide_uuid::rack::RackId;
 use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::mock::MockNvSwitchManager;
@@ -31,11 +32,14 @@ use component_manager::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus,
 };
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
-use db::switch as db_switch;
+use db::{rack as db_rack, switch as db_switch};
+use librms::protos::rack_manager::SwitchService;
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::rack::{RackConfig, RackErrorRecoveryPolicy, RackState};
 use model::switch::{
-    ConfigureCertificateState, ConfiguringState, SwitchControllerState, SwitchDecommissioningState,
+    ConfigureCertificateState, ConfiguringState, InitializingState, SwitchControllerState,
+    SwitchDecommissioningState,
 };
 use model::test_support::rms_rack_profiles;
 use rpc::forge::forge_server::Forge;
@@ -47,8 +51,8 @@ use tonic::Request;
 
 use crate::common::{
     ControllerEnv, configure_certificate_start_state, configure_certificate_wait_state,
-    default_switch_mtls_services, mark_switch_as_deleted, new_switch, set_switch_rack_id,
-    transition_switch_controller_state,
+    default_switch_mtls_services, mark_switch_as_deleted, new_switch, set_switch_controller_state,
+    set_switch_rack_id, transition_switch_controller_state,
 };
 
 fn firmware_only_activities() -> Vec<model::rack::MaintenanceActivity> {
@@ -71,6 +75,130 @@ fn nvos_and_nmxc_activities() -> Vec<model::rack::MaintenanceActivity> {
         },
         model::rack::MaintenanceActivity::ConfigureNmxCluster,
     ]
+}
+
+#[sqlx_test]
+async fn initializing_requires_only_the_primary_nvos_port_to_be_associated(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, Some("primary-wait".to_string()), None).await?;
+
+    let mut txn = pool.begin().await?;
+    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    let bmc_mac = switch.bmc_mac_address.expect("switch has a BMC MAC");
+    let mut expected = db::expected_switch::find_by_bmc_mac_address(txn.as_mut(), bmc_mac)
+        .await?
+        .expect("expected switch exists");
+    let non_primary = expected.nvos_interfaces[0].mac_address;
+    let primary = "02:00:00:ff:00:01".parse()?;
+    expected.nvos_interfaces = vec![
+        model::expected_switch::ExpectedNvosInterface {
+            mac_address: primary,
+            is_primary: true,
+        },
+        model::expected_switch::ExpectedNvosInterface {
+            mac_address: non_primary,
+            is_primary: false,
+        },
+    ];
+    db::expected_switch::update(txn.as_mut(), &expected).await?;
+    set_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        SwitchControllerState::Initializing {
+            initializing_state: InitializingState::WaitForOsMachineInterface,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    env.run_switch_controller_iteration().await;
+
+    let mut txn = pool.begin().await?;
+    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Initializing {
+            initializing_state: InitializingState::WaitForOsMachineInterface
+        }
+    ));
+    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), non_primary).await?;
+    assert_eq!(interfaces[0].switch_id, Some(switch_id));
+
+    // Make the discovered port primary; the still-unknown secondary must not
+    // prevent initialization from advancing.
+    for interface in &mut expected.nvos_interfaces {
+        interface.is_primary = interface.mac_address == non_primary;
+    }
+    db::expected_switch::update(txn.as_mut(), &expected).await?;
+    txn.commit().await?;
+    env.run_switch_controller_iteration().await;
+
+    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Configuring {
+            config_state: ConfiguringState::DisableMtls {
+                disable_mtls: model::switch::DisableMtlsState::Start,
+            },
+        }
+    ));
+    Ok(())
+}
+
+#[sqlx_test]
+async fn initializing_enters_error_when_a_multi_port_switch_has_no_primary(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, Some("missing-primary".to_string()), None).await?;
+
+    let mut txn = pool.begin().await?;
+    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    let bmc_mac = switch.bmc_mac_address.expect("switch has a BMC MAC");
+    let mut expected = db::expected_switch::find_by_bmc_mac_address(txn.as_mut(), bmc_mac)
+        .await?
+        .expect("expected switch exists");
+    expected.nvos_interfaces[0].is_primary = false;
+    expected
+        .nvos_interfaces
+        .push(model::expected_switch::ExpectedNvosInterface {
+            mac_address: "02:00:00:ff:00:02".parse()?,
+            is_primary: false,
+        });
+    db::expected_switch::update(txn.as_mut(), &expected).await?;
+    set_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        SwitchControllerState::Initializing {
+            initializing_state: InitializingState::WaitForOsMachineInterface,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    env.run_switch_controller_iteration().await;
+
+    let mut txn = pool.begin().await?;
+    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Error { ref cause }
+            if cause.contains("No primary NVOS port")
+    ));
+    txn.rollback().await?;
+    Ok(())
 }
 
 /// Empty activities means all phases, matching rack `MaintenanceScope::should_run`.
@@ -136,6 +264,7 @@ async fn decommission_request_enters_rms_workflow(
         &mut *connection,
         bmc_mac,
         model::bmc_suppression::BmcSuppressionSubsystem::SiteExplorer,
+        model::bmc_suppression::BmcSuppressionSource::Decommissioning,
     )
     .await?
     .expect("Site Explorer suppression should be requested");
@@ -161,7 +290,7 @@ async fn decommission_request_enters_rms_workflow(
     assert!(matches!(
         switch.controller_state.value,
         SwitchControllerState::Decommissioning {
-            decommissioning_state: SwitchDecommissioningState::SuppressingNvosDhcp,
+            decommissioning_state: SwitchDecommissioningState::FactoryResetNvos,
         }
     ));
 
@@ -242,7 +371,9 @@ pub(super) async fn run_switch_controller_with_services(
         .state_handler(Arc::new(SwitchStateHandler::default()))
         .build_for_manual_iterations(cancel_token)
         .unwrap();
-    controller.run_single_iteration().await;
+    // Keep intermediate-state assertions independent of task completion order.
+    // Follow-up transitions run on the next explicit iteration.
+    controller.run_single_iteration_ext(false).await;
 }
 
 /// Builds a component manager around the provided NVSwitch manager.
@@ -382,14 +513,14 @@ async fn test_configure_certificate_start_transitions_to_wait_for_complete_with_
     .await?;
     txn.commit().await?;
 
+    let mock_switch_manager = Arc::new(MockNvSwitchManager::default());
+
     run_switch_controller_with_services(
         pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
             db_pool: pool.clone(),
-            component_manager: Some(mock_component_manager(Arc::new(
-                MockNvSwitchManager::default(),
-            ))),
+            component_manager: Some(mock_component_manager(mock_switch_manager.clone())),
             credential_manager: env.test_credential_manager.clone(),
             switch_mtls_services: default_switch_mtls_services(),
             per_object_metrics_registry: carbide_health_metrics::PerObjectMetricsRegistry::new(
@@ -424,12 +555,112 @@ async fn test_configure_certificate_start_transitions_to_wait_for_complete_with_
     assert_eq!(switch.rack_id.as_ref(), Some(&"rack-id-1".into()));
 
     assert_eq!(
+        mock_switch_manager.certificate_services(),
+        vec![vec![
+            SwitchService::NvueApi as i32,
+            SwitchService::ScaleUpFabricTelemetryInterface as i32,
+        ]]
+    );
+
+    assert_eq!(
         env.test_credential_manager
             .get_credentials_from_writer(&credential_key)
             .await
             .expect("failed to read imported NVOS credentials"),
         Some(imported_credentials)
     );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_non_primary_with_only_cluster_services_skips_certificate_job(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, Some("Switch4".to_string()), None).await?;
+
+    let mut txn = pool.begin().await?;
+    set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
+
+    transition_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        configure_certificate_start_state(),
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    let mock_switch_manager = Arc::new(MockNvSwitchManager::default());
+
+    let services = SwitchStateHandlerServices {
+        db_pool: pool.clone(),
+        component_manager: Some(mock_component_manager(mock_switch_manager.clone())),
+        credential_manager: env.test_credential_manager.clone(),
+        switch_mtls_services: vec![SwitchService::ScaleUpFabricManager as i32],
+        per_object_metrics_registry: carbide_health_metrics::PerObjectMetricsRegistry::new(
+            Vec::new(),
+            Duration::from_secs(60),
+        ),
+        redfish_client_pool: env.redfish_sim.clone(),
+        bmc_credential_ops: env.redfish_sim.clone(),
+        bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
+            db::credential_rotation::CredentialRotationType::Bmc,
+        ),
+        bmc_rotation_enabled: false,
+    };
+
+    run_switch_controller_with_services(
+        pool.clone(),
+        env.api.work_lock_manager_handle(),
+        services.clone(),
+    )
+    .await;
+
+    let mut conn = pool.acquire().await?;
+
+    let switch = db_switch::find_by_id(&mut conn, &switch_id)
+        .await?
+        .expect("switch should exist");
+
+    assert!(!switch.is_primary);
+
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Configuring {
+            config_state: ConfiguringState::RotateOsPassword,
+        }
+    ));
+
+    drop(conn);
+
+    let mut txn = pool.begin().await?;
+
+    transition_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        SwitchControllerState::Maintenance {
+            operation: model::switch::SwitchMaintenanceOperation::ReconfigureCertificate,
+            request: None,
+            configure_certificate: None,
+        },
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    run_switch_controller_with_services(pool.clone(), env.api.work_lock_manager_handle(), services)
+        .await;
+
+    let mut conn = pool.acquire().await?;
+
+    let switch = db_switch::find_by_id(&mut conn, &switch_id)
+        .await?
+        .expect("switch should exist");
+
+    assert_eq!(switch.controller_state.value, SwitchControllerState::Ready);
+    assert!(mock_switch_manager.certificate_services().is_empty());
 
     Ok(())
 }
@@ -703,6 +934,7 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_error_on_fa
 
     let failing_mock = MockNvSwitchManager::default().with_certificate_job_status(
         ConfigureSwitchCertificateJobStatus {
+            failure: None,
             state: ConfigureSwitchCertificateState::Failed,
             error: Some("cert install failed".to_string()),
         },
@@ -735,7 +967,9 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_error_on_fa
         .expect("switch should exist");
     assert!(matches!(
         switch.controller_state.value,
-        SwitchControllerState::Error { ref cause } if cause == "cert install failed"
+        SwitchControllerState::Error { ref cause }
+            if cause.contains("cert install failed")
+                && cause.contains("mTLS restoration is incomplete")
     ));
 
     Ok(())
@@ -861,7 +1095,7 @@ async fn test_switch_deletion_with_state_controller(
 }
 
 /// Tests the entire Switch ControllerState transition flow: Initializing -> Configuring
-/// (ConfigureCertificate) -> Configuring (RotateOsPassword) -> FetchInfo
+/// (DisableMtls) -> Configuring (ConfigureCertificate) -> Configuring (RotateOsPassword) -> FetchInfo
 /// -> Validating (ValidationComplete) -> BomValidating (BomValidationComplete) -> Ready.
 /// state handler performs its transition.
 #[sqlx_test]
@@ -934,6 +1168,7 @@ async fn test_switch_entire_state_transition_flow(
     controller.run_single_iteration().await;
     controller.run_single_iteration().await;
     controller.run_single_iteration().await;
+    controller.run_single_iteration().await;
 
     // Final assertion: state is Ready
     let mut txn = pool.acquire().await?;
@@ -971,7 +1206,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_waits_for_terminal_status
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -981,6 +1216,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_waits_for_terminal_status
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_firmware_upgrade_status(
         txn.as_mut(),
         switch_id,
@@ -1034,7 +1270,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_transitions_to_waiting_fo
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1044,6 +1280,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_transitions_to_waiting_fo
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_firmware_upgrade_status(
         txn.as_mut(),
         switch_id,
@@ -1070,6 +1307,72 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_transitions_to_waiting_fo
         }
     ));
     assert!(switch.switch_reprovisioning_requested.is_some());
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_rack_error_unwinds_switch_waiting_for_nvos(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let rack_id = RackId::new("rack-nvos-source-error");
+    let switch_id = new_switch(&env, None, None).await?;
+
+    let mut txn = pool.begin().await?;
+    let rack = db_rack::create(txn.as_mut(), &rack_id, None, &RackConfig::default(), None).await?;
+
+    assert_eq!(
+        db_rack::try_update_controller_state(
+            txn.as_mut(),
+            &rack_id,
+            rack.controller_state.version,
+            rack.controller_state.version.increment(),
+            &RackState::Error {
+                certificate_failure: None,
+                cause: "profile SOT unavailable".to_string(),
+                recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+            },
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+
+    set_switch_rack_id(txn.as_mut(), &switch_id, &rack_id).await?;
+
+    db_switch::set_switch_reprovisioning_requested(
+        txn.as_mut(),
+        switch_id,
+        &format!("rack-{rack_id}"),
+        all_phases_activities(),
+    )
+    .await?;
+
+    transition_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        SwitchControllerState::ReProvisioning {
+            reprovisioning_state: model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
+        },
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    env.run_switch_controller_iteration().await;
+
+    let mut txn = pool.acquire().await?;
+
+    let switch = db_switch::find_by_id(&mut txn, &switch_id)
+        .await?
+        .expect("switch should exist");
+
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Ready
+    ));
+
+    assert!(switch.switch_reprovisioning_requested.is_none());
 
     Ok(())
 }
@@ -1144,7 +1447,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_next_state_by_activities(
             .as_ref()
             .expect("switch reprovision request should exist")
             .requested_at;
-        db_switch::try_update_controller_state(
+        let updated = db_switch::try_update_controller_state(
             txn.as_mut(),
             switch_id,
             switch.controller_state.version,
@@ -1154,6 +1457,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_next_state_by_activities(
             },
         )
         .await?;
+        assert_eq!(updated, db::ConditionalWrite::Applied(()));
         db_switch::update_firmware_upgrade_status(
             txn.as_mut(),
             switch_id,
@@ -1221,7 +1525,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_returns_ready_for_firmwar
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1231,6 +1535,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_returns_ready_for_firmwar
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_firmware_upgrade_status(
         txn.as_mut(),
         switch_id,
@@ -1282,7 +1587,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_accepts_completion_when_o
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1292,6 +1597,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_accepts_completion_when_o
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_firmware_upgrade_status(
         txn.as_mut(),
         switch_id,
@@ -1340,7 +1646,7 @@ async fn test_switch_ready_routes_rack_requests_to_waiting_for_rack_firmware_upg
     let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
         .await?
         .expect("switch should exist");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1348,6 +1654,7 @@ async fn test_switch_ready_routes_rack_requests_to_waiting_for_rack_firmware_upg
         &SwitchControllerState::Ready,
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     txn.commit().await?;
 
     env.run_switch_controller_iteration().await;
@@ -1389,7 +1696,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_waiting_for_nmxc_on
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1399,6 +1706,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_waiting_for_nmxc_on
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_nvos_update_status(
         txn.as_mut(),
         switch_id,
@@ -1454,7 +1762,7 @@ async fn test_switch_waiting_for_nvos_upgrade_waits_for_current_cycle_status(
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1464,6 +1772,7 @@ async fn test_switch_waiting_for_nvos_upgrade_waits_for_current_cycle_status(
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_nvos_update_status(
         txn.as_mut(),
         switch_id,
@@ -1519,7 +1828,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_error_on_failure(
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1529,6 +1838,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_error_on_failure(
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_nvos_update_status(
         txn.as_mut(),
         switch_id,
@@ -1579,7 +1889,7 @@ async fn test_switch_waiting_for_nmxc_configure_returns_ready_when_fm_is_running
     let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
         .await?
         .expect("switch should exist");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1589,6 +1899,7 @@ async fn test_switch_waiting_for_nmxc_configure_returns_ready_when_fm_is_running
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_fabric_manager_status(
         txn.as_mut(),
         switch_id,

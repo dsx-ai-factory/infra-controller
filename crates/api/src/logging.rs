@@ -91,7 +91,9 @@ pub(super) fn setup_logging(
             .into_iter()
             .map(logfmt::EventField::new),
     );
-    let logfmt_stdout_formatter = logfmt::layer().with_event_fields(event_fields);
+    let logfmt_stdout_formatter = logfmt::layer()
+        .with_trace_context()
+        .with_event_fields(event_fields);
     let spancount_layer = spancounter::layer();
     let spancount_reader = spancount_layer.reader();
     let log_events = carbide_instrument::LogEventsMetric::new("nico-api");
@@ -120,12 +122,7 @@ pub(super) fn setup_logging(
             {
                 None => None,
                 Some(endpoint) => {
-                    // Exporter reads from OTEL_EXPORTER_OTLP_TRACES_ENDPOINT env var for endpoint
-                    let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
-                        .with_tonic()
-                        .with_protocol(opentelemetry_otlp::Protocol::Grpc)
-                        .with_endpoint(endpoint)
-                        .build()?;
+                    let otlp_exporter = build_span_exporter(&endpoint)?;
 
                     let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
                         // CarbideSpanSampler selects explicitly marked application trace roots.
@@ -153,9 +150,10 @@ pub(super) fn setup_logging(
         tracing_subscriber::registry()
             .with(log_events.layer().with_filter(initial_log_filter.clone()))
             .with(spancount_layer.with_filter(log_level))
-            .with(maybe_otel_tracing_layer)
             .with(logfmt_stdout_formatter.with_filter(logfmt_stdout_filter))
             .with(log_stream_layer)
+            // Logging consumers must run before OTel removes span context on close.
+            .with(maybe_otel_tracing_layer)
             .with(sqlx_query_tracing::create_sqlx_query_tracing_layer())
             .try_init()
             .wrap_err("new tracing subscriber try_init()")?;
@@ -183,6 +181,17 @@ pub(super) fn setup_logging(
         })
     }
 }
+
+fn build_span_exporter(
+    endpoint: &str,
+) -> Result<opentelemetry_otlp::SpanExporter, opentelemetry_otlp::ExporterBuildError> {
+    opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_protocol(opentelemetry_otlp::Protocol::Grpc)
+        .with_endpoint(endpoint)
+        .build()
+}
+
 #[derive(Debug, Clone)]
 struct CarbideSpanSampler(Arc<AtomicBool>);
 
@@ -259,9 +268,94 @@ fn is_carbide_root_span(attributes: &[KeyValue]) -> bool {
 }
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
+    use std::time::Duration;
+
     use opentelemetry::KeyValue;
+    use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::{
+        TraceService, TraceServiceServer,
+    };
+    use opentelemetry_proto::tonic::collector::trace::v1::{
+        ExportTraceServiceRequest, ExportTraceServiceResponse,
+    };
+    use opentelemetry_sdk::testing::trace::new_test_export_span_data;
+    use opentelemetry_sdk::trace::SpanExporter;
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    struct TraceReceiver {
+        requests: mpsc::Sender<ExportTraceServiceRequest>,
+    }
+
+    #[tonic::async_trait]
+    impl TraceService for TraceReceiver {
+        async fn export(
+            &self,
+            request: tonic::Request<ExportTraceServiceRequest>,
+        ) -> Result<tonic::Response<ExportTraceServiceResponse>, tonic::Status> {
+            self.requests
+                .try_send(request.into_inner())
+                .map_err(|error| tonic::Status::internal(error.to_string()))?;
+            Ok(tonic::Response::new(ExportTraceServiceResponse::default()))
+        }
+    }
+
+    #[tokio::test]
+    async fn tracing_exporter_sends_spans_over_ipv6() {
+        let listener = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+            .await
+            .expect("bind IPv6 OTLP receiver");
+        let address = listener.local_addr().expect("OTLP receiver address");
+        let exporter = build_span_exporter(&format!("http://{address}"))
+            .expect("build production tracing exporter");
+        let mut span = new_test_export_span_data();
+        span.name = "ipv6-dependency-exchange".into();
+        let trace_id = span.span_context.trace_id().to_bytes();
+        let (requests, mut received) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        let server = tonic::transport::Server::builder()
+            .add_service(TraceServiceServer::new(TraceReceiver { requests }));
+
+        let (export_result, server_result) = tokio::join!(
+            async {
+                let result =
+                    tokio::time::timeout(Duration::from_secs(10), exporter.export(vec![span]))
+                        .await;
+                drop(exporter);
+                cancellation.cancel();
+                result
+            },
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                server.serve_with_incoming_shutdown(
+                    TcpListenerStream::new(listener),
+                    cancellation.cancelled(),
+                ),
+            ),
+        );
+
+        server_result
+            .expect("IPv6 OTLP receiver did not stop within 15 seconds")
+            .expect("serve IPv6 OTLP receiver");
+        export_result
+            .expect("IPv6 OTLP export did not finish within 10 seconds")
+            .expect("export span over IPv6");
+        let request = received.try_recv().expect("receive OTLP Export request");
+        let [resource] = request.resource_spans.as_slice() else {
+            panic!("expected one exported resource");
+        };
+        let [scope] = resource.scope_spans.as_slice() else {
+            panic!("expected one exported scope");
+        };
+        let [span] = scope.spans.as_slice() else {
+            panic!("expected one exported span");
+        };
+        assert_eq!(span.name, "ipv6-dependency-exchange");
+        assert_eq!(span.trace_id, trace_id);
+    }
 
     fn sample_decision(enabled: bool, attributes: Vec<KeyValue>) -> SamplingDecision {
         CarbideSpanSampler::new(Arc::new(AtomicBool::new(enabled)))

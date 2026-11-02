@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use carbide_uuid::rack::RackId;
 use db::db_read::DbReader;
@@ -48,15 +48,11 @@ impl std::fmt::Display for ManagedHostGroupType {
 /// Default NMX-C gRPC port when switch NVOS info does not specify one.
 pub const NMX_C_DEFAULT_GRPC_PORT: u16 = 9370;
 
-fn nmx_c_endpoint_uses_tls(config: &NvLinkConfig) -> bool {
-    config.nmx_c_tls_client_cert_path.is_some() && config.nmx_c_tls_client_key_path.is_some()
-}
-
 fn nmx_c_endpoint_scheme(config: &NvLinkConfig) -> &'static str {
-    if config.allow_insecure && !nmx_c_endpoint_uses_tls(config) {
-        "http"
-    } else {
+    if config.nmx_c_uses_https() {
         "https"
+    } else {
+        "http"
     }
 }
 
@@ -66,13 +62,13 @@ pub fn nmx_c_endpoint_url_from_nvos_ip(
     port: Option<u16>,
     config: &NvLinkConfig,
 ) -> String {
-    format!(
-        "{}://{}:{}",
-        nmx_c_endpoint_scheme(config),
-        ip,
+    // SocketAddr includes the brackets required by an IPv6 URL authority.
+    let address = SocketAddr::new(
+        *ip,
         port.or(config.nmx_c_endpoint_port)
-            .unwrap_or(NMX_C_DEFAULT_GRPC_PORT)
-    )
+            .unwrap_or(NMX_C_DEFAULT_GRPC_PORT),
+    );
+    format!("{}://{address}", nmx_c_endpoint_scheme(config))
 }
 
 /// Outcome of resolving an NMX-C gRPC endpoint for a chassis- or rack-scoped machine group.
@@ -165,9 +161,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
     use carbide_macros::sqlx_test;
+    use carbide_test_support::{Check, check_values};
     use carbide_uuid::rack::{RackId, RackProfileId};
     use model::rack::RackConfig;
     use model::switch::{
@@ -178,35 +173,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoint_url_uses_http_when_allow_insecure() {
-        let config = NvLinkConfig {
-            allow_insecure: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            nmx_c_endpoint_url_from_nvos_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), None, &config),
-            "http://10.0.0.1:9370"
-        );
-    }
+    fn endpoint_urls_preserve_address_scheme_and_port() {
+        struct EndpointCase {
+            ip: &'static str,
+            port: Option<u16>,
+            config: NvLinkConfig,
+        }
 
-    #[test]
-    fn endpoint_url_uses_https_by_default() {
-        let config = NvLinkConfig::default();
-        assert_eq!(
-            nmx_c_endpoint_url_from_nvos_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), None, &config),
-            "https://10.0.0.1:9370"
-        );
-    }
-
-    #[test]
-    fn endpoint_url_uses_configured_port() {
-        let config = NvLinkConfig {
-            nmx_c_endpoint_port: Some(9601),
-            ..Default::default()
-        };
-        assert_eq!(
-            nmx_c_endpoint_url_from_nvos_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), None, &config),
-            "https://10.0.0.1:9601"
+        check_values(
+            [
+                Check {
+                    scenario: "IPv4 default",
+                    input: EndpointCase {
+                        ip: "10.0.0.1",
+                        port: None,
+                        config: NvLinkConfig::default(),
+                    },
+                    expect: "https://10.0.0.1:9370".to_string(),
+                },
+                Check {
+                    scenario: "IPv6 default",
+                    input: EndpointCase {
+                        ip: "2001:db8::1",
+                        port: None,
+                        config: NvLinkConfig::default(),
+                    },
+                    expect: "https://[2001:db8::1]:9370".to_string(),
+                },
+                Check {
+                    scenario: "insecure HTTP",
+                    input: EndpointCase {
+                        ip: "10.0.0.1",
+                        port: None,
+                        config: NvLinkConfig {
+                            allow_insecure: true,
+                            ..Default::default()
+                        },
+                    },
+                    expect: "http://10.0.0.1:9370".to_string(),
+                },
+                Check {
+                    scenario: "configured port",
+                    input: EndpointCase {
+                        ip: "10.0.0.1",
+                        port: None,
+                        config: NvLinkConfig {
+                            nmx_c_endpoint_port: Some(9601),
+                            ..Default::default()
+                        },
+                    },
+                    expect: "https://10.0.0.1:9601".to_string(),
+                },
+                Check {
+                    scenario: "explicit port overrides configuration",
+                    input: EndpointCase {
+                        ip: "2001:db8::1",
+                        port: Some(9602),
+                        config: NvLinkConfig {
+                            nmx_c_endpoint_port: Some(9601),
+                            ..Default::default()
+                        },
+                    },
+                    expect: "https://[2001:db8::1]:9602".to_string(),
+                },
+            ],
+            |case| {
+                let ip = case.ip.parse().expect("parse fixture IP");
+                let url = nmx_c_endpoint_url_from_nvos_ip(&ip, case.port, &case.config);
+                libnmxc::Endpoint::new(&url).expect("parse generated NMX-C endpoint");
+                url
+            },
         );
     }
 
@@ -270,7 +306,7 @@ mod tests {
         let switch = db::switch::find_by_id(txn.as_mut(), &switch.id)
             .await?
             .expect("switch should exist");
-        assert!(
+        assert_eq!(
             db::switch::try_update_controller_state(
                 txn.as_mut(),
                 switch.id,
@@ -278,7 +314,8 @@ mod tests {
                 switch.controller_state.version.increment(),
                 &SwitchControllerState::Ready,
             )
-            .await?
+            .await?,
+            db::ConditionalWrite::Applied(())
         );
         db::switch::update_fabric_manager_status(
             txn.as_mut(),
@@ -345,21 +382,19 @@ mod tests {
 
         // Simulate a switch whose NVOS management interface has never been discovered:
         // ready and control-plane-configured, but with no NVOS MAC/IP to resolve.
-        sqlx::query(
-            "UPDATE expected_switches SET nvos_mac_addresses = NULL WHERE bmc_mac_address = $1",
-        )
-        .bind(
-            switch
-                .bmc_mac_address
-                .expect("seeded switch should have a BMC MAC"),
-        )
-        .execute(txn.as_mut())
-        .await?;
+        sqlx::query("DELETE FROM expected_switch_nvos_interfaces WHERE bmc_mac_address = $1")
+            .bind(
+                switch
+                    .bmc_mac_address
+                    .expect("seeded switch should have a BMC MAC"),
+            )
+            .execute(txn.as_mut())
+            .await?;
 
         let switch = db::switch::find_by_id(txn.as_mut(), &switch.id)
             .await?
             .expect("switch should exist");
-        assert!(
+        assert_eq!(
             db::switch::try_update_controller_state(
                 txn.as_mut(),
                 switch.id,
@@ -367,7 +402,8 @@ mod tests {
                 switch.controller_state.version.increment(),
                 &SwitchControllerState::Ready,
             )
-            .await?
+            .await?,
+            db::ConditionalWrite::Applied(())
         );
         db::switch::update_fabric_manager_status(
             txn.as_mut(),

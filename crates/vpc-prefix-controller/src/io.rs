@@ -19,7 +19,7 @@
 
 use carbide_uuid::vpc::VpcPrefixId;
 use config_version::{ConfigVersion, Versioned};
-use db::{self, DatabaseError, ObjectColumnFilter};
+use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::vpc_prefix::{self, VpcPrefix, VpcPrefixControllerState, VpcPrefixDeletionState};
 use model::{DeletedFilter, StateSla};
@@ -112,7 +112,7 @@ impl StateControllerIO for VpcPrefixStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         // Optimistically update the controller-owned state version and value.
         db::vpc_prefix::try_update_controller_state(
             txn,

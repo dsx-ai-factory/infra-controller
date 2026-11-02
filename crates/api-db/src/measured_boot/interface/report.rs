@@ -20,6 +20,7 @@
  *  tables in the database, leveraging the report-specific record types.
  */
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::MeasurementReportId;
 use measured_boot::pcr::PcrRegisterValue;
@@ -94,8 +95,11 @@ pub async fn insert_measurement_report_record(
     txn: &mut PgConnection,
     machine_id: MachineId,
 ) -> Result<MeasurementReportRecord, DatabaseError> {
-    let query = "insert into measurement_reports(machine_id) values($1) returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "insert into measurement_reports(machine_id) values($1) returning {}",
+        MeasurementReportRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(machine_id)
         .fetch_one(txn)
         .await
@@ -131,8 +135,11 @@ async fn insert_measurement_report_value_record(
     report_id: MeasurementReportId,
     value: &PcrRegisterValue,
 ) -> Result<MeasurementReportValueRecord, DatabaseError> {
-    let query = "insert into measurement_reports_values(report_id, pcr_register, sha_any) values($1, $2, $3) returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "insert into measurement_reports_values(report_id, pcr_register, sha_any) values($1, $2, $3) returning {}",
+        MeasurementReportValueRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(report_id)
         .bind(value.pcr_register)
         .bind(&value.sha_any)
@@ -216,8 +223,11 @@ pub(crate) async fn update_report_tstamp(
     report_id: MeasurementReportId,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<MeasurementReportRecord, DatabaseError> {
-    let query = "UPDATE measurement_reports SET ts = $1 WHERE report_id = $2 returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "UPDATE measurement_reports SET ts = $1 WHERE report_id = $2 returning {}",
+        MeasurementReportRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(ts)
         .bind(report_id)
         .fetch_one(txn)
@@ -230,9 +240,12 @@ pub(crate) async fn update_report_values_tstamp(
     report_id: MeasurementReportId,
     ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<MeasurementReportValueRecord>, DatabaseError> {
-    let query = "UPDATE measurement_reports_values SET ts = $1 WHERE report_id = $2 returning *";
+    let query = format!(
+        "UPDATE measurement_reports_values SET ts = $1 WHERE report_id = $2 returning {}",
+        MeasurementReportValueRecord::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(ts)
         .bind(report_id)
         .fetch_all(txn)

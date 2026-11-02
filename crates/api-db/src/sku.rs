@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use chrono::Utc;
 use futures_util::stream::StreamExt;
@@ -28,12 +29,17 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::sku::{
     SKU_VERSION_WITH_DRIVE_LOCATION, Sku, SkuComponentChassis, SkuComponentCpu, SkuComponentGpu,
     SkuComponentInfinibandDevices, SkuComponentMemory, SkuComponentStorage, SkuComponentTpm,
-    SkuComponents, diff_skus,
+    SkuComponents, SkuComponentsReplacement, diff_skus,
 };
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, ObjectFilter, Transaction, machine};
+
+#[cfg(test)]
+mod test_decode;
+#[cfg(test)]
+mod test_explicit_columns;
 
 /// The current version of the SKU format.  The state machine will create older
 /// versions from hardware using the currently assigned sku's version so that
@@ -56,7 +62,10 @@ pub async fn find_matching_with_exclusion(
     sku: &Sku,
     excluded_sku_id: Option<&String>,
 ) -> Result<Option<Sku>, DatabaseError> {
-    let mut builder = sqlx::QueryBuilder::new("SELECT * FROM machine_skus");
+    let mut builder = sqlx::QueryBuilder::new(format!(
+        "SELECT {} FROM machine_skus",
+        Sku::db_table_columns(),
+    ));
     if let Some(excluded_sku_id) = excluded_sku_id {
         builder.push(" WHERE id != ");
         builder.push_bind(excluded_sku_id);
@@ -90,8 +99,11 @@ pub async fn find_matching_with_exclusion(
 /// matching. This most commonly occurs when a v5 SKU is auto-generated from
 /// hardware_info that predates the size_mb/pci_path fields; those SKUs should
 /// not be persisted until the hardware has been re-enumerated.
-fn validate_storage_for_create(sku: &Sku) -> Result<(), DatabaseError> {
-    for storage in &sku.components.storage {
+fn validate_storage_for_create(
+    components: &SkuComponents,
+    schema_version: u32,
+) -> Result<(), DatabaseError> {
+    for storage in &components.storage {
         for pattern in &storage.pci_patterns {
             regex::Regex::new(pattern).map_err(|err| {
                 DatabaseError::InvalidArgument(format!(
@@ -107,7 +119,7 @@ fn validate_storage_for_create(sku: &Sku) -> Result<(), DatabaseError> {
                 storage.model
             )));
         }
-        if sku.schema_version >= SKU_VERSION_WITH_DRIVE_LOCATION
+        if schema_version >= SKU_VERSION_WITH_DRIVE_LOCATION
             && storage.pci_patterns.is_empty()
             && storage.min_size_mb.is_none()
             && storage.max_size_mb.is_none()
@@ -135,7 +147,7 @@ pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseErr
         ));
     }
 
-    validate_storage_for_create(sku)?;
+    validate_storage_for_create(&sku.components, sku.schema_version)?;
 
     let mut inner_txn = Transaction::begin_inner(txn).await?;
 
@@ -213,9 +225,12 @@ pub async fn find(
         return Ok(Vec::new());
     }
 
-    let query = "SELECT * FROM machine_skus WHERE id=ANY($1)";
+    let query = format!(
+        "SELECT {} FROM machine_skus WHERE id=ANY($1)",
+        Sku::db_table_columns(),
+    );
 
-    let skus: Vec<Sku> = sqlx::query_as(query)
+    let skus: Vec<Sku> = sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(sku_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>())
         .fetch_all(txn)
         .await
@@ -264,32 +279,113 @@ pub async fn update_metadata(
     Ok(())
 }
 
+/// `replace` replaces an existing SKU's components, schema version, description,
+/// and device type, then requests verification for associated machines. It
+/// preserves the creation time and machine assignments and returns the saved SKU.
+///
+/// The schema version must equal [`CURRENT_SKU_VERSION`]. An empty ID, unsupported
+/// schema version, invalid storage constraints, or definition matching another
+/// SKU returns [`DatabaseError::InvalidArgument`] before checking for absence.
+/// A valid replacement that does not match another SKU returns
+/// [`DatabaseError::NotFoundError`] when its target ID is absent. Other SQLx
+/// errors are preserved.
 pub async fn replace(txn: &mut PgConnection, sku: &Sku) -> Result<Sku, DatabaseError> {
-    if sku.schema_version != CURRENT_SKU_VERSION {
+    validate_replacement(&sku.id, &sku.components, sku.schema_version)?;
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+    lock_for_replacement(&mut inner_txn).await?;
+    replace_locked(&mut inner_txn, sku).await?;
+    inner_txn.commit().await?;
+
+    find(txn, std::slice::from_ref(&sku.id))
+        .await?
+        .pop()
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "SKU",
+            id: sku.id.clone(),
+        })
+}
+
+/// `replace_components` replaces the complete hardware definition and requests
+/// verification for associated machines. Omitted metadata is preserved under the
+/// replacement lock; supplied strings, including empty strings, replace it.
+/// The SKU must exist. The replacement must use the current schema version and
+/// pass the same component validation and duplicate checks as [`replace`].
+pub async fn replace_components(
+    txn: &mut PgConnection,
+    replacement: SkuComponentsReplacement,
+) -> Result<Sku, DatabaseError> {
+    validate_replacement(
+        &replacement.id,
+        &replacement.components,
+        replacement.schema_version,
+    )?;
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+    lock_for_replacement(&mut inner_txn).await?;
+
+    // Read metadata after acquiring the replacement lock so a saved metadata
+    // edit cannot be overwritten by values read before another writer commits.
+    let mut sku = find(&mut inner_txn, std::slice::from_ref(&replacement.id))
+        .await?
+        .pop()
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "SKU",
+            id: replacement.id.clone(),
+        })?;
+    sku.components = replacement.components;
+    sku.schema_version = replacement.schema_version;
+    if let Some(description) = replacement.description {
+        sku.description = description;
+    }
+    if let Some(device_type) = replacement.device_type {
+        sku.device_type = Some(device_type);
+    }
+
+    replace_locked(&mut inner_txn, &sku).await?;
+    inner_txn.commit().await?;
+
+    find(txn, std::slice::from_ref(&sku.id))
+        .await?
+        .pop()
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "SKU",
+            id: sku.id,
+        })
+}
+
+fn validate_replacement(
+    sku_id: &str,
+    components: &SkuComponents,
+    schema_version: u32,
+) -> Result<(), DatabaseError> {
+    if schema_version != CURRENT_SKU_VERSION {
         return Err(DatabaseError::InvalidArgument(
             "SKU version is no longer supported".to_string(),
         ));
     }
 
-    if sku.id.is_empty() {
+    if sku_id.is_empty() {
         return Err(DatabaseError::InvalidArgument(
             "SKU ID must not be empty".to_string(),
         ));
     }
 
-    validate_storage_for_create(sku)?;
+    validate_storage_for_create(components, schema_version)
+}
 
-    let mut inner_txn = Transaction::begin_inner(txn).await?;
-
+async fn lock_for_replacement(txn: &mut PgConnection) -> Result<(), DatabaseError> {
     let query = "LOCK TABLE machine_skus IN ACCESS EXCLUSIVE MODE";
     sqlx::query(query)
-        .execute(inner_txn.as_pgconn())
+        .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    if let Some(existing_sku) =
-        find_matching_with_exclusion(&mut inner_txn, sku, Some(&sku.id)).await?
-    {
+    Ok(())
+}
+
+/// The caller must hold the table lock from `lock_for_replacement` so the
+/// duplicate check and replacement cannot race another SKU writer.
+async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
+    if let Some(existing_sku) = find_matching_with_exclusion(txn, sku, Some(&sku.id)).await? {
         return Err(DatabaseError::InvalidArgument(format!(
             "Specified SKU matches SKU with ID: {}",
             existing_sku.id
@@ -304,21 +400,17 @@ pub async fn replace(txn: &mut PgConnection, sku: &Sku) -> Result<Sku, DatabaseE
         .bind(sku.schema_version as i32)
         .bind(&sku.device_type)
         .bind(&sku.id)
-        .fetch_one(inner_txn.as_pgconn())
+        .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::new("replace sku: update", e))?;
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DatabaseError::NotFoundError {
+                kind: "SKU",
+                id: sku.id.clone(),
+            },
+            e => DatabaseError::new("replace sku: update", e),
+        })?;
 
-    crate::machine::update_sku_status_verify_request_time_for_sku(&mut inner_txn, &sku.id).await?;
-
-    inner_txn.commit().await?;
-
-    find(txn, std::slice::from_ref(&sku.id))
-        .await?
-        .pop()
-        .ok_or_else(|| DatabaseError::NotFoundError {
-            kind: "SKU",
-            id: sku.id.clone(),
-        })
+    crate::machine::update_sku_status_verify_request_time_for_sku(txn, &sku.id).await
 }
 
 pub async fn generate_sku_from_machine(
@@ -799,10 +891,11 @@ pub async fn generate_sku_from_machine_at_version_5(
 
     // Unlike earlier versions, v5 records one storage entry per NVMe drive so
     // each drive's size and PCI location can be validated individually. The
-    // discovered size is stored as an exact point (min == max) and the concrete
-    // sysfs/PCI path is stored as the drive's single "pattern". An expected SKU
-    // authored from this can then widen the size range or replace the literal
-    // path with a regex. Drives are ordered by path for deterministic output.
+    // discovered size is stored as an exact point (min == max) and the drive's
+    // sysfs/PCI location (see `drive_location`) is stored as its single
+    // "pattern". An expected SKU authored from this can then widen the size
+    // range or replace the literal path with a regex. Drives are ordered by
+    // path for deterministic output.
     //
     // size_mb and pci_path may be absent on hardware_info records that predate
     // the v5 fields (discovered before PR #3717). Rather than failing generation
@@ -821,8 +914,8 @@ pub async fn generate_sku_from_machine_at_version_5(
             max_size_mb: nvme.size_mb,
             pci_patterns: nvme
                 .pci_path
-                .as_ref()
-                .map(|p| vec![p.clone()])
+                .as_deref()
+                .map(|path| vec![drive_location(path)])
                 .unwrap_or_default(),
         })
         .collect();
@@ -842,9 +935,27 @@ pub async fn generate_sku_from_machine_at_version_5(
     Ok(sku)
 }
 
+/// The location recorded for a drive whose sysfs `DEVPATH` is `pci_path`.
+///
+/// Host enumeration reports each NVMe controller's full `DEVPATH`, which ends
+/// in the kernel-assigned instance node, e.g.
+/// `/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme/nvme3`. That node is
+/// numbered in probe order, so it changes across reboots and differs between
+/// identical machines. Drop it and record its parent, which is fixed by the PCI
+/// slot. A path with nothing above the final node is kept as is.
+///
+/// SKUs generated before this rule recorded the full path; their patterns must
+/// be shortened the same way to keep matching.
+fn drive_location(pci_path: &str) -> String {
+    match pci_path.rsplit_once('/') {
+        Some((parent, _node)) if !parent.is_empty() => parent.to_string(),
+        _ => pci_path.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Check, check_values, value_scenarios};
     use model::hardware_info::MemoryDeviceGroup;
     use model::test_support::machine_snapshot::host_machine;
 
@@ -947,6 +1058,20 @@ mod tests {
                 },
             ],
             generated_memory,
+        );
+    }
+
+    #[test]
+    fn drive_location_drops_the_controller_node() {
+        value_scenarios!(drive_location:
+            "the kernel-assigned controller node is dropped" {
+                "/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme/nvme3"
+                    => "/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme".to_string(),
+            }
+            "a path with nothing above the final node is kept" {
+                "nvme3" => "nvme3".to_string(),
+                "/nvme3" => "/nvme3".to_string(),
+            }
         );
     }
 }

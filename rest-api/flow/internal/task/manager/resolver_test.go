@@ -53,6 +53,7 @@ func newMockTargetFetcher() *mockTargetFetcher {
 func (m *mockTargetFetcher) GetRacksForNVLDomain(
 	_ context.Context,
 	id identifier.Identifier,
+	_ bool,
 ) ([]*rack.Rack, error) {
 	if m.getDomainErr != nil {
 		return nil, m.getDomainErr
@@ -171,6 +172,7 @@ func newTestComponent(id uuid.UUID, rackID uuid.UUID, compType devicetypes.Compo
 	)
 
 	comp.RackID = rackID
+	comp.ComponentID = name
 	return comp
 }
 
@@ -709,6 +711,7 @@ func TestResolveRackTarget_MultipleComponentTypeFilters(t *testing.T) {
 	comp1 := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "comp-1")
 	comp2 := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeNVSwitch, "comp-2")
 	comp3 := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypePowerShelf, "comp-3")
+	comp3.ComponentID = "" // Unlinked but outside the selected component types.
 	testRack.AddComponent(comp1)
 	testRack.AddComponent(comp2)
 	testRack.AddComponent(comp3)

@@ -56,6 +56,7 @@ flowchart TB
 ```
 
 **Log flow:**
+
 - **Console logs**: The default sidecar ships directly to Loki via Loki API. This can be
   reconfigured to export via OTLP to a site collector if needed.
 - **DPU logs**: Always flow via OTLP over mTLS to the site otel-collector, which routes
@@ -67,27 +68,32 @@ flowchart TB
 
 ### 2.1 How it works
 
-When a user connects to a machine's BMC console through nico-ssh-console, the proxy:
+SSH Console maintains BMC connections independently of interactive client
+sessions, using SSH or IPMI SOL according to the BMC. With console logging
+enabled, the proxy:
 
-1. Establishes an SSH session to the BMC
-2. Captures all serial console output (stdout from the BMC session)
-3. Strips ANSI escape sequences for cleaner logs
-4. Writes timestamped output to a local file
-5. Rotates files when they exceed the configured size
+1. Captures serial console output from the BMC session
+2. Strips ANSI escape sequences for cleaner logs
+3. Writes timestamped output to a local file
+4. Rotates files when they exceed the configured size
 
 Console logging runs for the duration of each BMC session. When the session ends, the logger
 writes a closing timestamp and flushes the file.
+
+For service setup and interactive access, see
+[SSH Console Setup and Access](../configuration/ssh-console.md).
 
 ### 2.2 Log file location and naming
 
 Console logs are written to:
 
-```
+```text
 /var/log/consoles/<machine-id>_<bmc-ip>.log
 ```
 
 For example:
-```
+
+```text
 /var/log/consoles/fm100ds..0042_10.0.1.50.log
 ```
 
@@ -98,7 +104,7 @@ identify which machine produced the logs.
 
 Console logs contain raw serial output with session markers:
 
-```
+```text
 --- ssh-console started at 2026-06-12T10:15:30+00:00 ---
 [    0.000000] Linux version 5.15.0-generic ...
 [    0.000000] Command line: BOOT_IMAGE=/vmlinuz-5.15.0
@@ -109,6 +115,7 @@ Console logs contain raw serial output with session markers:
 ```
 
 These logs are useful for:
+
 - Debugging boot failures
 - Capturing kernel panics and oops messages
 - Reviewing BIOS/UEFI output
@@ -248,16 +255,19 @@ through the same pipeline as all other pod logs.
 Once centralized, query console logs by machine ID:
 
 **Loki (LogQL):**
+
 ```logql
 {machineid="fm100ds..0042"}
 ```
 
 **VictoriaLogs (LogsQL):**
-```
+
+```text
 machineid:fm100ds..0042
 ```
 
 To find boot failures or kernel panics:
+
 ```logql
 {machineid="fm100ds..0042"} |~ "panic|oops|failed|error"
 ```
@@ -290,7 +300,7 @@ the DPU's local filesystem.
 These paths are on the DPU Arm OS filesystem. The HBN container writes logs to host-mounted
 volumes, making them accessible to the otelcol-contrib collector running on the host.
 
-```
+```text
 /var/log/doca/hbn/frr/frr.log
 /var/log/doca/hbn/nl2docad.log
 /var/log/doca/hbn/nvued.log
@@ -316,6 +326,7 @@ The DPU runs `otelcol-contrib` with configuration from `/etc/otelcol-contrib/con
 Key aspects:
 
 **Resource attributes added to all logs:**
+
 - `host.name` — DPU hostname (from `resourcedetection` processor)
 - `machine.id` — NICo machine ID (from file at `/run/otelcol-contrib/machine-id`)
 - `host.machine.id` — Host machine ID (from `/run/otelcol-contrib/host-machine-id`)
@@ -359,7 +370,7 @@ receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: ${env:MY_POD_IP}:4317
+        endpoint: "[${env:MY_POD_IP}]:4317"
 
 service:
   pipelines:
@@ -371,6 +382,10 @@ service:
         - batch
       exporters: [loki]  # or otlphttp for VictoriaLogs
 ```
+
+By default, the Helm chart sets `MY_POD_IP` from the collector pod's IP
+address. The brackets separate an IPv6 address from the port, for example
+`[2001:db8::1]:4317`. This format also works with IPv4 addresses.
 
 **Resource labels for Loki indexing:**
 
@@ -393,16 +408,19 @@ The routing/pipeline configuration depends on your deployment. It may require cu
 ### 3.4 Querying DPU logs
 
 **By DPU hostname:**
+
 ```logql
 {host_name="dpu-node-01"}
 ```
 
 **By machine ID:**
+
 ```logql
 {machine_id="fm100ds..0042"}
 ```
 
 **By component:**
+
 ```logql
 {component="journald"} |~ "kernel"
 {component="hbn"} |~ "frr|bgp"
@@ -410,6 +428,7 @@ The routing/pipeline configuration depends on your deployment. It may require cu
 ```
 
 **Kernel errors on a specific DPU:**
+
 ```logql
 {host_name="dpu-node-01", component="journald"} | json | PRIORITY <= 3
 ```
@@ -428,6 +447,7 @@ The routing/pipeline configuration depends on your deployment. It may require cu
 | Sidecar shipping but no data in backend | Wrong exporter endpoint | Check sidecar config and backend connectivity |
 
 **Verify console logging is working:**
+
 ```bash
 # Check for console log files
 kubectl exec -it deploy/nico-ssh-console-rs -- ls -la /var/log/consoles/
@@ -446,6 +466,7 @@ kubectl exec -it deploy/nico-ssh-console-rs -- tail -f /var/log/consoles/<machin
 | Logs arriving but missing labels | Processor misconfiguration | Check `resource/dpu-logs-loki` processor |
 
 **Verify DPU collector is running:**
+
 ```bash
 # SSH to DPU and check service
 systemctl status otelcol-contrib
@@ -458,6 +479,7 @@ ls -la /opt/forge/machine_cert.pem /opt/forge/machine_cert.key
 ```
 
 **Verify site collector is receiving:**
+
 ```bash
 # Check site collector logs for incoming connections
 kubectl logs -l app.kubernetes.io/name=opentelemetry-collector -f | grep -i "otlp\|dpu"

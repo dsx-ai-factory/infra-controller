@@ -5,6 +5,9 @@ package activity
 
 import (
 	"context"
+	"errors"
+
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -109,6 +112,11 @@ func invokeGRPCProxyOnSite(
 	respJSON, err := grpcClient.InvokeJSON(ctx, req.FullMethod, reqJSON)
 	if err != nil {
 		logger.Warn().Err(err).Msgf("Failed to proxy %s gRPC call", backend.Label)
+		// A missing local descriptor means the backend was never called. Preserve
+		// that distinction before Temporal serialization loses the sentinel.
+		if errors.Is(err, client.ErrUnknownProxyMethod) {
+			return grpcproxy.Response{}, temporal.NewNonRetryableApplicationError(err.Error(), swe.ErrTypeNICoUnimplemented, err)
+		}
 		return grpcproxy.Response{}, swe.WrapErr(err)
 	}
 

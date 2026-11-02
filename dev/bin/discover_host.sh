@@ -44,13 +44,15 @@ fi
 
 API_SERVER_HOST=$1
 API_SERVER_PORT=$2
+source "$(dirname "${BASH_SOURCE[0]}")/host_port.sh"
+API_SERVER=$(host_port "$API_SERVER_HOST" "$API_SERVER_PORT")
 HOST_DHCP_FILE=$3/host_dhcp_discovery.json
 HOST_MACHINE_FILE=$3/host_machine_discovery.json
 BMC_METADATA_FILE=$3/update_host_bmc_metadata.json
 DISCOVERY_MODE=$4
 
 # Relies on the assumption that the DPU is the only entry
-DPU_INFO=$(${GRPCURL} -d "{\"search_config\": {\"include_dpus\": true}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/FindMachines)
+DPU_INFO=$(${GRPCURL} -d "{\"search_config\": {\"include_dpus\": true}}" "${API_SERVER}" forge.Forge/FindMachines)
 DPU_MACHINE_ID=$(jq -rn "${DPU_INFO}.machines[0].interfaces[0].machineId.id")
 DPU_INTERFACE_ID=$(jq -rn "${DPU_INFO}.machines[0].interfaces[0].id.value")
 echo "DPU machine id: ${DPU_MACHINE_ID}"
@@ -61,7 +63,7 @@ DPU_CONFIG_FILE="/tmp/forge-dpu-agent-sim-config.toml"
 
 # Determine the CircuitId that our host needs to use
 # We use the first network segment that we can find
-RESULT=$(${GRPCURL} $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/FindNetworkSegments)
+RESULT=$(${GRPCURL} "${API_SERVER}" forge.Forge/FindNetworkSegments)
 CIRCUIT_ID=$(echo "$RESULT" | jq -r '(.networkSegments[0].config.prefixes[0].circuitId // .networkSegments[0].prefixes[0].circuitId // empty)')
 if [ -z "$CIRCUIT_ID" ]; then
   echo "ERROR: could not determine CIRCUIT_ID from FindNetworkSegments response" >&2
@@ -73,7 +75,7 @@ echo "Circuit ID is $CIRCUIT_ID"
 # IMPORTANT: This only works a single time, because the loopback IP used in this request is hardcoded
 # And that hardcoded IP will only be assigned to the first DPU that is discovered
 HOST_DHCP_REQUEST=$(jq --arg circuit_id "$CIRCUIT_ID" '.circuit_id = $circuit_id' "$HOST_DHCP_FILE")
-RESULT=$(echo "$HOST_DHCP_REQUEST" | ${GRPCURL} -d @ $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/DiscoverDhcp)
+RESULT=$(echo "$HOST_DHCP_REQUEST" | ${GRPCURL} -d @ "${API_SERVER}" forge.Forge/DiscoverDhcp)
 MACHINE_INTERFACE_ID=$(echo "$RESULT" | jq ".machineInterfaceId.value" | tr -d '"')
 echo "Using Machine Interface with ID $MACHINE_INTERFACE_ID"
 if [ "${DISCOVERY_MODE}" == "dhcp-only" ]; then
@@ -84,32 +86,32 @@ fi
 DISCOVER_MACHINE_REQUEST=$(jq --arg machine_interface_id "$MACHINE_INTERFACE_ID" '.machine_interface_id.value = $machine_interface_id' "$HOST_MACHINE_FILE")
 
 # Assuming ManagedHost is Host/Init state now.
-RESULT=$(echo "$DISCOVER_MACHINE_REQUEST" | ${GRPCURL} -d @ $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/DiscoverMachine)
+RESULT=$(echo "$DISCOVER_MACHINE_REQUEST" | ${GRPCURL} -d @ "${API_SERVER}" forge.Forge/DiscoverMachine)
 HOST_MACHINE_ID=$(echo "$RESULT" | jq ".machineId.id" | tr -d '"')
-ACTION=$(${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/ForgeAgentControl | jq -r .action)
+ACTION=$(${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" "${API_SERVER}" forge.Forge/ForgeAgentControl | jq -r .action)
 echo "Forge agent control: ${ACTION}"
 
 # Give it a BMC IP and credentials
 UPDATE_BMC_METADATA=$(jq --arg machine_id "$HOST_MACHINE_ID" '.machine_id.id = $machine_id' "$BMC_METADATA_FILE")
-${GRPCURL} -d "$UPDATE_BMC_METADATA" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/UpdateBMCMetaData
+${GRPCURL} -d "$UPDATE_BMC_METADATA" "${API_SERVER}" forge.Forge/UpdateBMCMetaData
 echo "Created HOST Machine with ID $HOST_MACHINE_ID. Starting discovery."
 
-MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
+MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" "${API_SERVER}" forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
 echo "State: ${MACHINE_STATE}"
-ACTION=$(${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/ForgeAgentControl | jq -r .action)
+ACTION=$(${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" "${API_SERVER}" forge.Forge/ForgeAgentControl | jq -r .action)
 echo "Host Forge agent control: ${ACTION}"
-ACTION=$(${GRPCURL} -d "{\"machine_id\": {\"id\": \"$DPU_MACHINE_ID\"}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/ForgeAgentControl | jq -r .action)
+ACTION=$(${GRPCURL} -d "{\"machine_id\": {\"id\": \"$DPU_MACHINE_ID\"}}" "${API_SERVER}" forge.Forge/ForgeAgentControl | jq -r .action)
 echo "DPU Forge agent control: ${ACTION}"
 
 # Mark discovery complete
-RESULT=$(${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/DiscoveryCompleted)
+RESULT=$(${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" "${API_SERVER}" forge.Forge/DiscoveryCompleted)
 
 # Wait past the enforced delay until we look for DPU to have rebooted
 i=0
 while [[ $i -lt $MAX_RETRY ]]; do
   sleep 4
 
-  MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
+  MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" "${API_SERVER}" forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
   if [[ "$MACHINE_STATE" == *WaitForDPUUp* ]]; then
     break
   fi
@@ -121,7 +123,7 @@ if [[ $i -ge "$MAX_RETRY" ]]; then
   exit 1
 fi
 
-MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
+MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" "${API_SERVER}" forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
 echo "State: ${MACHINE_STATE}"
 
 # Run forge-dpu-agent to report an observation, which shows that DPU has now rebooted
@@ -133,11 +135,11 @@ cd ${REPO_ROOT} && cargo run -p agent -- --config-path "$DPU_CONFIG_FILE" run --
 
 # Wait until host reaches discovered state.
 i=0
-MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
+MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" "${API_SERVER}" forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
 while [[ $MACHINE_STATE != "HostInitializing/Discovered" && $MACHINE_STATE != "Ready" && $i -lt $MAX_RETRY ]]; do
   sleep 4
 
-  MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
+  MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" "${API_SERVER}" forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
   echo "Checking machine state. Waiting for it to be in Host/Discovered or Ready state. Current: $MACHINE_STATE"
   i=$((i + 1))
 done
@@ -149,15 +151,15 @@ if [[ $i -ge "$MAX_RETRY" ]]; then
   exit 1
 fi
 
-${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" "$API_SERVER_HOST:$API_SERVER_PORT" forge.Forge/ForgeAgentControl
-${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" "$API_SERVER_HOST:$API_SERVER_PORT" forge.Forge/RebootCompleted
+${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" "${API_SERVER}" forge.Forge/ForgeAgentControl
+${GRPCURL} -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" "${API_SERVER}" forge.Forge/RebootCompleted
 
 # Wait until host reaches ready state.
 i=0
 while [[ $MACHINE_STATE != "Ready" && $i -lt $MAX_RETRY ]]; do
   sleep 2
 
-  MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" $API_SERVER_HOST:$API_SERVER_PORT forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
+  MACHINE_STATE=$(${GRPCURL} -d "{\"id\": {\"id\": \"$HOST_MACHINE_ID\"}, \"search_config\": {\"include_dpus\": true}}" "${API_SERVER}" forge.Forge/FindMachines | jq ".machines[0].state" | tr -d '"')
   echo "Checking machine state. Waiting for it to be in Ready state. Current: $MACHINE_STATE"
   i=$((i + 1))
 done

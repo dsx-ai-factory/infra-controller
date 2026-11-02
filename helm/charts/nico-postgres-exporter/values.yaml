@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Disabled by default, both standalone and as an umbrella dependency.
+enabled: false
+fullnameOverride: ""
+
+# Disable the workload to provision only the dashboard.
+exporter:
+  enabled: true
+
+# Required when the exporter is enabled. Supply an image containing the
+# nico-postgres-exporter binary; no registry or release tag is assumed.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+database:
+  # Required: PostgreSQL host, database name, and a Secret in the release
+  # namespace. Credentials are read from this Secret, never chart values.
+  host: ""
+  port: 5432
+  name: ""
+  credentialsSecret: ""
+  usernameKey: username
+  passwordKey: password
+  # disable, allow, prefer, require, verify-ca, or verify-full.
+  sslMode: require
+  # Optional existing Secret containing a PEM CA bundle. The selected key
+  # is mounted as /var/run/secrets/postgres-ca/ca.crt and passed to SQLx.
+  sslRootCertSecret:
+    name: ""
+    key: ca.crt
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+# Requires Prometheus Operator CRDs. Configure labels to match the site's
+# Prometheus serviceMonitorSelector and ensure it watches this namespace.
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+
+# Does not install Grafana. Its sidecar must watch this namespace and selector.
+grafanaDashboards:
+  enabled: true
+  # Empty means the release namespace. A different namespace must exist.
+  namespace: ""
+  labels:
+    grafana_dashboard: "1"
+  folder: PostgreSQL
+  folderAnnotation: grafana_folder
+  annotations: {}

@@ -16,6 +16,7 @@
  */
 use std::ops::DerefMut;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
@@ -28,6 +29,9 @@ use sqlx::{PgConnection, PgTransaction};
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter, network_segment, vpc};
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 #[derive(Clone, Copy)]
 pub struct VniColumn;
@@ -72,7 +76,11 @@ pub async fn persist(
                 description,
                 labels, routing_profile_type, routing_profile_overrides, vni, status, power_resource_group,
                 slaac_enabled)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *";
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     sqlx::query_as(query)
         .bind(value.id)
         .bind(&value.metadata.name)
@@ -193,10 +201,20 @@ async fn find_by_inner<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
     row_lock: VpcRowLock,
+    include_deleted: bool,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM vpcs").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted
+         FROM vpcs",
+    )
+    .filter(&filter);
 
-    query.push(" AND deleted IS NULL");
+    if !include_deleted {
+        query.push(" AND deleted IS NULL");
+    }
     if matches!(row_lock, VpcRowLock::Mutation) {
         query.push(" FOR NO KEY UPDATE");
     }
@@ -214,18 +232,40 @@ pub async fn find_by_with_lock<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     filter: ObjectColumnFilter<'a, C>,
     row_lock: VpcRowLock,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    find_by_inner(&mut *txn, filter, row_lock).await
+    find_by_inner(&mut *txn, filter, row_lock, false).await
 }
 
 pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    find_by_inner(txn, filter, VpcRowLock::None).await
+    find_by_inner(txn, filter, VpcRowLock::None, false).await
+}
+
+/// Finds one VPC by ID while retaining a soft-deleted row so allocation validation can distinguish
+/// a deleted VPC from an identifier that never existed.
+///
+/// Callers that serialize with deletion must lock the `instance_addresses` table before this read.
+pub async fn find_by_id_including_deleted(
+    txn: impl DbReader<'_>,
+    id: VpcId,
+) -> Result<Option<Vpc>, DatabaseError> {
+    Ok(find_by_inner(
+        txn,
+        ObjectColumnFilter::One(IdColumn, &id),
+        VpcRowLock::None,
+        true,
+    )
+    .await?
+    .pop())
 }
 
 pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
-    let query = "SELECT * from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL";
+    let query = "SELECT id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted
+        from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL";
 
     sqlx::query_as(query)
         .bind(vni)
@@ -240,7 +280,10 @@ pub async fn set_vni(value: &Vpc, txn: &mut PgConnection, vni: i32) -> DatabaseR
     let query = "UPDATE vpcs
             SET vni=$1, status=jsonb_set(status, '{vni}', to_jsonb($1::integer), true), updated=NOW()
             WHERE id=$2 AND deleted is null
-            RETURNING *";
+            RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     sqlx::query_as(query)
         .bind(vni)
         .bind(value.id)
@@ -266,7 +309,10 @@ pub async fn change_routing_profile(
             status = jsonb_set(status, '{vni}', to_jsonb($2::integer), true),
             version = $3, updated = NOW()
         WHERE id = $4 AND version = $5 AND deleted IS NULL
-        RETURNING *";
+        RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     let result = sqlx::query_as(query)
         .bind(&value.routing_profile_type)
         .bind(vni)
@@ -296,9 +342,11 @@ pub async fn find_by_segment(
     txn: impl DbReader<'_>,
     segment_id: NetworkSegmentId,
 ) -> Result<Option<Vpc>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new(
-        "SELECT v.* from vpcs v INNER JOIN network_segments s ON v.id = s.vpc_id",
-    )
+    let mut query = FilterableQueryBuilder::new(format!(
+        "SELECT {} FROM {} INNER JOIN network_segments s ON v.id = s.vpc_id",
+        Vpc::db_aliased_columns(),
+        Vpc::db_aliased_table(),
+    ))
     .filter_relation(
         &ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
         Some("s"),
@@ -318,17 +366,32 @@ pub async fn find_by_segment(
 /// If the VPC was already deleted, this returns Ok(`None`), even if historical
 /// records still reference it.
 ///
-/// Callers that coordinate VPC-attached child mutations must acquire
-/// [`VpcRowLock::Mutation`] on this VPC before calling this function.
+/// Use an explicit transaction to keep the VPC row locked from the reference
+/// checks until the deletion is committed or rolled back.
 pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>, DatabaseError> {
-    let active_vpc_query = "SELECT EXISTS(SELECT 1 FROM vpcs WHERE id=$1 AND deleted IS NULL)";
-    let is_active: bool = sqlx::query_scalar(active_vpc_query)
+    // Domain creation takes the same lock, so it cannot add a reference
+    // between the checks below and the deletion.
+    let vpcs = find_by_with_lock(
+        &mut *txn,
+        ObjectColumnFilter::One(IdColumn, &id),
+        VpcRowLock::Mutation,
+    )
+    .await?;
+    if vpcs.is_empty() {
+        return Ok(None);
+    }
+
+    // A VPC cannot be deleted while it owns a live domain.
+    let domain_query = "SELECT EXISTS(SELECT 1 FROM domains WHERE vpc_id=$1 AND deleted IS NULL)";
+    let has_domains: bool = sqlx::query_scalar(domain_query)
         .bind(id)
         .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(active_vpc_query, e))?;
-    if !is_active {
-        return Ok(None);
+        .map_err(|error| DatabaseError::query(domain_query, error))?;
+    if has_domains {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "VPC {id} cannot be deleted while live DNS domains reference it"
+        )));
     }
 
     // Block deletion while any active or soft-deleted prefix row still
@@ -367,8 +430,11 @@ pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>
         )));
     }
 
-    let query =
-        "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL RETURNING *";
+    let query = "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL
+        RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     match sqlx::query_as(query).bind(id).fetch_one(txn).await {
         Ok(vpc) => Ok(Some(vpc)),
         Err(sqlx::Error::RowNotFound) => Ok(None),
@@ -406,7 +472,10 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
                 power_resource_group=CASE WHEN $7 THEN $8 ELSE power_resource_group END,
                 updated=NOW()
             WHERE id=$9 AND version=$10 AND deleted is null
-            RETURNING *";
+            RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
     let (update_power_resource_group, power_resource_group) =
         match value.power_resource_group.as_ref() {
             Some(PowerResourceGroupUpdate::Set(resource_group)) => {
@@ -457,7 +526,10 @@ pub async fn update_virtualization(
     let query = "UPDATE vpcs
             SET version=$1, network_virtualization_type=$2, updated=NOW()
             WHERE id=$3 AND version=$4 AND deleted is null
-            RETURNING *";
+            RETURNING id, version, organization_id, network_security_group_id,
+                network_virtualization_type, routing_profile_type, routing_profile_overrides,
+                power_resource_group, slaac_enabled, vni, status, name, description, labels,
+                created, updated, deleted";
 
     let current_version = match value.if_version_match {
         Some(version) => version,

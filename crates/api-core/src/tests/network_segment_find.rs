@@ -202,7 +202,6 @@ async fn test_find_network_segment_by_ids(pool: sqlx::PgPool) {
                 .prefixes
                 .is_empty()
         );
-        assert!(!segment.history.is_empty());
         let prefix = segment
             .config
             .as_ref()

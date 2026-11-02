@@ -63,12 +63,9 @@ Boot and DPU configuration is **declarative**: you describe the host in the Expe
 
 So a standard DPU host is handled entirely by defaults. A host without DPU hardware must instead use `dpu_policy: ignore` and declare a primary HostInband NIC as described in [3.2](#32-zero-dpu-host-no-dpu-hardware). The knobs below exist for the hosts that *don't* fit the standard-DPU mold.
 
-`rack_management_enabled` is a separate deployment-mode setting, not another
-DPU policy, and it does not override this resolution. Rack-manager deployments
-that operate DPUs as NICs must also set the site-wide `dpu_policy` (or each
-host's policy) to `nic`. If rack management is enabled while both policy
-levels remain unset, the effective policy is still `manage` and the Admin-network
-default above still applies.
+Rack management does not override this resolution. Rack-manager deployments
+that operate DPUs as NICs must set the site-wide `dpu_policy` (or each host's
+policy) to `nic`.
 
 ### `dpu_policy`
 
@@ -227,12 +224,29 @@ All of these are **admin-only**; the Forge gRPC service enforces admin authoriza
 | admin-cli | Forge RPC | Purpose |
 |---|---|---|
 | `em add …` | `AddExpectedMachine` | Add one host (BMC creds, `--dpu-policy`, `--interfaces`, metadata). |
-| `em show [--bmc-mac-address <mac>]` | `GetAllExpectedMachines` / `GetExpectedMachine` | List all, or show one. Add `-f json` to export. |
-| `em update --filename <json>` | `UpdateExpectedMachine` | Full replacement of one entry from JSON. |
-| `em patch --bmc-mac-address <mac> …` | `UpdateExpectedMachine` | Partial update (e.g. `--dpu-policy`), preserving other fields. |
-| `em delete --bmc-mac-address <mac>` | `DeleteExpectedMachine` | Remove one entry. |
+| `em show [<mac>]` or `em show --id <uuid>` | `GetAllExpectedMachines` / `GetExpectedMachine` | Use one selector to show one entry, or omit both to list all. Put `-f json` before `em` for JSON output. |
+| `em update --filename <json>` | `PatchExpectedMachine` | Update one entry from JSON, including all metadata fields. |
+| `em patch --bmc-mac-address <mac> …` | `PatchExpectedMachine` | Update selected fields, such as `--dpu-policy`, preserving omitted fields. |
+| `em delete <mac>` or `em delete --id <uuid>` | `DeleteExpectedMachine` | Remove one entry. Provide exactly one selector. |
 | `em replace-all --filename <json>` | (bulk) | Replace the entire table from a file. |
 | `em erase` | (bulk) | Erase the entire table. |
+
+Use `em patch` to correct only a BMC username or password. Supply `--bmc-username`,
+`--bmc-password`, or both; each omitted credential field keeps its stored value.
+
+Both update commands fall back to `UpdateExpectedMachine` on `Unimplemented` or
+`PermissionDenied`, or when the stored record has no ID. For file updates, include
+`bmc_mac_address`, `bmc_username`, `bmc_password`, and `chassis_serial_number`.
+For a file update through Core PATCH, both credentials must be nonempty.
+
+File updates always replace the stored name, description, and labels. Omitting `metadata`
+or setting it to `null` clears all three. A supplied `metadata` object requires `name`,
+`description`, and `labels`; use empty values to clear them. Other omitted top-level
+optional fields are preserved. For interface replacement and clearing, refer to
+[Update and clear interfaces](expected-machine-interfaces.md#update-and-clear-interfaces).
+For command options, refer to the
+[expected-machine update reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/expected-machine/expected-machine-update.md)
+and [expected-machine patch reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/expected-machine/expected-machine-patch.md).
 
 ### Boot interface / primary interface
 
@@ -341,6 +355,7 @@ This diagram intentionally summarizes the success and release paths; the canonic
 Created → DpuDiscoveringState → HostInit → Validation → Ready
                 (DPU hosts)        │
                                    ├─ EnableIpmiOverLan
+                                   ├─ DisableOnboardNics               (Vera Rubin with managed DPUs only)
                                    ├─ WaitingForPlatformConfiguration  (configure BIOS)
                                    ├─ WaitingForBiosJob                (Dell BIOS job)
                                    ├─ PollingBiosSetup                 (verify BIOS)
@@ -354,6 +369,8 @@ Ready ── allocation ──→ Assigned ── release ──→ Ready
 ```
 
 Site-explorer creates the host in `Created` (DPUs, if any, in `DpuDiscoveringState`), records the boot **predictions**, and initializes the desired target as soon as selection is unambiguous. The machine-controller then drives `HostInit`, where it configures BIOS and sets the boot order. If final verification cannot be recorded there, the desired version remains pending and `Ready` enters the persisted `BootConfiguring` path before the host can be allocated.
+
+`DisableOnboardNics` is limited to Vera Rubin because other SKUs do not support disabling onboard NICs through the BMC. Vera Rubin hosts without managed DPUs also skip it, preserving their onboard NIC settings for host networking.
 
 ### Resolving and persisting the boot interface
 

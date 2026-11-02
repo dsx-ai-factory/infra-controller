@@ -37,7 +37,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -299,7 +298,7 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 	tscWithNICoDenied.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// NICo is strict about changes in capabilities and allowing
 	// instance type updates, so we sort before sending the data nico.
@@ -555,7 +554,6 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(ip.Org)
 			ec.Set("user", ipu)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := cith.Handle(ec); (err != nil) != tt.wantErr {
@@ -589,9 +587,9 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 			assert.Equal(t, tt.args.reqData.SiteID, rst.SiteID)
 
 			if tt.args.reqData.Labels != nil {
-				assert.Equal(t, tt.args.reqData.Labels, rst.Labels)
+				assert.Equal(t, tt.args.reqData.Labels, map[string]string(rst.Labels))
 			} else {
-				assert.Equal(t, map[string]string{}, rst.Labels)
+				assert.Equal(t, model.APILabels{}, rst.Labels)
 			}
 			assert.Equal(t, cdbm.InstanceTypeStatusReady, rst.Status)
 			assert.Equal(t, len(rst.StatusHistory), 1)
@@ -673,7 +671,7 @@ func TestGetAllInstanceTypeHandler_Handle(t *testing.T) {
 	ipu2 := common.TestBuildUser(t, dbSession, "test-starfleet-id-456", ipOrg, ipRoles)
 	ip2 := common.TestBuildInfrastructureProvider(t, dbSession, "Test Infrastructure Provider 2", ipOrg2, ipu2)
 	st3 := common.TestBuildSite(t, dbSession, ip2, "Test Site 3", ipu2)
-	ip2it := common.TestBuildInstanceType(t, dbSession, fmt.Sprintf("test-instance-type-ip2"), sutil.GetPtr(uuid.New()), st3, map[string]string{
+	ip2it := common.TestBuildInstanceType(t, dbSession, "test-instance-type-ip2", sutil.GetPtr(uuid.New()), st3, map[string]string{
 		"name":        "test-instance-type-ip2",
 		"description": "Test Instance Type IP2 Description",
 	}, ipu2)
@@ -785,6 +783,7 @@ func TestGetAllInstanceTypeHandler_Handle(t *testing.T) {
 	// by orgProvider), but tenant perspective should succeed.
 	externalSite := common.TestBuildSite(t, dbSession, ip, "External Site For Dual-Role Tenant", ipu)
 	common.TestBuildTenantSite(t, dbSession, orgTenant, externalSite, orgUser)
+	common.TestBuildAllocation(t, dbSession, externalSite, orgTenant, "test-ext-site-allocation", ipu)
 	externalSiteITCount := 3
 	for i := 0; i < externalSiteITCount; i++ {
 		it := common.TestBuildInstanceType(t, dbSession, fmt.Sprintf("test-ext-site-it-%02d", i), sutil.GetPtr(uuid.New()), externalSite, map[string]string{
@@ -810,7 +809,7 @@ func TestGetAllInstanceTypeHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1406,7 +1405,6 @@ func TestGetAllInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gaith.Handle(ec)
@@ -1570,7 +1568,7 @@ func TestGetInstanceTypeHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1798,7 +1796,6 @@ func TestGetInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.instanceTypeID.String())
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gith.Handle(ec)
@@ -1960,7 +1957,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 	tscWithNICoDenied.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -2452,7 +2449,6 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.instanceTypeID.String())
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err = uith.Handle(ec)
@@ -2492,7 +2488,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 			}
 
 			if tt.args.reqData.Labels != nil {
-				assert.Equal(t, tt.args.reqData.Labels, rst.Labels)
+				assert.Equal(t, tt.args.reqData.Labels, map[string]string(rst.Labels))
 			}
 
 			assert.NotEqual(t, rst.Updated.String(), it.Updated.String())
@@ -2639,7 +2635,7 @@ func TestDeleteInstanceTypeHandler_Handle(t *testing.T) {
 		"DeleteInstanceType", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -2785,7 +2781,6 @@ func TestDeleteInstanceTypeHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.instanceTypeID)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := dith.Handle(ec)
@@ -2832,11 +2827,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	scp := sc.NewClientPool(tcfg)
 
 	cith := CreateInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewCreateInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, cith) {
@@ -2844,10 +2838,9 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	gaith := GetAllInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 
 	if got := NewGetAllInstanceTypeHandler(dbSession, tc, cfg); !reflect.DeepEqual(got, gaith) {
@@ -2855,10 +2848,9 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	gith := GetInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 
 	if got := NewGetInstanceTypeHandler(dbSession, tc, cfg); !reflect.DeepEqual(got, gith) {
@@ -2866,11 +2858,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	uith := UpdateInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewUpdateInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, uith) {
@@ -2878,11 +2869,10 @@ func TestInstanceTypeHandlers(t *testing.T) {
 	}
 
 	dith := DeleteInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		scp:        scp,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
+		scp:       scp,
 	}
 
 	if got := NewDeleteInstanceTypeHandler(dbSession, tc, scp, cfg); !reflect.DeepEqual(got, dith) {

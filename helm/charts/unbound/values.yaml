@@ -28,8 +28,10 @@ exporter:
 ##   command: ["/bin/sh", "-c"]
 ##   args:
 ##     - |
-##       printf 'server:\n  interface: 0.0.0.0\n  interface: ::0\n  access-control: 0.0.0.0/0 allow\ninclude: "/etc/unbound/local.conf.d/*.conf"\n' > /tmp/unbound.conf
+##       printf 'server:\n  interface: 0.0.0.0\n  interface: ::0\ninclude: "/etc/unbound/local.conf.d/*.conf"\n' > /tmp/unbound.conf
 ##       exec unbound -d -c /tmp/unbound.conf
+## If reusing an older copy, remove its inline `access-control: 0.0.0.0/0 allow`.
+## Keep access rules in `localConfig.access_control.conf` so site overrides apply.
 command: []
 args: []
 
@@ -37,6 +39,12 @@ imagePullSecrets: []
 
 service:
   type: ClusterIP
+
+## Request dual-stack exposure on the combined nico-unbound DNS/metrics Service.
+## Configure and verify the supplied image's IPv6 DNS and exporter listeners first.
+## This flag does not change container startup, localConfig, or external DNS Services.
+ipv6:
+  enabled: false
 
 ## External LoadBalancer Service (bare-metal / MetalLB). When enabled, renders two
 ## Services (UDP+TCP on 53) sharing one VIP via metallb.universe.tf/allow-shared-ip, so
@@ -46,7 +54,24 @@ service:
 externalService:
   enabled: false
   type: LoadBalancer
+  # Omitted, null, or empty settings keep SingleStack IPv4. Use SingleStack
+  # with [IPv6] for IPv6 only, or RequireDualStack with [IPv4, IPv6] for both.
+  # PreferDualStack allows fallback on a single-stack cluster. The first family
+  # is primary and cannot be changed on an existing Service.
+  # Configure the image's matching DNS listeners and localConfig access rules.
+  # These Service settings are independent of the internal ipv6.enabled option.
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
+  # Empty keeps the Kubernetes default (Cluster). MetalLB only lets Local
+  # Services share an IP with Services that select the same pods.
   externalTrafficPolicy: ""
+  # Annotation key that lets the UDP and TCP Services share an IP. Its value
+  # is <name>-external. Change the key for a load-balancer controller that
+  # does not use MetalLB annotations, or set it to "" to omit the annotation.
+  # An
+  # annotations entry under either MetalLB spelling replaces the built-in
+  # annotation; one with the same key overrides its value.
+  sharedIpAnnotation: metallb.universe.tf/allow-shared-ip
   annotations: {}
 
 serviceMonitor:
@@ -80,6 +105,7 @@ localConfig:
   access_control.conf: |
     server:
         access-control: 0.0.0.0/0 allow
+        access-control: ::/0 allow
   extended_statistics.conf: |
     server:
         extended-statistics: yes

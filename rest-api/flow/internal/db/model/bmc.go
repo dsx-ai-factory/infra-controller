@@ -5,6 +5,8 @@ package model
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/google/uuid"
@@ -81,24 +83,38 @@ func (bd *BMC) InvalidType() bool {
 	return !devicetypes.IsValidBMCTypeString(bd.Type)
 }
 
-// GetComponentByBMCMAC retrieves a component by its BMC MAC address.
+// ErrAmbiguousBMCMAC indicates that case variants of a BMC MAC belong to different components.
+var ErrAmbiguousBMCMAC = errors.New("BMC MAC address matches multiple components")
+
+// GetComponentByBMCMAC retrieves a unique component by its case-insensitive BMC MAC address.
 // Returns the component with all its associated BMCs (needed for powershelf manager queries).
 func GetComponentByBMCMAC(
 	ctx context.Context,
 	idb bun.IDB,
 	macAddress string,
 ) (*Component, error) {
-	var bmc BMC
+	// Select components rather than BMC rows so duplicate spellings owned by
+	// the same component do not make the component identity ambiguous.
+	matchingBMCs := idb.NewSelect().Model((*BMC)(nil)).Column("component_id").
+		Where("lower(b.mac_address) = lower(?)", macAddress)
+	var components []Component
 	err := idb.NewSelect().
-		Model(&bmc).
-		Where("b.mac_address = ?", macAddress).
-		Relation("Component").
-		Relation("Component.BMCs").
-		Relation("Component.Rack").
+		Model(&components).
+		Where("c.id IN (?)", matchingBMCs).
+		Relation("BMCs").
+		Relation("Rack").
+		Limit(2).
 		Scan(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return bmc.Component, nil
+	switch len(components) {
+	case 0:
+		return nil, sql.ErrNoRows
+	case 1:
+		return &components[0], nil
+	default:
+		return nil, ErrAmbiguousBMCMAC
+	}
 }

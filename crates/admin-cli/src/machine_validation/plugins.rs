@@ -7,7 +7,8 @@ use ::rpc::forge::{
     self as forgerpc, MachineValidationTestEnableDisableTestRequest,
     MachineValidationTestFullHostApprovalRequest, MachineValidationTestVerfiedRequest,
 };
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use eyre::WrapErr as _;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -34,6 +35,8 @@ pub(crate) enum Args {
 pub(crate) struct CreateArgs {
     #[clap(long)]
     name: String,
+    #[clap(long = "type", value_enum, default_value_t = PluginType::Container)]
+    plugin_type: PluginType,
     #[clap(long)]
     image: String,
     #[clap(long, required = true)]
@@ -50,6 +53,19 @@ pub(crate) struct CreateArgs {
     privileged: bool,
     #[clap(long)]
     host_access_full: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum PluginType {
+    Container,
+}
+
+impl PluginType {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -90,6 +106,7 @@ impl Run for Args {
                         components: Vec::new(),
                         is_enabled: None,
                         plugin: Some(forgerpc::MachineValidationPlugin {
+                            r#type: args.plugin_type.as_str().to_owned(),
                             image: args.image,
                             entrypoint: args.entrypoint,
                             parameters_json: args.parameters,
@@ -98,10 +115,18 @@ impl Run for Args {
                         }),
                     })
                     .await?;
-                println!(
+                crate::async_writeln!(
+                    ctx.output_file,
                     "Created plugin revision: {} {}",
-                    response.test_id, response.version
-                );
+                    response.test_id,
+                    response.version
+                )
+                .wrap_err_with(|| {
+                    format!(
+                        "plugin creation succeeded for {} {} but its confirmation could not be written",
+                        response.test_id, response.version
+                    )
+                })?;
             }
             Self::Verify(args) => {
                 let response = ctx
@@ -112,7 +137,8 @@ impl Run for Args {
                         version: args.version,
                     })
                     .await?;
-                println!("{}", response.message);
+                crate::async_writeln!(ctx.output_file, "{}", response.message)
+                    .wrap_err("plugin verification request succeeded but its confirmation could not be written")?;
             }
             Self::ApproveFullHost(args) => {
                 let response = ctx
@@ -125,7 +151,8 @@ impl Run for Args {
                         },
                     )
                     .await?;
-                println!("{}", response.message);
+                crate::async_writeln!(ctx.output_file, "{}", response.message)
+                    .wrap_err("full host approval request succeeded but its confirmation could not be written")?;
             }
             Self::Enable(args) => {
                 let response = ctx
@@ -139,7 +166,9 @@ impl Run for Args {
                         },
                     )
                     .await?;
-                println!("{}", response.message);
+                crate::async_writeln!(ctx.output_file, "{}", response.message).wrap_err(
+                    "plugin enable request succeeded but its confirmation could not be written",
+                )?;
             }
             Self::Disable(args) => {
                 let response = ctx
@@ -153,7 +182,9 @@ impl Run for Args {
                         },
                     )
                     .await?;
-                println!("{}", response.message);
+                crate::async_writeln!(ctx.output_file, "{}", response.message).wrap_err(
+                    "plugin disable request succeeded but its confirmation could not be written",
+                )?;
             }
         }
         Ok(())
@@ -162,6 +193,7 @@ impl Run for Args {
 
 #[cfg(test)]
 mod tests {
+    use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
 
     use super::Args;
@@ -181,6 +213,26 @@ mod tests {
             "--host-access-full",
         ]);
         assert!(args.is_ok());
+    }
+
+    #[test]
+    fn rejects_an_unsupported_plugin_type_before_calling_the_api() {
+        let error = Args::try_parse_from([
+            "plugins",
+            "create",
+            "--name",
+            "gpu-health",
+            "--type",
+            "script",
+            "--image",
+            "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--entrypoint",
+            "/plugin/entrypoint",
+        ])
+        .expect_err("unsupported plugin type must fail CLI parsing");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("possible values: container"));
     }
 
     #[test]

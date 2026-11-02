@@ -56,7 +56,7 @@ fn event_context() -> EventContext {
         addr: BmcAddr {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             port: Some(443),
-            mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap(),
+            mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").unwrap()),
         },
         collector_type: "sensor_collector",
         labels: Default::default(),
@@ -82,6 +82,7 @@ fn build_sensor_metric_event(idx: usize, unique_keys: usize) -> CollectorEvent {
 
     CollectorEvent::Metric(
         MetricSample {
+            semantics: carbide_health::sink::MetricSemantics::Gauge,
             key: sensor_key.clone(),
             name: "hw_sensor".to_string(),
             metric_type: "temperature".to_string(),
@@ -103,6 +104,7 @@ fn build_sensor_metric_event(idx: usize, unique_keys: usize) -> CollectorEvent {
 fn build_nmxt_metric_event(idx: usize) -> CollectorEvent {
     CollectorEvent::Metric(
         MetricSample {
+            semantics: carbide_health::sink::MetricSemantics::Gauge,
             key: format!("effective_ber:{}", idx % 64),
             name: "switch_nmxt".to_string(),
             metric_type: "effective_ber".to_string(),

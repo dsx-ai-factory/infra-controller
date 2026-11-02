@@ -33,6 +33,12 @@ Indicates that a tenant reported an issue with the host while releasing the bare
 Indicates that a tenant reported an issue with the host while releasing the bare metal instance
 and that repair by an external framework is required.
 
+### `RequestOnlineRepair`
+
+Indicates that an instance was selected for online repair without releasing it.
+The alert prevents new allocations and instance deletion, and suppresses
+external fleet-health alerting until the online repair override is cleared.
+
 ## Site Explorer health probe identifiers
 
 ### `BmcExplorationFailure`
@@ -53,29 +59,68 @@ Indicates that an already-ingested Managed Host's BMC MAC is no longer listed in
 
 ## Hardware/BMC health probe identifiers
 
-`nico-hardware-health` currently reports sensor-based hardware health with a single probe ID:
+`nico-hardware-health` reports sensor-based hardware health with a single probe ID:
 
 ### `BmcSensor`
 
-Indicates that a BMC sensor reported a warning/critical/failure condition.
+Indicates that a BMC sensor reported a warning/critical/fatal/failure condition.
 
 Details:
 
 - `target` is set to the BMC sensor ID (for example, a fan/temperature/power sensor name).
 - The alert `message` contains the entity type, reading, unit, and threshold ranges used for evaluation.
-- Classifications are documented in [Health alert classifications](health_alert_classifications.md), including `Hardware`, `SensorWarning`, `SensorCritical`, and `SensorFailure`.
+- Classifications are documented in [Health alert classifications](health_alert_classifications.md), including `Hardware`, `SensorWarning`, `SensorCritical`, `SensorFatal`, and `SensorFailure`.
 
 `message` format:
 
 ```text
-<entity_type> '<sensor_id>': <status> - reading <value><unit> (<reading_type>), valid range: <range>, caution: <range>, critical: <range>
+<entity_type> '<sensor_id>': <status> - reading <value><unit> (<reading_type>), valid range: <range>, caution: <range>, critical: <range>, fatal: <range>
 ```
 
 Example:
 
 ```text
-power_supply 'PSU0_OutputPower': Critical - reading 1320.00W (power), valid range: 0.0 to 1500.0, caution: 1200.0 to 1300.0, critical: 0.0 to 1310.0
+power_supply 'PSU0_OutputPower': Critical - reading 1320.00W (power), valid range: 0.0 to 1500.0, caution: 1200.0 to 1300.0, critical: 0.0 to 1310.0, fatal: not set
 ```
+
+### `IntrusionSensorTriggered`
+
+Indicates that a BMC event reports an asserted intrusion sensor. The target is
+the host BMC. The alert prevents allocations until a matching normal or cleared
+event removes it.
+
+## Leak detection health probe identifiers
+
+### `BmcLeakDetection`
+
+Reports BMC Redfish leak detector observations. The target identifies the
+detector. Warning and critical detector states use the `LeakDetector`
+classification, while a detector that cannot be read uses `SensorFailure`.
+Configured leak processing can derive tray-level and rack-level alerts with the
+`TrayLeak` and `RackLeak` classifications from these observations.
+
+### `NvueLeakage`
+
+Reports leakage sensor state from the NVUE API on a switch. For per-sensor
+observations, the target identifies the sensor; an endpoint-wide unavailable
+response has no target. A reported leak uses the `Leak` classification;
+unavailable, missing, or unrecognized sensor state uses `SensorFailure`.
+
+## BMS leak health probe identifiers
+
+The DSX Exchange consumer maps Building Management System (BMS) leak events to
+rack health reports. The target is the rack ID. Active events prevent
+allocations and use the `SensorCritical` and `Hardware` classifications. The
+leak-detection probe also uses `RackLeak`; the sensor-fault probe does not,
+because it does not establish that a leak is active.
+
+### `BmsLeakDetectRack`
+
+Indicates that BMS reported a rack-level leak.
+
+### `BmsLeakSensorFaultRack`
+
+Indicates that BMS reported a rack-level leak sensor fault.
 
 ## NVLink domain health probe identifiers
 
@@ -84,6 +129,78 @@ power_supply 'PSU0_OutputPower': Critical - reading 1320.00W (power), valid rang
 Indicates that NMX-C reported `Unhealthy` or `UnhealthyDbCorrupted` controller
 health for an NVLink domain. A `Healthy` report clears the probe. `Degraded` and
 `Unknown` do not generate a domain health report.
+
+## NVLink GPU health probe identifiers
+
+### `NvlinkUnhealthy`
+
+Raised when NMX-C reports a GPU in the host's NVLink inventory as `Degraded`,
+`NoNvlink`, or `DegradedBw`. The NVLink partition monitor writes a `Merge` report
+under the source `nvlink-partition-monitor`. Its alerts carry
+[`PreventAllocations`](health_alert_classifications.md#preventallocations),
+blocking normal tenant allocation while they remain in aggregate host health.
+Targeted allocation with `allow_unhealthy_machine` can bypass this health check.
+A host-level `Replace` health report takes precedence over the monitor's merge
+report. The monitor only updates its merge entry; it leaves replace overrides
+unchanged, including one with the same source name.
+
+The report carries one alert per affected GPU. Each alert's `target` is the
+GPU's NMX-C UID, and its `message` names the health state NMX-C reported
+(`degraded`, `no_nvlink`, or `degraded_bw`). An affected GPU stays in the report
+until NMX-C reports that same GPU `Healthy` and its UID still appears in the
+host's NVLink inventory. `Unknown` health, or the GPU being absent from the
+response, keeps it flagged. NMX-C represents a GPU under rediscovery as UID `0`
+with `Unknown` health, so a healthy sibling GPU never clears an affected one.
+GPUs that were never flagged create no alert while `Unknown` or absent. UID `0`
+is never treated as an identity on either side: NMX-C rows with UID `0` are
+ignored, and an inventory entry whose stored UID is `0` (an unparseable fabric
+GUID at discovery) is never evaluated. A failure of the pass's initial
+partition-list fetch or of the GPU-health query prevents reevaluation. The
+alert evaluation runs before the pass's later post-operation partition-list
+refresh, so a failure of that refresh does not mean the stored report was
+retained; it may already have been set or cleared on that pass. The two
+fetches are told apart by the `nmxc_connect_err` field of the monitor's
+per-pass metrics summary log and by the `error` label on
+`carbide_nvlink_partition_monitor_nmxc_connect_error_count`, which read
+`Failed to get NMX-C partition info list when updating db` for the later
+refresh. A failed health-report
+write leaves the stored report unchanged until the next pass retries it; each such failure increments
+`carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total`
+(label `write`: `set` or `clear`) and logs the machine ID and error. An alert
+can therefore reflect an earlier fault rather than a
+current unhealthy observation. The stored report is rewritten only when the set
+of affected GPUs or their classifications changes, so an alert's `message` label
+may lag a GPU that moves between unhealthy states until the set next changes.
+If the stored copy of an alert loses `PreventAllocations` (for example, through
+a manual edit of this source's report), the monitor restores it on the next pass
+for as long as the alert is retained, including while NMX-C reports that GPU
+`Unknown` or omits it.
+
+The monitor removes its merge report once every affected GPU's alert has
+cleared. Replacing a GPU with a different UID does not clear the old GPU's
+alert, even if the replacement reports `Healthy`. If an affected UID has left
+the host's inventory, automatic recovery cannot clear it; after confirming the
+fault was resolved, remove the report manually.
+
+To clear it manually, for example after confirming the fault was resolved
+outside NICo:
+
+```bash
+nico-admin-cli machine health-report remove <machine-id> nvlink-partition-monitor
+```
+
+This removes the whole report for that source, including all affected GPU
+alerts. If both `Replace` and `Merge` reports use this source name, the command
+removes the replace report first; run it again to remove the merge report.
+
+The monitor re-evaluates on each successful GPU-health query, which runs when
+a machine group is checked: every pass (`nvlink_config.monitor_run_interval`,
+default `60s`) for a group whose inputs changed, and otherwise at its full check
+(`nvlink_config.partition_monitor_full_check_interval`, default `10m`). If NMX-C still reports an
+unhealthy GPU matching the host's inventory, the monitor re-asserts the alert
+with a new `in_alert_since` after manual removal. Use removal for resolved
+faults whose alerts the monitor can no longer clear, such as a replaced GPU or
+a host that has left the NVLink inventory.
 
 ## DPU related health probe identifiers
 
@@ -111,6 +228,12 @@ for the complete policy and transport state matrix.
 
 Indicates that a BGP session with the route server that is part of the NICo control plane could not be established by a host/DPU.
 
+### `UnexpectedBgpPeer`
+
+Indicates that `dpu-agent` found a BGP session whose peer was not among the
+configured host routes or route servers. The target identifies the unexpected
+peer. The alert prevents allocations and host state changes.
+
 ### `BgpStats`
 
 Indicates that `dpu-agent` could not collect or validate FRR BGP statistics.
@@ -128,6 +251,22 @@ Indicates issues regarding the start of the DHCP relay on the DPU
 ### `DhcpServer`
 
 Indicates issues regarding the start of the DHCP server on the DPU
+
+### `Ifreload`
+
+Indicates that the HBN container's `ifreload --all --syntax-check` command
+failed to execute, returned a nonzero exit code, or produced non-empty standard
+output.
+
+### `FileExists`
+
+Indicates that an expected HBN configuration file does not exist. The target
+identifies the missing file.
+
+### `FileIsValid`
+
+Indicates that an expected HBN configuration file could not be inspected or did
+not meet its minimum size requirement. The target identifies the file.
 
 ### `HeartbeatTimeout`
 
@@ -149,6 +288,11 @@ Indicates an issue with retrieving the list of running services
 ### `ServiceRunning`
 
 Indicates that an expected service on the DPU is not running.
+
+### `NvueApiRunning`
+
+Indicates that `dpu-agent` could not retrieve basic system information from the
+NVUE API.
 
 ### `PostConfigCheckWait`
 
@@ -176,6 +320,16 @@ Indicates that the dpu-agent failed to check disk utilization
 Indicates that the dpu-agent disk utilization on the DPU is above a critical threshold
 
 ## Other health probe identifiers
+
+### `IbPortDown`
+
+Indicates that one or more monitored InfiniBand ports are not active. The alert
+message reports the affected port GUIDs and prevents allocations.
+
+### `Quarantine`
+
+Indicates that an administrator quarantined the host to block its network
+traffic. The alert prevents allocations until the quarantine is cleared.
 
 ### `MissingReport`
 

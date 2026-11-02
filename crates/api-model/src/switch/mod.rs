@@ -35,6 +35,8 @@ use crate::metadata::Metadata;
 
 mod slas;
 pub mod switch_id;
+#[cfg(test)]
+mod test_decode;
 
 #[derive(Debug, Clone)]
 pub struct NewSwitch {
@@ -73,7 +75,10 @@ pub enum SwitchMaintenanceOperation {
     /// Power on the switch.
     PowerOn,
     /// Power off the switch.
-    PowerOff,
+    PowerOff {
+        #[serde(default)]
+        graceful: bool,
+    },
     /// Reset the switch (restart / AC power cycle).
     Reset,
     /// Reinstall or rotate the switch NVOS mTLS certificate via Component Manager.
@@ -217,27 +222,31 @@ pub struct Switch {
     pub health_reports: HealthReportSources,
 }
 
+/// Decodes a `Switch`, preserving supported absence in nullable JSON columns.
+/// Present values that cannot be decoded return `sqlx::Error` instead.
 impl<'r> FromRow<'r, PgRow> for Switch {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let controller_state: sqlx::types::Json<SwitchControllerState> =
             row.try_get("controller_state")?;
         let config: sqlx::types::Json<SwitchConfig> = row.try_get("config")?;
-        let status: Option<sqlx::types::Json<SwitchStatus>> = row.try_get("status").ok();
+        // `db::switch::update` writes JSON null for an absent status;
+        // newly created switches have SQL NULL instead. Accept both.
+        let status: Option<sqlx::types::Json<Option<SwitchStatus>>> = row.try_get("status")?;
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
-            row.try_get("controller_state_outcome").ok();
+            row.try_get("controller_state_outcome")?;
         let switch_maintenance_requested: Option<sqlx::types::Json<SwitchMaintenanceRequest>> =
-            row.try_get("switch_maintenance_requested").ok();
+            row.try_get("switch_maintenance_requested")?;
         let switch_reprovisioning_requested: Option<sqlx::types::Json<SwitchReprovisionRequest>> =
-            row.try_get("switch_reprovisioning_requested").ok();
+            row.try_get("switch_reprovisioning_requested")?;
         let firmware_upgrade_status: Option<sqlx::types::Json<RackFirmwareUpgradeStatus>> =
-            row.try_get("firmware_upgrade_status").ok();
+            row.try_get("firmware_upgrade_status")?;
         let nvos_update_status: Option<sqlx::types::Json<SwitchNvosUpdateStatus>> =
-            row.try_get("nvos_update_status").ok();
+            row.try_get("nvos_update_status")?;
         let fabric_manager_status: Option<sqlx::types::Json<FabricManagerStatus>> =
-            row.try_get("fabric_manager_status").ok().flatten();
+            row.try_get("fabric_manager_status")?;
 
         let health_reports: HealthReportSources = row
-            .try_get::<sqlx::types::Json<HealthReportSources>, _>("health_reports")
+            .try_get::<Option<sqlx::types::Json<HealthReportSources>>, _>("health_reports")?
             .map(|j| j.0)
             .unwrap_or_default();
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
@@ -247,21 +256,17 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             labels: labels.0,
         };
         let bmc_info = row
-            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")
-            .ok()
-            .flatten()
+            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")?
             .map(|j| j.0);
         Ok(Switch {
             id: row.try_get("id")?,
             config: config.0,
-            status: status.map(|s| s.0),
+            status: status.and_then(|s| s.0),
             deleted: row.try_get("deleted")?,
-            bmc_mac_address: row.try_get("bmc_mac_address").ok().flatten(),
+            bmc_mac_address: row.try_get("bmc_mac_address")?,
             bmc_info,
-            bmc_credential_rotation_requested: row
-                .try_get("bmc_credential_rotation_requested")
-                .unwrap_or(false),
-            decommission_requested: row.try_get("decommission_requested").unwrap_or(false),
+            bmc_credential_rotation_requested: row.try_get("bmc_credential_rotation_requested")?,
+            decommission_requested: row.try_get("decommission_requested")?,
             controller_state: Versioned {
                 value: controller_state.0,
                 version: row.try_get("controller_state_version")?,
@@ -272,14 +277,13 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
             nvos_update_status: nvos_update_status.map(|j| j.0),
             fabric_manager_status: fabric_manager_status.map(|j| j.0),
-            // A reader may overlap the additive migration during a rolling deployment.
-            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid").ok().flatten(),
+            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid")?,
             metadata,
             version: row.try_get("version")?,
-            is_primary: row.try_get("is_primary").unwrap_or(false),
-            rack_id: row.try_get("rack_id").ok().flatten(),
-            slot_number: row.try_get("slot_number").ok().flatten(),
-            tray_index: row.try_get("tray_index").ok().flatten(),
+            is_primary: row.try_get("is_primary")?,
+            rack_id: row.try_get("rack_id")?,
+            slot_number: row.try_get("slot_number")?,
+            tray_index: row.try_get("tray_index")?,
             health_reports,
         })
     }
@@ -303,6 +307,29 @@ pub fn derive_switch_aggregate_health(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InitializingState {
     WaitForOsMachineInterface,
+}
+
+/// Sub-states of `ConfiguringState::DisableMtls`.
+///
+/// `Start` submits an RMS job that resets existing mTLS bindings over the
+/// switch's SSH workflow, which does not require a working NVUE endpoint.
+/// `WaitForComplete` polls the returned job id until the operation finishes.
+/// Only after it completes does initial ingestion install current certificates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisableMtlsState {
+    Start,
+    WaitForComplete { job_id: String },
+}
+
+impl std::fmt::Display for DisableMtlsState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DisableMtlsState::Start => write!(f, "Start"),
+            DisableMtlsState::WaitForComplete { job_id } => {
+                write!(f, "WaitForComplete({job_id})")
+            }
+        }
+    }
 }
 
 /// Sub-states of `ConfiguringState::ConfigureCertificate`.
@@ -329,6 +356,12 @@ impl std::fmt::Display for ConfigureCertificateState {
 /// Sub-state for SwitchControllerState::Configuring
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfiguringState {
+    /// Initial ingestion only: reset stale mTLS bindings before installing
+    /// certificates. Variants are additive, so states persisted before this
+    /// variant existed still deserialize.
+    DisableMtls {
+        disable_mtls: DisableMtlsState,
+    },
     ConfigureCertificate {
         configure_certificate: ConfigureCertificateState,
     },
@@ -365,24 +398,54 @@ pub enum ReProvisioningState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum SwitchDecommissioningState {
-    /// Site Explorer is being suppressed before the destructive reset.
+    /// Requests Site Explorer suppression and advances to [`Self::FactoryResetNvos`]
+    /// once suppression is acknowledged.
     SuppressingSiteExplorer,
-    /// NVOS DHCP is suppressed before the factory reset so post-reset discovers are ignored.
-    SuppressingNvosDhcp,
     /// Submits the destructive RMS NVOS factory-reset job.
-    /// Completion is not polled: NVOS DHCP is already suppressed, so the job
-    /// cannot be observed reliably; progress continues via DHCP acknowledgement.
+    /// A returned job ID advances to [`Self::WaitingForNvosFactoryReset`]; an unknown
+    /// submission outcome advances to [`Self::NvosFactoryResetOutcomeUnknown`].
     FactoryResetNvos,
-    /// Waiting for the pre-reset NVOS DHCP suppression to be acknowledged.
+    /// Submission may have succeeded without returning a job ID. Reports an error
+    /// on every iteration without resubmitting or advancing; operator recovery is required.
+    NvosFactoryResetOutcomeUnknown {
+        /// Submission failure explaining why the reset must not be retried automatically.
+        error: String,
+    },
+    /// Polls the saved job ID, waiting while pending and advancing to
+    /// [`Self::SuppressingNvosDhcp`] only on successful completion. A failed job or
+    /// polling error is reported while retaining the job ID; the reset is not resubmitted.
+    WaitingForNvosFactoryReset {
+        /// Opaque RMS job handle retained across controller iterations and restarts.
+        job_id: String,
+    },
+    /// Records NVOS DHCP suppression after the factory reset completes, then advances
+    /// to [`Self::RebootingSwitch`] without waiting for suppression acknowledgement.
+    SuppressingNvosDhcp,
+    /// Requests a forced restart through the BMC and advances to
+    /// [`Self::WaitingForNvosDhcpAcknowledgement`] when the request succeeds.
+    RebootingSwitch,
+    /// Waits for NVOS DHCP suppression acknowledgement after requesting the reboot,
+    /// then advances to [`Self::SuppressingBmcDhcp`].
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForNvosDhcpAcknowledgement,
-    /// BMC DHCP is suppressed before the BMC factory reset.
+    /// Records BMC DHCP suppression and advances to [`Self::FactoryResetBmc`]
+    /// without waiting for suppression acknowledgement.
     SuppressingBmcDhcp,
-    /// Issues the BMC factory reset.
+    /// Issues the BMC factory reset and advances to
+    /// [`Self::WaitingForBmcDhcpAcknowledgement`] when the request succeeds.
     FactoryResetBmc,
-    /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
+    /// Waits for BMC DHCP suppression acknowledgement, then advances to
+    /// [`Self::DeletingManagedCredentials`].
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForBmcDhcpAcknowledgement,
-    /// Managed per-device BMC and NVOS credentials are being removed after factory reset.
+    /// Deletes managed BMC and NVOS credentials and their credential-rotation records,
+    /// then advances to [`Self::Decommissioned`] once cleanup succeeds.
     DeletingManagedCredentials,
+    /// Terminal decommissioning state; performs no further work and retains the switch record.
     Decommissioned,
 }
 
@@ -429,6 +492,10 @@ pub enum SwitchControllerState {
     /// The Switch is executing an operator-requested maintenance operation.
     Maintenance {
         operation: SwitchMaintenanceOperation,
+        /// The request admitted before external work began. Older saved states
+        /// omit this, so their completion must leave pending requests alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<SwitchMaintenanceRequest>,
         /// Sub-states for async maintenance operations such as certificate reconfiguration.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         configure_certificate: Option<ConfigureCertificateState>,
@@ -445,15 +512,18 @@ pub enum SwitchControllerState {
 }
 
 impl SwitchControllerState {
-    /// Builds the controller state for a requested maintenance operation.
-    pub fn maintenance_for_operation(operation: SwitchMaintenanceOperation) -> Self {
+    /// Starts `Maintenance` and saves the full request for the completion check.
+    /// `ReconfigureCertificate` starts at `ConfigureCertificateState::Start`;
+    /// other operations have no certificate job state.
+    pub fn maintenance_for_request(request: SwitchMaintenanceRequest) -> Self {
         Self::Maintenance {
-            operation,
+            operation: request.operation,
             configure_certificate: matches!(
-                operation,
+                request.operation,
                 SwitchMaintenanceOperation::ReconfigureCertificate
             )
             .then_some(ConfigureCertificateState::Start),
+            request: Some(request),
         }
     }
 }
@@ -502,8 +572,19 @@ pub fn state_sla(state: &SwitchControllerState, state_version: &ConfigVersion) -
                 std::time::Duration::from_secs(slas::DECOMMISSIONING_SUPPRESSING_NVOS_DHCP),
                 time_in_state,
             ),
-            SwitchDecommissioningState::FactoryResetNvos => StateSla::with_sla(
-                std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+            SwitchDecommissioningState::FactoryResetNvos
+            | SwitchDecommissioningState::NvosFactoryResetOutcomeUnknown { .. } => {
+                StateSla::with_sla(
+                    std::time::Duration::from_secs(slas::DECOMMISSIONING_FACTORY_RESET_NVOS),
+                    time_in_state,
+                )
+            }
+            SwitchDecommissioningState::WaitingForNvosFactoryReset { .. } => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_WAITING_FOR_NVOS_RESET),
+                time_in_state,
+            ),
+            SwitchDecommissioningState::RebootingSwitch => StateSla::with_sla(
+                std::time::Duration::from_secs(slas::DECOMMISSIONING_REBOOTING_SWITCH),
                 time_in_state,
             ),
             SwitchDecommissioningState::WaitingForNvosDhcpAcknowledgement => StateSla::with_sla(
@@ -722,6 +803,7 @@ mod tests {
             "maintenance: power on" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::PowerOn,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"poweron"}}"#.to_string(),
@@ -730,10 +812,11 @@ mod tests {
 
             "maintenance: power off" {
                 SwitchControllerState::Maintenance {
-                    operation: SwitchMaintenanceOperation::PowerOff,
+                    operation: SwitchMaintenanceOperation::PowerOff { graceful: false },
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
-                    r#"{"state":"maintenance","operation":{"operation":"poweroff"}}"#
+                    r#"{"state":"maintenance","operation":{"operation":"poweroff","graceful":false}}"#
                         .to_string(),
                 ),
             }
@@ -741,6 +824,7 @@ mod tests {
             "maintenance: reset" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::Reset,
+                    request: None,
                     configure_certificate: None,
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"reset"}}"#.to_string(),
@@ -750,6 +834,7 @@ mod tests {
             "maintenance: reconfigure certificate" {
                 SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::ReconfigureCertificate,
+                    request: None,
                     configure_certificate: Some(ConfigureCertificateState::Start),
                 } => Yields(
                     r#"{"state":"maintenance","operation":{"operation":"reconfigurecertificate"},"configure_certificate":"Start"}"#
@@ -866,6 +951,7 @@ mod tests {
             "maintenance: reset" {
                 r#"{"state":"maintenance","operation":{"operation":"reset"}}"# => Yields(SwitchControllerState::Maintenance {
                     operation: SwitchMaintenanceOperation::Reset,
+                    request: None,
                     configure_certificate: None,
                 }),
             }
@@ -906,8 +992,12 @@ mod tests {
                 SwitchMaintenanceOperation::PowerOn => Yields(r#"{"operation":"poweron"}"#.to_string()),
             }
 
-            "power off" {
-                SwitchMaintenanceOperation::PowerOff => Yields(r#"{"operation":"poweroff"}"#.to_string()),
+            "power off (forced, default)" {
+                SwitchMaintenanceOperation::PowerOff { graceful: false } => Yields(r#"{"operation":"poweroff","graceful":false}"#.to_string()),
+            }
+
+            "graceful power off" {
+                SwitchMaintenanceOperation::PowerOff { graceful: true } => Yields(r#"{"operation":"poweroff","graceful":true}"#.to_string()),
             }
 
             "reset" {
@@ -930,8 +1020,12 @@ mod tests {
                 r#"{"operation":"poweron"}"# => Yields(SwitchMaintenanceOperation::PowerOn),
             }
 
-            "power off" {
-                r#"{"operation":"poweroff"}"# => Yields(SwitchMaintenanceOperation::PowerOff),
+            "power off defaults to forced" {
+                r#"{"operation":"poweroff"}"# => Yields(SwitchMaintenanceOperation::PowerOff { graceful: false }),
+            }
+
+            "graceful power off" {
+                r#"{"operation":"poweroff","graceful":true}"# => Yields(SwitchMaintenanceOperation::PowerOff { graceful: true }),
             }
 
             "reset" {
@@ -1016,6 +1110,26 @@ mod tests {
         let state = SwitchControllerState::Ready;
         let serialized = serde_json::to_string(&state).unwrap();
         assert_eq!(serialized, r#"{"state":"ready"}"#);
+        assert_eq!(
+            serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
+            state
+        );
+    }
+
+    #[test]
+    fn disable_mtls_state_persists_job_id() {
+        let state = SwitchControllerState::Configuring {
+            config_state: ConfiguringState::DisableMtls {
+                disable_mtls: DisableMtlsState::WaitForComplete {
+                    job_id: "job-1".to_string(),
+                },
+            },
+        };
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"state":"configuring","config_state":{"DisableMtls":{"disable_mtls":{"WaitForComplete":{"job_id":"job-1"}}}}}"#
+        );
         assert_eq!(
             serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
             state

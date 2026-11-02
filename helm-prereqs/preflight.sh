@@ -23,17 +23,19 @@
 # Also sourced automatically at the start of every setup.sh run.
 #
 # Checks (in order — fails fast so the most actionable issues appear first):
-#   1. Environment variables    — presence and format
-#   2. Required tools           — helm, helmfile, kubectl, jq, ssh-keygen
-#   3. values/metallb-config.yaml — YAML, pools, advertisement mode, ASNs
-#   4. Cluster reachability     — kubectl can reach the API server
-#   5. Node resources           — at least 3 schedulable (Ready + untainted) nodes
-#   6. MetalLB BGPPeer nodes    — hostnames in config exist in the cluster
-#   7. Per-node checks          — kernel params (sysctl) and DNS on every node
-#   8. Temporal/Keycloak DB     — opt-in nico-pg-cluster migration wasn't skipped
-#   9. Registry/image access    — registry host and rendered NICo image refs
-#                                  are reachable with the supplied credentials
-#   10. NICo REST source/charts  — in-tree rest-api/ and helm/rest/ are present
+#   1. Environment variables:    presence and format
+#   2. Required tools:           helm, helmfile, kubectl, jq, ssh-keygen
+#                                Core VIP validation also needs python3 + PyYAML
+#   3. values/metallb-config.yaml: YAML, pools, advertisement mode, ASNs
+#   4. Cluster reachability:     kubectl can reach the API server
+#   5. Node resources:           at least 3 schedulable (Ready + untainted) nodes
+#   6. MetalLB BGPPeer nodes:    hostnames in config exist in the cluster
+#   7. Per-node checks:          kernel params (sysctl) and DNS on every node
+#   8. Temporal/Keycloak DB:     resolve useHaPostgres, check a migration to
+#                                nico-pg-cluster wasn't skipped
+#   9. Registry/image access:    registry host and rendered NICo image refs
+#                                are reachable with the supplied credentials
+#   10. NICo REST source/charts: in-tree rest-api/ and helm/rest/ are present
 #
 # Configurable:
 #   PREFLIGHT_CHECK_IMAGE — image used for per-node pod checks (default: busybox:1.36)
@@ -93,7 +95,6 @@ if ! ${_SOURCED}; then
         case "$1" in
             --skip-core)      SKIP_CORE=true ;;
             --skip-rest)      SKIP_REST=true ;;
-            --skip-flow)      SKIP_FLOW=true ;;
             --skip-dpf)       INSTALL_DPF=false ;;
             --install-dpf)    INSTALL_DPF=true ;;
             --skip-rms)       INSTALL_RMS=false ;;
@@ -109,6 +110,8 @@ fi
 
 ERRORS=()
 WARNINGS=()
+# Errors that neither -y nor answering y at the prompt can skip.
+BLOCKING_ERRORS=()
 
 _CORE_VALUES_CFG="${CORE_VALUES:-${SCRIPT_DIR}/values/nico-core.yaml}"
 _CORE_VALUES_LABEL="${CORE_VALUES:-values/nico-core.yaml}"
@@ -474,13 +477,28 @@ if [[ -n "${KUBECONFIG:-}" && ! -f "${KUBECONFIG}" ]]; then
     ERRORS+=("KUBECONFIG='${KUBECONFIG}' does not exist — check the path to your cluster kubeconfig")
 fi
 
+# A phase that installs from a pinned helm-prereqs/<name> submodule needs git
+# and a record of the pinned commit: the gitlink in a git checkout of this
+# repository, or the helm-prereqs/<name>.pin file shipped with the packaged
+# chart (setup.sh clones that commit). A source tarball has neither, so fail
+# here rather than in setup.sh after earlier phases have already changed the
+# cluster.
+#   $1 phase label   $2 submodule name   $3 local-source override   $4 skip flag
+_check_pinned_submodule() {
+    local _phase="$1" _name="$2" _override="$3" _skip="$4"
+    if ! command -v git &>/dev/null; then
+        ERRORS+=("${_phase} requires 'git' to fetch the pinned ${_name} source - install it, set ${_override}, or pass ${_skip}")
+    elif ! git -C "${SCRIPT_DIR}/.." ls-files -s -- "helm-prereqs/${_name}" 2>/dev/null | grep -q '^160000 ' && \
+         ! grep -qE '^[0-9a-f]{40}$' "${SCRIPT_DIR}/${_name}.pin" 2>/dev/null; then
+        ERRORS+=("${_phase} requires the pinned helm-prereqs/${_name} commit: a git checkout of this repository recording the submodule, or the helm-prereqs/${_name}.pin file from the packaged chart (a source tarball has neither) - run from a git clone or the packaged chart, set ${_override}, or pass ${_skip}")
+    fi
+}
+
 # RMS requirements. RMS installs by default; these apply unless --skip-rms
 # (NICO_SKIP_RMS=true / NICO_INSTALL_RMS=false), which clears INSTALL_RMS.
 if [[ "${INSTALL_RMS:-true}" == "true" ]]; then
-    if [[ -z "${NICO_RMS_CHART:-}" ]]; then
-        command -v git &>/dev/null || \
-            ERRORS+=("RMS requires 'git' to initialize the nv-rms submodule - install it, or set NICO_RMS_CHART to a local chart path")
-    fi
+    [[ -n "${NICO_RMS_CHART:-}" ]] || \
+        _check_pinned_submodule RMS nv-rms 'NICO_RMS_CHART=<clone>/helm' --skip-rms
     [[ -z "${NICO_RMS_IMAGE_TAG:-}" ]] && \
         ERRORS+=("NICO_RMS_IMAGE_TAG is not set    (RMS API server image tag; the rack-manager chart fails at render without one — required unless --skip-rms)")
     # The default rms-api image is entitlement-gated on NGC; without a key the
@@ -501,16 +519,17 @@ fi
 # DPF requirements. DPF installs by default; these apply unless --skip-dpf
 # (NICO_SKIP_DPF=true / NICO_INSTALL_DPF=false), which clears INSTALL_DPF.
 if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
-    command -v git &>/dev/null || \
-        ERRORS+=("DPF requires 'git' to clone doca-platform — install it, or pass --skip-dpf")
+    [[ -n "${NICO_DPF_SRC:-}" ]] || \
+        _check_pinned_submodule DPF doca-platform 'NICO_DPF_SRC=<clone>' --skip-dpf
+    if [[ -n "${NICO_DPF_SRC:-}" && ! -d "${NICO_DPF_SRC}/deploy/charts/dpf-operator" ]]; then
+        ERRORS+=("NICO_DPF_SRC='${NICO_DPF_SRC}' has no deploy/charts/dpf-operator - point it at a NVIDIA/doca-platform checkout")
+    fi
     command -v envsubst &>/dev/null || \
         ERRORS+=("DPF requires 'envsubst' (gettext) to render DPF manifests — install it, or pass --skip-dpf")
     [[ -z "${NICO_DPF_DPU_INTERFACE:-}" ]] && \
         ERRORS+=("NICO_DPF_DPU_INTERFACE is not set    (controller interface for the DPU cluster keepalived VIP; required unless --skip-dpf)")
     [[ -z "${NICO_DPF_DPU_CLUSTER_VIP:-}" ]] && \
         ERRORS+=("NICO_DPF_DPU_CLUSTER_VIP is not set    (VIP the DPUs use to reach their control plane; required unless --skip-dpf)")
-    [[ -z "${NICO_DPF_BMC_ROOT_PASSWORD:-}" ]] && \
-        WARNINGS+=("NICO_DPF_BMC_ROOT_PASSWORD is not set  (site-wide BMC root password; setup.sh will skip automated credential seeding — set it manually via nico-admin-cli after deploy before DPU provisioning will work)")
     if [[ -z "${NICO_DPF_NGC_API_KEY:-${REGISTRY_PULL_SECRET:-}}" ]]; then
         WARNINGS+=("NICO_DPF_NGC_API_KEY / REGISTRY_PULL_SECRET not set — the DPF operator + public DOCA images still pull anonymously, but the Argo repo secrets are skipped, so the private NICo DPUService charts (carbide) won't authenticate unless you mirror/build them into your own registry")
     fi
@@ -521,18 +540,18 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
     # the whole DPF prereq stack. Without this, a --core-values file with a
     # missing/commented [dpf] block passes preflight and aborts only in phase 6,
     # after argo-cd, kamaji, NFD, the operator and its CRs are already installed,
-    # leaving a half-provisioned cluster. This mirrors the setup.sh two-phase
+    # leaving a half-provisioned cluster. This mirrors setup.sh's rendered-values
     # guard, but it is a pure function of the static file so it can run up front.
     if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
-        # Reproduce setup.sh's DPF-ON rendering: the default file ships the [dpf]
+        # Reproduce setup.sh's DPF rendering: the default file ships the [dpf]
         # block '#dpf# '-commented (uncomment it); a --core-values file is
         # expected to carry a live [dpf] block already.
         if [[ -n "${CORE_VALUES:-}" ]]; then
-            _dpf_on_src="$(cat "${_CORE_VALUES_CFG}")"
+            _dpf_values_src="$(cat "${_CORE_VALUES_CFG}")"
         else
-            _dpf_on_src="$(sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_CFG}")"
+            _dpf_values_src="$(sed -E 's/^([[:space:]]*)#dpf# ?/\1/' "${_CORE_VALUES_CFG}")"
         fi
-        _dpf_enabled_val="$(printf '%s\n' "${_dpf_on_src}" | awk '
+        _dpf_enabled_val="$(printf '%s\n' "${_dpf_values_src}" | awk '
             /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { indpf = ($0 ~ /^[[:space:]]*\[dpf\][[:space:]]*$/) ? 1 : 0 }
             indpf==1 && /^[[:space:]]*enabled[[:space:]]*=/ {
                 # Anchor to the FIRST "=" so a trailing comment (e.g. "# default=true")
@@ -546,6 +565,24 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
                 ERRORS+=("${_CORE_VALUES_LABEL}: the default [dpf] block (normally '#dpf# '-commented) is missing or malformed — restore helm-prereqs/values/nico-core.yaml, or pass --skip-dpf")
             fi
         fi
+    fi
+fi
+
+# KMIP KEK provider client material. setup.sh loads these three files into
+# Secret nico-system/nico-kmip-client before Phase 6; see README.md →
+# "Opting in to the KMIP KEK provider". The mounts and the Secret itself are
+# checked against the site config in 4c below.
+if [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+    if [[ "${SKIP_CORE:-false}" == "true" ]]; then
+        ERRORS+=("NICO_KMIP_CLIENT_DIR cannot be used with --skip-core — unset it or install NICo Core")
+    elif [[ ! -d "${NICO_KMIP_CLIENT_DIR}" ]]; then
+        ERRORS+=("NICO_KMIP_CLIENT_DIR='${NICO_KMIP_CLIENT_DIR}' is not a directory")
+    else
+        for _kmip_file in ca.pem client.pem client.key; do
+            if [[ ! -s "${NICO_KMIP_CLIENT_DIR}/${_kmip_file}" || ! -r "${NICO_KMIP_CLIENT_DIR}/${_kmip_file}" ]]; then
+                ERRORS+=("NICO_KMIP_CLIENT_DIR='${NICO_KMIP_CLIENT_DIR}' has no readable, non-empty ${_kmip_file}    (setup.sh loads ca.pem, client.pem, and client.key into Secret nico-system/nico-kmip-client)")
+            fi
+        done
     fi
 fi
 
@@ -631,6 +668,7 @@ fi
 #     required keys. (Comment lines and inline `# …` comments are stripped first.)
 # ---------------------------------------------------------------------------
 _SITE_VALUES_CFG="${SCRIPT_DIR}/values.yaml"
+_REST_VALUES_CFG="${SCRIPT_DIR}/values/nico-rest.yaml"
 _PLACEHOLDER_RE='EXAMPLE|examplesite|example\.com|TMP_SITE|REPLACE_WITH|<your-registry>|<yoursite>|your-site|changeme|REPLACE_ME'
 for _vf in "${_SITE_VALUES_CFG}" "${_CORE_VALUES_CFG}" "${_METALLB_CFG}"; do
     [[ -f "${_vf}" ]] || continue
@@ -673,21 +711,329 @@ _yaml_toplevel_value() {
     ' "${_file}"
 }
 
+# Prints the namespace Keycloak deploys into: KEYCLOAK_NS, else keycloak.namespace.
+_keycloak_ns() {
+    local _ns="${KEYCLOAK_NS:-$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak namespace)}"
+    printf '%s\n' "${_ns:-nico-rest}"
+}
+
+# Prints the PostgreSQL host the deployed Temporal or Keycloak connects to, or
+# nothing when it isn't deployed. Fails when the cluster can't be read, when
+# Temporal's services don't all name the same host, or when a deployed Keycloak
+# doesn't set KC_DB_URL as a literal value.
+#
+# Temporal's host comes from the ConfigMaps its pods load, not Helm's values.
+# Helm reports the latest revision even when its pre-upgrade schema hook failed
+# before the ConfigMaps changed, so it can name a database Temporal never used.
+_deployed_db_host() {
+    local _service _config _configs="" _found=0 _hosts _kc_ns _kc_deployment _kc_url
+    case "$1" in
+        temporal)
+            for _service in frontend history matching worker; do
+                _config="$(kubectl get configmap "temporal-${_service}-config" -n temporal \
+                    --ignore-not-found -o jsonpath='{.data.config_template\.yaml}')" || return 1
+                if [[ -n "${_config}" ]]; then
+                    _found=$((_found + 1))
+                    _configs+="${_config}"$'\n'
+                fi
+            done
+            [[ "${_found}" -gt 0 ]] || return 0
+            [[ "${_found}" -eq 4 ]] || return 1
+            _hosts="$(awk '$1 == "connectAddr:" { v = $2; gsub(/"/, "", v); sub(/:[0-9]+$/, "", v); print v }' \
+                <<< "${_configs}" | sort -u)"
+            [[ -n "${_hosts}" && "${_hosts}" != *$'\n'* ]] || return 1
+            printf '%s\n' "${_hosts}"
+            ;;
+        keycloak)
+            _kc_ns="$(_keycloak_ns)"
+            _kc_deployment="$(kubectl get deployment keycloak -n "${_kc_ns}" --ignore-not-found -o name)" \
+                || return 1
+            [[ -n "${_kc_deployment}" ]] || return 0
+            _kc_url="$(kubectl get deployment keycloak -n "${_kc_ns}" \
+                -o jsonpath='{.spec.template.spec.containers[?(@.name=="keycloak")].env[?(@.name=="KC_DB_URL")].value}')" \
+                || return 1
+            [[ -n "${_kc_url}" ]] || return 1
+            _kc_url="${_kc_url#jdbc:postgresql://}"
+            printf '%s\n' "${_kc_url%%[:/]*}"
+            ;;
+    esac
+}
+
+# setup.sh records each workload's database location here after deploying it,
+# and migrate-temporal-keycloak-db.sh leaves its receipt here. It lives with the
+# databases, so deleting the postgres namespace removes it too.
+_DB_RECORD_CONFIGMAP="nico-workload-databases"
+
+# Sets _DB_LOCATION to where the component's database is now: nico-pg-cluster,
+# standalone, new, or other. The deployed workload decides first, then the
+# location setup.sh recorded, then, for Temporal only, whether the standalone
+# StatefulSet or its volume is still there. Phase 7c reattaches a retained
+# volume. Sets
+# _DB_LOCATION_ERROR for other, and leaves _DB_LOCATION empty with an error
+# when the cluster can't be read.
+_db_location() {
+    local _component="$1" _db_host _recorded _standalone
+    _DB_LOCATION=""
+    _DB_LOCATION_ERROR=""
+    if ! _db_host="$(_deployed_db_host "${_component}" 2>/dev/null)" \
+        || ! _recorded="$(kubectl get configmap "${_DB_RECORD_CONFIGMAP}" -n postgres \
+            --ignore-not-found -o jsonpath="{.data.${_component}}" 2>/dev/null)" \
+        || ! _standalone="$(kubectl get statefulset/postgres \
+            persistentvolumeclaim/postgres-data-postgres-0 -n postgres \
+            --ignore-not-found -o name 2>/dev/null)"; then
+        _DB_LOCATION_ERROR="could not tell which PostgreSQL the deployed ${_component} uses"
+        return 0
+    fi
+    # Only the names Kubernetes DNS resolves for the two Services count. A host
+    # with any other suffix, such as .example.net, is a different database.
+    case "${_db_host}" in
+        nico-pg-cluster.postgres | nico-pg-cluster.postgres.svc \
+            | nico-pg-cluster.postgres.svc.cluster.local | nico-pg-cluster.postgres.svc.cluster.local.)
+            _DB_LOCATION=nico-pg-cluster
+            return 0
+            ;;
+        postgres.postgres | postgres.postgres.svc \
+            | postgres.postgres.svc.cluster.local | postgres.postgres.svc.cluster.local.)
+            _DB_LOCATION=standalone
+            return 0
+            ;;
+        ?*)
+            _DB_LOCATION=other
+            _DB_LOCATION_ERROR="doesn't recognize ${_db_host}, the PostgreSQL host the deployed ${_component} uses"
+            return 0
+            ;;
+    esac
+    case "${_recorded}" in
+        nico-pg-cluster)
+            _DB_LOCATION=nico-pg-cluster
+            ;;
+        standalone)
+            # Without the StatefulSet or its volume, the data the record points
+            # at is gone, so the database starts fresh like a new one.
+            if [[ -n "${_standalone}" ]]; then
+                _DB_LOCATION=standalone
+            else
+                _DB_LOCATION=new
+            fi
+            ;;
+        "")
+            # REST always deploys Temporal, so a missing release next to the
+            # StatefulSet means it was deleted. Keycloak is optional, so a
+            # missing Deployment usually means it was never deployed.
+            if [[ "${_component}" == "temporal" && -n "${_standalone}" ]]; then
+                _DB_LOCATION=standalone
+            else
+                _DB_LOCATION=new
+            fi
+            ;;
+        *)
+            _DB_LOCATION=other
+            _DB_LOCATION_ERROR="doesn't recognize ${_recorded}, the location recorded for ${_component} in the ${_DB_RECORD_CONFIGMAP} ConfigMap"
+            ;;
+    esac
+    return 0
+}
+
+# Resolves temporal.useHaPostgres or keycloak.useHaPostgres into
+# _USE_HA_POSTGRES as true or false. `auto` keeps the database where
+# _db_location finds it, so it never moves an existing database, and a new Site
+# gets nico-pg-cluster. With postgresql.enabled false, nico-pg-cluster is an
+# external or out-of-band PostgreSQL, which only exists once the Site
+# provisions it, so a new Site's `auto` means false. Records a blocking error and leaves
+# _USE_HA_POSTGRES empty when it can't decide, since phase 7 can't run then.
+#
+# A Keycloak that nico-rest.yaml disables resolves to true without looking at
+# the cluster. Phase 7d won't deploy it, so it needs no database, and a
+# Deployment the Site runs itself under that name must not block setup.
+_resolve_use_ha_postgres() {
+    local _component="$1" _value
+    _USE_HA_POSTGRES=""
+    if [[ "${_component}" == "keycloak" \
+        && "$(_yaml_toplevel_value "${_REST_VALUES_CFG}" keycloak enabled)" != "true" ]]; then
+        _USE_HA_POSTGRES=true
+        return 0
+    fi
+    _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "${_component}" useHaPostgres)"
+    case "${_value}" in
+        true | false)
+            _USE_HA_POSTGRES="${_value}"
+            return 0
+            ;;
+        auto) ;;
+        *)
+            # _check_use_ha_postgres_value already recorded the error.
+            return 0
+            ;;
+    esac
+
+    _db_location "${_component}"
+    case "${_DB_LOCATION}" in
+        nico-pg-cluster)
+            _USE_HA_POSTGRES=true
+            ;;
+        new)
+            if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
+                _USE_HA_POSTGRES=false
+            else
+                _USE_HA_POSTGRES=true
+            fi
+            ;;
+        standalone)
+            _USE_HA_POSTGRES=false
+            ;;
+        other)
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. setup.sh only runs ${_component} on nico-pg-cluster or the standalone postgres.postgres StatefulSet")
+            ;;
+        *)
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: auto ${_DB_LOCATION_ERROR}. Check cluster access and re-run")
+            ;;
+    esac
+    return 0
+}
+
+# Records a blocking error unless the resolved value (true or false) can
+# safely keep or move the component's database. Moving it off the standalone
+# StatefulSet onto nico-pg-cluster needs the receipt
+# migrate-temporal-keycloak-db.sh leaves after a complete copy. Every Deployment
+# it stopped also has to keep the uid and generation the receipt lists. A
+# restart, scale, or recreate changes them, and may have let the standalone
+# database take writes the copy doesn't have. A move back off nico-pg-cluster
+# has no supported reverse migration, and a workload on any other host would be
+# repointed without its data, so both stop setup too.
+_check_db_cutover() {
+    local _component="$1" _target="$2" _ns _receipt _state _recorded _entry _dep _hint
+    local -a _deployments _entries
+    _hint="helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db ${_component}"
+    _db_location "${_component}"
+    case "${_DB_LOCATION}" in
+        standalone)
+            if [[ "${_target}" != "true" ]]; then
+                return 0
+            fi
+            ;;
+        nico-pg-cluster)
+            if [[ "${_target}" == "false" ]]; then
+                BLOCKING_ERRORS+=("${_component}.useHaPostgres: false would move ${_component} off nico-pg-cluster onto the standalone postgres.postgres StatefulSet, which has no supported reverse migration. Set it to auto or true")
+            fi
+            return 0
+            ;;
+        other)
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight ${_DB_LOCATION_ERROR}. setup.sh only runs ${_component} on nico-pg-cluster or the standalone postgres.postgres StatefulSet, so either value would repoint it without its data")
+            return 0
+            ;;
+        "")
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight ${_DB_LOCATION_ERROR}, so it can't rule out moving ${_component} between the standalone postgres.postgres StatefulSet and nico-pg-cluster. Check cluster access and re-run")
+            return 0
+            ;;
+        *) return 0 ;;
+    esac
+
+    case "${_component}" in
+        temporal)
+            _ns=temporal
+            _deployments=(temporal-frontend temporal-history temporal-matching temporal-worker)
+            ;;
+        keycloak)
+            _ns="$(_keycloak_ns)"
+            _deployments=(keycloak)
+            ;;
+    esac
+    if ! _receipt="$(kubectl get configmap "${_DB_RECORD_CONFIGMAP}" -n postgres \
+        --ignore-not-found -o jsonpath="{.data.${_component}-migrated}" 2>/dev/null)"; then
+        BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight could not read the migration receipt in the ${_DB_RECORD_CONFIGMAP} ConfigMap. Check cluster access and re-run")
+        return 0
+    fi
+    if [[ -z "${_receipt}" ]]; then
+        if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated, and 2.4 doesn't support copying it into an external or out-of-band PostgreSQL. Set it to auto. Support is tracked in https://github.com/dsx-ai-factory/infra-controller/issues/7989")
+        else
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: true moves ${_component} off the standalone postgres.postgres StatefulSet, but its data hasn't been migrated. Run '${_hint}' first")
+        fi
+        return 0
+    fi
+    read -r -a _entries <<< "${_receipt}"
+    for _dep in "${_deployments[@]}"; do
+        if ! _state="$(kubectl get deployment "${_dep}" -n "${_ns}" --ignore-not-found \
+            -o jsonpath='{.metadata.uid}/{.metadata.generation}' 2>/dev/null)"; then
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: preflight could not read ${_ns}/${_dep}. Check cluster access and re-run")
+            return 0
+        fi
+        _recorded=""
+        for _entry in "${_entries[@]}"; do
+            if [[ "${_entry%%=*}" == "${_dep}" ]]; then
+                _recorded="${_entry#*=}"
+            fi
+        done
+        if [[ -z "${_state}" || "${_state}" != "${_recorded}" ]]; then
+            BLOCKING_ERRORS+=("${_component}.useHaPostgres: ${_ns}/${_dep} changed after the migration, so the standalone database may have newer data. Run '${_hint}' again")
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Succeeds when the value can move the component's database, which only an
+# explicit true or false can. auto follows wherever the database already is.
+_can_move_db() {
+    [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "$1" useHaPostgres)" != "auto" ]]
+}
+
+# Records a blocking error when KEYCLOAK_NS differs from keycloak.namespace.
+# ESO syncs Keycloak's nico-pg-cluster credentials only into keycloak.namespace,
+# so phase 7d would wait for them in the wrong namespace until it times out.
+_check_keycloak_ns() {
+    local _values_ns
+    _values_ns="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak namespace)"
+    _values_ns="${_values_ns:-nico-rest}"
+    if [[ -n "${KEYCLOAK_NS:-}" && "${KEYCLOAK_NS}" != "${_values_ns}" ]]; then
+        BLOCKING_ERRORS+=("KEYCLOAK_NS is ${KEYCLOAK_NS}, but keycloak.namespace is ${_values_ns}. ESO only syncs Keycloak's database credentials into keycloak.namespace, so set keycloak.namespace instead, or unset KEYCLOAK_NS")
+    fi
+    return 0
+}
+
+# Records a blocking error for a useHaPostgres value other than true, false, or
+# auto. The nico-prereqs chart fails to render one in phases 2 and 5, which run
+# on --skip-rest too, so this check stays outside section 8.
+_check_use_ha_postgres_value() {
+    local _value
+    _value="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" "$1" useHaPostgres)"
+    case "${_value}" in
+        true | false | auto) ;;
+        *) BLOCKING_ERRORS+=("values.yaml: $1.useHaPostgres must be true, false, or auto (got '${_value}')") ;;
+    esac
+    return 0
+}
+_check_use_ha_postgres_value temporal
+_check_use_ha_postgres_value keycloak
+
 if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     # nico-api.hostname must be a real external hostname
     if _strip_comments "${_CORE_VALUES_CFG}" | grep -qE '^[[:space:]]*hostname:[[:space:]]*("")?[[:space:]]*$'; then
         ERRORS+=("${_CORE_VALUES_LABEL}: nico-api.hostname is empty — set your external nico-api hostname")
     fi
-    # Every enabled externalService needs a VIP from the MetalLB pool
-    if _strip_comments "${_CORE_VALUES_CFG}" | grep -qE 'loadBalancerIPs:[[:space:]]*("")?[[:space:]]*$'; then
-        ERRORS+=("${_CORE_VALUES_LABEL}: one or more loadBalancerIPs are empty — assign each enabled externalService a VIP from your MetalLB pool")
+    # Parse YAML so formatting cannot bypass active-Service checks; parser failures are errors.
+    if ! command -v python3 &>/dev/null; then
+        ERRORS+=("Core VIP preflight requires python3 with PyYAML — install them before running setup.sh")
+    elif _vip_checks="$(python3 "${SCRIPT_DIR}/check-external-service-vips.py" "${_CORE_VALUES_CFG}" --metallb-stdin <<< "${_METALLB_RENDERED}" 2>&1)"; then
+        # Duplicate VIPs remain warnings; missing, malformed, or out-of-pool VIPs are errors.
+        # Route pool errors to their own input file.
+        while IFS= read -r _check; do
+            case "${_check}" in
+                "ERROR[pool]: "*) ERRORS+=("${_METALLB_CFG_LABEL}: ${_check#ERROR\[pool\]: }") ;;
+                "ERROR: "*) ERRORS+=("${_CORE_VALUES_LABEL}: ${_check#ERROR: }") ;;
+                "WARNING: "*) WARNINGS+=("${_CORE_VALUES_LABEL}: ${_check#WARNING: }") ;;
+            esac
+        done <<< "${_vip_checks}"
+    else
+        ERRORS+=("${_CORE_VALUES_LABEL}: ${_vip_checks}")
     fi
 fi
 
-# MetalLB: a pool declared with no CIDR/range entries
-if [[ -f "${_METALLB_CFG}" && ! -d "${_METALLB_CFG}" ]]; then
+# Keep the prerequisite-only empty-pool check independent of Python when Core is skipped.
+# Core installs validate both address families from parsed pools above.
+if [[ "${SKIP_CORE:-false}" == "true" && -f "${_METALLB_CFG}" && ! -d "${_METALLB_CFG}" ]]; then
     if _strip_comments "${_METALLB_CFG}" | grep -qE '^kind:[[:space:]]*IPAddressPool' && \
-       ! _strip_comments "${_METALLB_CFG}" | grep -qE '^[[:space:]]*-[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+       ! _strip_comments "${_METALLB_CFG}" | grep -qE '^[[:space:]]*-[[:space:]]*["'\'']?([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9A-Fa-f]*:)'; then
         ERRORS+=("${_METALLB_CFG_LABEL}: IPAddressPool has no addresses — add your VIP CIDR(s)/range(s)")
     fi
 fi
@@ -700,10 +1046,8 @@ if [[ -f "${_SITE_VALUES_CFG}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3c. IP / subnet validation — every service VIP must be a valid IPv4 that
-#     falls inside one of the MetalLB IPAddressPool CIDRs/ranges, and VIPs must
-#     not collide. Catches typos and pool/VIP mismatches before MetalLB silently
-#     fails to allocate (services stuck <pending>).
+# 3c. IPv4-only DPF VIP and Kea DHCP hook IP validation.
+#     External Service VIPs and MetalLB pool syntax are checked above for both families.
 # ---------------------------------------------------------------------------
 _ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
 _is_ipv4() {
@@ -749,31 +1093,6 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
                   | grep -E '/[0-9]+$|-' )
     fi
 
-    # Collect every configured service VIP (non-empty loadBalancerIPs values).
-    _SEEN_VIPS=""
-    while IFS= read -r _vip; do
-        [[ -z "${_vip}" ]] && continue
-        if ! _is_ipv4 "${_vip}"; then
-            ERRORS+=("${_CORE_VALUES_LABEL}: loadBalancerIP '${_vip}' is not a valid IPv4 address")
-            continue
-        fi
-        # Duplicate VIP across services
-        if [[ " ${_SEEN_VIPS} " == *" ${_vip} "* ]]; then
-            WARNINGS+=("${_CORE_VALUES_LABEL}: VIP ${_vip} is assigned to more than one service — each service needs a unique IP")
-        fi
-        _SEEN_VIPS="${_SEEN_VIPS} ${_vip}"
-        # Containment in a MetalLB pool
-        if [[ ${#_POOL_BLOCKS[@]} -gt 0 ]]; then
-            _in_pool=false
-            for _blk in "${_POOL_BLOCKS[@]}"; do
-                if _ip_in_block "${_vip}" "${_blk}"; then _in_pool=true; break; fi
-            done
-            ${_in_pool} || \
-                ERRORS+=("${_CORE_VALUES_LABEL}: VIP ${_vip} is not within any MetalLB IPAddressPool (${_METALLB_CFG_LABEL}) — MetalLB cannot allocate it")
-        fi
-    done < <(sed -E 's/[[:space:]]+#.*$//; /^[[:space:]]*#/d' "${_CORE_VALUES_CFG}" \
-              | grep -E 'loadBalancerIPs:' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' )
-
     # kea DHCP hook IPs (nameservers / ntpServer / provisioningServer) are handed
     # to DPUs at boot — validate format + pool-containment (no dup check: these
     # intentionally mirror the unbound/ntp/pxe VIPs above).
@@ -792,17 +1111,6 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     done < <(sed -E 's/[[:space:]]+#.*$//; /^[[:space:]]*#/d' "${_CORE_VALUES_CFG}" \
               | grep -E 'nameservers:|ntpServer:|provisioningServer:' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' )
 
-    # Validate MetalLB pool blocks are well-formed CIDR/range.
-    for _blk in "${_POOL_BLOCKS[@]}"; do
-        _net="${_blk%%[-/]*}"
-        if ! _is_ipv4 "${_net}"; then
-            ERRORS+=("${_METALLB_CFG_LABEL}: pool entry '${_blk}' is not a valid CIDR/range")
-        elif [[ "${_blk}" == */* ]]; then
-            _bits="${_blk#*/}"
-            { [[ "${_bits}" =~ ^[0-9]+$ ]] && (( _bits >= 0 && _bits <= 32 )); } || \
-                ERRORS+=("${_METALLB_CFG_LABEL}: pool entry '${_blk}' has an invalid CIDR prefix length")
-        fi
-    done
 fi
 
 # nico-core: bootArtifactContainers must be populated or DPU/host HTTP boot 404s
@@ -868,6 +1176,38 @@ if [[ "${_CLUSTER_REACHABLE}" == "true" ]]; then
             elif [[ -n "${_missing_core_pull_secrets}" ]]; then
                 WARNINGS+=("${_CORE_VALUES_LABEL}: imagePullSecrets not found in nico-system: ${_missing_core_pull_secrets}")
             fi
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # 4c. KMIP KEK provider — when the site TOML declares a type = "kmip"
+    #     provider, its ca_bundle, client_cert and client_key paths must lie
+    #     under a nico-api.extraVolumeMounts mount, and the Secret behind that
+    #     mount must exist in nico-system with the keys those paths read,
+    #     unless setup.sh creates nico-kmip-client from NICO_KMIP_CLIENT_DIR
+    #     this run, in which case an existing Secret must carry setup's label.
+    #     Otherwise the mistake surfaces only inside the install, as a Pod
+    #     stuck on a missing Secret or nico-api refusing to start on a
+    #     missing file. The checker decides from the decoded values, so YAML
+    #     quoting cannot hide a provider; it needs the TOML parser (python3
+    #     3.11 or the tomli package) only when the site config mentions KMIP.
+    # -----------------------------------------------------------------------
+    if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
+        _kmip_check_args=("${_CORE_VALUES_CFG}")
+        if [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+            _kmip_check_args+=(--managed-secret)
+        fi
+        if ! command -v python3 &>/dev/null; then
+            ERRORS+=("KMIP provider preflight requires python3 with PyYAML — install them before running setup.sh")
+        elif _kmip_checks="$(python3 "${SCRIPT_DIR}/check-kmip-provider.py" "${_kmip_check_args[@]}" 2>&1)"; then
+            while IFS= read -r _check; do
+                case "${_check}" in
+                    "ERROR: "*) ERRORS+=("${_CORE_VALUES_LABEL}: ${_check#ERROR: }") ;;
+                    "WARNING: "*) WARNINGS+=("${_CORE_VALUES_LABEL}: ${_check#WARNING: }") ;;
+                esac
+            done <<< "${_kmip_checks}"
+        else
+            ERRORS+=("${_CORE_VALUES_LABEL}: ${_kmip_checks}")
         fi
     fi
 
@@ -1052,105 +1392,47 @@ EOF
     _cleanup_preflight_pods
 
     # -----------------------------------------------------------------------
-    # 8. Temporal/Keycloak DB consolidation — opt-in transition safety.
-    # See "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md
-    # for the full story. Short version: temporal.useHaPostgres/keycloak.useHaPostgres
-    # point Temporal/Keycloak at nico-pg-cluster instead of postgres.postgres;
-    # this fails closed rather than let setup.sh silently redirect a site with
-    # un-migrated legacy data onto an empty/incomplete target database.
+    # 8. Temporal/Keycloak database. Resolves temporal.useHaPostgres and
+    # keycloak.useHaPostgres for setup.sh phases 7c/7d/7f, and warns while
+    # either stays on the deprecated standalone postgres.postgres StatefulSet.
+    # Stops setup before it moves a database off the StatefulSet without a
+    # complete migration. See "Consolidating Temporal/Keycloak onto
+    # nico-pg-cluster" in README.md. Only phase 7 uses these databases, so a
+    # --skip-rest run skips the section rather than stop on errors about them.
     # -----------------------------------------------------------------------
-    _TEMPORAL_TOGGLE="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" temporal useHaPostgres)"
-    _KEYCLOAK_TOGGLE="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak useHaPostgres)"
+    if [[ "${SKIP_REST:-false}" != "true" ]]; then
+        _resolve_use_ha_postgres temporal
+        _TEMPORAL_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
+        _resolve_use_ha_postgres keycloak
+        _KEYCLOAK_USE_HA_POSTGRES="${_USE_HA_POSTGRES}"
 
-    if [[ "${_TEMPORAL_TOGGLE}" == "true" || "${_KEYCLOAK_TOGGLE}" == "true" ]]; then
-        _LEGACY_PG_POD="$(kubectl get pods -n postgres -l app=postgres \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-        _NICO_PG_POD="$(kubectl get pods -n postgres \
-            -l cluster-name=nico-pg-cluster,spilo-role=master \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-
-        # Fails closed: an unreadable legacy count, a missing target database,
-        # or an unreadable target count are all treated as "cannot rule out
-        # data loss" and raise an ERROR — not silently skipped as "nothing to
-        # migrate". In particular, flipping the toggle and running setup.sh
-        # directly (skipping the documented `helmfile sync -l name=nico-prereqs`
-        # step) means the target database genuinely doesn't exist yet at this
-        # point — that's exactly the case this check exists to catch, not a
-        # reason to wave it through.
-        _check_db_migration_needed() {
-            local _label="$1" _db="$2" _count_query="$3" _script_hint="$4"
-
-            # No legacy pod at all: genuinely nothing to protect (fresh
-            # cluster, postgres.postgres was never deployed). But a legacy
-            # pod WITH no nico-pg-cluster pod is exactly the direct
-            # opt-in-then-run-setup.sh-without-syncing-first case this check
-            # exists to catch — fail closed here too, not just skip.
-            [[ -n "${_LEGACY_PG_POD}" ]] || return 0
-            if [[ -z "${_NICO_PG_POD}" ]]; then
-                ERRORS+=("${_label}: nico-pg-cluster is not reachable, so this can't confirm postgres.postgres/${_db} has already been migrated — ensure postgresql.enabled=true and the nico-prereqs release has synced ('helmfile sync -l name=nico-prereqs') before proceeding")
-                return 0
-            fi
-
-            local _legacy_count
-            if ! _legacy_count="$(kubectl exec -n postgres "${_LEGACY_PG_POD}" -- \
-                psql -U postgres -d "${_db}" -tAc "${_count_query}" 2>/dev/null)" \
-                || [[ ! "${_legacy_count}" =~ ^[0-9]+$ ]]; then
-                ERRORS+=("${_label}: could not read a row count from postgres.postgres/${_db} — cannot verify whether ${_db} needs to be migrated before proceeding")
-                return 0
-            fi
-            # Legacy is genuinely empty — nothing to lose, safe to proceed.
-            [[ "${_legacy_count}" -gt 0 ]] || return 0
-
-            if ! kubectl exec -n postgres "${_NICO_PG_POD}" -- \
-                psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${_db}'" 2>/dev/null \
-                | grep -q 1; then
-                ERRORS+=("${_label}: postgres.postgres/${_db} has ${_legacy_count} row(s) but the nico-pg-cluster '${_db}' database doesn't exist yet — run 'helmfile sync -l name=nico-prereqs' to provision it, then '${_script_hint}', before re-running setup.sh")
-                return 0
-            fi
-
-            local _nico_count
-            if ! _nico_count="$(kubectl exec -n postgres "${_NICO_PG_POD}" -- \
-                psql -U postgres -d "${_db}" -tAc "${_count_query}" 2>/dev/null)" \
-                || [[ ! "${_nico_count}" =~ ^[0-9]+$ ]]; then
-                ERRORS+=("${_label}: could not read a row count from nico-pg-cluster/${_db} — cannot verify the migration completed")
-                return 0
-            fi
-
-            # A dump/restore of the same table should leave equal counts.
-            # Fewer means an incomplete/partial migration; more means the
-            # target has diverged from what was actually dumped (e.g. a
-            # stale prior migration attempt) — either way it's not the clean
-            # 1:1 restore this check exists to confirm. (Nothing else writes
-            # to nico-pg-cluster/${_db} before setup.sh cuts the workload
-            # over to it.)
-            if [[ "${_nico_count}" -ne "${_legacy_count}" ]]; then
-                ERRORS+=("${_label}: postgres.postgres/${_db} has ${_legacy_count} row(s) but nico-pg-cluster/${_db} has ${_nico_count} — migration looks incomplete or stale. Run '${_script_hint}' before proceeding, or this data will be orphaned")
-            fi
-            # This function communicates findings via ERRORS, not its own
-            # exit code — without this, a false `-eq 0` above (the "all
-            # good" case) would make the function return 1, and since
-            # preflight.sh is sourced into setup.sh's `set -e` shell, a bare
-            # call to this function would silently abort setup.sh entirely.
-            return 0
-        }
-
-        if [[ "${_TEMPORAL_TOGGLE}" == "true" ]]; then
-            _check_db_migration_needed \
-                "temporal.useHaPostgres" "temporal" "SELECT count(*) FROM namespaces" \
-                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal"
-            # temporal_visibility has its own tables (no namespaces table) —
-            # use schema presence (any tables at all) as the migrated-or-not
-            # signal, so a partial migration (temporal restored,
-            # temporal_visibility not) is caught too.
-            _check_db_migration_needed \
-                "temporal.useHaPostgres" "temporal_visibility" \
-                "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" \
-                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal"
+        # Also read by setup.sh for its closing summary.
+        _STANDALONE_PG_WORKLOADS=""
+        [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "false" ]] && _STANDALONE_PG_WORKLOADS="Temporal"
+        [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "false" ]] && \
+            _STANDALONE_PG_WORKLOADS="${_STANDALONE_PG_WORKLOADS:+${_STANDALONE_PG_WORKLOADS} and }Keycloak"
+        _STANDALONE_PG_HINT="Migrate to nico-pg-cluster with the guide in helm-prereqs/README.md, \"Consolidating Temporal/Keycloak onto nico-pg-cluster\""
+        if [[ "$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" postgresql enabled)" == "false" ]]; then
+            _STANDALONE_PG_HINT="Move them onto an external or out-of-band PostgreSQL as helm-prereqs/README.md, \"Using an external or out-of-band PostgreSQL\", describes"
         fi
-        if [[ "${_KEYCLOAK_TOGGLE}" == "true" ]]; then
-            _check_db_migration_needed \
-                "keycloak.useHaPostgres" "keycloak" "SELECT count(*) FROM realm" \
-                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db keycloak"
+        if [[ -n "${_STANDALONE_PG_WORKLOADS}" ]]; then
+            WARNINGS+=("Deprecated: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}. Support for it will be removed in 2.5. ${_STANDALONE_PG_HINT}")
+        fi
+
+        # auto never moves a deployed database, so only an explicit value can.
+        # These errors stop setup even under -y. Phase 7d doesn't deploy a
+        # Keycloak that nico-rest.yaml disables.
+        if [[ -n "${_TEMPORAL_USE_HA_POSTGRES}" ]] && _can_move_db temporal; then
+            _check_db_cutover temporal "${_TEMPORAL_USE_HA_POSTGRES}"
+        fi
+        if [[ -n "${_KEYCLOAK_USE_HA_POSTGRES}" ]] \
+            && [[ "$(_yaml_toplevel_value "${_REST_VALUES_CFG}" keycloak enabled)" == "true" ]]; then
+            if _can_move_db keycloak; then
+                _check_db_cutover keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
+            fi
+            if [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
+                _check_keycloak_ns
+            fi
         fi
     fi
 
@@ -1217,6 +1499,10 @@ fi
 # ---------------------------------------------------------------------------
 _print_separator() { echo "---------------------------------------------------------------------"; }
 
+if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
+    ERRORS+=("${BLOCKING_ERRORS[@]}")
+fi
+
 if [[ ${#ERRORS[@]} -eq 0 && ${#WARNINGS[@]} -eq 0 ]]; then
     if ${_NICO_REST_ENABLED}; then
         echo "Pre-flight OK  (NICo REST source: ${NICO_REST_DIR}, charts: ${NICO_REST_HELM_DIR})"
@@ -1267,6 +1553,10 @@ if [[ ${#ERRORS[@]} -eq 0 ]]; then
 fi
 
 # Hard errors — default abort
+if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
+    echo "  The database errors above stop setup, even with -y. Fix them and re-run setup.sh."
+    if ${_SOURCED}; then return 1; else exit 1; fi
+fi
 if [[ "${AUTO_YES:-false}" == "true" ]]; then
     echo "  Errors above noted — continuing (-y flag set). Things may fail."
     if ${_SOURCED}; then return 0; else exit 0; fi

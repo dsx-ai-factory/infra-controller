@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	dynamictls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 )
 
 // Config holds explicit file paths for the CA cert, TLS cert, and TLS key.
@@ -110,4 +112,46 @@ func (c Config) ServerTLSConfig() (*tls.Config, error) {
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    certPool,
 	}, nil
+}
+
+// DynamicTLSConfig builds a client-side TLS config whose certificate and key
+// are refreshed from disk. The caller owns the returned dynamic config and
+// must close it when the client is no longer used.
+func (c Config) DynamicTLSConfig(serverName string) (*tls.Config, *dynamictls.DynTLSCfg, error) {
+	err := c.Validate()
+	if err != nil {
+		return nil, nil, err
+	}
+	dynamicConfig, err := dynamictls.NewDynTLSCfg(c.TLSKey, c.TLSCert, c.CACert)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	baseConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: serverName,
+	}
+
+	return dynamicConfig.WithTLSCfg(baseConfig).ClientCfg(), dynamicConfig, nil
+}
+
+// DynamicServerTLSConfig builds a server-side TLS config whose certificate,
+// key, and client CA pool are refreshed from disk. The caller owns the returned
+// dynamic config and must close it when the server stops.
+func (c Config) DynamicServerTLSConfig() (*tls.Config, *dynamictls.DynTLSCfg, error) {
+	err := c.Validate()
+	if err != nil {
+		return nil, nil, err
+	}
+	dynamicConfig, err := dynamictls.NewDynTLSCfg(c.TLSKey, c.TLSCert, c.CACert)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	baseConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+	}
+
+	return dynamicConfig.WithTLSCfg(baseConfig).ServerCfg(), dynamicConfig, nil
 }

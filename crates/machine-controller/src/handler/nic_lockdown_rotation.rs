@@ -38,6 +38,8 @@
 //! Convergence/quarantine is recorded against the same `device_credential_rotation`
 //! bookkeeping the other families use, keyed by each card's **NIC MAC**.
 
+use db::ConditionalWrite::{Applied, NotApplied};
+use db::ControllerStateNotCurrent;
 use eyre::eyre;
 use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState, DpaInterfaceType};
 use model::machine::{ManagedHostState, ManagedHostStateSnapshot};
@@ -153,7 +155,9 @@ pub(crate) async fn handle_rotating_nic_lockdown(
 
     // Collect SVPC interfaces up front so the borrow of `state` does not overlap
     // the mutable `txn` borrow inside the loop.
-    let svpc: Vec<_> = svpc_interfaces(state).collect();
+    let mut svpc: Vec<_> = svpc_interfaces(state).collect();
+    // Match observation merging's ID order before acquiring multiple card locks.
+    svpc.sort_by_key(|interface| interface.id);
 
     // Whether at least one card is still actively converging (kicked this tick or
     // mid-rekey within its step budget). While true the host waits; once false
@@ -193,7 +197,7 @@ pub(crate) async fn handle_rotating_nic_lockdown(
                 // Idle and lagging: start the tenant-free rekey. CAS on the
                 // controller-state version so a concurrent dpa-manager write
                 // cannot be clobbered; a lost race just retries next tick.
-                let applied = db::dpa_interface::try_update_controller_state(
+                match db::dpa_interface::try_update_controller_state(
                     txn.as_mut(),
                     iface.id,
                     iface.controller_state.version,
@@ -203,14 +207,14 @@ pub(crate) async fn handle_rotating_nic_lockdown(
                 .await
                 .map_err(|e| {
                     StateHandlerError::GenericError(eyre!("kick rekey for {nic_mac}: {e}"))
-                })?;
-                if applied {
-                    tracing::info!(
+                })? {
+                    Applied(()) => tracing::info!(
                         %nic_mac,
                         dpa_interface_id = %iface.id,
                         target,
                         "starting SuperNIC lockdown IKM rekey to site-wide target"
-                    );
+                    ),
+                    NotApplied(ControllerStateNotCurrent) => {}
                 }
                 in_progress = true;
             }
@@ -232,7 +236,7 @@ pub(crate) async fn handle_rotating_nic_lockdown(
                     // be stale: if dpa-manager advanced this card since it loaded
                     // (e.g. the card finally reported its lock mode), the CAS on
                     // the observed controller-state version loses.
-                    let transitioned_to_ready = db::dpa_interface::try_update_controller_state(
+                    match db::dpa_interface::try_update_controller_state(
                         txn.as_mut(),
                         iface.id,
                         iface.controller_state.version,
@@ -244,37 +248,38 @@ pub(crate) async fn handle_rotating_nic_lockdown(
                         StateHandlerError::GenericError(eyre!(
                             "rotation timed out; failed to transition {nic_mac} back to a ready state: {e}"
                         ))
-                    })?;
-
-                    if transitioned_to_ready {
-                        let quarantined_until = db::credential_rotation::backoff_until(
-                            status.rotate_attempts,
-                            chrono::Utc::now(),
-                        );
-                        db::credential_rotation::increment_rotate_attempt(
-                            txn.as_mut(),
-                            nic_mac,
-                            LockdownIkm,
-                            "SuperNIC lockdown rekey step timed out (card unreachable)",
-                            quarantined_until,
-                        )
-                        .await
-                        .map_err(|e| {
-                            StateHandlerError::GenericError(eyre!(
-                                "quarantine unreachable rekey card {nic_mac}: {e}"
-                            ))
-                        })?;
-                        tracing::warn!(
-                            %nic_mac,
-                            dpa_interface_id = %iface.id,
-                            %quarantined_until,
-                            "SuperNIC lockdown rekey step timed out; quarantined until backoff elapses"
-                        );
-                    } else {
-                        // Lost the reset CAS: dpa-manager advanced the card since
-                        // the snapshot loaded. Do not quarantine or settle on stale
-                        // state; wait and re-read the card next tick.
-                        in_progress = true;
+                    })? {
+                        Applied(()) => {
+                            let quarantined_until = db::credential_rotation::backoff_until(
+                                status.rotate_attempts,
+                                chrono::Utc::now(),
+                            );
+                            db::credential_rotation::increment_rotate_attempt(
+                                txn.as_mut(),
+                                nic_mac,
+                                LockdownIkm,
+                                "SuperNIC lockdown rekey step timed out (card unreachable)",
+                                quarantined_until,
+                            )
+                            .await
+                            .map_err(|e| {
+                                StateHandlerError::GenericError(eyre!(
+                                    "quarantine unreachable rekey card {nic_mac}: {e}"
+                                ))
+                            })?;
+                            tracing::warn!(
+                                %nic_mac,
+                                dpa_interface_id = %iface.id,
+                                %quarantined_until,
+                                "SuperNIC lockdown rekey step timed out; quarantined until backoff elapses"
+                            );
+                        }
+                        NotApplied(ControllerStateNotCurrent) => {
+                            // Lost the reset CAS: dpa-manager advanced the card since
+                            // the snapshot loaded. Do not quarantine or settle on stale
+                            // state; wait and re-read the card next tick.
+                            in_progress = true;
+                        }
                     }
                 } else {
                     in_progress = true;

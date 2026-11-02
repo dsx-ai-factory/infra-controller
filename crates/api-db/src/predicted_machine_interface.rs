@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_uuid::DbTable;
 use mac_address::MacAddress;
 use model::predicted_machine_interface::{NewPredictedMachineInterface, PredictedMachineInterface};
 use sqlx::PgConnection;
@@ -45,8 +46,11 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = PredictedMachineInterface
     txn: &mut PgConnection,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<PredictedMachineInterface>, DatabaseError> {
-    let mut query =
-        FilterableQueryBuilder::new("SELECT * FROM predicted_machine_interfaces").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(format!(
+        "SELECT {} FROM predicted_machine_interfaces",
+        PredictedMachineInterface::db_table_columns(),
+    ))
+    .filter(&filter);
     query
         .build_query_as()
         .fetch_all(txn)
@@ -146,8 +150,12 @@ pub async fn create(
     value: NewPredictedMachineInterface<'_>,
     txn: &mut PgConnection,
 ) -> Result<PredictedMachineInterface, DatabaseError> {
-    let query = "INSERT INTO predicted_machine_interfaces (machine_id, mac_address, expected_network_segment_type, boot_interface_id, primary_interface) VALUES ($1, $2, $3, $4, $5) RETURNING *";
-    sqlx::query_as(query)
+    let query = format!(
+        "INSERT INTO predicted_machine_interfaces (machine_id, mac_address, expected_network_segment_type, boot_interface_id, primary_interface) VALUES ($1, $2, $3, $4, $5)
+        RETURNING {}",
+        PredictedMachineInterface::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(value.machine_id)
         .bind(value.mac_address)
         .bind(value.expected_network_segment_type)
@@ -155,5 +163,5 @@ pub async fn create(
         .bind(value.primary_interface)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }

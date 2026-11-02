@@ -24,8 +24,11 @@ use http_body_util::BodyExt;
 use nv_redfish::bmc_http::{
     BmcCredentials, CacheableError, HttpClient, RejectedUriReferenceError, RequestError,
 };
-use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
-use nv_redfish::core::{BoxTryStream, ModificationResponse, ODataETag, SessionCreateResponse};
+use nv_redfish::core::upload::{HttpPushUriUpdateRequest, MultipartUpdateRequest, UploadReader};
+use nv_redfish::core::{
+    BmcError, BmcErrorClass, BoxTryStream, ModificationResponse, ODataETag, Repair,
+    SessionCreateResponse,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tower::ServiceExt;
@@ -63,6 +66,18 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl BmcError for Error {
+    fn error_class(&self) -> BmcErrorClass {
+        match self {
+            Self::InvalidResponse { status, .. } => BmcErrorClass::HttpResponse {
+                status: status.as_u16(),
+            },
+            Self::Json(_) => BmcErrorClass::ResponseParse,
+            _ => BmcErrorClass::Other,
+        }
+    }
+}
 
 impl RequestError for Error {
     fn rejected_uri_reference(error: RejectedUriReferenceError) -> Self {
@@ -146,6 +161,7 @@ impl HttpClient for AxumRouterHttpClient {
         credentials: &BmcCredentials,
         _: Option<ODataETag>,
         custom_headers: &HeaderMap,
+        repair: &impl Repair,
     ) -> Result<T, Self::Error>
     where
         T: DeserializeOwned,
@@ -161,8 +177,21 @@ impl HttpClient for AxumRouterHttpClient {
                 text: String::from_utf8_lossy(&bytes).to_string(),
             });
         }
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(Error::Json)?;
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(Error::Json)?;
+        repair.repair(&mut value);
         serde_json::from_value(value).map_err(Error::Json)
+    }
+
+    async fn poll<T>(
+        &self,
+        _: Url,
+        _: &BmcCredentials,
+        _: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        Err(Error::NotSupported("Task polling is not supported yet"))
     }
 
     async fn post<B, T>(
@@ -241,5 +270,53 @@ impl HttpClient for AxumRouterHttpClient {
         V: Serialize + Send + Sync,
     {
         Err(Error::NotSupported("Multipart update is not supported yet"))
+    }
+
+    async fn post_http_push_uri_update<U, T>(
+        &self,
+        _: Url,
+        _: HttpPushUriUpdateRequest<U>,
+        _: &BmcCredentials,
+        _: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        U: UploadReader,
+        T: DeserializeOwned + Send + Sync,
+    {
+        Err(Error::NotSupported(
+            "HttpPushUri update is not supported yet",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn bmc_error_classification_distinguishes_http_and_parse_failures() {
+        let cases = [
+            (
+                "server failure must not be skipped as an unclassified account slot",
+                Error::InvalidResponse {
+                    url: Url::parse("http://bmc.example/redfish/v1/AccountService/Accounts/1")
+                        .unwrap(),
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    text: String::new(),
+                },
+                BmcErrorClass::HttpResponse { status: 503 },
+            ),
+            (
+                "malformed response",
+                Error::Json(serde_json::from_str::<bool>("invalid").unwrap_err()),
+                BmcErrorClass::ResponseParse,
+            ),
+        ];
+
+        for (scenario, error, expected) in cases {
+            let actual = error.error_class();
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }

@@ -11,17 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/google/uuid"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 
 	"github.com/uptrace/bun"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -296,18 +298,14 @@ type VpcPrefixDAO interface {
 type VpcPrefixSQLDAO struct {
 	dbSession *db.Session
 	VpcPrefixDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new VpcPrefix from the given parameters
-func (vpsd VpcPrefixSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcPrefixCreateInput) (*VpcPrefix, error) {
+func (vpsd VpcPrefixSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcPrefixCreateInput) (_ *VpcPrefix, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.Create")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "name", input.Name)
-	}
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPrefixDAO.Create")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
+	cotel.SetAttribute(vpDAOSpan, attribute.String("name", input.Name))
 
 	id := input.VpcPrefixID
 	if id == nil {
@@ -345,14 +343,11 @@ func (vpsd VpcPrefixSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcPref
 // GetByID returns a VpcPrefix by ID
 // includeRelation can be a subset of Vpc
 // returns db.ErrDoesNotExist error if the record is not found
-func (vpsd VpcPrefixSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*VpcPrefix, error) {
+func (vpsd VpcPrefixSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *VpcPrefix, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.GetByID")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", id.String())
-	}
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPrefixDAO.GetByID")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
+	cotel.SetAttribute(vpDAOSpan, attribute.String("id", id.String()))
 
 	vpp := &VpcPrefix{}
 
@@ -377,12 +372,10 @@ func (vpsd VpcPrefixSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in VpcPrefixOrderByDefault in ascending order
-func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPrefixFilterInput, page paginator.PageInput, includeRelations []string) ([]VpcPrefix, int, error) {
+func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPrefixFilterInput, page paginator.PageInput, includeRelations []string) (_ []VpcPrefix, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.GetAll")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-	}
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPrefixDAO.GetAll")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
 
 	vps := []VpcPrefix{}
 
@@ -393,39 +386,30 @@ func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPre
 	}
 	if filter.VpcPrefixIDs != nil {
 		query = query.Where("vp.id IN (?)", bun.In(filter.VpcPrefixIDs))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "vpc_prefix_ids", filter.VpcPrefixIDs)
 	}
 	if filter.Names != nil {
 		query = query.Where("vp.name IN (?)", bun.In(filter.Names))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "name", filter.Names)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("vp.site_id IN (?)", bun.In(filter.SiteIDs))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.VpcIDs != nil {
 		query = query.Where("vp.vpc_id IN (?)", bun.In(filter.VpcIDs))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "vpc_id", filter.VpcIDs)
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("vp.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 	if filter.IpBlockIDs != nil {
 		query = query.Where("vp.ip_block_id IN (?)", bun.In(filter.IpBlockIDs))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "ip_block_id", filter.IpBlockIDs)
 	}
 	if filter.Prefixes != nil {
 		query = query.Where("vp.prefix IN (?)", bun.In(filter.Prefixes))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "prefix", filter.Prefixes)
 	}
 	if filter.PrefixLengths != nil {
 		query = query.Where("vp.prefix_length IN (?)", bun.In(filter.PrefixLengths))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "prefix_length", filter.PrefixLengths)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("vp.status IN (?)", bun.In(filter.Statuses))
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "status", filter.Statuses)
 	}
 	searchQuery, normalizedTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
 	if ok {
@@ -435,7 +419,7 @@ func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPre
 				WhereOr("vp.name ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("vp.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(vpDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -465,14 +449,10 @@ func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPre
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (vpsd VpcPrefixSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcPrefixUpdateInput) (*VpcPrefix, error) {
+func (vpsd VpcPrefixSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcPrefixUpdateInput) (_ *VpcPrefix, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.Update")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", input.VpcPrefixID)
-	}
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPrefixDAO.Update")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
 
 	vp := &VpcPrefix{
 		ID: input.VpcPrefixID,
@@ -482,47 +462,45 @@ func (vpsd VpcPrefixSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcPref
 	if input.Name != nil {
 		vp.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(vpDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.TenantOrg != nil {
 		vp.Org = *input.TenantOrg
 		updatedFields = append(updatedFields, "org")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "org", *input.TenantOrg)
+		cotel.SetAttribute(vpDAOSpan, attribute.String("org", *input.TenantOrg))
 	}
 	if input.VpcID != nil {
 		vp.VpcID = *input.VpcID
 		updatedFields = append(updatedFields, "vpc_id")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "vpc_id", input.VpcID.String())
+		cotel.SetAttribute(vpDAOSpan, attribute.String("vpc_id", input.VpcID.String()))
 	}
 	if input.TenantID != nil {
 		vp.TenantID = *input.TenantID
 		updatedFields = append(updatedFields, "tenant_id")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "tenant_id", input.TenantID.String())
+		cotel.SetAttribute(vpDAOSpan, attribute.String("tenant_id", input.TenantID.String()))
 	}
 	if input.IpBlockID != nil {
 		vp.IPBlockID = input.IpBlockID
 		updatedFields = append(updatedFields, "ip_block_id")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "ip_block_id", input.IpBlockID.String())
+		cotel.SetAttribute(vpDAOSpan, attribute.String("ip_block_id", input.IpBlockID.String()))
 	}
 	if input.Prefix != nil {
 		vp.Prefix = *input.Prefix
 		updatedFields = append(updatedFields, "prefix")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "prefix", *input.Prefix)
+		cotel.SetAttribute(vpDAOSpan, attribute.String("prefix", *input.Prefix))
 	}
 	if input.PrefixLength != nil {
 		vp.PrefixLength = *input.PrefixLength
 		updatedFields = append(updatedFields, "prefix_length")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "prefix_length", *input.PrefixLength)
 	}
 	if input.Status != nil {
 		vp.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(vpDAOSpan, attribute.String("status", *input.Status))
 	}
 	if input.IsMissingOnSite != nil {
 		vp.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 
 	if len(updatedFields) > 0 {
@@ -543,13 +521,10 @@ func (vpsd VpcPrefixSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcPref
 }
 
 // Clear clears VpcPrefix attributes based on provided arguments
-func (vpsd VpcPrefixSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcPrefixClearInput) (*VpcPrefix, error) {
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.Clear")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", input.VpcPrefixID.String())
-	}
+func (vpsd VpcPrefixSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcPrefixClearInput) (_ *VpcPrefix, retErr error) {
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPrefixDAO.Clear")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
+	cotel.SetAttribute(vpDAOSpan, attribute.String("id", input.VpcPrefixID.String()))
 
 	vp := &VpcPrefix{
 		ID: input.VpcPrefixID,
@@ -585,14 +560,11 @@ func (vpsd VpcPrefixSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcPrefi
 // Delete deletes an VpcPrefix by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (vpsd VpcPrefixSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (vpsd VpcPrefixSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.Delete")
-	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
-
-		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", id.String())
-	}
+	ctx, vpDAOSpan := cotel.StartSpan(ctx, "VpcPrefixDAO.Delete")
+	defer func() { cotel.EndSpan(vpDAOSpan, retErr) }()
+	cotel.SetAttribute(vpDAOSpan, attribute.String("id", id.String()))
 
 	vp := &VpcPrefix{
 		ID: id,
@@ -757,7 +729,6 @@ func (vpsd VpcPrefixSQLDAO) GetPrefixUsage(ctx context.Context, tx *db.Tx, vpcPr
 // NewVpcPrefixDAO returns a new VpcPrefixDAO
 func NewVpcPrefixDAO(dbSession *db.Session) VpcPrefixDAO {
 	return &VpcPrefixSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

@@ -36,7 +36,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tonic_prost_build::configure()
         .build_client(true)
-        .build_server(false)
+        // The transport test needs gNMI server bindings; compile them only for tests.
+        .build_server(true)
+        .server_mod_attribute("gnmi", "#[cfg(test)]")
         .extern_path(
             ".gnmi_ext",
             "crate::collectors::nvue::gnmi::proto::gnmi_ext",

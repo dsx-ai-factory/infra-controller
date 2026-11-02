@@ -41,7 +41,8 @@ const EXPECTED_FILES: [&str; 4] = [
     HBN_DAEMONS_FILE,
 ];
 
-const EXPECTED_SERVICES: [&str; 3] = ["frr", "nl2doca", "rsyslog"];
+const RSYSLOG_SERVICE: &str = "rsyslog";
+const EXPECTED_SERVICES: [&str; 3] = ["frr", "nl2doca", RSYSLOG_SERVICE];
 const DHCP_SERVER_SERVICE: &str = "forge-dhcp-server-default";
 /// Maximum allowed disk utilization in % before the DpuDiskUtilizationCritical health alert will be sent
 const MAX_DISK_UTILIZATION: u32 = 85;
@@ -257,22 +258,41 @@ async fn check_hbn_services_running(
     };
     passed(hr, probe_ids::SupervisorctlStatus.clone(), None);
 
-    for service in expected_services.iter().map(|x| x.to_string()) {
-        match st.status_of(&service) {
-            SctlState::Running => passed(hr, probe_ids::ServiceRunning.clone(), Some(service)),
-            status => {
-                tracing::warn!(
-                    service = service.as_str(),
-                    service_state = %status,
-                    "HBN service is not running"
-                );
-                failed(
-                    hr,
-                    probe_ids::ServiceRunning.clone(),
-                    Some(service.clone()),
-                    format!("{service} is {status}, need {}", SctlState::Running),
-                );
-            }
+    for service in expected_services {
+        record_hbn_service_health(hr, service, st.status_of(service));
+    }
+}
+
+/// Reports one HBN service's Supervisor state.
+///
+/// HBN restarts `rsyslog` during log rotation. It is outside the network data
+/// path, so its `STARTING` state emits neither a success nor an alert. Supervisor
+/// bounds that transition through `startsecs`; the next sample reports `RUNNING`
+/// or a failure state.
+fn record_hbn_service_health(
+    hr: &mut health_report::HealthReport,
+    service: &str,
+    status: SctlState,
+) {
+    match status {
+        SctlState::Running => passed(
+            hr,
+            probe_ids::ServiceRunning.clone(),
+            Some(service.to_string()),
+        ),
+        SctlState::Starting if service == RSYSLOG_SERVICE => {}
+        status => {
+            tracing::warn!(
+                service,
+                service_state = %status,
+                "HBN service is not running"
+            );
+            failed(
+                hr,
+                probe_ids::ServiceRunning.clone(),
+                Some(service.to_string()),
+                format!("{service} is {status}, need {}", SctlState::Running),
+            );
         }
     }
 }
@@ -795,6 +815,74 @@ shm              68M  8.2k   68M   1% /run/containerd/io.containerd.grpc.v1.cri/
 overlay          41G   12G   27G  31% /run/containerd/io.containerd.runtime.v2.task/k8s.io/5e38cefc8507fcf3b872fa12f21bdbcc09244832c24a34871ef9d8d519fa37b9/rootfs
 tmpfs           3.4G     0  3.4G   0% /run/user/1002
 "#;
+
+    /// Builds the critical `ServiceRunning` alert expected for a failed HBN service.
+    fn expected_service_running_alert(
+        service: &str,
+        status: SctlState,
+    ) -> health_report::HealthProbeAlert {
+        health_report::HealthProbeAlert {
+            id: probe_ids::ServiceRunning.clone(),
+            target: Some(service.to_string()),
+            in_alert_since: None,
+            message: format!("{service} is {status}, need {}", SctlState::Running),
+            tenant_message: None,
+            classifications: vec![
+                health_report::HealthAlertClassification::prevent_allocations(),
+                health_report::HealthAlertClassification::prevent_host_state_changes(),
+            ],
+        }
+    }
+
+    #[test]
+    fn hbn_service_health_defers_only_rsyslog_starting() {
+        check_values(
+            [
+                Check {
+                    scenario: "running rsyslog reports success",
+                    input: (RSYSLOG_SERVICE, SctlState::Running),
+                    expect: (
+                        vec![health_report::HealthProbeSuccess {
+                            id: probe_ids::ServiceRunning.clone(),
+                            target: Some(RSYSLOG_SERVICE.to_string()),
+                        }],
+                        vec![],
+                    ),
+                },
+                Check {
+                    scenario: "starting rsyslog is omitted",
+                    input: (RSYSLOG_SERVICE, SctlState::Starting),
+                    expect: (vec![], vec![]),
+                },
+                Check {
+                    scenario: "failed rsyslog remains critical",
+                    input: (RSYSLOG_SERVICE, SctlState::Fatal),
+                    expect: (
+                        vec![],
+                        vec![expected_service_running_alert(
+                            RSYSLOG_SERVICE,
+                            SctlState::Fatal,
+                        )],
+                    ),
+                },
+                Check {
+                    scenario: "another starting service remains critical",
+                    input: ("frr", SctlState::Starting),
+                    expect: (
+                        vec![],
+                        vec![expected_service_running_alert("frr", SctlState::Starting)],
+                    ),
+                },
+            ],
+            |(service, status)| {
+                let mut report = health_report::HealthReport::empty(
+                    health_report::HealthReport::DPU_AGENT_SOURCE.to_string(),
+                );
+                record_hbn_service_health(&mut report, service, status);
+                (report.successes, report.alerts)
+            },
+        );
+    }
 
     #[test]
     fn post_config_wait_alert_tracks_wait_signal() {

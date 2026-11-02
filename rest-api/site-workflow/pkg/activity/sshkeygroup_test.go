@@ -85,7 +85,7 @@ func TestManageSSHKeyGroupInventory_DiscoverSSHKeyGroupInventory(t *testing.T) {
 			})
 
 			ctx := context.Background()
-			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockWantCount, tt.args.wantTotalItems)
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize
 			if tt.args.wantTotalItems%tt.fields.cloudPageSize > 0 {
@@ -115,7 +115,7 @@ func TestManageSSHKeyGroupInventory_DiscoverSSHKeyGroupInventory(t *testing.T) {
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnEveryPage(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }

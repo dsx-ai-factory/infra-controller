@@ -134,11 +134,11 @@ pub(super) async fn reconcile_reachability_collectors(
             continue;
         }
 
-        let collector_registry =
-            Arc::new(ctx.metrics_manager.create_collector_registry(
-                format!("reachability_collector_{key}"),
-                metrics_prefix,
-            )?);
+        let registry_key = endpoint.addr.registry_key();
+        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
+            format!("reachability_collector_{registry_key}"),
+            metrics_prefix,
+        )?);
 
         match Collector::start::<ReachabilityCollector>(
             endpoint.clone(),
@@ -286,8 +286,9 @@ mod tests {
         endpoint.addr.port = Some(9443);
 
         endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "switch-1".to_string(),
+            serial: Some("switch-1".to_string()),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,

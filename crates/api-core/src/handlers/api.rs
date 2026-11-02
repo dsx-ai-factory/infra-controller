@@ -27,15 +27,43 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
 fn advertised_build_capabilities() -> Vec<i32> {
-    vec![rpc::BuildCapability::VpcSlaac as i32]
+    vec![
+        rpc::BuildCapability::VpcSlaac as i32,
+        rpc::BuildCapability::ReplaceSkuComponents as i32,
+    ]
 }
 
-pub(crate) fn version(
+pub(crate) async fn version(
     api: &Api,
     request: Request<rpc::VersionRequest>,
 ) -> Result<Response<rpc::BuildInfo>, Status> {
     log_request_data(&request);
     let version_request = request.into_inner();
+
+    let runtime_config = if version_request.display_config {
+        let config = api.runtime_config.redacted();
+        let retained_operator_roots = if config.site_fabric_null_routes.is_none() {
+            ::db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(
+                &api.database_connection,
+            )
+            .await
+            .map_err(CarbideError::from)?
+        } else {
+            vec![]
+        };
+        let effective_null_routes = config
+            .resolved_site_fabric_null_routes(&retained_operator_roots, &[])
+            .into_iter()
+            .map(|prefix| prefix.to_string())
+            .collect();
+        let mut runtime_config: rpc::RuntimeConfig = config.into();
+        runtime_config.site_fabric_null_routes = Some(::rpc::common::StringList {
+            items: effective_null_routes,
+        });
+        Some(runtime_config)
+    } else {
+        None
+    };
 
     let v = rpc::BuildInfo {
         build_version: carbide_version::v!(build_version).to_string(),
@@ -46,11 +74,7 @@ pub(crate) fn version(
         build_hostname: carbide_version::v!(build_hostname).to_string(),
         capabilities: advertised_build_capabilities(),
 
-        runtime_config: if version_request.display_config {
-            Some(api.runtime_config.redacted().into())
-        } else {
-            None
-        },
+        runtime_config,
     };
     Ok(Response::new(v))
 }
@@ -200,7 +224,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advertised_build_capabilities_include_vpc_slaac() {
-        assert!(advertised_build_capabilities().contains(&(rpc::BuildCapability::VpcSlaac as i32)));
+    fn advertised_build_capabilities_include_supported_features() {
+        let capabilities = advertised_build_capabilities();
+        for capability in [
+            rpc::BuildCapability::VpcSlaac,
+            rpc::BuildCapability::ReplaceSkuComponents,
+        ] {
+            assert!(capabilities.contains(&(capability as i32)));
+        }
     }
 }

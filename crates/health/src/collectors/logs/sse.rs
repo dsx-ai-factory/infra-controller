@@ -16,6 +16,8 @@
  */
 
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +33,7 @@ use super::diagnostic::{
 };
 use super::redfish::{
     RedfishLogFields, RedfishSeverity, add_redfish_analyzer_attributes, event_diagnostic_is_cper,
-    nvidia_error_id, redfish_event_type_string, redfish_log_type,
+    nvidia_error_id, push_message_identity, redfish_event_type_string, redfish_log_type,
 };
 use crate::HealthError;
 use crate::collectors::inventory::{
@@ -383,13 +385,15 @@ fn record_to_log(
         .as_ref()
         .map(|log_entry_ref| log_entry_ref.odata_id().to_string());
 
-    let mut attributes = vec![
-        (Cow::Borrowed("message_id"), record.message_id.clone()),
-        (
-            Cow::Borrowed("event_record_id"),
-            record.base.odata_id().to_string(),
-        ),
-    ];
+    let mut attributes = vec![(
+        Cow::Borrowed("event_record_id"),
+        record.odata_id.to_string(),
+    )];
+    push_message_identity(
+        &mut attributes,
+        Some(&record.message_id),
+        record.message.as_deref(),
+    );
 
     if let Some(event_type) = redfish_event_type_string(Some(&record.event_type)) {
         attributes.push((Cow::Borrowed("event_type"), event_type));
@@ -398,7 +402,7 @@ fn record_to_log(
         &mut attributes,
         log_type,
         severity,
-        nvidia_error_id(record.base.base.oem.as_ref()),
+        nvidia_error_id(record.oem.as_ref()),
     );
     if let Some(event_id) = &record.event_id {
         attributes.push((Cow::Borrowed("event_id"), event_id.clone()));
@@ -438,10 +442,29 @@ fn record_to_log(
     if let Some(resolution) = &record.resolution {
         attributes.push((Cow::Borrowed("resolution"), resolution.clone()));
     }
-    if let Some(oem) = &record.base.base.oem {
+    if let Some(oem) = &record.oem {
         attributes.push((
             Cow::Borrowed("redfish.oem"),
             oem.additional_properties.to_string(),
+        ));
+    }
+
+    // Without either optional identifier, an EventRecord URI can recur across
+    // payloads. Hash the occurrence fields before sink-specific projection;
+    // inventory enrichment must not change the identity of an exact replay.
+    if record.event_id.as_deref().is_none_or(str::is_empty)
+        && log_entry_id.as_deref().is_none_or(str::is_empty)
+    {
+        let timestamp = attributes
+            .iter()
+            .find_map(|(key, value)| (key == "event_timestamp").then_some(value.as_str()));
+
+        let mut hasher = DefaultHasher::new();
+        (body.as_str(), timestamp, record.message_args.as_deref()).hash(&mut hasher);
+
+        attributes.push((
+            Cow::Borrowed("event_record_fingerprint"),
+            hasher.finish().to_string(),
         ));
     }
 
@@ -485,6 +508,136 @@ mod tests {
     use super::*;
     use crate::endpoint::test_support::{mac, test_endpoint};
     use crate::sink::LogSeverity;
+
+    #[tokio::test]
+    async fn sse_envelopes_preserve_content_through_the_health_client() {
+        use bmc_mock::test_support::serve_https;
+
+        use crate::endpoint::test_support::endpoint_with_creds;
+        use crate::endpoint::{BmcAddr, BmcCredentials as HealthCredentials};
+
+        let app = Router::new()
+            .route(
+                "/redfish/v1",
+                get(|| async {
+                    Json(json!({
+                        "@odata.type": "#ServiceRoot.ServiceRoot",
+                        "@odata.id": "/redfish/v1", "Id": "RootService", "Name": "Root",
+                        "Links": {
+                            "Sessions": {
+                                "@odata.id": "/redfish/v1/SessionService/Sessions"
+                            }
+                        },
+                        "EventService": {"@odata.id": "/redfish/v1/EventService"}
+                    }))
+                }),
+            )
+            .route(
+                "/redfish/v1/EventService",
+                get(|| async {
+                    Json(json!({
+                        "@odata.type": "#EventService.EventService",
+                        "@odata.id": "/redfish/v1/EventService", "Id": "EventService",
+                        "Name": "Event service", "ServerSentEventUri": "/events"
+                    }))
+                }),
+            );
+
+        let cases = [
+            (
+                "missing record identifier",
+                false,
+                "/redfish/v1/EventService/SSE#/Events/record-7",
+            ),
+            (
+                "explicit record identifier",
+                true,
+                "/redfish/v1/EventService/Events/control/Events/record-7",
+            ),
+        ];
+
+        for (name, explicit_record_id, expected_record_id) in cases {
+            let mut payload = json!({
+                "@odata.type": "#Event.Event", "Name": "Synthetic health event",
+                "Id": "control", "@odata.id": "/redfish/v1/EventService/Events/control",
+                "Events": [{
+                    "MemberId": "record-7", "EventId": "event-7", "EventType": "Alert",
+                    "MessageId": "Example.Fault", "Message": "synthetic failure",
+                    "MessageSeverity": "Critical", "Oem": {"Example": {"ErrorId": "error-7"}}
+                }]
+            });
+
+            if explicit_record_id {
+                payload["Events"][0]["@odata.id"] =
+                    json!("/redfish/v1/EventService/Events/control/Events/record-7");
+            }
+
+            let frame = format!("id: 42\ndata: {payload}\n\n");
+
+            let router = app.clone().route(
+                "/events",
+                get(move || {
+                    let frame = frame.clone();
+
+                    async move { ([("content-type", "text/event-stream")], frame) }
+                }),
+            );
+            let (mut server, base_url) = serve_https("health-sse", router);
+
+            let endpoint = Arc::new(endpoint_with_creds(
+                BmcAddr {
+                    ip: "127.0.0.1".parse().unwrap(),
+                    port: base_url.port(),
+                    mac: None,
+                },
+                HealthCredentials::SessionToken {
+                    token: "fixture-token".into(),
+                },
+                None,
+                None,
+            ));
+
+            let mut collector = SseLogCollector::new_runner(
+                Arc::clone(endpoint.bmc()),
+                endpoint,
+                SseLogCollectorConfig {
+                    include_diagnostics: false,
+                    request_concurrency: NonZeroUsize::MIN,
+                    gpu_inventory: None,
+                },
+            )
+            .expect("collector builds");
+
+            let result = tokio::time::timeout(Duration::from_secs(10), async {
+                let StreamingConnectResult::Connected(mut stream) =
+                    collector.connect().await.expect("collector connects")
+                else {
+                    panic!("connected stream expected");
+                };
+
+                stream.next().await.expect("one collector result exists")
+            })
+            .await
+            .expect("collector receives an event within its deadline");
+
+            let event = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            let record = log_record(&event);
+
+            assert_eq!(record.body, "synthetic failure", "{name}");
+            assert_eq!(record.severity, LogSeverity::Fatal, "{name}");
+
+            for (key, expected) in [
+                ("event_record_id", expected_record_id),
+                ("event_id", "event-7"),
+                ("message_id", "Example.Fault"),
+                ("redfish.oem", r#"{"Example":{"ErrorId":"error-7"}}"#),
+            ] {
+                assert_eq!(attribute(record, key), Some(expected), "{name}: {key}");
+            }
+
+            server.stop().await.expect("server stops");
+        }
+    }
 
     async fn event_to_logs_with_timeout<B: Bmc>(
         event: &Event,
@@ -899,6 +1052,51 @@ mod tests {
     }
 
     #[test]
+    fn fallback_occurrences_preserve_content_changes_and_exact_replays() {
+        use crate::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
+
+        let payload = json!({
+            "@odata.id": "/redfish/v1/EventService/SSE#/Events/0", "MemberId": "0",
+            "EventType": "Alert", "MessageId": "Example.1.0.Event", "Message": "first",
+            "MessageArgs": ["resource", "detail"], "EventTimestamp": "2026-10-03T00:00:01Z"
+        });
+
+        let record = serde_json::from_value(payload.clone()).unwrap();
+        let event = record_to_log(&record, false, Vec::new());
+        let expected = OpenBmcEventMapper.queue_key("bmc", &log_record(&event).attributes);
+
+        for (field, value, same) in [
+            ("Message", json!("first"), true),
+            ("EventTimestamp", json!("2026-10-03T00:00:02Z"), false),
+            ("Message", json!("second"), false),
+            (
+                "MessageArgs",
+                json!(["resource", "changed later argument"]),
+                false,
+            ),
+        ] {
+            let mut changed = payload.clone();
+            changed[field] = value;
+
+            let record = serde_json::from_value(changed).unwrap();
+
+            let event = record_to_log(
+                &record,
+                false,
+                vec![(Cow::Borrowed("gpu_uuid"), "new enrichment".into())],
+            );
+
+            let record = log_record(&event);
+
+            assert_eq!(
+                OpenBmcEventMapper.queue_key("bmc", &record.attributes) == expected,
+                same,
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
     fn diagnostic_payload_remains_behind_sink_gate() {
         let record: nv_redfish::schema::event::EventRecord = serde_json::from_value(json!({
             "@odata.id": "/redfish/v1/EventService/Events/records/cper",
@@ -950,6 +1148,34 @@ mod tests {
             value["Severity"] = json!(severity);
         }
         serde_json::from_value(value).expect("valid event record")
+    }
+
+    /// A LiteOn-shaped event with an empty `MessageId` carries the same derived
+    /// identity over SSE as the periodic path derives for a null `MessageId`.
+    #[test]
+    fn empty_message_id_derives_identity_from_message() {
+        let record: nv_redfish::schema::event::EventRecord = serde_json::from_value(json!({
+            "@odata.id": "/redfish/v1/EventService/Events/records/1",
+            "MemberId": "0",
+            "EventType": "Alert",
+            "MessageId": "",
+            "Message": "PowerDevicePresence ( powerdevice1 chassis_SN: 613337RXX01X75101UG Assert )",
+        }))
+        .expect("valid event record");
+
+        let event = record_to_log(&record, false, Vec::new());
+        let log = log_record(&event);
+        assert_eq!(attribute(log, "message_id"), None);
+        assert_eq!(
+            attribute(log, "message_family"),
+            Some("PowerDevicePresence")
+        );
+        assert_eq!(attribute(log, "redfish.component"), Some("powerdevice1"));
+
+        let event = record_to_log(&severity_record(None, None), false, Vec::new());
+        let log = log_record(&event);
+        assert_eq!(attribute(log, "message_id"), Some("Example.1.0.Event"));
+        assert_eq!(attribute(log, "message_family"), None);
     }
 
     /// Exercises the severity chain through `record_to_log`: the schema field
@@ -1064,6 +1290,7 @@ mod gpu_enrichment_tests {
             entities.push(DiscoveredEntity::Chassis {
                 entity: Arc::new(chassis),
                 sensors: Vec::new(),
+                shelf_power: None,
                 gpu,
             });
         }

@@ -296,7 +296,7 @@ mod tests {
             addr: BmcAddr {
                 ip: "10.0.0.1".parse().expect("valid ip"),
                 port: Some(443),
-                mac: MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
+                mac: Some(MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap()),
             },
             collector_type: "test",
             metadata: None,
@@ -573,8 +573,9 @@ mod tests {
         let mut ctx = test_context();
 
         ctx.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "SN-SWITCH-001".to_string(),
+            serial: Some("SN-SWITCH-001".to_string()),
             slot_number: Some(7),
             tray_index: Some(3),
             nvlink_domain_uuid: Some(nvlink_domain_uuid),

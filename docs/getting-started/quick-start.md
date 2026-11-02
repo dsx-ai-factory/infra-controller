@@ -62,6 +62,8 @@ The following tools must be installed on the machine that you will use to run `s
 | `jq` | 1.6 | `brew install jq` | `apt install jq` / `yum install jq` |
 | `ssh-keygen` | any | built-in | built-in |
 
+Core virtual IP address (VIP) preflight also requires Python 3 with PyYAML installed in the `python3` environment. It parses the selected Core values file as YAML and validates supplied VIP annotations for enabled external `LoadBalancer` Services. Existing `externalService` configurations can omit VIP annotations for automatic allocation. Explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs. The DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`.
+
 The `helmfile` tool requires the `helm-diff` plugin. Install it as follows:
 
 ```bash
@@ -91,12 +93,14 @@ export NICO_REST_IMAGE_TAG=<nico-rest-image-tag>         # e.g. v2.0.0
 # --skip-dpf to setup.sh (sites with no DPUs / still on iPXE):
 export NICO_DPF_DPU_INTERFACE=<control-plane-nic>     # NIC facing the DPUs
 export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plane VIP
-# Optional: if provided, setup.sh seeds the site-wide BMC root credential
-# automatically during phase 6b so DPU provisioning starts immediately.
-# If omitted, set it after deploy via nico-admin-cli (carbide-api picks it
-# up within 60 s). Prompt to keep it out of shell history:
-read -r -s -p "Site-wide BMC root password (leave blank to set later): " NICO_DPF_BMC_ROOT_PASSWORD; echo
-export NICO_DPF_BMC_ROOT_PASSWORD
+# Optional: setup creates and mounts a persistent watched version-0 Secret.
+# export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
+# Otherwise configure it through the API after installation. DPU provisioning
+# waits for the credential; carbide-api startup does not in local_first mode.
+
+# Optional: KMIP KEK provider. setup creates the nico-kmip-client Secret from a
+# directory holding ca.pem, client.pem, and client.key.
+# export NICO_KMIP_CLIENT_DIR=/path/to/kmip-client
 
 # RMS (Rack Management Service) installs by default. Set the image tag (there
 # is no safe default), or pass --skip-rms to setup.sh to opt out:
@@ -117,8 +121,9 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 | `NICO_REST_IMAGE_TAG` | Unless `--skip-rest` | NICo REST image tag (e.g. `v2.0.0`). |
 | `KUBECONFIG` | No | Path to the target cluster kubeconfig. Omit when the current `kubectl` context is already correct. |
 | `NICO_DPF_DPU_INTERFACE`, `NICO_DPF_DPU_CLUSTER_VIP` | **Yes**, unless `--skip-dpf` | DPF DPU provisioning (default-on): the control-plane NIC facing the DPUs and a free DPU-routable VIP for the DPU cluster control plane. See [helm-prereqs → DPF](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf). |
-| `NICO_DPF_BMC_ROOT_PASSWORD` | No | Site-wide BMC root password. When provided, setup.sh seeds the credential via nico-admin-cli in phase 6b so DPU provisioning starts immediately. When omitted, carbide-api starts without it (the startup read is best-effort) and the credential can be set at any time via `nico-admin-cli credential add-bmc --kind=site-wide-root`; carbide-api picks it up within 60 s. |
+| `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password. After a DPF-enabled Core deployment is accepted, setup stores it in `nico-system/nico-bmc-v0-credentials` and makes that watched Secret the authoritative local version-0 source. When omitted on such a deployment, setup reuses its marked Secret or leaves version 0 backend-managed. Declining deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. A rerun rejects a different value, and using the variable with `--skip-core` or `--skip-dpf` is an error. |
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
+| `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in [KMIP KEK provider](../configuration/kmip-kek-provider.md). Before Core deploys, setup creates the `nico-system/nico-kmip-client` Secret from them for `nico-api` to mount, and preflight checks that each of the provider's TLS paths lies under a chart-provided mount or under a mounted Secret that exists and has the key the path reads. An error with `--skip-core`. See [helm-prereqs → Opting in to the KMIP KEK provider](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#opting-in-to-the-kmip-kek-provider). |
 
 ### 3b. Set your Site Name
 
@@ -164,20 +169,30 @@ Open `helm-prereqs/values/nico-core.yaml` and update the following values:
   | `initial_domain_name` | Base DNS domain for the site (e.g. `mysite.example.com`) |
   | `dhcp_servers` | List of DHCP server IPs reachable from bare-metal hosts, or `[]` |
   | `ntp_servers` | List of enterprise NTP server IPs for BMC time setup and DHCP option 42, or `[]` to use the legacy DHCP/DNS fallback |
-  | `site_fabric_prefixes` | CIDRs that are part of the site fabric (instance-to-instance traffic) |
+  | `site_fabric_prefixes` | CIDRs that are part of the site fabric. Under mutual isolation, ETV uses these CIDRs for its isolation ACL and omitted `site_fabric_null_routes` inherits them for FNN blackholes |
+  | `site_fabric_null_routes` | Optional FNN isolation CIDRs. Omit to inherit `site_fabric_prefixes`. Set `[]` to install no null routes |
   | `deny_prefixes` | CIDRs instances must not reach (OOB, control plane, management) |
   | `[pools.lo-ip]` ranges | Loopback IP range allocated to bare-metal hosts |
   | `[pools.vlan-id]` ranges | VLAN ID allocation range |
   | `[pools.vni]` ranges | VXLAN Network Identifier range |
-  | `[networks.admin]` | Admin network CIDR, gateway, and MTU |
+  | `[networks.admin]` | `type = "admin"`, `prefix`, `mtu`, and `reserve_first`; add `gateway` whenever an IPv4 prefix is present, including dual-stack definitions |
   | `[networks.<underlay>]` | Underlay data-plane network(s) — one block per L3 segment |
 
 All fields are documented with inline comments in the file.
 
-**Required fields--do not leave empty:** You must set `[networks.admin]`, `prefix`, and `gateway` to real values. `nico-api` crashes at startup with a parse error if these are empty strings. Similarly, `[pools.lo-ip]`, `[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
+Define the site networks to create at startup using the
+[Initial Network Configuration](../provisioning/ip-and-network-configuration.md#initial-network-configuration)
+requirements. An IPv4 prefix requires a gateway; an IPv6-only definition can
+omit it. IPv6-only admin networking requires a configured FNN site and compatible
+Core and DPU-agent builds as described in the linked guide. Retain IPv4 DPU
+loopback addresses and IPv4 VXLAN tunnel endpoints. These IPv4 requirements do
+not restrict the address families of physical underlay segments. Non-FNN admin
+networking requires an IPv4 prefix and gateway. Do not use empty strings for
+address fields. The `[pools.lo-ip]`, `[pools.vlan-id]`, and `[pools.vni]` ranges
+must be non-empty.
 
 <Tip>
-The following fields are safe to leave as empty arrays: `dhcp_servers`, `ntp_servers`, `site_fabric_prefixes`, and `deny_prefixes`. Do not delete any field from the TOML block; missing keys cause a different crash than empty ones.
+The following fields are safe to leave as empty arrays: `dhcp_servers` and `ntp_servers`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
 </Tip>
 
 ### 3d. NICo REST source tree
@@ -217,6 +232,103 @@ nico-rest-api:
 
 When `keycloak.enabled: false`, the Keycloak deployment is still created by `setup.sh`, but `nico-rest-api` will not use it for token validation.
 
+#### Optional: Expose NICo REST over TLS with Ingress
+
+By default, `setup.sh` exposes `nico-rest-api` through a NodePort in `helm-prereqs/values/nico-rest.yaml`. To expose it through a fully qualified domain name with TLS, enable the `nico-rest-api` ingress and configure its certificate settings in that file:
+
+```yaml filename="helm-prereqs/values/nico-rest.yaml"
+nico-rest-api:
+  nodePort:
+    enabled: false
+  ingress:
+    enabled: true
+    className: contour
+    hosts:
+      - host: rest-api.mysite.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    certificate:
+      enabled: true
+      secretName: rest-api-mysite-example-com-tls
+```
+
+With this managed-certificate setup, `ingress.hosts` is the only place the DNS name appears. The chart adds every host to the ingress `spec.tls` block and to the certificate `dnsNames`, and uses the first host as the certificate common name, so a host that is renamed here stays covered by TLS. Supplying your own `ingress.tls` or `certificate.dnsNames` replaces the corresponding derived list, and the name then has to appear there too. The chart rejects an override that leaves an `ingress.hosts` entry out, under the rule that applies to each list: `ingress.tls[].hosts` has to name the host exactly, because that is how an ingress controller keys the virtual host it terminates TLS on, while `certificate.dnsNames` accepts a wildcard covering one label, as X.509 SAN matching does.
+
+Two settings are defaults rather than something to configure. `ingress.annotations` carries `ingress.kubernetes.io/force-ssl-redirect: "true"`, because a `spec.tls` block alone leaves port 80 serving the API in cleartext. And the chart rejects `ingress.enabled` together with `nodePort.enabled`.
+
+The chart creates a cert-manager `Certificate` for the ingress TLS Secret when `ingress.certificate.enabled: true`. The certificate is issued by the REST stack's `nico-rest-ca-issuer`, so this is a quick self-signed/private-CA setup suitable for lab and site-local deployments. If your cluster already has a TLS Secret for the domain, set `ingress.certificate.enabled: false` and set `ingress.tls` to point at that existing Secret.
+
+The ingress routes to the chart-managed `nico-rest-api` Service on `service.port`; the API pod still serves plain HTTP internally and does not need TLS-specific configuration. If your cluster does not already have an ingress controller, run setup with the optional Contour/Envoy controller:
+
+```bash
+./setup.sh --install-contour
+# or
+export NICO_INSTALL_CONTOUR=true
+./setup.sh -y
+```
+
+##### Use an ingress controller the cluster already has
+
+Nothing in the rendered Ingress is Contour-specific, so skip `--install-contour` and point `ingress.className` at your own controller's class. The `contour` default only reflects the controller `setup.sh` can install for you. To serve a TLS Secret your own issuer populates, set `ingress.certificate.enabled: false` and list the Secret in `ingress.tls`:
+
+```yaml filename="helm-prereqs/values/nico-rest.yaml"
+nico-rest-api:
+  nodePort:
+    enabled: false
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    hosts:
+      - host: rest-api.mysite.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    certificate:
+      enabled: false
+    tls:
+      - secretName: mysite-wildcard-tls
+        hosts:
+          - rest-api.mysite.example.com
+```
+
+Note that `ingress.tls[].hosts` names the concrete host even though the Secret holds a wildcard certificate. Contour keys its secure virtual host by the literal string there and attaches a route only on an exact match, so a `*.mysite.example.com` entry would leave this route with no HTTPS virtual host at all. The chart rejects any `ingress.hosts` entry that `ingress.tls[].hosts` does not name exactly. The wildcard certificate itself still works, and `certificate.dnsNames` does accept wildcards, since X.509 SAN matching covers one label.
+
+Three things differ from the Contour path:
+
+- **The redirect annotation is controller-specific.** A `spec.tls` block does not redirect plaintext HTTP on its own. The chart defaults `ingress.annotations` to `ingress.kubernetes.io/force-ssl-redirect: "true"`, which Contour honours, and ingress-nginx wants `nginx.ingress.kubernetes.io/force-ssl-redirect` instead, as the example above sets. Overriding the map merges with the default, so add your controller's annotation rather than assuming the inherited one applies.
+- **Annotation values must be quoted strings.** Kubernetes annotations are `map[string]string`, so an unquoted `true` or a bare number is rejected at apply time with `cannot unmarshal bool into Go struct field ObjectMeta.metadata.annotations of type string`.
+- **The Secret must live in the `nico-rest` namespace.** `spec.tls[].secretName` resolves in the Ingress's own namespace, so copy or mirror a site-wide wildcard Secret into `nico-rest`. Contour additionally needs a `TLSCertificateDelegation` to read one from elsewhere.
+
+Keeping `ingress.certificate.enabled: true` also works with a foreign controller; the chart issues the Secret through cert-manager and your controller serves it. The DNS step below still applies, but read the external address from your controller's own Service instead of `contour-envoy`.
+
+##### Point DNS at the ingress and trust the CA
+
+The Ingress does not answer until the host resolves to the Envoy LoadBalancer address. MetalLB assigns that address from `vip-pool-external`, so populate the `addresses` field of that pool in `helm-prereqs/values/metallb-config.yaml` before installing Contour, then read the assigned address:
+
+```bash
+kubectl get service contour-envoy -n projectcontour \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+Create an `A` record for `rest-api.mysite.example.com` pointing at it. `health-check.sh` prints the same address under its Contour/Envoy section.
+
+Because `nico-rest-ca-issuer` is a CA issuer backed by the site CA in `ca-signing-secret`, clients reject the certificate until they trust that CA. Export the bundle from the issued Secret and confirm the chain:
+
+```bash
+kubectl get secret rest-api-mysite-example-com-tls -n nico-rest \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > nico-rest-ca.crt
+openssl s_client -connect rest-api.mysite.example.com:443 \
+  -servername rest-api.mysite.example.com \
+  -CAfile nico-rest-ca.crt </dev/null 2>/dev/null | grep 'Verify return code'
+```
+
+`Verify return code: 0 (ok)` confirms Envoy is serving the issued certificate and that the CA bundle validates it. Pass the same file to API clients, for example `curl --cacert nico-rest-ca.crt`, and use `https://rest-api.mysite.example.com` as the base URL in place of the NodePort address.
+
+For a certificate issued by a public CA instead, set `ingress.certificate.enabled: false` and point `ingress.tls` at a Secret your own issuer populates.
+
 ### 3f. Review site-agent Config
 
 The defaults in `helm-prereqs/values/nico-site-agent.yaml` point at the Zalando-managed `nico-pg-cluster` (`DB_ADDR: nico-pg-cluster.postgres.svc.cluster.local`, `DB_DATABASE: nico_rest`), which is the same cluster used by `nico-rest-api`. No changes are needed for a standard deployment.
@@ -242,6 +354,8 @@ MetalLB provides LoadBalancer IPs for NICo Core services (nico-api, DHCP, DNS, P
 NICo includes a built-in NTP service (`nico-ntp`). This is a 3-replica chrony StatefulSet where each replica gets its own MetalLB VIP.
 
 To use the service, set `nico-ntp.externalService.enabled: true`, assign three VIPs from your internal pool via `nico-ntp.externalService.perPodAnnotations`, and set `nico-dhcp.config.kea.hookParameters.ntpServer` to a comma-separated list of those same VIPs so DPUs receive them over DHCP. Enterprise NTP server IPs in `siteConfig.ntp_servers` continue to be used for BMC pre-ingestion time sync independently of `nico-ntp`.
+
+For the DPU-local server to advertise NTP through DHCPv6 option 56, provide reachable IPv6 NTP addresses under `unbound.localData` for the NTP hostname baked into the agent (`carbide-ntp.forge` by default). The Unbound chart emits IPv6 entries as AAAA records. Without an AAAA record, the IPv4 NTP path remains available but there is no service-discovered IPv6 NTP fallback.
 </Note>
 
 Edit `helm-prereqs/values/metallb-config.yaml`--this file ships pre-populated with example values. Replace all values labeled `# EXAMPLE` with your site-specific configuration before running `setup.sh`.
@@ -280,6 +394,10 @@ All IPs must be within the `IPAddressPool` ranges you defined in `values/metallb
 - **nico-dns Note**: Use `perPodAnnotations` (a list) rather than `annotations` because each replica gets its own VIP.
 - **nico-api IP and DNS Note**: The nico-api VIP must resolve in external DNS to the `hostname` you set in Step 3c.
 
+For the SSH Console endpoint, DNS, host-key verification, and Tenant access,
+see [SSH Console Setup and Access](../configuration/ssh-console.md).
+The Site's REST console fields do not deploy or enable the service.
+
 ### 3i. (Optional) Pre-set the Site UUID
 
 On a fresh install, you normally leave `NICO_SITE_UUID` unset. `setup.sh` resolves the UUID in several ways: it tries to reuse the UUID from a prior install (site-agent ConfigMap); if that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself (see Step 5). You only need to set the UUID explicitly to bind the site-agent to a site that already exists:
@@ -306,7 +424,7 @@ The `preflight.sh` script checks the following:
 | Category | Checks |
 |----------|--------|
 | Environment variables | Conditional image variables are set; registry has no URL scheme; UUID is valid if set; KUBECONFIG path exists if set |
-| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH |
+| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH. Core VIP validation also requires Python 3 with PyYAML. The KMIP KEK provider check needs Python 3.11 or later, or the `tomli` package, when the site config mentions KMIP; without either, preflight warns and skips that check, or fails when `NICO_KMIP_CLIENT_DIR` is set. |
 | `values/metallb-config.yaml` | File exists; YAML is valid; at least one IPAddressPool defined; exactly one advertisement mode active (BGP or L2, not both); example placeholder hostnames not still present |
 | Cluster reachability | `kubectl` can reach the API server. |
 | Node resources | At least three schedulable nodes |
@@ -337,10 +455,11 @@ You can combine common options as needed:
 |--------|--------|
 | `--core-values <file>` | Use site-specific NICo Core values for Phase 6. |
 | `--debug` | Enable shell tracing. This may print secrets, so protect the logs. |
+| `--flow-values <file>` | Use site-specific NICo Flow values for Phase 7h. Flow overrides made outside `setup.sh` are reset on every run unless they are in this file. |
+| `--install-contour` | Install the optional Contour/Envoy ingress controller in Phase 1d, for clusters that do not already provide one. Envoy's Service is `LoadBalancer` and takes its external IP from MetalLB. Same as `NICO_INSTALL_CONTOUR=true`; defaults to `false`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Phase 6. |
 | `--skip-core` | Skip the Phase 6 NICo Core Helm release. |
-| `--skip-flow` | Skip Phase 7h NICo Flow. Also set `flow.enabled=false` in `helm-prereqs/values.yaml` to omit Flow prerequisites. |
 | `--skip-rest` | Skip all Phase 7 NICo REST phases. |
 | `--skip-rms` | Skip Phase 5c Rack Management Service (installs by default; `NICO_RMS_IMAGE_TAG` required otherwise). |
 | `--with-observability` | Install the optional local metrics, logs, and traces stack before Phase 7. This also runs with `--skip-rest`; see [`helm-prereqs/observability/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/README.md) for standalone installation. |
@@ -349,7 +468,7 @@ You can combine common options as needed:
 The `setup.sh` script installs all prerequisites and NICo components in sequential phases:
 
 When upgrading a deployment that previously bundled PSM and NSM, complete the
-[preserve-or-overwrite steps](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm)
+[preserve-or-overwrite steps](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm)
 before continuing.
 
 <Anchor id="setup-script-phases"/>
@@ -360,6 +479,7 @@ before continuing.
 | 1 | local-path-provisioner + StorageClasses |
 | 1b | postgres-operator (Zalando) |
 | 1c | MetalLB + site BGP/L2 config |
+| 1d | Optional Contour/Envoy ingress controller (`--install-contour`) |
 | 2 | cert-manager + Vault TLS bootstrap (PKI chain) |
 | 3 | HashiCorp Vault (3-node HA Raft) |
 | 4 | Vault init + unseal + SSH host key |
@@ -367,8 +487,8 @@ before continuing.
 | 5b | DPF stack for DPU provisioning (default; `--skip-dpf` to opt out) |
 | 5c | RMS (Rack Management Service) (default; `--skip-rms` to opt out) |
 | 6 | **NICo Core** (nico helm release) |
-| 7a-7g | **NICo REST** base stack (source and CA setup, PostgreSQL, Keycloak, Temporal, REST services) |
-| 7h | **NICo Flow**, unless `--skip-flow` is used |
+| 7a-7g | **NICo REST** base stack (source and CA setup, Keycloak, Temporal, REST services) |
+| 7h | **NICo Flow** |
 | 7i | **NICo REST site-agent** |
 
 The following components are deployed:
@@ -376,23 +496,28 @@ The following components are deployed:
 ```text
 local-path-provisioner     (raw manifest - StorageClasses for Vault + PostgreSQL PVCs)
 metallb                    (metallb/metallb 0.14.5 - LoadBalancer IPs via BGP or L2)
-postgres-operator          (zalando/postgres-operator 1.10.1 - manages nico-pg-cluster)
+contour + envoy            (optional - Ingress controller for REST API FQDN/TLS)
+postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)
 external-secrets           (external-secrets/external-secrets 0.14.3)
 DPF stack                  (default; --skip-dpf to opt out: argo-cd, kamaji, NFD,
-                            maintenance-operator, dpf-operator — see docs/manuals/dpf.md)
+                            maintenance-operator, dpf-operator from the pinned
+                            doca-platform commit: the submodule in a git checkout
+                            or doca-platform.pin from the packaged chart; the
+                            NICO_DPF_SRC override installs an operator-managed
+                            checkout instead - see docs/manuals/dpf.md)
 rack-manager (RMS)         (default; --skip-rms to opt out - pinned nv-rms submodule, mTLS
                             via vault-nico-issuer, rms database on nico-pg-cluster)
 nico-prereqs               (this Helm chart - nico-system namespace)
 NICo Core                  (../helm - nico-core.yaml values)
 NICo REST                  (../helm/rest/nico-rest)
   ├── nico-rest-ca-issuer   (ClusterIssuer - cert-manager.io)
-  ├── postgres StatefulSet  (temporal + keycloak databases)
-  ├── keycloak              (dev OIDC IdP, nico-dev realm)
-  ├── temporal              (temporal-helm/temporal, mTLS)
+  ├── postgres StatefulSet  (deprecated standalone DB, only while Temporal or Keycloak uses it)
+  ├── keycloak              (dev OIDC IdP, nico realm, DB on nico-pg-cluster unless useHaPostgres resolves to false)
+  ├── temporal              (temporal-helm/temporal, mTLS, DB on nico-pg-cluster unless useHaPostgres resolves to false)
   └── nico-rest             (API, cert-manager, workflow, site-manager)
-NICo Flow                  (../helm/charts/nico-flow)
+NICo Flow                  (../helm/nico-flow)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)
 ```
 
@@ -512,8 +637,8 @@ This `GET` endpoint lazily initializes the org on first call as follows:
 
 1. Checks if service account is enabled in the auth config
 2. Creates an **InfrastructureProvider** for the org if one doesn't exist
-3. Creates a **Tenant** with targeted instance creation enabled if one doesn't exist
-4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist
+3. Creates a **Tenant** for the org if one doesn't exist
+4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist, already in `Ready` status with the `targetedInstanceCreation` capability enabled
 5. Returns the service account status with the provider and tenant IDs
 
 Without this call, site operations return 404. Subsequent calls are read-only.
@@ -604,6 +729,10 @@ kubectl get svc nico-api -n nico-system -o jsonpath='{.status.loadBalancer.ingre
 
 Configure the credentials NICo will apply to BMCs and UEFI after ingestion. These commands write to the configured credential store: Vault by default, or Postgres when the site was set up as described in [Day 0 Credential Store](installation-options/day0-credential-store.md).
 
+If `nico-api.credentials.bmcSiteWideRootSource` is `local`, skip the first
+command: the local environment-then-file chain owns version 0 of the site-wide
+BMC root, and the API rejects attempts to write that credential to the backend.
+
 ```bash
 nico-admin-cli -a <api-url> credential add-bmc --kind=site-wide-root --password='<password>'
 nico-admin-cli -a <api-url> host generate-host-uefi-password
@@ -625,7 +754,8 @@ each iteration with `MissingCredentials` while any one is missing.
 When DPF is enabled, the site-wide BMC root credential is also mirrored into the
 DPF `bmc-shared-password` Secret; refer to
 [Set the site-wide BMC root credential](../manuals/dpf.md#36-set-the-site-wide-bmc-root-credential)
-for the DPF-specific details and for how to seed it ahead of time instead.
+for the DPF-specific details and for how to provide version 0 through a watched
+Kubernetes Secret before installation.
 
 ### Upload the Expected Machines Manifest
 

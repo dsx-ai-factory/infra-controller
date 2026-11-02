@@ -24,7 +24,8 @@ use crate::infiniband::Guid;
 use crate::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use crate::redfish::update_service::UpdateServiceConfig;
 use crate::{
-    DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, HardwareType, RackPlacement, hw, redfish,
+    Callbacks, DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, DUMMY_NVOS_USERNAME, HardwareType,
+    RackPlacement, hw, nvue, redfish,
 };
 
 /// Represents static information we know ahead of time about a host or DPU (independent of any
@@ -310,16 +311,6 @@ impl DpuMachineInfo {
         }
     }
 
-    /// The [`bmc_vendor::DpuModel`] this DPU emulates, so the mock can share
-    /// per-model logic (e.g. factory-default credentials) with the rest of the
-    /// stack rather than duplicating it against the local [`DpuType`].
-    fn dpu_model(&self) -> bmc_vendor::DpuModel {
-        match self.dpu_type() {
-            DpuType::Bluefield3 => bmc_vendor::DpuModel::BlueField3,
-            DpuType::Bluefield4 => bmc_vendor::DpuModel::BlueField4,
-        }
-    }
-
     fn bmc_product(&self) -> Option<&'static str> {
         match self.dpu_type() {
             DpuType::Bluefield3 => Some("BlueField-3 DPU"),
@@ -334,10 +325,10 @@ impl DpuMachineInfo {
         }
     }
 
-    fn system_config(
+    fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn crate::Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         match self.dpu_type() {
             DpuType::Bluefield3 => self.bluefield3().system_config(callbacks),
             DpuType::Bluefield4 => self.bluefield4().system_config(callbacks),
@@ -351,11 +342,19 @@ impl DpuMachineInfo {
         }
     }
 
+    fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        match self.dpu_type() {
+            DpuType::Bluefield3 => self.bluefield3().event_service_config(),
+            DpuType::Bluefield4 => self.bluefield4().event_service_config(),
+        }
+    }
+
     fn update_service_config(&self) -> UpdateServiceConfig {
         let mut config = match self.dpu_type() {
             DpuType::Bluefield3 => self.bluefield3().update_service_config(),
             DpuType::Bluefield4 => self.bluefield4().update_service_config(),
         };
+        config.dpu_os = true;
         self.append_configured_firmware_inventory(&mut config);
         config
     }
@@ -599,10 +598,10 @@ impl HostMachineInfo {
         }
     }
 
-    fn system_config(
+    fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn crate::Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         match self.hw_type {
             HardwareType::DellPowerEdgeR750 => self.dell_poweredge_r750().system_config(callbacks),
             HardwareType::DellPowerEdgeR760Bf4 => {
@@ -617,8 +616,12 @@ impl HostMachineInfo {
             }
             HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().system_config(),
             HardwareType::DeltaPowerShelf => self.delta_power_shelf().system_config(),
-            HardwareType::NvidiaSwitchNd5200Ld => self.nvidia_switch_nd5200_ld().system_config(),
-            HardwareType::NvidiaSwitchN5700Ld => self.nvidia_switch_n5700_ld().system_config(),
+            HardwareType::NvidiaSwitchNd5200Ld => {
+                self.nvidia_switch_nd5200_ld().system_config(callbacks)
+            }
+            HardwareType::NvidiaSwitchN5700Ld => {
+                self.nvidia_switch_n5700_ld().system_config(callbacks)
+            }
             HardwareType::NvidiaDgxH100 => self.nvidia_dgx_h100().system_config(callbacks),
             HardwareType::HpeProliantDl380aGen11 => {
                 self.hpe_proliant_dl380a_gen11().system_config(callbacks)
@@ -648,6 +651,35 @@ impl HostMachineInfo {
             }
             HardwareType::GenericAmi | HardwareType::GenericSupermicro => {
                 self.generic_server().chassis_config()
+            }
+        }
+    }
+
+    fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        match self.hw_type {
+            HardwareType::DellPowerEdgeR750 => self.dell_poweredge_r750().event_service_config(),
+            HardwareType::DellPowerEdgeR760Bf4 => {
+                self.dell_poweredge_r760_bf4().event_service_config()
+            }
+            HardwareType::WiwynnGB200Nvl => self.wiwynn_gb200_nvl().event_service_config(),
+            HardwareType::LenovoGB300Nvl => self.lenovo_gb300_nvl().event_service_config(),
+            HardwareType::NvidiaDgxGb300 => self.dgx_gb300_nvl().event_service_config(),
+            HardwareType::SupermicroGb300Nvl => self.supermicro_gb300_nvl().event_service_config(),
+            HardwareType::NvidiaDgxVr => self.dgx_vr_nvl().event_service_config(),
+            HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().event_service_config(),
+            HardwareType::DeltaPowerShelf => self.delta_power_shelf().event_service_config(),
+            HardwareType::NvidiaSwitchNd5200Ld => {
+                self.nvidia_switch_nd5200_ld().event_service_config()
+            }
+            HardwareType::NvidiaSwitchN5700Ld => {
+                self.nvidia_switch_n5700_ld().event_service_config()
+            }
+            HardwareType::NvidiaDgxH100 => self.nvidia_dgx_h100().event_service_config(),
+            HardwareType::HpeProliantDl380aGen11 => {
+                self.hpe_proliant_dl380a_gen11().event_service_config()
+            }
+            HardwareType::GenericAmi | HardwareType::GenericSupermicro => {
+                self.generic_server().event_service_config()
             }
         }
     }
@@ -724,6 +756,25 @@ impl HostMachineInfo {
             DUMMY_FACTORY_USERNAME,
             DUMMY_FACTORY_PASSWORD,
         )
+    }
+
+    /// The NVOS a switch tray runs, served over NVUE at its NVOS address;
+    /// `None` for hardware without one. The administrator starts on the
+    /// factory password, as the BMC's accounts do.
+    pub(crate) fn nvue_config(&self) -> Option<nvue::Config> {
+        let admin = nvue::Account::new(DUMMY_NVOS_USERNAME, DUMMY_FACTORY_PASSWORD);
+        let management_mac = self.nvos_mac_addresses.first().copied();
+        match self.hw_type {
+            HardwareType::NvidiaSwitchN5700Ld => Some(
+                self.nvidia_switch_n5700_ld()
+                    .nvue_config(management_mac, admin),
+            ),
+            HardwareType::NvidiaSwitchNd5200Ld => Some(
+                self.nvidia_switch_nd5200_ld()
+                    .nvue_config(management_mac, admin),
+            ),
+            _ => None,
+        }
     }
 
     fn dell_poweredge_r750(&self) -> hw::dell_poweredge_r750::DellPowerEdgeR750<'_> {
@@ -991,6 +1042,17 @@ impl HostMachineInfo {
         !matches!(self.hw_type, HardwareType::DeltaPowerShelf)
     }
 
+    /// What this host says it can attest. `None` for every profile that does
+    /// not model the collection yet, which is how a BMC without one behaves.
+    fn component_integrity_config(
+        &self,
+    ) -> Option<Vec<redfish::component_integrity::ComponentIntegrity>> {
+        match self.hw_type {
+            HardwareType::NvidiaDgxGb300 => Some(self.dgx_gb300_nvl().component_integrity_config()),
+            _ => None,
+        }
+    }
+
     fn nvidia_switch_nd5200_ld(&self) -> hw::nvidia_switch_nd5200_ld::NvidiaSwitchNd5200Ld<'_> {
         let mut pool = MacAddressPool::new_pool(self.hw_mac_addr_pool);
         let mut next_mac = || pool.allocate().expect("MAC address must be allocated");
@@ -1096,12 +1158,19 @@ impl HostMachineInfo {
     }
 
     fn generic_server(&self) -> hw::generic_ami::GenericAmi<'_> {
-        let nics = self
-            .dpus
-            .iter()
-            .enumerate()
-            .map(|(index, dpu)| (index + 1, dpu.bluefield3().host_nic()))
-            .collect();
+        let nics = if self.dpus.is_empty() {
+            self.non_dpu_mac_address
+                .iter()
+                .enumerate()
+                .map(|(index, mac_address)| (index + 1, hw::nic::Nic::rooftop(*mac_address)))
+                .collect()
+        } else {
+            self.dpus
+                .iter()
+                .enumerate()
+                .map(|(index, dpu)| (index + 1, dpu.bluefield3().host_nic()))
+                .collect()
+        };
 
         hw::generic_ami::GenericAmi {
             product_serial_number: Cow::Borrowed(&self.serial),
@@ -1172,10 +1241,10 @@ impl MachineInfo {
         }
     }
 
-    pub(super) fn system_config(
+    pub(super) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn crate::Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         match self {
             MachineInfo::Host(host) => host.system_config(callbacks),
             MachineInfo::Dpu(dpu) => dpu.system_config(callbacks),
@@ -1186,6 +1255,13 @@ impl MachineInfo {
         match self {
             Self::Host(h) => h.chassis_config(),
             Self::Dpu(dpu) => dpu.chassis_config(),
+        }
+    }
+
+    pub(super) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        match self {
+            Self::Host(h) => h.event_service_config(),
+            Self::Dpu(dpu) => dpu.event_service_config(),
         }
     }
 
@@ -1202,6 +1278,17 @@ impl MachineInfo {
         match self {
             Self::Host(h) => h.exposes_computer_systems(),
             Self::Dpu(_) => true,
+        }
+    }
+
+    /// What this machine says it can attest, or `None` for one that advertises
+    /// no `ComponentIntegrity` collection.
+    pub(super) fn component_integrity_config(
+        &self,
+    ) -> Option<Vec<redfish::component_integrity::ComponentIntegrity>> {
+        match self {
+            Self::Host(h) => h.component_integrity_config(),
+            Self::Dpu(_) => None,
         }
     }
 
@@ -1239,9 +1326,11 @@ impl MachineInfo {
         match self {
             MachineInfo::Host(h) => h.factory_default_account(),
             MachineInfo::Dpu(d) => {
-                // Read the per-model default from the shared source of truth so the
-                // mock and site-explorer's fallback cannot drift.
-                let (username, password) = d.dpu_model().default_factory_credentials();
+                let username = match d.dpu_type() {
+                    DpuType::Bluefield3 => "root",
+                    DpuType::Bluefield4 => "admin",
+                };
+                let password = "0penBmc";
                 redfish::account_service::Account::administrator(username, username, password)
             }
         }
@@ -1327,6 +1416,31 @@ mod tests {
     }
 
     #[test]
+    fn bluefield_factory_accounts_use_generation_credentials() {
+        for (hardware_type, username) in [
+            (HardwareType::DellPowerEdgeR750, "root"),
+            (HardwareType::DellPowerEdgeR760Bf4, "admin"),
+        ] {
+            let mut pool = MacAddressPool::new(Config {
+                ranges: None,
+                pool: Some(PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 16).unwrap()),
+            });
+            let info = MachineInfo::Dpu(dpu(
+                hardware_type,
+                &mut pool,
+                DpuFirmwareVersions::default(),
+            ));
+            let accounts =
+                redfish::account_service::AccountServiceState::new(info.factory_default_account());
+            assert!(
+                accounts.is_factory_default_password(username, "0penBmc"),
+                "{hardware_type}"
+            );
+            assert!(accounts.find(username).is_some(), "{hardware_type}");
+        }
+    }
+
+    #[test]
     fn gb300_primary_serials_match_machine_serial() {
         let pool_config =
             PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 16).expect("valid MAC pool");
@@ -1349,6 +1463,50 @@ mod tests {
             supermicro.serial
         );
         assert_ne!(dgx.serial, supermicro.serial);
+    }
+
+    #[test]
+    fn generic_host_boot_inventory_includes_host_nics_without_dpus() {
+        for dpu_count in [0, 2] {
+            let pool_config =
+                PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 16).expect("valid MAC pool");
+            let mut pool = MacAddressPool::new(Config {
+                ranges: None,
+                pool: Some(pool_config),
+            });
+            let hw_mac_addr_pool = PoolConfig::new(MacAddress::new([6, 0, 0, 0, 0, 0]), 16)
+                .expect("valid hardware MAC pool");
+            let hardware_type = HardwareType::GenericAmi;
+            let dpus = (0..dpu_count)
+                .map(|_| DpuMachineInfo::new(hardware_type, &mut pool, DpuSettings::default()))
+                .collect();
+            let host = HostMachineInfo::new(hardware_type, dpus, &mut pool, hw_mac_addr_pool);
+            let expected_macs = if dpu_count == 0 {
+                vec![host.non_dpu_mac_address.expect("zero-DPU host NIC")]
+            } else {
+                host.dpus.iter().map(|dpu| dpu.host_mac_address).collect()
+            };
+            let config =
+                host.system_config(Arc::new(crate::test_support::TestCallbacks::default()));
+            let options = config.systems[0]
+                .boot_options
+                .as_ref()
+                .expect("boot inventory");
+            assert_eq!(options.len(), expected_macs.len() + 1, "{dpu_count} DPUs");
+            for (option, mac) in options.iter().zip(expected_macs) {
+                assert_eq!(option.kind, crate::BootOptionKind::Network);
+                assert!(
+                    option.to_json()["DisplayName"]
+                        .as_str()
+                        .expect("boot label")
+                        .contains(&mac.to_string())
+                );
+            }
+            assert_eq!(
+                options.last().expect("disk boot").kind,
+                crate::BootOptionKind::Disk
+            );
+        }
     }
 
     #[test]

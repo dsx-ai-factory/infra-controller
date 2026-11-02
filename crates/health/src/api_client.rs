@@ -15,10 +15,6 @@
  * limitations under the License.
  */
 
-// The deprecated fields on `rpc::forge::Machine` must still be read here for
-// backwards-compat. See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
-
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::net::IpAddr;
@@ -39,12 +35,13 @@ use url::Url;
 
 use crate::HealthError;
 use crate::bmc::{
-    BmcClient, BmcLatencyInstrumentation, BoxFuture, CredentialProvider,
+    BmcClient, BmcLatencyEndpointLabels, BmcLatencyInstrumentation, BoxFuture, CredentialProvider,
     bmc_latency_endpoint_labels,
 };
 use crate::endpoint::{
-    BmcAddr, BmcCredentials, BmcEndpoint, EndpointMetadata, EndpointSource, MachineData,
-    PowerShelfData, SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, ComponentInventory, EndpointMetadata, EndpointSnapshot,
+    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, RackInventory,
+    SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
 
@@ -221,7 +218,12 @@ impl ApiClientWrapper {
             .await
             .map_err(HealthError::ApiInvocationError)?;
 
-        Ok(response.machines.into_iter().next().and_then(|m| m.hw_sku))
+        Ok(response
+            .machines
+            .into_iter()
+            .next()
+            .and_then(|m| m.config)
+            .and_then(|config| config.hw_sku))
     }
 }
 
@@ -245,18 +247,19 @@ impl ApiCredentialKind {
 struct ApiCredentialProvider {
     client: ForgeApiClient,
     kind: ApiCredentialKind,
+    mac: MacAddress,
 }
 
 impl CredentialProvider for ApiCredentialProvider {
     fn fetch_credentials<'a>(
         &'a self,
-        endpoint: &'a BmcAddr,
+        _endpoint: &'a BmcAddr,
     ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
         Box::pin(async move {
             let response = match &self.kind {
                 ApiCredentialKind::Bmc => {
                     let request = rpc::forge::GetBmcCredentialsRequest {
-                        mac_addr: endpoint.mac.to_string(),
+                        mac_addr: self.mac.to_string(),
                     };
                     self.client
                         .get_bmc_credentials(request)
@@ -285,21 +288,19 @@ impl CredentialProvider for ApiCredentialProvider {
     }
 }
 
-fn switch_endpoint_metadata(
+fn switch_data(
     switch: &rpc::forge::Switch,
     endpoint_role: SwitchEndpointRole,
     nmxt_enabled: bool,
-) -> Result<EndpointMetadata, HealthError> {
-    let config = switch
-        .config
-        .as_ref()
-        .ok_or_else(|| HealthError::GenericError("switch endpoint does not have serial".into()))?;
-
-    let serial = config.name.clone();
-
-    Ok(EndpointMetadata::Switch(SwitchData {
+) -> SwitchData {
+    SwitchData {
+        log_checkpoint_identity: switch.config.as_ref().map(|config| config.name.clone()),
         id: switch.id,
-        serial,
+        serial: switch
+            .status
+            .as_ref()
+            .and_then(|status| status.serial_number.clone())
+            .filter(|serial| !serial.is_empty()),
         slot_number: switch
             .placement_in_rack
             .as_ref()
@@ -313,9 +314,126 @@ fn switch_endpoint_metadata(
             .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
         endpoint_role,
         is_primary: switch.is_primary,
-        nmxc_enabled: config.enable_nmxc || switch.is_primary,
+        nmxc_enabled: switch
+            .config
+            .as_ref()
+            .is_some_and(|config| config.enable_nmxc)
+            || switch.is_primary,
         nmxt_enabled,
+    }
+}
+
+fn machine_data(machine: &rpc::forge::Machine) -> MachineData {
+    let status = machine.status.as_ref();
+    let discovery_info = status.and_then(|status| status.discovery_info.as_ref());
+    MachineData {
+        machine_id: machine.id,
+        machine_serial: discovery_info
+            .and_then(|info| info.dmi_data.as_ref())
+            .map(|dmi| dmi.chassis_serial.clone()),
+        system_uuid: SharedSystemUuid::default(),
+        slot_number: machine
+            .placement_in_rack
+            .as_ref()
+            .and_then(|placement| placement.slot_number),
+        tray_index: machine
+            .placement_in_rack
+            .as_ref()
+            .and_then(|placement| placement.tray_index),
+        nvlink_domain_uuid: status
+            .and_then(|status| status.nvlink_info.as_ref())
+            .and_then(|info| info.domain_uuid)
+            .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
+        driver_version: unique_gpu_driver_version(discovery_info),
+    }
+}
+
+fn inventory_bmc_mac(bmc_info: Option<&rpc::forge::BmcInfo>) -> Option<MacAddress> {
+    bmc_info
+        .and_then(|info| info.mac.as_deref())
+        .and_then(|mac| MacAddress::from_str(mac).ok())
+}
+
+fn machine_component_inventory(
+    machine: &rpc::forge::Machine,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = machine.rack_id.clone() else {
+        return Ok(None);
+    };
+    let machine_id = machine.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "machine assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::Machine(MachineData {
+            machine_id: Some(machine_id),
+            ..machine_data(machine)
+        }),
+        bmc_mac: inventory_bmc_mac(machine.bmc_info.as_ref()),
     }))
+}
+
+fn switch_component_inventory(
+    switch: &rpc::forge::Switch,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = switch.rack_id.clone() else {
+        return Ok(None);
+    };
+    let switch_id = switch.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "switch assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::Switch(SwitchData {
+            id: Some(switch_id),
+            ..switch_data(switch, SwitchEndpointRole::Bmc, false)
+        }),
+        bmc_mac: inventory_bmc_mac(switch.bmc_info.as_ref()),
+    }))
+}
+
+fn power_shelf_component_inventory(
+    power_shelf: &rpc::forge::PowerShelf,
+) -> Result<Option<ComponentInventory>, HealthError> {
+    let Some(rack_id) = power_shelf.rack_id.clone() else {
+        return Ok(None);
+    };
+    let power_shelf_id = power_shelf.id.ok_or_else(|| {
+        HealthError::GenericError(format!(
+            "power shelf assigned to rack {rack_id} is missing its component ID"
+        ))
+    })?;
+
+    Ok(Some(ComponentInventory {
+        rack_id,
+        metadata: EndpointMetadata::PowerShelf(PowerShelfData {
+            id: Some(power_shelf_id),
+            serial: None,
+            nvlink_domain_uuid: power_shelf
+                .nvlink_domain_uuid
+                .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
+        }),
+        bmc_mac: inventory_bmc_mac(power_shelf.bmc_info.as_ref()),
+    }))
+}
+
+fn include_component_inventory(
+    result: Result<Option<ComponentInventory>, HealthError>,
+    components: &mut Vec<ComponentInventory>,
+    inventory_error: &mut Option<HealthError>,
+) {
+    match result {
+        Ok(Some(component)) => components.push(component),
+        Ok(None) => {}
+        Err(error) if inventory_error.is_none() => *inventory_error = Some(error),
+        Err(_) => {}
+    }
 }
 
 pub struct ApiEndpointSource {
@@ -331,8 +449,25 @@ pub struct ApiEndpointSource {
 #[derive(Clone)]
 struct CachedBmcClient {
     client: Arc<BmcClient>,
+    addr: BmcAddr,
+    /// The machine and rack in the client's latency labels.
+    latency_labels: BmcLatencyEndpointLabels,
     kind: ApiCredentialKind,
     system_uuid: SharedSystemUuid,
+}
+
+struct ComponentEndpointFetch {
+    endpoints: Vec<Arc<BmcEndpoint>>,
+    components: Vec<ComponentInventory>,
+    inventory_error: Option<HealthError>,
+}
+
+fn effective_find_by_ids_page_size(preferred: usize, advertised_max: usize) -> usize {
+    if advertised_max == 0 {
+        preferred
+    } else {
+        preferred.min(advertised_max)
+    }
 }
 
 impl ApiEndpointSource {
@@ -372,20 +507,147 @@ impl ApiEndpointSource {
         }
     }
 
+    /// Returns usable endpoints after all component queries succeed.
+    ///
+    /// Query failures and incomplete detail pages return an error.
+    /// Individual endpoint extraction failures are logged and skipped.
+    /// Inventory-only metadata errors do not discard usable collector endpoints.
     pub async fn fetch_bmc_hosts(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
-        let mut endpoints = self.fetch_machine_endpoints().await?;
-        endpoints.extend(self.fetch_power_shelf_endpoints().await);
-        endpoints.extend(self.fetch_switch_endpoints().await);
+        Ok(self.fetch_component_endpoints().await?.endpoints)
+    }
+
+    async fn fetch_component_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
+        let ComponentEndpointFetch {
+            mut endpoints,
+            mut components,
+            mut inventory_error,
+        } = self.fetch_machine_endpoints().await?;
+
+        // Prune cached clients only after all component queries and detail-page
+        // checks succeed. Endpoint extraction can still skip individual records.
+        // Inventory-only projection errors are tracked separately.
+        let power_shelves = self.fetch_power_shelf_endpoints().await?;
+        endpoints.extend(power_shelves.endpoints);
+        components.extend(power_shelves.components);
+
+        if inventory_error.is_none() {
+            inventory_error = power_shelves.inventory_error;
+        }
+
+        let switches = self.fetch_switch_endpoints().await?;
+        endpoints.extend(switches.endpoints);
+        components.extend(switches.components);
+
+        if inventory_error.is_none() {
+            inventory_error = switches.inventory_error;
+        }
 
         self.prune_bmc_client_cache(&endpoints);
 
         tracing::info!(endpoint_count = endpoints.len(), "Prepared endpoints");
 
-        Ok(endpoints)
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
+    }
+
+    async fn find_by_ids_page_size(&self) -> Result<usize, HealthError> {
+        // A zero limit means the server does not cap find-by-ID requests. Keep
+        // pages bounded in that case, and otherwise honor the advertised cap.
+        const PREFERRED_PAGE_SIZE: usize = 100;
+        let max_find_by_ids = self
+            .api
+            .client
+            .version(true)
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .runtime_config
+            .unwrap_or_default()
+            .max_find_by_ids as usize;
+
+        Ok(effective_find_by_ids_page_size(
+            PREFERRED_PAGE_SIZE,
+            max_find_by_ids,
+        ))
+    }
+
+    async fn fetch_rack_inventory(&self) -> Result<Vec<RackInventory>, HealthError> {
+        let rack_ids = self
+            .api
+            .client
+            .find_rack_ids(rpc::forge::RackSearchFilter::default())
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .rack_ids;
+
+        let page_size = self.find_by_ids_page_size().await?;
+
+        let mut inventory = Vec::with_capacity(rack_ids.len());
+        for rack_ids in rack_ids.chunks(page_size) {
+            let racks = self
+                .api
+                .client
+                .find_racks_by_ids(rack_ids.to_vec())
+                .await
+                .map_err(HealthError::ApiInvocationError)?;
+            if racks.racks.len() != rack_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "rack inventory response returned {} of {} requested racks",
+                    racks.racks.len(),
+                    rack_ids.len()
+                )));
+            }
+
+            for rack in racks.racks {
+                let rack_id = rack.id.ok_or_else(|| {
+                    HealthError::GenericError(
+                        "rack inventory response contains a rack without an ID".to_string(),
+                    )
+                })?;
+                let (created_seconds, created_nanos) = rack
+                    .created
+                    .map(|created| (Some(created.seconds), Some(created.nanos)))
+                    .unwrap_or((None, None));
+
+                inventory.push(RackInventory {
+                    rack_id,
+                    created_seconds,
+                    created_nanos,
+                });
+            }
+        }
+
+        Ok(inventory)
+    }
+
+    async fn fetch_endpoint_snapshot(&self) -> Result<EndpointSnapshot, HealthError> {
+        let ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        } = self.fetch_component_endpoints().await?;
+
+        let inventory = match inventory_error {
+            Some(error) => Err(error),
+            None => self
+                .fetch_rack_inventory()
+                .await
+                .map(|racks| Some(InventorySnapshot { racks, components })),
+        };
+
+        Ok(EndpointSnapshot {
+            endpoints,
+            inventory,
+        })
     }
 
     fn prune_bmc_client_cache(&self, live_endpoints: &[Arc<BmcEndpoint>]) {
-        let live_macs: HashSet<MacAddress> = live_endpoints.iter().map(|ep| ep.addr.mac).collect();
+        let live_macs = live_endpoints
+            .iter()
+            .filter_map(|endpoint| endpoint.addr.mac)
+            .collect::<HashSet<_>>();
         let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
         let before = cache.len();
         cache.retain(|mac, _| live_macs.contains(mac));
@@ -399,7 +661,7 @@ impl ApiEndpointSource {
         }
     }
 
-    async fn fetch_machine_endpoints(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
+    async fn fetch_machine_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
         let machine_ids = self
             .api
             .client
@@ -416,6 +678,8 @@ impl ApiEndpointSource {
         );
 
         let mut endpoints = Vec::new();
+        let mut components = Vec::new();
+        let mut inventory_error = None;
 
         // Page by id count, but keep each reply well under tonic's 4 MiB receive
         // limit: a page of 100 machines has exceeded it in the field at about
@@ -438,7 +702,20 @@ impl ApiEndpointSource {
                 "Fetched machine details"
             );
 
+            if machines.machines.len() != ids_chunk.len() {
+                return Err(HealthError::GenericError(format!(
+                    "machine inventory response returned {} of {} requested components",
+                    machines.machines.len(),
+                    ids_chunk.len()
+                )));
+            }
+
             for machine in machines.machines {
+                include_component_inventory(
+                    machine_component_inventory(&machine),
+                    &mut components,
+                    &mut inventory_error,
+                );
                 match self.extract_machine_endpoint(&machine) {
                     Ok(endpoint) => endpoints.push(endpoint),
                     Err(error) => tracing::warn!(
@@ -451,88 +728,142 @@ impl ApiEndpointSource {
             }
         }
 
-        Ok(endpoints)
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
-    async fn fetch_switch_endpoints(&self) -> Vec<Arc<BmcEndpoint>> {
-        let switch_request = rpc::forge::SwitchQuery {
-            name: None,
-            switch_id: None,
-        };
+    async fn fetch_switch_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
+        let page_size = self.find_by_ids_page_size().await?;
+        let switch_ids = self
+            .api
+            .client
+            .find_switch_ids(rpc::forge::SwitchSearchFilter::default())
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .ids;
+        let mut endpoints = Vec::with_capacity(switch_ids.len());
+        let mut components = Vec::with_capacity(switch_ids.len());
+        let mut inventory_error = None;
 
-        match self.api.client.find_switches(switch_request).await {
-            Ok(response) => {
-                let mut endpoints = Vec::new();
+        for requested_ids in switch_ids.chunks(page_size) {
+            let switches = self
+                .api
+                .client
+                .find_switches_by_ids(rpc::forge::SwitchesByIdsRequest {
+                    switch_ids: requested_ids.to_vec(),
+                })
+                .await
+                .map_err(HealthError::ApiInvocationError)?
+                .switches;
+            if switches.len() != requested_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "switch inventory response returned {} of {} requested switches",
+                    switches.len(),
+                    requested_ids.len()
+                )));
+            }
 
-                for switch in response.switches {
-                    match self.extract_switch_endpoint(&switch) {
-                        Ok(endpoint) => endpoints.push(endpoint),
-                        Err(error) => tracing::warn!(
-                            ?switch,
-                            ?error,
-                            rack_id = switch.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add switch endpoint due to error"
-                        ),
-                    }
-
-                    match self.extract_switch_host_endpoint(&switch) {
-                        Ok(Some(endpoint)) => endpoints.push(endpoint),
-                        Ok(None) => {}
-                        Err(error) => tracing::warn!(
-                            ?switch,
-                            ?error,
-                            rack_id = switch.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add switch host endpoint due to error"
-                        ),
-                    }
+            for switch in switches {
+                include_component_inventory(
+                    switch_component_inventory(&switch),
+                    &mut components,
+                    &mut inventory_error,
+                );
+                match self.extract_switch_endpoint(&switch) {
+                    Ok(endpoint) => endpoints.push(endpoint),
+                    Err(error) => tracing::warn!(
+                        ?switch,
+                        ?error,
+                        rack_id = switch.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add switch endpoint due to error"
+                    ),
                 }
 
-                tracing::debug!(
-                    switch_endpoint_count = endpoints.len(),
-                    "Fetched switch endpoints"
-                );
-                endpoints
-            }
-            Err(error) => {
-                tracing::warn!(?error, "Failed to fetch switch endpoints");
-                Vec::new()
+                match self.extract_switch_host_endpoint(&switch) {
+                    Ok(Some(endpoint)) => endpoints.push(endpoint),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        ?switch,
+                        ?error,
+                        rack_id = switch.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add switch host endpoint due to error"
+                    ),
+                }
             }
         }
+
+        tracing::debug!(
+            switch_endpoint_count = endpoints.len(),
+            "Fetched switch endpoints"
+        );
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
-    async fn fetch_power_shelf_endpoints(&self) -> Vec<Arc<BmcEndpoint>> {
-        let request = rpc::forge::PowerShelfQuery {
-            name: None,
-            power_shelf_id: None,
-        };
+    async fn fetch_power_shelf_endpoints(&self) -> Result<ComponentEndpointFetch, HealthError> {
+        let page_size = self.find_by_ids_page_size().await?;
+        let power_shelf_ids = self
+            .api
+            .client
+            .find_power_shelf_ids(rpc::forge::PowerShelfSearchFilter::default())
+            .await
+            .map_err(HealthError::ApiInvocationError)?
+            .ids;
+        let mut endpoints = Vec::with_capacity(power_shelf_ids.len());
+        let mut components = Vec::with_capacity(power_shelf_ids.len());
+        let mut inventory_error = None;
 
-        match self.api.client.find_power_shelves(request).await {
-            Ok(response) => {
-                let mut endpoints = Vec::new();
-
-                for power_shelf in response.power_shelves {
-                    match self.extract_power_shelf_endpoint(&power_shelf) {
-                        Ok(endpoint) => endpoints.push(endpoint),
-                        Err(error) => tracing::warn!(
-                            ?power_shelf,
-                            ?error,
-                            rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
-                            "Could not add power shelf endpoint due to error"
-                        ),
-                    }
-                }
-
-                tracing::debug!(
-                    power_shelf_endpoint_count = endpoints.len(),
-                    "Fetched power shelf endpoints"
-                );
-                endpoints
+        for requested_ids in power_shelf_ids.chunks(page_size) {
+            let power_shelves = self
+                .api
+                .client
+                .find_power_shelves_by_ids(rpc::forge::PowerShelvesByIdsRequest {
+                    power_shelf_ids: requested_ids.to_vec(),
+                })
+                .await
+                .map_err(HealthError::ApiInvocationError)?
+                .power_shelves;
+            if power_shelves.len() != requested_ids.len() {
+                return Err(HealthError::GenericError(format!(
+                    "power shelf inventory response returned {} of {} requested power shelves",
+                    power_shelves.len(),
+                    requested_ids.len()
+                )));
             }
-            Err(error) => {
-                tracing::warn!(?error, "Failed to fetch power shelf endpoints");
-                Vec::new()
+
+            for power_shelf in power_shelves {
+                include_component_inventory(
+                    power_shelf_component_inventory(&power_shelf),
+                    &mut components,
+                    &mut inventory_error,
+                );
+                match self.extract_power_shelf_endpoint(&power_shelf) {
+                    Ok(endpoint) => endpoints.push(endpoint),
+                    Err(error) => tracing::warn!(
+                        ?power_shelf,
+                        ?error,
+                        rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
+                        "Could not add power shelf endpoint due to error"
+                    ),
+                }
             }
         }
+
+        tracing::debug!(
+            power_shelf_endpoint_count = endpoints.len(),
+            "Fetched power shelf endpoints"
+        );
+        Ok(ComponentEndpointFetch {
+            endpoints,
+            components,
+            inventory_error,
+        })
     }
 
     fn extract_machine_endpoint(
@@ -545,30 +876,9 @@ impl ApiEndpointSource {
             ));
         };
         let addr = BmcAddr::try_from(bmc_info)?;
-        let metadata = machine.id.map(|machine_id| {
-            EndpointMetadata::Machine(MachineData {
-                machine_id: Some(machine_id),
-                machine_serial: machine
-                    .discovery_info
-                    .as_ref()
-                    .and_then(|info| info.dmi_data.as_ref())
-                    .map(|dmi| dmi.chassis_serial.clone()),
-                system_uuid: SharedSystemUuid::default(),
-                slot_number: machine
-                    .placement_in_rack
-                    .as_ref()
-                    .and_then(|placement| placement.slot_number),
-                tray_index: machine
-                    .placement_in_rack
-                    .as_ref()
-                    .and_then(|placement| placement.tray_index),
-                nvlink_domain_uuid: machine
-                    .nvlink_info
-                    .as_ref()
-                    .and_then(|info| info.domain_uuid),
-                driver_version: unique_gpu_driver_version(machine.discovery_info.as_ref()),
-            })
-        });
+        let metadata = machine
+            .id
+            .map(|_| EndpointMetadata::Machine(machine_data(machine)));
 
         self.endpoint_for(
             addr,
@@ -587,8 +897,11 @@ impl ApiEndpointSource {
                 "Could not extract switch endpoint without BMC Info".to_string(),
             ));
         };
+
         let addr = BmcAddr::try_from(bmc_info)?;
-        let metadata = switch_endpoint_metadata(switch, SwitchEndpointRole::Bmc, false)?;
+
+        let metadata =
+            EndpointMetadata::Switch(switch_data(switch, SwitchEndpointRole::Bmc, false));
 
         self.endpoint_for(
             addr,
@@ -598,6 +911,7 @@ impl ApiEndpointSource {
         )
     }
 
+    #[allow(deprecated)]
     fn extract_switch_host_endpoint(
         &self,
         switch: &rpc::forge::Switch,
@@ -608,9 +922,14 @@ impl ApiEndpointSource {
         let switch_id = switch.id.ok_or_else(|| {
             HealthError::GenericError("switch host endpoint missing switch ID".to_string())
         })?;
+
         let addr = BmcAddr::try_from(nvos_info)?;
-        let metadata =
-            switch_endpoint_metadata(switch, SwitchEndpointRole::Host, switch.is_primary)?;
+
+        let metadata = EndpointMetadata::Switch(switch_data(
+            switch,
+            SwitchEndpointRole::Host,
+            switch.is_primary,
+        ));
 
         let endpoint = self.endpoint_for(
             addr,
@@ -638,6 +957,9 @@ impl ApiEndpointSource {
             Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: power_shelf.id,
                 serial: None,
+                nvlink_domain_uuid: power_shelf
+                    .nvlink_domain_uuid
+                    .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
             })),
             power_shelf.rack_id.clone(),
             ApiCredentialKind::Bmc,
@@ -651,18 +973,25 @@ impl ApiEndpointSource {
         rack_id: Option<RackId>,
         credential_kind: ApiCredentialKind,
     ) -> Result<Arc<BmcEndpoint>, HealthError> {
-        let bmc_latency_instrumentation = self.bmc_latency_metrics.clone().map(|metrics| {
-            BmcLatencyInstrumentation::new(
-                metrics,
-                bmc_latency_endpoint_labels(metadata.as_ref(), rack_id.as_ref()),
-            )
-        });
+        let mac = addr.mac.ok_or_else(|| {
+            HealthError::GenericError(format!("API endpoint {} has no BMC MAC address", addr.ip))
+        })?;
+        let latency_labels = bmc_latency_endpoint_labels(metadata.as_ref(), rack_id.as_ref());
+        let bmc_latency_instrumentation = self
+            .bmc_latency_metrics
+            .clone()
+            .map(|metrics| BmcLatencyInstrumentation::new(metrics, latency_labels.clone()));
         let cached = {
             let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
-            cache_or_create_bmc_client(&mut cache, addr.mac, credential_kind, |kind| {
+            let binding = ClientBinding {
+                addr: &addr,
+                latency_labels: &latency_labels,
+            };
+            cache_or_create_bmc_client(&mut cache, mac, binding, credential_kind, |kind| {
                 let provider: Arc<dyn CredentialProvider> = Arc::new(ApiCredentialProvider {
                     client: self.api.client.clone(),
                     kind,
+                    mac,
                 });
                 Ok(Arc::new(BmcClient::new(
                     self.reqwest.clone(),
@@ -689,12 +1018,27 @@ impl ApiEndpointSource {
     }
 }
 
+/// What a BMC client is built with that it cannot change afterwards.
+#[derive(Clone, Copy)]
+struct ClientBinding<'a> {
+    addr: &'a BmcAddr,
+    latency_labels: &'a BmcLatencyEndpointLabels,
+}
+
+/// Returns the cached client for a BMC MAC, creating one on first use.
+///
+/// A client is bound to the address and latency labels it was built with, so
+/// a new address, port, machine, or rack for the same MAC replaces the client.
+/// The resolved system UUID is carried over because the MAC still identifies
+/// the same hardware.
 fn cache_or_create_bmc_client(
     cache: &mut HashMap<MacAddress, CachedBmcClient>,
     mac: MacAddress,
+    binding: ClientBinding<'_>,
     credential_kind: ApiCredentialKind,
     make_client: impl FnOnce(ApiCredentialKind) -> Result<Arc<BmcClient>, HealthError>,
 ) -> Result<CachedBmcClient, HealthError> {
+    let mut system_uuid = SharedSystemUuid::default();
     if let Some(existing) = cache.get(&mac) {
         if existing.kind != credential_kind {
             return Err(HealthError::GenericError(format!(
@@ -705,14 +1049,27 @@ fn cache_or_create_bmc_client(
                 credential_kind.tag(),
             )));
         }
-        return Ok(existing.clone());
+        if existing.addr == *binding.addr && existing.latency_labels == *binding.latency_labels {
+            return Ok(existing.clone());
+        }
+        tracing::info!(
+            bmc_mac_address = %mac,
+            old_bmc_address = ?existing.addr,
+            new_bmc_address = ?binding.addr,
+            old_latency_labels = ?existing.latency_labels,
+            new_latency_labels = ?binding.latency_labels,
+            "BMC address or labels changed; replacing cached BMC client"
+        );
+        system_uuid = existing.system_uuid.clone();
     }
 
     let client = make_client(credential_kind.clone())?;
     let cached = CachedBmcClient {
         client,
+        addr: binding.addr.clone(),
+        latency_labels: binding.latency_labels.clone(),
         kind: credential_kind,
-        system_uuid: SharedSystemUuid::default(),
+        system_uuid,
     };
     cache.insert(mac, cached.clone());
     Ok(cached)
@@ -745,6 +1102,10 @@ impl EndpointSource for ApiEndpointSource {
     fn fetch_bmc_hosts<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
         Box::pin(self.fetch_bmc_hosts())
     }
+
+    fn fetch_snapshot<'a>(&'a self) -> BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+        Box::pin(self.fetch_endpoint_snapshot())
+    }
 }
 
 impl TryFrom<&rpc::forge::BmcInfo> for BmcAddr {
@@ -767,7 +1128,11 @@ impl TryFrom<&rpc::forge::BmcInfo> for BmcAddr {
             })?;
         let port = bmc_info.port.map(|port| port.try_into().unwrap_or(443));
 
-        Ok(Self { ip, port, mac })
+        Ok(Self {
+            ip,
+            port,
+            mac: Some(mac),
+        })
     }
 }
 
@@ -791,7 +1156,11 @@ impl TryFrom<&rpc::forge::SwitchNvosInfo> for BmcAddr {
             })?;
         let port = nvos_info.port.map(|port| port.try_into().unwrap_or(443));
 
-        Ok(Self { ip, port, mac })
+        Ok(Self {
+            ip,
+            port,
+            mac: Some(mac),
+        })
     }
 }
 
@@ -821,12 +1190,21 @@ impl From<rpc::forge::bmc_credentials::Type> for BmcCredentials {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::{Request, Response};
     use carbide_test_support::{Check, check_values, value_scenarios};
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
     use carbide_uuid::nvlink::NvLinkDomainId;
+    use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use nv_redfish::bmc_http::reqwest::ClientParams as ReqwestClientParams;
+    use prost::Message;
+    use tokio::task::JoinSet;
+    use tokio::time::timeout;
 
     use super::*;
     use crate::bmc::FixedCredentialProvider;
@@ -839,7 +1217,7 @@ mod tests {
         BmcAddr {
             ip: "10.0.0.1".parse().expect("valid ip"),
             port: Some(443),
-            mac: test_mac(),
+            mac: Some(test_mac()),
         }
     }
 
@@ -850,6 +1228,28 @@ mod tests {
 
     fn test_switch_id() -> SwitchId {
         SwitchId::new(SwitchIdSource::Tpm, [7u8; 32], SwitchType::NvLink)
+    }
+
+    fn test_machine_id() -> MachineId {
+        MachineId::new(MachineIdSource::Tpm, [8u8; 32], MachineType::Host)
+    }
+
+    fn test_power_shelf_id() -> PowerShelfId {
+        PowerShelfId::new(
+            PowerShelfIdSource::ProductBoardChassisSerial,
+            [9u8; 32],
+            PowerShelfType::Rack,
+        )
+    }
+
+    fn binding<'a>(
+        addr: &'a BmcAddr,
+        latency_labels: &'a BmcLatencyEndpointLabels,
+    ) -> ClientBinding<'a> {
+        ClientBinding {
+            addr,
+            latency_labels,
+        }
     }
 
     fn make_test_client(_kind: ApiCredentialKind) -> Result<Arc<BmcClient>, HealthError> {
@@ -919,7 +1319,205 @@ mod tests {
     }
 
     #[test]
-    fn switch_endpoint_metadata_uses_non_nil_api_domain() {
+    #[allow(deprecated)]
+    fn switch_discovery_exports_hardware_serial() {
+        use crate::otlp::convert::build_metrics_export_request;
+        use crate::sink::{EventContext, MetricSample};
+
+        let client = ForgeApiClient::new(&ApiConfig::new(
+            "http://127.0.0.1:1079",
+            &ForgeClientConfig::default(),
+        ));
+
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper { client }),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+
+        for (serial, expected) in [
+            (Some(Some("MT2515600ZYB")), Some("MT2515600ZYB")),
+            (Some(None), None),
+            (Some(Some("")), None),
+            (None, None),
+        ] {
+            let switch = rpc::forge::Switch {
+                id: Some(test_switch_id()),
+                status: serial.map(|serial| rpc::forge::SwitchStatus {
+                    serial_number: serial.map(str::to_string),
+                    ..Default::default()
+                }),
+                config: Some(rpc::forge::SwitchConfig {
+                    name: "switch-name".to_string(),
+                    ..Default::default()
+                }),
+                bmc_info: Some(rpc::forge::BmcInfo {
+                    ip: Some("192.0.2.1".to_string()),
+                    mac: Some("02:00:00:00:00:01".to_string()),
+                    ..Default::default()
+                }),
+                nvos_info: Some(rpc::forge::SwitchNvosInfo {
+                    ip: Some("192.0.2.2".to_string()),
+                    mac: Some("02:00:00:00:00:02".to_string()),
+                    ..Default::default()
+                }),
+                rack_id: Some(RackId::new("RACK_1")),
+                ..Default::default()
+            };
+
+            let inventory = switch_component_inventory(&switch).unwrap().unwrap();
+
+            assert_eq!(inventory.metadata.serial_number(), expected);
+
+            for endpoint in [
+                source.extract_switch_endpoint(&switch).unwrap(),
+                source
+                    .extract_switch_host_endpoint(&switch)
+                    .unwrap()
+                    .unwrap(),
+            ] {
+                let context = EventContext::from_endpoint(&endpoint, "nvue_gnmi");
+
+                let sample = MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
+                    key: "temperature".to_string(),
+                    name: "nvue_gnmi".to_string(),
+                    metric_type: "temperature".to_string(),
+                    unit: "celsius".to_string(),
+                    value: 25.0,
+                    labels: vec![],
+                    context: None,
+                };
+
+                let exported = build_metrics_export_request(
+                    &[(context, sample)],
+                    1,
+                    "carbide_hardware_health",
+                );
+
+                let attributes = &exported.resource_metrics[0]
+                    .resource
+                    .as_ref()
+                    .unwrap()
+                    .attributes;
+
+                let actual = attributes
+                    .iter()
+                    .find(|attr| attr.key == "switch_serial_number")
+                    .and_then(|attr| attr.value.as_ref())
+                    .and_then(|value| value.value.as_ref());
+
+                let expected_value = expected.map(|serial| {
+                    opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                        serial.to_string(),
+                    )
+                });
+
+                assert_eq!(actual, expected_value.as_ref());
+                assert_eq!(endpoint.log_identity(), "switch-name");
+            }
+        }
+    }
+
+    #[test]
+    fn inventory_page_size_honors_server_limit() {
+        check_values(
+            [
+                Check {
+                    scenario: "server advertises no limit",
+                    input: (100, 0),
+                    expect: 100,
+                },
+                Check {
+                    scenario: "server limit is below preferred size",
+                    input: (100, 75),
+                    expect: 75,
+                },
+                Check {
+                    scenario: "server limit exceeds preferred size",
+                    input: (100, 200),
+                    expect: 100,
+                },
+            ],
+            |(preferred, advertised_max)| {
+                effective_find_by_ids_page_size(preferred, advertised_max)
+            },
+        );
+    }
+
+    #[test]
+    fn authoritative_component_inventory_does_not_require_bmc_endpoint() {
+        let rack_id = RackId::new("RACK_1");
+        let machine = machine_component_inventory(&rpc::forge::Machine {
+            id: Some(test_machine_id()),
+            rack_id: Some(rack_id.clone()),
+            bmc_info: Some(rpc::forge::BmcInfo {
+                mac: Some("not-a-mac".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let switch = switch_component_inventory(&rpc::forge::Switch {
+            id: Some(test_switch_id()),
+            rack_id: Some(rack_id.clone()),
+            bmc_info: None,
+            is_primary: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let power_shelf = power_shelf_component_inventory(&rpc::forge::PowerShelf {
+            id: Some(test_power_shelf_id()),
+            rack_id: Some(rack_id),
+            bmc_info: None,
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+
+        assert!(machine.bmc_mac.is_none());
+        assert!(switch.bmc_mac.is_none());
+        assert!(power_shelf.bmc_mac.is_none());
+        assert!(matches!(machine.metadata, EndpointMetadata::Machine(_)));
+        assert!(matches!(switch.metadata, EndpointMetadata::Switch(_)));
+        assert!(matches!(
+            power_shelf.metadata,
+            EndpointMetadata::PowerShelf(_)
+        ));
+    }
+
+    #[test]
+    fn missing_racked_component_identity_rejects_inventory_snapshot() {
+        let rack_id = RackId::new("RACK_1");
+        let errors = [
+            machine_component_inventory(&rpc::forge::Machine {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            })
+            .unwrap_err(),
+            switch_component_inventory(&rpc::forge::Switch {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            })
+            .unwrap_err(),
+            power_shelf_component_inventory(&rpc::forge::PowerShelf {
+                rack_id: Some(rack_id),
+                ..Default::default()
+            })
+            .unwrap_err(),
+        ];
+
+        for error in errors {
+            assert!(error.to_string().contains("missing its component ID"));
+        }
+    }
+
+    #[test]
+    fn switch_data_uses_non_nil_api_domain() {
         let domain = NvLinkDomainId::from_str("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e")
             .expect("valid domain UUID");
 
@@ -942,7 +1540,7 @@ mod tests {
                 },
             ],
             |nvlink_domain_uuid| {
-                let metadata = switch_endpoint_metadata(
+                let switch = switch_data(
                     &rpc::forge::Switch {
                         config: Some(rpc::forge::SwitchConfig {
                             name: "switch-a".to_string(),
@@ -953,12 +1551,7 @@ mod tests {
                     },
                     SwitchEndpointRole::Bmc,
                     false,
-                )
-                .expect("switch metadata");
-
-                let EndpointMetadata::Switch(switch) = metadata else {
-                    panic!("expected switch metadata");
-                };
+                );
 
                 switch.nvlink_domain_uuid
             },
@@ -966,8 +1559,47 @@ mod tests {
     }
 
     #[test]
-    fn switch_endpoint_metadata_enables_nmxc_for_primary_switch() {
-        let metadata = switch_endpoint_metadata(
+    fn machine_inventory_uses_non_nil_api_domain() {
+        let domain = NvLinkDomainId::from_str("9f4b45ec-705a-4af4-89f7-a112bc9c8f4e")
+            .expect("valid domain UUID");
+
+        check_values(
+            [
+                Check {
+                    scenario: "domain is missing",
+                    input: None,
+                    expect: None,
+                },
+                Check {
+                    scenario: "nil domain is absent",
+                    input: Some(NvLinkDomainId::nil()),
+                    expect: None,
+                },
+                Check {
+                    scenario: "non-nil API machine field",
+                    input: Some(domain),
+                    expect: Some(domain),
+                },
+            ],
+            |domain_uuid| {
+                machine_data(&rpc::forge::Machine {
+                    status: Some(rpc::forge::MachineStatus {
+                        nvlink_info: Some(rpc::forge::MachineNvLinkInfo {
+                            domain_uuid,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .nvlink_domain_uuid
+            },
+        );
+    }
+
+    #[test]
+    fn switch_data_enables_nmxc_for_primary_switch() {
+        let switch = switch_data(
             &rpc::forge::Switch {
                 config: Some(rpc::forge::SwitchConfig {
                     name: "switch-a".to_string(),
@@ -978,20 +1610,14 @@ mod tests {
             },
             SwitchEndpointRole::Host,
             false,
-        )
-        .expect("switch metadata");
-
-        let EndpointMetadata::Switch(switch) = metadata else {
-            panic!("expected switch metadata");
-        };
+        );
 
         assert!(switch.nmxc_enabled);
     }
 
     #[test]
-    fn power_shelf_endpoint_preserves_api_rack_id()
-    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let api_url = Url::parse("https://127.0.0.1:1079")?;
+    fn power_shelf_endpoint_uses_api_rack_id_and_non_nil_domain() {
+        let api_url = Url::parse("https://127.0.0.1:1079").expect("valid URL");
 
         let source = ApiEndpointSource::new(
             Arc::new(ApiClientWrapper::new(
@@ -1007,29 +1633,54 @@ mod tests {
         );
 
         let rack_id = RackId::new("RACK_1");
+        let domain = NvLinkDomainId::new();
 
-        let endpoint = source.extract_power_shelf_endpoint(&rpc::forge::PowerShelf {
-            config: Some(rpc::forge::PowerShelfConfig {
-                name: "power-shelf-a".to_string(),
-                ..Default::default()
-            }),
-            bmc_info: Some(rpc::forge::BmcInfo {
-                ip: Some("10.0.0.1".to_string()),
-                mac: Some(test_mac().to_string()),
-                port: Some(443),
-                ..Default::default()
-            }),
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        })?;
+        check_values(
+            [
+                Check {
+                    scenario: "domain is missing",
+                    input: None,
+                    expect: None,
+                },
+                Check {
+                    scenario: "nil domain is absent",
+                    input: Some(NvLinkDomainId::nil()),
+                    expect: None,
+                },
+                Check {
+                    scenario: "non-nil API power shelf field",
+                    input: Some(domain),
+                    expect: Some(domain),
+                },
+            ],
+            |nvlink_domain_uuid| {
+                let endpoint = source
+                    .extract_power_shelf_endpoint(&rpc::forge::PowerShelf {
+                        config: Some(rpc::forge::PowerShelfConfig {
+                            name: "power-shelf-a".to_string(),
+                            ..Default::default()
+                        }),
+                        bmc_info: Some(rpc::forge::BmcInfo {
+                            ip: Some("10.0.0.1".to_string()),
+                            mac: Some(test_mac().to_string()),
+                            port: Some(443),
+                            ..Default::default()
+                        }),
+                        rack_id: Some(rack_id.clone()),
+                        nvlink_domain_uuid,
+                        ..Default::default()
+                    })
+                    .expect("power shelf endpoint");
 
-        assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
-        let Some(EndpointMetadata::PowerShelf(power_shelf)) = endpoint.metadata.as_ref() else {
-            panic!("expected power shelf metadata");
-        };
-        assert_eq!(power_shelf.serial, None);
-
-        Ok(())
+                assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
+                let Some(EndpointMetadata::PowerShelf(power_shelf)) = endpoint.metadata.as_ref()
+                else {
+                    panic!("expected power shelf metadata");
+                };
+                assert_eq!(power_shelf.serial, None);
+                power_shelf.nvlink_domain_uuid
+            },
+        );
     }
 
     #[tokio::test]
@@ -1037,19 +1688,29 @@ mod tests {
         let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
         let factory_calls = AtomicUsize::new(0);
 
-        let first =
-            cache_or_create_bmc_client(&mut cache, test_mac(), ApiCredentialKind::Bmc, |kind| {
+        let first = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
+            ApiCredentialKind::Bmc,
+            |kind| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 make_test_client(kind)
-            })
-            .expect("first insert");
+            },
+        )
+        .expect("first insert");
 
-        let second =
-            cache_or_create_bmc_client(&mut cache, test_mac(), ApiCredentialKind::Bmc, |kind| {
+        let second = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
+            ApiCredentialKind::Bmc,
+            |kind| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 make_test_client(kind)
-            })
-            .expect("cache hit");
+            },
+        )
+        .expect("cache hit");
 
         assert!(
             Arc::ptr_eq(&first.client, &second.client),
@@ -1075,12 +1736,128 @@ mod tests {
     }
 
     #[test]
+    fn api_endpoint_requires_mac_before_caching_client() {
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper::new(
+                "test-ca.pem".to_string(),
+                "test-client.pem".to_string(),
+                "test-client-key.pem".to_string(),
+                &Url::parse("https://127.0.0.1:1079").expect("valid API URL"),
+            )),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+        let error = source
+            .endpoint_for(
+                BmcAddr {
+                    ip: "2001:db8::1".parse().expect("valid IPv6 address"),
+                    port: None,
+                    mac: None,
+                },
+                None,
+                None,
+                ApiCredentialKind::Bmc,
+            )
+            .err()
+            .expect("missing API MAC is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "generic error: API endpoint 2001:db8::1 has no BMC MAC address"
+        );
+        assert!(
+            source
+                .bmc_client_cache
+                .lock()
+                .expect("cache lock")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_replaces_client_when_bmc_address_or_labels_change() {
+        let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
+        let labels = |machine_id: Option<&str>, rack_id: &str| {
+            BmcLatencyEndpointLabels::new(machine_id.map(str::to_string), Some(rack_id.to_string()))
+        };
+        let original = (test_addr(), labels(None, "rack-a"));
+        let moved = (
+            BmcAddr {
+                ip: "10.99.0.2".parse().expect("valid test IP"),
+                ..test_addr()
+            },
+            original.1.clone(),
+        );
+        let repointed = (
+            BmcAddr {
+                port: Some(8443),
+                ..moved.0.clone()
+            },
+            original.1.clone(),
+        );
+        // Latency labels are fixed at construction, so a rack or machine
+        // change needs a client that reports the new labels.
+        let reracked = (repointed.0.clone(), labels(None, "rack-b"));
+        let assigned = (repointed.0.clone(), labels(Some("machine-1"), "rack-b"));
+
+        let first = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            binding(&original.0, &original.1),
+            ApiCredentialKind::Bmc,
+            make_test_client,
+        )
+        .expect("first insert");
+        let system_uuid = uuid::uuid!("4c4c4544-0044-4710-8052-cac04f4b4632");
+        first
+            .system_uuid
+            .get_or_try_init(|| async { Ok::<_, std::convert::Infallible>(Some(system_uuid)) })
+            .await
+            .expect("infallible UUID initialization");
+
+        let mut previous = first;
+        for (addr, latency_labels) in [&moved, &repointed, &reracked, &assigned] {
+            let replaced = cache_or_create_bmc_client(
+                &mut cache,
+                test_mac(),
+                binding(addr, latency_labels),
+                ApiCredentialKind::Bmc,
+                make_test_client,
+            )
+            .expect("a changed binding rebuilds the client");
+            assert!(
+                !Arc::ptr_eq(&previous.client, &replaced.client),
+                "a changed binding must not reuse the client bound to {:?} {:?}",
+                previous.addr,
+                previous.latency_labels,
+            );
+            assert_eq!(&replaced.addr, addr);
+            assert_eq!(&replaced.latency_labels, latency_labels);
+            assert_eq!(replaced.system_uuid.get(), Some(system_uuid));
+            previous = replaced;
+        }
+
+        let reused = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            binding(&assigned.0, &assigned.1),
+            ApiCredentialKind::Bmc,
+            |_| panic!("an unchanged binding must reuse the cached client"),
+        )
+        .expect("cache hit");
+        assert!(Arc::ptr_eq(&previous.client, &reused.client));
+    }
+
+    #[test]
     fn cache_rejects_conflicting_credential_kinds() {
         let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
 
         cache_or_create_bmc_client(
             &mut cache,
             test_mac(),
+            binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
             ApiCredentialKind::Bmc,
             make_test_client,
         )
@@ -1089,6 +1866,7 @@ mod tests {
         let err = cache_or_create_bmc_client(
             &mut cache,
             test_mac(),
+            binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
             ApiCredentialKind::SwitchNvosAdmin {
                 switch_id: test_switch_id(),
             },
@@ -1120,5 +1898,456 @@ mod tests {
             .get(&test_mac())
             .expect("cached entry not removed by failed registration");
         assert_eq!(still_cached.kind, ApiCredentialKind::Bmc);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MembershipScenario {
+        PowerShelfFailure,
+        SwitchFailure,
+        ShortMachinePage,
+        CompleteEmpty,
+        RackInventoryFailure,
+    }
+
+    /// Serves only the RPCs used by discovery, without a production API seam.
+    async fn membership_response(
+        State((scenario, reached)): State<(MembershipScenario, Arc<AtomicBool>)>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let method = request.uri().path().rsplit('/').next().expect("RPC path");
+
+        let target = match scenario {
+            MembershipScenario::PowerShelfFailure => "FindPowerShelfIds",
+            MembershipScenario::SwitchFailure => "FindSwitchIds",
+            MembershipScenario::ShortMachinePage => "FindMachinesByIds",
+            MembershipScenario::CompleteEmpty | MembershipScenario::RackInventoryFailure => {
+                "FindRackIds"
+            }
+        };
+
+        if method == target {
+            reached.store(true, Ordering::SeqCst);
+        }
+
+        let failed = matches!(
+            (scenario, method),
+            (MembershipScenario::PowerShelfFailure, "FindPowerShelfIds")
+                | (MembershipScenario::SwitchFailure, "FindSwitchIds")
+                | (MembershipScenario::RackInventoryFailure, "FindRackIds")
+        );
+
+        let status = if failed {
+            "13"
+        } else if matches!(
+            method,
+            "FindMachineIds"
+                | "FindMachinesByIds"
+                | "FindPowerShelfIds"
+                | "FindSwitchIds"
+                | "FindRackIds"
+                | "Version"
+        ) {
+            "0"
+        } else {
+            "12"
+        };
+
+        let bytes = if matches!(scenario, MembershipScenario::ShortMachinePage)
+            && method == "FindMachineIds"
+        {
+            rpc::common::MachineIdList {
+                machine_ids: vec![test_machine_id()],
+            }
+            .encode_to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // A unary gRPC success has a compression byte and a big-endian length.
+        // Empty protobuf messages represent complete empty lists and defaults.
+        let mut frame = vec![0];
+
+        frame.extend_from_slice(
+            &u32::try_from(bytes.len())
+                .expect("small fixture")
+                .to_be_bytes(),
+        );
+
+        frame.extend(bytes);
+
+        Response::builder()
+            .header("content-type", "application/grpc")
+            .header("grpc-status", status)
+            .header("grpc-message", "discovery fixture failure")
+            .body(Body::from(if status == "0" { frame } else { Vec::new() }))
+            .expect("valid gRPC response")
+    }
+
+    /// Owns a bounded RPC fixture and observes the production snapshot and cache.
+    async fn membership_observation(
+        scenario: MembershipScenario,
+    ) -> (&'static str, usize, bool, bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind discovery fixture");
+
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+
+        let reached = Arc::new(AtomicBool::new(false));
+
+        let app = axum::Router::new()
+            .fallback(membership_response)
+            .with_state((scenario, reached.clone()));
+
+        // JoinSet aborts the owned server even if setup or an assertion panics.
+        let mut server = JoinSet::new();
+        server.spawn(async move { axum::serve(listener, app).await });
+
+        let client = ForgeApiClient::new(&ApiConfig::new(&url, &ForgeClientConfig::default()));
+
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper { client }),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+
+        let cached_client = {
+            let mut cache = source.bmc_client_cache.lock().expect("cache lock");
+
+            cache_or_create_bmc_client(
+                &mut cache,
+                test_mac(),
+                binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
+                ApiCredentialKind::Bmc,
+                make_test_client,
+            )
+            .expect("seed cached client")
+            .client
+        };
+
+        let result = timeout(Duration::from_secs(10), source.fetch_endpoint_snapshot()).await;
+
+        // Finish owned cleanup before checking the response, including timeouts.
+        server.abort_all();
+
+        let server_result = timeout(Duration::from_secs(10), server.join_next())
+            .await
+            .expect("bounded server cleanup");
+
+        assert!(
+            matches!(server_result, Some(Err(error)) if error.is_cancelled()),
+            "{scenario:?}: server failed before cleanup"
+        );
+
+        let result = result.expect("bounded discovery request");
+
+        let outcome = match &result {
+            Err(HealthError::ApiInvocationError(status))
+                if status.code() == tonic::Code::Internal
+                    && status.message() == "discovery fixture failure" =>
+            {
+                "membership error"
+            }
+            Err(HealthError::GenericError(message))
+                if message == "machine inventory response returned 0 of 1 requested components" =>
+            {
+                "short machine page"
+            }
+            Ok(snapshot) if snapshot.endpoints.is_empty() => match &snapshot.inventory {
+                Ok(Some(inventory))
+                    if inventory.racks.is_empty() && inventory.components.is_empty() =>
+                {
+                    "complete empty"
+                }
+                Err(HealthError::ApiInvocationError(status))
+                    if status.code() == tonic::Code::Internal
+                        && status.message() == "discovery fixture failure" =>
+                {
+                    "inventory error"
+                }
+                _ => "unexpected inventory",
+            },
+            _ => "unexpected discovery result",
+        };
+
+        let (cache_len, same_client) = {
+            let cache = source.bmc_client_cache.lock().expect("cache lock");
+
+            (
+                cache.len(),
+                cache
+                    .get(&test_mac())
+                    .is_some_and(|cached| Arc::ptr_eq(&cached.client, &cached_client)),
+            )
+        };
+
+        println!(
+            "{scenario:?}: outcome={outcome}, cache_len={cache_len}, same_client={same_client}"
+        );
+
+        (
+            outcome,
+            cache_len,
+            same_client,
+            reached.load(Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn endpoint_snapshot_retains_clients_until_membership_is_complete() {
+        let cases = [
+            (
+                "power-shelf membership failure",
+                MembershipScenario::PowerShelfFailure,
+                "membership error",
+                1,
+                true,
+            ),
+            (
+                "switch membership failure",
+                MembershipScenario::SwitchFailure,
+                "membership error",
+                1,
+                true,
+            ),
+            (
+                "short machine detail page",
+                MembershipScenario::ShortMachinePage,
+                "short machine page",
+                1,
+                true,
+            ),
+            (
+                "complete empty membership",
+                MembershipScenario::CompleteEmpty,
+                "complete empty",
+                0,
+                false,
+            ),
+            (
+                "inventory-only failure",
+                MembershipScenario::RackInventoryFailure,
+                "inventory error",
+                0,
+                false,
+            ),
+        ];
+
+        let mut checks = Vec::new();
+
+        for (label, scenario, expected_outcome, expected_cache_len, expected_identity) in cases {
+            let observed = membership_observation(scenario).await;
+
+            checks.push(Check {
+                scenario: label,
+                input: observed,
+                expect: (
+                    expected_outcome,
+                    expected_cache_len,
+                    expected_identity,
+                    true,
+                ),
+            });
+        }
+
+        check_values(checks, |observed| observed);
+    }
+
+    /// The production API source, answering one machine endpoint whose
+    /// machine ID the test changes between discovery passes.
+    struct ChangingMachineSource {
+        api: ApiEndpointSource,
+        machine_id: std::sync::Mutex<MachineId>,
+    }
+
+    impl EndpointSource for ChangingMachineSource {
+        fn fetch_bmc_hosts<'a>(
+            &'a self,
+        ) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
+            let machine_id = *self.machine_id.lock().expect("machine id lock");
+            Box::pin(async move {
+                let metadata = EndpointMetadata::Machine(MachineData {
+                    machine_id: Some(machine_id),
+                    machine_serial: None,
+                    system_uuid: SharedSystemUuid::default(),
+                    slot_number: None,
+                    tray_index: None,
+                    nvlink_domain_uuid: None,
+                    driver_version: None,
+                });
+                let endpoint = self.api.endpoint_for(
+                    test_addr(),
+                    Some(metadata),
+                    Some(RackId::new("rack-a")),
+                    ApiCredentialKind::Bmc,
+                )?;
+                Ok(vec![endpoint])
+            })
+        }
+    }
+
+    /// Answers the client's version handshake and GetBmcCredentials, the only
+    /// RPC the BMC client makes.
+    async fn credentials_response(request: Request<Body>) -> Response<Body> {
+        let method = request.uri().path().rsplit('/').next().expect("RPC path");
+        if method == "Version" {
+            // An empty protobuf message: compression byte and zero length.
+            return Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "0")
+                .body(Body::from(vec![0u8; 5]))
+                .expect("valid gRPC response");
+        }
+        if method != "GetBmcCredentials" {
+            return Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "12")
+                .body(Body::empty())
+                .expect("valid gRPC response");
+        }
+        let bytes = rpc::forge::GetBmcCredentialsResponse {
+            credentials: Some(rpc::forge::BmcCredentials {
+                r#type: Some(rpc::forge::bmc_credentials::Type::UsernamePassword(
+                    rpc::forge::UsernamePassword {
+                        username: "reader".to_string(),
+                        password: "reader-password".to_string(),
+                    },
+                )),
+            }),
+        }
+        .encode_to_vec();
+        let mut frame = vec![0];
+        frame.extend_from_slice(
+            &u32::try_from(bytes.len())
+                .expect("small fixture")
+                .to_be_bytes(),
+        );
+        frame.extend(bytes);
+        Response::builder()
+            .header("content-type", "application/grpc")
+            .header("grpc-status", "0")
+            .body(Body::from(frame))
+            .expect("valid gRPC response")
+    }
+
+    /// BMC requests counted in the latency histogram, by machine_id label.
+    fn latency_requests_by_machine(registry: &prometheus::Registry) -> HashMap<String, u64> {
+        let mut out = HashMap::new();
+        for family in registry.gather() {
+            for metric in family.get_metric() {
+                if let Some(label) = metric.get_label().iter().find(|l| l.name() == "machine_id") {
+                    *out.entry(label.value().to_string()).or_default() +=
+                        metric.get_histogram().get_sample_count();
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn machine_change_moves_running_collectors_to_a_relabeled_client() {
+        use crate::config::{Config, Configurable, SensorCollectorConfig};
+        use crate::discovery::{DiscoveryLoopContext, run_discovery_iteration};
+        use crate::limiter::NoopLimiter;
+        use crate::metrics::MetricsManager;
+        use crate::sharding::ShardManager;
+
+        // NICo answers only the BMC credentials request.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind credentials fixture");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let mut server = JoinSet::new();
+        let app = axum::Router::new().fallback(credentials_response);
+        server.spawn(async move { axum::serve(listener, app).await });
+        let client = ForgeApiClient::new(&ApiConfig::new(&url, &ForgeClientConfig::default()));
+
+        // A recorded Redfish BMC over HTTPS, reached through the proxy setting.
+        let (_bmc, bmc_url) = bmc_mock::test_support::serve_https(
+            "health-machine-change",
+            bmc_mock::test_support::lenovo_thinksystem_sr670_router(),
+        );
+        let latency_registry = prometheus::Registry::new();
+        let latency = Arc::new(
+            BmcLatencyMetrics::new(&latency_registry, "machine_change").expect("latency metrics"),
+        );
+        let changing = Arc::new(ChangingMachineSource {
+            api: ApiEndpointSource::new(
+                Arc::new(ApiClientWrapper { client }),
+                reqwest(),
+                Some(bmc_url),
+                10,
+                Some(latency),
+            ),
+            machine_id: std::sync::Mutex::new(test_machine_id()),
+        });
+        let source: Arc<dyn EndpointSource> = changing.clone();
+        let first = test_machine_id().to_string();
+        let second_id = MachineId::new(MachineIdSource::Tpm, [6u8; 32], MachineType::Host);
+        let second = second_id.to_string();
+
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        config.collectors.discovery.refresh_interval = Duration::from_millis(100);
+        config.collectors.sensors = Configurable::Enabled(SensorCollectorConfig {
+            sensor_fetch_interval: Duration::from_millis(100),
+            ..Default::default()
+        });
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            Arc::new(MetricsManager::new("machine_change_iteration").expect("metrics manager")),
+            Arc::new(config),
+        )
+        .expect("discovery context");
+        let shard_manager = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+        let wait_for = |machine: String| {
+            let registry = latency_registry.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    while latency_requests_by_machine(&registry)
+                        .get(&machine)
+                        .copied()
+                        .unwrap_or(0)
+                        == 0
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("no BMC requests labeled machine_id={machine}"));
+            }
+        };
+
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("first discovery");
+        wait_for(first.clone()).await;
+
+        // The same BMC now belongs to another machine. Collectors restart onto
+        // the rebuilt client, so its requests carry the new machine ID.
+        *changing.machine_id.lock().expect("machine id lock") = second_id;
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("second discovery");
+        let first_after_restart = latency_requests_by_machine(&latency_registry)[&first];
+        wait_for(second.clone()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let counts = latency_requests_by_machine(&latency_registry);
+        assert_eq!(
+            counts[&first], first_after_restart,
+            "requests kept the old machine ID after the restart: {counts:?}"
+        );
+        server.abort_all();
     }
 }

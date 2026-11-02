@@ -14,6 +14,63 @@ type ComponentOperationStatus struct {
 	BlockedOperations []OperationType `json:"blocked_operations,omitempty"`
 }
 
+// AggregateComponentOperationStatus returns the strictest operability phase
+// present in statuses. Missing, empty, and unrecognized statuses fail closed as
+// Unknown. An empty component set is also Unknown because the rack has no
+// evidence that it is ready.
+func AggregateComponentOperationStatus(statuses []*ComponentOperationStatus) Phase {
+	if len(statuses) == 0 {
+		return PhaseUnknown
+	}
+
+	result := PhaseReady
+	for _, status := range statuses {
+		phase := PhaseUnknown
+		if status != nil {
+			phase = normalizedPhase(status.Phase)
+		}
+
+		if phasePriority(phase) > phasePriority(result) {
+			result = phase
+		}
+		if result == PhaseUnknown {
+			return result
+		}
+	}
+
+	return result
+}
+
+func normalizedPhase(phase Phase) Phase {
+	switch phase {
+	case PhaseReady, PhaseInUse, PhaseDeleting, PhaseInitializing, PhaseError, PhaseUnknown:
+		return phase
+	default:
+		return PhaseUnknown
+	}
+}
+
+func phasePriority(phase Phase) int {
+	// Priority represents aggregation severity; higher values win:
+	// Unknown > Error > Initializing > Deleting > InUse > Ready.
+	switch phase {
+	case PhaseReady:
+		return 1
+	case PhaseInUse:
+		return 2
+	case PhaseDeleting:
+		return 3
+	case PhaseInitializing:
+		return 4
+	case PhaseError:
+		return 5
+	case PhaseUnknown:
+		return 6
+	default:
+		return 6
+	}
+}
+
 // IsReady returns true when the component is in Ready phase with no
 // blocked operations of interest. It is a convenience for callers that
 // only need a boolean go/no-go.

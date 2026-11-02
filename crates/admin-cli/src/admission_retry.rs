@@ -15,75 +15,24 @@
  * limitations under the License.
  */
 
-//! Shared helpers for retrying gRPC calls that get rejected with
-//! `RESOURCE_EXHAUSTED` admission-control errors. Every retry loop in this
-//! crate that reacts to `grpc-retry-pushback-ms` (release's preflight
-//! lookups, and `get_all_instances`'s internal paged fetches) should go
-//! through [`retry_on_admission_exhaustion`] rather than reimplementing the
-//! loop, so a fix like honoring a negative pushback as a stop-retrying
-//! signal only has to happen in one place. (`release_batch_with_retry` in
-//! `instance/release/cmd.rs` is the one exception -- it retries a call
-//! returning `Result<BatchInstanceReleaseResponse, tonic::Status>` rather
-//! than `CarbideCliResult<T>`, so it still parses pushback via
-//! [`resolve_backoff_delay`] directly but keeps its own loop.)
+//! Retry loop for gRPC calls that get rejected with `RESOURCE_EXHAUSTED`
+//! admission-control errors. Every retry loop in this crate that reacts to
+//! `grpc-retry-pushback-ms` (release's preflight lookups, and
+//! `get_all_instances`'s internal paged fetches) should go through
+//! [`retry_on_admission_exhaustion`] rather than reimplementing the loop.
+//! Pushback parsing itself lives in `rpc::admission_retry`, shared with
+//! machine-a-tron. (`release_batch_with_retry` in `instance/release/cmd.rs`
+//! is the one exception -- it retries a call returning
+//! `Result<BatchInstanceReleaseResponse, tonic::Status>` rather than
+//! `CarbideCliResult<T>`, so it calls [`resolve_backoff_delay`] directly but
+//! keeps its own loop.)
 
 use std::future::Future;
 use std::time::Duration;
 
+use ::rpc::admission_retry::resolve_backoff_delay;
+
 use crate::errors::{CarbideCliError, CarbideCliResult};
-
-/// gRPC metadata key the API attaches to a `RESOURCE_EXHAUSTED` admission
-/// rejection, carrying the advertised backoff in whole milliseconds. Must
-/// match `GRPC_RETRY_PUSHBACK_HEADER` in `api-core/src/admission/mod.rs`.
-pub(crate) const ADMISSION_RETRY_PUSHBACK_HEADER: &str = "grpc-retry-pushback-ms";
-/// Backoff used when the server omits an (unexpected) parseable pushback value.
-pub(crate) const DEFAULT_ADMISSION_BACKOFF: Duration = Duration::from_secs(5);
-/// Bounds mirroring the server's own advertised range in `admission/retry.rs`.
-pub(crate) const MIN_ADMISSION_BACKOFF: Duration = Duration::from_secs(1);
-pub(crate) const MAX_ADMISSION_BACKOFF: Duration = Duration::from_secs(30);
-
-/// Outcome of parsing the server-advertised `grpc-retry-pushback-ms` header.
-pub(crate) enum PushbackAdvice {
-    /// No header present -- the caller should fall back to its own default.
-    Absent,
-    /// A valid non-negative delay was advertised.
-    Delay(Duration),
-    /// The header was present but negative or otherwise unparseable. Per the
-    /// gRPC retry-pushback spec, this is an explicit "do not retry" signal
-    /// from the server, distinct from simply omitting the header -- treating
-    /// it the same as `Absent` (and retrying anyway with a default delay)
-    /// would ignore the server's request to stop.
-    StopRetrying,
-}
-
-/// Parses the server-advertised retry delay from a rejection's metadata.
-pub(crate) fn admission_retry_delay(status: &tonic::Status) -> PushbackAdvice {
-    let Some(raw) = status.metadata().get(ADMISSION_RETRY_PUSHBACK_HEADER) else {
-        return PushbackAdvice::Absent;
-    };
-    let Ok(raw) = raw.to_str() else {
-        return PushbackAdvice::StopRetrying;
-    };
-    match raw.parse::<i64>() {
-        Ok(millis) if millis >= 0 => PushbackAdvice::Delay(Duration::from_millis(millis as u64)),
-        // Negative (explicit stop signal) or unparseable -- both mean "stop".
-        _ => PushbackAdvice::StopRetrying,
-    }
-}
-
-/// Resolves the delay to sleep for one retry attempt, given a
-/// `RESOURCE_EXHAUSTED` rejection. Returns `None` if the server signaled to
-/// stop retrying (a negative or malformed pushback value), in which case the
-/// caller should surface the error immediately rather than retry.
-pub(crate) fn resolve_backoff_delay(status: &tonic::Status) -> Option<Duration> {
-    match admission_retry_delay(status) {
-        PushbackAdvice::Absent => Some(DEFAULT_ADMISSION_BACKOFF),
-        PushbackAdvice::Delay(delay) => {
-            Some(delay.clamp(MIN_ADMISSION_BACKOFF, MAX_ADMISSION_BACKOFF))
-        }
-        PushbackAdvice::StopRetrying => None,
-    }
-}
 
 /// Retries a fallible call on `RESOURCE_EXHAUSTED` admission rejections,
 /// honoring the server's advertised `grpc-retry-pushback-ms` backoff (or
@@ -137,6 +86,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use ::rpc::admission_retry::ADMISSION_RETRY_PUSHBACK_HEADER;
     use tonic::metadata::MetadataValue;
 
     use super::*;
@@ -158,53 +110,6 @@ mod tests {
         );
         status
     }
-
-    #[test]
-    fn parses_advertised_pushback_delay() {
-        assert!(matches!(
-            admission_retry_delay(&exhausted(7_000)),
-            PushbackAdvice::Delay(d) if d == Duration::from_secs(7)
-        ));
-        assert!(matches!(
-            admission_retry_delay(&tonic::Status::resource_exhausted("no header")),
-            PushbackAdvice::Absent
-        ));
-    }
-
-    #[test]
-    fn negative_pushback_is_a_stop_retrying_signal() {
-        assert!(matches!(
-            admission_retry_delay(&pushback_status("-1")),
-            PushbackAdvice::StopRetrying
-        ));
-    }
-
-    #[test]
-    fn malformed_pushback_is_a_stop_retrying_signal() {
-        assert!(matches!(
-            admission_retry_delay(&pushback_status("not-a-number")),
-            PushbackAdvice::StopRetrying
-        ));
-    }
-
-    #[test]
-    fn resolve_backoff_delay_clamps_and_defaults() {
-        assert_eq!(
-            resolve_backoff_delay(&tonic::Status::resource_exhausted("no header")),
-            Some(DEFAULT_ADMISSION_BACKOFF)
-        );
-        assert_eq!(
-            resolve_backoff_delay(&exhausted(1)),
-            Some(MIN_ADMISSION_BACKOFF)
-        );
-        assert_eq!(
-            resolve_backoff_delay(&exhausted(60_000)),
-            Some(MAX_ADMISSION_BACKOFF)
-        );
-        assert_eq!(resolve_backoff_delay(&pushback_status("-1")), None);
-    }
-
-    use std::cell::Cell;
 
     #[tokio::test(start_paused = true)]
     async fn retries_after_advertised_delay_then_succeeds() {

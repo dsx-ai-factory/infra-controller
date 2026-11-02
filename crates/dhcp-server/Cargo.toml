@@ -33,7 +33,7 @@ path = "src/main.rs"
 
 # [local-dependencies]
 carbide-dhcp-common = { path = "../dhcp-common" }
-carbide-instrument = { path = "../instrument" }
+carbide-instrument = { path = "../instrument", features = ["otlp-tracing"] }
 carbide-dhcpv6 = { path = "../dhcpv6" }
 carbide-tls = { path = "../tls" }
 logfmt = { path = "../logfmt" }
@@ -62,10 +62,13 @@ lru = { workspace = true }
 socket2 = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
-carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-instrument = { path = "../instrument", features = [
+  "otlp-tracing",
+  "test-support",
+] }
 carbide-test-support = { path = "../test-support" }
 tokio = { workspace = true, features = ["test-util"] }
 futures = { workspace = true }

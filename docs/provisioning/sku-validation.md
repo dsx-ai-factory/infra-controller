@@ -16,7 +16,7 @@ Machines that are assigned a SKU are automatically validated during ingestion ba
 Hardware validation occurs during initial ingestion and after an instance is released and new discovery information is received.
 
 New machines are automatically checked against existing SKUs and if a match is found, the machine passes
-SKU validation and continues with the normal ingestion process.  If no match is found the machine waits until
+SKU validation and continues with the normal ingestion process. If no match is found the machine waits until
 a matching SKU is available or until the machine is made compatible with an existing SKU, if SKU validation is enabled
 in the site (`ignore_unassigned_machines` configuration option).
 
@@ -38,16 +38,19 @@ An admin can also assign or remove a SKU on an individual host manually, either 
 `nico-admin-cli sku unassign` commands or from the machine detail page of the [NICo Debug WebUI](../operations/debug_webui.md).
 
 ### BOM Validation States
-Verifying a SKU against a machine goes through several steps to acquire updated machine inventory and perform the validation.  Depending on the inventory of the machine and the SKU configuration, the state machine needs to handle several situations.  The bom validation process is broken down into the following sub-states:
+
+Verifying a SKU against a machine goes through several steps to acquire updated machine inventory and perform the validation. Depending on the inventory of the machine and the SKU configuration, the state machine needs to handle several situations. The bom validation process is broken down into the following sub-states:
+
 - `MatchingSku` - The state machine will attempt to find an existing SKU that matches the machine inventory.
-- `UpdatingInventory` - NICo is requesting that scout re-inventory the machine.  This ensures that other operations are using a recent version of the machine inventory
+- `UpdatingInventory` - NICo is requesting that scout re-inventory the machine. This ensures that other operations are using a recent version of the machine inventory
 - `VerifyingSku` - NICo is comparing the machine inventory against the SKU
-- `SkuVerificationFailed` - The machine did not match the SKU.  Manual intervention is required.  The `sku verify` command may be used to retry the verification
+- `SkuVerificationFailed` - The machine did not match the SKU. Manual intervention is required. The `sku verify` command may be used to retry the verification
 - `WaitingForSkuAssignment` - The machine does not have a SKU assigned and the configuration requires one.
-- `SkuMissing` - The machine has a SKU assigned, but the SKU does not exist.  This happens when a SKU is specified in the expected machines, but was not created.  If configured, NICo will attempt to generate a SKU
+- `SkuMissing` - The machine has a SKU assigned, but the SKU does not exist. This happens when a SKU is specified in the expected machines, but was not created. If configured, NICo will attempt to generate a SKU. For details, refer to [Assign a SKU through the expected machine](#assign-a-sku-through-the-expected-machine).
 
 ### Versions
-NICo maintains a version of the SKU schema used when a SKU is created.  This ensures that the same comparison is used during the lifetime of a SKU and ensures that the behavior of BOM validation does not change between NICo versions.  When new components are added, or new data sources are used during validation, existing SKUs will not be updated with the change and continue to behave as they did in previous NICo versions.  In order to use the new version, a new SKU must be created.
+
+NICo maintains a version of the SKU schema used when a SKU is created. This ensures that the same comparison is used during the lifetime of a SKU and ensures that the behavior of BOM validation does not change between NICo versions. When new components are added, or new data sources are used during validation, existing SKUs will not be updated with the change and continue to behave as they did in previous NICo versions. In order to use the new version, a new SKU must be created. The one exception is the storage location format described in [Storage Drive Locations](#storage-drive-locations): schema version 5 SKUs that still record a controller name must be updated in place.
 
 ### Configuration
 
@@ -64,7 +67,7 @@ auto_generate_missing_sku = false,
 auto_generate_missing_sku_interval = "300s"
 ```
 
-- `enabled` - Enables or disables the entire bom validation process.  When disabled, machines
+- `enabled` - Enables or disables the entire bom validation process. When disabled, machines
   will skip bom validation and proceed as if all validation has passed.
 - `allow_allocation_on_validation_failure` - When true, machines with an assigned SKU are allowed to stay in Ready state
   and remain allocatable even when SKU validation fails. Validation still occurs but only logs are recorded - health reports
@@ -78,13 +81,15 @@ auto_generate_missing_sku_interval = "300s"
   it will proceed as if all validation has passed. Only machines with an associated SKU will be validated. This allows
   existing sites to be upgraded and BOM Validation enabled as SKUs are added to the system without impacting site operation.
   Machines that do not have an assigned SKU will still be usable and assignable.
-- `find_match_interval` - determines how often NICo will attempt to find a matching SKU for a machine.  NICo will only
+- `find_match_interval` - determines how often NICo will attempt to find a matching SKU for a machine. NICo will only
   attempt to find a SKU when the machine is in the `Ready` state.
 - `auto_generate_missing_sku` - Enables or disables generation of a SKU from a machine. This only applies to a machine with a SKU
-specified in the expected machine configuration and in the `SkuMissing` state.
+specified in the expected machine configuration and in the `SkuMissing` state. Refer to
+[Assign a SKU through the expected machine](#assign-a-sku-through-the-expected-machine).
 - `auto_generate_missing_sku_interval` - Determines how often NICo will attempt to generate a SKU from the machine data.
 
 ### Hardware Validated
+
 <Tip>
 This list is current as of NICo v2.1. More hardware validation may be added in the future.
 </Tip>
@@ -95,7 +100,59 @@ NICo validates the following hardware against the SKU:
 - CPU: Model and count matched
 - GPUs: Model, memory capacity, and count matched
 - Memory: Type, capacity, and count matched
-- Storage: Model and count matched
+- Storage: Capacity and PCI location of each NVMe drive matched for schema version 5 and later. Versions 1 through 4 matched model and count, and version 0 did not validate storage. For more information, refer to [Storage Drive Locations](#storage-drive-locations).
+
+### Storage Drive Locations
+
+Schema version 5 SKUs record one storage entry per NVMe drive. Each entry includes the drive capacity as a size range and its physical location in `pci_patterns`. When NICo generates a SKU from a machine, `min_size_mb` and `max_size_mb` are equal. The model is for reference only and is not compared.
+
+In an expected SKU, you can omit either bound to define an open range; `sku show` displays an omitted bound as `*` and leaves the size cell blank when both are omitted. Both bounds are inclusive values in MiB, and `min_size_mb` must not exceed `max_size_mb`. You can omit `pci_patterns` to match drives by size alone. Each entry must include at least one size bound or one PCI pattern. NICo rejects invalid regular expressions, and a minimum bound above the maximum, when you create or replace the SKU.
+
+The recorded location is the NVMe controller's sysfs device path with its last node removed, for example `/devices/pci0000:64/0000:64:02.0/0000:65:00.0/nvme`. The removed node is the kernel's controller name (`nvme3`), which is assigned in probe order and can change between boots or differ between identical machines. The remaining path is fixed by the PCI slot, so identical machines produce identical entries.
+
+Each pattern is a regular expression matched anywhere in the recorded location. A generated SKU holds the literal path; an expected SKU may keep it or widen it:
+
+```text
+/devices/pci0000:64/0000:64:02.0/0000:65:00.0/nvme   the generated literal path
+0000:65:00\.0/nvme                                   this slot under any PCI root
+^/devices/pci.*/nvme$                                any NVMe drive; set count to the number of drives
+```
+
+Each entry in an expected SKU is a group. `count` is the number of drives the group claims, and a drive is eligible for the group when it matches any of the group's `pci_patterns`. Every pattern in a group must match at least one drive, or validation reports `Expected storage drive at PCI location /.../ not found`. A generated SKU lists one entry per drive with `count` set to 1. An expected SKU can merge drives into one group by listing several patterns or by using a broader pattern with a higher count.
+
+A literal path works as a pattern because each `.` can match a literal dot, although it also matches any other character. To match the complete recorded location exactly, escape each dot as `\.` and enclose the pattern with `^` and `$`. In the JSON file, write the backslash twice (`\\.`) so that the pattern reaches the regular expression as `\.`. Do not end a pattern with a controller name such as `nvme0$`. The recorded location never contains it, so such a pattern matches nothing.
+
+`sku show` and `sku generate` render the entries with their size range and patterns:
+
+```text
+Storage Devices:
+          +----------------------------+-------+-----------------+----------------------------------------------------+
+          | Model                      | Count | Size (MiB)      | PCI Patterns                                       |
+          +============================+=======+=================+====================================================+
+          | Dell DC NVMe CD7 U.2 960GB | 1     | 915715-915715   | /devices/pci0000:00/0000:00:1b.0/0000:02:00.0/nvme |
+          +----------------------------+-------+-----------------+----------------------------------------------------+
+          | KIOXIA KCD8DRUG7T68        | 1     | 7325650-7325650 | /devices/pci0000:64/0000:64:02.0/0000:65:00.0/nvme |
+          +----------------------------+-------+-----------------+----------------------------------------------------+
+          | KIOXIA KCD8DRUG7T68        | 1     | 7325650-7325650 | /devices/pci0000:64/0000:64:04.0/0000:66:00.0/nvme |
+          +----------------------------+-------+-----------------+----------------------------------------------------+
+```
+
+#### Updating SKUs That Still End in a Controller Name
+
+Schema version 5 SKUs generated before [issue #6013](https://github.com/dsx-ai-factory/infra-controller/issues/6013) was fixed stored the full controller path, for example `/devices/pci0000:64/0000:64:02.0/0000:65:00.0/nvme/nvme3`. That pattern is longer than the location NICo now records, so it matches nothing: machines assigned the SKU fail verification with `Expected storage drive at PCI location /.../ not found` and `Found unexpected storage drive (...)` for every drive, and unassigned machines are not matched to the SKU. Update each pattern so that it ends at `/nvme`, then replace the SKU:
+
+```sh
+nico-admin-cli -f json -o <sku_name>.json sku show <sku_name>
+# In <sku_name>.json, shorten each "pci_patterns" entry to end in "/nvme" by removing the
+# controller name ("nvme<N>") and anything after it.
+nico-admin-cli sku replace <sku_name>.json
+```
+
+If `sku replace` fails with `Specified SKU matches SKU with ID: <other_sku>`, the two SKUs describe the same hardware: the controller name made identical machines generate separate SKUs. Keep one and retire the other after upgrading NICo, when the unshortened SKU no longer matches any inventory and automatic matching cannot reattach it. For each machine that `sku show-machines <redundant_sku>` lists, run `sku unassign <machineid>` and then `sku assign <kept_sku> <machineid>`. `sku unassign` requires the machine to be in the `Ready` or `SkuVerificationFailed` state, and `sku assign` accepts those states plus `WaitingForSkuAssignment` and `SkuMissing`; in any other state, such as an allocated machine, pass `--force` to both commands. Without `--force`, `sku assign` also refuses a machine that still has a SKU. Finally, remove the redundant SKU with `sku delete <redundant_sku>`.
+
+The shortened pattern is a prefix of the old path, so it also matches inventory recorded by earlier releases, and you can update the SKU before or after upgrading NICo. A pattern that ends with the `$` anchor is the exception: it matches only the new location, so remove the anchor until the upgrade is complete.
+
+You can also regenerate the SKU from a machine with `sku generate <machineid> --id <sku_name>` and replace it. For an example, refer to [Upgrading a SKU to the Current Version Example](#upgrading-a-sku-to-the-current-version-example). Regeneration requires a machine whose inventory was collected by a release that records drive sizes and locations. If the stored inventory predates those fields, `sku generate` emits storage entries without constraints. In that case, `sku replace` rejects the file until the machine has been re-inventoried.
 
 ## SKU Names
 
@@ -130,12 +187,14 @@ by visiting the admin page for a site and clicking "SKUs" from the left-side nav
 ### Viewing SKU information
 
 There are 2 commands for showing information related to SKUs:
-- `sku show` lists SKUs or shows information related to an existing SKU.
-- `sku generate` shows what a SKU would look like for a machine.  The generate command does not create the SKU or assign the SKU to the machine.
 
-Both commands honor the JSON format flag `-f json` to change the output to JSON.  JSON is used by other commands.
+- `sku show` lists SKUs or shows information related to an existing SKU.
+- `sku generate` shows what a SKU would look like for a machine. The generate command does not create the SKU or assign the SKU to the machine.
+
+Both commands honor the JSON format flag `-f json` to change the output to JSON. JSON is used by other commands.
 
 The `sku show` command can be used to list all SKUs, or show the details of a single SKU:
+
 ```sh
 nico-admin-cli sku show [<sku id>]
 
@@ -263,18 +322,108 @@ machine goes to ready (not assigned) state, or goes through a machine validation
 nico-admin-cli sku assign <sku_name> <machineid>
 ```
 
+### Assign a SKU through the expected machine
+
+To assign a SKU before a host is discovered, set the SKU ID in the host's expected machine entry. When Site Explorer
+creates the machine, NICo copies that ID to the machine, so BOM validation verifies the host against the named SKU
+during ingestion instead of searching the existing SKUs for a match. The value is the SKU ID that `sku create --id`
+and `sku assign` use; follow the [SKU Names](#sku-names) convention.
+
+The rest of this section assumes that BOM validation is enabled (`enabled = true` under `[bom_validation]`; refer to
+[Configuration](#configuration)). When it is disabled, NICo still copies the ID to the machine but skips validation,
+so the host neither enters `SkuMissing` nor triggers automatic SKU generation.
+
+Set the ID with `em add --sku-id` when you create the entry, or change an existing entry in place:
+
+```sh
+nico-admin-cli em patch --bmc-mac-address <bmc-mac> --sku-id <sku_name>
+```
+
+The key is `sku_id` in the JSON files that `em replace-all` and `em update` read; refer to
+[Per-Host Fields With the Admin CLI](ingesting-hosts.md#per-host-fields-with-the-admin-cli). Through the REST API,
+set `skuId` in the request or pass `--sku-id` to `nicocli expected-machine create`; refer to
+[Registering Expected Machines](ingesting-hosts-rest-api.md#registering-expected-machines).
+
+NICo copies the ID only when it creates the machine. Changing the SKU ID in an entry does not change a machine
+that already exists; use `sku assign` and `sku unassign` for that.
+
+The two paths differ in when the SKU has to exist. REST requires a supplied `skuId` to identify an existing SKU
+at the Expected Machine's Site. For single POST and PATCH requests, REST checks your Site access before looking
+up the SKU. It rejects missing SKUs and SKUs from another Site with HTTP 422 and "SKU ID specified in request
+does not exist". If the SKU lookup fails because of a database error, these single requests return HTTP 500
+with "Failed to validate SKU ID in request data due to DB error" and `data: null`.
+Batch create and update requests return HTTP 400 with a per-item `skuID` error prefixed by
+"the SkuID specified for Expected Machine does not exist in DB:" followed by the supplied ID. Replace-all
+returns HTTP 400 and "SkuID specified for an Expected Machine does not exist on the Site". The admin CLI saves
+the entry without checking, so a host whose entry names a SKU that does not exist yet enters `SkuMissing` as
+described below.
+
+For single create, batch create, and replace-all entries, omitting `skuId` or setting it to `null` leaves the
+association unset. For single and batch PATCH, omission and null preserve the existing association. These
+requests reject an empty `skuId` with HTTP 400, and PATCH cannot remove the association. The
+[Batch Update](ingesting-hosts-rest-api.md#batch-update) requirement for the same fields in every item also
+applies to `skuId`.
+
+Inventory synchronization does not check the SKU's Site. An entry saved through the admin CLI or directly
+in Core can therefore reference a SKU stored under another Site in REST. GET responses return that stored
+`skuId` but omit `sku`, even with `includeRelation=Sku`.
+
+If the SKU exists when the host reaches BOM validation, verification proceeds as for any assigned SKU: a matching
+host continues ingestion, and a mismatch moves the host to `SkuVerificationFailed` with a health alert. If the SKU
+does not exist, the host moves to `SkuMissing`, receives the health alert `The assigned sku <sku_name> does not
+exist`, and cannot be allocated. With `allow_allocation_on_validation_failure = true`, the host continues in both
+cases instead of waiting in `SkuVerificationFailed` or `SkuMissing`, as described in
+[Configuration](#configuration). Create the SKU in one of two ways:
+
+- Create it manually. The waiting host itself can be the source, as described in
+  [Creating SKUs for a Site](#creating-skus-for-a-site):
+
+  ```sh
+  nico-admin-cli -f json -o <sku_name>.json sku generate <machineid> --id <sku_name>
+  nico-admin-cli sku create <sku_name>.json
+  ```
+
+- Let NICo create it. With `auto_generate_missing_sku = true` in the `[bom_validation]` configuration, NICo
+  generates a SKU from the current inventory of a host in `SkuMissing` and stores it under the expected SKU ID.
+  NICo only does this while the host's expected machine entry still names the same SKU ID as the machine, and it
+  retries no more often than `auto_generate_missing_sku_interval` (default `300s`). The generated SKU describes
+  exactly that first host, including literal storage locations, so review it with `sku show <sku_name>` and widen
+  it with `sku replace` if it must cover other configurations.
+
+After the SKU exists, NICo refreshes the inventory of each host waiting in `SkuMissing` and verifies it on the next
+pass. Other hosts whose entries name the same SKU ID verify against the same SKU. A host that reached `Ready`
+while the SKU was missing, which `allow_allocation_on_validation_failure = true` permits, is not verified
+automatically; request it with `sku verify <machineid>`.
+
+Generation fails when an existing SKU already matches the host hardware under a different ID. `nico-api` logs
+`Failed to create generated SKU for machine` with the error `Specified SKU matches SKU with ID: <other_sku>`, and
+the host returns to `SkuMissing` after the inventory refresh. Assign the existing SKU instead, or remove the
+assignment so that matching finds it. In `SkuMissing`, both commands need `--force`: `sku assign` because the host
+still has a SKU assigned, and `sku unassign` because the host is not in `Ready` or `SkuVerificationFailed`:
+
+```sh
+nico-admin-cli sku assign --force <other_sku> <machineid>
+nico-admin-cli sku unassign --force <machineid>
+```
+
+Correct the expected machine entry as well, so that the host receives the right SKU if it is deleted and
+discovered again.
+
 ### Remove a SKU assignment from a machine
 
 To remove the assignment of a SKU from a machine, the `sku unassign` can be used. Note that if a machine already matches
 a SKU in the given site, and it is not in an assigned state, it will likely be quickly reassigned automatically by
-the site controller after this command is run.
+the site controller after this command is run. Matching uses the machine's current inventory, so a SKU whose storage
+patterns still end in a controller name is not matched until it is updated as described in
+[Storage Drive Locations](#storage-drive-locations).
 
 ```sh
 nico-admin-cli sku unassign <machineid>
 ```
 
 ### Replacing an existing SKU
-If a SKU has a set of components that do not work for a set of machines (either due to bugs, or NICo software updates) updating machines by unassigning and assigning a SKU would be challenging.  Replacing the components of a SKU can be done with the `sku replace` command.  This will force all machines to go through verification when no instance is allocated to the machine (all machines are verified when an instance is released).
+
+If a SKU has a set of components that do not work for a set of machines (either due to bugs, or NICo software updates) updating machines by unassigning and assigning a SKU would be challenging. Replacing the components of a SKU can be done with the `sku replace` command. This will force all machines to go through verification when no instance is allocated to the machine (all machines are verified when an instance is released).
 
 ```sh
 nico-admin-cli sku replace <filename> [--id <sku_name>]
@@ -292,9 +441,10 @@ nico-admin-cli sku delete <sku_name>
 ```
 
 #### Upgrading a SKU to the current version example
-When a new version of NICo is released that changes how SKUs behave, existing SKUs maintain their previous behavior.  In order to use the new version of the SKU, a manual "upgrade" process is required using the `sku replace` command.
 
-The existing SKU is below.  Note that the "Storage Devices" section includes a device with a model of "NO_MODEL" and there is no TPM.  The extra storage device is created by the raid card and may not always exist and should not have been included in the SKU.
+When a new version of NICo is released that changes how SKUs behave, existing SKUs maintain their previous behavior. In order to use the new version of the SKU, a manual "upgrade" process is required using the `sku replace` command. The output in this example was captured with an older release. Newer releases also show the `Size (MiB)` and `PCI Patterns` storage columns described in [Storage Drive Locations](#storage-drive-locations).
+
+The existing SKU is below. Note that the "Storage Devices" section includes a device with a model of "NO_MODEL" and there is no TPM. The extra storage device is created by the raid card and may not always exist and should not have been included in the SKU.
 
 ```sh
 nico-admin-cli sku show XE9680
@@ -338,15 +488,15 @@ Storage Devices:
           +----------------------------------+-------+
 ```
 
-Using the `sku generate` command, we can see what the updated SKU looks like for the same machine.  This is the same machine that generated the older SKU in a previous release.  Note that the "NO_MODEL" device is gone, the RAID controller is now shown as `Dell BOSS-N1` and the version of the TPM is shown.
+Using the `sku generate` command, we can see what the updated SKU looks like for the same machine. This is the same machine that generated the older SKU in a previous release. Note that the "NO_MODEL" device is gone, the RAID controller is now shown as `Dell BOSS-N1` and the version of the TPM is shown.
 
 ``` sh
-nico-admin-cli sku generate fm100hti7olik00gefc9qlma831n6q49d1odkksp86q639cugt5afjnm4s0
-ID                  : PowerEdge R750 1xGPU 1xIB
+nico-admin-cli sku generate fm100hti7olik00gefc9qlma831n6q49d1odkksp86q639cugt5afjnm4s0 --id XE9680
+ID                  : XE9680
 Schema Version      : 4
-Description         : PowerEdge R750; 2xCPU; 1xGPU; 128 GiB
+Description         : PowerEdge XE9680; 2xCPU; 8xGPU; 2 TiB
 Device Type         :
-Model               : PowerEdge R750
+Model               : PowerEdge XE9680
 Architecture        : x86_64
 Created At          : 2025-02-27T13:57:19.435162Z
 TPM Version         : 2.0
@@ -385,13 +535,15 @@ Storage Devices:
 
 ```
 
-Create a new SKU file using the generate command again, but create a json file.  Note that the same ID needs to be specified as the existing SKU in order for the replace command to find the old SKU.
+Create a new SKU file using the generate command again, but create a json file. Note that the same ID needs to be specified as the existing SKU in order for the replace command to find the old SKU.
+
 ```sh
 nico-admin-cli -f json -o /tmp/xe9680.json sku g fm100hti7olik00gefc9qlma831n6q49d1odkksp86q639cugt5afjnm4s0 --id XE9680
 
 ```
 
 Then replace the old SKU
+
 ```sh
 nico-admin-cli sku replace /tmp/xe9680.json
 +--------+---------------------------------------+------------------+-----------------------------+
@@ -402,16 +554,17 @@ nico-admin-cli sku replace /tmp/xe9680.json
 
 ```
 
-The `show sku` command now shows the updated components (and version)
+The `sku show` command now shows the updated components (and version)
+
 ```sh
 nico-admin-cli sku show XE9680
 ID                  : XE9680
 Schema Version      : 4
-Description         : PowerEdge R750; 2xCPU; 1xGPU; 128 GiB
+Description         : PowerEdge XE9680; 2xCPU; 8xGPU; 2 TiB
 Device Type         :
-Model               : PowerEdge R750
+Model               : PowerEdge XE9680
 Architecture        : x86_64
-Created At          : 2025-02-27T13:57:19.435162Z
+Created At          : 2025-04-18T16:30:58.748991Z
 TPM Version         : 2.0
 
 CPUs:
@@ -446,7 +599,6 @@ Storage Devices:
           | Dell Ent NVMe FIPS CM6 RI 3.84TB | 8     |
           +----------------------------------+-------+
 ```
-
 
 ### Finding assigned machines for a SKU
 
@@ -481,5 +633,10 @@ as to where the mismatch is believed to be. Using this, it should be possible to
 machine is actually configured incorrectly, or in the case that the new configuration should be
 correct, you can remove the SKU from the machine `sku unassign` and create a new SKU as shown
 above to represent this machine.
+
+A mismatch that reports `Expected storage drive at PCI location /.../ not found` together with
+`Found unexpected storage drive (...)` for the same number of drives usually means the SKU's storage patterns still
+end in a controller name. Update the SKU as described in [Storage Drive Locations](#storage-drive-locations) instead of
+unassigning the machine.
 
 ###

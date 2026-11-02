@@ -284,17 +284,37 @@ impl SwitchCertMonitorInstruments {
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
-                        let mut expirations_by_status = BTreeMap::new();
-                        for cert in &metrics.observed_certs {
-                            if let Some(observed_cert) = &cert.observed_cert {
-                                let entry = expirations_by_status
-                                    .entry(rotation_window_status(cert))
-                                    .or_insert(observed_cert.not_after_timestamp);
-                                *entry = (*entry).min(observed_cert.not_after_timestamp);
-                            }
+                        for (status, not_after) in
+                            earliest_cert_expiration_by_status(&metrics.observed_certs)
+                        {
+                            observer.observe(
+                                not_after,
+                                &metric_attrs(attrs, &[KeyValue::new("status", status)]),
+                            );
                         }
+                    })
+                })
+                .build();
+        }
 
-                        for (status, not_after) in expirations_by_status {
+        {
+            // `_seconds`-suffixed alias of the gauge above. The value is Unix epoch
+            // seconds, so the name must carry the unit suffix per the observability
+            // naming contract; the legacy unsuffixed name is retained for existing
+            // consumers. Both instruments observe the same per-status value.
+            let metrics = shared_metrics.clone();
+            meter
+                .i64_observable_gauge(
+                    "carbide_nvlink_switch_cert_monitor_observed_cert_expiration_time_seconds",
+                )
+                .with_description(
+                    "Earliest expiration time (Unix epoch seconds) for certificates served by NMX-C, by status",
+                )
+                .with_callback(move |observer| {
+                    metrics.if_available(|metrics, attrs| {
+                        for (status, not_after) in
+                            earliest_cert_expiration_by_status(&metrics.observed_certs)
+                        {
                             observer.observe(
                                 not_after,
                                 &metric_attrs(attrs, &[KeyValue::new("status", status)]),
@@ -687,7 +707,11 @@ impl SwitchCertificateMonitor {
                     tracing::info!("SwitchCertificateMonitor stop was requested");
                     return Ok(());
                 }
-                observed_cert = self.probe_endpoint_certificate(&target.endpoint_url, cancel_token) => {
+                observed_cert = Self::probe_endpoint_certificate(
+                    &self.config,
+                    &target.endpoint_url,
+                    cancel_token,
+                ) => {
                     observed_cert
                 }
             };
@@ -1007,7 +1031,7 @@ impl SwitchCertificateMonitor {
     }
 
     async fn probe_endpoint_certificate(
-        &self,
+        config: &NvLinkConfig,
         endpoint_url: &str,
         cancel_token: &CancellationToken,
     ) -> Result<CertificateProbeOutcome, String> {
@@ -1022,25 +1046,28 @@ impl SwitchCertificateMonitor {
             ));
         }
 
+        // URI hosts retain IPv6 brackets, but TLS names and TCP host/port
+        // tuples need the bare address. Leave an explicit TLS authority alone.
         let host = uri
             .host()
             .ok_or_else(|| format!("NMX-C endpoint {endpoint_url} has no host"))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .to_string();
         let port = uri.port_u16().unwrap_or(443);
-        let tls_authority = self
-            .config
+        let tls_authority = config
             .nmx_c_tls_authority
             .clone()
             .unwrap_or_else(|| host.clone());
         let server_name = ServerName::try_from(tls_authority.clone())
             .map_err(|error| format!("invalid NMX-C TLS authority {tls_authority}: {error}"))?;
 
-        let probe_timeout = self.config.nmx_c_certificate_rotation.probe_timeout;
+        let probe_timeout = config.nmx_c_certificate_rotation.probe_timeout;
         let client_config = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Err(Self::PROBE_CANCELLED_ERROR.to_string());
             }
-            client_config = build_tls_client_config(&self.config) => client_config?,
+            client_config = build_tls_client_config(config) => client_config?,
         };
         let connector = TlsConnector::from(Arc::new(client_config));
         let tcp_stream = tokio::select! {
@@ -1052,9 +1079,9 @@ impl SwitchCertificateMonitor {
                 TcpStream::connect((host.as_str(), port)),
             ) => tcp_stream
                 .map_err(|_| {
-                    format!("connection to {host}:{port} timed out after {probe_timeout:?}")
+                    format!("connection to {endpoint_url} timed out after {probe_timeout:?}")
                 })?
-                .map_err(|error| format!("failed to connect to {host}:{port}: {error}"))?,
+                .map_err(|error| format!("failed to connect to {endpoint_url}: {error}"))?,
         };
         let tls_stream = tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -1208,6 +1235,25 @@ fn count_by_status(
     counts
 }
 
+/// Earliest observed `not_after` (Unix epoch seconds) per rotation-window
+/// status, across all certificates that carry an observation. Shared by the
+/// legacy `..._observed_cert_expiration_time` gauge and its `_seconds`-suffixed
+/// alias so both expose identical values.
+fn earliest_cert_expiration_by_status(
+    certs: &[ObservedSwitchCertMetrics],
+) -> BTreeMap<&'static str, i64> {
+    let mut expirations_by_status = BTreeMap::new();
+    for cert in certs {
+        if let Some(observed_cert) = &cert.observed_cert {
+            let entry = expirations_by_status
+                .entry(rotation_window_status(cert))
+                .or_insert(observed_cert.not_after_timestamp);
+            *entry = (*entry).min(observed_cert.not_after_timestamp);
+        }
+    }
+    expirations_by_status
+}
+
 fn count_errors_by_kind<'a>(
     errors: impl Iterator<Item = &'a str>,
 ) -> BTreeMap<SwitchCertMonitorErrorKind, u64> {
@@ -1277,11 +1323,18 @@ fn switch_cert_monitor_error_kind(error: &str) -> SwitchCertMonitorErrorKind {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
+
     use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{Case, Check, check_cases_async, check_values};
     use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use rustls::ServerConfig;
     use rustls_pki_types::UnixTime;
+    use tempfile::NamedTempFile;
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
 
     use super::*;
 
@@ -1380,6 +1433,121 @@ mod tests {
             ],
             |error| tls_error_is_expired_certificate(&error),
         );
+    }
+
+    #[tokio::test]
+    async fn certificate_probe_dials_ipv6_and_verifies_the_selected_identity() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "IPv6 identity from endpoint",
+                    input: ("::1", None),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "DNS authority while dialing IPv6",
+                    input: ("nmxc.example.test", Some("nmxc.example.test")),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "explicit authority does not match certificate",
+                    input: ("::1", Some("nmxc.example.test")),
+                    expect: Fails,
+                },
+            ],
+            |(certificate_name, authority)| async move {
+                let CertifiedKey { cert, signing_key } =
+                    generate_simple_self_signed(vec![certificate_name.to_string()]).unwrap();
+                let expected_certificate = certificate_info_from_der(cert.der()).unwrap();
+                let ca_file = NamedTempFile::new().unwrap();
+                std::fs::write(ca_file.path(), cert.pem()).unwrap();
+                let config = NvLinkConfig {
+                    nmx_c_tls_ca_cert_path: Some(ca_file.path().to_str().unwrap().to_string()),
+                    nmx_c_tls_authority: authority.map(str::to_string),
+                    ..Default::default()
+                };
+                let server_config = ServerConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::aws_lc_rs::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.der().clone()],
+                    PrivateKeyDer::Pkcs8(signing_key.serialize_der().into()),
+                )
+                .unwrap();
+                let acceptor = TlsAcceptor::from(Arc::new(server_config));
+                let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+                    .await
+                    .expect("IPv6 loopback listener binds");
+                let endpoint = format!("https://{}", listener.local_addr().unwrap());
+                let cancel_token = CancellationToken::new();
+                let (probe, server) = tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(
+                        SwitchCertificateMonitor::probe_endpoint_certificate(
+                            &config,
+                            &endpoint,
+                            &cancel_token,
+                        ),
+                        async {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            acceptor.accept(stream).await
+                        },
+                    )
+                })
+                .await
+                .expect("local certificate probe finishes within five seconds");
+
+                match probe {
+                    Ok(certificate) => {
+                        server.expect("server completes the verified TLS handshake");
+                        assert_eq!(
+                            certificate,
+                            CertificateProbeOutcome::Observed(expected_certificate),
+                        );
+                        Ok(())
+                    }
+                    Err(error) => {
+                        assert!(error.starts_with("TLS handshake failed"), "{error}");
+                        assert!(server.is_err(), "server must reject the failed handshake");
+                        Err(error)
+                    }
+                }
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn certificate_probe_rejects_invalid_explicit_authorities() {
+        check_cases_async(
+            [
+                ("empty authority", ""),
+                ("bracketed IPv6 authority", "[::1]"),
+            ]
+            .map(|(scenario, authority)| Case {
+                scenario,
+                input: authority,
+                expect: Fails,
+            }),
+            |authority| async move {
+                let config = NvLinkConfig {
+                    nmx_c_tls_authority: Some(authority.to_string()),
+                    ..Default::default()
+                };
+                SwitchCertificateMonitor::probe_endpoint_certificate(
+                    &config,
+                    "https://[::1]:9370",
+                    &CancellationToken::new(),
+                )
+                .await
+                .inspect_err(|error| {
+                    assert!(error.starts_with("invalid NMX-C TLS authority"), "{error}");
+                })
+            },
+        )
+        .await;
     }
 
     #[test]
@@ -1601,5 +1769,61 @@ mod tests {
                 "iteration latency must remain label-free: {sample}"
             );
         }
+    }
+
+    #[test]
+    fn observed_certificate_expiration_exposes_seconds_suffixed_alias() {
+        const LEGACY_NAME: &str =
+            "carbide_nvlink_switch_cert_monitor_observed_cert_expiration_time";
+        const SECONDS_NAME: &str =
+            "carbide_nvlink_switch_cert_monitor_observed_cert_expiration_time_seconds";
+        // A representative Unix epoch-seconds expiration (~2026).
+        const NOT_AFTER: i64 = 1_791_539_642;
+
+        let metrics = MetricsCapture::start();
+
+        let mut recorded = SwitchCertMonitorMetrics::new();
+        recorded.observed_certs.push(ObservedSwitchCertMetrics {
+            probe_success: true,
+            rotation_required: false,
+            observed_cert: Some(CertificateInfo {
+                fingerprint_sha256: "TEST".to_string(),
+                not_after_timestamp: NOT_AFTER,
+            }),
+            error: String::new(),
+            apply_status: SwitchCertApplyStatus::NotNeeded,
+            apply_error: String::new(),
+        });
+
+        let holder = SharedMetricsHolder::with_hold_period(Duration::from_secs(3600));
+        holder.update(recorded);
+        SwitchCertMonitorInstruments::register(
+            opentelemetry::global::meter("carbide-nvlink-switch-cert-monitor-test"),
+            holder,
+        );
+
+        // The `_seconds`-suffixed alias exposes the same epoch-seconds value as the
+        // retained legacy gauge, so no value or unit changes for existing consumers.
+        let legacy = metrics.gauge_value(LEGACY_NAME, &[("status", "ok")]);
+        let seconds = metrics.gauge_value(SECONDS_NAME, &[("status", "ok")]);
+        assert_eq!(
+            legacy, NOT_AFTER as f64,
+            "legacy gauge value must be unchanged"
+        );
+        assert_eq!(
+            seconds, NOT_AFTER as f64,
+            "the _seconds-suffixed alias must expose the same epoch-seconds value"
+        );
+
+        // The alias is exported and carries the unit suffix exactly once.
+        let rendered = metrics.render();
+        assert!(
+            rendered.contains(SECONDS_NAME),
+            "the _seconds-suffixed gauge must be exported:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&format!("{SECONDS_NAME}_seconds")),
+            "the unit suffix must be applied exactly once:\n{rendered}"
+        );
     }
 }

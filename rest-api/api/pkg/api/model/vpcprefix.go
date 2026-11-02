@@ -6,6 +6,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -30,20 +31,101 @@ type APIVpcPrefixCreateRequest struct {
 	VpcID string `json:"vpcId"`
 	// IPBlockID is the derived ipBlockId for the tenant from an allocation
 	IPBlockID *string `json:"ipBlockId"`
+	// Prefix is the exact CIDR to reserve from the IP Block
+	Prefix *string `json:"prefix"`
 	// PrefixLength is the length of the prefix
-	PrefixLength int `json:"prefixLength"`
+	PrefixLength *int `json:"prefixLength"`
 }
 
-// ValidatePrefixLength checks PrefixLength against the maximum resolved from
-// the IP Block family and VPC address mode. Callers run Validate first because
-// those values are not part of the request body.
+// GetPrefixLength returns the requested prefix length from either allocation
+// selector. Callers must run Validate first.
+func (vpcr *APIVpcPrefixCreateRequest) GetPrefixLength() (int, error) {
+	if vpcr.PrefixLength != nil {
+		return *vpcr.PrefixLength, nil
+	}
+	if vpcr.Prefix == nil {
+		return 0, errors.New("exactly one of `prefix` or `prefixLength` must be specified")
+	}
+
+	prefix, err := netip.ParsePrefix(*vpcr.Prefix)
+	if err != nil {
+		return 0, fmt.Errorf("prefix %q must be a valid CIDR", *vpcr.Prefix)
+	}
+	return prefix.Bits(), nil
+}
+
+// ValidatePrefixLength checks the effective prefix length against the maximum
+// resolved from the IP Block family and VPC address mode. Callers run Validate
+// first because those values are not part of the request body.
 func (vpcr *APIVpcPrefixCreateRequest) ValidatePrefixLength(maxPrefixLength int) error {
-	if vpcr.PrefixLength > maxPrefixLength {
+	prefixLength, err := vpcr.GetPrefixLength()
+	if err != nil {
 		return validation.Errors{
-			"prefixLength": fmt.Errorf("prefixLength must be at most %d for this IP Block and VPC", maxPrefixLength),
+			validationCommonErrorField: err,
+		}
+	}
+	if prefixLength > maxPrefixLength {
+		field := "prefixLength"
+		message := fmt.Sprintf("prefixLength must be at most %d for this IP Block and VPC", maxPrefixLength)
+		if vpcr.Prefix != nil {
+			field = "prefix"
+			message = fmt.Sprintf("prefix %q must have a prefix length of at most %d for this IP Block and VPC", *vpcr.Prefix, maxPrefixLength)
+		}
+		return validation.Errors{
+			field: errors.New(message),
 		}
 	}
 
+	return nil
+}
+
+func (vpcr *APIVpcPrefixCreateRequest) validatePrefix() error {
+	if (vpcr.Prefix == nil) == (vpcr.PrefixLength == nil) {
+		return validation.Errors{
+			validationCommonErrorField: errors.New("exactly one of `prefix` or `prefixLength` must be specified"),
+		}
+	}
+
+	if vpcr.PrefixLength != nil {
+		return validation.ValidateStruct(vpcr,
+			validation.Field(&vpcr.PrefixLength,
+				validation.Required.Error(validationErrorValueRequired),
+				validation.Min(vpcprefix.PrefixLengthMinimum).Error(fmt.Sprintf("prefixLength must be at least %d", vpcprefix.PrefixLengthMinimum)),
+				validation.Max(vpcprefix.PrefixLengthMaximum).Error(fmt.Sprintf("prefixLength must be at most %d", vpcprefix.PrefixLengthMaximum))),
+		)
+	}
+
+	inputPrefix := *vpcr.Prefix
+	prefix, err := netip.ParsePrefix(inputPrefix)
+	if err != nil {
+		return validation.Errors{
+			"prefix": fmt.Errorf("prefix %q must be a valid CIDR", inputPrefix),
+		}
+	}
+	if prefix.Addr().Is4In6() {
+		return validation.Errors{
+			"prefix": fmt.Errorf("prefix %q must not use an IPv4-mapped IPv6 address", inputPrefix),
+		}
+	}
+	if prefix != prefix.Masked() {
+		return validation.Errors{
+			"prefix": fmt.Errorf("prefix %q must be network-aligned", inputPrefix),
+		}
+	}
+	if prefix.Bits() < vpcprefix.PrefixLengthMinimum || prefix.Bits() > vpcprefix.PrefixLengthMaximum {
+		return validation.Errors{
+			"prefix": fmt.Errorf(
+				"prefix %q has prefix length %d; must be between %d and %d",
+				inputPrefix,
+				prefix.Bits(),
+				vpcprefix.PrefixLengthMinimum,
+				vpcprefix.PrefixLengthMaximum,
+			),
+		}
+	}
+
+	canonicalPrefix := prefix.String()
+	vpcr.Prefix = &canonicalPrefix
 	return nil
 }
 
@@ -59,17 +141,13 @@ func (vpcr *APIVpcPrefixCreateRequest) Validate() error {
 		validation.Field(&vpcr.IPBlockID,
 			validation.Required.Error(validationErrorIPBlockIDRequired),
 			validation.When(vpcr.IPBlockID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
-		validation.Field(&vpcr.PrefixLength,
-			validation.Required.Error(validationErrorValueRequired),
-			validation.Min(vpcprefix.PrefixLengthMinimum).Error(fmt.Sprintf("prefixLength must be at least %d", vpcprefix.PrefixLengthMinimum)),
-			validation.Max(vpcprefix.PrefixLengthMaximum).Error(fmt.Sprintf("prefixLength must be at most %d", vpcprefix.PrefixLengthMaximum))),
 	)
 
 	if err != nil {
 		return err
 	}
 
-	return nil
+	return vpcr.validatePrefix()
 }
 
 // ToProto builds the workflow request that asks a Site to create a new
@@ -102,6 +180,8 @@ type APIVpcPrefixUpdateRequest struct {
 	Name *string `json:"name"`
 	// IPBlockID is the derived ipBlockId for the tenant from an allocation
 	IPBlockID *string `json:"ipBlockId"`
+	// Prefix is the immutable CIDR allocated to the VpcPrefix
+	Prefix *string `json:"prefix"`
 	// PrefixLength is the length of the prefix
 	PrefixLength *int `json:"prefixLength"`
 }
@@ -118,6 +198,11 @@ func (vpur *APIVpcPrefixUpdateRequest) Validate() error {
 	if vpur.IPBlockID != nil || vpur.PrefixLength != nil {
 		return validation.Errors{
 			"prefixLength": errors.New("prefix length modification is not supported at this time"),
+		}
+	}
+	if vpur.Prefix != nil {
+		return validation.Errors{
+			"prefix": errors.New("prefix modification is not supported"),
 		}
 	}
 

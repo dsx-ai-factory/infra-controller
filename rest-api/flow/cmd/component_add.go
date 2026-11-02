@@ -34,6 +34,8 @@ var (
 	addBmcType         string
 )
 
+const unknownComponentPosition = -1
+
 // newAddCmd returns a configured cobra.Command for adding a new component
 // to an existing rack in the inventory.
 func newAddCmd() *cobra.Command {
@@ -77,7 +79,7 @@ Examples:
     --manufacturer "NVIDIA" --serial-number "PS123" --bmc-mac "aa:bb:cc:dd:ee:ff" --bmc-ip "10.0.0.1"
 `,
 		Run: func(cmd *cobra.Command, args []string) {
-			doAddComponent()
+			doAddComponent(cmd)
 		},
 	}
 
@@ -110,7 +112,7 @@ func init() {
 
 // doAddComponent builds a types.Component from the CLI flags and calls
 // AddComponent via the gRPC client, printing the created component as JSON.
-func doAddComponent() {
+func doAddComponent(cmd *cobra.Command) {
 	// --rack-id is optional; parse only when provided. uuid.Nil signals
 	// "ingest without a rack assignment" to the server.
 	var rackID uuid.UUID
@@ -138,12 +140,8 @@ func doAddComponent() {
 			Description:  addDescription,
 		},
 		FirmwareVersion: addFirmwareVersion,
-		Position: types.InRackPosition{
-			SlotID:    addSlotID,
-			TrayIndex: addTrayIndex,
-			HostID:    addHostID,
-		},
-		RackID: rackID,
+		Position:        componentPositionFromFlags(cmd),
+		RackID:          rackID,
 	}
 
 	// Add BMC if provided
@@ -184,4 +182,22 @@ func doAddComponent() {
 		log.Fatal().Err(err).Msg("Failed to marshal JSON")
 	}
 	fmt.Println(string(data))
+}
+
+func componentPositionFromFlags(cmd *cobra.Command) types.InRackPosition {
+	position := types.InRackPosition{
+		SlotID:    unknownComponentPosition,
+		TrayIndex: unknownComponentPosition,
+		HostID:    unknownComponentPosition,
+	}
+	if cmd.Flags().Changed("slot-id") {
+		position.SlotID = addSlotID
+	}
+	if cmd.Flags().Changed("tray-index") {
+		position.TrayIndex = addTrayIndex
+	}
+	if cmd.Flags().Changed("host-id") {
+		position.HostID = addHostID
+	}
+	return position
 }

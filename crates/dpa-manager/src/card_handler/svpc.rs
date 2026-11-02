@@ -22,6 +22,7 @@ use carbide_dpa::DpaInfo;
 use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::spx::{NULL_SPX_PARTITION_ID, SpxPartitionId};
 use chrono::TimeDelta;
+use db::credential_rotation::NoStagedCredentialRotation;
 use db::{self, ObjectColumnFilter};
 use mac_address::MacAddress;
 use model::dpa_interface::DpaLockMode::{Locked, Unlocked};
@@ -434,13 +435,24 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             });
         };
 
-        if let Some(ref firmware_report) = card_state.firmware_report {
-            let reset_ok = firmware_report.reset.unwrap_or(true);
-            if firmware_report.flashed && reset_ok {
+        if let Some(ref operation) = card_state.firmware_operation {
+            if operation.operation_id != dpa_interface.firmware_operation_id() {
+                tracing::debug!(
+                    dpa_interface_id = %dpa_interface.id,
+                    operation_id = %operation.operation_id,
+                    "ignoring firmware progress from an earlier state entry"
+                );
+                return Ok(HandlerResult {
+                    new_state: None,
+                    txn: None,
+                });
+            }
+            if operation.is_complete() {
                 let new_state = DpaInterfaceControllerState::ApplyProfile;
                 tracing::info!(
                     next_state = ?new_state,
-                    observed_version = firmware_report.observed_version.as_deref().unwrap_or("none"),
+                    operation_id = %operation.operation_id,
+                    observed_version = operation.report.observed_version.as_deref().unwrap_or("none"),
                     "firmware report received and successfully applied, transitioning"
                 );
                 return Ok(HandlerResult {
@@ -448,11 +460,11 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
                     txn: None,
                 });
             }
-            tracing::warn!(
-                flashed = firmware_report.flashed,
-                reset = ?firmware_report.reset,
-                observed_version = firmware_report.observed_version.as_deref().unwrap_or("none"),
-                "firmware report received but not successful, waiting for retry"
+            tracing::debug!(
+                operation_id = %operation.operation_id,
+                operation_state = ?operation.state,
+                diagnostic = ?operation.diagnostic,
+                "firmware operation is not complete; remaining in ApplyFirmware"
             );
         }
 
@@ -768,9 +780,8 @@ fn apply_profile(state: &DpaInterface) -> DpaManagerResult<HandlerResult> {
 ///     must NOT re-read the site-wide target: it can advance between issuing the
 ///     lock and observing it, which would record the card as converged to a
 ///     newer version than the IKM it is actually locked under.
-///   * if nothing is staged (a card locked before this flow shipped, already
-///     covered by the backfill at v0), fall back to the site-wide target and
-///     warn; that path is idempotent.
+///   * if nothing is staged, preserve the existing record and warn. Observing
+///     Locked does not identify the IKM version used to lock the card.
 async fn record_lock_convergence(
     conn: &mut PgConnection,
     dpa_interface_id: DpaInterfaceId,
@@ -783,19 +794,13 @@ async fn record_lock_convergence(
     )
     .await?;
 
-    if !promoted {
+    if let db::ConditionalWrite::NotApplied(NoStagedCredentialRotation) = promoted {
         tracing::warn!(
             %dpa_interface_id,
             %mac_address,
             "card locked without a staged lockdown IKM rotation; \
-             recording convergence at the site-wide target"
+             keeping existing rotation bookkeeping"
         );
-        db::credential_rotation::record_device_converged(
-            conn,
-            mac_address,
-            db::credential_rotation::CredentialRotationType::LockdownIkm,
-        )
-        .await?;
     }
     Ok(())
 }
@@ -875,10 +880,8 @@ mod tests {
         );
     }
 
-    // Fallback (warn) path: nothing staged falls back to the site-wide target
-    // (seeded at 0 by the backfill migration).
     #[crate::sqlx_test]
-    async fn falls_back_to_sitewide_target_when_nothing_staged(pool: PgPool) {
+    async fn missing_staged_version_does_not_claim_sitewide_target(pool: PgPool) {
         let id = carbide_uuid::dpa_interface::DpaInterfaceId::new();
         let mac: MacAddress = "02:00:00:00:00:12".parse().unwrap();
 
@@ -888,8 +891,8 @@ mod tests {
 
         assert_eq!(
             lockdown_version_of(&pool, "02:00:00:00:00:12").await,
-            Some(0),
-            "nothing staged must fall back to the site-wide target (0)"
+            None,
+            "observing Locked does not prove which IKM version was used"
         );
     }
 }

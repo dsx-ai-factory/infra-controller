@@ -1,6 +1,6 @@
 # `nico-admin-cli instance-type associate`
 
-_[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **associate**_
+*[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **associate***
 
 ## NAME
 
@@ -9,9 +9,11 @@ machines
 
 ## SYNOPSIS
 
-**nico-admin-cli instance-type associate** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*INSTANCE_TYPE_ID*\>
-\[*MACHINE_IDS*\]
+```text
+nico-admin-cli instance-type associate [--extended]
+[--sort-by] [-h|--help] <INSTANCE_TYPE_ID>
+[MACHINE_IDS]
+```
 
 ## DESCRIPTION
 
@@ -19,30 +21,34 @@ Associate an instance type with machines
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
-\<*INSTANCE_TYPE_ID*\>  
+`<INSTANCE_TYPE_ID>`
+
 InstanceTypeId
 
-\[*MACHINE_IDS*\]  
+[*MACHINE_IDS*]
+
 Machine Ids, separated by comma
 
 ## Examples
@@ -54,4 +60,4 @@ nico-admin-cli instance-type associate 12345678-1234-5678-90ab-cdef01234567 abcd
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**Related:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)

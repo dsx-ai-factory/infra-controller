@@ -6,23 +6,28 @@ package model
 import (
 	"context"
 	"database/sql"
-	"reflect"
+	"errors"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
 	// SkuRelationName is the relation name for the Sku model
 	SkuRelationName = "Sku"
 	// names of order by fields
+	SkuOrderByID      = "id"
 	SkuOrderByCreated = "created"
 	skuOrderByUpdated = "updated"
 	// SkuOrderByDefault default field to be used for ordering when none specified
@@ -31,7 +36,7 @@ const (
 
 var (
 	// SkuOrderByFields is a list of valid order by fields for the SKU model
-	SkuOrderByFields = []string{SkuOrderByCreated, skuOrderByUpdated}
+	SkuOrderByFields = []string{SkuOrderByID, SkuOrderByCreated, skuOrderByUpdated}
 	// SkuRelatedEntities is a list of valid relation by fields for the Sku model
 	SkuRelatedEntities = map[string]bool{
 		SiteRelationName: true,
@@ -45,12 +50,8 @@ type SkuComponents struct {
 	*corev1.SkuComponents
 }
 
-// Equal reports whether two `*SkuComponents` wrappers carry the same
-// underlying proto, treating a nil wrapper as carrying a nil proto.
-// Avoids dereferencing a nil wrapper to read `.SkuComponents`. Declared
-// as a method (per the Go convention used by `time.Time.Equal`,
-// `cmp.Equal`, etc.) so callers can write `s.Equal(other)` instead of
-// reaching for a free helper.
+// Equal compares protobuf field values, ignoring runtime bookkeeping such as
+// cached message state. A nil wrapper is treated as a nil underlying proto.
 func (s *SkuComponents) Equal(other *SkuComponents) bool {
 	var sp, op *corev1.SkuComponents
 	if s != nil {
@@ -59,7 +60,7 @@ func (s *SkuComponents) Equal(other *SkuComponents) bool {
 	if other != nil {
 		op = other.SkuComponents
 	}
-	return reflect.DeepEqual(sp, op)
+	return proto.Equal(sp, op)
 }
 
 func (s *SkuComponents) UnmarshalJSON(b []byte) error {
@@ -189,6 +190,9 @@ type SkuUpdateInput struct {
 	DeviceType           *string
 	AssociatedMachineIds []string
 	Created              *time.Time
+	// ExpectedUpdated requires a matching stored `Updated` when non-nil.
+	// Nil leaves writes unconditional; no-field calls ignore this condition.
+	ExpectedUpdated *time.Time
 }
 
 // SkuFilterInput input parameters for Filter method
@@ -228,12 +232,19 @@ func (s *SKU) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuery
 type SkuDAO interface {
 	// Create used to create new row
 	Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (*SKU, error)
-	// Update used to update row
+	// Update writes supplied fields and stamps `Updated`, checking `ExpectedUpdated`
+	// when set. A missing row or version mismatch returns `db.ErrDoesNotExist`.
+	// With no fields it returns the stored row without writing or checking the token.
 	Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (*SKU, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, skuID string) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, updated time.Time) (bool, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) ([]SKU, int, error)
+	// GetForAttachment locks requested SKUs on a Site until tx completes.
+	GetForAttachment(ctx context.Context, tx *db.Tx, siteID uuid.UUID, skuIDs []string) ([]SKU, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, skuID string) (*SKU, error)
 }
@@ -242,17 +253,14 @@ type SkuDAO interface {
 type SkuSQLDAO struct {
 	dbSession *db.Session
 	SkuDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new SKU from the given parameters
 // SKU comes from NICo, so SkuID is required
-func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (*SKU, error) {
+func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Create")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Create")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
 
 	sk := &SKU{
 		ID:                   input.SkuID,
@@ -277,13 +285,11 @@ func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput
 
 // Get returns a SKU by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (*SKU, error) {
+func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Get")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", id)
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Get")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", id))
 
 	sk := &SKU{}
 
@@ -300,32 +306,44 @@ func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (*SKU, error
 	return sk, nil
 }
 
+// GetForAttachment returns requested SKUs belonging to the Site and holds them
+// until the transaction completes. Missing or foreign SKUs are absent from the
+// result. An empty ID list selects nothing; a transaction is always required.
+func (ssd SkuSQLDAO) GetForAttachment(ctx context.Context, tx *db.Tx, siteID uuid.UUID, skuIDs []string) (_ []SKU, retErr error) {
+	if tx == nil {
+		return nil, errors.New("transaction is required to lock SKU attachments")
+	}
+	if len(skuIDs) == 0 {
+		return []SKU{}, nil
+	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.GetForAttachment")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+
+	// `Update` never changes `SiteID`, so moving a SKU requires deletion and
+	// recreation. KEY SHARE makes that deletion wait until this transaction
+	// ends while ordinary metadata updates can proceed. Lock rows in ID order.
+	skus := []SKU{}
+	err := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(&skus).
+		Where("sk.site_id = ?", siteID).
+		Where("sk.id IN (?)", bun.In(skuIDs)).
+		OrderExpr("sk.id ASC").For("KEY SHARE").Scan(ctx)
+	return skus, err
+}
+
 // setQueryWithFilter populates the lookup query based on specified filter
-func (ssd SkuSQLDAO) setQueryWithFilter(filter SkuFilterInput, query *bun.SelectQuery, skuDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (ssd SkuSQLDAO) setQueryWithFilter(filter SkuFilterInput, query *bun.SelectQuery, skuDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if len(filter.SiteIDs) > 0 {
 		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
-		if skuDAOSpan != nil {
-			ssd.tracerSpan.SetAttribute(skuDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 	if len(filter.SkuIDs) > 0 {
 		query = query.Where("id IN (?)", bun.In(filter.SkuIDs))
-		if skuDAOSpan != nil {
-			ssd.tracerSpan.SetAttribute(skuDAOSpan, "sku_ids", filter.SkuIDs)
-		}
 	}
 	if len(filter.DeviceTypes) > 0 {
 		query = query.Where("device_type IN (?)", bun.In(filter.DeviceTypes))
-		if skuDAOSpan != nil {
-			ssd.tracerSpan.SetAttribute(skuDAOSpan, "device_types", filter.DeviceTypes)
-		}
 	}
 	if len(filter.AssociatedMachineIds) > 0 {
 		// For array type, use overlap '&&' with a typed array literal to work with COUNT.
 		query = query.Where("sk.associated_machines && ARRAY[?]::text[]", bun.In(filter.AssociatedMachineIds))
-		if skuDAOSpan != nil {
-			ssd.tracerSpan.SetAttribute(skuDAOSpan, "associated_machine_ids", filter.AssociatedMachineIds)
-		}
 	}
 
 	return query, nil
@@ -334,12 +352,10 @@ func (ssd SkuSQLDAO) setQueryWithFilter(filter SkuFilterInput, query *bun.Select
 // GetAll returns all SKUs with optional filters
 // If orderBy is nil, then records are ordered by column specified
 // in SkuOrderByDefault in ascending order
-func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) ([]SKU, int, error) {
+func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) (_ []SKU, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.GetAll")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.GetAll")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
 
 	skus := []SKU{}
 
@@ -368,14 +384,14 @@ func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInpu
 	return skus, pager.Total, nil
 }
 
-// Update updates specified fields of an existing SKU
-func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (*SKU, error) {
+// Update writes supplied fields and stamps `Updated`, checking `ExpectedUpdated`
+// when set. A missing row or version mismatch returns `db.ErrDoesNotExist`.
+// With no fields it returns the stored row without writing or checking the token.
+func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Update")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", input.SkuID)
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Update")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", input.SkuID))
 
 	sk := &SKU{ID: input.SkuID}
 	updatedFields := []string{}
@@ -415,9 +431,21 @@ func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput
 	}
 
 	if len(updatedFields) > 0 {
-		_, err := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(sk).Column(updatedFields...).Where("sk.id = ?", input.SkuID).Exec(ctx)
+		updatedFields = append(updatedFields, "updated")
+		query := db.GetIDB(tx, ssd.dbSession).NewUpdate().Model(sk).Column(updatedFields...).Where("sk.id = ?", input.SkuID)
+		if input.ExpectedUpdated != nil {
+			query = query.Where("sk.updated = ?", *input.ExpectedUpdated)
+		}
+		result, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			return nil, db.ErrDoesNotExist
 		}
 	}
 
@@ -425,13 +453,11 @@ func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput
 }
 
 // Delete deletes a SKU by ID
-func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) error {
+func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Delete")
-	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
-		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", id)
-	}
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.Delete")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", id))
 
 	sk := &SKU{ID: id}
 
@@ -443,10 +469,25 @@ func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) error {
 	return nil
 }
 
+// DeleteIfUnchanged deletes a row only if its `Updated` timestamp matches `updated`.
+// It returns false if the row changed or no longer exists.
+func (ssd SkuSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, skuID string, updated time.Time) (_ bool, retErr error) {
+	ctx, skuDAOSpan := cotel.StartSpan(ctx, "SkuDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(skuDAOSpan, retErr) }()
+	cotel.SetAttribute(skuDAOSpan, attribute.String("id", skuID))
+
+	result, err := db.GetIDB(tx, ssd.dbSession).NewDelete().Model((*SKU)(nil)).
+		Where("id = ?", skuID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
 // NewSkuDAO returns a new SkuDAO
 func NewSkuDAO(dbSession *db.Session) SkuDAO {
 	return &SkuSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

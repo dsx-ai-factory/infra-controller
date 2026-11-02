@@ -1,0 +1,99 @@
+suite: External Unbound Service address families
+templates:
+  - external-service.yaml
+set:
+  externalService.enabled: true
+tests:
+  - it: keeps both external Services IPv4-only independently of internal IPv6
+    set:
+      ipv6.enabled: true
+    asserts: &ipv4Services
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv4]
+
+  - it: keeps IPv4 defaults when family settings are null
+    set:
+      externalService.ipFamilyPolicy: null
+      externalService.ipFamilies: null
+    asserts: *ipv4Services
+
+  - it: keeps IPv4 defaults when family settings are empty
+    set:
+      externalService.ipFamilyPolicy: ""
+      externalService.ipFamilies: []
+    asserts: *ipv4Services
+
+  - it: selects IPv6 for both DNS protocols without changing their shared VIP
+    set:
+      externalService:
+        ipFamilyPolicy: SingleStack
+        ipFamilies: [IPv6]
+        annotations:
+          metallb.io/loadBalancerIPs: "2001:db8::53"
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
+      - equal:
+          path: metadata.annotations["metallb.io/loadBalancerIPs"]
+          value: "2001:db8::53"
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
+          value: unbound-external
+      - equal:
+          path: metadata.name
+          value: unbound-external-udp
+        documentIndex: 0
+      - equal:
+          path: spec.ports
+          value:
+            - {port: 53, targetPort: dns-udp, protocol: UDP, name: dns-udp}
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: unbound-external-tcp
+        documentIndex: 1
+      - equal:
+          path: spec.ports
+          value:
+            - {port: 53, targetPort: dns-tcp, protocol: TCP, name: dns-tcp}
+        documentIndex: 1
+
+  - it: preserves the requested primary family for both dual-stack Services
+    set:
+      externalService.ipFamilyPolicy: RequireDualStack
+      externalService.ipFamilies: [IPv6, IPv4]
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: RequireDualStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6, IPv4]
+
+  - it: rejects a non-string policy instead of silently defaulting it
+    set:
+      externalService.ipFamilyPolicy: false
+    asserts:
+      - failedTemplate:
+          errorPattern: 'externalService.ipFamilyPolicy'
+
+  - it: rejects a non-list family selection instead of silently defaulting it
+    set:
+      externalService.ipFamilies: false
+    asserts:
+      - failedTemplate:
+          errorPattern: 'externalService.ipFamilies'

@@ -151,7 +151,7 @@ func (o *ActionConfig) GetParameters() map[string]interface{} {
 	return o.Parameters
 }
 
-// GetParametersOk returns a tuple with the Parameters field value if set, nil otherwise
+// GetParametersOk returns a tuple with the Parameters field value if set, an empty map otherwise
 // and a boolean to check if the value has been set.
 func (o *ActionConfig) GetParametersOk() (map[string]interface{}, bool) {
 	if o == nil || IsNil(o.Parameters) {

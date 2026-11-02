@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
-use carbide_uuid::dpa_interface::{DpaInterfaceId, NULL_DPA_INTERFACE_ID};
+use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::machine::HostMachineId;
 use config_version::ConfigVersion;
 use mac_address::MacAddress;
@@ -28,10 +28,12 @@ use model::dpa_interface::{
     DpaInterface, DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaSearchConfig,
     NewDpaInterface,
 };
+use model::pci::PciBdfOrderingKey;
 use sqlx::PgConnection;
 
 use super::DatabaseError;
 use crate::db_read::DbReader;
+use crate::{ConditionalWrite, ControllerStateNotCurrent};
 
 pub async fn persist(
     value: NewDpaInterface,
@@ -62,10 +64,10 @@ pub async fn persist(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// ensure inserts a new interface if one doesn't already exist for
-/// the given (machine_id, mac_address), or returns the existing one if
-/// it does. This makes it so repeated processing of device reports from
-/// scout are handled gracefully.
+/// Ensure an interface exists for the given `(machine_id, mac_address)`.
+/// An existing live interface may replace its `/dev/mst/` locator with a
+/// reported lowercase `dddd:bb:dd.f` PCI BDF. All other existing locators and
+/// interface state are preserved, including on reports from older Scouts.
 pub async fn ensure(
     value: NewDpaInterface,
     txn: &mut PgConnection,
@@ -75,9 +77,22 @@ pub async fn ensure(
     let state_version = ConfigVersion::initial();
     let state = DpaInterfaceControllerState::Provisioning;
     let description = value.device_description.unwrap_or_default();
+    // The shared parser owns PCI numeric bounds; the layout check restricts
+    // this one-way locator upgrade to Scout's canonical spelling.
+    let is_canonical_pci_name = matches!(
+        value.pci_name.as_bytes(),
+        [_, _, _, _, b':', _, _, b':', _, _, b'.', _]
+    ) && value
+        .pci_name
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b':' | b'.'))
+        && PciBdfOrderingKey::from_bdf(&value.pci_name).is_ok();
 
     let insert_query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (machine_id, mac_address) DO NOTHING RETURNING row_to_json(dpa_interfaces.*)";
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (machine_id, mac_address) DO UPDATE SET pci_name = EXCLUDED.pci_name
+            WHERE dpa_interfaces.deleted IS NULL AND dpa_interfaces.pci_name LIKE '/dev/mst/%' AND $11
+            RETURNING row_to_json(dpa_interfaces.*)";
 
     let result: Option<DpaInterface> = sqlx::query_as(insert_query)
         .bind(value.machine_id.to_string())
@@ -90,17 +105,17 @@ pub async fn ensure(
         .bind(value.pci_name)
         .bind(description)
         .bind(value.interface_type)
+        .bind(is_canonical_pci_name)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(insert_query, e))?;
 
-    // A new interface was inserted, return it!
+    // Return the inserted interface or the existing interface with its locator upgraded.
     if let Some(interface) = result {
         return Ok(interface);
     }
 
-    // ...nope, we got nothin. Fetch and return
-    // the existing interface instead.
+    // A locator that does not qualify for upgrade stays on the existing live interface.
     let select_query = "SELECT row_to_json(m.*) FROM (SELECT * FROM dpa_interfaces WHERE deleted IS NULL AND machine_id = $1 AND mac_address = $2) m";
     sqlx::query_as(select_query)
         .bind(value.machine_id)
@@ -322,6 +337,25 @@ pub async fn find_by_machine_id(
     Ok(results)
 }
 
+/// Load a host's SVPC cards while locking each row for observation merging.
+/// The caller must keep this transaction through the dependent card-state writes;
+/// ID ordering prevents concurrent multi-card reports from reversing lock order.
+pub async fn find_svpc_by_machine_id_for_update(
+    txn: &mut PgConnection,
+    machine_id: HostMachineId,
+) -> Result<Vec<DpaInterface>, DatabaseError> {
+    let query = "SELECT row_to_json(card.*) FROM (
+        SELECT * FROM dpa_interfaces
+        WHERE deleted IS NULL AND machine_id = $1 AND interface_type = 'Svpc'
+        ORDER BY id FOR UPDATE
+    ) card";
+    sqlx::query_as(query)
+        .bind(machine_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Batch-load DPA interfaces for many machines in a single query.
 ///
 /// This is the set-oriented counterpart to [`find_by_machine_id`]: callers that
@@ -373,6 +407,76 @@ pub async fn find_by_machine_ids(
             by_machine
         },
     ))
+}
+
+/// A SpectrumX attachment-selector group projected from non-deleted DPA interfaces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpectrumXDeviceCapability {
+    /// The non-empty device description used as the attachment `device` selector.
+    pub device: String,
+    /// The number of interfaces in the group. Valid `device_instance` selectors
+    /// are `0..count`, resolved in PCI-name order during attachment allocation.
+    pub count: u32,
+}
+
+/// Batch-load SpectrumX attachment-selector inventory for a set of host machines.
+///
+/// This intentionally projects and aggregates only the fields needed by
+/// machine capability discovery instead of loading complete DPA-interface rows,
+/// whose configuration and device-info JSON can be substantially wider. This
+/// inventory does not represent site-level SpectrumX enablement or readiness.
+pub async fn find_spectrum_x_capabilities_by_machine_ids(
+    txn: impl DbReader<'_>,
+    machine_ids: &[HostMachineId],
+) -> Result<std::collections::HashMap<HostMachineId, Vec<SpectrumXDeviceCapability>>, DatabaseError>
+{
+    if machine_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct SpectrumXCapabilityRow {
+        machine_id: HostMachineId,
+        device: String,
+        count: i64,
+    }
+
+    let query = "SELECT machine_id, device_description AS device, COUNT(*) AS count
+        FROM dpa_interfaces
+        WHERE deleted IS NULL
+          AND machine_id = ANY($1)
+          AND device_description IS NOT NULL
+          AND device_description <> ''
+        GROUP BY machine_id, device_description
+        ORDER BY machine_id, device_description";
+    let rows = sqlx::query_as::<_, SpectrumXCapabilityRow>(query)
+        .bind(machine_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    let mut capabilities_by_machine =
+        std::collections::HashMap::<HostMachineId, Vec<SpectrumXDeviceCapability>>::new();
+    for row in rows {
+        let count = row
+            .count
+            .try_into()
+            .map_err(|error| DatabaseError::Internal {
+                message: format!(
+                    "SpectrumX interface count {} for machine {} and device {:?} does not fit in u32: {error}",
+                    row.count, row.machine_id, row.device,
+                ),
+            })?;
+        capabilities_by_machine
+            .entry(row.machine_id)
+            .or_default()
+            .push(SpectrumXDeviceCapability {
+                device: row.device,
+                count,
+            });
+    }
+
+    Ok(capabilities_by_machine)
 }
 
 pub async fn find_by_ids(
@@ -448,18 +552,19 @@ pub async fn all_dpa_states_in_sync(
     Ok(true)
 }
 
-/// Updates the dpa interface state that is owned by the state controller
-/// under the premise that the current controller state version didn't change.
+/// `try_update_controller_state` updates the DPA controller state when its
+/// version matches `expected_version`, replacing that version with `new_version`.
 ///
-/// Returns `true` if the state could be updated, and `false` if the object
-/// either doesn't exist anymore or is at a different version.
+/// Returns `NotApplied(ControllerStateNotCurrent)` if the row is missing or its
+/// version differs. `new_version` must advance `expected_version`; the caller must
+/// commit any surrounding transaction. Database failures are returned as errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     id: DpaInterfaceId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &DpaInterfaceControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = "UPDATE dpa_interfaces SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, DpaInterfaceId>(query)
         .bind(new_version)
@@ -470,7 +575,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(
@@ -528,31 +636,43 @@ pub async fn batch_is_machine_dpa_capable(
         .collect())
 }
 
-/// Updates the desired network configuration for a host
+/// `DpaNetworkConfigNotCurrent` means the interface is missing or its network
+/// config version no longer matches the snapshot. The write does not distinguish
+/// these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DpaNetworkConfigNotCurrent;
+
+/// `try_update_network_config` updates the desired DPA network configuration and
+/// advances its version when it matches `expected_version`.
+///
+/// Returns `Applied(interface_id)` when the update applies, or
+/// `NotApplied(DpaNetworkConfigNotCurrent)` if the interface is missing or its
+/// version differs. The caller must commit any surrounding transaction.
+/// Database failures are returned as errors.
 pub async fn try_update_network_config(
     txn: &mut PgConnection,
     interface_id: &DpaInterfaceId,
     expected_version: ConfigVersion,
     new_state: &DpaInterfaceNetworkConfig,
-) -> Result<DpaInterfaceId, DatabaseError> {
+) -> Result<ConditionalWrite<DpaInterfaceId, DpaNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
     let query = "UPDATE dpa_interfaces SET network_config_version=$1, network_config=$2::json
             WHERE id=$3::uuid AND network_config_version=$4
             RETURNING id";
-    let query_result: Result<DpaInterfaceId, _> = sqlx::query_as(query)
+    let result: Option<DpaInterfaceId> = sqlx::query_as(query)
         .bind(next_version)
         .bind(sqlx::types::Json(new_state))
         .bind(interface_id)
         .bind(expected_version)
-        .fetch_one(txn)
-        .await;
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
 
-    match query_result {
-        Ok(interface_id) => Ok(interface_id),
-        Err(sqlx::Error::RowNotFound) => Ok(NULL_DPA_INTERFACE_ID),
-        Err(e) => Err(DatabaseError::query(query, e)),
-    }
+    Ok(match result {
+        Some(interface_id) => ConditionalWrite::Applied(interface_id),
+        None => ConditionalWrite::NotApplied(DpaNetworkConfigNotCurrent),
+    })
 }
 
 #[cfg(test)]
@@ -561,16 +681,72 @@ mod test {
 
     use carbide_libmlx_model::device::info::MlxDeviceInfo;
     use carbide_test_support::query_counter::count_queries;
+    use carbide_uuid::dpa_interface::DpaInterfaceId;
     use carbide_uuid::machine::{
         HostMachineId as MachineId, MachineId as GenericMachineId, MachineIdSource, MachineType,
     };
     use mac_address::MacAddress;
     use model::dpa_interface::{
-        DpaInterfaceControllerState, DpaInterfaceType, DpaSearchConfig, NewDpaInterface,
+        CardState, DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType,
+        DpaLockMode, DpaSearchConfig, NewDpaInterface,
     };
     use model::machine::ManagedHostState;
 
-    use crate::machine;
+    use super::{DpaNetworkConfigNotCurrent, try_update_network_config};
+    use crate::{ConditionalWrite, machine};
+
+    /// The observation loader must return only this host's SVPC cards in ID
+    /// order. Fixed IDs keep insertion order from accidentally proving sorting.
+    #[crate::sqlx_test]
+    async fn locked_svpc_query_returns_exact_membership_in_id_order(pool: sqlx::PgPool) {
+        let hosts: [MachineId; 2] = [1, 2].map(|byte| {
+            GenericMachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [byte; 32],
+                MachineType::Host,
+            )
+            .try_into()
+            .unwrap()
+        });
+        let mut txn = pool.begin().await.unwrap();
+        for host in hosts {
+            machine::create(&mut txn, None, &host, ManagedHostState::Ready, None, 2)
+                .await
+                .unwrap();
+        }
+        for (ordinal, host, interface_type) in [
+            (2, hosts[0], DpaInterfaceType::Svpc),
+            (1, hosts[0], DpaInterfaceType::Svpc),
+            (3, hosts[0], DpaInterfaceType::Astra),
+            (4, hosts[1], DpaInterfaceType::Svpc),
+        ] {
+            let id = DpaInterfaceId::from(uuid::Uuid::from_u128(u128::from(ordinal)));
+            sqlx::query(
+                "INSERT INTO dpa_interfaces
+                 (id, machine_id, mac_address, device_type, pci_name, interface_type)
+                 VALUES ($1, $2, $3, 'SuperNIC', $4, $5)",
+            )
+            .bind(id)
+            .bind(host)
+            .bind(MacAddress::from([0, 0x11, 0x22, 0x33, 0x44, ordinal]))
+            .bind(format!("0000:{ordinal:02x}:00.0"))
+            .bind(interface_type)
+            .execute(&mut *txn)
+            .await
+            .unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        let mut txn = pool.begin().await.unwrap();
+        let cards = super::find_svpc_by_machine_id_for_update(&mut txn, hosts[0])
+            .await
+            .unwrap();
+        assert_eq!(
+            cards.iter().map(|card| card.id).collect::<Vec<_>>(),
+            [1, 2].map(|id| DpaInterfaceId::from(uuid::Uuid::from_u128(id)))
+        );
+        txn.commit().await.unwrap();
+    }
 
     /// Query-count regression guard for the batched DPA-interface loader.
     ///
@@ -764,6 +940,79 @@ mod test {
             "empty input must produce an empty map"
         );
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn network_config_requires_current_interface(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        let interface = super::persist(
+            NewDpaInterface {
+                machine_id,
+                mac_address: "00:11:22:33:44:55".parse()?,
+                device_type: "SuperNIC".to_string(),
+                pci_name: "0000:cc:00.0".to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Svpc,
+            },
+            &mut txn,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let old_version = interface.network_config.version;
+        let desired = DpaInterfaceNetworkConfig {
+            use_admin_network: Some(false),
+            ..Default::default()
+        };
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            try_update_network_config(&mut txn, &interface.id, old_version, &desired).await?,
+            ConditionalWrite::Applied(interface.id)
+        );
+        txn.commit().await?;
+
+        for (scenario, id) in [
+            ("stale snapshot", interface.id),
+            ("missing interface", DpaInterfaceId::nil()),
+        ] {
+            let mut txn = pool.begin().await?;
+            assert_eq!(
+                try_update_network_config(
+                    &mut txn,
+                    &id,
+                    old_version,
+                    &DpaInterfaceNetworkConfig::default(),
+                )
+                .await?,
+                ConditionalWrite::NotApplied(DpaNetworkConfigNotCurrent),
+                "{scenario}"
+            );
+            txn.commit().await?;
+        }
+
+        let persisted = super::find_by_ids(&pool, &[interface.id], false)
+            .await?
+            .pop()
+            .expect("DPA interface exists");
+        assert_eq!(persisted.network_config.value, desired);
+        assert_eq!(
+            persisted.network_config.version.version_nr(),
+            old_version.version_nr() + 1
+        );
         Ok(())
     }
 
@@ -1004,6 +1253,138 @@ mod test {
         Ok(())
     }
 
+    /// `ensure` must preserve established card state when a report cannot
+    /// upgrade its locator. Astra inventory also shares this conflict path.
+    #[crate::sqlx_test]
+    async fn ensure_preserves_state_for_rejected_locator_changes(pool: sqlx::PgPool) {
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
+                .unwrap();
+        let mut txn = pool.begin().await.unwrap();
+        machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        for (scenario, mac_tail, interface_type, saved_locator, reported_locator) in [
+            (
+                "uppercase BDF cannot upgrade MST locator",
+                1,
+                DpaInterfaceType::Svpc,
+                "/dev/mst/mt41692_pciconf0",
+                "0000:CC:00.0",
+            ),
+            (
+                "out-of-range function cannot upgrade MST locator",
+                2,
+                DpaInterfaceType::Svpc,
+                "/dev/mst/mt41692_pciconf0",
+                "0000:cc:00.8",
+            ),
+            (
+                "SVPC report cannot replace an existing Astra interface",
+                3,
+                DpaInterfaceType::Astra,
+                "0000:cc:00.0",
+                "0000:dd:00.0",
+            ),
+        ] {
+            let mut txn = pool.begin().await.unwrap();
+            let mut card = super::persist(
+                NewDpaInterface {
+                    machine_id,
+                    mac_address: MacAddress::from([0, 0x11, 0x22, 0x33, 0x44, mac_tail]),
+                    device_type: "BlueField3".into(),
+                    pci_name: saved_locator.into(),
+                    device_description: Some("retained description".into()),
+                    interface_type,
+                },
+                &mut txn,
+            )
+            .await
+            .unwrap();
+            // Non-default values expose an upsert that replaces the row or
+            // resets its controller/network versions while changing inventory.
+            assert_eq!(
+                super::try_update_controller_state(
+                    &mut txn,
+                    card.id,
+                    card.controller_state.version,
+                    card.controller_state.version.increment(),
+                    &DpaInterfaceControllerState::Assigned,
+                )
+                .await
+                .unwrap(),
+                ConditionalWrite::Applied(())
+            );
+            assert_eq!(
+                super::try_update_network_config(
+                    &mut txn,
+                    &card.id,
+                    card.network_config.version,
+                    &DpaInterfaceNetworkConfig {
+                        use_admin_network: Some(false),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+                ConditionalWrite::Applied(card.id)
+            );
+            card.card_state = Some(CardState {
+                lockmode: Some(DpaLockMode::Locked),
+                profile: Some("retained-profile".into()),
+                profile_synced: Some(true),
+                ..Default::default()
+            });
+            super::update_card_state(&mut txn, card.clone())
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            let row_query = "SELECT to_jsonb(dpa_interfaces) FROM dpa_interfaces WHERE id = $1";
+            let before: serde_json::Value = sqlx::query_scalar(row_query)
+                .bind(card.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+            let mut txn = pool.begin().await.unwrap();
+            let reported = super::ensure(
+                NewDpaInterface {
+                    machine_id,
+                    mac_address: card.mac_address,
+                    device_type: "SuperNIC".into(),
+                    pci_name: reported_locator.into(),
+                    device_description: Some("replacement description".into()),
+                    interface_type: DpaInterfaceType::Svpc,
+                },
+                &mut txn,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reported.id, card.id, "{scenario}");
+            assert_eq!(reported.pci_name, saved_locator, "{scenario}");
+            assert_eq!(reported.interface_type, interface_type, "{scenario}");
+            txn.commit().await.unwrap();
+
+            // Reload the whole row so an ignored conflicting report cannot
+            // silently change any saved state or version alongside the locator.
+            let after: serde_json::Value = sqlx::query_scalar(row_query)
+                .bind(card.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(after, before, "{scenario}");
+        }
+    }
+
     // test_device_info_roundtrip is a super basic test that inserts
     // a new DPA + corresponding MlxDeviceInfo (as a JSONB blob) into
     // the database, and makes sure it gets read back out successfully.
@@ -1068,6 +1449,7 @@ mod test {
             uefi_version_virtio_blk_current: None,
             uefi_version_virtio_net_current: None,
             base_mac: Some(MacAddress::from_str("00:11:22:33:44:55")?),
+            base_guid: None,
             status: Some("OK".to_string()),
         };
 

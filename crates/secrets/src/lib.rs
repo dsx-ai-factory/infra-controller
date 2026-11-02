@@ -95,17 +95,24 @@ pub enum CertBackend {
 ///
 /// `shared_vault` is the already-constructed credential Vault client, reused
 /// for [`CertBackend::SharedVault`] so no second client or token lease is
-/// created in the common case. `spiffe` is the site's SPIFFE identity; a
-/// dedicated Vault issues certs under the same identity namespace as the rest
-/// of the deployment.
+/// created in the common case; that backend fails without it, and a dedicated
+/// Vault never uses it. `spiffe` is the site's SPIFFE identity; a dedicated
+/// Vault issues certs under the same identity namespace as the rest of the
+/// deployment.
 pub fn create_certificate_provider(
     config: &CertificateConfig,
-    shared_vault: &Arc<ForgeVaultClient>,
+    shared_vault: Option<&Arc<ForgeVaultClient>>,
     spiffe: SpiffeIdentity,
 ) -> eyre::Result<Arc<dyn CertificateProvider>> {
     match &config.backend {
         CertBackend::SharedVault => {
-            let provider: Arc<dyn CertificateProvider> = shared_vault.clone();
+            let provider: Arc<dyn CertificateProvider> = shared_vault
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "the shared vault certificate backend requires the credential vault client"
+                    )
+                })?
+                .clone();
             Ok(provider)
         }
         CertBackend::DedicatedVault(dedicated) => {
@@ -166,6 +173,13 @@ pub enum SecretsError {
     UfmCredentialMutationBlocked {
         fabric: String,
     },
+    /// A local source owns version 0 of the site-wide BMC root but has no entry;
+    /// callers should surface the configuration remediation without falling
+    /// through to a persistent backend.
+    BmcSiteWideRootV0CredentialReadBlocked,
+    /// A caller attempted to mutate version 0 of the site-wide BMC root in a
+    /// persistent backend while local sources own it.
+    BmcSiteWideRootV0CredentialMutationBlocked,
 }
 
 impl Display for SecretsError {
@@ -188,6 +202,20 @@ impl Display for SecretsError {
                 crate::chained_reader::UFM_LOCAL_CREDENTIAL_REMEDIATION,
                 crate::chained_reader::UFM_BACKEND_SOURCE_REMEDIATION
             ),
+            SecretsError::BmcSiteWideRootV0CredentialReadBlocked => write!(
+                f,
+                "secrets operation failed: site-wide BMC root version 0 is absent from the \
+                 configured local sources; {}; {}",
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_BACKEND_SOURCE_REMEDIATION
+            ),
+            SecretsError::BmcSiteWideRootV0CredentialMutationBlocked => write!(
+                f,
+                "persistent backend credential mutation is disabled for site-wide BMC root \
+                 version 0 because local sources own it; {}; {}",
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_BACKEND_SOURCE_REMEDIATION
+            ),
         }
     }
 }
@@ -204,6 +232,12 @@ impl From<SecretsError> for eyre::Report {
             SecretsError::GenericError(report) => report,
             value @ SecretsError::UfmCredentialReadBlocked { .. } => eyre::eyre!("{value}"),
             value @ SecretsError::UfmCredentialMutationBlocked { .. } => eyre::eyre!("{value}"),
+            value @ SecretsError::BmcSiteWideRootV0CredentialReadBlocked => {
+                eyre::eyre!("{value}")
+            }
+            value @ SecretsError::BmcSiteWideRootV0CredentialMutationBlocked => {
+                eyre::eyre!("{value}")
+            }
         }
     }
 }

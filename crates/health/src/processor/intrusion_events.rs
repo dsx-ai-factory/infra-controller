@@ -125,6 +125,7 @@ impl EventProcessor for BmcIntrusionEventProcessor {
             IntrusionEventState::Alert => (
                 Vec::new(),
                 vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::IntrusionSensorTriggered,
                     target: Some(HOST_BMC_TARGET.to_string()),
                     message: INTRUSION_ALERT_MESSAGE.to_string(),
@@ -136,6 +137,7 @@ impl EventProcessor for BmcIntrusionEventProcessor {
             ),
             IntrusionEventState::Clear => (
                 vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::IntrusionSensorTriggered,
                     target: Some(HOST_BMC_TARGET.to_string()),
                 }],
@@ -189,7 +191,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "logs_collector",
             metadata: None,

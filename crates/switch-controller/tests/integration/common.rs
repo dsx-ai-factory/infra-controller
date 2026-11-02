@@ -203,7 +203,10 @@ pub(super) async fn new_switch(
             }),
             nvos_username,
             nvos_password,
-            nvos_mac_addresses: vec![nvos_mac.to_string()],
+            nvos_interfaces: vec![rpc::forge::ExpectedNvosInterface {
+                mac_address: nvos_mac.to_string(),
+                is_primary: true,
+            }],
             bmc_ip_address: bmc_ip.to_string(),
             nvos_ip_address: Some(nvos_ip.to_string()),
             ..Default::default()
@@ -298,7 +301,7 @@ pub(super) async fn transition_switch_controller_state(
     let switch = db_switch::find_by_id(txn, switch_id)
         .await?
         .expect("switch should exist");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn,
         *switch_id,
         switch.controller_state.version,
@@ -306,6 +309,7 @@ pub(super) async fn transition_switch_controller_state(
         &new_state,
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     Ok(())
 }
 

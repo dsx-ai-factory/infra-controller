@@ -22,6 +22,7 @@ mod iteration;
 mod reachability;
 mod spawn;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -29,6 +30,8 @@ use carbide_utils::managed_loop::{self, LoopManager};
 pub use context::DiscoveryLoopContext;
 pub(crate) use context::load_nmxc_schema_override;
 pub use iteration::run_discovery_iteration;
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::HealthError;
 use crate::collectors::{BackoffConfig, ExponentialBackoff};
@@ -40,26 +43,52 @@ pub struct DiscoveryIterationStats {
     pub active_monitors: usize,
 }
 
+/// Outcome of draining collectors at shutdown: `closed` finished within the
+/// deadline, `timed_out` were abandoned.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DiscoveryShutdown {
+    pub(crate) closed: usize,
+    pub(crate) timed_out: usize,
+}
+
 /// One pass of the endpoint discovery loop: the unit of work
 /// [`run_discovery_loop`] repeats, counts, and retries.
 #[async_trait]
 pub(crate) trait DiscoveryIteration: Send {
     async fn run_once(&mut self) -> Result<(), HealthError>;
+
+    /// Stops every collector this iteration owns; called once, after the loop
+    /// observes cancellation.
+    async fn shutdown(&mut self) -> DiscoveryShutdown {
+        DiscoveryShutdown::default()
+    }
 }
 
 /// Drives `iteration` forever on the discovery cadence. Every pass is
 /// counted by the shared managed-loop event; a failed pass writes that
 /// event's WARN line and schedules a capped exponential backoff instead of
 /// ending the loop, and the next success resets the backoff and returns the
-/// cadence to `interval`.
+/// cadence to `interval`. Collector mode transitions wake the loop before the
+/// scheduled delay expires.
+///
+/// Cancellation breaks the loop before the next pass and drains collectors
+/// through [`DiscoveryIteration::shutdown`].
 pub(crate) async fn run_discovery_loop(
     interval: Duration,
     backoff_config: BackoffConfig,
+    collector_transition_notify: Arc<Notify>,
+    cancel_token: CancellationToken,
     mut iteration: impl DiscoveryIteration,
-) {
+) -> DiscoveryShutdown {
     let mut backoff = ExponentialBackoff::new(&backoff_config);
+
     loop {
-        let result = iteration.run_once().await;
+        let result = tokio::select! {
+            biased;
+            () = cancel_token.cancelled() => break,
+            result = iteration.run_once() => result,
+        };
+
         managed_loop::record_iteration(LoopManager::HealthDiscovery, &result);
         let delay = match result {
             Ok(()) => {
@@ -68,12 +97,22 @@ pub(crate) async fn run_discovery_loop(
             }
             Err(_) => backoff.next_delay(),
         };
-        tokio::time::sleep(delay).await;
+
+        tokio::select! {
+            biased;
+            () = cancel_token.cancelled() => break,
+            () = tokio::time::sleep(delay) => {}
+            () = collector_transition_notify.notified() => {}
+        }
     }
+
+    iteration.shutdown().await
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use carbide_instrument::testing::MetricsCapture;
 
     use super::*;
@@ -112,6 +151,7 @@ mod tests {
     async fn discovery_loop_retries_failures_and_resets_backoff() {
         let metrics = MetricsCapture::start();
         let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
+        let collector_transition_notify = Arc::new(Notify::new());
 
         let loop_task = tokio::spawn(run_discovery_loop(
             Duration::from_secs(300),
@@ -119,6 +159,8 @@ mod tests {
                 initial: Duration::from_secs(1),
                 max: Duration::from_secs(8),
             },
+            collector_transition_notify,
+            CancellationToken::new(),
             ScriptedIteration {
                 // Two failures (retry, then doubled retry), a success
                 // (normal cadence), then a failure that must retry from the
@@ -170,5 +212,89 @@ mod tests {
             ),
             2.0
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collector_transition_wakes_discovery_before_the_normal_interval() {
+        let _metrics = MetricsCapture::start();
+        let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
+        let collector_transition_notify = Arc::new(Notify::new());
+
+        let loop_task = tokio::spawn(run_discovery_loop(
+            Duration::from_secs(300),
+            BackoffConfig::default(),
+            collector_transition_notify.clone(),
+            CancellationToken::new(),
+            ScriptedIteration {
+                script: vec![true],
+                calls: 0,
+                times: times_tx,
+            },
+        ));
+
+        let first_iteration = times_rx.recv().await.expect("first iteration should run");
+        collector_transition_notify.notify_one();
+
+        let second_iteration = times_rx
+            .recv()
+            .await
+            .expect("transition should wake the next iteration");
+
+        loop_task.abort();
+
+        assert_eq!(second_iteration, first_iteration);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_stops_the_loop_and_runs_shutdown_once() {
+        let _metrics = MetricsCapture::start();
+        let (times_tx, mut times_rx) = tokio::sync::mpsc::unbounded_channel();
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+
+        struct CountingShutdown {
+            inner: ScriptedIteration,
+            shutdowns: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl DiscoveryIteration for CountingShutdown {
+            async fn run_once(&mut self) -> Result<(), HealthError> {
+                self.inner.run_once().await
+            }
+
+            async fn shutdown(&mut self) -> DiscoveryShutdown {
+                self.shutdowns.fetch_add(1, Ordering::SeqCst);
+                DiscoveryShutdown {
+                    closed: 1,
+                    timed_out: 0,
+                }
+            }
+        }
+
+        let cancel_token = CancellationToken::new();
+
+        let loop_task = tokio::spawn(run_discovery_loop(
+            Duration::from_secs(300),
+            BackoffConfig::default(),
+            Arc::new(Notify::new()),
+            cancel_token.clone(),
+            CountingShutdown {
+                inner: ScriptedIteration {
+                    script: vec![true],
+                    calls: 0,
+                    times: times_tx,
+                },
+                shutdowns: shutdowns.clone(),
+            },
+        ));
+
+        times_rx.recv().await.expect("first iteration runs");
+        cancel_token.cancel();
+
+        let shutdown = loop_task.await.expect("loop task joins after cancel");
+
+        assert_eq!(shutdown.closed, 1);
+        assert_eq!(shutdown.timed_out, 0);
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
     }
 }

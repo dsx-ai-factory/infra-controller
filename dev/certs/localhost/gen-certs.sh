@@ -54,6 +54,7 @@ DNS.2 = host.docker.internal
 IP.1 = 127.0.0.1
 IP.2 = 192.168.65.254
 IP.3 = 192.168.5.2
+IP.4 = ::1
 EOF
 
 # Generate CA key and self-signed certificate

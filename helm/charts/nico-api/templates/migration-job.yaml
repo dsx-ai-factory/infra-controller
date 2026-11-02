@@ -34,8 +34,9 @@ spec:
             - /bin/sh
             - -c
             - |
+              {{- include "nico-api.databaseUrlScript" . | nindent 14 }}
               if [ -x /opt/nico/nico-api ]; then BIN=/opt/nico/nico-api; else BIN=/opt/carbide/carbide-api; fi
-              exec "$BIN" migrate --datastore="postgres://${DATASTORE_USER}:${DATASTORE_PASSWORD}@${DATASTORE_HOST}:${DATASTORE_PORT}/${DATASTORE_NAME}?sslmode={{ .Values.migrationJob.sslMode }}"
+              exec "$BIN" migrate --datastore="${DATASTORE_URL}?sslmode={{ .Values.migrationJob.sslMode }}"
           env:
             - name: DATASTORE_USER
               valueFrom:

@@ -66,7 +66,7 @@ func (s *server) Run() error {
 	go func() {
 		s.log.Info("serving metrics", "at", fmt.Sprintf("%s/metrics", s.c.MetricsEndpoint))
 		metricsServer := http.NewServeMux()
-		metricsServer.Handle("/metrics", promhttp.Handler())
+		metricsServer.Handle("GET /metrics", promhttp.Handler())
 		ms := &http.Server{
 			Addr:              s.c.MetricsEndpoint,
 			Handler:           metricsServer,

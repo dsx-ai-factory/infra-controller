@@ -35,7 +35,7 @@ pub use auth::RedfishAuth;
 use carbide_instrument::{Event, LabelValue, emit};
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
 use carbide_utils::HostPortPair;
-use carbide_utils::redfish::BmcAccessInfo;
+use carbide_utils::redfish::{BmcAccessInfo, redact_redfish_response_body};
 pub use error::{CredentialOpError, RedfishClientCreationError};
 use libredfish::Redfish;
 use libredfish::model::service_root::RedfishVendor;
@@ -421,6 +421,35 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
         ))
     }
 
+    /// Restore account 1 IPMI access after a recovered Lenovo password change.
+    /// Uses the current credentials without repeating the password change;
+    /// other vendors require no repair. Errors redact the supplied password.
+    async fn restore_bmc_root_ipmi_access(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        vendor: RedfishVendor,
+        credentials: Credentials,
+    ) -> Result<(), RedfishClientCreationError> {
+        if vendor != RedfishVendor::Lenovo {
+            return Ok(());
+        }
+        let Credentials::UsernamePassword { username, password } = credentials;
+        let client = self
+            .create_client(
+                host,
+                port,
+                RedfishAuth::Direct(username, password.clone()),
+                Some(vendor),
+            )
+            .await?;
+        client
+            .enable_ipmi_account_access("1", &password)
+            .await
+            .map_err(|err| redact_password(err, &password))
+            .map_err(RedfishClientCreationError::RedfishError)
+    }
+
     /// Rotate a BMC's root password in place, then apply the vendor-specific
     /// password policy.
     ///
@@ -493,13 +522,16 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
                     .map_err(|err| redact_password(err, curr_password.as_str()))
                     .map_err(RedfishClientCreationError::RedfishError)?;
             }
-            // AMI-based BMCs, including Vikings and Lenovo GB300s.
+            // AMI-based BMCs, including Vikings, Lenovo GB300s and Giga Computing.
             // Resolve the admin account by username. If reads are blocked by
             // `PasswordChangeRequired`, use its account URI or fall back to id "2".
             // Any other error propagates.
             //
             // https://docs.nvidia.com/dgx/dgxh100-user-guide/redfish-api-supp.html
-            RedfishVendor::AMI | RedfishVendor::LenovoAMI | RedfishVendor::LenovoGB300 => {
+            RedfishVendor::AMI
+            | RedfishVendor::LenovoAMI
+            | RedfishVendor::LenovoGB300
+            | RedfishVendor::GigaComputingAMI => {
                 match client
                     .change_password(curr_user.as_str(), new_password.as_str())
                     .await
@@ -553,10 +585,18 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
             .create_client(
                 host,
                 port,
-                RedfishAuth::Direct(curr_user.to_string(), new_password),
+                RedfishAuth::Direct(curr_user.to_string(), new_password.clone()),
                 Some(vendor),
             )
             .await?;
+
+        if vendor == RedfishVendor::Lenovo {
+            vendored_client
+                .enable_ipmi_account_access("1", &new_password)
+                .await
+                .map_err(|err| redact_password(err, &new_password))
+                .map_err(RedfishClientCreationError::RedfishError)?;
+        }
 
         vendored_client
             .set_machine_password_policy()
@@ -769,9 +809,9 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
     }
 }
 
-// Some BMC implementation may return passwords in response body and
-// we can display them to user. This function is helper to remove
-// password leak for password-related refish functions.
+// Some BMC implementations may return passwords in a response body that is
+// later displayed to a user. This helper removes that exposure from
+// password-related Redfish functions.
 pub fn redact_password(err: libredfish::RedfishError, password: &str) -> libredfish::RedfishError {
     redact_passwords(err, &[password])
 }
@@ -821,13 +861,16 @@ fn mask_all(text: &str, needles: &[&str]) -> String {
 
 /// [`redact_password`] over several passwords at once, with union masking
 /// (see [`mask_all`]) so overlapping matches cannot leave fragments of one
-/// password behind after another is replaced.
+/// password behind after another is replaced. JSON response bodies are decoded
+/// first so escaped forms of a password are covered as well.
 pub fn redact_passwords(
     err: libredfish::RedfishError,
     passwords: &[&str],
 ) -> libredfish::RedfishError {
     type RfError = libredfish::RedfishError;
     let redact = |v: String| mask_all(&v, passwords);
+    let redact_response_body =
+        |v: String| redact_redfish_response_body(&v, passwords.iter().copied());
     match err {
         RfError::HTTPErrorCode {
             url,
@@ -836,11 +879,11 @@ pub fn redact_passwords(
         } => RfError::HTTPErrorCode {
             url,
             status_code,
-            response_body: redact(response_body),
+            response_body: redact_response_body(response_body),
         },
         RfError::JsonDeserializeError { url, body, source } => RfError::JsonDeserializeError {
             url,
-            body: redact(body),
+            body: redact_response_body(body),
             source,
         },
         RfError::JsonSerializeError {
@@ -1067,6 +1110,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovered_ipmi_access_is_lenovo_only_and_redacts_failures() {
+        let sim = test_support::RedfishSim::default();
+        let credentials = Credentials::new("1", "test-recovery-password");
+        sim.restore_bmc_root_ipmi_access(
+            "127.0.0.1",
+            None,
+            RedfishVendor::Dell,
+            credentials.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(sim.create_client_calls().is_empty());
+
+        sim.seed_user("1", "test-recovery-password");
+        sim.fail_next_ipmi_access("rejected test-recovery-password");
+        let error = sim
+            .restore_bmc_root_ipmi_access("127.0.0.1", None, RedfishVendor::Lenovo, credentials)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("test-recovery-password"));
+        assert!(!sim.ipmi_account_access_enabled("1"));
+    }
+
+    #[tokio::test]
     async fn test_power_state() {
         let sim = RedfishSim::default();
         let client = sim
@@ -1115,6 +1183,57 @@ mod tests {
             !redact_password(err, PASSWORD)
                 .to_string()
                 .contains(PASSWORD)
+        );
+    }
+
+    #[test]
+    fn password_redact_from_error_decodes_json_strings() {
+        const PASSWORD: &str = "secret";
+        let err = libredfish::RedfishError::HTTPErrorCode {
+            url: "https://example.com/redfish/v1/Systems/1".into(),
+            status_code: http::StatusCode::BAD_REQUEST,
+            response_body: r#"{"error":{"message":"credential s\u0065cret rejected"}}"#.into(),
+        };
+
+        let redacted = redact_password(err, PASSWORD);
+        let libredfish::RedfishError::HTTPErrorCode { response_body, .. } = redacted else {
+            panic!("HTTP error remains an HTTP error after redaction");
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(&response_body).expect("redacted body remains valid JSON");
+        assert_eq!(response["error"]["message"], "credential REDACTED rejected");
+    }
+
+    /// Verifies libredfish's local non-response masker removes the bare Basic
+    /// payload even when the authentication scheme is normalized or omitted.
+    #[test]
+    fn password_redaction_masks_basic_payload_variants_in_local_errors() {
+        // Derive the same complete redaction context retained by the direct
+        // client, then echo its payload through a non-response error variant.
+        let (authorization, sensitive_values) =
+            carbide_utils::redfish::redfish_basic_authorization_context("root", Some("secret"));
+        let payload = &sensitive_values[1];
+        let error = libredfish::RedfishError::GenericError {
+            error: format!(
+                "exact {authorization}; lower basic {payload}; upper BASIC {payload}; bare {payload}"
+            ),
+        };
+        let sensitive_values = sensitive_values
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        // Run the local variant-aware sanitizer rather than the JSON response
+        // path so both masking implementations protect the same credential.
+        let redacted = redact_passwords(error, &sensitive_values);
+        let libredfish::RedfishError::GenericError { error } = redacted else {
+            panic!("generic error remains a generic error after redaction");
+        };
+
+        // The scheme is not itself secret, but no reusable Base64 payload may survive.
+        assert_eq!(
+            error,
+            "exact REDACTED; lower basic REDACTED; upper BASIC REDACTED; bare REDACTED"
         );
     }
 
@@ -1194,15 +1313,30 @@ mod tests {
         // Lenovo dispatches to account id "1"; seed it so the rotation succeeds.
         let sim = RedfishSim::default();
         sim.seed_user("1", "factory_pass");
+        sim.set_enforce_auth(true);
         sim.set_bmc_root_password(
             "127.0.0.1",
             Some(443),
             RedfishVendor::Lenovo,
-            Credentials::new("root", "factory_pass"),
+            Credentials::new("1", "factory_pass"),
             "site_pass".to_string(),
         )
         .await
         .expect("Lenovo rotation against account id 1 should succeed");
+        assert!(sim.ipmi_account_access_enabled("1"));
+        assert_eq!(
+            sim.auth_attempts(),
+            vec![
+                test_support::RedfishSimAuthAttempt {
+                    credentials: Credentials::new("1", "factory_pass"),
+                    authorized: true,
+                },
+                test_support::RedfishSimAuthAttempt {
+                    credentials: Credentials::new("1", "site_pass"),
+                    authorized: true,
+                },
+            ],
+        );
     }
 
     #[tokio::test]
@@ -1299,6 +1433,36 @@ mod tests {
                 RedfishClientCreationError::RedfishError(libredfish::RedfishError::MissingVendor)
             ),
             "expected MissingVendor, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn set_bmc_root_password_sushy_is_noop() {
+        let sim = RedfishSim::default();
+        sim.seed_user("root", "factory_pass");
+
+        sim.set_bmc_root_password(
+            "127.0.0.1",
+            Some(443),
+            RedfishVendor::Sushy,
+            Credentials::new("root", "factory_pass"),
+            "site_pass".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sim.user_password("root").as_deref(),
+            Some("factory_pass"),
+            "Sushy password change must be a no-op",
+        );
+        assert_eq!(
+            sim.create_client_calls()
+                .into_iter()
+                .map(|call| call.vendor)
+                .collect::<Vec<_>>(),
+            vec![Some(RedfishVendor::Unknown), Some(RedfishVendor::Sushy)],
+            "Sushy must still create the Unknown rotation client and the vendor policy client",
         );
     }
 

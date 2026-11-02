@@ -145,10 +145,9 @@ impl TryFrom<rpc::forge::NetworkSegmentCreationRequest> for NewNetworkSegment {
 /// Marshal a Data Object (NetworkSegment) into an RPC NetworkSegment
 ///
 /// subdomain_id - Rust UUID -> ProtoBuf UUID(String) cannot fail, so convert it or return None
-#[allow(deprecated)]
 impl From<NetworkSegment> for rpc::NetworkSegment {
     fn from(src: NetworkSegment) -> Self {
-        // Deprecated TenantState mapping - kept to populate the backward-compat flat field.
+        // Coarse tenant-facing state derived from the full controller state.
         // Note that even though the segment might already be ready,
         // we only return `Ready` after the state machine also noticed that.
         // Otherwise we would need to allow address allocation before the
@@ -179,9 +178,6 @@ impl From<NetworkSegment> for rpc::NetworkSegment {
 
         let state_reason: Option<rpc::forge::ControllerStateReason> =
             src.status.controller_state_outcome.map(Into::into);
-
-        let history: Vec<rpc::forge::NetworkSegmentStateHistory> =
-            src.status.history.into_iter().map(Into::into).collect();
 
         let flags: Vec<i32> = {
             use crate::forge::NetworkSegmentFlag::*;
@@ -220,7 +216,6 @@ impl From<NetworkSegment> for rpc::NetworkSegment {
             updated: Some(src.updated.into()),
             deleted: src.deleted.map(|t| t.into()),
 
-            // New structured fields - internal clients use these.
             // Note: prefixes are placed under config in the proto even though they are top-level
             // in the Rust model. The Rust model keeps them top-level because each NetworkPrefix
             // contains mixed config fields (CIDR, gateway) and status fields (free_ip_count,
@@ -229,40 +224,25 @@ impl From<NetworkSegment> for rpc::NetworkSegment {
                 vpc_id: src.config.vpc_id,
                 subdomain_id: src.config.subdomain_id,
                 mtu: Some(src.config.mtu),
-                prefixes: prefixes.clone(),
+                prefixes,
                 segment_type: src.config.segment_type as i32,
                 infer_slaac_eui64_addresses: src.config.infer_slaac_eui64_addresses,
             }),
             status: Some(rpc::forge::NetworkSegmentStatus {
-                flags: flags.clone(),
+                flags,
                 lifecycle: Some(rpc::forge::LifecycleStatus {
                     state: lifecycle_state,
-                    version: version.clone(),
-                    state_reason: state_reason.clone(),
+                    version,
+                    state_reason,
                     sla: Some(sla),
                 }),
                 tenant_state: tenant_state as i32,
             }),
             metadata: Some(rpc::forge::Metadata {
-                name: src.config.name.clone(),
+                name: src.config.name,
                 description: String::new(),
                 labels: vec![],
             }),
-
-            // Deprecated flat fields - populated for external client compatibility.
-            // Remove after nico-rest migrates to config/status/metadata (Phase 3).
-            vpc_id: src.config.vpc_id,
-            name: src.config.name,
-            subdomain_id: src.config.subdomain_id,
-            mtu: Some(src.config.mtu),
-            prefixes,
-            segment_type: src.config.segment_type as i32,
-            flags,
-            version,
-            state: tenant_state as i32,
-            history,
-            state_reason,
-            state_sla: Some(sla),
         }
     }
 }

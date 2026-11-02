@@ -40,7 +40,6 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 duration-str = { workspace = true }
 eyre = { workspace = true }
-librms = { workspace = true }
 mac_address = { workspace = true }
 opentelemetry = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["rustls"] }

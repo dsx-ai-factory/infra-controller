@@ -14,12 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-mod actor;
 pub mod api_client;
 pub mod api_throttler;
 mod bmc_mock_wrapper;
 mod config;
+mod console_output;
 mod control_router;
+mod desired_firmware;
 mod device_handle;
 mod device_simulator;
 mod dhcp_retry_fsm;
@@ -28,6 +29,7 @@ mod dhcp_wrapper;
 mod dhcp_wrapper_udp;
 mod discovery_info;
 mod dpu_machine;
+mod expected_inventory;
 mod host_machine;
 pub mod lifecycle_timings;
 mod machine_a_tron;
@@ -38,26 +40,38 @@ mod mock_ssh_server;
 mod power_shelf_fsm;
 mod power_shelf_simulator;
 mod rack;
+mod run_jitter;
+mod scout_stream;
 mod simulator_registry;
 mod status;
 mod switch_fsm;
 mod switch_simulator;
+mod tenant_network;
 
 use std::time::{Duration, Instant};
 
 pub use bmc_mock_wrapper::BmcMockRegistry;
+
+#[cfg(test)]
+mod bmc_reset_actor_tests;
 pub use config::{
     DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronArgs, MachineATronConfig,
     MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,
     RackModelConfig, WiwynnGb200RackConfig,
 };
+pub use console_output::ConsoleOutputController;
 pub use control_router::{ControlState, append as append_control_routes};
+pub use desired_firmware::spawn_desired_firmware_refresher;
 pub use device_handle::DeviceHandle;
 pub use device_simulator::{
     DeviceSimulator, MachineSimulator, PowerShelfSimulator, SimulatorLifecycle, SwitchSimulator,
 };
 pub use dhcp_wrapper::{DhcpClient, UdpDhcpService};
 pub use dpu_machine::DpuMachineHandle;
+pub use expected_inventory::{
+    DeviceRecord, DpuKey, ExpectedInventorySummary, ExpectedRecordsResponse, MemberIntent,
+    NicIntent, RackGroupIntent, RackIntent, ServedRecords,
+};
 pub use machine_a_tron::MachineATron;
 pub use mock_ssh_server::{
     Credentials as MockSshCredentials, MockSshServerHandle, PromptBehavior,

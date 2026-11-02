@@ -37,7 +37,7 @@ pub struct DhcpByteBuffer {
 
 impl DhcpByteBuffer {
     /// Return an empty buffer for omitted DHCPv6 options.
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         Self {
             ptr: ptr::null_mut(),
             len: 0,
@@ -45,7 +45,7 @@ impl DhcpByteBuffer {
     }
 
     /// Move option payload bytes into an FFI-safe buffer owned by Rust.
-    fn from_vec(bytes: Vec<u8>) -> Self {
+    pub(super) fn from_vec(bytes: Vec<u8>) -> Self {
         if bytes.is_empty() {
             return Self::empty();
         }
@@ -406,14 +406,6 @@ pub extern "C" fn machine_get_client_fqdn_ipv6(ctx: *mut Machine) -> DhcpByteBuf
         }
         None => DhcpByteBuffer::empty(),
     }
-}
-
-/// Return whether DHCPv6 rapid commit option rendering is enabled.
-#[unsafe(no_mangle)]
-pub extern "C" fn machine_get_rapid_commit_v6(ctx: *mut Machine) -> bool {
-    assert!(!ctx.is_null());
-
-    CONFIG.read().unwrap().rapid_commit_v6
 }
 
 /// Write the configured DHCPv6 provisioning-server address into a caller-provided 16-byte buffer.

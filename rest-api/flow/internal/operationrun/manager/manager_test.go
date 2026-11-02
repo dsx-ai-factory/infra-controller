@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
@@ -22,6 +24,19 @@ import (
 
 var _ Store = (*mockStore)(nil)
 var _ planner.TargetLookup = (*mockTargetLookup)(nil)
+
+type taskValidatorFunc func(context.Context, *operation.Request) error
+
+func (f taskValidatorFunc) ValidateTask(
+	ctx context.Context,
+	req *operation.Request,
+) error {
+	return f(ctx, req)
+}
+
+var acceptTask = taskValidatorFunc(func(context.Context, *operation.Request) error {
+	return nil
+})
 
 func TestCreatePersistsRunAndPlannedTargets(t *testing.T) {
 	runID := uuid.New()
@@ -46,6 +61,36 @@ func TestCreatePersistsRunAndPlannedTargets(t *testing.T) {
 		require.Equal(t, runID, target.OperationRunID)
 		require.Equal(t, operationrun.OperationRunTargetStatusPending, target.Status)
 	}
+}
+
+func TestCreateValidatesEveryPlannedTaskBeforeStoreWrite(t *testing.T) {
+	store := &mockStore{runID: uuid.New()}
+	plan := planner.New(&mockTargetLookup{
+		defaultScope: testExecutionTargets(2),
+	}, planner.Config{})
+	validateCalls := 0
+	validator := taskValidatorFunc(func(
+		_ context.Context,
+		req *operation.Request,
+	) error {
+		validateCalls++
+		require.NotEqual(t, uuid.Nil, req.RequiredRackID)
+		if validateCalls == 2 {
+			return status.Error(codes.FailedPrecondition, "unsupported firmware options")
+		}
+		return nil
+	})
+	manager, err := New(store, plan, validator)
+	require.NoError(t, err)
+
+	_, err = manager.Create(context.Background(), testOperationRun(t))
+
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.ErrorContains(t, err, "unsupported firmware options")
+	require.Equal(t, 2, validateCalls)
+	require.Zero(t, store.txCalls)
+	require.Zero(t, store.createCalls)
+	require.Zero(t, store.createTargetsCalls)
 }
 
 func TestCreateRejectsEmptyPlannedTargetsBeforeStoreWrite(t *testing.T) {
@@ -110,11 +155,14 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 	store := &mockStore{runID: uuid.New()}
 	plan := planner.New(&mockTargetLookup{}, planner.Config{})
 
-	_, err := New(nil, plan)
+	_, err := New(nil, plan, acceptTask)
 	require.ErrorContains(t, err, "operation run store is required")
 
-	_, err = New(store, nil)
+	_, err = New(store, nil, acceptTask)
 	require.ErrorContains(t, err, "operation run planner is required")
+
+	_, err = New(store, plan, nil)
+	require.ErrorContains(t, err, "task validator is required")
 }
 
 func TestGetMapsStoreNoRowsToNotFound(t *testing.T) {
@@ -679,7 +727,7 @@ func newTestManager(
 ) *ManagerImpl {
 	t.Helper()
 
-	manager, err := New(store, plan)
+	manager, err := New(store, plan, acceptTask)
 	require.NoError(t, err)
 	return manager
 }

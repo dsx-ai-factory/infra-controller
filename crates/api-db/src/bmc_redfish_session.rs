@@ -24,12 +24,13 @@
 //! once and the only durable artifact is the session's `@odata.id`, which is
 //! what a later revoke (cap enforcement or `flush_mac`) needs.
 
+use carbide_uuid::DbTable;
 use mac_address::MacAddress;
 use model::bmc_redfish_session::StoredSession;
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult};
+use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
 /// Returns every outstanding session row for `(spiffe_service_id, bmc_mac)`,
 /// oldest first, so a caller enforcing a cap revokes from the front.
@@ -38,17 +39,20 @@ pub async fn find_by_owner(
     spiffe_service_id: &str,
     bmc_mac: MacAddress,
 ) -> DatabaseResult<Vec<StoredSession>> {
-    let query = "SELECT spiffe_service_id, bmc_mac_address, session_odata_id, issued_at
+    let query = format!(
+        "SELECT {}
                  FROM bmc_redfish_sessions
                  WHERE spiffe_service_id = $1 AND bmc_mac_address = $2
-                 ORDER BY issued_at, session_odata_id";
+                 ORDER BY issued_at, session_odata_id",
+        StoredSession::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(spiffe_service_id)
         .bind(bmc_mac)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Records a newly created session. `issued_at` is set to `now()`
@@ -83,18 +87,20 @@ pub async fn insert(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// Deletes one session row, scoped to its owner, and reports whether a row
-/// was actually removed. `false` means the row no longer belonged to this
-/// owner -- typically because [`insert`] transferred it to another identity
-/// after the BMC reused the `@odata.id`. The caller must then leave the
-/// session on the BMC alone: it is the new owner's live session, and this
-/// row was the only handle that could have revoked it.
+/// `SessionNotOwned` means the session row is missing or belongs to another
+/// service identity. The delete does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionNotOwned;
+
+/// `delete_session` removes one session row only if it belongs to this owner.
+/// `NotApplied` requires leaving the remote session alone: [`insert`] may have
+/// transferred the row to another identity after the BMC reused its `@odata.id`.
 pub async fn delete_session(
     txn: &mut PgConnection,
     spiffe_service_id: &str,
     bmc_mac: MacAddress,
     session_odata_id: &str,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), SessionNotOwned>> {
     let query = "DELETE FROM bmc_redfish_sessions
                        WHERE spiffe_service_id = $1
                          AND bmc_mac_address = $2
@@ -106,7 +112,13 @@ pub async fn delete_session(
         .bind(session_odata_id)
         .execute(txn)
         .await
-        .map(|result| result.rows_affected() > 0)
+        .map(|result| {
+            if result.rows_affected() > 0 {
+                ConditionalWrite::Applied(())
+            } else {
+                ConditionalWrite::NotApplied(SessionNotOwned)
+            }
+        })
         .map_err(|e| DatabaseError::query(query, e))
 }
 
@@ -117,15 +129,18 @@ pub async fn delete_by_mac(
     txn: &mut PgConnection,
     bmc_mac: MacAddress,
 ) -> DatabaseResult<Vec<StoredSession>> {
-    let query = "DELETE FROM bmc_redfish_sessions
+    let query = format!(
+        "DELETE FROM bmc_redfish_sessions
                  WHERE bmc_mac_address = $1
-                 RETURNING spiffe_service_id, bmc_mac_address, session_odata_id, issued_at";
+                 RETURNING {}",
+        StoredSession::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(bmc_mac)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 #[cfg(test)]
@@ -133,7 +148,8 @@ mod tests {
     use mac_address::MacAddress;
     use sqlx::PgPool;
 
-    use super::{delete_by_mac, delete_session, find_by_owner, insert};
+    use super::{SessionNotOwned, delete_by_mac, delete_session, find_by_owner, insert};
+    use crate::ConditionalWrite;
 
     const PER_SESSION_ROWS_MIGRATION: &str =
         include_str!("../migrations/20260824235713_bmc_redfish_sessions_per_session_rows.sql");
@@ -278,6 +294,10 @@ mod tests {
     async fn one_identity_holds_many_sessions_oldest_first(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
         let bmc = mac(1);
+        let issued_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
 
         insert(txn.as_mut(), "svc", bmc, "/sessions/1")
             .await
@@ -300,6 +320,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/sessions/1", "/sessions/2"],
         );
+        for row in rows {
+            assert_eq!(row.spiffe_service_id, "svc");
+            assert_eq!(row.bmc_mac_address, bmc);
+            assert_eq!(row.issued_at, issued_at);
+        }
     }
 
     #[crate::sqlx_test]
@@ -314,13 +339,19 @@ mod tests {
             .await
             .unwrap();
 
-        delete_session(txn.as_mut(), "svc", bmc, "/sessions/1")
-            .await
-            .unwrap();
+        assert_eq!(
+            delete_session(txn.as_mut(), "svc", bmc, "/sessions/1")
+                .await
+                .unwrap(),
+            ConditionalWrite::Applied(())
+        );
         // Deleting again is a no-op, matching best-effort revocation.
-        delete_session(txn.as_mut(), "svc", bmc, "/sessions/1")
-            .await
-            .unwrap();
+        assert_eq!(
+            delete_session(txn.as_mut(), "svc", bmc, "/sessions/1")
+                .await
+                .unwrap(),
+            ConditionalWrite::NotApplied(SessionNotOwned)
+        );
 
         let rows = find_by_owner(txn.as_mut(), "svc", bmc).await.unwrap();
         assert_eq!(rows.len(), 1);
@@ -343,9 +374,12 @@ mod tests {
             .await
             .unwrap();
 
-        delete_session(txn.as_mut(), "svc-old", bmc, "/sessions/1")
-            .await
-            .unwrap();
+        assert_eq!(
+            delete_session(txn.as_mut(), "svc-old", bmc, "/sessions/1")
+                .await
+                .unwrap(),
+            ConditionalWrite::NotApplied(SessionNotOwned)
+        );
 
         let rows = find_by_owner(txn.as_mut(), "svc-new", bmc).await.unwrap();
         assert_eq!(rows.len(), 1, "the new owner's row must survive");
@@ -383,6 +417,10 @@ mod tests {
     async fn delete_by_mac_returns_every_caller_row_for_that_bmc(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
         let bmc = mac(4);
+        let issued_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
 
         insert(txn.as_mut(), "svc-1", bmc, "/sessions/1")
             .await
@@ -399,6 +437,12 @@ mod tests {
         assert_eq!(removed.len(), 2);
         assert_eq!(removed[0].spiffe_service_id, "svc-1");
         assert_eq!(removed[1].spiffe_service_id, "svc-2");
+        assert_eq!(removed[0].session_odata_id, "/sessions/1");
+        assert_eq!(removed[1].session_odata_id, "/sessions/2");
+        for row in removed {
+            assert_eq!(row.bmc_mac_address, bmc);
+            assert_eq!(row.issued_at, issued_at);
+        }
 
         assert!(
             find_by_owner(txn.as_mut(), "svc-1", bmc)

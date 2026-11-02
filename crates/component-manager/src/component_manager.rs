@@ -25,8 +25,8 @@ use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
     ScaleUpFabricManagerJobStatus, ScaleUpFabricServiceStatuses, ScaleUpFabricStatus,
-    SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
-    SwitchPasswordRotationState,
+    SwitchCertificateEndpoint, SwitchEndpoint, SwitchFactoryResetJobStatus,
+    SwitchFactoryResetState, SwitchMtlsDisableJobStatus, SwitchPasswordRotationState,
 };
 use crate::power_shelf_manager::{Backend as PowerShelfBackend, PowerShelfManager};
 use crate::rms::{RmsSwitchSystemImageStatusApi, validate_rms_backend_rack_profiles};
@@ -120,7 +120,6 @@ pub async fn request_rack_maintenance_via_state_controller(
     maintenance_access_token: Option<RackMaintenanceAccessToken<'_>>,
 ) -> Result<RackMaintenanceRequestOutcome, ComponentManagerError> {
     let rack_id = rack_id.clone();
-    let scheduled_scope = scope.clone();
     let transaction_rack_id = rack_id.clone();
 
     let result = db_pool
@@ -147,11 +146,14 @@ pub async fn request_rack_maintenance_via_state_controller(
                 })?;
 
                 if let Some(existing_scope) = rack.config.maintenance_requested.as_ref() {
-                    return Ok(if existing_scope == &scope {
-                        RackMaintenanceRequestOutcome::AlreadyPending
-                    } else {
-                        RackMaintenanceRequestOutcome::Busy
-                    });
+                    return Ok((
+                        if existing_scope.same_request(&scope) {
+                            RackMaintenanceRequestOutcome::AlreadyPending
+                        } else {
+                            RackMaintenanceRequestOutcome::Busy
+                        },
+                        None,
+                    ));
                 }
 
                 let state = rack.controller_state.value.clone();
@@ -162,7 +164,7 @@ pub async fn request_rack_maintenance_via_state_controller(
                     }
                 };
                 if !eligible {
-                    return Ok(RackMaintenanceRequestOutcome::Deferred { state });
+                    return Ok((RackMaintenanceRequestOutcome::Deferred { state }, None));
                 }
 
                 let reset_firmware_upgrade_job =
@@ -171,8 +173,10 @@ pub async fn request_rack_maintenance_via_state_controller(
                         components: vec![],
                         force_update: false,
                     });
+                let mut accepted_scope = scope;
+                accepted_scope.requested_at = Some(chrono::Utc::now());
                 let mut config = rack.config;
-                config.maintenance_requested = Some(scope);
+                config.maintenance_requested = Some(accepted_scope.clone());
                 db::rack::update(txn.as_mut(), &transaction_rack_id, &config)
                     .await
                     .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
@@ -185,18 +189,22 @@ pub async fn request_rack_maintenance_via_state_controller(
                         .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
                 }
 
-                Ok(RackMaintenanceRequestOutcome::Scheduled)
+                Ok((
+                    RackMaintenanceRequestOutcome::Scheduled,
+                    Some(accepted_scope),
+                ))
             })
         })
         .await;
 
-    let outcome = match result {
-        Ok(Ok(outcome)) => outcome,
+    let (outcome, accepted_scope) = match result {
+        Ok(Ok(accepted)) => accepted,
         Ok(Err(error)) => return Err(error),
         Err(error) => return Err(ComponentManagerError::Internal(error.to_string())),
     };
 
     if outcome == RackMaintenanceRequestOutcome::Scheduled
+        && let Some(accepted_scope) = accepted_scope.as_ref()
         && let Some(RackMaintenanceAccessToken {
             credential_manager,
             token,
@@ -212,7 +220,7 @@ pub async fn request_rack_maintenance_via_state_controller(
             .await
     {
         let recovery =
-            recover_rack_maintenance_after_credential_failure(db_pool, &rack_id, &scheduled_scope)
+            recover_rack_maintenance_after_credential_failure(db_pool, &rack_id, accepted_scope)
                 .await;
         return Err(ComponentManagerError::Internal(match recovery {
             Ok(recovery) => format!(
@@ -422,7 +430,7 @@ impl ComponentManager {
                             txn,
                             *machine_id,
                             &initiator,
-                            operation,
+                            operation.clone(),
                         )
                         .await
                         .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
@@ -451,12 +459,71 @@ impl ComponentManager {
             .await
     }
 
+    /// Delegates asynchronous certificate configuration for all switches to
+    /// [`NvSwitchManager::batch_configure_switch_certificate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged.
+    pub async fn batch_configure_switch_certificate(
+        &self,
+        endpoints: &[SwitchCertificateEndpoint],
+        domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        self.nv_switch
+            .batch_configure_switch_certificate(endpoints, domain_name, services)
+            .await
+    }
+
+    /// Delegates certificate batch status reads to
+    /// [`NvSwitchManager::get_configure_switch_certificate_job_status`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged. A
+    /// [`ComponentManagerError::NotFound`] result means the submitted job can no
+    /// longer be observed.
     pub async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,
     ) -> Result<ConfigureSwitchCertificateJobStatus, ComponentManagerError> {
         self.nv_switch
             .get_configure_switch_certificate_job_status(job_id)
+            .await
+    }
+
+    /// Delegates asynchronous mTLS removal to
+    /// [`NvSwitchManager::batch_disable_switch_mtls`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged. Only
+    /// [`ComponentManagerError::Unsupported`] and
+    /// [`ComponentManagerError::RejectedBeforeDispatch`] establish that no work was
+    /// dispatched.
+    pub async fn batch_disable_switch_mtls(
+        &self,
+        endpoints: &[SwitchEndpoint],
+        services: &[i32],
+    ) -> Result<String, ComponentManagerError> {
+        self.nv_switch
+            .batch_disable_switch_mtls(endpoints, services)
+            .await
+    }
+
+    /// Delegates mTLS-disable job status reads to
+    /// [`NvSwitchManager::get_disable_switch_mtls_job_status`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged.
+    pub async fn get_disable_switch_mtls_job_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+        self.nv_switch
+            .get_disable_switch_mtls_job_status(job_id)
             .await
     }
 
@@ -781,7 +848,8 @@ mod tests {
     use carbide_uuid::rack::RackId;
     use db::ObjectColumnFilter;
     use model::rack::{
-        FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig, RackState,
+        FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig,
+        RackErrorRecoveryPolicy, RackState,
     };
     use model::rack_type::{
         RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -1042,7 +1110,7 @@ mod tests {
             .await
             .unwrap();
         if state != RackState::Created {
-            assert!(
+            assert_eq!(
                 db::rack::try_update_controller_state(
                     txn.as_mut(),
                     &rack_id,
@@ -1051,7 +1119,8 @@ mod tests {
                     &state,
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+                db::ConditionalWrite::Applied(())
             );
         }
         txn.commit().await.unwrap();
@@ -1094,19 +1163,27 @@ mod tests {
             .unwrap(),
             RackMaintenanceRequestOutcome::Scheduled,
         );
+        let scheduled = load_rack(&pool, &ready_rack)
+            .await
+            .config
+            .maintenance_requested
+            .expect("the accepted request is persisted");
+        let requested_at = scheduled
+            .requested_at
+            .expect("acceptance stamps the request time");
         assert_eq!(
-            load_rack(&pool, &ready_rack)
-                .await
-                .config
-                .maintenance_requested,
-            Some(scope.clone()),
+            scheduled,
+            MaintenanceScope {
+                requested_at: Some(requested_at),
+                ..scope.clone()
+            },
         );
 
         // Exact retries are idempotent, including after the rack state has
         // moved on. A different request is busy and cannot replace it.
         let rack = load_rack(&pool, &ready_rack).await;
         let mut txn = pool.begin().await.unwrap();
-        assert!(
+        assert_eq!(
             db::rack::try_update_controller_state(
                 txn.as_mut(),
                 &ready_rack,
@@ -1115,7 +1192,8 @@ mod tests {
                 &RackState::Discovering,
             )
             .await
-            .unwrap()
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
         );
         txn.commit().await.unwrap();
         assert_eq!(
@@ -1152,13 +1230,19 @@ mod tests {
                 .await
                 .config
                 .maintenance_requested,
-            Some(scope),
+            Some(MaintenanceScope {
+                requested_at: Some(requested_at),
+                ..scope
+            }),
+            "the pending request, timestamp included, survives both retries",
         );
 
         // Automatic callers defer non-Ready racks; operator callers may
         // explicitly opt into recovering a rack from Error.
         let error_state = RackState::Error {
+            certificate_failure: None,
             cause: "test".into(),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         };
         let error_rack = create_rack_in_state(&pool, error_state.clone()).await;
         assert_eq!(

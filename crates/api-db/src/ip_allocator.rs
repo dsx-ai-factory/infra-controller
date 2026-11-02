@@ -312,6 +312,13 @@ fn build_allocated_networks(
     segment_prefix: &Prefix,
     used_ips: &[IpNetwork],
 ) -> DatabaseResult<Vec<IpNetwork>> {
+    // Reject negative stored counts before they become a large iterator limit.
+    let num_reserved = usize::try_from(segment_prefix.num_reserved).map_err(|_| {
+        DatabaseError::internal(format!(
+            "network prefix {} has negative reservation count {}",
+            segment_prefix.id, segment_prefix.num_reserved
+        ))
+    })?;
     let mut allocated_ips: Vec<IpNetwork> = Vec::new();
 
     // First, if the segment prefix has a configured gateway (which comes
@@ -332,11 +339,7 @@ fn build_allocated_networks(
     // If the first address also happens to be the gateway address, and
     // the gateway address is set for this network prefix, then it just
     // gets added twice (and will be de-duplicated later).
-    for next_ip in segment_prefix
-        .prefix
-        .iter()
-        .take(segment_prefix.num_reserved as usize)
-    {
+    for next_ip in segment_prefix.prefix.iter().take(num_reserved) {
         let next_net = IpNetwork::new(next_ip, next_ip.address_family().interface_prefix_len())?;
         allocated_ips.push(next_net);
     }
@@ -383,12 +386,10 @@ fn build_allocated_networks(
 fn collapse_allocated_networks(input_networks: &[IpNetwork]) -> Vec<IpNetwork> {
     let mut collapsed_networks: Vec<&IpNetwork> = input_networks.iter().collect();
 
-    // Sort the input `allocated_cidrs` in descending order. The
-    // idea here is we start with smaller networks in an outer
-    // iteration, and then check to see if any of the larger
-    // networks [below] contain the smaller ones.
-    // parsed_allocated_cidrs.sort_by(|a, b| b.prefix().cmp(&a.prefix()));
-    collapsed_networks.sort_by_key(|b| std::cmp::Reverse(b.prefix()));
+    // Process wider networks (shorter prefixes) first. Otherwise, an address at
+    // a network's start could cause that wider network to be discarded. CIDRs
+    // that overlap contain one another, so checking the start is sufficient.
+    collapsed_networks.sort_by_key(|network| network.prefix());
 
     // And now iterate over the allocated CIDRs and check
     // to see if any of the smaller networks are covered
@@ -430,15 +431,15 @@ fn get_network_size(ip_network: &IpNetwork) -> AddressCount {
 // trying to.. well.. allocate.
 //
 // You'll notice this stores values as u128 -- this is
-// just to make it easier for stepping in the search
-// loop, since I can just current_ip += network_size.
+// to make it easier for stepping in the search
+// loop with either address family.
 fn get_network_details(network_segment: &IpNetwork, prefix_length: u8) -> NetworkDetails {
     let (base_ip, network_size, broadcast_ip) = match network_segment {
         IpNetwork::V4(net) => {
             let base_ip = u32::from(net.network());
-            let network_size = 1 << (32 - prefix_length);
+            let network_size = 1u128 << (32 - prefix_length);
             let broadcast_ip = u32::from(net.broadcast());
-            (base_ip as u128, network_size as u128, broadcast_ip as u128)
+            (base_ip as u128, network_size, broadcast_ip as u128)
         }
         IpNetwork::V6(net) => {
             let base_ip = u128::from(net.network());
@@ -455,9 +456,7 @@ fn get_network_details(network_segment: &IpNetwork, prefix_length: u8) -> Networ
     }
 }
 
-/// build_candidate_subnet builds the next candidate network
-/// prefix. Even though we currently don't support IPv6 yet,
-/// we allow for V6 here.
+/// build_candidate_subnet builds the next candidate network prefix.
 fn build_candidate_subnet(
     network: IpNetwork,
     current_ip: u128,
@@ -480,6 +479,7 @@ fn build_candidate_subnet(
 // that prefix, and the size of the next prefix you would
 // like to allocate. It then finds the next valid subnet
 // of the provided prefix length that can be allocated.
+// An IPv6 /128 can also return its single host address.
 //
 // Note that this will fill in fragmentation. For example,
 // if you allocate some /32, such that a /30 needs to skip
@@ -492,6 +492,13 @@ fn next_available_prefix(
     prefix_length: u8,
     allocated_networks: Vec<IpNetwork>,
 ) -> DatabaseResult<Option<IpNetwork>> {
+    // Allow an IPv6 /128 to allocate itself before requiring a longer prefix.
+    if network_segment.prefix() == 128 && prefix_length == 128 {
+        let is_allocated = allocated_networks
+            .iter()
+            .any(|allocated| allocated.contains(network_segment.network()));
+        return Ok((!is_allocated).then_some(network_segment));
+    }
     if prefix_length <= network_segment.prefix() {
         return Err(DatabaseError::internal(format!(
             "requested prefix length ({}) must be greater than the network segment prefix length ({})",
@@ -500,30 +507,32 @@ fn next_available_prefix(
         )));
     }
 
-    // Now take the starting IP from the input `network_prefix`,
-    // and scan the entire range (up until the broadcast IP), stepping
-    // by the network size for each iteration.
+    // Start at the segment's first address and skip occupied ranges while
+    // keeping each candidate aligned to the requested prefix length.
     let network_details = get_network_details(&network_segment, prefix_length);
     let mut current_ip = network_details.base_ip;
     while current_ip <= network_details.broadcast_ip {
-        // Define the next candidate subnet, and then check allocated_networks
-        // to see if there is any relationship between the candidate and each
-        // allocated network.
         let candidate_subnet = build_candidate_subnet(network_segment, current_ip, prefix_length)?;
-        let is_allocated = allocated_networks.iter().any(|allocated_network| {
+        let overlap = allocated_networks.iter().find(|allocated_network| {
             allocated_network.contains(candidate_subnet.network())
                 || candidate_subnet.contains(allocated_network.network())
         });
-
-        // If it isn't allocated, we have our candidate!
-        if !is_allocated {
+        let Some(allocated_network) = overlap else {
             return Ok(Some(candidate_subnet));
-        }
+        };
 
-        // Otherwise, jump to the next network based on the
-        // requested prefix_length, and see if the next candidate
-        // subnet is our winner winner chicken dinner.
-        current_ip += network_details.network_size;
+        let occupied_end = match allocated_network.broadcast() {
+            IpAddr::V4(address) => u128::from(u32::from(address)),
+            IpAddr::V6(address) => u128::from(address),
+        };
+        // A smaller occupied range still excludes its entire candidate subnet.
+        let aligned_end = occupied_end | (network_details.network_size - 1);
+
+        // Beyond `u128::MAX`, there is no representable next IPv6 subnet.
+        let Some(next_ip) = aligned_end.checked_add(1) else {
+            return Ok(None);
+        };
+        current_ip = next_ip;
     }
 
     Ok(None)
@@ -535,6 +544,23 @@ mod tests {
     use carbide_test_support::{Case, check_cases, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn test_build_allocated_networks_rejects_negative_reservations() {
+        let prefix = Prefix {
+            id: uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c1200").into(),
+            prefix: "2001:db8::/126".parse().unwrap(),
+            gateway: None,
+            num_reserved: -1,
+        };
+        let error = build_allocated_networks(&prefix, &[]).unwrap_err();
+        assert!(matches!(
+            error,
+            DatabaseError::Internal { message }
+                if message.contains(&prefix.id.to_string())
+                    && message.contains("negative reservation count -1")
+        ));
+    }
 
     #[test]
     fn test_ip_allocation() {
@@ -662,7 +688,11 @@ mod tests {
 
         let result = allocator.next().unwrap();
         assert_eq!(result.0, prefix_id);
-        assert!(result.1.is_err());
+        assert!(matches!(
+            result.1,
+            Err(DatabaseError::DhcpError(DhcpError::PrefixExhausted(ip)))
+                if ip == IpAddr::V4(Ipv4Addr::new(10, 1, 1, 0))
+        ));
         assert!(allocator.next().is_none());
     }
     #[test]
@@ -732,10 +762,7 @@ mod tests {
     }
 
     #[test]
-    // test getting the next /30 from the IpAllocator
-    // since .164 is already allocated, the allocator
-    // should need to skip to the next valid /30, which
-    // ends up being .168/30.
+    // Addresses .2, .3, and .4 occupy the first two /30s, so the next is .8/30.
     fn test_ip_allocation_with_used_networks() {
         let prefix_id = uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c1200").into();
         let prefix = IpNetwork::V4("10.217.4.0/24".parse().unwrap());
@@ -761,7 +788,7 @@ mod tests {
         // will be reserved, so:
         //
         // - 1x gateway
-        // - 1x num_reserved (which overlaps with gateway)
+        // - 1x num_reserved (which overlaps with the network address)
         // - 1x network
         // - 1x broadcast
         // - 3x used
@@ -804,7 +831,7 @@ mod tests {
         // will be reserved, so:
         //
         // - 1x gateway
-        // - 1x num_reserved (which overlaps with gateway)
+        // - 1x num_reserved (which overlaps with the network address)
         // - 1x network
         // - 1x broadcast
         // - 3x used /30's (12 IPs)
@@ -858,16 +885,23 @@ mod tests {
     #[test]
     fn test_collapse_allocated_with_duplicate_and_covered() {
         // 192.168.1.0/32 is dropped as a duplicate,
-        // and 192.168.1.4/30 contains 192.168.1.4/31,
-        // so 192.168.1.4/31 is dropped also.
+        // and 192.168.1.4/30 contains both 192.168.1.4/31
+        // and 192.168.1.6/32, so both smaller networks are dropped.
         let allocated_cidrs = vec![
             "192.168.1.0/32".parse().unwrap(),
             "192.168.1.0/32".parse().unwrap(),
             "192.168.1.4/31".parse().unwrap(),
             "192.168.1.4/30".parse().unwrap(),
+            "192.168.1.6/32".parse().unwrap(),
         ];
         let allocated_networks = collapse_allocated_networks(&allocated_cidrs);
-        assert_eq!(2, allocated_networks.len());
+        assert_eq!(
+            allocated_networks,
+            vec![
+                "192.168.1.0/32".parse().unwrap(),
+                "192.168.1.4/30".parse().unwrap(),
+            ]
+        );
     }
 
     #[test]
@@ -875,7 +909,7 @@ mod tests {
         // A /30 from 192.168.1.0/24 always lands on 192.168.1.8/30 once .0 and the
         // .4/30 block are taken — and stays there however the already-allocated set
         // is spelled: with a bare pair, with a duplicate /32, or with a smaller /31
-        // already covered by the .4/30. The candidate search collapses all three.
+        // already covered by the .4/30.
         struct AllocatedSet {
             scenario: &'static str,
             allocated_cidrs: Vec<IpNetwork>,
@@ -952,6 +986,85 @@ mod tests {
     }
 
     #[test]
+    fn test_ipv6_single_address_candidate() {
+        let network: IpNetwork = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"
+            .parse()
+            .unwrap();
+        value_scenarios!(run = |allocated: Vec<IpNetwork>| {
+            next_available_prefix(network, 128, allocated).unwrap()
+        };
+            "single address at the IPv6 upper bound" {
+                vec![] => Some(network),
+                vec![network] => None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_candidates_at_address_space_boundaries() {
+        struct CandidateSearch {
+            network: IpNetwork,
+            prefix_length: u8,
+            allocated: Vec<IpNetwork>,
+        }
+
+        let final_pair = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/127"
+            .parse()
+            .unwrap();
+        let first_address = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/128"
+            .parse()
+            .unwrap();
+        let last_address = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"
+            .parse()
+            .unwrap();
+
+        check_cases(
+            [
+                Case {
+                    scenario: "second /1 of the full IPv4 space remains available",
+                    input: CandidateSearch {
+                        network: "0.0.0.0/0".parse().unwrap(),
+                        prefix_length: 1,
+                        allocated: vec!["0.0.0.0/1".parse().unwrap()],
+                    },
+                    expect: Yields(Some("128.0.0.0/1".parse().unwrap())),
+                },
+                Case {
+                    scenario: "last IPv6 address remains available",
+                    input: CandidateSearch {
+                        network: final_pair,
+                        prefix_length: 128,
+                        allocated: vec![first_address],
+                    },
+                    expect: Yields(Some(last_address)),
+                },
+                Case {
+                    scenario: "both addresses in the final /127 are allocated",
+                    input: CandidateSearch {
+                        network: final_pair,
+                        prefix_length: 128,
+                        allocated: vec![first_address, last_address],
+                    },
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "both /1 subnets of the full IPv6 space are allocated",
+                    input: CandidateSearch {
+                        network: "::/0".parse().unwrap(),
+                        prefix_length: 1,
+                        allocated: vec!["::/1".parse().unwrap(), "8000::/1".parse().unwrap()],
+                    },
+                    expect: Yields(None),
+                },
+            ],
+            |search| {
+                next_available_prefix(search.network, search.prefix_length, search.allocated)
+                    .map_err(|e| e.to_string())
+            },
+        );
+    }
+
+    #[test]
     fn test_ipv6_allocation_single_address() {
         let prefix_id = uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c1200").into();
         let address_strategy = AddressSelectionStrategy::NextAvailableIp;
@@ -1019,6 +1132,48 @@ mod tests {
     }
 
     #[test]
+    fn test_count_and_allocate_with_partially_occupied_ipv6_prefix() {
+        // The occupied /65 includes the gateway and first reserved address.
+        // The other half has 2^63 addresses, minus the excluded final address.
+        let prefix_id = uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c1200").into();
+        let prefix = "2001:db8::/64".parse().unwrap();
+        let mut allocator = IpAllocator {
+            prefixes: vec![Prefix {
+                id: prefix_id,
+                prefix,
+                gateway: Some("2001:db8::1".parse().unwrap()),
+                num_reserved: 1,
+            }],
+            used_ips: vec!["2001:db8::/65".parse().unwrap()],
+            address_strategy: AddressSelectionStrategy::NextAvailableIp,
+        };
+
+        assert_eq!(allocator.num_free(prefix_id).unwrap(), (1u128 << 63) - 1);
+        let (allocated_prefix_id, address) = allocator.next().unwrap();
+        assert_eq!(allocated_prefix_id, prefix_id);
+        assert_eq!(address.unwrap(), "2001:db8:0:0:8000::/128".parse().unwrap());
+    }
+
+    #[test]
+    fn test_ip_allocation_skips_network_containing_reserved_addresses() {
+        let prefix_id = uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c1200").into();
+        let mut allocator = IpAllocator {
+            prefixes: vec![Prefix {
+                id: prefix_id,
+                prefix: "192.0.2.0/29".parse().unwrap(),
+                gateway: Some("192.0.2.1".parse().unwrap()),
+                num_reserved: 1,
+            }],
+            used_ips: vec!["192.0.2.0/30".parse().unwrap()],
+            address_strategy: AddressSelectionStrategy::NextAvailableIp,
+        };
+
+        let (allocated_prefix_id, address) = allocator.next().unwrap();
+        assert_eq!(allocated_prefix_id, prefix_id);
+        assert_eq!(address.unwrap(), "192.0.2.4/32".parse().unwrap());
+    }
+
+    #[test]
     fn test_num_free_is_computed_for_each_prefix() {
         let ipv4_id = uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c1200").into();
         let ipv6_id = uuid::uuid!("91609f10-c91d-470d-a260-6293ea0c1201").into();
@@ -1056,9 +1211,7 @@ mod tests {
         let used_ips = vec![];
         let allocated = build_allocated_networks(&prefix, &used_ips).unwrap();
 
-        // Should have: 2 reserved (::0, ::1) + network (::0) + broadcast (::ffff)
-        // The network address overlaps with the first reserved, so after collapse
-        // we should have distinct /128 entries
+        // Reservations and endpoints form an uncollapsed list of host prefixes.
         for net in &allocated {
             assert!(
                 net.prefix() == 128,

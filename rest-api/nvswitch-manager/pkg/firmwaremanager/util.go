@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -184,7 +185,7 @@ func WaitForReboot(ctx context.Context, ip net.IP, downTimeout, upTimeout time.D
 // IsReachable performs a single non-blocking check if a host is reachable via TCP on the specified port.
 // Returns true if reachable, false otherwise. This is used for async polling.
 func IsReachable(ip string, port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, port), 2*time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), 2*time.Second)
 	if err != nil {
 		return false
 	}

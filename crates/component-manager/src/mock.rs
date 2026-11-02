@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use model::component_manager::{
@@ -9,25 +10,29 @@ use model::component_manager::{
     PowerAction, PowerShelfComponent,
 };
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::compute_tray_manager::{
     Backend, ComputeTrayEndpoint, ComputeTrayFirmwareUpdateStatus, ComputeTrayManager,
     ComputeTrayResult,
 };
 use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
-    ConfigureSwitchCertificateJobStatus, NvSwitchManager, SwitchComponentResult, SwitchEndpoint,
-    SwitchFactoryResetJobStatus, SwitchFirmwareUpdateStatus, SwitchPasswordRotationState,
-    SwitchPowerStateResult, SwitchSlotAndTrayResult,
+    ConfigureSwitchCertificateJobStatus, NvSwitchManager, SwitchCertificateEndpoint,
+    SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFirmwareUpdateStatus,
+    SwitchMtlsDisableJobStatus, SwitchMtlsDisableState, SwitchPasswordRotationState,
+    SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     PowerShelfComponentResult, PowerShelfEndpoint, PowerShelfFirmwareUpdateStatus,
-    PowerShelfFirmwareVersions, PowerShelfManager, PowerShelfPowerStateResult,
+    PowerShelfFirmwareVersions, PowerShelfManager,
 };
 use crate::types::FirmwareUpdateOptions;
 
 /// Configurable switch backend used by component-manager and controller tests.
 #[derive(Debug, Clone, Default)]
 pub struct MockNvSwitchManager {
+    certificate_batch_attempts: Option<Arc<AtomicUsize>>,
+    certificate_services: Arc<Mutex<Vec<Vec<i32>>>>,
     certificate_job_status: Option<ConfigureSwitchCertificateJobStatus>,
     password_rotation_enabled: bool,
     password_rotation_start_result: Option<MockPasswordRotationStartResult>,
@@ -35,9 +40,53 @@ pub struct MockNvSwitchManager {
     expected_password_rotation_password: Option<String>,
     factory_reset_job_status_responses: Option<Arc<Mutex<VecDeque<FactoryResetJobStatusResult>>>>,
     factory_reset_job_status_calls: Arc<Mutex<Vec<String>>>,
+    mtls_disable_submission: Option<MockMtlsDisableSubmission>,
+    mtls_disable_job_status_responses: Option<Arc<Mutex<VecDeque<MtlsDisableJobStatusResult>>>>,
+    mtls_calls: Arc<Mutex<Vec<MockSwitchMtlsCall>>>,
 }
 
+/// Switch mTLS backend call recorded by [`MockNvSwitchManager`], in call order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockSwitchMtlsCall {
+    /// mTLS removal was submitted for these services.
+    DisableSubmitted { services: Vec<i32> },
+
+    /// A disable job's status was read.
+    DisableStatusRead { job_id: String },
+
+    /// Certificate configuration was submitted for these services.
+    CertificateSubmitted { services: Vec<i32> },
+}
+
+/// Configured outcome of submitting mTLS removal.
+#[derive(Debug, Clone)]
+enum MockMtlsDisableSubmission {
+    Job(String),
+    OutcomeUnknown(String),
+}
+
+/// Result returned by one configured mTLS-disable job-status poll.
+pub type MtlsDisableJobStatusResult = Result<SwitchMtlsDisableJobStatus, ComponentManagerError>;
+
 impl MockNvSwitchManager {
+    /// Rejects the first certificate batch before dispatch, then accepts retries.
+    pub fn with_certificate_batch_rejected_once(mut self) -> Self {
+        self.certificate_batch_attempts = Some(Arc::new(AtomicUsize::new(0)));
+        self
+    }
+
+    /// Returns the number of certificate batch submission attempts.
+    pub fn certificate_batch_attempts(&self) -> usize {
+        self.certificate_batch_attempts
+            .as_ref()
+            .map_or(0, |attempts| attempts.load(Ordering::Relaxed))
+    }
+
+    /// Returns the service lists submitted for individual switch certificates.
+    pub fn certificate_services(&self) -> Vec<Vec<i32>> {
+        self.certificate_services.lock().unwrap().clone()
+    }
+
     /// Returns a mock configured with a certificate job status.
     pub fn with_certificate_job_status(
         mut self,
@@ -108,6 +157,40 @@ impl MockNvSwitchManager {
             Some(Arc::new(Mutex::new(responses.into_iter().collect())));
 
         self
+    }
+
+    /// Enables mTLS removal and makes submission return `job_id`. Without this, the
+    /// mock reports the operation as unsupported, like a backend lacking it.
+    pub fn with_mtls_disable_job(mut self, job_id: impl Into<String>) -> Self {
+        self.mtls_disable_submission = Some(MockMtlsDisableSubmission::Job(job_id.into()));
+        self
+    }
+
+    /// Makes mTLS-removal submission report an ambiguous outcome.
+    pub fn with_mtls_disable_outcome_unknown(mut self, message: impl Into<String>) -> Self {
+        self.mtls_disable_submission =
+            Some(MockMtlsDisableSubmission::OutcomeUnknown(message.into()));
+        self
+    }
+
+    /// Queues mTLS-disable job-status results in polling order. Without a queue,
+    /// polls report completion.
+    pub fn with_mtls_disable_job_status_responses(
+        mut self,
+        responses: impl IntoIterator<Item = MtlsDisableJobStatusResult>,
+    ) -> Self {
+        self.mtls_disable_job_status_responses =
+            Some(Arc::new(Mutex::new(responses.into_iter().collect())));
+
+        self
+    }
+
+    /// Returns recorded mTLS submissions and status reads in call order.
+    pub fn mtls_calls(&self) -> Vec<MockSwitchMtlsCall> {
+        self.mtls_calls
+            .lock()
+            .expect("mTLS calls lock poisoned")
+            .clone()
     }
 
     /// Returns the factory-reset parent job IDs requested by callers.
@@ -213,13 +296,12 @@ impl NvSwitchManager for MockNvSwitchManager {
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         Ok(endpoints
             .iter()
-            .map(|ep| SwitchPowerStateResult {
-                bmc_mac: ep.bmc_mac,
-                power_state: None,
-                error: None,
+            .map(|ep| ComponentPowerStateResult {
+                mac_address: ep.bmc_mac,
+                power_state: Ok(None),
             })
             .collect())
     }
@@ -228,9 +310,43 @@ impl NvSwitchManager for MockNvSwitchManager {
         &self,
         _endpoint: &SwitchEndpoint,
         _domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        self.certificate_services
+            .lock()
+            .unwrap()
+            .push(services.unwrap_or_default().to_vec());
+
+        self.mtls_calls
+            .lock()
+            .expect("mTLS calls lock poisoned")
+            .push(MockSwitchMtlsCall::CertificateSubmitted {
+                services: services.unwrap_or_default().to_vec(),
+            });
+
+        Ok("mock-switch-cert-job".to_string())
+    }
+
+    async fn batch_configure_switch_certificate(
+        &self,
+        _endpoints: &[SwitchCertificateEndpoint],
+        _domain_name: Option<&str>,
         _services: Option<&[i32]>,
     ) -> Result<String, ComponentManagerError> {
-        Ok("mock-switch-cert-job".to_string())
+        let Some(attempts) = &self.certificate_batch_attempts else {
+            return Err(ComponentManagerError::Unsupported(
+                "rack-wide switch certificate configuration is not supported by this backend"
+                    .to_string(),
+            ));
+        };
+
+        if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Err(ComponentManagerError::RejectedBeforeDispatch(
+                "mock certificate batch preparation failed".to_string(),
+            ));
+        }
+
+        Ok("mock-switch-cert-batch-job".to_string())
     }
 
     async fn get_configure_switch_certificate_job_status(
@@ -241,9 +357,65 @@ impl NvSwitchManager for MockNvSwitchManager {
             .certificate_job_status
             .clone()
             .unwrap_or(ConfigureSwitchCertificateJobStatus {
+                failure: None,
                 state: ConfigureSwitchCertificateState::Completed,
                 error: None,
             }))
+    }
+
+    async fn batch_disable_switch_mtls(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+        services: &[i32],
+    ) -> Result<String, ComponentManagerError> {
+        let Some(submission) = &self.mtls_disable_submission else {
+            return Err(ComponentManagerError::Unsupported(
+                "mock switch mTLS disable is disabled".to_string(),
+            ));
+        };
+
+        self.mtls_calls
+            .lock()
+            .expect("mTLS calls lock poisoned")
+            .push(MockSwitchMtlsCall::DisableSubmitted {
+                services: services.to_vec(),
+            });
+
+        match submission {
+            MockMtlsDisableSubmission::Job(job_id) => Ok(job_id.clone()),
+            MockMtlsDisableSubmission::OutcomeUnknown(message) => Err(
+                ComponentManagerError::OperationOutcomeUnknown(message.clone()),
+            ),
+        }
+    }
+
+    async fn get_disable_switch_mtls_job_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+        self.mtls_calls
+            .lock()
+            .expect("mTLS calls lock poisoned")
+            .push(MockSwitchMtlsCall::DisableStatusRead {
+                job_id: job_id.to_string(),
+            });
+
+        let Some(responses) = &self.mtls_disable_job_status_responses else {
+            return Ok(SwitchMtlsDisableJobStatus {
+                state: SwitchMtlsDisableState::Completed,
+                error: None,
+            });
+        };
+
+        responses
+            .lock()
+            .expect("mTLS-disable job-status responses lock poisoned")
+            .pop_front()
+            .unwrap_or_else(|| {
+                Err(ComponentManagerError::Internal(
+                    "no mock switch mTLS-disable job-status response queued".to_string(),
+                ))
+            })
     }
 
     async fn get_switch_factory_reset_job_status(
@@ -387,13 +559,12 @@ impl PowerShelfManager for MockPowerShelfManager {
     async fn get_power_state(
         &self,
         endpoints: &[PowerShelfEndpoint],
-    ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         Ok(endpoints
             .iter()
-            .map(|ep| PowerShelfPowerStateResult {
-                pmc_mac: ep.pmc_mac,
-                power_state: None,
-                error: None,
+            .map(|ep| ComponentPowerStateResult {
+                mac_address: ep.pmc_mac,
+                power_state: Ok(None),
             })
             .collect())
     }
@@ -424,6 +595,7 @@ impl ComputeTrayManager for MockComputeTrayManager {
                 bmc_mac: ep.bmc_mac,
                 success: true,
                 error: None,
+                backend_job_id: None,
             })
             .collect())
     }
@@ -442,6 +614,7 @@ impl ComputeTrayManager for MockComputeTrayManager {
                 bmc_mac: ep.bmc_mac,
                 success: true,
                 error: None,
+                backend_job_id: None,
             })
             .collect())
     }

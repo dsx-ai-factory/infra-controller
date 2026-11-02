@@ -5,6 +5,8 @@ package model
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,13 +14,26 @@ import (
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 var defaultRackPagination = dbquery.Pagination{
 	Offset: 0,
 	Limit:  100,
 	Total:  0,
+}
+
+// GetAllRacks returns every non-deleted rack without relations.
+func GetAllRacks(ctx context.Context, idb bun.IDB) (ret []Rack, err error) {
+	err = idb.NewSelect().Model(&ret).Scan(ctx)
+	return ret, err
+}
+
+var defaultRackOrderBy = []dbquery.OrderBy{
+	{Column: "name", Direction: dbquery.OrderAscending},
+	{Column: "id", Direction: dbquery.OrderAscending},
 }
 
 type Rack struct {
@@ -39,14 +54,69 @@ type Rack struct {
 	// (ExpectedRack.rack_id, e.g. "a12") populated by the expected-inventory
 	// mirror. NULL on racks that the mirror has never adopted (e.g. legacy
 	// ingestion-gRPC rows on first run).
-	ExternalID *string     `bun:"external_id"`
-	Status     RackStatus  `bun:"status,type:varchar(16),default:'new'"`
-	CreatedAt  time.Time   `bun:"created_at,nullzero,notnull,default:current_timestamp"`
-	UpdatedAt  time.Time   `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
-	IngestedAt *time.Time  `bun:"ingested_at"`
-	DeletedAt  *time.Time  `bun:"deleted_at,soft_delete"`
-	Components []Component `bun:"rel:has-many,join:id=rack_id"`
-	NVLDomain  *NVLDomain  `bun:"rel:belongs-to,join:nvldomain_id=id"`
+	ExternalID    *string             `bun:"external_id"`
+	RackProfileID *string             `bun:"rack_profile_id"`
+	RackGroupID   *string             `bun:"rack_group_id"`
+	Status        RackStatus          `bun:"status,type:varchar(16),default:'new'"`
+	Health        *types.HealthReport `bun:"health,type:jsonb,nullzero"`
+	CreatedAt     time.Time           `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	UpdatedAt     time.Time           `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+	IngestedAt    *time.Time          `bun:"ingested_at"`
+	DeletedAt     *time.Time          `bun:"deleted_at,soft_delete"`
+	Components    []Component         `bun:"rel:has-many,join:id=rack_id"`
+	NVLDomain     *NVLDomain          `bun:"rel:belongs-to,join:nvldomain_id=id"`
+}
+
+// RackPatch contains rack metadata fields selected by a patch operation.
+// Nil fields are omitted from the UPDATE.
+type RackPatch struct {
+	ID          uuid.UUID
+	Name        *string
+	Description *map[string]any
+	Location    *map[string]any
+}
+
+func (patch *RackPatch) apply(rack *Rack) []string {
+	columns := make([]string, 0, 3)
+	if patch.Name != nil {
+		rack.Name = *patch.Name
+		columns = append(columns, "name")
+	}
+	if patch.Description != nil {
+		rack.Description = *patch.Description
+		columns = append(columns, "description")
+	}
+	if patch.Location != nil {
+		rack.Location = *patch.Location
+		columns = append(columns, "location")
+	}
+	return columns
+}
+
+// Patch updates only rack metadata explicitly selected by RackPatch.
+func (patch *RackPatch) Patch(ctx context.Context, idb bun.IDB) error {
+	rack := &Rack{ID: patch.ID}
+	columns := patch.apply(rack)
+	if len(columns) == 0 {
+		return nil
+	}
+
+	result, err := idb.NewUpdate().
+		Model(rack).
+		Column(columns...).
+		Where("id = ?", patch.ID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("patch rack %s affected %d rows", patch.ID, rowsAffected)
+	}
+	return nil
 }
 
 type RackStatus string
@@ -141,10 +211,36 @@ func (rd *Rack) Patch(ctx context.Context, idb bun.IDB) error {
 	return err
 }
 
+// SetHealthByExternalID writes the latest aggregate health snapshot for the
+// rack identified by Core's external ID.
+func (rd *Rack) SetHealthByExternalID(ctx context.Context, idb bun.IDB) error {
+	if rd.ExternalID == nil || *rd.ExternalID == "" {
+		return errors.New("rack external ID not set")
+	}
+	_, err := idb.NewUpdate().Model(rd).
+		Set("health = ?", rd.Health).
+		Where("external_id = ?", *rd.ExternalID).
+		Exec(ctx)
+	return err
+}
+
 // BuildPatch builds a patched rack from the current rack and the
 // input rack. It goes through the patchable fields and builds the patched
 // rack. If there is no change on patchable fields, it returns nil.
 func (rd *Rack) BuildPatch(cur *Rack) *Rack {
+	patch := rd.BuildColumnPatch(cur)
+	if patch == nil {
+		return nil
+	}
+
+	patchedRack := *cur
+	patch.apply(&patchedRack)
+	return &patchedRack
+}
+
+// BuildColumnPatch returns only patchable rack metadata whose supplied values
+// differ from the current row.
+func (rd *Rack) BuildColumnPatch(cur *Rack) *RackPatch {
 	if rd == nil || cur == nil {
 		return nil
 	}
@@ -154,31 +250,27 @@ func (rd *Rack) BuildPatch(cur *Rack) *Rack {
 	// Description
 	// Location
 
-	// Make a copy fo the current rack which serves as the base for the
-	// patched rack.
-	patchedRack := *cur
-	patched := false
+	patch := &RackPatch{ID: cur.ID}
 
-	if len(rd.Name) > 0 && patchedRack.Name != rd.Name {
-		patchedRack.Name = rd.Name
-		patched = true
+	if len(rd.Name) > 0 && cur.Name != rd.Name {
+		patch.Name = &rd.Name
 	}
 
-	if desc := utils.CompareAndCopyMaps(rd.Description, cur.Description); desc != nil {
-		patchedRack.Description = desc
-		patched = true
+	desc := utils.CompareAndCopyMaps(rd.Description, cur.Description)
+	if desc != nil {
+		patch.Description = &desc
 	}
 
-	if loc := utils.CompareAndCopyMaps(rd.Location, cur.Location); loc != nil {
-		patchedRack.Location = loc
-		patched = true
+	loc := utils.CompareAndCopyMaps(rd.Location, cur.Location)
+	if loc != nil {
+		patch.Location = &loc
 	}
 
-	if !patched {
+	if patch.Name == nil && patch.Description == nil && patch.Location == nil {
 		return nil
 	}
 
-	return &patchedRack
+	return patch
 }
 
 // SerialInfo returns the serial number information of the rack.
@@ -198,6 +290,7 @@ func GetListOfRacks(
 	pagination *dbquery.Pagination,
 	orderBy *dbquery.OrderBy,
 	withComponents bool,
+	withExternalIDOnly bool,
 ) ([]Rack, int32, error) {
 	var racks []Rack
 	conf := &dbquery.Config{
@@ -213,6 +306,11 @@ func GetListOfRacks(
 
 	// Build filterables list from all provided filters
 	filterables := make([]dbquery.Filterable, 0)
+	if withExternalIDOnly {
+		filterables = append(filterables, &dbquery.Filter{
+			Column: "external_id", Operator: dbquery.OperatorNotEqual, Value: "",
+		})
+	}
 
 	if filterable := info.ToFilterable("name"); filterable != nil {
 		filterables = append(filterables, filterable)
@@ -264,8 +362,12 @@ func GetListOfRacks(
 		conf.Filterables = filterables
 	}
 
+	conf.DefaultOrderBy = defaultRackOrderBy
 	if orderBy != nil {
-		conf.DefaultOrderBy = []dbquery.OrderBy{*orderBy}
+		conf.DefaultOrderBy = []dbquery.OrderBy{
+			*orderBy,
+			{Column: "id", Direction: dbquery.OrderAscending},
+		}
 	}
 
 	if withComponents {
@@ -288,9 +390,13 @@ func GetRacksForNVLDomain(
 	ctx context.Context,
 	idb bun.IDB,
 	nvlDomainID uuid.UUID,
+	withComponents bool,
 ) ([]Rack, error) {
 	var racks []Rack
 	q := idb.NewSelect().Model(&racks).Where("nvldomain_id = ?", nvlDomainID)
+	if withComponents {
+		q = q.Relation("Components").Relation("Components.BMCs")
+	}
 
 	if err := q.Scan(ctx); err != nil {
 		return nil, err
@@ -342,4 +448,49 @@ func GetRacksByIDsIncludingDeleted(
 	}
 
 	return racks, nil
+}
+
+// GetRackOperationStatuses derives each requested rack's operability phase
+// from its active Compute, NVSwitch, and PowerShelf components. Racks with no
+// supported active components, or with any missing/unrecognized participating
+// component status, fail closed as Unknown.
+func GetRackOperationStatuses(
+	ctx context.Context,
+	idb bun.IDB,
+	rackIDs []uuid.UUID,
+) (map[uuid.UUID]types.Phase, error) {
+	result := make(map[uuid.UUID]types.Phase, len(rackIDs))
+	statusesByRack := make(map[uuid.UUID][]*types.ComponentOperationStatus, len(rackIDs))
+	for _, rackID := range rackIDs {
+		result[rackID] = types.PhaseUnknown
+	}
+	if len(rackIDs) == 0 {
+		return result, nil
+	}
+
+	var components []Component
+	supportedTypes := []string{
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch),
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypePowerShelf),
+	}
+	err := idb.NewSelect().
+		Model(&components).
+		Column("rack_id", "status").
+		Where("rack_id IN (?)", bun.In(rackIDs)).
+		Where("type IN (?)", bun.In(supportedTypes)).
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range components {
+		component := &components[i]
+		statusesByRack[component.RackID] = append(statusesByRack[component.RackID], component.Status)
+	}
+	for rackID, statuses := range statusesByRack {
+		result[rackID] = types.AggregateComponentOperationStatus(statuses)
+	}
+
+	return result, nil
 }

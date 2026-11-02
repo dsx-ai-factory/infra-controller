@@ -38,11 +38,13 @@ carbide-tls = { path = "../tls" }
 logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 carbide-utils = { path = "../utils" }
+carbide-uuid = { path = "../uuid" }
 trace-propagation = { path = "../trace-propagation" }
 libc = { workspace = true }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 #these are alphabetized
+async-trait = { workspace = true }
 axum-extra = { workspace = true, features = ["cookie", "cookie-private"] }
 axum = { workspace = true, features = ["http2"] }
 bytes = { workspace = true }
@@ -53,6 +55,7 @@ futures-util = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
 http = { workspace = true }
+humantime-serde = { workspace = true }
 hyper-rustls = { workspace = true }
 hyper-timeout = { workspace = true }
 hyper-util = { workspace = true }
@@ -60,6 +63,7 @@ hyper = { workspace = true, features = ["full"] }
 lazy_static = { workspace = true }
 mac_address = { workspace = true }
 moka = { workspace = true }
+nv-redfish-dispatcher = { workspace = true }
 opentelemetry = { workspace = true, features = ["logs"] }
 opentelemetry-otlp = { workspace = true, features = ["grpc-tonic"] }
 opentelemetry-prometheus.workspace = true
@@ -109,8 +113,15 @@ serde = { features = ["derive"], workspace = true }
 carbide-version = { path = "../version" }
 
 [dev-dependencies]
+bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
+axum-server = { workspace = true, features = ["tls-rustls"] }
+rcgen = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tonic-prost = { workspace = true }
 
 [lints]
 workspace = true

@@ -10,11 +10,11 @@ tests:
         tag: v1.2.3
     asserts:
       - equal:
-          path: spec.template.spec.containers[2].name
+          path: spec.template.spec.containers[3].name
           value: transceiver-exporter
       # tag defaults to the otelcol-contrib image tag when unset
       - equal:
-          path: spec.template.spec.containers[2].image
+          path: spec.template.spec.containers[3].image
           value: nvcr.io/0837451325059433/carbide-dev/transceiver-exporter:v1.2.3
 
   - it: should fall back to chart appVersion when no tag is set anywhere
@@ -24,7 +24,7 @@ tests:
         repository: test
     asserts:
       - equal:
-          path: spec.template.spec.containers[2].image
+          path: spec.template.spec.containers[3].image
           value: nvcr.io/0837451325059433/carbide-dev/transceiver-exporter:0.1.0
 
   - it: should bind transceiver-exporter to loopback on the configured port
@@ -35,10 +35,10 @@ tests:
         tag: test
     asserts:
       - contains:
-          path: spec.template.spec.containers[2].args
+          path: spec.template.spec.containers[3].args
           content: -web.listen-address=127.0.0.1:9300
       - contains:
-          path: spec.template.spec.containers[2].args
+          path: spec.template.spec.containers[3].args
           content: -collector.interface-features.enable=false
 
   - it: should honor a custom transceiver-exporter port and image
@@ -55,13 +55,13 @@ tests:
         port: 19300
     asserts:
       - equal:
-          path: spec.template.spec.containers[2].image
+          path: spec.template.spec.containers[3].image
           value: mirror.example.com/transceiver-exporter:v9.9.9
       - equal:
-          path: spec.template.spec.containers[2].imagePullPolicy
+          path: spec.template.spec.containers[3].imagePullPolicy
           value: Always
       - contains:
-          path: spec.template.spec.containers[2].args
+          path: spec.template.spec.containers[3].args
           content: -web.listen-address=127.0.0.1:19300
 
   - it: should run transceiver-exporter as root with only NET_ADMIN/NET_RAW
@@ -72,22 +72,22 @@ tests:
         tag: test
     asserts:
       - equal:
-          path: spec.template.spec.containers[2].securityContext.runAsUser
+          path: spec.template.spec.containers[3].securityContext.runAsUser
           value: 0
       - equal:
-          path: spec.template.spec.containers[2].securityContext.readOnlyRootFilesystem
+          path: spec.template.spec.containers[3].securityContext.readOnlyRootFilesystem
           value: true
       - equal:
-          path: spec.template.spec.containers[2].securityContext.allowPrivilegeEscalation
+          path: spec.template.spec.containers[3].securityContext.allowPrivilegeEscalation
           value: false
       - contains:
-          path: spec.template.spec.containers[2].securityContext.capabilities.add
+          path: spec.template.spec.containers[3].securityContext.capabilities.add
           content: NET_ADMIN
       - contains:
-          path: spec.template.spec.containers[2].securityContext.capabilities.add
+          path: spec.template.spec.containers[3].securityContext.capabilities.add
           content: NET_RAW
       - contains:
-          path: spec.template.spec.containers[2].securityContext.capabilities.drop
+          path: spec.template.spec.containers[3].securityContext.capabilities.drop
           content: ALL
 
   - it: should omit transceiver-exporter resources by default
@@ -98,7 +98,7 @@ tests:
         tag: test
     asserts:
       - isNull:
-          path: spec.template.spec.containers[2].resources
+          path: spec.template.spec.containers[3].resources
 
   - it: should render transceiver-exporter resources when set
     template: daemonset.yaml
@@ -114,8 +114,8 @@ tests:
             cpu: 50m
     asserts:
       - equal:
-          path: spec.template.spec.containers[2].resources.limits.memory
+          path: spec.template.spec.containers[3].resources.limits.memory
           value: 64Mi
       - equal:
-          path: spec.template.spec.containers[2].resources.requests.cpu
+          path: spec.template.spec.containers[3].resources.requests.cpu
           value: 50m

@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -39,28 +41,47 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 	// Input validation.
 	sched := req.GetSchedule()
 	if sched == nil {
-		return nil, errors.New("schedule config is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule config is required")
 	}
 
 	if sched.GetName() == "" {
-		return nil, errors.New("schedule.name is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule.name is required")
 	}
 
 	spec := sched.GetSpec()
 	if spec == nil ||
 		spec.GetType() == pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_UNSPECIFIED {
-		return nil, errors.New("schedule.spec.type is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule.spec.type is required")
 	}
 
 	if spec.GetSpec() == "" {
-		return nil, errors.New("schedule.spec.spec is required")
+		return nil, status.Error(codes.InvalidArgument, "schedule.spec.spec is required")
+	}
+
+	// Validate the schedule before resolving the operation or its target scope.
+	// This also computes the value that will be persisted as next_run_at.
+	specType := protoSpecTypeToModel(spec.GetType())
+	tz := spec.GetTimezone()
+	if tz == "" && specType == dbmodel.SpecTypeCron {
+		tz = "UTC"
+	}
+
+	nextRunAt, err := taskschedule.ComputeFirstRunAt(
+		specType, spec.GetSpec(), tz,
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "schedule.spec is invalid: %v", err)
 	}
 
 	// Extract operation info and target_spec from the ScheduledOperation.
 	// The target_spec serves as the initial scope for the schedule.
 	opInfo, targetSpec, pbQueueOpts, pbRuleID, err := protobuf.ScheduledOperationFrom(req.GetOperation())
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	ruleID, err := protobuf.OptionalUUIDFrom(pbRuleID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
 	}
 	firmwareInfo, isFirmware := opInfo.(*operations.FirmwareControlTaskInfo)
 	if isFirmware {
@@ -85,7 +106,10 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 	}
 
 	if len(scopes) == 0 {
-		return nil, errors.New("target_spec resolved to no rack scopes; at least one rack target is required") //nolint:lll
+		return nil, status.Error(
+			codes.InvalidArgument,
+			"target_spec resolved to no rack scopes; at least one rack target is required",
+		)
 	}
 
 	// The overlap policy drives the conflict strategy stored in the template:
@@ -102,8 +126,8 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 		ConflictStrategy: int(conflictStrategy),
 		QueueTimeoutSecs: int64(queueTimeout.Seconds()),
 	}
-	if ruleUUID := protobuf.UUIDFrom(pbRuleID); ruleUUID != uuid.Nil {
-		templateOpts.RuleID = ruleUUID.String()
+	if ruleID != nil {
+		templateOpts.RuleID = ruleID.String()
 	}
 
 	// Build operation_template JSON (target comes from scope rows at fire time).
@@ -115,21 +139,6 @@ func (rs *FlowServerImpl) CreateTaskSchedule(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build operation template: %w", err)
-	}
-
-	// Determine spec type and timezone.
-	specType := protoSpecTypeToModel(spec.GetType())
-	tz := spec.GetTimezone()
-	if tz == "" && specType == dbmodel.SpecTypeCron {
-		tz = "UTC"
-	}
-
-	// Compute next_run_at.
-	nextRunAt, err := taskschedule.ComputeFirstRunAt(
-		specType, spec.GetSpec(), tz,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("compute next_run_at: %w", err)
 	}
 
 	row := &dbmodel.TaskSchedule{
@@ -208,8 +217,12 @@ func (rs *FlowServerImpl) ListTaskSchedules(
 		EnabledOnly: req.GetEnabledOnly(),
 		Pagination:  pg,
 	}
-	if rackID := protobuf.UUIDFrom(req.GetRackId()); rackID != uuid.Nil {
-		opts.RackIDs = []uuid.UUID{rackID}
+	rackID, err := protobuf.OptionalUUIDFrom(req.GetRackId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rack_id %v", err)
+	}
+	if rackID != nil {
+		opts.RackIDs = []uuid.UUID{*rackID}
 	}
 
 	rows, total, err := rs.taskScheduleStore.List(ctx, opts)
@@ -623,11 +636,19 @@ func (rs *FlowServerImpl) CheckScheduleConflicts(
 	ctx context.Context,
 	req *pb.CheckScheduleConflictsRequest,
 ) (*pb.CheckScheduleConflictsResponse, error) {
-	opInfo, targetSpec, _, _, err := protobuf.ScheduledOperationFrom(
+	opInfo, targetSpec, _, pbRuleID, err := protobuf.ScheduledOperationFrom(
 		req.GetOperation(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	_, err = protobuf.OptionalUUIDFrom(pbRuleID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rule_id %v", err)
+	}
+	excludeID, err := protobuf.OptionalUUIDFrom(req.GetExcludeScheduleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "exclude_schedule_id %v", err)
 	}
 
 	scopes, err := rs.resolveScope(ctx, targetSpec)
@@ -639,7 +660,6 @@ func (rs *FlowServerImpl) CheckScheduleConflicts(
 		return nil, errors.New("target_spec resolved to no rack scopes; at least one rack target is required")
 	}
 
-	excludeID := protobuf.UUIDFrom(req.GetExcludeScheduleId())
 	proposedOp := operation.Wrapper{
 		Type: opInfo.Type(),
 		Code: opInfo.CodeString(),
@@ -666,8 +686,8 @@ func (rs *FlowServerImpl) CheckScheduleConflicts(
 	// Pre-seed excludeID so the dedup check below doubles as the exclude check,
 	// avoiding a separate branch per iteration.
 	seenScheduleIDs := make(map[uuid.UUID]struct{})
-	if excludeID != uuid.Nil {
-		seenScheduleIDs[excludeID] = struct{}{}
+	if excludeID != nil {
+		seenScheduleIDs[*excludeID] = struct{}{}
 	}
 	var conflicts []*pb.TaskSchedule
 

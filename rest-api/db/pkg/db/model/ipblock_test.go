@@ -7,7 +7,9 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,11 +18,205 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 )
+
+func TestGetSiteFabricIPBlockRoutingType(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{
+			name:   "whole 10.0.0.0/8 range",
+			prefix: "10.0.0.0/8",
+			want:   IPBlockRoutingTypeDatacenterOnly,
+		},
+		{
+			name:   "last /16 of 172.16.0.0/12",
+			prefix: "172.31.0.0/16",
+			want:   IPBlockRoutingTypeDatacenterOnly,
+		},
+		{
+			name:   "inside 192.168.0.0/16",
+			prefix: "192.168.4.128/26",
+			want:   IPBlockRoutingTypeDatacenterOnly,
+		},
+		{
+			name:   "inside IPv6 unique local range",
+			prefix: "fd12:3456::/48",
+			want:   IPBlockRoutingTypeDatacenterOnly,
+		},
+		{
+			name:   "starts inside a private range but extends past it",
+			prefix: "192.168.0.0/15",
+			want:   IPBlockRoutingTypePublic,
+		},
+		{
+			name:   "public IPv4",
+			prefix: "203.0.113.0/24",
+			want:   IPBlockRoutingTypePublic,
+		},
+		{
+			name:   "public IPv6",
+			prefix: "2001:db8::/32",
+			want:   IPBlockRoutingTypePublic,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, GetSiteFabricIPBlockRoutingType(netip.MustParsePrefix(tt.prefix)))
+		})
+	}
+}
+
+func TestIPBlock_Key(t *testing.T) {
+	siteID, providerID := uuid.New(), uuid.New()
+	base := IPBlock{
+		SiteID:                   siteID,
+		InfrastructureProviderID: providerID,
+		Managed:                  true,
+		Prefix:                   "10.0.0.0",
+		PrefixLength:             24,
+		ProtocolVersion:          IPBlockProtocolVersionV4,
+		RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+	}
+	tests := []struct {
+		name  string
+		block IPBlock
+		equal bool
+	}{
+		{
+			name:  "same block",
+			block: base,
+			equal: true,
+		},
+		{
+			name: "Site",
+			block: IPBlock{
+				SiteID:                   uuid.New(),
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "provider",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: uuid.New(),
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "tenant",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+				TenantID:                 cutil.GetPtr(uuid.New()),
+			},
+		},
+		{
+			name: "management",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "prefix",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.1.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "length",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             25,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "family",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV6,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "routing",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypePublic,
+			},
+		},
+		{
+			name: "IDs metadata and lifecycle are excluded",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+				ID:                       uuid.New(),
+				SitePrefixID:             cutil.GetPtr(uuid.New()),
+				Name:                     "REST name",
+				Description:              cutil.GetPtr("REST description"),
+				Status:                   IPBlockStatusDeleting,
+				Deleted:                  cutil.GetPtr(time.Now()),
+			},
+			equal: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.equal, base.Key() == tt.block.Key())
+		})
+	}
+}
 
 func testIPBlockInitDB(t *testing.T) *db.Session {
 	dbSession := util.GetTestDBSession(t, false)
@@ -93,6 +289,41 @@ func testIPBlockBuildTenant(t *testing.T, dbSession *db.Session, name string) *T
 	_, err := dbSession.DB.NewInsert().Model(tenant).Exec(context.Background())
 	assert.Nil(t, err)
 	return tenant
+}
+
+func TestIPBlock_ValidateChildPrefixLength(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		prefix   string
+		bits     int
+		length   int
+		wantErr  bool
+		tooShort bool
+	}{
+		{name: "IPv4 full grant", prefix: "192.0.2.0", bits: 24, length: 24},
+		{name: "IPv4 maximum", prefix: "192.0.2.0", bits: 24, length: 32},
+		{name: "IPv4 too long", prefix: "192.0.2.0", bits: 24, length: 33, wantErr: true},
+		{name: "IPv6 full grant", prefix: "2001:db8::", bits: 64, length: 64},
+		{name: "IPv6 maximum", prefix: "2001:db8::", bits: 64, length: 128},
+		{name: "IPv6 too long", prefix: "2001:db8::", bits: 64, length: 129, wantErr: true},
+		{name: "larger than source", prefix: "2001:db8::", bits: 64, length: 63, wantErr: true, tooShort: true},
+		{name: "negative length", prefix: "2001:db8::", bits: 64, length: -128, wantErr: true, tooShort: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ipBlock := IPBlock{Prefix: tc.prefix, PrefixLength: tc.bits}
+			err := ipBlock.ValidateChildPrefixLength(tc.length)
+			if tc.tooShort {
+				assert.ErrorIs(t, err, ErrChildPrefixLengthTooShort)
+			} else {
+				assert.NotErrorIs(t, err, ErrChildPrefixLengthTooShort)
+			}
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestIPBlock_ContainsPrefix(t *testing.T) {
@@ -237,8 +468,6 @@ func TestIPBlockSQLDAO_Create(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -401,8 +630,6 @@ func TestIPBlockSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -419,7 +646,7 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 	user := testInstanceBuildUser(t, dbSession, "testUser")
 	dao := NewIPBlockDAO(dbSession)
 
-	create := func(name string, tenantID, sitePrefixID *uuid.UUID, sequence int) *IPBlock {
+	create := func(name string, tenantID, sitePrefixID *uuid.UUID, managed *bool, sequence int) *IPBlock {
 		t.Helper()
 		ipBlock, err := dao.Create(ctx, nil, IPBlockCreateInput{
 			Name:                     name,
@@ -427,6 +654,7 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 			InfrastructureProviderID: provider.ID,
 			TenantID:                 tenantID,
 			SitePrefixID:             sitePrefixID,
+			Managed:                  managed,
 			RoutingType:              IPBlockRoutingTypeDatacenterOnly,
 			Prefix:                   fmt.Sprintf("10.%d.0.0", sequence),
 			PrefixLength:             24,
@@ -438,14 +666,18 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 		return ipBlock
 	}
 
-	// These are the three meaningful identifier combinations: no TenantID is a
-	// provider root, TenantID alone is an Allocation, and TenantID with
-	// SitePrefixID is a private Tenant SitePrefix.
+	// Management is independent of the Core link: an allocated block remains
+	// provider-visible even if it acquires a SitePrefix ID.
 	providerSitePrefixID := uuid.New()
-	providerRoot := create("provider-root", nil, &providerSitePrefixID, 30)
-	allocation := create("allocation", &tenant.ID, nil, 31)
+	providerRoot := create("provider-root", nil, &providerSitePrefixID, nil, 30)
+	allocation := create("allocation", &tenant.ID, nil, nil, 31)
 	tenantSitePrefixID := uuid.New()
-	tenantSitePrefix := create("tenant-site-prefix", &tenant.ID, &tenantSitePrefixID, 32)
+	tenantSitePrefix := create("tenant-site-prefix", &tenant.ID, &tenantSitePrefixID, cutil.GetPtr(false), 32)
+	linkedAllocation := create("linked-allocation", &tenant.ID, cutil.GetPtr(uuid.New()), cutil.GetPtr(true), 33)
+	unlinkedTenantBlock := create("unlinked-tenant-block", &tenant.ID, nil, cutil.GetPtr(false), 34)
+	require.True(t, providerRoot.Managed)
+	require.True(t, allocation.Managed)
+	require.False(t, tenantSitePrefix.Managed)
 
 	providerVisibleFilter := IPBlockFilterInput{}
 	providerVisibleFilter.ProviderVisible(provider.ID)
@@ -460,6 +692,28 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 		filter  IPBlockFilterInput
 		wantErr error
 	}{
+		{
+			name:   "provider sees linked Allocation",
+			id:     linkedAllocation.ID,
+			filter: providerVisibleFilter,
+		},
+		{
+			name:   "Allocation filter sees linked Allocation",
+			id:     linkedAllocation.ID,
+			filter: tenantAllocatedFilter,
+		},
+		{
+			name:    "provider cannot see unlinked tenant-created block",
+			id:      unlinkedTenantBlock.ID,
+			filter:  providerVisibleFilter,
+			wantErr: db.ErrDoesNotExist,
+		},
+		{
+			name:    "Allocation filter excludes unlinked tenant-created block",
+			id:      unlinkedTenantBlock.ID,
+			filter:  tenantAllocatedFilter,
+			wantErr: db.ErrDoesNotExist,
+		},
 		{
 			name:   "provider sees Site fabric root",
 			id:     providerRoot.ID,
@@ -561,6 +815,7 @@ func TestIPBlockSQLDAO_GetCountByStatus(t *testing.T) {
 	sitePrefixID := uuid.New()
 	_, err = ipsd.Create(ctx, nil, IPBlockCreateInput{
 		Name:                     "tenant-site-prefix",
+		Managed:                  cutil.GetPtr(false),
 		SiteID:                   site1.ID,
 		InfrastructureProviderID: ip.ID,
 		TenantID:                 &tenant.ID,
@@ -634,8 +889,6 @@ func TestIPBlockSQLDAO_GetCountByStatus(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1141,8 +1394,6 @@ func TestIPBlockSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1350,8 +1601,6 @@ func TestIPBlockSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1435,6 +1684,7 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 		ipb                 *IPBlock
 		paramDescription    bool
 		paramTenantID       bool
+		paramDeleted        bool
 		expectedUpdate      bool
 		expectedDescription *string
 		expectedTenantID    *uuid.UUID
@@ -1482,16 +1732,32 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 			expectedTenantID:    ipb.TenantID,
 			expectedError:       false,
 		},
+		{
+			desc:                "can restore soft deleted IP Block without clearing other fields",
+			ipb:                 ipb2,
+			paramDeleted:        true,
+			expectedUpdate:      true,
+			expectedDescription: cutil.GetPtr("description"),
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			if tc.paramDeleted {
+				require.NoError(t, ipbsd.Delete(ctx, nil, tc.ipb.ID))
+				_, err := ipbsd.GetByID(ctx, nil, tc.ipb.ID, nil)
+				require.ErrorIs(t, err, db.ErrDoesNotExist)
+			}
 			tmp, err := ipbsd.Clear(ctx, nil, IPBlockClearInput{
 				IPBlockID:   tc.ipb.ID,
 				Description: tc.paramDescription,
 				TenantID:    tc.paramTenantID,
+				Deleted:     tc.paramDeleted,
 			})
 			assert.Equal(t, tc.expectedError, err != nil)
 			assert.NotNil(t, tmp)
+			assert.Nil(t, tmp.Deleted)
+			assert.Equal(t, tc.ipb.ID, tmp.ID)
+			assert.Equal(t, tc.ipb.Created, tmp.Created)
 			assert.Equal(t, tc.expectedDescription == nil, tmp.Description == nil)
 			if tc.expectedDescription != nil {
 				assert.Equal(t, *tc.expectedDescription, *tmp.Description)
@@ -1508,8 +1774,6 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1580,8 +1844,190 @@ func TestIPBlockSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
+			}
+		})
+	}
+}
+
+type testIPBlockAfterUpdateHook struct {
+	afterUpdate func()
+}
+
+func (h *testIPBlockAfterUpdateHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testIPBlockAfterUpdateHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if h.afterUpdate == nil || event.Err != nil || event.Operation() != "UPDATE" {
+		return
+	}
+	afterUpdate := h.afterUpdate
+	h.afterUpdate = nil
+	afterUpdate()
+}
+
+func TestIPBlockSQLDAO_LinkSitePrefix(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testIPBlockInitDB(t)
+	defer dbSession.Close()
+	testIPBlockSetupSchema(t, dbSession)
+	provider := testIPBlockBuildInfrastructureProvider(t, dbSession, "link-site-prefix")
+	site := testIPBlockBuildSite(t, dbSession, provider, "link-site-prefix")
+	user := testInstanceBuildUser(t, dbSession, "link-site-prefix")
+	dao := NewIPBlockDAO(dbSession)
+
+	sequence := 0
+	create := func(name string) *IPBlock {
+		t.Helper()
+		sequence++
+		ipBlock, err := dao.Create(ctx, nil, IPBlockCreateInput{
+			Name:                     name,
+			Description:              cutil.GetPtr("SitePrefix link projection"),
+			SiteID:                   site.ID,
+			InfrastructureProviderID: provider.ID,
+			RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			Prefix:                   fmt.Sprintf("10.90.%d.0", sequence),
+			PrefixLength:             24,
+			ProtocolVersion:          IPBlockProtocolVersionV4,
+			Status:                   IPBlockStatusReady,
+			CreatedBy:                &user.ID,
+		})
+		require.NoError(t, err)
+		return ipBlock
+	}
+
+	tests := []struct {
+		name                   string
+		linkFirst              bool
+		requestDifferent       bool
+		deleteBeforeLink       bool
+		deleteAfterUpdate      bool
+		addColumn              bool
+		expectedError          error
+		expectLink             bool
+		expectUpdatedUnchanged bool
+	}{
+		{
+			name:       "links an active unlinked IP Block",
+			expectLink: true,
+		},
+		{
+			name:              "returns the linked snapshot when deletion follows the update",
+			deleteAfterUpdate: true,
+			expectLink:        true,
+		},
+		{
+			name:                   "repeats the same link",
+			linkFirst:              true,
+			expectLink:             true,
+			expectUpdatedUnchanged: true,
+		},
+		{
+			name:             "rejects reassignment to another SitePrefix",
+			linkFirst:        true,
+			requestDifferent: true,
+			expectedError:    db.ErrInvalidValue,
+			expectLink:       true,
+		},
+		{
+			name:             "rejects a deleted IP Block",
+			deleteBeforeLink: true,
+			expectedError:    db.ErrInvalidValue,
+		},
+		{
+			name:       "returns every model column after an unrelated column is added",
+			addColumn:  true,
+			expectLink: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ipBlock := create(tc.name)
+			sitePrefixID := uuid.New()
+			fixedUpdated := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.UTC)
+			if tc.linkFirst {
+				_, err := dao.LinkSitePrefix(ctx, nil, ipBlock.ID, sitePrefixID)
+				require.NoError(t, err)
+			}
+			if tc.expectUpdatedUnchanged {
+				_, err := dbSession.DB.NewUpdate().
+					Model((*IPBlock)(nil)).
+					Set("updated = ?", fixedUpdated).
+					Where("id = ?", ipBlock.ID).
+					Exec(ctx)
+				require.NoError(t, err)
+			}
+			if tc.deleteBeforeLink {
+				require.NoError(t, dao.Delete(ctx, nil, ipBlock.ID))
+			}
+
+			requestedID := sitePrefixID
+			if tc.requestDifferent {
+				requestedID = uuid.New()
+			}
+			var deleteErr error
+			deleteRan := false
+			var projectionHook *testProjectionQueryHook
+			if tc.addColumn {
+				_, err := dbSession.DB.ExecContext(ctx, "ALTER TABLE ip_block ADD COLUMN test_added_column text")
+				require.NoError(t, err)
+				projectionHook = &testProjectionQueryHook{}
+				dbSession.DB.AddQueryHook(projectionHook)
+			}
+			if tc.deleteAfterUpdate {
+				hook := &testIPBlockAfterUpdateHook{
+					afterUpdate: func() {
+						deleteRan = true
+						deleteErr = dao.Delete(ctx, nil, ipBlock.ID)
+					},
+				}
+				dbSession.DB.AddQueryHook(hook)
+				t.Cleanup(func() { hook.afterUpdate = nil })
+			}
+			got, err := dao.LinkSitePrefix(ctx, nil, ipBlock.ID, requestedID)
+			if tc.deleteAfterUpdate {
+				require.True(t, deleteRan)
+				require.NoError(t, deleteErr)
+			}
+			if tc.expectedError != nil {
+				require.ErrorIs(t, err, tc.expectedError)
+				if tc.expectLink {
+					got, err = dao.GetByID(ctx, nil, ipBlock.ID, nil)
+					require.NoError(t, err)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+			if tc.expectLink {
+				require.NotNil(t, got)
+				require.NotNil(t, got.SitePrefixID)
+				assert.Equal(t, sitePrefixID, *got.SitePrefixID)
+			}
+			if tc.deleteAfterUpdate {
+				assert.Nil(t, got.Deleted)
+				var stored IPBlock
+				err = dbSession.DB.NewSelect().Model(&stored).WhereAllWithDeleted().Where("id = ?", ipBlock.ID).Scan(ctx)
+				require.NoError(t, err)
+				require.NotNil(t, stored.SitePrefixID)
+				assert.Equal(t, sitePrefixID, *stored.SitePrefixID)
+				assert.NotNil(t, stored.Deleted)
+			}
+			if tc.expectUpdatedUnchanged {
+				assert.True(t, got.Updated.Equal(fixedUpdated))
+			}
+			if tc.addColumn {
+				_, projection, found := strings.Cut(projectionHook.query, " RETURNING ")
+				require.True(t, found)
+				testAssertNamedModelColumns(t, dbSession, IPBlock{}, projection)
+				expected := *ipBlock
+				expected.SitePrefixID = &sitePrefixID
+				expected.Updated = got.Updated
+				assert.Equal(t, expected, *got)
+				assert.False(t, got.Updated.Before(ipBlock.Updated))
+				stored, err := dao.GetByID(ctx, nil, ipBlock.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, got, stored)
 			}
 		})
 	}

@@ -26,8 +26,11 @@ pub(super) mod env;
 mod explored_endpoint;
 mod firmware;
 mod health;
+mod ipam;
+mod machine_validation;
 mod managed_host;
 mod network_segment;
+mod resource_pool;
 mod vpc;
 
 fn make_test_app(test_harness: &TestHarness) -> Router {

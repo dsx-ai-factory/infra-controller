@@ -40,9 +40,8 @@ NICo rack health report
 
 The consumer supports these BMS event types:
 
-- Rack leak detection (`LeakDetectRack`)
-- Rack leak-sensor fault (`LeakSensorFaultRack`)
-- Rack-tray leak detection (`LeakDetectRackTray`)
+- Rack leak detection (`RackLeakDetect`)
+- Rack leak-sensor fault (`RackLeakSensorFault`)
 
 For an active supported BMS event, NICo creates a rack health report with a leak alert. When the BMS publishes a clear event, NICo removes the corresponding rack health report.
 
@@ -60,14 +59,34 @@ Without these prerequisites, BMS events do not create NICo rack health reports.
 
 ### Health Reporting and Allocation Protection
 
-NICo provides **health visibility and allocation protection** for leak-related conditions. For BMS-based leak detection, rack leak health alerts come with these classifications:
+NICo provides **health visibility and allocation protection** for leak-related conditions. Tray leak health alerts come with these classifications:
 
-- `PreventAllocations`
+- `TrayLeak`
+- `Hardware`
 - `SensorCritical`
+- `PreventAllocations`
+
+BMS-based and derived rack leak health alerts come with these classifications:
+
+- `RackLeak`
+- `Hardware`
+- `SensorCritical`
+- `PreventAllocations`
+
+Flow polls NICo's aggregate rack health and treats every active `RackLeak`
+classification as a rack-scoped leak. The default response submits a forced
+power-off operation for every component currently known to Flow in that rack.
+This handling is in addition to any electrical or liquid isolation performed
+by the BMS. Rack alerts do not populate the component-level `leakStatus` field,
+which continues to reflect the tray-sensor status of each component.
 
 `PreventAllocations` blocks new allocations for hosts affected by the active tray- or rack-health condition. When the health alert clears later, NICo recalculates aggregate health; allocation eligibility can recover when no other active health condition prevents allocation.
 
-Current operational visibility is provided through NICo's health data, health alert details, logs, and metrics. To obtain a machine's current health reports, use the `GET /v2/org/{org}/nico/machine/{id}/health-report` [REST API endpoint](api:GET/v2/org/:org/nico/machine/:machineId/health-report).
+Tray list and detail responses expose `leakStatus` (`Unknown`, `Leaking`, or `NoLeak`) and `leakHandlingStatus` (`Unknown`, `None`, `ShuttingDown`, `Down`, or `Failed`). Rack responses expose these fields on objects in `components[]` only when `includeComponents=true`, not on the rack itself. These summarize detection and handling separately; `Unknown` is not confirmation that no leak exists.
+
+`leakHandlingStatus` tracks forced power-off tasks created by the event-rule leak handler. The legacy direct handler, which is selected by default, submits the same power-off response but its tasks do not update this field. See [Leakage runtime configuration](../../rest-api/flow/docs/event-rules-guide.md#leakage-runtime-configuration) for the implementation selector and [Rack-Level Administration](../manuals/rack_level_admin.md) for the inventory endpoints.
+
+For diagnostic details, use NICo's health reports, logs, and metrics. To obtain a machine's health reports, use the `GET /v2/org/{org}/nico/machine/{id}/health-report` [REST API endpoint](api:GET/v2/org/:org/nico/machine/:machineId/health-report).
 
 ### Three Tiers of Automated Leak Handling
 
@@ -97,7 +116,7 @@ The overall focus for the next phase of NICo leak detection and handling is to m
 
 ### Dedicated leak status and leak handling status API
 
-Instead of relying on low-level APIs for health report and task, [issue #5018](https://github.com/dsx-ai-factory/infra-controller/issues/5018) aims to provide a set of dedicated, easier-to-use leak status and leak handling status reporting API, such as
+Dedicated leak-reporting endpoints could consolidate the existing inventory status fields, health reports, and tasks. The following paths are proposed, not available APIs:
 
 ```http
 GET /nico/rack/{id}/leak
@@ -140,6 +159,5 @@ For hosts known to be leaking before being turned off, and for hosts in a previo
 - [`crates/dsx-exchange-consumer/src/health_updater.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dsx-exchange-consumer/src/health_updater.rs)
 - [`helm/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md)
 - [Issue #2076](https://github.com/dsx-ai-factory/infra-controller/issues/2076)
-- [Issue #5018](https://github.com/dsx-ai-factory/infra-controller/issues/5018)
 - [Issue #5391](https://github.com/dsx-ai-factory/infra-controller/issues/5391)
 - [Issue #5510](https://github.com/dsx-ai-factory/infra-controller/issues/5510)

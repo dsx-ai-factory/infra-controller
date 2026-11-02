@@ -18,23 +18,21 @@ import (
 
 // CreateMeasuredBootTrustedMachineHandler creates a machine trust approval.
 type CreateMeasuredBootTrustedMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateMeasuredBootTrustedMachineHandler returns a machine trust approval creation handler.
 func NewCreateMeasuredBootTrustedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateMeasuredBootTrustedMachineHandler {
 	return CreateMeasuredBootTrustedMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle creates a machine trust approval.
 func (cmbtmh CreateMeasuredBootTrustedMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedMachine", "Create", c, cmbtmh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedMachine", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -67,23 +65,21 @@ func (cmbtmh CreateMeasuredBootTrustedMachineHandler) Handle(c echo.Context) err
 
 // GetAllMeasuredBootTrustedMachineHandler lists machine trust approvals.
 type GetAllMeasuredBootTrustedMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetAllMeasuredBootTrustedMachineHandler returns a machine trust approval list handler.
 func NewGetAllMeasuredBootTrustedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetAllMeasuredBootTrustedMachineHandler {
 	return GetAllMeasuredBootTrustedMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle lists machine trust approvals.
 func (gambtmh GetAllMeasuredBootTrustedMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedMachine", "GetAll", c, gambtmh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedMachine", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -108,23 +104,21 @@ func (gambtmh GetAllMeasuredBootTrustedMachineHandler) Handle(c echo.Context) er
 
 // DeleteMeasuredBootTrustedMachineHandler deletes a machine trust approval.
 type DeleteMeasuredBootTrustedMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteMeasuredBootTrustedMachineHandler returns a machine trust approval deletion handler.
 func NewDeleteMeasuredBootTrustedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteMeasuredBootTrustedMachineHandler {
 	return DeleteMeasuredBootTrustedMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle deletes a machine trust approval.
 func (dmbtmh DeleteMeasuredBootTrustedMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedMachine", "Delete", c, dmbtmh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedMachine", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -153,23 +147,21 @@ func (dmbtmh DeleteMeasuredBootTrustedMachineHandler) Handle(c echo.Context) err
 
 // CreateMeasuredBootTrustedProfileHandler creates a profile trust approval.
 type CreateMeasuredBootTrustedProfileHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateMeasuredBootTrustedProfileHandler returns a profile trust approval creation handler.
 func NewCreateMeasuredBootTrustedProfileHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateMeasuredBootTrustedProfileHandler {
 	return CreateMeasuredBootTrustedProfileHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle creates a profile trust approval.
 func (cmbtph CreateMeasuredBootTrustedProfileHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedProfile", "Create", c, cmbtph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedProfile", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -202,23 +194,21 @@ func (cmbtph CreateMeasuredBootTrustedProfileHandler) Handle(c echo.Context) err
 
 // GetAllMeasuredBootTrustedProfileHandler lists profile trust approvals.
 type GetAllMeasuredBootTrustedProfileHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetAllMeasuredBootTrustedProfileHandler returns a profile trust approval list handler.
 func NewGetAllMeasuredBootTrustedProfileHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetAllMeasuredBootTrustedProfileHandler {
 	return GetAllMeasuredBootTrustedProfileHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle lists profile trust approvals.
 func (gambtph GetAllMeasuredBootTrustedProfileHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedProfile", "GetAll", c, gambtph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedProfile", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -243,23 +233,21 @@ func (gambtph GetAllMeasuredBootTrustedProfileHandler) Handle(c echo.Context) er
 
 // DeleteMeasuredBootTrustedProfileHandler deletes a profile trust approval.
 type DeleteMeasuredBootTrustedProfileHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteMeasuredBootTrustedProfileHandler returns a profile trust approval deletion handler.
 func NewDeleteMeasuredBootTrustedProfileHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteMeasuredBootTrustedProfileHandler {
 	return DeleteMeasuredBootTrustedProfileHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle deletes a profile trust approval.
 func (dmbtph DeleteMeasuredBootTrustedProfileHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedProfile", "Delete", c, dmbtph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MeasuredBootTrustedProfile", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

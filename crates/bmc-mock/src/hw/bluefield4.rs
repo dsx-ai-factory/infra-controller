@@ -21,7 +21,7 @@ use std::sync::Arc;
 use mac_address::MacAddress;
 use serde_json::json;
 
-use crate::{BootOptionKind, Callbacks, LogService, LogServices, hw, redfish};
+use crate::{BootOptionKind, Callbacks, hw, redfish};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Mode {
@@ -67,7 +67,7 @@ impl Bluefield4<'_> {
             chassis: vec![
                 redfish::chassis::SingleChassisConfig {
                     id: "BlueField_0".into(),
-                    chassis_type: "Card".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Card,
                     manufacturer: Some("Nvidia".into()),
                     model: Some(self.model().into()),
                     part_number: Some(self.part_number().into()),
@@ -82,7 +82,7 @@ impl Bluefield4<'_> {
                 },
                 redfish::chassis::SingleChassisConfig {
                     id: Self::BMC_CHASSIS_ID.into(),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some("Nvidia".into()),
                     model: Some("BlueField-4".into()),
                     part_number: Some(self.part_number().into()),
@@ -93,21 +93,21 @@ impl Bluefield4<'_> {
                 },
                 redfish::chassis::SingleChassisConfig {
                     id: "BlueField_ERoT_BMC_0".into(),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some(Cow::Borrowed("NVIDIA")),
                     serial_number: Some("".into()),
                     ..redfish::chassis::SingleChassisConfig::defaults()
                 },
                 redfish::chassis::SingleChassisConfig {
                     id: "BlueField_ERoT_CPU_0".into(),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some(Cow::Borrowed("NVIDIA")),
                     serial_number: Some("".into()),
                     ..redfish::chassis::SingleChassisConfig::defaults()
                 },
                 redfish::chassis::SingleChassisConfig {
                     id: "BlueField_IRoT_NIC_0".into(),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some(Cow::Borrowed("NVIDIA")),
                     serial_number: Some("0x3BC1ADDC364432C9".into()),
                     ..redfish::chassis::SingleChassisConfig::defaults()
@@ -124,9 +124,10 @@ impl Bluefield4<'_> {
                 Self::NETWORK_DEVICE_FUNCTION_ID,
             ),
         )
-        .ethernet(json!({
-            "PermanentMACAddress": Self::ndf0_permanent_mac(self.host_mac_address),
-        }))
+        .ethernet(
+            redfish::schema::network_device_function::Ethernet::new()
+                .permanent_mac_address(Self::ndf0_permanent_mac(self.host_mac_address).to_string()),
+        )
         .build();
 
         vec![
@@ -137,15 +138,14 @@ impl Bluefield4<'_> {
                 ),
                 &self.host_nic(),
             )
-            .network_device_functions(
+            .status(redfish::resource::Status::Ok.into())
+            .build_with_functions(
                 &redfish::network_device_function::chassis_collection(
                     Self::SYSTEM_ID,
                     Self::NETWORK_ADAPTER_ID,
                 ),
                 vec![function],
-            )
-            .status(redfish::resource::Status::Ok)
-            .build(),
+            ),
         ]
     }
 
@@ -164,13 +164,13 @@ impl Bluefield4<'_> {
         MacAddress::new([bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = Self::SYSTEM_ID;
-        let boot_opt_builder = |id: &str, kind| {
-            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
+        let boot_opt_builder = |id: &str| {
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id))
                 .boot_option_reference(id)
         };
         let host_mac = self
@@ -331,20 +331,20 @@ impl Bluefield4<'_> {
         ]
         .into_iter()
         .map(|(id, display_name, uefi_device_path)| {
-            boot_opt_builder(id, BootOptionKind::Network)
+            boot_opt_builder(id)
                 .display_name(display_name)
                 .uefi_device_path(&uefi_device_path)
-                .build()
+                .build(BootOptionKind::Network)
         });
         let boot_options = [
-            boot_opt_builder("Boot0000", BootOptionKind::Disk)
+            boot_opt_builder("Boot0000")
                 .display_name("ubuntu0")
                 .uefi_device_path(
                     "HD(1,GPT,3FECD8EB-847F-49EB-A0E5-A59B9D4C0B47,0x800,0x19000)/\
                      \\EFI\\ubuntu\\shimaa64.efi",
                 )
-                .build(),
-            boot_opt_builder("Boot0003", BootOptionKind::Disk)
+                .build(BootOptionKind::Disk),
+            boot_opt_builder("Boot0003")
                 .display_name("UEFI HFS480GEJ8X176N 4425ADEAQ5394I080947 1")
                 .uefi_device_path(
                     "VenHw(1E5A432C-0466-4D31-B009-D4D9239271D3)/\
@@ -352,18 +352,18 @@ impl Bluefield4<'_> {
                      Pci(0x0,0x0)/Pci(0x0,0x0)/\
                      NVMe(0x1,00-55-CF-55-00-2E-E4-AC)",
                 )
-                .build(),
+                .build(BootOptionKind::Disk),
         ]
         .into_iter()
         .chain(network_boot_options)
         .chain(std::iter::once(
-            boot_opt_builder("Boot0019", BootOptionKind::Disk)
+            boot_opt_builder("Boot0019")
                 .display_name("UEFI Shell")
                 .uefi_device_path(
                     "Fv(9AEF2E52-DEAD-4F63-B895-3A504A3E63C4)/\
                      FvFile(7C04A583-9E3E-4F1C-AD65-E05268D0B4D1)",
                 )
-                .build(),
+                .build(BootOptionKind::Disk),
         ))
         .collect();
         redfish::computer_system::Config {
@@ -383,14 +383,11 @@ impl Bluefield4<'_> {
                 oem: redfish::computer_system::Oem::NvidiaBluefield,
                 base_bios: Some(
                     redfish::bios::builder(&redfish::bios::resource(system_id))
-                        .attributes(json!({}))
-                        .build(),
+                        .with_attributes(json!({})),
                 ),
-                log_services: Some(Arc::new(Bf4LogServices {
-                    event_log: DpuEventLog {
-                        entries: vec!["DPU Warm Reset".to_string()],
-                    },
-                })),
+                log_services: Some(redfish::log_service::LogServices::event_log([
+                    "DPU Warm Reset",
+                ])),
                 storage: Some(vec![]),
                 processors: Some(vec![]),
                 memory: None,
@@ -398,6 +395,10 @@ impl Bluefield4<'_> {
                 secure_boot_available: true,
             }],
         }
+    }
+
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
     }
 
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
@@ -408,7 +409,7 @@ impl Bluefield4<'_> {
                     redfish::ethernet_interface::builder(
                         &redfish::ethernet_interface::manager_resource(Self::MANAGER_ID, "eth0"),
                     )
-                    .mac_address(self.bmc_mac_address)
+                    .mac_address((self.bmc_mac_address).to_string())
                     .interface_enabled(true)
                     .build(),
                 ]),
@@ -462,42 +463,5 @@ impl Bluefield4<'_> {
             Mode::B4240 => "900-9D4B4-CWAA-TSA",
             Mode::B4240V => "900-9D4A4-00CB-TS4",
         }
-    }
-}
-
-struct DpuEventLog {
-    entries: Vec<String>,
-}
-
-impl LogService for DpuEventLog {
-    fn id(&self) -> &str {
-        "EventLog"
-    }
-
-    fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<serde_json::Value> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                redfish::log_service::event_entry(collection, &idx.to_string())
-                    .message(entry)
-                    // These are not required by specification but
-                    // required by libredfish. Making it happy. However, in future
-                    // we may want to simulate these fields as well.
-                    .severity("OK")
-                    .created("2026-02-12T02:06:58+00:00")
-                    .build()
-            })
-            .collect()
-    }
-}
-
-struct Bf4LogServices {
-    event_log: DpuEventLog,
-}
-
-impl LogServices for Bf4LogServices {
-    fn services(&self) -> Vec<&(dyn LogService + '_)> {
-        vec![&self.event_log as &dyn LogService]
     }
 }

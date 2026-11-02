@@ -3,6 +3,8 @@
 
 package model
 
+import "encoding/json"
+
 const (
 	// DeletionRequestAcceptedMessage is returned when an asynchronous delete has
 	// been accepted for processing.
@@ -24,4 +26,17 @@ func NewAPIDeletionAcceptedResponse() APIMessageResponse {
 	return APIMessageResponse{
 		Message: DeletionRequestAcceptedMessage,
 	}
+}
+
+// APILabels is a response label map that serializes nil as an empty JSON object.
+// Request and database models retain their own nil semantics.
+// Response fields using this type must not use omitempty.
+type APILabels map[string]string
+
+// MarshalJSON encodes labels as an object, including when the map is nil.
+func (labels APILabels) MarshalJSON() ([]byte, error) {
+	if labels == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(map[string]string(labels))
 }

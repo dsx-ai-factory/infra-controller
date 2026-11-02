@@ -55,8 +55,8 @@ exit {error_code} ||
 async fn whoami(machine: Machine, state: State<AppState>) -> impl IntoResponse {
     let (template_key, template_data) =
         if let Some(instructions) = machine.instructions.discovery_instructions {
-            match (instructions.machine_interface, instructions.domain) {
-                (Some(interface), Some(_)) => {
+            match instructions.machine_interface {
+                Some(interface) => {
                     let mut template_data = HashMap::new();
                     template_data.insert("fqdn".to_string(), interface.hostname);
                     template_data.insert("mac_address".to_string(), interface.mac_address);
@@ -67,7 +67,7 @@ async fn whoami(machine: Machine, state: State<AppState>) -> impl IntoResponse {
                     });
                     ("whoami".to_string(), template_data)
                 }
-                _ => {
+                None => {
                     emit(PxeBootOutcome {
                         endpoint: BootEndpoint::Whoami,
                         reason: OutcomeReason::InterfaceNotFound,
@@ -75,7 +75,7 @@ async fn whoami(machine: Machine, state: State<AppState>) -> impl IntoResponse {
                     (
                         "error".to_string(),
                         generate_error_template(
-                            "Could not load interface or domain",
+                            "Could not load interface",
                             PxeErrorCode::InterfaceNotFound as isize,
                         ),
                     )
@@ -220,7 +220,46 @@ mod tests {
     use carbide_instrument::testing::MetricsCapture;
 
     use super::*;
-    use crate::common::test_app_state;
+    use crate::common::{test_app_state, test_app_state_with_templates};
+
+    #[tokio::test]
+    async fn whoami_renders_an_interface_without_a_domain() {
+        let metrics = MetricsCapture::start();
+        let response = whoami(
+            Machine {
+                instructions: rpc::forge::CloudInitInstructions {
+                    discovery_instructions: Some(rpc::forge::CloudInitDiscoveryInstructions {
+                        machine_interface: Some(rpc::forge::MachineInterface {
+                            hostname: "secondary-host".to_string(),
+                            mac_address: "02:00:00:00:00:02".to_string(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            },
+            State(test_app_state_with_templates()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("FQDN.....${boldoff}${white} secondary-host"));
+        assert!(text.contains("MAC Address..${boldoff}${white} 02:00:00:00:00:02"));
+        assert!(!text.contains("exit 106"));
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_pxe_boot_outcomes_total",
+                &[("endpoint", "whoami"), ("reason", "ok")],
+            ),
+            1.0,
+        );
+    }
 
     /// A whoami request with no discovery instructions serves the error
     /// template and moves the outcome counter -- previously this failure

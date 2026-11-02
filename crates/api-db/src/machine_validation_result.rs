@@ -37,6 +37,10 @@ impl ColumnInfo<'_> for MachineValidationIdColumn {
     }
 }
 
+/// `find_by_machine_id` returns results for the discovery, cleanup, and on-demand
+/// validation runs referenced by the machine, or results from all its runs when
+/// `include_history` is set. Without history, a missing machine returns
+/// `NotFoundError`; other lookup errors propagate unchanged.
 pub async fn find_by_machine_id<DB>(
     txn: &mut DB,
     machine_id: &MachineId,
@@ -72,9 +76,7 @@ where
         {
             Err(err) => {
                 tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                return Err(DatabaseError::InvalidArgument(
-                    "err loading machine".to_string(),
-                ));
+                return Err(err);
             }
             Ok(None) => {
                 tracing::info!(%machine_id, "machine not found");
@@ -109,8 +111,13 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineValidationResult>>
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<MachineValidationResult>, DatabaseError> {
-    let mut query =
-        FilterableQueryBuilder::new("SELECT * FROM machine_validation_results").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT
+            machine_validation_id, name, description, command, args, context, stdout, stderr,
+            exit_code, start_time, end_time, test_id
+        FROM machine_validation_results",
+    )
+    .filter(&filter);
     query.push(" ORDER BY start_time");
     let custom_results = query
         .build_query_as()

@@ -19,7 +19,7 @@
 
 use carbide_uuid::extension_service::ExtensionServiceId;
 use config_version::{ConfigVersion, Versioned};
-use db::{self, DatabaseError};
+use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
@@ -94,7 +94,7 @@ impl StateControllerIO for ExtensionServiceStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db::extension_service::try_update_controller_state(
             txn,
             *service_id,

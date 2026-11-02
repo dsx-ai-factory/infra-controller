@@ -66,6 +66,12 @@ class ManifestTest(unittest.TestCase):
         static_stripped = ("-extldflags=-static", "-w", "-s")
         static_only = ("-extldflags=-static",)
         metadata_flags = {
+            "credsmgr": (
+                "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}",
+            ),
+            "sitemgr": (
+                "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}",
+            ),
             "api": (
                 "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.Version=${VERSION}",
                 "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.BuildTime=${BUILD_TIME_LEGACY}",
@@ -83,12 +89,12 @@ class ManifestTest(unittest.TestCase):
         linux_flags = {
             "api": static_stripped + metadata_flags["api"],
             "migrations": static_stripped,
-            "sitemgr": static_stripped,
+            "sitemgr": static_stripped + metadata_flags["sitemgr"],
             "workflow": static_stripped,
             "site-agent": static_stripped + metadata_flags["site-agent"],
             "mock-core": (),
             "mock-flow": (),
-            "credsmgr": static_stripped,
+            "credsmgr": static_stripped + metadata_flags["credsmgr"],
             "flow": static_only + metadata_flags["flow"],
             "nicocli": static_stripped,
             "nico-mcp": static_stripped,

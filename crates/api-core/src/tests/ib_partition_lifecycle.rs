@@ -21,7 +21,7 @@ use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_uuid::infiniband::IBPartitionId;
 use db::db_read::PgPoolReader;
 use db::{self, ObjectColumnFilter};
-use model::ib::{IBMtu, IBNetwork, IBQosConf, IBRateLimit, IBServiceLevel};
+use model::ib::{DEFAULT_IB_FABRIC_NAME, IBMtu, IBNetwork, IBQosConf, IBRateLimit, IBServiceLevel};
 use model::ib_partition::{IBPartition, IBPartitionConfig, IBPartitionStatus, NewIBPartition};
 use model::metadata::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -306,6 +306,62 @@ async fn test_reject_create_with_invalid_metadata(
 }
 
 #[crate::sqlx_test]
+async fn create_ib_partition_rejects_explicit_pkey_in_automatic_only_pool(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = common::api_fixtures::get_config();
+    config.ib_config = Some(IBFabricConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+    let pkey_pool = &env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
+    sqlx::query("UPDATE resource_pool SET auto_assign = true WHERE name = $1")
+        .bind(pkey_pool.name())
+        .execute(&env.pool)
+        .await?;
+    let before = db::resource_pool::stats(&env.pool, pkey_pool.name()).await?;
+    let id = IBPartitionId::new();
+
+    let error = env
+        .api
+        .create_ib_partition(Request::new(rpc::forge::IbPartitionCreationRequest {
+            id: Some(id),
+            config: Some(IbPartitionConfig {
+                name: "explicit-pkey".to_string(),
+                tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+                pkey: Some("0x05".to_string()),
+            }),
+            metadata: Some(rpc::Metadata {
+                name: "explicit-pkey".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect_err("automatic-only pools must reject explicit PKeys");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("has no explicit allocation range"));
+    assert_eq!(
+        db::resource_pool::stats(&env.pool, pkey_pool.name()).await?,
+        before
+    );
+    let persisted = env
+        .api
+        .find_ib_partitions_by_ids(Request::new(rpc::forge::IbPartitionsByIdsRequest {
+            ib_partition_ids: vec![id],
+            include_history: false,
+        }))
+        .await?
+        .into_inner();
+    assert!(persisted.ib_partitions.is_empty());
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn create_ib_partition_with_api_with_id(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -347,7 +403,7 @@ async fn create_ib_partition_with_api_with_id(
     // Try an explicit pkey request with a good format but in the range
     // that isn't allowed to be explicitly requested.
     // This should fail.
-    let _ = env
+    let error = env
         .api
         .create_ib_partition(Request::new(rpc::forge::IbPartitionCreationRequest {
             id: Some(IBPartitionId::new()),
@@ -367,6 +423,7 @@ async fn create_ib_partition_with_api_with_id(
         }))
         .await
         .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
     // Now get a partition with a valid PKEY that can be
     // explicitly requested.
@@ -491,7 +548,7 @@ async fn test_update_ib_partition(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
     });
     // What we're testing
     let mut txn = pool.begin().await?;
-    db::ib_partition::update(&partition, &mut txn).await?;
+    db::ib_partition::update_status(partition.id, &partition.status, &mut txn).await?;
     txn.commit().await?;
 
     let partition2 = db::ib_partition::find_by(
@@ -545,7 +602,13 @@ async fn test_reject_update_with_invalid_metadata(
     partition.metadata.name = "".to_string(); // Invalid name
 
     let mut txn = pool.begin().await?;
-    let result = db::ib_partition::update(&partition, &mut txn).await;
+    let result = db::ib_partition::update_metadata(
+        partition.id,
+        partition.version,
+        &partition.metadata,
+        &mut txn,
+    )
+    .await;
     txn.commit().await?;
 
     let error = result
@@ -680,7 +743,7 @@ async fn test_duplicate_ib_partition(pool: sqlx::PgPool) {
     status.pkey = Some(pkey.to_string().parse().unwrap());
 
     let mut txn = pool.begin().await.unwrap();
-    db::ib_partition::update(&partition, &mut txn)
+    db::ib_partition::update_status(partition.id, &partition.status, &mut txn)
         .await
         .unwrap_err();
     txn.rollback().await.unwrap();
@@ -932,28 +995,129 @@ async fn test_handler_update_ib_partition_version_match(
     let created_config = created.config.unwrap();
     let version = created.config_version.clone();
 
+    let mut request = rpc::forge::IbPartitionUpdateRequest {
+        id: created.id,
+        config: Some(IbPartitionConfig {
+            name: created_config.name.clone(),
+            tenant_organization_id: created_config.tenant_organization_id.clone(),
+            pkey: None,
+        }),
+        if_version_match: Some(version),
+        metadata: Some(rpc::Metadata {
+            name: "updated_with_version".into(),
+            labels: vec![],
+            description: "".into(),
+        }),
+    };
     let updated = env
         .api
-        .update_ib_partition(Request::new(rpc::forge::IbPartitionUpdateRequest {
-            id: created.id,
-            config: Some(IbPartitionConfig {
-                name: created_config.name.clone(),
-                tenant_organization_id: created_config.tenant_organization_id.clone(),
-                pkey: None,
-            }),
-            if_version_match: Some(version),
-            metadata: Some(rpc::Metadata {
-                name: "updated_with_version".into(),
-                labels: vec![],
-                description: "".into(),
-            }),
-        }))
+        .update_ib_partition(Request::new(request.clone()))
         .await?
         .into_inner();
 
     assert_eq!(updated.metadata.unwrap().name, "updated_with_version");
 
+    request.metadata.as_mut().unwrap().name = "rejected replacement".into();
+    let err = env
+        .api
+        .update_ib_partition(Request::new(request))
+        .await
+        .expect_err("a successful metadata update must invalidate its client revision");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    let persisted = db::ib_partition::find_by(
+        &env.pool,
+        ObjectColumnFilter::One(db::ib_partition::IdColumn, created.id.as_ref().unwrap()),
+    )
+    .await?
+    .remove(0);
+    assert_eq!(persisted.metadata.name, "updated_with_version");
+    assert_eq!(persisted.version.to_string(), updated.config_version);
+
     Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_handler_update_ib_partition_rejects_concurrent_metadata(pool: sqlx::PgPool) {
+    let mut config = common::api_fixtures::get_config();
+    config.ib_config = Some(IBFabricConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+    let created = create_ib_partition_with_api(&env.api, "concurrent_metadata".to_string())
+        .await
+        .unwrap()
+        .into_inner();
+    let id = created.id.unwrap();
+    let snapshot = db::ib_partition::find_by(
+        &env.pool,
+        ObjectColumnFilter::One(db::ib_partition::IdColumn, &id),
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    let mut writer = env.db_txn().await;
+    let writer_pid: i32 =
+        sqlx::query_scalar("SELECT pg_backend_pid() FROM ib_partitions WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+
+    let request = env
+        .api
+        .update_ib_partition(Request::new(rpc::forge::IbPartitionUpdateRequest {
+            id: Some(id),
+            config: created.config,
+            if_version_match: Some(created.config_version),
+            metadata: Some(rpc::Metadata {
+                name: "rejected replacement".into(),
+                labels: vec![],
+                description: "must not persist".into(),
+            }),
+        }));
+    let winning_metadata = Metadata {
+        name: "winning edit".to_string(),
+        description: "committed while the API write waited".to_string(),
+        labels: [("owner".to_string(), "winner".to_string())].into(),
+    };
+    let competing_write = async {
+        // The API has passed its initial version check and is waiting to write.
+        // Advance that version before releasing the row to exercise SQL rejection.
+        common::postgres::wait_for_blocked_query(&env.pool, writer_pid, "UPDATE ib_partitions")
+            .await;
+        let db::ConditionalWrite::Applied(winner) =
+            db::ib_partition::update_metadata(id, snapshot.version, &winning_metadata, &mut writer)
+                .await
+                .unwrap()
+        else {
+            panic!("the competing writer holds the current partition revision");
+        };
+        writer.commit().await.unwrap();
+        winner.version
+    };
+    let (result, winning_version) =
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(request, competing_write)
+        })
+        .await
+        .expect("the competing metadata updates must finish");
+    let err = result.expect_err("the database rejection must fail the API request");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    let persisted = db::ib_partition::find_by(
+        &env.pool,
+        ObjectColumnFilter::One(db::ib_partition::IdColumn, &id),
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    assert_eq!(persisted.metadata, winning_metadata);
+    assert_eq!(persisted.version, winning_version);
+    assert_eq!(persisted.status, snapshot.status);
 }
 
 #[crate::sqlx_test]

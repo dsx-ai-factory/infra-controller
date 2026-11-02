@@ -69,7 +69,7 @@ mod tests {
             BmcAddr {
                 ip: "10.0.0.1".parse().unwrap(),
                 port: Some(443),
-                mac: MacAddress::from_str(mac).unwrap(),
+                mac: Some(MacAddress::from_str(mac).unwrap()),
             },
             BmcCredentials::UsernamePassword {
                 username: "admin".into(),

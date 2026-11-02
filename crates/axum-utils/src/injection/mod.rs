@@ -27,7 +27,8 @@
 //! the inner handler is skipped (`Status` short-circuit) or its execution is
 //! delayed (`Latency`). After the inner handler runs the middleware calls
 //! `InjectionStore::post_handle` to apply `Replace` / `JsonMerge` actions
-//! on the response body.
+//! on successful JSON responses. Non-2xx and non-JSON responses pass through
+//! without consuming finite Replace/JsonMerge rule budgets.
 //!
 //! Globbing follows the [`glob`] crate (filesystem-style):
 //! - `*` matches any sequence of characters except `/`

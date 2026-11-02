@@ -96,7 +96,11 @@ pub(crate) async fn seed_test_data(
     )
     .await
     .expect("failed to advance rack to Ready");
-    assert!(advanced, "rack controller_state version mismatch");
+    assert_eq!(
+        advanced,
+        db::ConditionalWrite::Applied(()),
+        "rack controller_state version mismatch"
+    );
 
     txn.commit().await.unwrap();
     (rack_id, ps1, ps2, sw1, sw2)
@@ -169,7 +173,7 @@ pub(crate) async fn seed_switch(
             bmc_password: "pass".into(),
             nvos_username: None,
             nvos_password: None,
-            nvos_mac_addresses: vec![],
+            nvos_interfaces: vec![],
             metadata: Metadata::default(),
             rack_id: Some(rack_id.clone()),
             bmc_retain_credentials: None,

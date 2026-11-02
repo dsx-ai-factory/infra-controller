@@ -18,6 +18,8 @@ stateDiagram-v2
     state "Validation" as Validation
     state "Measuring" as Measuring
     state "Ready" as Ready
+    state "Decommissioning" as Decommissioning
+    state "Decommissioned (terminal)" as Decommissioned
     state "Assigned" as Assigned
     state "HostReprovision" as HostReprovision
     state "DPUReprovision" as DPUReprovision
@@ -51,6 +53,7 @@ stateDiagram-v2
     Ready --> Measuring : Redo Measurements Request
     Ready --> BomValidating : BOM Validation Request
     Ready --> Validation : Machine Validation Request
+    Ready --> Decommissioning : Decommission Request
 
     Assigned --> PostAssignedMeasuring : Measurements required
     Assigned --> WaitingForCleanup : Cleanup
@@ -67,6 +70,8 @@ stateDiagram-v2
     WaitingForCleanup --> BomValidating
 
     PostAssignedMeasuring --> WaitingForCleanup : Measurements complete
+
+    Decommissioning --> Decommissioned : Device reset and credential deletion complete
 
     AnyNotAssignedState --> Failed : Any failure condition
     Failed --> AnyNotAssignedState : Recovery
@@ -207,6 +212,24 @@ stateDiagram-v2
 
 ## Host Initialization State Details (HostInitState)
 
+`DisableOnboardNics` applies only to Vera Rubin hosts with managed DPUs. Other
+SKUs do not support disabling onboard NICs through the BMC and skip this state.
+After enabling IPMI over LAN, eligible hosts enter `DisableOnboardNics`.
+The controller enables onboard NICs, waits at least ten seconds, disables them,
+and waits at least ten more seconds before platform configuration. Each wait uses
+its persisted substate-entry timestamp, so controller restarts preserve progress.
+Libredfish checks that host power is On before writing. Setter errors, including
+power-state failures, leave the configure substate
+in place for retry. No AUX-cycle delay is required. The waits allow settings to
+apply, but they do not verify physical NIC state through boot options.
+
+Hosts without managed DPUs, including hosts whose DPUs are ignored or operated in
+NIC mode, skip this sequence and retain their onboard NIC settings. The existing
+no-DPU paths into platform configuration remain unchanged.
+For Vera Rubin hosts that skip `DisableOnboardNics` and keep onboard NICs enabled,
+`machine_setup_status` reports "not done" with a `HostManagementNetworkAccess` diff
+expecting `Disabled`, which is expected for these configurations.
+
 Shows host initialization including boot order and UEFI setup:
 
 ```mermaid
@@ -246,6 +269,12 @@ stateDiagram-v2
     }
 
     state "EnableIpmiOverLan" as HI_EnableIpmiOverLan
+    state "DisableOnboardNics" as HI_DisableOnboardNics {
+        state "ConfigureOnboardNics(enable=true)" as HI_DON_Enable
+        state "WaitForConfigToBeApplied(onboard_nics_disabled=false)" as HI_DON_WaitEnabled
+        state "ConfigureOnboardNics(enable=false)" as HI_DON_Disable
+        state "WaitForConfigToBeApplied(onboard_nics_disabled=true)" as HI_DON_WaitDisabled
+    }
     state "WaitingForPlatformConfiguration" as HI_WaitingForPlatformConfiguration
     state "WaitingForBiosJob" as HI_WaitingForBiosJob {
         state "HandleBiosJobFailure" as HI_WBJ_HandleBiosJobFailure
@@ -264,7 +293,16 @@ stateDiagram-v2
     Failed --> HI_M_WaitingForMeasurements
     Failed --> HI_SBO_SetBootOrder : BiosSetupFailed AND is_bios_setup ok
 
-    HI_EnableIpmiOverLan --> HI_WaitingForPlatformConfiguration : Enable IPMI over LAN access
+    HI_EnableIpmiOverLan --> HI_DON_Enable : IPMI configured, Vera Rubin with managed DPUs
+    HI_EnableIpmiOverLan --> HI_WaitingForPlatformConfiguration : IPMI configured, other SKU or no managed DPUs
+    HI_DON_Enable --> HI_DON_WaitEnabled : Host On, enable write succeeds
+    HI_DON_WaitEnabled --> HI_DON_Disable : At least 10 seconds since state entry
+    HI_DON_Disable --> HI_DON_WaitDisabled : Host On, disable write succeeds
+    HI_DON_WaitDisabled --> HI_WaitingForPlatformConfiguration : At least 10 seconds since state entry
+    HI_DON_Enable --> HI_DON_Enable : Host not On or write fails (retry)
+    HI_DON_Disable --> HI_DON_Disable : Host not On or write fails (retry)
+    HI_DON_WaitEnabled --> HI_DON_WaitEnabled : Less than 10 seconds (wait)
+    HI_DON_WaitDisabled --> HI_DON_WaitDisabled : Less than 10 seconds (wait)
     HI_WaitingForPlatformConfiguration --> HI_PollingBiosSetup : Call machine setup/Restart Host
     HI_WaitingForPlatformConfiguration --> HI_WaitingForBiosJob : Dell BIOS job scheduled
     HI_WaitingForBiosJob --> HI_PollingBiosSetup : BIOS job completed
@@ -401,6 +439,12 @@ stateDiagram-v2
 
 ## Ready State Details (Ready)
 
+For hosts already provisioned through DPF, a reprovisioning request can remain
+in `Ready` while NICo checks compatibility or retries a failed DPU restart.
+Refer to [DPU Firmware Updates](../../operations/firmware-updates/dpu-firmware.md#eligibility-and-scheduling)
+for the start checks, saved start timestamps, and retry behavior behind the
+reprovisioning transitions in these diagrams.
+
 Shows what can happen in Ready state:
 
 ```mermaid
@@ -418,6 +462,7 @@ stateDiagram-v2
     state "Measuring/WaitingForMeasurements" as Measuring_M_WaitingForMeasurements
     state "DPUReprovision/dr_bfb_check_support" as DPUReprovision_dr_bfb_check_support
     state "HostReprovision/CheckingFirmware" as HostReprovision_HR_CheckingFirmware
+    state "Decommissioning/SuppressingSiteExplorer" as Decommissioning_SuppressingSiteExplorer
 
     HostInit_HI_Discovered --> Ready
     Measuring --> Ready : Measuring completed
@@ -430,7 +475,60 @@ stateDiagram-v2
     Ready --> Assigned_A_WaitingForNetworkSegmentToBeReady : Instance assigned
     Ready --> Measuring_M_WaitingForMeasurements : Redo measuring requested
     Ready --> HostInit_HI_UefiSetup_HI_USS_UnlockHost : Need setup BIOS password
+    Ready --> Decommissioning_SuppressingSiteExplorer : Decommission requested
 ```
+
+## Decommissioning State Details
+
+Decommissioning starts only from `Ready` and follows this top-level sequence:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "SuppressingSiteExplorer" as SuppressingSiteExplorer
+    state "DeconfiguringHost" as DeconfiguringHost
+    state "DeconfiguringDpus" as DeconfiguringDpus
+    state "SuppressingOobDhcp" as SuppressingOobDhcp
+    state "PowerCyclingHost" as PowerCyclingHost
+    state "PoweringOnHost" as PoweringOnHost
+    state "WaitingForOobDhcpAcknowledgement" as WaitingForOobDhcpAcknowledgement
+    state "SuppressingBmcDhcp" as SuppressingBmcDhcp
+    state "FactoryResettingBmcs" as FactoryResettingBmcs
+    state "WaitingForBmcDhcpAcknowledgement" as WaitingForBmcDhcpAcknowledgement
+    state "DeletingManagedCredentials" as DeletingManagedCredentials
+    state "Decommissioned (terminal)" as Decommissioned
+
+    [*] --> SuppressingSiteExplorer
+    SuppressingSiteExplorer --> DeconfiguringHost : Site Explorer acknowledges suppressions
+    DeconfiguringHost --> DeconfiguringDpus : Host firmware configuration reset
+    DeconfiguringDpus --> SuppressingOobDhcp : DPUs run preingestion BFB
+    SuppressingOobDhcp --> PowerCyclingHost : OOB DHCP suppressions recorded
+    PowerCyclingHost --> PoweringOnHost : AC power cycle accepted
+    PoweringOnHost --> WaitingForOobDhcpAcknowledgement : Host power state is On after power cycle
+    WaitingForOobDhcpAcknowledgement --> WaitingForOobDhcpAcknowledgement : OOB DHCP acknowledgement pending
+    WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : No OOB DHCP acknowledgements pending
+    SuppressingBmcDhcp --> FactoryResettingBmcs : BMC DHCP suppressions recorded
+    FactoryResettingBmcs --> WaitingForBmcDhcpAcknowledgement : BMC resets accepted
+    WaitingForBmcDhcpAcknowledgement --> WaitingForBmcDhcpAcknowledgement : BMC DHCP acknowledgement pending
+    WaitingForBmcDhcpAcknowledgement --> DeletingManagedCredentials : No BMC DHCP acknowledgements pending
+    DeletingManagedCredentials --> Decommissioned : Per-device credentials deleted
+```
+
+`DeconfiguringHost` disables lockdown, unlocks managed SuperNICs, resets UEFI
+settings, and clears the host UEFI password. `DeconfiguringDpus` removes DPF
+resources when applicable and installs the vanilla `preingestion.bfb` on every
+DPU.
+
+The OOB DHCP wait checks the host and DPU OOB interface MACs, and the BMC DHCP
+wait checks the host and DPU BMC MACs. Each DHCP wait advances after every MAC
+it checks has a recorded suppression acknowledgement or qualifies to advance
+without one. Refer to
+[DHCP Suppression Acknowledgement](../../decommissioning/index.md#dhcp-suppression-acknowledgement)
+for the shared rule.
+
+Refer to [Decommission Managed Hosts and DPUs](../../decommissioning/hosts.md) for the
+operator procedure, platform limitations, and intended post-reset state.
 
 ## Instance Assignment State Details (InstanceState)
 
@@ -529,9 +627,10 @@ stateDiagram-v2
     A_NCU_WaitingForNetworkSegmentToBeReady --> A_NCU_WaitingForConfigSynced : No segments OR All ready
     A_NCU_WaitingForNetworkSegmentToBeReady --> A_NCU_WaitingForNetworkSegmentToBeReady : Not all segments ready
 
-    A_NCU_WaitingForConfigSynced --> A_NCU_ReleaseOldResources : No associated DPU OR observations synced with no aggregate PreventHostStateChanges
-    A_NCU_WaitingForConfigSynced --> A_NCU_WaitingForConfigSynced : Managed DPU observation not synced OR aggregate PreventHostStateChanges
-    A_NCU_ReleaseOldResources --> A_Ready
+    A_NCU_WaitingForConfigSynced --> A_NCU_ReleaseOldResources : No associated DPU OR managed-host and instance versions current with no blocking health
+    A_NCU_WaitingForConfigSynced --> A_NCU_WaitingForConfigSynced : Missing or stale acknowledgement OR blocking health
+    A_NCU_ReleaseOldResources --> A_NCU_ReleaseOldResources : Missing or stale acknowledgement OR blocking health
+    A_NCU_ReleaseOldResources --> A_Ready : Same checks pass and old-resource cleanup commits
 
     A_HPC_PowerCycle --> A_HPC_PowerCycle : Wait Power Off
     A_HPC_PowerCycle --> A_HPC_UH_DisableLockdown : Power On
@@ -594,16 +693,61 @@ Normal success proceeds directly from `WaitingForNetworkConfig` to
 `WaitingForExtensionServicesConfig` remain only so NICo can recover hosts that
 persisted those states on an older release.
 
-The following requests bypass these readiness checks:
+The following requests bypass these initial provisioning readiness checks:
 
 - Instance deletion proceeds through its required restart without waiting for
   network health.
 - An explicit custom iPXE request proceeds through its requested restart.
 
-A live network update uses `NetworkConfigUpdate/WaitingForConfigSynced`. A host
-with associated DPUs waits for current observations and aggregate health alerts
-that prevent host state changes. A host without associated DPUs skips both
-checks. This path does not apply the primary p0 PXE gate or restart the host.
+### Live Network Update Resource Release
+
+A live network update keeps old network resources until the required DPU
+reports and health checks pass. It does not restart the host or apply the
+primary p0 PXE gate.
+
+For a host with associated DPUs, NICo checks these conditions in order:
+
+1. Every DPU in the host topology reports the current managed-host network
+   configuration version. A missing DPU snapshot, observation, or version does
+   not count as an acknowledgement.
+1. The number of instance network observations matches the number of DPUs
+   required by the current instance configuration. Every recorded instance
+   observation reports the current instance network configuration version.
+1. The aggregate health report has no `PreventHostStateChanges` alert.
+
+A host without associated DPUs skips these acknowledgement and aggregate health
+checks.
+
+`NetworkConfigUpdate/WaitingForConfigSynced` runs the checks first. If they pass,
+the host enters `NetworkConfigUpdate/ReleaseOldResources`, which repeats them.
+Another DPU report can arrive after NICo saves the state change.
+
+Missing or stale acknowledgements cause a wait. Blocking health causes a
+handler error. In either case, NICo keeps the same state, old resources, and
+pending update request, then checks again on a later iteration. Instance
+deletion does not bypass these checks for a pending live update.
+
+After the repeated checks pass, NICo completes cleanup in one transaction. It
+releases old addresses and unused VPC loopbacks, marks removed generated
+segments for deletion, and clears the pending update request. The host returns
+to `Assigned/Ready`. To troubleshoot a pending update, refer to
+[Diagnose a Live Network Update](../../playbooks/stuck_objects/waiting_for_network_config.md#diagnose-a-live-network-update).
+
+A DPU that loses all tenant interfaces still belongs to the host
+topology. It must acknowledge its Admin configuration before NICo can release
+the old resources.
+
+Until that DPU reports again, its old instance observation can leave more
+instance observations than required DPUs, even if its managed-host version
+still matches. If applying Admin fails, the instance observation can disappear
+without proving that the old tenant configuration was removed. A healthy
+report or an absent instance observation is therefore not enough: NICo still
+needs the managed-host acknowledgement.
+
+NICo uses the versions and health that the agents report. It does not
+independently verify hardware forwarding. Refer to
+[Wait for Removed DPUs Before Releasing Instance Network Resources](https://github.com/dsx-ai-factory/infra-controller/issues/3895)
+for background on this removed-DPU scenario.
 
 ## Host Reprovision State Details (HostReprovisionState)
 

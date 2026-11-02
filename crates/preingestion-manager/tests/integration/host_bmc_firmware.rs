@@ -24,9 +24,10 @@ use std::time::Duration;
 
 use carbide_firmware::test_support::script_setup;
 use carbide_preingestion_manager::PreingestionManager;
-use carbide_redfish::libredfish::test_support::RedfishSim;
+use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::default_config;
+use libredfish::{PowerState, SystemPowerControl};
 use model::firmware::{
     FirmwareComponentType, FirmwareEntry, FirmwareFileArtifact, HostFirmwareConfig,
 };
@@ -34,6 +35,96 @@ use model::site_explorer::{InitialResetPhase, PowerDrainState, PreingestionState
 use rpc::forge::DhcpDiscovery;
 
 use crate::common;
+
+#[sqlx_test]
+async fn lenovo_preingestion_releases_firmware_lockdown(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+    let sim = Arc::new(RedfishSim::default());
+    sim.set_lockdown(libredfish::EnabledDisabled::Enabled);
+    let manager = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("02:00:00:00:01:32", underlay.relay_address)
+                .vendor_string("Lenovo")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let address: IpAddr = response.address.parse()?;
+    let mut firmware = HostFirmwareConfig::from(config.host_models.get("1").unwrap().clone());
+    firmware.vendor = bmc_vendor::BMCVendor::Lenovo;
+    firmware.model = "ThinkSystem SR650 V4".to_string();
+    let bmc = firmware
+        .components
+        .get_mut(&FirmwareComponentType::Bmc)
+        .unwrap();
+    bmc.preingest_upgrade_when_below = Some("2.97".to_string());
+    bmc.known_firmware = vec![FirmwareEntry::standard("2.97")];
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "2.03", "1.13.2", false).await?;
+    let mut endpoint = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    endpoint.report.vendor = Some(bmc_vendor::BMCVendor::Lenovo);
+    endpoint.report.model = Some(firmware.model.clone());
+    for system in &mut endpoint.report.systems {
+        system.manufacturer = Some("Lenovo".to_string());
+        system.model = Some(firmware.model.clone());
+    }
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    db::host_firmware_config::upsert(&mut txn, &firmware).await?;
+    txn.commit().await?;
+
+    let mut uploaded = false;
+    for _ in 0..4 {
+        manager.run_single_iteration().await?;
+        let mut txn = pool.begin().await?;
+        let endpoints = db::explored_endpoints::find_all_by_ip(address, &mut txn).await?;
+        if matches!(
+            endpoints[0].preingestion_state,
+            PreingestionState::UpgradeFirmwareWait { .. }
+        ) {
+            uploaded = true;
+            break;
+        }
+    }
+    assert!(
+        uploaded,
+        "Lenovo should start uploading after releasing firmware lockdown"
+    );
+    assert!(
+        sim.lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Disabled)
+    );
+    Ok(())
+}
 
 #[sqlx_test]
 async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -180,7 +271,7 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
 
     // Now we simulate site explorer coming through and reading the new updated version
     endpoint.report.service[0].inventories[0].version = Some("6.00.30.00".to_string());
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             endpoint.address,
             endpoint.report_version,
@@ -188,7 +279,8 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
             false,
             &mut txn
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
 
     txn.commit().await?;
@@ -226,6 +318,148 @@ async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::
             == 1
     );
     txn.commit().await?;
+
+    Ok(())
+}
+
+/// UEFI firmware activates on the next host boot. A host that pre-ingestion
+/// found powered off refuses `ForceRestart`, so activation powers it on
+/// instead; a running host, and a host whose power state cannot be read,
+/// keep the `ForceRestart` this step always issued (#7100).
+#[sqlx_test]
+async fn test_preingestion_uefi_activation_powers_on_an_off_host(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let ip_addr = IpAddr::from_str(addr).unwrap();
+
+    struct Case {
+        scenario: &'static str,
+        power_state: Option<PowerState>,
+        power_state_unreadable: bool,
+        expected: SystemPowerControl,
+    }
+    let cases = [
+        Case {
+            scenario: "host off: powered on",
+            power_state: Some(PowerState::Off),
+            power_state_unreadable: false,
+            expected: SystemPowerControl::On,
+        },
+        Case {
+            scenario: "host on: force restarted",
+            power_state: Some(PowerState::On),
+            power_state_unreadable: false,
+            expected: SystemPowerControl::ForceRestart,
+        },
+        Case {
+            scenario: "power state unreadable: force restarted",
+            power_state: Some(PowerState::Off),
+            power_state_unreadable: true,
+            expected: SystemPowerControl::ForceRestart,
+        },
+    ];
+
+    for case in cases {
+        // BMC up to date, UEFI below the pre-ingestion minimum: the UEFI
+        // upload runs first and its completion lands in ResetForNewFirmware.
+        let mut txn = pool.begin().await?;
+        db::explored_endpoints::delete(&mut txn, ip_addr).await?;
+        common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.0", false).await?;
+        txn.commit().await?;
+        if let Some(power_state) = case.power_state {
+            redfish_sim.set_power_state(addr, power_state);
+        }
+
+        // Up to the upload; the task is complete as soon as it is created.
+        let mut uploaded = false;
+        for _ in 0..4 {
+            mgr.run_single_iteration().await?;
+            let mut txn = pool.begin().await?;
+            let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+            txn.commit().await?;
+            if let PreingestionState::UpgradeFirmwareWait { upgrade_type, .. } =
+                &endpoints[0].preingestion_state
+            {
+                assert!(
+                    upgrade_type.is_uefi(),
+                    "{}: {upgrade_type:?}",
+                    case.scenario
+                );
+                uploaded = true;
+                break;
+            }
+        }
+        assert!(
+            uploaded,
+            "{}: never reached UpgradeFirmwareWait",
+            case.scenario
+        );
+
+        if case.power_state_unreadable {
+            redfish_sim.fail_next_power_state_read("sim: power state unavailable");
+        }
+        let timepoint = redfish_sim.timepoint();
+        mgr.run_single_iteration().await?;
+
+        let power_actions: Vec<_> = redfish_sim
+            .actions_since(&timepoint)
+            .for_host(addr)
+            .into_iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    RedfishSimAction::Power(_) | RedfishSimAction::PowerFailed(_)
+                )
+            })
+            .collect();
+        assert_eq!(
+            power_actions,
+            vec![RedfishSimAction::Power(case.expected)],
+            "{}",
+            case.scenario
+        );
+        let mut txn = pool.begin().await?;
+        let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+        txn.commit().await?;
+        assert!(
+            matches!(
+                endpoints[0].preingestion_state,
+                PreingestionState::NewFirmwareReportedWait { .. }
+            ),
+            "{}: {:?}",
+            case.scenario,
+            endpoints[0].preingestion_state
+        );
+    }
 
     Ok(())
 }
@@ -496,7 +730,7 @@ async fn test_preingestion_preupdate_powercycling(
 
     // Now we simulate site explorer coming through and reading the new updated version
     endpoint.report.service[0].inventories[0].version = Some("6.00.30.00".to_string());
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             endpoint.address,
             endpoint.report_version,
@@ -504,7 +738,8 @@ async fn test_preingestion_preupdate_powercycling(
             false,
             &mut txn
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
 
     txn.commit().await?;
@@ -544,7 +779,7 @@ async fn test_preingestion_preupdate_powercycling(
 
         // At some point in here we would have picked up the new version
         endpoint.report.service[0].inventories[1].version = Some("1.13.2".to_string());
-        assert!(
+        assert_eq!(
             db::explored_endpoints::try_update(
                 endpoint.address,
                 endpoint.report_version,
@@ -552,7 +787,8 @@ async fn test_preingestion_preupdate_powercycling(
                 false,
                 &mut txn
             )
-            .await?
+            .await?,
+            db::ConditionalWrite::Applied(())
         );
 
         txn.commit().await?;

@@ -6,17 +6,22 @@ package model
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 const (
@@ -52,6 +57,9 @@ const (
 )
 
 var (
+	// ErrChildPrefixLengthTooShort identifies a requested prefix larger than its source IP Block.
+	ErrChildPrefixLengthTooShort = errors.New("child prefix length must be at least the source prefix length")
+
 	// IPBlockOrderByFields is a list of valid order by fields for the IPBlock model
 	IPBlockOrderByFields = []string{"name", "prefix", "status", "created", "updated"}
 	// IPBlockRelatedEntities is a list of valid relation by fields for the IPBlock model
@@ -70,9 +78,40 @@ var (
 	}
 )
 
-// IPBlock contains information about an IPv4/v6 address pool owned
-// by the InfrastructureProvider and assigned as an overlay network
-// for a particular site
+// SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
+// prefix import, root IP Block creation, and SitePrefix inventory reconciliation
+// for one Site.
+// The key keeps its DatacenterOnly suffix, so an upgrade doesn't change the ID
+// that processes from the previous release still take.
+func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString(fmt.Sprintf(
+		"site-fabric-ip-blocks:%s:%s:%s",
+		infrastructureProviderID.String(),
+		siteID.String(),
+		IPBlockRoutingTypeDatacenterOnly,
+	))
+}
+
+// GetSiteFabricIPBlockRoutingType returns DatacenterOnly for a prefix entirely
+// inside RFC 1918 or RFC 4193 space, and Public otherwise. Testing only the
+// starting address would misclassify ranges such as 192.168.0.0/15.
+func GetSiteFabricIPBlockRoutingType(prefix netip.Prefix) string {
+	for _, privatePrefix := range []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("fc00::/7"),
+	} {
+		if privatePrefix.Bits() <= prefix.Bits() && privatePrefix.Contains(prefix.Addr()) {
+			return IPBlockRoutingTypeDatacenterOnly
+		}
+	}
+	return IPBlockRoutingTypePublic
+}
+
+// IPBlock is REST's local record for an IPv4 or IPv6 address pool associated
+// with a Site. SitePrefixID optionally links the record to its corresponding
+// Core SitePrefix.
 type IPBlock struct {
 	bun.BaseModel `bun:"table:ip_block,alias:ipb"`
 
@@ -86,16 +125,38 @@ type IPBlock struct {
 	TenantID                 *uuid.UUID              `bun:"tenant_id,type:uuid"`
 	Tenant                   *Tenant                 `bun:"rel:belongs-to,join:tenant_id=id"`
 	SitePrefixID             *uuid.UUID              `bun:"site_prefix_id,type:uuid"`
-	RoutingType              string                  `bun:"routing_type,notnull"`
-	Prefix                   string                  `bun:"prefix,notnull"`
-	PrefixLength             int                     `bun:"prefix_length,notnull"`
-	ProtocolVersion          string                  `bun:"protocol_version,notnull"`
-	FullGrant                bool                    `bun:"full_grant,notnull"`
-	Status                   string                  `bun:"status,notnull"`
-	Created                  time.Time               `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated                  time.Time               `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	Deleted                  *time.Time              `bun:"deleted,soft_delete"`
-	CreatedBy                *uuid.UUID              `bun:"created_by,type:uuid"`
+	// Managed is true for Site fabric/root/overlay blocks and blocks allocated to Tenants by the Provider, false for blocks created by Tenants.
+	// Bun's default tag replaces zero values with the SQL default, so default:true
+	// would override explicit false inserts. Create supplies the default instead.
+	Managed         bool       `bun:"managed,notnull"`
+	RoutingType     string     `bun:"routing_type,notnull"`
+	Prefix          string     `bun:"prefix,notnull"`
+	PrefixLength    int        `bun:"prefix_length,notnull"`
+	ProtocolVersion string     `bun:"protocol_version,notnull"`
+	FullGrant       bool       `bun:"full_grant,notnull"`
+	Status          string     `bun:"status,notnull"`
+	Created         time.Time  `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated         time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	Deleted         *time.Time `bun:"deleted,soft_delete"`
+	CreatedBy       *uuid.UUID `bun:"created_by,type:uuid"`
+}
+
+// Key identifies an IP Block by Site, provider, tenant, management, CIDR, family,
+// and routing type. REST/Core IDs, metadata, and lifecycle are checked separately.
+func (ipb *IPBlock) Key() string {
+	values := url.Values{
+		"site_id":                    {ipb.SiteID.String()},
+		"infrastructure_provider_id": {ipb.InfrastructureProviderID.String()},
+		"managed":                    {strconv.FormatBool(ipb.Managed)},
+		"prefix":                     {ipb.Prefix},
+		"prefix_length":              {strconv.Itoa(ipb.PrefixLength)},
+		"protocol_version":           {ipb.ProtocolVersion},
+		"routing_type":               {ipb.RoutingType},
+	}
+	if ipb.TenantID != nil {
+		values.Set("tenant_id", ipb.TenantID.String())
+	}
+	return values.Encode()
 }
 
 // ContainsPrefix reports whether prefix belongs to this IPBlock.
@@ -111,6 +172,22 @@ func (ipb *IPBlock) ContainsPrefix(prefix netip.Prefix) bool {
 		ipBlockPrefix.Contains(prefix.Addr())
 }
 
+// ValidateChildPrefixLength accepts lengths from this IP Block's prefix length
+// through its address family maximum, including an equal-length full grant.
+func (ipb *IPBlock) ValidateChildPrefixLength(length int) error {
+	prefix, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", ipb.Prefix, ipb.PrefixLength))
+	if err != nil {
+		return err
+	}
+	if length < prefix.Bits() {
+		return fmt.Errorf("%w: got %d, minimum %d", ErrChildPrefixLengthTooShort, length, prefix.Bits())
+	}
+	if length > prefix.Addr().BitLen() {
+		return fmt.Errorf("prefix length must be between %d and %d", prefix.Bits(), prefix.Addr().BitLen())
+	}
+	return nil
+}
+
 // IPBlockCreateInput input parameters for Create method
 type IPBlockCreateInput struct {
 	IPBlockID                *uuid.UUID
@@ -119,10 +196,11 @@ type IPBlockCreateInput struct {
 	SiteID                   uuid.UUID
 	InfrastructureProviderID uuid.UUID
 	TenantID                 *uuid.UUID
-	// SitePrefixID identifies the backing Core SitePrefix. Together with
-	// TenantID, it identifies a private Tenant SitePrefix; a Site fabric root
-	// may also carry this ID when linked to Core.
-	SitePrefixID    *uuid.UUID
+	// SitePrefixID identifies the related Core SitePrefix for this block, if available.
+	// Provider-allocated tenant blocks may have no Core SitePrefix; the link does not indicate management.
+	SitePrefixID *uuid.UUID
+	// Managed defaults to true. Tenant-created IP Blocks explicitly set false.
+	Managed         *bool
 	RoutingType     string
 	Prefix          string
 	PrefixLength    int
@@ -153,11 +231,14 @@ type IPBlockClearInput struct {
 	IPBlockID   uuid.UUID
 	Description bool
 	TenantID    bool
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 // IPBlockFilterInput input parameters for Filter method
 type IPBlockFilterInput struct {
 	IPBlockIDs                []uuid.UUID
+	SitePrefixIDs             []uuid.UUID
 	Names                     []string
 	SiteIDs                   []uuid.UUID
 	InfrastructureProviderIDs []uuid.UUID
@@ -169,8 +250,10 @@ type IPBlockFilterInput struct {
 	FullGrant                 *bool
 	Statuses                  []string
 	ExcludeDerived            bool
-	ExcludeTenantSitePrefixes bool
-	SearchQuery               *string
+	Managed                   *bool
+	// CoreLinkedOnly limits the result to IP Blocks linked to a Core SitePrefix.
+	CoreLinkedOnly bool
+	SearchQuery    *string
 	// IncludeDeleted returns soft-deleted rows in addition to active ones.
 	IncludeDeleted bool
 }
@@ -178,7 +261,7 @@ type IPBlockFilterInput struct {
 // ProviderVisible applies the provider's IPBlock visibility rules to the filter.
 func (filter *IPBlockFilterInput) ProviderVisible(infrastructureProviderID uuid.UUID) {
 	filter.InfrastructureProviderIDs = []uuid.UUID{infrastructureProviderID}
-	filter.ExcludeTenantSitePrefixes = true
+	filter.Managed = new(true)
 }
 
 // SiteFabric applies the provider's Site fabric root rules to the filter.
@@ -190,7 +273,7 @@ func (filter *IPBlockFilterInput) SiteFabric(infrastructureProviderID uuid.UUID)
 // TenantAllocated applies the tenant's Allocation IPBlock rules to the filter.
 func (filter *IPBlockFilterInput) TenantAllocated(tenantID uuid.UUID) {
 	filter.TenantIDs = []uuid.UUID{tenantID}
-	filter.ExcludeTenantSitePrefixes = true
+	filter.Managed = new(true)
 }
 
 var _ bun.BeforeAppendModelHook = (*IPBlock)(nil)
@@ -223,6 +306,8 @@ type IPBlockDAO interface {
 	Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (*IPBlock, error)
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*IPBlock, error)
+	// GetByIDForUpdate returns and locks one active IP Block for the transaction.
+	GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (*IPBlock, error)
 	//
 	GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, filter IPBlockFilterInput, includeRelations []string) (*IPBlock, error)
 	//
@@ -231,6 +316,9 @@ type IPBlockDAO interface {
 	GetAll(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput, page paginator.PageInput, includeRelations []string) ([]IPBlock, int, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input IPBlockUpdateInput) (*IPBlock, error)
+	// LinkSitePrefix attaches a Core SitePrefix ID, treats the same link as a
+	// no-op, and does not allow reassignment.
+	LinkSitePrefix(ctx context.Context, tx *db.Tx, id uuid.UUID, sitePrefixID uuid.UUID) (*IPBlock, error)
 	//
 	Clear(ctx context.Context, tx *db.Tx, input IPBlockClearInput) (*IPBlock, error)
 	//
@@ -241,26 +329,26 @@ type IPBlockDAO interface {
 type IPBlockSQLDAO struct {
 	dbSession *db.Session
 	IPBlockDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new IPBlock from the given parameters
 // The returned IPBlock will not have any related structs (Site/InfrastructureProvider/Tenant) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (_ *IPBlock, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.Create")
-	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "name", input.Name)
-	}
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.Create")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
+	cotel.SetAttribute(ipblockDAOSpan, attribute.String("name", input.Name))
 
 	id := uuid.New()
 
 	if input.IPBlockID != nil {
 		id = *input.IPBlockID
+	}
+	managed := true
+	if input.Managed != nil {
+		managed = *input.Managed
 	}
 
 	ipb := &IPBlock{
@@ -271,6 +359,7 @@ func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockC
 		InfrastructureProviderID: input.InfrastructureProviderID,
 		TenantID:                 input.TenantID,
 		SitePrefixID:             input.SitePrefixID,
+		Managed:                  managed,
 		RoutingType:              input.RoutingType,
 		Prefix:                   input.Prefix,
 		PrefixLength:             input.PrefixLength,
@@ -296,14 +385,11 @@ func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockC
 // GetByID returns a IPBlock by ID
 // includeRelation can be a subset of "Site", "InfrastructureProvider", "Tenant"
 // returns db.ErrDoesNotExist error if the record is not found
-func (ipbsd IPBlockSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *IPBlock, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetByID")
-	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "id", id.String())
-	}
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.GetByID")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
+	cotel.SetAttribute(ipblockDAOSpan, attribute.String("id", id.String()))
 
 	ipb := &IPBlock{}
 
@@ -324,12 +410,37 @@ func (ipbsd IPBlockSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID,
 	return ipb, nil
 }
 
-// GetOne returns the IPBlock with the given ID when it also matches the filter.
-func (ipbsd IPBlockSQLDAO) GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, filter IPBlockFilterInput, includeRelations []string) (*IPBlock, error) {
-	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetOne")
-	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+// GetByIDForUpdate returns an active IP Block and keeps its row locked until
+// the required transaction commits or rolls back.
+func (ipbsd IPBlockSQLDAO) GetByIDForUpdate(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *IPBlock, retErr error) {
+	if tx == nil {
+		return nil, db.ErrInvalidParams
 	}
+
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.GetByIDForUpdate")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
+	cotel.SetAttribute(ipblockDAOSpan, attribute.String("id", id.String()))
+
+	ipBlock := &IPBlock{}
+	err := db.GetIDB(tx, ipbsd.dbSession).
+		NewSelect().
+		Model(ipBlock).
+		Where("ipb.id = ?", id).
+		For("UPDATE").
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, db.ErrDoesNotExist
+	}
+	if err != nil {
+		return nil, err
+	}
+	return ipBlock, nil
+}
+
+// GetOne returns the IPBlock with the given ID when it also matches the filter.
+func (ipbsd IPBlockSQLDAO) GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, filter IPBlockFilterInput, includeRelations []string) (_ *IPBlock, retErr error) {
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.GetOne")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
 
 	filter.IPBlockIDs = []uuid.UUID{id}
 	ipb := &IPBlock{}
@@ -357,12 +468,10 @@ func (ipbsd IPBlockSQLDAO) GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, 
 // GetCountByStatus returns count of IPBlocks for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (ipbsd IPBlockSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput) (map[string]int, error) {
+func (ipbsd IPBlockSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetCountByStatus")
-	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
-	}
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.GetCountByStatus")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
 
 	ipb := &IPBlock{}
 	var statusQueryResults []map[string]interface{}
@@ -375,13 +484,13 @@ func (ipbsd IPBlockSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, filt
 	// Count callers scope by one provider, site, or tenant. Record that owner ID
 	// as a string because the tracer ignores slice values.
 	if len(filter.InfrastructureProviderIDs) == 1 {
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "infrastructure_provider_id", filter.InfrastructureProviderIDs[0].String())
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("infrastructure_provider_id", filter.InfrastructureProviderIDs[0].String()))
 	}
 	if len(filter.SiteIDs) == 1 {
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "site_id", filter.SiteIDs[0].String())
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("site_id", filter.SiteIDs[0].String()))
 	}
 	if len(filter.TenantIDs) == 1 {
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "tenant_id", filter.TenantIDs[0].String())
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("tenant_id", filter.TenantIDs[0].String()))
 	}
 
 	err = query.Column("ipb.status").ColumnExpr("COUNT(*) AS total_count").GroupExpr("ipb.status").Scan(ctx, &statusQueryResults)
@@ -407,59 +516,52 @@ func (ipbsd IPBlockSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, filt
 	return results, nil
 }
 
-func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPBlockFilterInput, span *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPBlockFilterInput, span otrace.Span) (*bun.SelectQuery, error) {
 	if filter.TenantIDs != nil && filter.ExcludeDerived {
 		return nil, db.ErrInvalidParams
 	}
 
 	if filter.SiteIDs != nil {
 		query = query.Where("ipb.site_id IN (?)", bun.In(filter.SiteIDs))
-		ipbsd.tracerSpan.SetAttribute(span, "site_id", filter.SiteIDs)
 	}
 	if filter.InfrastructureProviderIDs != nil {
 		query = query.Where("ipb.infrastructure_provider_id IN (?)", bun.In(filter.InfrastructureProviderIDs))
-		ipbsd.tracerSpan.SetAttribute(span, "infrastructure_provider_id", filter.InfrastructureProviderIDs)
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("ipb.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		ipbsd.tracerSpan.SetAttribute(span, "tenant_id", filter.TenantIDs)
 	}
 	if filter.RoutingTypes != nil {
 		query = query.Where("ipb.routing_type IN (?)", bun.In(filter.RoutingTypes))
-		ipbsd.tracerSpan.SetAttribute(span, "routing_type", filter.RoutingTypes)
 	}
 	if filter.Names != nil {
 		query = query.Where("ipb.name IN (?)", bun.In(filter.Names))
-		ipbsd.tracerSpan.SetAttribute(span, "name", filter.Names)
 	}
 	if filter.FullGrant != nil {
 		query = query.Where("ipb.full_grant = ?", *filter.FullGrant)
-		ipbsd.tracerSpan.SetAttribute(span, "full_grant", filter.FullGrant)
 	}
 	if filter.ExcludeDerived {
 		query = query.Where("ipb.tenant_id IS NULL")
-		ipbsd.tracerSpan.SetAttribute(span, "exclude_derived", filter.ExcludeDerived)
 	}
-	if filter.ExcludeTenantSitePrefixes {
-		// A SitePrefix managed by the operator may have SitePrefixID without
-		// TenantID. Only both fields identify a private Tenant SitePrefix.
-		query = query.Where("(ipb.tenant_id IS NULL OR ipb.site_prefix_id IS NULL)")
+	if filter.Managed != nil {
+		query = query.Where("ipb.managed = ?", *filter.Managed)
+	}
+	if filter.CoreLinkedOnly {
+		query = query.Where("ipb.site_prefix_id IS NOT NULL")
 	}
 	if filter.Prefixes != nil {
 		query = query.Where("ipb.prefix IN (?)", bun.In(filter.Prefixes))
-		ipbsd.tracerSpan.SetAttribute(span, "prefix", filter.Prefixes)
 	}
 	if filter.PrefixLengths != nil {
 		query = query.Where("ipb.prefix_length IN (?)", bun.In(filter.PrefixLengths))
-		ipbsd.tracerSpan.SetAttribute(span, "prefix_length", filter.PrefixLengths)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("ipb.status IN (?)", bun.In(filter.Statuses))
-		ipbsd.tracerSpan.SetAttribute(span, "status", filter.Statuses)
 	}
 	if filter.IPBlockIDs != nil {
 		query = query.Where("ipb.id IN (?)", bun.In(filter.IPBlockIDs))
-		ipbsd.tracerSpan.SetAttribute(span, "id", filter.IPBlockIDs)
+	}
+	if filter.SitePrefixIDs != nil {
+		query = query.Where("ipb.site_prefix_id IN (?)", bun.In(filter.SitePrefixIDs))
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -471,7 +573,7 @@ func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPB
 				WhereOr("ipb.description ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("ipb.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		ipbsd.tracerSpan.SetAttribute(span, "search_query", searchQuery)
+		cotel.SetAttribute(span, attribute.String("search_query", searchQuery))
 	}
 
 	return query, nil
@@ -482,12 +584,10 @@ func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPB
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in IPBlockOrderByDefault in ascending order
-func (ipbsd IPBlockSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput, page paginator.PageInput, includeRelations []string) ([]IPBlock, int, error) {
+func (ipbsd IPBlockSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput, page paginator.PageInput, includeRelations []string) (_ []IPBlock, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetAll")
-	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
-	}
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.GetAll")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
 
 	ipbs := []IPBlock{}
 
@@ -527,12 +627,10 @@ func (ipbsd IPBlockSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IPBlock
 // For setting to null values, use: ClearFromParams
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockUpdateInput) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockUpdateInput) (_ *IPBlock, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.Update")
-	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
-	}
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.Update")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
 
 	ipb := &IPBlock{
 		ID: input.IPBlockID,
@@ -543,67 +641,52 @@ func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockU
 	if input.Name != nil {
 		ipb.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		ipb.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.SiteID != nil {
 		ipb.SiteID = *input.SiteID
 		updatedFields = append(updatedFields, "site_id")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "site_id", input.SiteID)
 	}
 	if input.InfrastructureProviderID != nil {
 		ipb.InfrastructureProviderID = *input.InfrastructureProviderID
 		updatedFields = append(updatedFields, "infrastructure_provider_id")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "infrastructure_provider_id", input.InfrastructureProviderID)
 	}
 	if input.TenantID != nil {
 		ipb.TenantID = input.TenantID
 		updatedFields = append(updatedFields, "tenant_id")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "tenant_id", input.TenantID)
 	}
 	if input.RoutingType != nil {
 		ipb.RoutingType = *input.RoutingType
 		updatedFields = append(updatedFields, "routing_type")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "routing_type", *input.RoutingType)
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("routing_type", *input.RoutingType))
 	}
 	if input.Prefix != nil {
 		ipb.Prefix = *input.Prefix
 		updatedFields = append(updatedFields, "prefix")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "prefix", *input.Prefix)
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("prefix", *input.Prefix))
 	}
 	if input.PrefixLength != nil {
 		ipb.PrefixLength = *input.PrefixLength
 		updatedFields = append(updatedFields, "prefix_length")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "prefix_length", *input.PrefixLength)
 	}
 	if input.ProtocolVersion != nil {
 		ipb.ProtocolVersion = *input.ProtocolVersion
 		updatedFields = append(updatedFields, "protocol_version")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "protocol_version", *input.ProtocolVersion)
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("protocol_version", *input.ProtocolVersion))
 	}
 	if input.FullGrant != nil {
 		ipb.FullGrant = *input.FullGrant
 		updatedFields = append(updatedFields, "full_grant")
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "full_grant", *input.FullGrant)
 	}
 	if input.Status != nil {
 		ipb.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "name", *input.Status)
+		cotel.SetAttribute(ipblockDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if len(updatedFields) > 0 {
@@ -623,18 +706,43 @@ func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockU
 	return nv, nil
 }
 
+// LinkSitePrefix attaches a Core SitePrefix ID to an active IP Block. Repeating
+// the same link is a no-op, and an existing link cannot be reassigned.
+func (ipbsd IPBlockSQLDAO) LinkSitePrefix(ctx context.Context, tx *db.Tx, id uuid.UUID, sitePrefixID uuid.UUID) (_ *IPBlock, retErr error) {
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.LinkSitePrefix")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
+	cotel.SetAttribute(ipblockDAOSpan, attribute.String("id", id.String()))
+	cotel.SetAttribute(ipblockDAOSpan, attribute.String("site_prefix_id", sitePrefixID.String()))
+
+	ipb := &IPBlock{}
+	err := db.GetIDB(tx, ipbsd.dbSession).
+		NewUpdate().
+		Model(ipb).
+		Set("site_prefix_id = ?", sitePrefixID).
+		Set("updated = CASE WHEN site_prefix_id IS NULL THEN ? ELSE updated END", db.GetCurTime()).
+		Where("id = ?", id).
+		Where("deleted IS NULL").
+		Where("(site_prefix_id IS NULL OR site_prefix_id = ?)", sitePrefixID).
+		Returning("?TableColumns").
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: IP Block is deleted or linked to another SitePrefix", db.ErrInvalidValue)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return ipb, nil
+}
+
 // ClearFromParams sets parameters of an existing IPBlock to null values in db
 // parameters displayName, description, siteID when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockClearInput) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockClearInput) (_ *IPBlock, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.ClearFromParams")
-	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
-
-		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "id", input.IPBlockID)
-	}
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.ClearFromParams")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
 
 	ipb := &IPBlock{
 		ID: input.IPBlockID,
@@ -650,11 +758,19 @@ func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockCl
 		ipb.TenantID = nil
 		updatedFields = append(updatedFields, "tenant_id")
 	}
+	if input.Deleted {
+		ipb.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, ipbsd.dbSession).NewUpdate().Model(ipb).Column(updatedFields...).Where("id = ?", input.IPBlockID).Exec(ctx)
+		query := db.GetIDB(tx, ipbsd.dbSession).NewUpdate().Model(ipb).Column(updatedFields...).Where("id = ?", input.IPBlockID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -670,12 +786,10 @@ func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockCl
 // Delete deletes an IPBlock by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (ipbsd IPBlockSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ipbsd IPBlockSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.Delete")
-	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
-	}
+	ctx, ipblockDAOSpan := cotel.StartSpan(ctx, "IPBlockDAO.Delete")
+	defer func() { cotel.EndSpan(ipblockDAOSpan, retErr) }()
 
 	ipb := &IPBlock{
 		ID: id,
@@ -692,7 +806,6 @@ func (ipbsd IPBlockSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) 
 // NewIPBlockDAO returns a new IPBlockDAO
 func NewIPBlockDAO(dbSession *db.Session) IPBlockDAO {
 	return &IPBlockSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

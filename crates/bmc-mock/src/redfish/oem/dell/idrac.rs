@@ -24,39 +24,41 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use lazy_static::lazy_static;
+use nv_redfish_server_core::Enum;
 use rand::RngExt;
 use rand::distr::StandardUniform;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
-use crate::json::{JsonExt, JsonPatch, json_patch};
-use crate::{http, redfish};
+use crate::json::{JsonExt, json_patch};
+use crate::redfish::ModelExt;
+use crate::{Callbacks, http, redfish};
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Attributes",
-        get(get_managers_oem_dell_attributes).patch(patch_managers_oem_dell_attributes),
+        get(get_managers_oem_dell_attributes::<C>).patch(patch_managers_oem_dell_attributes::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1",
-        get(get_managers_oem_dell_attributes).patch(patch_managers_oem_dell_attributes),
+        get(get_managers_oem_dell_attributes::<C>).patch(patch_managers_oem_dell_attributes::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Jobs",
-        post(post_dell_create_bios_job),
+        post(post_dell_create_bios_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs",
-        post(post_dell_create_bios_job),
+        post(post_dell_create_bios_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Jobs/{job_id}",
-        get(get_dell_job),
+        get(get_dell_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}",
-        get(get_dell_job),
+        get(get_dell_job::<C>),
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService/Actions/DellJobService.DeleteJobQueue",
         post(post_delete_job_queue)
     ).route(
         "/redfish/v1/Managers/iDRAC.Embedded.1/Actions/Oem/EID_674_Manager.ImportSystemConfiguration",
-        post(post_import_sys_configuration)
+        post(post_import_sys_configuration::<C>)
     )
 }
 
@@ -65,19 +67,25 @@ fn attributes_resource() -> redfish::Resource<'static> {
         odata_id: Cow::Borrowed(
             "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1",
         ),
-        odata_type: Cow::Borrowed("#DellAttributes.v1_0_0.DellAttributes"),
+        odata_type: Cow::Borrowed(redfish::schema::dell_attributes::DellAttributes::ODATA_TYPE),
         name: Cow::Borrowed("OEMAttributeRegistry"),
         id: Cow::Borrowed("iDRACAttributes"),
     }
 }
 
-async fn get_managers_oem_dell_attributes(State(state): State<BmcState>) -> Response {
+async fn get_managers_oem_dell_attributes<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
     lazy_static! {
         // Only attributes required by libredfish:
-        static ref base: serde_json::Value = attributes_resource().json_patch().patch(json!({
+        static ref base: serde_json::Value = {
+            let resource = attributes_resource();
+            // Attributes are registry-defined; the bundled CSDL leaves their type opaque.
+            redfish::schema::dell_attributes::DellAttributes::new(resource.odata_id.as_ref(), resource.id.as_ref(), resource.name.as_ref())
+                .into_json().patch(json!({
             "Attributes": {
                 "IPMILan.1.Enable": "Enabled",
                 "IPMISOL.1.BaudRate": "115200",
@@ -90,13 +98,14 @@ async fn get_managers_oem_dell_attributes(State(state): State<BmcState>) -> Resp
                 "SerialRedirection.1.Enable": "Enabled",
                 "WebServer.1.HostHeaderCheck": "Disabled",
             }
-        }));
+        }))
+        };
     }
     state.get_attrs(base.clone()).into_ok_response()
 }
 
-async fn patch_managers_oem_dell_attributes(
-    State(state): State<BmcState>,
+async fn patch_managers_oem_dell_attributes<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Json(attrs): Json<serde_json::Value>,
 ) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
@@ -112,7 +121,10 @@ pub(crate) enum JobState {
     Completed,
 }
 
-async fn get_dell_job(State(state): State<BmcState>, Path(job_id): Path<String>) -> Response {
+async fn get_dell_job<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(job_id): Path<String>,
+) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
@@ -121,36 +133,37 @@ async fn get_dell_job(State(state): State<BmcState>, Path(job_id): Path<String>)
             .into_response(StatusCode::NOT_FOUND);
     };
 
+    use crate::redfish::schema::dell_job::{DellJob, JobState as State};
     let job_state = match job.job_state {
-        JobState::Scheduled => "Scheduled".to_string(),
-        JobState::Completed => "Completed".to_string(),
+        JobState::Scheduled => State::Scheduled,
+        JobState::Completed => State::Completed,
     };
-
-    serde_json::json!({
-        "@odata.context": "/redfish/v1/$metadata#DellJob.DellJob",
-        "@odata.id": format!("/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}"),
-        "@odata.type": "#DellJob.v1_5_0.DellJob",
-        "ActualRunningStartTime": format!("{}", job.start_time),
-        "ActualRunningStopTime": null,
-        "CompletionTime": null,
-        "Description": "Job Instance",
-        "EndTime": "TIME_NA",
-        "Id": job_id,
-        "JobState": job_state,
-        "JobType": job.job_type,
-        "Message": job_state,
-        "MessageArgs": [],
-        "MessageArgs@odata.count": 0,
-        "MessageId": "PR19",
-        "Name": job.job_type,
-        "PercentComplete": job.percent_complete(),
-        "StartTime": format!("{}", job.start_time),
-        "TargetSettingsURI": null
-    })
+    DellJob::new(
+        format!("/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}"),
+        job_id,
+        &job.job_type,
+    )
+    .odata_context("/redfish/v1/$metadata#DellJob.DellJob")
+    .actual_running_start_time(job.start_time.to_string())
+    .actual_running_stop_time_null()
+    .completion_time_null()
+    .description("Job Instance")
+    .end_time("TIME_NA")
+    .job_state(job_state)
+    .message(job_state.as_str())
+    .message_args(std::iter::empty::<&str>())
+    .message_id("PR19")
+    .percent_complete(i64::from(job.percent_complete()))
+    .start_time(job.start_time.to_string())
+    .target_settings_uri_null()
+    .into_json()
+    // The legacy mock JobType is absent from Dell's CSDL enum. Preserve it and
+    // the captured structural-array count annotation for existing clients.
+    .patch(json!({"JobType": job.job_type, "MessageArgs@odata.count": 0}))
     .into_ok_response()
 }
 
-pub(in crate::redfish) fn create_job_with_location(state: BmcState) -> Response {
+pub(in crate::redfish) fn create_job_with_location<C: Callbacks>(state: BmcState<C>) -> Response {
     let redfish::oem::State::DellIdrac(state) = state.oem_state else {
         return http::not_found();
     };
@@ -165,7 +178,7 @@ pub(in crate::redfish) fn create_job_with_location(state: BmcState) -> Response 
     }
 }
 
-async fn post_dell_create_bios_job(State(state): State<BmcState>) -> Response {
+async fn post_dell_create_bios_job<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     create_job_with_location(state)
 }
 
@@ -173,7 +186,7 @@ async fn post_delete_job_queue() -> Response {
     json!({}).into_ok_response()
 }
 
-async fn post_import_sys_configuration(State(state): State<BmcState>) -> Response {
+async fn post_import_sys_configuration<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     create_job_with_location(state)
 }
 
@@ -255,6 +268,10 @@ impl IdracState {
             job.end_time = Some(chrono::offset::Utc::now());
             jobs.insert(job.job_id.clone(), job);
         }
+    }
+
+    pub(crate) fn reset_attributes(&self) {
+        *self.dell_attrs.lock().expect("mutex poisoned") = json!({});
     }
 
     pub(crate) fn update_attrs(&self, v: serde_json::Value) {

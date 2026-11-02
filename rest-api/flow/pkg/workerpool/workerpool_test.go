@@ -115,7 +115,12 @@ func TestWorkerPool_MultipleWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			t.Errorf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	// Submit multiple tasks
 	numTasks := 10
@@ -165,7 +170,12 @@ func TestWorkerPool_TaskErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			t.Errorf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	// Submit tasks that will fail
 	numFailingTasks := 3
@@ -213,7 +223,12 @@ func TestWorkerPool_SubmitWithResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			t.Errorf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	resultCh := make(chan JobResult, 1)
 	task := newMockTask("result-test", 10*time.Millisecond, false)
@@ -249,7 +264,12 @@ func TestWorkerPool_QueueFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			t.Errorf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	// Submit tasks that will block worker
 	blockingTask1 := newMockTask("block-1", 200*time.Millisecond, false)
@@ -295,7 +315,12 @@ func TestWorkerPool_TaskTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			t.Errorf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	resultCh := make(chan JobResult, 1)
 
@@ -350,7 +375,12 @@ func TestWorkerPool_ConcurrentSubmissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			t.Errorf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	// Submit tasks concurrently
 	numGoroutines := 10

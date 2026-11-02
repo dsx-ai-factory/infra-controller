@@ -26,29 +26,7 @@ func CreateTestDB(ctx context.Context, t *testing.T, dbConf db.Config) (*db.Sess
 	}
 	defer dbInitial.Close()
 
-	// Create a unique test database name based on the test name
-	// PostgreSQL has a 63-character limit for identifiers
-	testName := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "_"))
-	testDBName := dbConf.DBName + "_test_" + testName
-
-	// Truncate to 63 characters if needed, ensuring uniqueness with a hash suffix
-	if len(testDBName) > 63 {
-		// Use last 8 chars as a simple hash-like suffix for uniqueness
-		// Guard against short test names (less than 8 chars)
-		suffixLen := 8
-		if len(testName) < suffixLen {
-			suffixLen = len(testName)
-		}
-		suffix := testName[len(testName)-suffixLen:]
-		maxPrefix := 63 - 1 - len(suffix) // 1 for "_" separator
-		if maxPrefix > len(testDBName)-len(suffix)-1 {
-			maxPrefix = len(testDBName) - len(suffix) - 1
-		}
-		if maxPrefix < 1 {
-			maxPrefix = 1
-		}
-		testDBName = testDBName[:maxPrefix] + "_" + suffix
-	}
+	testDBName := testDatabaseName(dbConf.DBName, t.Name())
 	log.Infof("Creating test database: %v", testDBName)
 
 	// Quote the database name as a PostgreSQL identifier to prevent SQL injection
@@ -74,6 +52,20 @@ func CreateTestDB(ctx context.Context, t *testing.T, dbConf db.Config) (*db.Sess
 	}
 
 	return session, nil
+}
+
+func testDatabaseName(dbName, testName string) string {
+	testName = strings.ToLower(strings.ReplaceAll(testName, "/", "_"))
+	name := dbName + "_test_" + testName
+	// PostgreSQL limits identifiers to 63 bytes.
+	if len(name) <= 63 {
+		return name
+	}
+
+	// Hash the full name so subtests that differ in the shortened portion
+	// still get separate databases. Drop any partial UTF-8 character from the prefix.
+	prefix := strings.ToValidUTF8(name[:63-1-16], "")
+	return fmt.Sprintf("%s_%016x", prefix, db.GetStringToUint64Hash(name))
 }
 
 // QuoteIdentifier quotes a string as a PostgreSQL identifier.

@@ -8,6 +8,7 @@ metadata:
     app: {{ include "nico-dsx-exchange-consumer.name" . }}
     app.kubernetes.io/metrics: {{ include "nico-dsx-exchange-consumer.name" . }}
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-dsx-exchange-consumer.selectorLabels" . | nindent 4 }}
   ports:

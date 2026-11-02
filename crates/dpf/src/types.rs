@@ -26,12 +26,25 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use serde::{Deserialize, Serialize};
 
 use crate::crds::dpus_generated::{
-    DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
+    DpuStatus, DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
 };
+
+/// IPv4 route prefix lengths used to build Astra DPUDevice underlay values.
+#[derive(Debug, Clone, Copy)]
+pub struct AstraRoutePrefixes {
+    pub rail_route_prefix_len: u8,
+    pub software_plane_route_prefix_len: u8,
+}
 
 /// Async provider for BMC passwords used to create and refresh the K8s BMC
 /// secret. Implement this trait to supply credentials dynamically (e.g. from
-/// a vault or credential manager).
+/// a vault or credential manager). Return
+/// [`crate::DpfError::BmcPasswordSourceUnavailable`] when the configured source
+/// cannot supply the credential. Return
+/// [`crate::DpfError::LocalBmcPasswordSourceUnavailable`] for an authoritative
+/// local version 0 miss so the SDK can reject source-policy activation before
+/// startup. After a value has been published, source-unavailable and ordinary
+/// transient lookup failures retain the last published value and are retried.
 #[async_trait::async_trait]
 pub trait BmcPasswordProvider: Send + Sync {
     async fn get_bmc_password(&self) -> Result<String, crate::DpfError>;
@@ -63,8 +76,13 @@ pub const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_NAME: &str = "doca-weave-flow-contr
 pub const DOCA_XPLANE_SERVICE_NAME: &str = "doca-xplane";
 /// Hash-stable legacy VF population used by default DPF flavors and SDK initialization.
 pub const DEFAULT_DPU_NUM_OF_VFS: u32 = 16;
-/// Default SF capacity reserved beyond configured NICo-managed service endpoints.
+/// Default SF capacity reserve for regular BF3 and generic BF4.
+///
+/// BF3 GB200 uses this pool for validation but emits fixed `PF_TOTAL_SF=128`; Astra derives its
+/// capacity from managed endpoints and fixed allocations instead.
 pub const DEFAULT_PF_TOTAL_SF_RESERVED: u32 = 30;
+/// Default operator-declared SF ceiling per parent PF for BF3 and generic BF4.
+pub const DEFAULT_MAX_SF_PER_PF: u32 = 126;
 // Keep direct SDK validation aligned with api-core's general BlueField provisioning bound without
 // coupling this lightweight crate to the complete API configuration model.
 pub(crate) const MAX_BLUEFIELD_VFS_PER_PF: u32 = 126;
@@ -103,12 +121,22 @@ pub struct InitDpfResourcesConfig {
     pub(crate) flavor_name: String,
     /// Service templates and configs for M4 DPUDeployment.
     /// When empty, `default_services()` is used automatically.
+    /// BF4 Astra rejects consumers of SF NADs declared in these services when
+    /// absent from the effective service chains. Namespace-qualified local
+    /// references are checked during SDK initialization.
     pub(crate) services: Vec<ServiceDefinition>,
 
     /// Number of hardware VFs provisioned per DPU PF for BF3 and generic BF4.
+    /// BF4 Astra always emits `NUM_OF_VFS=46`; this value does not shrink its topology-free static
+    /// inventory, but it still bounds VF identities in the shared intercept-bridging topology.
     pub(crate) num_of_vfs: u32,
-    /// SF capacity reserved beyond configured NICo-managed service endpoints.
-    /// Without intercept bridging, this remains the complete legacy `PF_TOTAL_SF` value.
+    /// SF capacity reserve for regular BF3 and generic BF4.
+    ///
+    /// With intercept bridging, it is added to NICo-managed service endpoints and
+    /// `additional_managed_sf`. Without intercept bridging, it is the complete legacy
+    /// `PF_TOTAL_SF` pool, and those endpoints plus `additional_managed_sf` must fit inside it. BF3
+    /// GB200 applies the same validation but emits fixed `PF_TOTAL_SF=128`. BF4 Astra ignores this
+    /// value and derives capacity from managed endpoints plus fixed allocations.
     pub(crate) pf_total_sf_reserved: u32,
     /// Managed SF capacity not represented in [`interfaces`](Self::interfaces).
     /// Added to calculated BF3/generic-BF4 capacity when intercept bridging is configured;
@@ -116,6 +144,13 @@ pub struct InitDpfResourcesConfig {
     pub(crate) additional_managed_sf: u32,
     /// NICo-managed service-VPC slots wired from HBN to dedicated OVS bridges.
     pub(crate) service_vpc_slots: crate::ServiceVpcSlots,
+    /// SFs reserved for active or terminating service-VPC interfaces (default zero).
+    /// Sharing a VPC slot does not reduce this endpoint reservation.
+    pub(crate) max_active_service_vpc_interfaces_per_dpu: u32,
+    /// Operator-declared SF ceiling per parent PF (default 126, positive when slots are enabled).
+    /// BF3/generic BF4 ignore it with zero slots; GB200 retains its fixed 128-SF ceiling.
+    /// Astra does not use this field; a ceiling does not establish physical BAR qualification.
+    pub(crate) max_sf_per_pf: u32,
     /// Enables deployment-scoped DPUServiceInterface names and node selectors.
     /// False preserves the legacy global resource naming and selector mode for
     /// BF3 (including BF3 GB200) and generic BF4. BF4 Astra requires this to be true for the
@@ -129,7 +164,7 @@ pub struct InitDpfResourcesConfig {
     /// API-core rejects a disabled value during DPF initialization while scoped
     /// ServiceInterfaces exist.
     pub(crate) deployment_scoped_service_interfaces: bool,
-    /// Optional intercept-bridging topology for BF3 and generic BF4. `Some` replaces the
+    /// Optional intercept-bridging topology for BF3 and both BF4 profiles. `Some` replaces the
     /// ordinary static PF/VF inventory and contains exactly one configured PF.
     #[builder(setter(strip_option))]
     pub(crate) intercept_bridging: Option<DpfInterceptBridging>,
@@ -149,6 +184,10 @@ pub struct InitDpfResourcesConfig {
     /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning the deployment's
     /// DPUs.
     pub(crate) extra_bfcfg_parameters: Vec<String>,
+    /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
+    pub(crate) enable_delay_host_init: bool,
+    /// Omit partial-multiplane maintenance initialization from Astra provisioning when true.
+    pub(crate) partial_multiplane_disabled: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
     pub(crate) deployment_type: DpuDeploymentType,
 }
@@ -160,9 +199,16 @@ pub struct InitDpfResourcesConfig {
 pub struct BlueFieldSoftwareParams {
     /// OS ISO URL used by the DPU OS installation flow (`spec.osIso`).
     pub os_iso: String,
-    /// Optional PLDM firmware bundle URL for baseline firmware updates
+    /// Optional PLDM firmware bundle URLs for baseline firmware updates
     /// (`spec.pldmFwBundle`).
-    pub pldm_fw_bundle: Option<String>,
+    pub pldm_fw_bundle: Option<BTreeMap<String, String>>,
+}
+
+impl InitDpfResourcesConfig {
+    /// Returns the platform profile selected for this initialization configuration.
+    pub fn deployment_type(&self) -> DpuDeploymentType {
+        self.deployment_type
+    }
 }
 
 impl Default for InitDpfResourcesConfig {
@@ -177,18 +223,25 @@ impl Default for InitDpfResourcesConfig {
             pf_total_sf_reserved: DEFAULT_PF_TOTAL_SF_RESERVED,
             additional_managed_sf: 0,
             service_vpc_slots: crate::ServiceVpcSlots::default(),
+            max_active_service_vpc_interfaces_per_dpu: 0,
+            max_sf_per_pf: DEFAULT_MAX_SF_PER_PF,
             deployment_scoped_service_interfaces: false,
             intercept_bridging: None,
             interfaces: Vec::new(),
             proxy: None,
             extra_bfcfg_parameters: Vec::new(),
+            enable_delay_host_init: false,
+            partial_multiplane_disabled: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
     }
 }
 
 impl InitDpfResourcesConfigBuilder {
-    /// Builds an immutable configuration after validation.
+    /// Builds an immutable configuration after namespace-independent inventory and capacity validation.
+    /// SDK `initialize` and `create_initialization_objects` additionally check namespace-qualified references to SF NADs declared in `services` within their target namespace.
+    /// `initialize` checks before writing the BMC Secret. `create_initialization_objects` checks before writing provisioning resources.
+    /// Types of NADs outside this inventory or namespace are not inspected.
     pub fn build(self) -> Result<InitDpfResourcesConfig, crate::DpfError> {
         let config = self
             .assemble()
@@ -267,6 +320,8 @@ pub enum ServiceConfigPortProtocol {
 pub struct ServiceDefinition {
     /// Service name (e.g. "dts").
     pub name: String,
+    /// Whether upgrades wait for DPF's NodeEffect gate. Defaults to true when omitted.
+    pub apply_node_effect: Option<bool>,
     /// Helm chart repository URL.
     pub helm_repo_url: String,
     /// Helm chart name.
@@ -289,8 +344,9 @@ pub struct ServiceDefinition {
     pub service_daemon_set_annotations: Option<std::collections::BTreeMap<String, String>>,
     /// Optional extended resources requested by the service DaemonSet.
     pub service_daemon_set_resources: Option<BTreeMap<String, IntOrString>>,
-    /// Optional service Network Attachment Definition specification
-    pub service_nad: Option<ServiceNAD>,
+    /// Deployment-local NADs referenced by this service's interfaces.
+    /// Empty creates no NADs; each name is remapped to the deployment's suffix.
+    pub service_nads: Vec<ServiceNAD>,
 }
 
 /// Interface kind rendered into a DPUServiceInterface template.
@@ -369,7 +425,7 @@ impl DpfInterceptBridge {
     }
 }
 
-/// Deterministic, validated intercept-bridging topology shared by BF3 and generic BF4.
+/// Deterministic, validated intercept-bridging topology shared by BF3 and both BF4 profiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpfInterceptBridging {
     interfaces: Vec<DpfInterceptBridge>,
@@ -612,6 +668,8 @@ pub struct DpuServiceInterfacePatch {
     pub(crate) peer_bridge: String,
     pub(crate) peer_patch_name: String,
     pub(crate) peer_external_ids: Option<BTreeMap<String, String>>,
+    /// Optional MTU for the DPUDeployment service-chain switch terminating this patch.
+    pub(crate) service_mtu: Option<i64>,
 }
 
 /// Network interface for a DPU service.
@@ -670,20 +728,166 @@ impl ServiceDefinition {
 /// Desired definition of a direct, detached DPUService.
 ///
 /// This is deliberately distinct from [`ServiceDefinition`], which produces a
-/// DPUServiceTemplate/DPUServiceConfiguration pair for DPUDeployment. A
-/// detached service has no DPUDeployment, service ID, interfaces, config
-/// ports, or DPU-cluster selector.
+/// DPUServiceTemplate/DPUServiceConfiguration pair for DPUDeployment.
 #[derive(Debug, Clone)]
 pub struct DetachedDpuServiceDefinition {
     pub name: String,
     pub namespace: String,
     pub labels: BTreeMap<String, String>,
     pub helm_chart: DetachedHelmChart,
-    pub deploy_in_cluster: bool,
-    pub security_privileged: bool,
-    /// Exact-match node labels for the detached service's DaemonSet. The SDK
-    /// renders these as one NodeSelector term with `In` expressions.
+    pub deploy_in_cluster: Option<bool>,
+    pub security: DetachedDpuServiceSecurity,
+    /// Optional DaemonSet settings supplied by the feature using the SDK.
+    /// Absence remains absence; the SDK does not impose placement policy.
+    pub service_daemon_set: Option<DetachedServiceDaemonSet>,
+    /// Optional stable workload identity projected to the DPUService specification.
+    pub service_id: Option<String>,
+    /// DPUServiceInterface parents DPF attaches to every service pod.
+    /// Networked registrations list only their service-side interfaces.
+    pub interfaces: Option<Vec<String>>,
+}
+
+/// Desired definition of a dynamically managed DPUServiceInterface parent.
+/// Keeps generated DPF CR types inside the SDK so controllers can define interfaces
+/// without importing codegen modules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedDpuServiceInterfaceDefinition {
+    /// Kubernetes resource name.
+    pub name: String,
+    /// Kubernetes namespace containing the resource.
+    pub namespace: String,
+    /// Resource labels used for ownership and registration identity.
+    pub labels: BTreeMap<String, String>,
+    /// Exact labels selecting the DPU nodes where the interface is instantiated.
     pub node_selector_labels: BTreeMap<String, String>,
+    /// Labels propagated to each generated interface object.
+    pub template_labels: BTreeMap<String, String>,
+    /// Immutable interface kind and attachment identity.
+    pub interface: DetachedDpuServiceInterface,
+}
+
+/// Immutable interface-specific portion of a detached DPUServiceInterface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetachedDpuServiceInterface {
+    /// Service-side SF attached to a raw platform NAD.
+    Service {
+        /// Stable DPF service identity receiving the interface.
+        service_id: String,
+        /// Interface name presented inside the service pod.
+        interface_name: String,
+        /// Namespaced network attachment definition used by DPF.
+        network: String,
+    },
+    /// Patch endpoint terminating on one fixed service-VPC bridge.
+    Patch {
+        /// OVS bridge at the tenant-facing end of this fixed slot.
+        peer_bridge: String,
+    },
+}
+
+/// Desired definition of a dynamically managed DPUServiceChain parent.
+/// Ports are interface-label selectors because DPF materializes the matching children per selected
+/// DPU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedDpuServiceChainDefinition {
+    /// Kubernetes resource name.
+    pub name: String,
+    /// Kubernetes namespace containing the resource.
+    pub namespace: String,
+    /// Resource labels used for ownership and slot identity.
+    pub labels: BTreeMap<String, String>,
+    /// Exact labels selecting the DPU nodes where the chain is instantiated.
+    pub node_selector_labels: BTreeMap<String, String>,
+    /// Labels propagated to each generated chain object.
+    pub template_labels: BTreeMap<String, String>,
+    /// Ordered interface-label selectors forming the chain's ports.
+    pub interface_selectors: Vec<BTreeMap<String, String>>,
+    /// MTU applied to the generated service-chain switch.
+    pub service_mtu: i64,
+}
+
+/// Kubernetes identity required to delete exactly the resource that was observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpfDeletePreconditions {
+    /// UID of the exact Kubernetes object generation that may be deleted.
+    pub uid: String,
+    /// Resource version of the exact Kubernetes object generation that may be deleted.
+    pub resource_version: String,
+}
+
+/// Captures DPUServiceInterface and DPUServiceChain observations for ownership checks,
+/// drift detection, and fenced patches or deletions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetachedDpfResourceObservation {
+    /// Observed resource name, if present in Kubernetes metadata.
+    pub name: Option<String>,
+    /// Observed namespace, if present in Kubernetes metadata.
+    pub namespace: Option<String>,
+    /// Complete observed label set.
+    pub labels: BTreeMap<String, String>,
+    /// Complete observed spec used to validate immutable DPUServiceInterface fields
+    /// and detect mutable interface or chain drift.
+    pub spec: serde_json::Value,
+    /// Kubernetes UID used to fence deletion.
+    pub uid: Option<String>,
+    /// Kubernetes resource version used to fence deletion.
+    pub resource_version: Option<String>,
+    /// Whether Kubernetes has accepted deletion and is waiting for finalizers.
+    pub is_deleting: bool,
+}
+
+impl DetachedDpfResourceObservation {
+    /// Returns deletion preconditions for the exact observed Kubernetes object.
+    /// Refusing an object without a UID avoids deleting a same-name replacement after a
+    /// reconciliation race.
+    pub fn delete_preconditions(&self) -> Result<DpfDeletePreconditions, crate::DpfError> {
+        Ok(DpfDeletePreconditions {
+            uid: self.uid.clone().ok_or_else(|| {
+                crate::DpfError::InvalidState(
+                    "observed DPF resource is missing metadata.uid".to_string(),
+                )
+            })?,
+            resource_version: self.resource_version.clone().ok_or_else(|| {
+                crate::DpfError::InvalidState(
+                    "observed DPF resource is missing metadata.resourceVersion".to_string(),
+                )
+            })?,
+        })
+    }
+}
+
+/// Security settings for a detached DPUService managed by an SDK caller.
+///
+/// Keeping the fields together preserves the DPF security boundary and makes
+/// presence-gated capabilities explicit at the SDK boundary.
+#[derive(Debug, Clone)]
+pub struct DetachedDpuServiceSecurity {
+    pub privileged: bool,
+    pub spiffe: bool,
+}
+
+/// Caller-configurable fields on a detached DPUService's generated DaemonSet.
+#[derive(Debug, Clone, Default)]
+pub struct DetachedServiceDaemonSet {
+    /// Exact-match node labels rendered as one NodeSelector term with `In`
+    /// expressions when the caller explicitly requests placement.
+    pub node_selector_labels: Option<BTreeMap<String, String>>,
+    pub annotations: Option<BTreeMap<String, String>>,
+    pub labels: Option<BTreeMap<String, String>>,
+    pub resources: Option<BTreeMap<String, IntOrString>>,
+    pub update_strategy: Option<DetachedServiceDaemonSetUpdateStrategy>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedServiceDaemonSetUpdateStrategy {
+    pub strategy_type: Option<String>,
+    pub rolling_update: Option<DetachedServiceDaemonSetRollingUpdate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedServiceDaemonSetRollingUpdate {
+    pub max_surge: Option<IntOrString>,
+    pub max_unavailable: Option<IntOrString>,
 }
 
 /// Helm-chart fields required by a [`DetachedDpuServiceDefinition`].
@@ -709,17 +913,65 @@ pub struct DpuServiceObservation {
     pub helm_chart: DpuServiceHelmChartObservation,
     pub deploy_in_cluster: Option<bool>,
     pub dpu_cluster_selector_present: bool,
-    pub interfaces_present: bool,
+    /// DPUServiceInterface parents attached to every generated service pod.
+    pub interfaces: Option<Vec<String>>,
     pub paused: Option<bool>,
-    pub security_privileged: Option<bool>,
-    /// Serialized Kubernetes NodeSelector, retained for immutable ownership
-    /// validation.
-    pub service_daemon_set_node_selector: Option<serde_json::Value>,
+    pub security: Option<DpuServiceSecurityObservation>,
+    pub service_daemon_set: Option<DpuServiceDaemonSetObservation>,
     pub service_id: Option<String>,
     pub config_ports_present: bool,
+    /// Kubernetes UID used to fence replacement deletion.
+    pub uid: Option<String>,
+    /// Kubernetes resource version used to fence replacement deletion and patching.
+    pub resource_version: Option<String>,
     /// Whether Kubernetes has accepted deletion and the CR is retained only
     /// while finalizers remove its dependent resources.
     pub is_deleting: bool,
+}
+
+impl DpuServiceObservation {
+    /// Returns deletion preconditions for the exact observed DPUService.
+    /// Replacement reconciliation must never delete a foreign same-name object created after its
+    /// read.
+    pub fn delete_preconditions(&self) -> Result<DpfDeletePreconditions, crate::DpfError> {
+        Ok(DpfDeletePreconditions {
+            uid: self.uid.clone().ok_or_else(|| {
+                crate::DpfError::InvalidState(
+                    "observed DPUService is missing metadata.uid".to_string(),
+                )
+            })?,
+            resource_version: self.resource_version.clone().ok_or_else(|| {
+                crate::DpfError::InvalidState(
+                    "observed DPUService is missing metadata.resourceVersion".to_string(),
+                )
+            })?,
+        })
+    }
+}
+
+/// Security settings observed on a live DPUService.
+///
+/// Optional privilege state preserves malformed or legacy resources, while
+/// the SPIFFE Boolean records whether its presence-gated object exists.
+#[derive(Debug, Clone)]
+pub struct DpuServiceSecurityObservation {
+    pub privileged: Option<bool>,
+    pub spiffe: bool,
+}
+
+/// SDK-owned view of the DaemonSet settings observed on a DPUService.
+#[derive(Debug, Clone)]
+pub struct DpuServiceDaemonSetObservation {
+    /// Serialized Kubernetes NodeSelector used to reject immutable placement drift.
+    pub node_selector: Option<serde_json::Value>,
+    /// DaemonSet annotations observed on the DPUService
+    pub annotations: Option<BTreeMap<String, String>>,
+    /// DaemonSet labels observed on the DPUService
+    pub labels: Option<BTreeMap<String, String>>,
+    /// Resource quantities observed on the DPUService's DaemonSet settings
+    pub resources: Option<BTreeMap<String, IntOrString>>,
+    /// Serialized update strategy observed on the DPUService
+    pub update_strategy: Option<serde_json::Value>,
 }
 
 /// Helm-chart fields as observed on a live DPUService.
@@ -777,6 +1029,46 @@ pub struct DpuNodeInfo {
     pub device_ids: Vec<String>,
     /// Deployment type for the DPUs on this node — used to look up deployment-specific labels.
     pub deployment_type: DpuDeploymentType,
+}
+
+/// A lifecycle phase and any terminal failure details from the same DPU CR observation.
+#[derive(Debug, Clone)]
+pub struct DpuPhaseObservation {
+    /// Actionable lifecycle phase; a deletion timestamp overrides the reported status.
+    pub phase: DpuPhase,
+    /// Diagnostic context present only for a non-terminating DPU in the `Error` phase.
+    pub failure: Option<DpuFailureObservation>,
+}
+
+/// Diagnostic context retained when a DPU enters its terminal `Error` phase.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DpuFailureObservation {
+    /// DPU custom resource name.
+    pub name: Option<String>,
+    /// Namespace containing the DPU custom resource.
+    pub namespace: Option<String>,
+    /// Kubernetes identity distinguishing this DPU from replacements with the same name.
+    pub uid: Option<String>,
+    /// Kubernetes resource revision that supplied both the phase and diagnostics.
+    pub resource_version: Option<String>,
+    /// Desired configuration generation of the observed DPU.
+    pub generation: Option<i64>,
+    /// Raw `svc.dpu.nvidia.com/owned-by-dpudeployment` label value, when present.
+    /// DPF encodes the owner as `<namespace>_<name>`; this is not a bare deployment name.
+    pub deployment: Option<String>,
+    /// Host DPUNode referenced by the DPU specification.
+    pub dpu_node_name: String,
+    /// DPUDevice referenced by the DPU specification.
+    pub dpu_device_name: String,
+    /// Desired DPUFlavor name.
+    pub dpu_flavor: String,
+    /// Desired BFB provisioning source, when configured.
+    pub bfb: Option<String>,
+    /// Desired BlueFieldSoftware provisioning source, when configured.
+    pub blue_field_software: Option<String>,
+    /// Complete operator status, including all condition collections and firmware task context.
+    pub status: DpuStatus,
 }
 
 /// Phase of DPU lifecycle.
@@ -845,16 +1137,17 @@ impl From<DpuStatusPhase> for DpuPhase {
                 Self::Provisioning("PerformArmForceRestart".into())
             }
             DpuStatusPhase::UpdateFirmware => Self::Provisioning("UpdateFirmware".into()),
-            DpuStatusPhase::HostOsInitRelease => Self::Provisioning("HostOsInitRelease".into()),
+            DpuStatusPhase::ServiceReadiness => Self::Provisioning("ServiceReadiness".into()),
         }
     }
 }
 
-/// Event emitted on any DPU resource change.
+/// Event emitted on named DPU resource changes with status and phase present.
 ///
-/// This event fires for every observed update to a DPU, not only when the
-/// phase transitions. Handlers must be idempotent and tolerate receiving
-/// the same phase multiple times.
+/// This event fires for every observed DPU update with `metadata.name`, `status`,
+/// and `status.phase` present, not only when the phase transitions. Updates
+/// missing any of these are skipped. Handlers must be idempotent and tolerate
+/// receiving the same phase multiple times.
 #[derive(Debug, Clone)]
 pub struct DpuEvent {
     /// Name of the DPU resource.
@@ -1432,6 +1725,12 @@ mod tests {
             run = |()| InitDpfResourcesConfig::default().proxy.is_none();
             "proxy is none" {
                 () => true,
+            }
+        );
+        value_scenarios!(
+            run = |()| InitDpfResourcesConfig::default().enable_delay_host_init;
+            "host initialization delay is disabled" {
+                () => false,
             }
         );
     }

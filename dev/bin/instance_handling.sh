@@ -28,10 +28,11 @@ fi
 export DISABLE_TLS_ENFORCEMENT=true
 export NO_DPU_CONTAINERS=true
 MAX_RETRY=10
-API_SERVER=$2:$3
+source "$(dirname "${BASH_SOURCE[0]}")/host_port.sh" || exit $?
+API_SERVER=$(host_port "$2" "$3")
 DPU_CONFIG_FILE="/tmp/forge-dpu-agent-sim-config.toml"
 
-HOST_MACHINE_ID=$(grpcurl -d '{}' -insecure ${API_SERVER} forge.Forge/FindMachines | python3 -c "import sys,json
+HOST_MACHINE_ID=$(grpcurl -d '{}' -insecure "${API_SERVER}" forge.Forge/FindMachines | python3 -c "import sys,json
 data=sys.stdin.read()
 j=json.loads(data)
 for machine in j['machines']:
@@ -39,7 +40,7 @@ for machine in j['machines']:
     print(machine['interfaces'][0]['machineId']['id'])
     break")
 
-DPU_MACHINE_ID=$(grpcurl -d '{"search_config": {"include_dpus": true, "include_predicted_host": true}}' -insecure ${API_SERVER} forge.Forge/FindMachines | python3 -c "import sys,json
+DPU_MACHINE_ID=$(grpcurl -d '{"search_config": {"include_dpus": true, "include_predicted_host": true}}' -insecure "${API_SERVER}" forge.Forge/FindMachines | python3 -c "import sys,json
 data=sys.stdin.read()
 j=json.loads(data)
 for machine in j['machines']:
@@ -106,7 +107,7 @@ if [[ "$1" == "test" || "$1" == "create" ]]; then
 fi
 
 # Check Instance state
-INSTANCE_ID=$(grpcurl -d '{}' -insecure ${API_SERVER} forge.Forge/FindInstances | jq ".instances[0].id.value" | tr -d '"')
+INSTANCE_ID=$(grpcurl -d '{}' -insecure "${API_SERVER}" forge.Forge/FindInstances | jq ".instances[0].id.value" | tr -d '"')
 
 if [[ "$INSTANCE_ID" == "null" ]]; then
 	echo "Could not find instance. Exiting."
@@ -121,7 +122,7 @@ if [[ "$1" == "test" || "$1" == "create" ]]; then
 	i=0
 	while [[ $INSTANCE_STATE != "READY" && $i -lt $MAX_RETRY ]]; do
 		sleep 10
-		INSTANCE_STATE=$(grpcurl -d "{\"id\": {\"value\": \"$INSTANCE_ID\"}}" -insecure ${API_SERVER} forge.Forge/FindInstances | jq ".instances[0].status.tenant.state" | tr -d '"')
+		INSTANCE_STATE=$(grpcurl -d "{\"id\": {\"value\": \"$INSTANCE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/FindInstances | jq ".instances[0].status.tenant.state" | tr -d '"')
 		echo "Checking instance state. Waiting for it to be in READY state. Current: $INSTANCE_STATE"
 		i=$((i + 1))
 	done
@@ -142,7 +143,7 @@ fi
 
 if [[ "$1" == "test" || "$1" == "delete" ]]; then
 	echo "Deleting instance now. Triggers a reboot."
-	grpcurl -d "{\"id\": {\"value\": \"$INSTANCE_ID\"}}" -insecure ${API_SERVER} forge.Forge/ReleaseInstance
+	grpcurl -d "{\"id\": {\"value\": \"$INSTANCE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/ReleaseInstance
 
 	MACHINE_STATE=""
 	i=0
@@ -160,7 +161,7 @@ if [[ "$1" == "test" || "$1" == "delete" ]]; then
 
 	# Boot host up with discovery image on overlay network.
 	echo "Machine comes up, forge-scout tells API that we're back"
-	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure ${API_SERVER} forge.Forge/ForgeAgentControl
+	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/ForgeAgentControl
 
 	MACHINE_STATE=""
 	i=0
@@ -181,14 +182,14 @@ if [[ "$1" == "test" || "$1" == "delete" ]]; then
 
 	# Boot host up with discovery image on admin network.
 	echo "Machine comes up, forge-scout tells API that we're back"
-	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure ${API_SERVER} forge.Forge/ForgeAgentControl
+	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/ForgeAgentControl
 
 	# Wait until its gone.
 	i=0
 	INSTANCE_GONE="$INSTANCE_ID"
 	while [[ -n "$INSTANCE_GONE" && $i -lt $MAX_RETRY ]]; do
 		echo "Waiting for instance to be deleted."
-		INSTANCE_GONE=$(grpcurl -d "{\"id\": {\"value\": \"$INSTANCE_ID\"}}" -insecure ${API_SERVER} forge.Forge/FindInstances | grep "$INSTANCE_ID")
+		INSTANCE_GONE=$(grpcurl -d "{\"id\": {\"value\": \"$INSTANCE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/FindInstances | grep "$INSTANCE_ID")
 		sleep 10
 		i=$((i + 1))
 	done
@@ -205,7 +206,7 @@ if [[ "$1" == "test" || "$1" == "delete" ]]; then
 	i=0
 	while [[ $MACHINE_STATE != "WaitingForCleanup/HostCleanup" && $i -lt $MAX_RETRY ]]; do
 		echo "Checking machine state. Waiting for it to be in Waitingforcleanup state. Current: $MACHINE_STATE"
-		MACHINE_STATE=$(grpcurl -d "{\"id\":\"$HOST_MACHINE_ID\"}" -insecure ${API_SERVER} forge.Forge/GetMachine | jq ".state" | tr -d '"')
+		MACHINE_STATE=$(grpcurl -d "{\"id\":\"$HOST_MACHINE_ID\"}" -insecure "${API_SERVER}" forge.Forge/GetMachine | jq ".state" | tr -d '"')
 		i=$((i + 1))
 		sleep 10
 	done
@@ -219,14 +220,14 @@ if [[ "$1" == "test" || "$1" == "delete" ]]; then
 	fi
 
 	# Wait for state change.
-	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure ${API_SERVER} forge.Forge/ForgeAgentControl
-	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure ${API_SERVER} forge.Forge/CleanupMachineCompleted
+	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/ForgeAgentControl
+	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/CleanupMachineCompleted
 
 	MACHINE_STATE=""
 	i=0
 	while [[ $MACHINE_STATE != "HostInitializing/Discovered" && $i -lt $MAX_RETRY ]]; do
 		echo "Checking machine state. Waiting for it to be in Host/Discovered state. Current: $MACHINE_STATE"
-		MACHINE_STATE=$(grpcurl -d "{\"id\":\"$HOST_MACHINE_ID\"}" -insecure ${API_SERVER} forge.Forge/GetMachine | jq ".state" | tr -d '"')
+		MACHINE_STATE=$(grpcurl -d "{\"id\":\"$HOST_MACHINE_ID\"}" -insecure "${API_SERVER}" forge.Forge/GetMachine | jq ".state" | tr -d '"')
 		i=$((i + 1))
 		sleep 10
 	done
@@ -237,12 +238,12 @@ if [[ "$1" == "test" || "$1" == "delete" ]]; then
 	fi
 
 	# Wait for state change.
-	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure ${API_SERVER} forge.Forge/ForgeAgentControl
+	grpcurl -d "{\"machine_id\": {\"id\": \"$HOST_MACHINE_ID\"}}" -insecure "${API_SERVER}" forge.Forge/ForgeAgentControl
 
 	i=0
 	while [[ $MACHINE_STATE != "Ready" && $i -lt $MAX_RETRY ]]; do
 		echo "Checking machine state. Waiting for it to be in Ready state. Current: $MACHINE_STATE"
-		MACHINE_STATE=$(grpcurl -d "{\"id\":\"$HOST_MACHINE_ID\"}" -insecure ${API_SERVER} forge.Forge/GetMachine | jq ".state" | tr -d '"')
+		MACHINE_STATE=$(grpcurl -d "{\"id\":\"$HOST_MACHINE_ID\"}" -insecure "${API_SERVER}" forge.Forge/GetMachine | jq ".state" | tr -d '"')
 		sleep 10
 		i=$((i + 1))
 	done

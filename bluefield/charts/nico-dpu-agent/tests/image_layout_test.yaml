@@ -40,7 +40,7 @@ tests:
               path: /opt/forge
               type: DirectoryOrCreate
 
-  - it: should fall back to /opt/nico when certsDir is cleared
+  - it: should fall back to /opt/forge when certsDir is cleared
     set:
       image:
         repository: test
@@ -51,18 +51,18 @@ tests:
           path: spec.template.spec.initContainers[0].volumeMounts
           content:
             name: nico-certs
-            mountPath: /opt/nico
+            mountPath: /opt/forge
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: nico-certs
-            mountPath: /opt/nico
+            mountPath: /opt/forge
       - contains:
           path: spec.template.spec.volumes
           content:
             name: nico-certs
             hostPath:
-              path: /opt/nico
+              path: /opt/forge
               type: DirectoryOrCreate
 
   - it: should accept a custom certsDir value

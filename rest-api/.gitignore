@@ -3,6 +3,7 @@
 
 build/
 /nico-rest
+/db/cmd/migrations/migrations
 .test-config/
 .idea/
 ref/

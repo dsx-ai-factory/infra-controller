@@ -18,13 +18,24 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
+
+/// Pauses one simulated power read or write after signaling that it arrived.
+#[derive(Debug)]
+struct BlockedPowerStateCall {
+    entered: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
 
 /// RMS simulation for testing, similar to RedfishSim
 pub struct RmsSim {
+    blocked_power_state_call: Arc<Mutex<Option<BlockedPowerStateCall>>>,
+    blocked_power_state_read: Arc<Mutex<Option<BlockedPowerStateCall>>>,
+    batch_get_node_device_info_delay: Arc<Mutex<Duration>>,
     fail_create_nodes: Arc<AtomicBool>,
     fail_inventory_get: Arc<AtomicBool>,
     registered_nodes: Arc<Mutex<Vec<rms::NodeInventoryInfo>>>,
@@ -95,6 +106,9 @@ pub struct RmsSim {
 impl Default for RmsSim {
     fn default() -> Self {
         Self {
+            blocked_power_state_call: Arc::new(Mutex::new(None)),
+            blocked_power_state_read: Arc::new(Mutex::new(None)),
+            batch_get_node_device_info_delay: Arc::new(Mutex::new(Duration::ZERO)),
             fail_create_nodes: Arc::new(AtomicBool::new(false)),
             fail_inventory_get: Arc::new(AtomicBool::new(false)),
             registered_nodes: Arc::new(Mutex::new(Vec::new())),
@@ -151,6 +165,11 @@ impl Default for RmsSim {
 }
 
 impl RmsSim {
+    /// Delays device-info responses by this duration, after recording each request.
+    pub async fn set_batch_get_node_device_info_delay(&self, delay: Duration) {
+        *self.batch_get_node_device_info_delay.lock().await = delay;
+    }
+
     /// Convert RmsSim to the type expected by Api and StateHandlerServices
     pub fn as_rms_client(&self) -> Option<Arc<dyn RmsApi>> {
         Some(Arc::new(self.build_mock_client()))
@@ -158,6 +177,9 @@ impl RmsSim {
 
     fn build_mock_client(&self) -> MockRmsClient {
         MockRmsClient {
+            blocked_power_state_call: self.blocked_power_state_call.clone(),
+            blocked_power_state_read: self.blocked_power_state_read.clone(),
+            batch_get_node_device_info_delay: self.batch_get_node_device_info_delay.clone(),
             fail_create_nodes: self.fail_create_nodes.clone(),
             fail_inventory_get: self.fail_inventory_get.clone(),
             registered_nodes: self.registered_nodes.clone(),
@@ -397,6 +419,25 @@ impl RmsSim {
             .push_back(response);
     }
 
+    /// Pauses the next `batch_get_power_state` call after recording its request
+    /// and reserving its queued response. Cancellation discards that response.
+    /// The receiver reports arrival; sending or dropping the sender releases it.
+    /// After arrival, a closed sender means the read was dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another power read gate is still waiting for a request.
+    pub async fn block_next_batch_get_power_state(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_power_state_read.lock().await;
+        assert!(blocked.is_none(), "a power read gate is already armed");
+        *blocked = Some(BlockedPowerStateCall { entered, resume });
+        (arrival, release)
+    }
+
     /// Snapshot recorded `BatchGetPowerState` requests in call order.
     pub async fn submitted_batch_get_power_state_requests(
         &self,
@@ -585,6 +626,19 @@ impl RmsSim {
             .push_back(response);
     }
 
+    /// Pauses the next power request after recording it. The receiver signals
+    /// arrival; sending or dropping the sender lets the request finish.
+    pub async fn block_next_batch_set_power_state(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_power_state_call.lock().await;
+        assert!(blocked.is_none(), "a power-state blocker is already armed");
+        *blocked = Some(BlockedPowerStateCall { entered, resume });
+        (arrival, release)
+    }
+
     /// Snapshot the recorded `BatchSetPowerState` requests, in
     /// the order they were received.
     pub async fn submitted_batch_set_power_state_requests(
@@ -599,6 +653,9 @@ impl RmsSim {
 
 #[derive(Debug, Clone)]
 pub struct MockRmsClient {
+    blocked_power_state_call: Arc<Mutex<Option<BlockedPowerStateCall>>>,
+    blocked_power_state_read: Arc<Mutex<Option<BlockedPowerStateCall>>>,
+    batch_get_node_device_info_delay: Arc<Mutex<Duration>>,
     fail_create_nodes: Arc<AtomicBool>,
     fail_inventory_get: Arc<AtomicBool>,
     registered_nodes: Arc<Mutex<Vec<rms::NodeInventoryInfo>>>,
@@ -677,6 +734,11 @@ impl RmsApi for MockRmsClient {
             .await
             .push(cmd);
 
+        let delay = *self.batch_get_node_device_info_delay.lock().await;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+
         self.queued_batch_get_node_device_info_responses
             .lock()
             .await
@@ -715,7 +777,13 @@ impl RmsApi for MockRmsClient {
         &self,
         _cmd: rms::UpdateSwitchSystemPasswordRequest,
     ) -> Result<rms::UpdateSwitchSystemPasswordResponse, RackManagerError> {
-        Ok(rms::UpdateSwitchSystemPasswordResponse::default())
+        Ok(rms::UpdateSwitchSystemPasswordResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "rms-sim-password-update".into(),
+                ..Default::default()
+            }),
+        })
     }
 
     async fn batch_reset_switch_sdn_factory_default(
@@ -773,6 +841,12 @@ impl RmsApi for MockRmsClient {
             .await
             .push(cmd);
 
+        let blocked = self.blocked_power_state_call.lock().await.take();
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+
         self.queued_batch_set_power_state_responses
             .lock()
             .await
@@ -796,18 +870,23 @@ impl RmsApi for MockRmsClient {
             .await
             .push(cmd);
 
-        self.queued_batch_get_power_state_responses
+        // Reserve this call's response before waiting, so another call cannot
+        // consume it while this read is paused or after it is cancelled.
+        let response = self
+            .queued_batch_get_power_state_responses
             .lock()
             .await
             .pop_front()
-            .unwrap_or(Ok(rms::BatchGetPowerStateResponse::default()))
-    }
+            .unwrap_or(Ok(rms::BatchGetPowerStateResponse::default()));
+        let blocked = self.blocked_power_state_read.lock().await.take();
+        if let Some(blocked) = blocked {
+            // Arrival notification is optional; dropping the release sender
+            // also releases the read instead of failing the simulated RPC.
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
 
-    async fn sequence_rack_power(
-        &self,
-        _cmd: rms::SequenceRackPowerRequest,
-    ) -> Result<rms::SequenceRackPowerResponse, RackManagerError> {
-        Ok(rms::SequenceRackPowerResponse::default())
+        response
     }
 
     async fn list_node_inventory(
@@ -866,20 +945,6 @@ impl RmsApi for MockRmsClient {
         Ok(rms::DeleteNodeResponse::default())
     }
 
-    async fn get_rack_power_on_sequence(
-        &self,
-        _cmd: rms::GetRackPowerOnSequenceRequest,
-    ) -> Result<rms::GetRackPowerOnSequenceResponse, RackManagerError> {
-        Ok(rms::GetRackPowerOnSequenceResponse::default())
-    }
-
-    async fn set_rack_power_on_sequence(
-        &self,
-        _cmd: rms::SetRackPowerOnSequenceRequest,
-    ) -> Result<rms::SetRackPowerOnSequenceResponse, RackManagerError> {
-        Ok(rms::SetRackPowerOnSequenceResponse::default())
-    }
-
     async fn list_racks(&self) -> Result<rms::ListRacksResponse, RackManagerError> {
         Ok(rms::ListRacksResponse::default())
     }
@@ -889,6 +954,20 @@ impl RmsApi for MockRmsClient {
         _cmd: rms::GetNodeFirmwareInventoryRequest,
     ) -> Result<rms::GetNodeFirmwareInventoryResponse, RackManagerError> {
         Ok(rms::GetNodeFirmwareInventoryResponse::default())
+    }
+
+    async fn batch_get_firmware_inventory(
+        &self,
+        _cmd: rms::BatchGetFirmwareInventoryRequest,
+    ) -> Result<rms::BatchGetFirmwareInventoryResponse, RackManagerError> {
+        Err(tonic::Status::unimplemented("batch_get_firmware_inventory is not implemented").into())
+    }
+
+    async fn compare_firmware_object(
+        &self,
+        _cmd: rms::CompareFirmwareObjectRequest,
+    ) -> Result<rms::CompareFirmwareObjectResponse, RackManagerError> {
+        Err(tonic::Status::unimplemented("compare_firmware_object is not implemented").into())
     }
 
     async fn get_rack_firmware_inventory(

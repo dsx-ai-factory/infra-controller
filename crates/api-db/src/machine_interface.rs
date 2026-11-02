@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
@@ -26,6 +26,7 @@ use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
+use const_format::concatcp;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -44,20 +45,23 @@ use sqlx::{FromRow, PgConnection, PgTransaction};
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
 use crate::db_read::DbReader;
 use crate::host_naming::{self, NamingContext};
-use crate::ip_allocator::{DhcpError, IpAllocator, UsedIpResolver};
+use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface_address::{AddressAlreadyInUseError, MachineInterfaceAddressWithType};
 use crate::{DatabaseError, DatabaseResult, Transaction, network_segment as db_network_segment};
 
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "machine_interfaces_segment_id_mac_address_key";
 const SQL_VIOLATION_ONE_PRIMARY_INTERFACE: &str = "one_primary_interface_per_machine";
 const SQL_VIOLATION_MAX_ONE_ASSOCIATION: &str = "chk_max_one_association";
-const FAST_PATH_MAX_RETRIES: usize = 128;
-const FAST_PATH_CANDIDATE_BATCH: i64 = 32;
+// Savepoint attempts per segment after ownership or FQDN conflicts, or per family
+// recovery after an ownership race. Each retry can repeat the full candidate scan.
+// Candidate lock contention skips retries on the same segment.
+const HOST_ALLOCATION_MAX_ATTEMPTS: usize = 128;
+// Candidate batches per prefix per attempt, advancing past each fully locked batch.
+const HOST_CANDIDATE_MAX_SCANS: usize = 128;
+const HOST_CANDIDATE_BATCH_SIZE: usize = 32;
 
 pub struct UsedAdminNetworkIpResolver {
     pub segment_id: NetworkSegmentId,
-    // All the IPs which can not be allocated, e.g. SVI IP.
-    pub busy_ips: Vec<IpAddr>,
 }
 
 #[derive(Debug)]
@@ -95,12 +99,37 @@ impl ColumnInfo<'_> for IdColumn {
     }
 }
 
+mod host_address_candidates;
+
+#[cfg(test)]
+mod allocation_benchmark;
 #[cfg(test)]
 mod ip_allocator;
 #[cfg(test)]
+mod test_allocation_removal;
+#[cfg(test)]
 mod test_duplicate_mac;
 #[cfg(test)]
+mod test_explicit_columns;
+#[cfg(test)]
 mod tests;
+
+/// Count unowned addresses eligible for host allocation across the full prefix.
+/// Candidate locks held by other transactions do not reduce this snapshot.
+pub(crate) fn num_free_host_addresses(
+    prefix: &NetworkPrefix,
+    used_ips: &[IpAddr],
+) -> DatabaseResult<u128> {
+    // Accounting rejects negative stored counts even though IPv4 allocation
+    // clamps them to its minimum reservation. Preserve both behaviors here.
+    if prefix.num_reserved < 0 {
+        return Err(DatabaseError::internal(format!(
+            "network prefix {} has negative reservation count {}",
+            prefix.id, prefix.num_reserved
+        )));
+    }
+    Ok(host_address_candidates::HostAddressCandidates::new(prefix)?.num_free(used_ips))
+}
 
 #[derive(Clone, Copy)]
 pub struct MacAddressColumn;
@@ -151,7 +180,11 @@ impl ColumnInfo<'_> for SwitchIdColumn {
 macro_rules! machine_interface_snapshot_query {
     () => {
         r#"
-    SELECT mi.*,
+    SELECT
+        mi.id, mi.attached_dpu_machine_id, mi.machine_id, mi.segment_id,
+        mi.domain_id, mi.hostname, mi.interface_type, mi.mac_address, mi.boot_interface_id,
+        mi.primary_interface, mi.created, mi.last_dhcp, mi.power_shelf_id, mi.switch_id,
+        mi.association_type,
         COALESCE(addresses_agg.json, '[]'::json) AS addresses,
         COALESCE(vendors_agg.json, '[]'::json) AS vendors,
         ns.network_segment_type
@@ -174,19 +207,80 @@ macro_rules! machine_interface_snapshot_query {
     };
 }
 
+/// `can_apply_expected_allocation` checks whether this family has neither a
+/// stateful address nor a recorded removal. SLAAC does not initialize it.
+///
+/// A caller that allocates after this check must hold the interface lock until
+/// the allocation commits. Removal evidence starts with the updated writers;
+/// addresses removed before then cannot be inferred from `last_dhcp`.
+pub async fn can_apply_expected_allocation(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    family: IpAddressFamily,
+) -> DatabaseResult<bool> {
+    let query = "SELECT NOT CASE $2 WHEN 4 THEN mi.ipv4_allocation_removed
+                ELSE mi.ipv6_allocation_removed END
+            AND NOT EXISTS (
+                SELECT 1 FROM machine_interface_addresses mia
+                WHERE mia.interface_id = mi.id AND family(mia.address) = $2
+                    AND mia.allocation_type IN ('dhcp', 'static')
+            )
+        FROM machine_interfaces mi WHERE mi.id = $1";
+    sqlx::query_scalar(query)
+        .bind(interface_id)
+        .bind(family.pg_family())
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Remember a removed stateful family while its interface still exists.
+/// The caller must already hold the interface lock and must have removed or
+/// moved an actual DHCP or Static address in this transaction.
+pub(crate) async fn record_allocation_removal(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    family: IpAddressFamily,
+) -> DatabaseResult<()> {
+    let query = match family {
+        IpAddressFamily::Ipv4 => {
+            "UPDATE machine_interfaces SET ipv4_allocation_removed = TRUE WHERE id = $1 AND NOT ipv4_allocation_removed"
+        }
+        IpAddressFamily::Ipv6 => {
+            "UPDATE machine_interfaces SET ipv6_allocation_removed = TRUE WHERE id = $1 AND NOT ipv6_allocation_removed"
+        }
+    };
+    sqlx::query(query)
+        .bind(interface_id)
+        .execute(txn)
+        .await
+        .map(|_| ())
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Sets current machine interface primary attribute to provided value.
 pub async fn set_primary_interface(
     interface_id: &MachineInterfaceId,
     primary: bool,
     txn: &mut PgConnection,
 ) -> Result<MachineInterfaceId, DatabaseError> {
-    let query = "UPDATE machine_interfaces SET primary_interface=$1 where id=$2::uuid RETURNING id";
-    sqlx::query_as(query)
+    // Only primary and BMC interfaces publish DNS names, so a real change here
+    // changes what the zone serves. The sub-select sees the pre-update row, so
+    // `changed` compares the old flag with the new one.
+    let query = "UPDATE machine_interfaces SET primary_interface=$1 WHERE id=$2::uuid
+                 RETURNING id,
+                     (SELECT primary_interface FROM machine_interfaces WHERE id=$2::uuid)
+                         IS DISTINCT FROM primary_interface AS changed";
+    let (id, changed): (MachineInterfaceId, bool) = sqlx::query_as(query)
         .bind(primary)
         .bind(*interface_id)
-        .fetch_one(txn)
+        .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if changed {
+        crate::dns::domain::bump_serial_for_interface(txn, *interface_id).await?;
+    }
+    Ok(id)
 }
 
 /// Clears `primary_interface` on every interface a machine currently owns.
@@ -200,12 +294,16 @@ pub async fn demote_primary_interfaces_for_machine(
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let query = "UPDATE machine_interfaces SET primary_interface=false WHERE machine_id=$1 AND primary_interface=true";
-    sqlx::query(query)
+    let demoted = sqlx::query(query)
         .bind(machine_id)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
-        .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if demoted.rows_affected() > 0 {
+        // A demoted primary stops publishing its names.
+        crate::dns::domain::bump_serial_for_machine_interfaces(txn, machine_id).await?;
+    }
+    Ok(())
 }
 
 /// Whether a machine owns any interface flagged `primary_interface`, in any segment.
@@ -225,6 +323,22 @@ pub async fn machine_has_primary_interface(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(exists)
+}
+
+/// Whether any interface row with `mac_address` belongs to a machine.
+///
+/// Lets DPU discovery tell a reattach of its host link from an allocation
+/// without loading the interface snapshots.
+pub async fn mac_address_has_machine(
+    db: impl DbReader<'_>,
+    mac_address: MacAddress,
+) -> DatabaseResult<bool> {
+    let query = "SELECT EXISTS(SELECT 1 FROM machine_interfaces WHERE mac_address = $1 AND machine_id IS NOT NULL)";
+    sqlx::query_scalar(query)
+        .bind(mac_address)
+        .fetch_one(db)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Records the vendor-native Redfish `EthernetInterface.Id` on the machine_interface
@@ -319,13 +433,23 @@ pub async fn set_interface_type(
     interface_type: InterfaceType,
     txn: &mut PgConnection,
 ) -> DatabaseResult<MachineInterfaceId> {
-    let query = "UPDATE machine_interfaces SET interface_type=$1 WHERE id=$2::uuid RETURNING id";
-    sqlx::query_as(query)
+    // Only primary and BMC interfaces publish DNS names, so a real change here
+    // changes what the zone serves. The sub-select sees the pre-update row, so
+    // `changed` compares the old type with the new one.
+    let query = "UPDATE machine_interfaces SET interface_type=$1 WHERE id=$2::uuid
+                 RETURNING id,
+                     (SELECT interface_type FROM machine_interfaces WHERE id=$2::uuid)
+                         IS DISTINCT FROM interface_type AS changed";
+    let (id, changed): (MachineInterfaceId, bool) = sqlx::query_as(query)
         .bind(interface_type)
         .bind(*interface_id)
-        .fetch_one(txn)
+        .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if changed {
+        crate::dns::domain::bump_serial_for_interface(txn, *interface_id).await?;
+    }
+    Ok(id)
 }
 
 pub async fn associate_interface_with_machine(
@@ -464,6 +588,37 @@ pub async fn find_by_ip(
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
+/// The interfaces holding any of `ips`, keyed by the requested address. An
+/// address belongs to at most one interface, so a requested address maps to
+/// one snapshot or is absent.
+pub async fn find_by_ips(
+    txn: impl DbReader<'_>,
+    ips: &[IpAddr],
+) -> Result<HashMap<IpAddr, MachineInterfaceSnapshot>, DatabaseError> {
+    static QUERY: &str = concat!(
+        machine_interface_snapshot_query!(),
+        r#" INNER JOIN machine_interface_addresses mia on mia.interface_id=mi.id
+        WHERE mia.address = ANY($1::inet[])"#,
+    );
+    let snapshots: Vec<MachineInterfaceSnapshot> = sqlx::query_as(QUERY)
+        .bind(ips)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))?;
+    let requested: HashSet<IpAddr> = ips.iter().copied().collect();
+    let mut by_ip = HashMap::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        for address in snapshot
+            .addresses
+            .iter()
+            .filter(|address| requested.contains(address))
+        {
+            by_ip.insert(*address, snapshot.clone());
+        }
+    }
+    Ok(by_ip)
+}
+
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<MachineInterfaceSnapshot>> {
     find_by(txn, ObjectColumnFilter::All::<IdColumn>).await
 }
@@ -501,12 +656,13 @@ where
     .into_group_map())
 }
 
-/// `find_by_machine_id_for_update` locks one host's non-BMC interface rows in
+/// `find_by_machine_id_for_update` locks one machine's non-BMC interface rows in
 /// ID order and returns their current snapshots.
 ///
-/// Primary-interface writers call this after taking the network-segment
-/// advisory locks. The stable row order keeps concurrent interface mutations
-/// from acquiring the same set of row locks in different orders.
+/// Callers must acquire any network-segment advisory locks their transaction
+/// needs before taking these row locks. The stable row order keeps concurrent
+/// interface mutations from acquiring the same set of row locks in different
+/// orders.
 pub async fn find_by_machine_id_for_update(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -572,6 +728,27 @@ pub async fn find_one(
     }
 }
 
+/// Lock an interface for address selection and return its current segment.
+///
+/// Call inside a transaction, then read the current addresses before deciding
+/// whether to insert or replace one. The parent row also serializes writers
+/// when the requested address family has no row yet. Callers that allocate
+/// from a pool must take the segment advisory lock before this row lock.
+pub async fn lock_for_address_assignment(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+) -> DatabaseResult<NetworkSegmentId> {
+    let query = "SELECT segment_id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
+    sqlx::query_scalar(query)
+        .bind(interface_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or(DatabaseError::FindOneReturnedNoResultsError(
+            interface_id.into(),
+        ))
+}
+
 /// Optional metadata used while finding or creating a DHCP machine interface.
 ///
 /// DHCPv4 and DHCPv6 for the same NIC intentionally converge on one
@@ -612,12 +789,15 @@ pub async fn find_or_create_machine_interface(
             retained_window,
         },
         None,
+        None,
     )
     .await
 }
 
 /// Find or create a DHCP interface, allocating only the requested family for a
-/// brand-new dynamic row.
+/// brand-new dynamic row. Callers must lock `locked_segment_ids` before any
+/// interface writes; a newly selected allocation segment outside that set
+/// returns `FailedPrecondition` rather than acquiring another lock out of order.
 pub async fn find_or_create_machine_interface_for_family(
     txn: &mut PgConnection,
     machine_id: Option<MachineId>,
@@ -625,6 +805,7 @@ pub async fn find_or_create_machine_interface_for_family(
     relays: &[IpAddr],
     options: FindOrCreateMachineInterfaceOptions,
     address_family: IpAddressFamily,
+    locked_segment_ids: &[NetworkSegmentId],
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
     find_or_create_machine_interface_inner(
         txn,
@@ -633,6 +814,7 @@ pub async fn find_or_create_machine_interface_for_family(
         relays,
         options,
         Some(address_family),
+        Some(locked_segment_ids),
     )
     .await
 }
@@ -644,6 +826,7 @@ async fn find_or_create_machine_interface_inner(
     relays: &[IpAddr],
     options: FindOrCreateMachineInterfaceOptions,
     address_family: Option<IpAddressFamily>,
+    locked_segment_ids: Option<&[NetworkSegmentId]>,
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
     let FindOrCreateMachineInterfaceOptions {
         expected_interface,
@@ -669,6 +852,7 @@ async fn find_or_create_machine_interface_inner(
                 expected_interface,
                 retained_window,
                 address_family,
+                locked_segment_ids,
             )
             .await?;
             apply_primary_declaration(&mut *txn, &mut interface, is_primary).await?;
@@ -742,7 +926,7 @@ pub async fn find_or_create_observed_machine_interface(
                             .await?;
 
                     if network_segments.is_empty() {
-                        return Err(DatabaseError::internal(format!(
+                        return Err(DatabaseError::FailedPrecondition(format!(
                             "No network segment defined for relay addresses: {:?}",
                             relays
                         )));
@@ -863,14 +1047,20 @@ WHERE id = $3::uuid
       OR ($2::boolean IS NOT NULL AND primary_interface IS DISTINCT FROM $2::boolean)
   )
 "#;
-    sqlx::query(query)
+    let changed = sqlx::query(query)
         .bind(interface_type)
         .bind(primary_interface)
         .bind(interface_id)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
         .map(|result| result.rows_affected() == 1)
-        .map_err(|error| DatabaseError::query(query, error))
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if changed {
+        // Only primary and BMC interfaces publish DNS names, so this changes
+        // what the zone serves.
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
+    Ok(changed)
 }
 
 /// Reconcile role-derived ExpectedInterface settings on an unassociated row.
@@ -1055,13 +1245,15 @@ pub async fn validate_existing_mac_and_create(
         expected_interface,
         retained_window,
         None,
+        None,
     )
     .await
 }
 
 /// If `address_family` is provided, it is applied only when this call creates
 /// a new dynamic interface: candidate segment snapshots are filtered to that
-/// family before `create` runs. Existing MAC reconciliation ignores the filter.
+/// family before allocation. Existing families keep their allocation policy;
+/// only an uninitialized family uses the current declaration's segment guard.
 async fn validate_existing_mac_and_create_inner(
     txn: &mut PgConnection,
     mac_address: MacAddress,
@@ -1069,6 +1261,7 @@ async fn validate_existing_mac_and_create_inner(
     expected_interface: Option<ExpectedInterface>,
     retained_window: Option<chrono::Duration>,
     address_family: Option<IpAddressFamily>,
+    locked_segment_ids: Option<&[NetworkSegmentId]>,
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
     let expected_interface_type = expected_interface
         .as_ref()
@@ -1108,12 +1301,7 @@ async fn validate_existing_mac_and_create_inner(
                     .iter()
                     .filter(|segment| authoritative_segment_ids.contains(&segment.id))
                 {
-                    if segment.config.allocation_strategy == AllocationStrategy::Reserved {
-                        return Err(DatabaseError::internal(format!(
-                            "segment {} configured for static DHCP leases only; no static reservation for MAC {mac_address}",
-                            segment.config.name,
-                        )));
-                    }
+                    validate_dynamic_allocation(segment, mac_address)?;
                 }
 
                 if !exact_segment_ids.is_empty() {
@@ -1150,24 +1338,35 @@ async fn validate_existing_mac_and_create_inner(
                     }
                 }
 
-                // Dynamic-pool allocation.
-                // Any AddressSelectionStrategy::StaticIp flows will have happened as part of
-                // preallocate_machine_interface, preallocate_bmc_machine_interface, or
-                // preallocate_expected_machine_interface.
-                // (`create` recovers any retained boot interface id onto the new row.)
-                let v = create_with_type(
+                if let Some(locked_segment_ids) = locked_segment_ids
+                    && let Some(segment) = network_segments
+                        .iter()
+                        .find(|segment| !locked_segment_ids.contains(&segment.id))
+                {
+                    return Err(DatabaseError::FailedPrecondition(format!(
+                        "network segment {} was not locked before DHCP interface reconciliation",
+                        segment.id,
+                    )));
+                }
+                let allocation_type = match expected_interface
+                    .as_ref()
+                    .map(ExpectedInterface::resolved_ip_allocation)
+                {
+                    Some(ExpectedInterfaceIpAllocation::Retained) => AllocationType::Static,
+                    _ => AllocationType::Dhcp,
+                };
+                let interface = create_dynamic(
                     txn,
                     &network_segments,
                     &mac_address,
                     expected_primary_interface.unwrap_or(true),
-                    AddressSelectionStrategy::NextAvailableIp,
                     interface_type,
-                    retained_window,
+                    allocation_type,
                 )
                 .await?;
-                Ok(v)
+                restore_retained_boot_interface(txn, interface, retained_window).await
             } else {
-                Err(DatabaseError::internal(format!(
+                Err(DatabaseError::FailedPrecondition(format!(
                     "No network segment defined for relay addresses: {:?}",
                     relays
                 )))
@@ -1184,11 +1383,41 @@ async fn validate_existing_mac_and_create_inner(
             // not update the interface. Consider having reconcile_interface_segment
             // just return the interface, which would probably look a lot better.
             let mut existing_interface = interface_snapshot.remove(0);
+            if let Some(family) = address_family
+                && !matches!(
+                    crate::machine_interface_address::find_allocation_type_for_family(
+                        txn,
+                        existing_interface.id,
+                        family
+                    )
+                    .await?,
+                    Some(AllocationType::Dhcp | AllocationType::Static)
+                )
+            {
+                let current_segment_id =
+                    lock_for_address_assignment(txn, existing_interface.id).await?;
+                if let Some(locked_segment_ids) = locked_segment_ids
+                    && !locked_segment_ids.contains(&current_segment_id)
+                {
+                    return Err(DatabaseError::FailedPrecondition(format!(
+                        "network segment {current_segment_id} was not locked before DHCP interface reconciliation",
+                    )));
+                }
+                existing_interface = find_one(&mut *txn, existing_interface.id).await?;
+            }
+            let apply_expected_allocation = match address_family {
+                Some(family) => {
+                    can_apply_expected_allocation(txn, existing_interface.id, family).await?
+                }
+                None => true,
+            };
             reconcile_interface_segment(
                 txn,
                 &mut existing_interface,
                 relays,
-                expected_interface.as_ref(),
+                expected_interface
+                    .as_ref()
+                    .filter(|_| apply_expected_allocation),
             )
             .await?;
             reconcile_unassociated_expected_interface_settings(
@@ -1212,6 +1441,20 @@ async fn validate_existing_mac_and_create_inner(
             ))
         }
     }
+}
+
+/// Reject fresh pool allocation on a Reserved segment, where the MAC needs a static reservation.
+fn validate_dynamic_allocation(
+    segment: &NetworkSegment,
+    mac_address: MacAddress,
+) -> DatabaseResult<()> {
+    if segment.config.allocation_strategy == AllocationStrategy::Reserved {
+        return Err(DatabaseError::internal(format!(
+            "segment {} configured for static DHCP leases only; no static reservation for MAC {mac_address}",
+            segment.config.name,
+        )));
+    }
+    Ok(())
 }
 
 /// Ensure a a `machine_interface` exists for the `mac_address` with its
@@ -1245,7 +1488,7 @@ pub async fn preallocate_machine_interface(
             primary_interface: None,
             segment_type_guard: None,
             require_managed_prefix: false,
-            allow_associated_interface_settings_update: true,
+            from_expected_machine: false,
         },
         retained_window,
     )
@@ -1267,7 +1510,7 @@ pub async fn preallocate_bmc_machine_interface(
             primary_interface: Some(false),
             segment_type_guard: None,
             require_managed_prefix: false,
-            allow_associated_interface_settings_update: true,
+            from_expected_machine: false,
         },
         retained_window,
     )
@@ -1276,140 +1519,46 @@ pub async fn preallocate_bmc_machine_interface(
 
 /// Create or reconcile a fixed ExpectedInterface reservation.
 ///
-/// The fixed address is reconciled whenever it is safe to do so. Role-derived
-/// interface settings apply to a new or unassociated row, but ExpectedMachine
-/// does not reclassify an already-associated interface.
+/// The fixed address is applied only before this family's first stateful
+/// allocation. Role-derived interface settings apply to a new or unassociated
+/// row, but ExpectedMachine does not reclassify an already-associated interface.
 pub async fn preallocate_expected_machine_interface(
     txn: &mut PgConnection,
     expected_interface: &ExpectedInterface,
     retained_window: Option<chrono::Duration>,
 ) -> DatabaseResult<()> {
+    let mac_address = expected_interface
+        .require_mac_address()
+        .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
     let static_ip = expected_interface
         .fixed_reservation_ip()
         .map_err(|message| {
             DatabaseError::InvalidArgument(format!(
                 "expected interface {}: {message}",
-                expected_interface.mac_address,
+                expected_interface.identity(),
             ))
         })?;
 
     preallocate_machine_interface_with_options(
         txn,
-        expected_interface.mac_address,
+        mac_address,
         static_ip,
         PreallocationOptions {
             interface_type: expected_interface.role.interface_type(),
             primary_interface: expected_interface.role.primary_interface_override(),
             segment_type_guard: expected_interface.segment_type_guard(),
             require_managed_prefix: !expected_interface.allows_static_assignments_fallback(),
-            allow_associated_interface_settings_update: false,
+            from_expected_machine: true,
         },
         retained_window,
     )
     .await
 }
 
-/// Pin DHCP addresses for an expected interface whose allocation policy is
-/// `Retained`. `ExpectedMachine` keeps the policy; matching DHCP address rows
-/// become `Static`, matching the existing Host BMC behavior.
-pub async fn retain_expected_machine_interface_address(
-    txn: &mut PgConnection,
-    expected_interface: &ExpectedInterface,
-) -> DatabaseResult<()> {
-    expected_interface
-        .require_ip_allocation(ExpectedInterfaceIpAllocation::Retained)
-        .map_err(|message| {
-            DatabaseError::InvalidArgument(format!(
-                "expected interface {}: {message}",
-                expected_interface.mac_address,
-            ))
-        })?;
-    retain_address_by_mac_and_type(
-        txn,
-        expected_interface.mac_address,
-        expected_interface.role.interface_type(),
-        expected_interface.segment_type_guard(),
-    )
-    .await
-}
-
-/// Convert matching DHCP addresses to `Static` for the current interface
-/// lifetime.
-///
-/// The interface type prevents a shared MAC from selecting the wrong row. When
-/// `segment_type_guard` is configured, every matching DHCP address must already
-/// belong to that segment type before any address is retained.
-async fn retain_address_by_mac_and_type(
-    txn: &mut PgConnection,
-    mac_address: MacAddress,
-    interface_type: InterfaceType,
-    segment_type_guard: Option<NetworkSegmentType>,
-) -> DatabaseResult<()> {
-    if let Some(segment_type_guard) = segment_type_guard {
-        let query = "SELECT ns.network_segment_type
-            FROM machine_interfaces mi
-            JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
-            JOIN network_segments ns ON ns.id = mi.segment_id
-            WHERE mi.mac_address = $1
-              AND mi.interface_type = $2
-              AND mia.allocation_type = 'dhcp'
-              AND ns.network_segment_type != $3
-            LIMIT 1";
-        let mismatched_segment_type: Option<NetworkSegmentType> = sqlx::query_scalar(query)
-            .bind(mac_address)
-            .bind(interface_type)
-            .bind(segment_type_guard)
-            .fetch_optional(&mut *txn)
-            .await
-            .map_err(|err| DatabaseError::query(query, err))?;
-        if let Some(mismatched_segment_type) = mismatched_segment_type {
-            return Err(DatabaseError::FailedPrecondition(format!(
-                "expected interface {mac_address} has a DHCP address on a {mismatched_segment_type} network segment, not the expected {segment_type_guard} segment type",
-            )));
-        }
-
-        let query = "UPDATE machine_interface_addresses
-            SET allocation_type = 'static'
-            WHERE allocation_type = 'dhcp'
-              AND interface_id IN (
-                  SELECT mi.id
-                  FROM machine_interfaces mi
-                  JOIN network_segments ns ON ns.id = mi.segment_id
-                  WHERE mi.mac_address = $1
-                    AND mi.interface_type = $2
-                    AND ns.network_segment_type = $3
-              )";
-        return sqlx::query(query)
-            .bind(mac_address)
-            .bind(interface_type)
-            .bind(segment_type_guard)
-            .execute(txn)
-            .await
-            .map(|_| ())
-            .map_err(|err| DatabaseError::query(query, err));
-    }
-
-    let query = "UPDATE machine_interface_addresses
-        SET allocation_type = 'static'
-        WHERE allocation_type = 'dhcp'
-          AND interface_id IN (
-              SELECT id FROM machine_interfaces
-              WHERE mac_address = $1 AND interface_type = $2
-          )";
-    sqlx::query(query)
-        .bind(mac_address)
-        .bind(interface_type)
-        .execute(txn)
-        .await
-        .map(|_| ())
-        .map_err(|err| DatabaseError::query(query, err))
-}
-
 /// Settings used to create or reconcile a fixed-address reservation.
 ///
-/// Address reconciliation always runs when it is safe. The associated-row
-/// option controls only whether `interface_type` and `primary_interface` may be
-/// changed after another resource owns the row.
+/// ExpectedMachine limits address reconciliation to first allocation, separate
+/// from whether the caller can change an associated row's role and primary flag.
 #[derive(Clone, Copy)]
 struct PreallocationOptions {
     /// Interface type used for new rows and eligible existing rows.
@@ -1422,26 +1571,18 @@ struct PreallocationOptions {
     /// Require a managed prefix to contain the fixed address instead of
     /// falling back to `static-assignments`.
     require_managed_prefix: bool,
-    /// Allow requested interface settings to change an already-associated row.
-    ///
-    /// This does not disable fixed-address reconciliation. ExpectedInterface
-    /// callers set this to `false` so expected configuration cannot reclassify
-    /// managed state, while legacy generic callers preserve their existing
-    /// setting-update behavior.
-    allow_associated_interface_settings_update: bool,
+    /// Restrict addresses to first allocation and metadata to unassociated rows.
+    from_expected_machine: bool,
 }
 
 /// If a machine interface row already exists for `mac_address`, reconcile it
 /// against the requested static IP and interface settings:
 ///   - Returns `Ok(true)` when an existing row can use `static_ip`. Updates
-///     its interface settings when allowed. Existing DHCP/SLAAC rows for the
-///     same address family are replaced by the static reservation.
+///     its interface settings when allowed. ExpectedMachine leaves initialized
+///     families unchanged; generic reservations may replace DHCP/SLAAC rows.
 ///   - Returns `Ok(false)` when no row exists for `mac_address` -- caller should create.
-///   - Returns `Err(InvalidArgument)` when a row exists but has a different `Static` address
-///     for the requested address family.
-///
-/// `allow_associated_interface_settings_update` affects only `interface_type`
-/// and `primary_interface`; it never disables fixed-address reconciliation.
+///   - Generic reservations reject a different existing `Static` address.
+///     Every exact static reservation must agree with a resolved target segment.
 async fn reconcile_existing_preallocation(
     txn: &mut PgConnection,
     mac_address: MacAddress,
@@ -1450,9 +1591,105 @@ async fn reconcile_existing_preallocation(
     known_target_segment: Option<&NetworkSegment>,
 ) -> DatabaseResult<bool> {
     let existing = find_by_mac_address(&mut *txn, mac_address).await?;
-    let Some(iface) = existing.first() else {
+    let Some(mut iface) = existing.into_iter().next() else {
         return Ok(false);
     };
+    // ExpectedMachine allocation takes its segment locks below before locking
+    // the interface. Generic fixed assignments need only the interface lock.
+    if !options.from_expected_machine {
+        lock_for_address_assignment(&mut *txn, iface.id).await?;
+        iface = find_one(&mut *txn, iface.id).await?;
+    }
+
+    if options.from_expected_machine {
+        if let Some(target_segment) = known_target_segment
+            && iface.segment_id != target_segment.id
+            && let Some(address) =
+                crate::machine_interface_address::find_by_address(&mut *txn, static_ip).await?
+            && address.id == iface.id
+            && address.allocation_type == AllocationType::Static
+            && address.segment_id != target_segment.id
+        {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "a machine interface already exists for MAC {mac_address} on segment {}; fixed IP {static_ip} belongs to segment {}; use update to change the segment",
+                address.segment_id, target_segment.id,
+            )));
+        }
+        if can_apply_expected_allocation(txn, iface.id, static_ip.address_family()).await? {
+            let mut allocation_txn = Transaction::begin_inner(txn).await?;
+            let derived_segment;
+            let target_segment = match known_target_segment {
+                Some(segment) => segment,
+                None => {
+                    derived_segment =
+                        db_network_segment::for_static_address(&mut allocation_txn, static_ip)
+                            .await?;
+                    &derived_segment
+                }
+            };
+            lock_network_segments_exclusive(
+                &mut allocation_txn,
+                &[iface.segment_id, target_segment.id],
+            )
+            .await?;
+            lock_for_address_assignment(&mut allocation_txn, iface.id).await?;
+            let locked_interface = find_one(&mut allocation_txn, iface.id).await?;
+            if can_apply_expected_allocation(
+                &mut allocation_txn,
+                iface.id,
+                static_ip.address_family(),
+            )
+            .await?
+            {
+                reconcile_existing_preallocation_address(
+                    &mut allocation_txn,
+                    &locked_interface,
+                    static_ip,
+                    Some(target_segment),
+                )
+                .await?;
+                allocation_txn.commit().await?;
+            } else {
+                // A concurrent first allocation won. Release its owner lock
+                // before a DHCP caller needs another segment lock.
+                allocation_txn.rollback().await?;
+            }
+        }
+    } else {
+        reconcile_existing_preallocation_address(txn, &iface, static_ip, known_target_segment)
+            .await?;
+    }
+
+    // Address eligibility and metadata ownership are separate: an existing
+    // allocation must not prevent an unassociated row from gaining its role.
+    if options.from_expected_machine {
+        update_unassociated_expected_interface_settings(
+            txn,
+            iface.id,
+            Some(options.interface_type),
+            options.primary_interface,
+        )
+        .await?;
+    } else {
+        if iface.interface_type != options.interface_type {
+            set_interface_type(&iface.id, options.interface_type, txn).await?;
+        }
+        if let Some(primary_interface) = options.primary_interface
+            && iface.primary_interface != primary_interface
+        {
+            set_primary_interface(&iface.id, primary_interface, txn).await?;
+        }
+    }
+    Ok(true)
+}
+
+async fn reconcile_existing_preallocation_address(
+    txn: &mut PgConnection,
+    iface: &MachineInterfaceSnapshot,
+    static_ip: IpAddr,
+    known_target_segment: Option<&NetworkSegment>,
+) -> DatabaseResult<()> {
+    let mac_address = iface.mac_address;
 
     let family = static_ip.address_family();
     let addresses =
@@ -1531,34 +1768,15 @@ async fn reconcile_existing_preallocation(
         }
     }
 
-    // Fixed-address reconciliation has already completed above. Ownership only
-    // decides whether this caller may also change the requested interface settings.
-    if options.allow_associated_interface_settings_update {
-        if iface.interface_type != options.interface_type {
-            set_interface_type(&iface.id, options.interface_type, txn).await?;
-        }
-        if let Some(primary_interface) = options.primary_interface
-            && iface.primary_interface != primary_interface
-        {
-            set_primary_interface(&iface.id, primary_interface, txn).await?;
-        }
-    } else {
-        update_unassociated_expected_interface_settings(
-            txn,
-            iface.id,
-            Some(options.interface_type),
-            options.primary_interface,
-        )
-        .await?;
-    }
-    Ok(true)
+    Ok(())
 }
 
 /// Create a fixed-address reservation or reconcile an existing row.
 ///
 /// Managed-prefix and segment-type requirements validate configured intent
-/// before either path runs. Associated-row policy affects only role-derived
-/// interface settings; it never suppresses safe fixed-address reconciliation.
+/// before either path runs. ExpectedMachine only assigns an uninitialized
+/// family; role-derived settings may still update an unassociated interface.
+/// Generic reservations retain their existing address-replacement behavior.
 async fn preallocate_machine_interface_with_options(
     txn: &mut PgConnection,
     mac_address: MacAddress,
@@ -1611,19 +1829,40 @@ async fn preallocate_machine_interface_with_options(
         Some(segment) => segment,
         None => db_network_segment::for_static_address(&mut *txn, static_ip).await?,
     };
-    match create_with_type(
-        txn,
-        std::slice::from_ref(&segment),
-        &mac_address,
-        options
-            .primary_interface
-            .unwrap_or(options.interface_type != InterfaceType::Bmc),
-        AddressSelectionStrategy::StaticAddress(static_ip),
-        options.interface_type,
-        retained_window,
-    )
-    .await
-    {
+    let primary_interface = options
+        .primary_interface
+        .unwrap_or(options.interface_type != InterfaceType::Bmc);
+    let result = if options.from_expected_machine {
+        let mut allocation_txn = Transaction::begin_inner(txn).await?;
+        lock_network_segment_exclusive(&mut allocation_txn, &segment).await?;
+        let result = create_with_type(
+            &mut allocation_txn,
+            std::slice::from_ref(&segment),
+            &mac_address,
+            primary_interface,
+            AddressSelectionStrategy::StaticAddress(static_ip),
+            options.interface_type,
+            retained_window,
+        )
+        .await;
+        match &result {
+            Ok(_) => allocation_txn.commit().await?,
+            Err(_) => allocation_txn.rollback().await?,
+        }
+        result
+    } else {
+        create_with_type(
+            txn,
+            std::slice::from_ref(&segment),
+            &mac_address,
+            primary_interface,
+            AddressSelectionStrategy::StaticAddress(static_ip),
+            options.interface_type,
+            retained_window,
+        )
+        .await
+    };
+    match result {
         Ok(_) => {
             tracing::info!(
                 %mac_address,
@@ -1658,6 +1897,8 @@ async fn preallocate_machine_interface_with_options(
     }
 }
 
+/// Create a data interface with dynamically allocated or explicitly assigned host addresses.
+/// See [`create_with_type`] for address selection and error behavior.
 pub async fn create(
     txn: &mut PgConnection,
     segments: &[NetworkSegment],
@@ -1678,6 +1919,22 @@ pub async fn create(
     .await
 }
 
+/// Create an interface of `interface_type` with dynamic or static host addresses.
+///
+/// `Automatic` and `NextAvailableIp` try segments in order, continuing after
+/// exhaustion, candidate contention, or exhausted ownership/hostname retries.
+/// Candidate contention moves to the next segment without repeating its scan
+/// budget. If the last segment is exhausted, earlier contention returns
+/// `Internal` with contention and exhaustion details; otherwise exhaustion
+/// returns `ResourceExhausted`.
+/// Contention on the last segment returns `TryAgain`.
+/// Ownership or hostname conflicts use a separate retry budget; exhausting
+/// that budget on the last segment returns `Internal`. Other errors return
+/// immediately, even after earlier contention.
+/// Static assignment uses the containing segment or the `static-assignments` fallback.
+/// An existing static address with the same MAC reuses its interface; a different
+/// owner returns `AddressAlreadyInUse`.
+/// `NextAvailablePrefix` returns `InvalidArgument` before creating an interface.
 pub async fn create_with_type(
     txn: &mut PgConnection,
     segments: &[NetworkSegment],
@@ -1687,9 +1944,17 @@ pub async fn create_with_type(
     interface_type: InterfaceType,
     retained_window: Option<chrono::Duration>,
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
-    let mut snapshot = match address_strategy {
+    let snapshot = match address_strategy {
         AddressSelectionStrategy::NextAvailableIp | AddressSelectionStrategy::Automatic => {
-            create_fast_path(txn, segments, macaddr, primary_interface, interface_type).await
+            create_dynamic(
+                txn,
+                segments,
+                macaddr,
+                primary_interface,
+                interface_type,
+                AllocationType::Dhcp,
+            )
+            .await
         }
         AddressSelectionStrategy::StaticAddress(addr) => {
             create_static_path(
@@ -1702,79 +1967,83 @@ pub async fn create_with_type(
             )
             .await
         }
-        //
         AddressSelectionStrategy::NextAvailablePrefix(_) => {
-            let [segment] = segments else {
-                return Err(DatabaseError::InvalidArgument(
-                    "NextAvailablePrefix allocation requires exactly one candidate segment"
-                        .to_string(),
-                ));
-            };
-
-            create_slow_path(
-                txn,
-                segment,
-                macaddr,
-                primary_interface,
-                address_strategy,
-                interface_type,
-            )
-            .await
+            return Err(DatabaseError::InvalidArgument(
+                "machine interfaces require host addresses, not whole-prefix allocations"
+                    .to_string(),
+            ));
         }
     }?;
 
+    restore_retained_boot_interface(txn, snapshot, retained_window).await
+}
+
+async fn restore_retained_boot_interface(
+    txn: &mut PgConnection,
+    mut snapshot: MachineInterfaceSnapshot,
+    retained_window: Option<chrono::Duration>,
+) -> DatabaseResult<MachineInterfaceSnapshot> {
     // Every brand-new row passes through here, whatever created it --
     // dynamic DHCP, a static preallocation, or predicted-interface
     // promotion. A prior row for this MAC may have been deleted with its
     // boot interface id retained; recover the pair onto the new row and
     // consume the retention record.
     if snapshot.boot_interface_id.is_none()
-        && let Some(boot_interface_id) =
-            crate::retained_boot_interface::take_by_mac(&mut *txn, *macaddr, retained_window)
-                .await?
+        && let Some(boot_interface_id) = crate::retained_boot_interface::take_by_mac(
+            &mut *txn,
+            snapshot.mac_address,
+            retained_window,
+        )
+        .await?
     {
-        set_boot_interface_id(*macaddr, &boot_interface_id, &mut *txn).await?;
+        set_boot_interface_id(snapshot.mac_address, &boot_interface_id, &mut *txn).await?;
         snapshot.boot_interface_id = Some(boot_interface_id);
     }
     Ok(snapshot)
 }
 
-async fn create_fast_path(
+async fn create_dynamic(
     txn: &mut PgConnection,
     segments: &[NetworkSegment],
     macaddr: &MacAddress,
     primary_interface: bool,
     interface_type: InterfaceType,
+    allocation_type: AllocationType,
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
+    let mut encountered_contention = false;
     for segments_idx in 0..segments.len() {
         let segment = &segments[segments_idx];
-        for _ in 0..FAST_PATH_MAX_RETRIES {
-            let mut fast_txn = Transaction::begin_inner(txn).await?;
+        for _ in 0..HOST_ALLOCATION_MAX_ATTEMPTS {
+            let mut allocation_txn = Transaction::begin_inner(txn).await?;
 
-            // Keep IPv4-only allocation concurrent, but serialize any segment
-            // containing IPv6 because the Rust allocator reads used addresses
-            // without taking per-IP candidate locks.
-            if segment
-                .prefixes
-                .iter()
-                .any(|prefix| prefix.prefix.is_ipv6())
-            {
-                lock_network_segment_exclusive(&mut fast_txn, segment).await?;
-            } else {
-                lock_network_segment_shared(&mut fast_txn, segment).await?;
+            // DHCP callers choose this lock mode before interface writes. Match it
+            // here so IPv4 never needs a shared-to-exclusive upgrade. Exclusive
+            // SVI writers also exclude allocations while changing the prefix.
+            match segment_lock_mode(segment.prefixes.iter().map(|prefix| &prefix.prefix)) {
+                SegmentLockMode::Exclusive => {
+                    lock_network_segment_exclusive(&mut allocation_txn, segment).await?;
+                }
+                SegmentLockMode::Shared => {
+                    lock_network_segments_shared(
+                        &mut allocation_txn,
+                        std::slice::from_ref(&segment.id),
+                    )
+                    .await?;
+                }
             }
 
-            let segment_exhausted = match try_create_fast_path(
-                &mut fast_txn,
+            let try_next_segment = match try_create_dynamic(
+                &mut allocation_txn,
                 segment,
                 macaddr,
                 primary_interface,
                 interface_type,
+                allocation_type,
             )
             .await
             {
                 Ok(interface_id) => {
-                    fast_txn.commit().await?;
+                    allocation_txn.commit().await?;
                     return Ok(
                         find_by(txn, ObjectColumnFilter::One(IdColumn, &interface_id))
                             .await?
@@ -1785,26 +2054,40 @@ async fn create_fast_path(
                     // Another simultaneous create got the same FQDN, try again.
                     false
                 }
-                Err(DatabaseError::TryAgain | DatabaseError::AddressAlreadyInUse(_)) => {
-                    // The candidates we read were claimed before this attempt
-                    // could insert them. Roll back and select another batch.
+                Err(DatabaseError::AddressAlreadyInUse(_)) => {
+                    // Another writer committed an address after selection. Roll
+                    // back this attempt and select again.
                     false
                 }
-                Err(DatabaseError::ResourceExhausted(_)) if segments_idx < segments.len() - 1 => {
-                    // If there are more segments to check, we just need to signal that this one was exhausted.
+                Err(DatabaseError::TryAgain) if segments_idx < segments.len() - 1 => {
+                    // This attempt already skipped locked candidates until the
+                    // prefix ended or the scan budget ran out. Try the next segment.
+                    encountered_contention = true;
                     true
                 }
+                Err(DatabaseError::ResourceExhausted(_)) if segments_idx < segments.len() - 1 => {
+                    true
+                }
+                Err(DatabaseError::ResourceExhausted(reason)) if encountered_contention => {
+                    // Earlier locked candidates may become available, and a
+                    // spent scan budget can leave later free addresses unread.
+                    allocation_txn.rollback().await?;
+                    return Err(DatabaseError::internal(format!(
+                        "host address allocation can be retried after earlier lock contention; final segment `{}` ({}) is exhausted: {reason}",
+                        segment.config.name, segment.id
+                    )));
+                }
                 Err(err) => {
-                    // Some other error, roll back the inner transaction
-                    fast_txn.rollback().await?;
+                    // Return terminal contention, exhaustion, or any other error
+                    // after rolling back this attempt.
+                    allocation_txn.rollback().await?;
                     return Err(err);
                 }
             };
 
-            fast_txn.rollback().await?;
+            allocation_txn.rollback().await?;
 
-            // If this segment is exhausted, go to the next segment.
-            if segment_exhausted {
+            if try_next_segment {
                 break;
             }
         }
@@ -1817,13 +2100,11 @@ async fn create_fast_path(
         .join(", ");
 
     Err(DatabaseError::internal(format!(
-        "unable to create machine interface in fast path out of segments {} after {} retries",
-        segment_list, FAST_PATH_MAX_RETRIES
+        "ownership or hostname retries exhausted while allocating machine interface addresses from segments {segment_list}"
     )))
 }
 
 /// Create a machine interface with a specific static IP address.
-/// A perfect compliment to create_fast_path and create_slow_path.
 ///
 /// If the target IP is already allocated to an interface with
 /// same MAC, just return the existing interface snapshot.
@@ -1860,7 +2141,7 @@ async fn create_static_path(
         if existing.mac_address == *macaddr {
             return Ok(existing);
         }
-        return Err(AddressAlreadyInUseError(
+        return Err(AddressAlreadyInUseError::active(
             address,
             existing.mac_address,
             existing.segment_id,
@@ -1888,89 +2169,15 @@ async fn create_static_path(
     )
 }
 
-/// Create a machine interface and allocate IP addresses, slow path for whole-prefix allocation.
-///
-/// This uses [`crate::IpAllocator`], which requires:
-///
-/// - Locking the machine_interfaces_lock table
-/// - Reading all used IP's from the database for the given segment
-/// - Selecting a batch of IP's according to the selection strategy
-pub async fn create_slow_path(
-    txn: &mut PgConnection,
-    segment: &NetworkSegment,
-    macaddr: &MacAddress,
-    primary_interface: bool,
-    address_strategy: AddressSelectionStrategy,
-    interface_type: InterfaceType,
-) -> DatabaseResult<MachineInterfaceSnapshot> {
-    // We're potentially about to insert a couple rows, so create a savepoint.
-    let mut inner_txn = Transaction::begin_inner(txn).await?;
-
-    // If either requested addresses are auto-generated, we lock the entire table
-    // by way of the inner_txn.
-    lock_network_segment_exclusive(&mut inner_txn, segment).await?;
-
-    // Collect SVI IPs so the allocator knows they're already reserved.
-    let mut reserved_ips = vec![];
-    for prefix in &segment.prefixes {
-        if let Some(svi_ip) = prefix.svi_ip {
-            reserved_ips.push(svi_ip);
-        }
-    }
-
-    let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-        Box::new(UsedAdminNetworkIpResolver {
-            segment_id: segment.id,
-            busy_ips: reserved_ips,
-        });
-
-    // Allocate an address from each prefix in the segment. For dual-stack
-    // segments this means one IPv4 address and one IPv6 address.
-    let allocator = IpAllocator::new(
-        inner_txn.as_pgconn(),
-        segment,
-        dhcp_handler,
-        address_strategy,
-    )
-    .await?;
-
-    let mut allocated_addresses = Vec::new();
-    for (_, maybe_address) in allocator {
-        let address = maybe_address?;
-        allocated_addresses.push(address.ip());
-    }
-
-    let interface_id = create_inner(
-        inner_txn.as_pgconn(),
-        segment,
-        macaddr,
-        segment.config.subdomain_id,
-        primary_interface,
-        &allocated_addresses,
-        AllocationType::Dhcp,
-        interface_type,
-    )
-    .await?;
-    inner_txn.commit().await?;
-
-    Ok(
-        find_by(txn, ObjectColumnFilter::One(IdColumn, &interface_id))
-            .await?
-            .remove(0),
-    )
-}
-
-/// Fast path for single-IP allocation.
-///
-/// This allocates a single candidate IP per prefix entirely in the database, without having to read
-/// all the used IP's.
-async fn try_create_fast_path(
+/// Allocate one host address per prefix and create the interface in this transaction.
+async fn try_create_dynamic(
     // Note: Must be a transaction since we're doing locks
     txn: &mut PgTransaction<'_>,
     segment: &NetworkSegment,
     macaddr: &MacAddress,
     primary_interface: bool,
     interface_type: InterfaceType,
+    allocation_type: AllocationType,
 ) -> DatabaseResult<MachineInterfaceId> {
     let allocated_addresses = allocate_addresses_from_segment(txn, segment).await?;
 
@@ -1981,7 +2188,7 @@ async fn try_create_fast_path(
         segment.config.subdomain_id,
         primary_interface,
         &allocated_addresses,
-        AllocationType::Dhcp,
+        allocation_type,
         interface_type,
     )
     .await
@@ -1991,94 +2198,16 @@ async fn try_create_fast_path(
 ///
 /// For dual-stack segments this means one IPv4 and one IPv6 address. Callers
 /// must already hold the segment's exclusive lock when the segment contains
-/// IPv6 prefixes.
+/// IPv6 prefixes, matching the DHCPv6 and SVI writers.
 async fn allocate_addresses_from_segment(
     txn: &mut PgTransaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<Vec<IpAddr>> {
     let mut addresses = Vec::with_capacity(segment.prefixes.len());
     for prefix in &segment.prefixes {
-        if prefix.prefix.is_ipv6() {
-            // Use a single-prefix segment view so v6 allocation cannot consume
-            // or reason about unrelated prefixes on a dual-stack segment.
-            let single_prefix_segment = NetworkSegment {
-                prefixes: vec![prefix.clone()],
-                ..segment.clone()
-            };
-            addresses
-                .extend(allocate_v6_addresses_via_ip_allocator(txn, &single_prefix_segment).await?);
-        } else {
-            // IPv4 stays on the SQL fast path for its existing concurrency and
-            // allocation-order behavior.
-            let address = allocate_next_ip_with_retry(txn, segment, prefix).await?;
-            addresses.push(address);
-        }
+        addresses.push(allocate_next_ip_with_retry(txn, segment, prefix).await?);
     }
     Ok(addresses)
-}
-
-/// Allocates IPv6 DHCP addresses using the Rust `IpAllocator`.
-///
-/// The caller must hold the segment's exclusive advisory lock because
-/// `IpAllocator` reads the used-address set instead of taking per-IP advisory
-/// locks for each candidate.
-async fn allocate_v6_addresses_via_ip_allocator(
-    txn: &mut PgTransaction<'_>,
-    segment: &NetworkSegment,
-) -> DatabaseResult<Vec<IpAddr>> {
-    // Collect SVI IPs so the allocator treats those addresses as unavailable.
-    let reserved_ips = segment
-        .prefixes
-        .iter()
-        .filter_map(|prefix| prefix.svi_ip)
-        .collect();
-
-    let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
-        Box::new(UsedAdminNetworkIpResolver {
-            segment_id: segment.id,
-            busy_ips: reserved_ips,
-        });
-
-    // Limit the allocator input to IPv6 prefixes; IPv4 remains on the SQL fast
-    // path even when the original segment is dual-stack.
-    let ipv6_segment = NetworkSegment {
-        prefixes: segment
-            .prefixes
-            .iter()
-            .filter(|prefix| prefix.prefix.is_ipv6())
-            .cloned()
-            .collect(),
-        ..segment.clone()
-    };
-
-    let allocator = IpAllocator::new(
-        txn.as_mut(),
-        &ipv6_segment,
-        dhcp_handler,
-        AddressSelectionStrategy::NextAvailableIp,
-    )
-    .await?;
-
-    let mut allocated_addresses = Vec::with_capacity(ipv6_segment.prefixes.len());
-    for (prefix_id, maybe_address) in allocator {
-        let address = match maybe_address {
-            Ok(address) => address,
-            Err(DatabaseError::DhcpError(DhcpError::PrefixExhausted(_))) => {
-                let prefix = ipv6_segment
-                    .prefixes
-                    .iter()
-                    .find(|prefix| prefix.id == prefix_id)
-                    .map_or_else(|| prefix_id.to_string(), |prefix| prefix.prefix.to_string());
-                return Err(DatabaseError::ResourceExhausted(format!(
-                    "No IP addresses left in prefix {prefix}"
-                )));
-            }
-            Err(err) => return Err(err),
-        };
-        allocated_addresses.push(address.ip());
-    }
-
-    Ok(allocated_addresses)
 }
 
 /// Create a machine interface row without inserting address rows.
@@ -2118,19 +2247,11 @@ async fn create_without_addresses(
     )
     .await?;
 
-    let mut snapshot = find_by(&mut *txn, ObjectColumnFilter::One(IdColumn, &interface_id))
+    let snapshot = find_by(&mut *txn, ObjectColumnFilter::One(IdColumn, &interface_id))
         .await?
         .remove(0);
-    if snapshot.boot_interface_id.is_none()
-        && let Some(boot_interface_id) =
-            crate::retained_boot_interface::take_by_mac(&mut *txn, *macaddr, retained_window)
-                .await?
-    {
-        set_boot_interface_id(*macaddr, &boot_interface_id, &mut *txn).await?;
-        snapshot.boot_interface_id = Some(boot_interface_id);
-    }
 
-    Ok(snapshot)
+    restore_retained_boot_interface(txn, snapshot, retained_window).await
 }
 
 /// Create the actual machine interface once we know what addresses we want.
@@ -2193,67 +2314,71 @@ async fn create_inner(
     Ok(interface_id)
 }
 
-/// Retries allocation for a single prefix which may be under contention.
+/// Select and lock one host candidate; the caller inserts its ownership row.
 ///
-/// Each iteration fetches a small free-IP batch, tries to take an advisory lock
-/// on each candidate, and returns once one lock is acquired.
-///
-/// This is for eliminating a big shared lock when we have lots of machines DHCP'ing for the first
-/// time simultaneously: By requesting a batch of free IP's at once and trying locks on each one, we
-/// can process roughly [`FAST_PATH_CANDIDATE_BATCH`] initial DHCP requests concurrently.
+/// Each iteration reads the next gaps between occupied addresses and selects up to
+/// `HOST_CANDIDATE_BATCH_SIZE` free candidates. Per-address advisory locks let
+/// concurrent IPv4 allocations choose different candidates from the same batch.
+/// Returns `ResourceExhausted` when no free candidates remain. After skipping
+/// locked candidates, reaching the end or `HOST_CANDIDATE_MAX_SCANS` returns
+/// `TryAgain` because those candidates may become available. The caller's insert
+/// still checks ownership if another writer committed after our read.
 async fn allocate_next_ip_with_retry(
     // Note: Must be a transaction since we're doing locks
     txn: &mut PgTransaction<'_>,
     segment: &NetworkSegment,
     prefix: &NetworkPrefix,
 ) -> DatabaseResult<IpAddr> {
-    // The SQL fast path is IPv4-only. IPv6 host-space math needs the Rust
-    // allocator's u128 arithmetic instead of PostgreSQL int4 shifts.
-    if prefix.prefix.is_ipv6() {
-        return Err(DatabaseError::internal(format!(
-            "IPv6 prefix {} cannot use the SQL fast-path allocator",
-            prefix.prefix
-        )));
-    }
+    let mut selector = host_address_candidates::HostAddressCandidates::new(prefix)?;
+    for scan in 0..HOST_CANDIDATE_MAX_SCANS {
+        let candidates = if let Some((first, last)) = selector.range() {
+            // Ownership is global, including reservations parked without an
+            // interface. `lead()` pairs occupied addresses with their successors;
+            // one query returns the gap boundaries while still reading occupied
+            // rows up to the limit. The unique address index can supply the order.
+            // Keep the first row to bound the leading gap. The CASE prevents
+            // incrementing the maximum IPv6 address, even in an exhausted /128.
+            let query = "SELECT address, next_address FROM (
+                    SELECT address,
+                        lead(address) OVER (ORDER BY address) AS next_address,
+                        row_number() OVER (ORDER BY address) AS position
+                    FROM machine_interface_addresses
+                    WHERE address BETWEEN $1::inet AND $2::inet
+                ) AS occupied
+                WHERE position = 1 OR next_address IS NULL
+                    OR CASE WHEN address < $2::inet
+                        THEN address + 1 < next_address ELSE false END
+                ORDER BY address
+                LIMIT CASE WHEN (
+                    SELECT address FROM machine_interface_addresses
+                    WHERE address BETWEEN $1::inet AND $2::inet
+                    ORDER BY address LIMIT 1
+                ) >= $4::inet THEN 1 ELSE $3::bigint END";
+            // Allow one marker for the first row and two gaps containing only the
+            // gateway or SVI before we have enough candidates. If the leading
+            // gap alone fills the batch, avoid scanning the occupied tail.
+            let occupied = sqlx::query_as::<_, host_address_candidates::OccupiedAddress>(query)
+                .bind(first)
+                .bind(last)
+                .bind((HOST_CANDIDATE_BATCH_SIZE + 3) as i64)
+                .bind(selector.leading_gap_threshold(HOST_CANDIDATE_BATCH_SIZE))
+                .fetch_all(txn.as_mut())
+                .await
+                .map_err(|e| DatabaseError::query(query, e))?;
+            selector.select(&occupied, HOST_CANDIDATE_BATCH_SIZE)
+        } else {
+            Vec::new()
+        };
 
-    let reserved = if prefix.gateway.is_none() {
-        prefix.num_reserved.max(2)
-    } else {
-        prefix.num_reserved.max(1)
-    };
-
-    let host_bits = 32 - prefix.prefix.prefix() as i32;
-
-    for _ in 0..FAST_PATH_MAX_RETRIES {
-        // Grab FAST_PATH_CANDIDATE_BATCH IP's at once
-        let query = r#"
-SELECT ($1::inet + ip_series.n)::inet AS ip
-FROM generate_series($3, (1 << $2) - 2) AS ip_series(n)
-LEFT JOIN machine_interface_addresses AS mia
-  ON mia.address = ($1::inet + ip_series.n)::inet
-WHERE mia.address IS NULL
-  AND ($4::inet IS NULL OR ($1::inet + ip_series.n)::inet <> $4::inet)
-  AND ($5::inet IS NULL OR ($1::inet + ip_series.n)::inet <> $5::inet)
-ORDER BY ip
-LIMIT $6;
-    "#;
-        let candidates = sqlx::query_scalar::<_, IpAddr>(query)
-            .bind(prefix.prefix.ip())
-            .bind(host_bits)
-            .bind(reserved)
-            .bind(prefix.gateway)
-            .bind(prefix.svi_ip)
-            .bind(FAST_PATH_CANDIDATE_BATCH)
-            .fetch_all(txn.as_mut())
-            .await
-            .map_err(|e| DatabaseError::query(query, e))?;
-
-        if candidates.is_empty() {
+        let Some(&last_candidate) = candidates.last() else {
+            if scan > 0 {
+                return Err(DatabaseError::TryAgain);
+            }
             return Err(DatabaseError::ResourceExhausted(format!(
                 "No IP addresses left in prefix {}",
                 prefix.prefix
             )));
-        }
+        };
 
         // Try to lock an IP (in case multiple allocation requests are happening at once)
         for candidate in candidates {
@@ -2261,6 +2386,7 @@ LIMIT $6;
                 return Ok(candidate);
             }
         }
+        selector.advance_past(last_candidate);
     }
 
     Err(DatabaseError::TryAgain)
@@ -2284,19 +2410,6 @@ async fn try_lock_ip_candidate(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-async fn lock_network_segment_shared(
-    // Note: Must be a transaction since we're doing locks
-    txn: &mut PgTransaction<'_>,
-    segment: &NetworkSegment,
-) -> DatabaseResult<()> {
-    let query = "SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))";
-    sqlx::query_scalar(query)
-        .bind(format!("network_segment.{}", segment.id))
-        .fetch_one(txn.as_mut())
-        .await
-        .map_err(|e| DatabaseError::query(query, e))
-}
-
 async fn lock_network_segment_exclusive(
     // Note: Must be a transaction since we're doing locks
     txn: &mut PgTransaction<'_>,
@@ -2307,9 +2420,8 @@ async fn lock_network_segment_exclusive(
 
 /// Advisory-lock every segment in `segment_ids`, in ascending id order --
 /// the allocator convention: segment advisory lock first, then machine
-/// interface/address row locks. This is the one home for the lock key and
-/// ordering; every segment-lock helper funnels through it. Must run inside a
-/// transaction: the locks are `pg_advisory_xact_lock`-scoped and release on
+/// interface/address row locks. Must run inside a transaction: the locks are
+/// `pg_advisory_xact_lock`-scoped and release on
 /// commit or rollback.
 pub async fn lock_network_segments_exclusive(
     txn: &mut PgConnection,
@@ -2329,46 +2441,152 @@ pub async fn lock_network_segments_exclusive(
     Ok(())
 }
 
-/// Advisory-lock every admin segment, in ascending id order. Transactions
-/// that touch machine-interface rows before their segment locks -- the flows
-/// that end in `reconcile_admin_addresses_for_host`, and machine teardown,
-/// which deletes interface rows wholesale -- call this right after opening
-/// the transaction so the whole transaction follows the allocator order.
-/// Later acquisitions of the same locks in the same transaction (reconcile's
-/// own pass) are no-ops.
+/// Acquire shared segment locks in ascending ID order within a transaction.
+/// IPv4 DHCP takes these before interface updates, matching its allocator's
+/// shared locks. Callers that can allocate IPv6 must use
+/// exclusive locks from the start rather than upgrade shared locks later.
+pub async fn lock_network_segments_shared(
+    txn: &mut PgConnection,
+    segment_ids: &[NetworkSegmentId],
+) -> DatabaseResult<()> {
+    let mut ids = segment_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    for id in ids {
+        let query = "SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))";
+        sqlx::query_scalar::<_, ()>(query)
+            .bind(format!("network_segment.{id}"))
+            .fetch_one(&mut *txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+    }
+    Ok(())
+}
+
+/// Advisory lock mode an allocating transaction holds on a segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentLockMode {
+    /// Compatible with other IPv4 allocators, which claim candidates with
+    /// per-IP try-locks under the shared segment lock.
+    Shared,
+    /// Required once any prefix is IPv6: the IPv6 allocator reads used
+    /// addresses without candidate locks.
+    Exclusive,
+}
+
+/// Picks the lock mode for `prefixes`. A transaction decides this once, from
+/// every prefix it may allocate from, before its first segment lock: every
+/// later segment lock it takes requests the same or a weaker mode, so a shared
+/// lock is never upgraded.
+fn segment_lock_mode<'a>(prefixes: impl IntoIterator<Item = &'a IpNetwork>) -> SegmentLockMode {
+    if prefixes.into_iter().any(IpNetwork::is_ipv6) {
+        SegmentLockMode::Exclusive
+    } else {
+        SegmentLockMode::Shared
+    }
+}
+
+/// Advisory-lock every admin segment exclusively, in ascending id order, for
+/// transactions that lock interface rows and then reconcile or delete them in
+/// the same transaction. Call it right after opening the transaction so the
+/// whole transaction follows the allocator order (segment advisory lock
+/// first, then interface and address rows). Later acquisitions of the same
+/// keys in the same transaction never wait.
 pub async fn lock_all_admin_segments(txn: &mut PgConnection) -> DatabaseResult<()> {
     let segment_ids =
         db_network_segment::list_segment_ids(&mut *txn, Some(NetworkSegmentType::Admin)).await?;
     lock_network_segments_exclusive(txn, &segment_ids).await
 }
 
-static ADMIN_LOCK_ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::OnceLock::new();
+/// Advisory-lock every admin segment, in ascending id order, in the mode the
+/// admin allocators use: shared while every admin prefix is IPv4, exclusive
+/// once any admin segment carries an IPv6 prefix. Taken right after opening a
+/// transaction that allocates a DPU-backed host link, it makes the allocator's
+/// own segment locks re-acquisitions of held keys, so the transaction never
+/// requests a segment lock after a row lock and never upgrades one.
+pub async fn lock_all_admin_segments_for_allocation(txn: &mut PgConnection) -> DatabaseResult<()> {
+    load_and_lock_all_admin_segments(txn).await.map(|_| ())
+}
 
-/// Admission gate for the `lock_all_admin_segments` flows. The admin-segment
-/// advisory locks serialize those transactions anyway; without a gate, every
-/// waiter parks *inside* an open transaction, pinning a pool connection while
-/// blocked on the lock. At fleet-ingestion scale that queue grows past
-/// Postgres `max_connections` and the whole system wedges (registration,
-/// exploration, and the state controllers all starve; see the 4,500-host
-/// ingestion wedge). Acquire this permit BEFORE opening the transaction and
-/// hold it until commit/rollback, so excess waiters queue in memory instead
-/// of on connections. Permits: `ADMIN_LOCK_ADMISSION` env var, default 16.
+/// The admission gate: its permit count and the semaphore that hands the
+/// permits out.
+struct AdminLockAdmission {
+    permits: usize,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+static ADMIN_LOCK_ADMISSION: std::sync::OnceLock<AdminLockAdmission> = std::sync::OnceLock::new();
+
+/// Accepted range of the admission permit count. 0 would deadlock every
+/// gated flow, and a value at or above the pool size defeats the gate's
+/// purpose (the waiters it is meant to keep off connections would all be
+/// admitted). The site configuration is validated against it at startup.
+pub const ADMIN_LOCK_ADMISSION_PERMIT_RANGE: std::ops::RangeInclusive<usize> = 1..=256;
+const DEFAULT_ADMIN_LOCK_ADMISSION_PERMITS: usize = 16;
+
+/// The permit count: the configured value, else the `ADMIN_LOCK_ADMISSION`
+/// environment variable clamped to the accepted range, else the default.
+fn admin_lock_admission_permit_count(
+    configured: Option<usize>,
+    environment: Option<&str>,
+) -> usize {
+    configured
+        .or_else(|| environment?.parse().ok())
+        .map(|permits| {
+            permits.clamp(
+                *ADMIN_LOCK_ADMISSION_PERMIT_RANGE.start(),
+                *ADMIN_LOCK_ADMISSION_PERMIT_RANGE.end(),
+            )
+        })
+        .unwrap_or(DEFAULT_ADMIN_LOCK_ADMISSION_PERMITS)
+}
+
+fn new_admin_lock_admission(configured: Option<usize>) -> AdminLockAdmission {
+    let environment = std::env::var("ADMIN_LOCK_ADMISSION").ok();
+    let permits = admin_lock_admission_permit_count(configured, environment.as_deref());
+    AdminLockAdmission {
+        permits,
+        semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(permits)),
+    }
+}
+
+fn admin_lock_admission_gate() -> &'static AdminLockAdmission {
+    ADMIN_LOCK_ADMISSION.get_or_init(|| new_admin_lock_admission(None))
+}
+
+/// Sets the admission permit count from the parsed site configuration.
+/// Called once during server startup, before any gated flow runs; the first
+/// value wins, and a later differing value is logged and ignored.
+pub fn configure_admin_lock_admission(permits: Option<usize>) {
+    let gate = new_admin_lock_admission(permits);
+    let requested = gate.permits;
+    if ADMIN_LOCK_ADMISSION.set(gate).is_err() && admin_lock_admission_permits() != requested {
+        tracing::warn!(
+            requested_permit_count = requested,
+            active_permit_count = admin_lock_admission_permits(),
+            "admin-lock admission permits are already set; keeping the active count"
+        );
+    }
+}
+
+/// The permit count of the admission gate, so a caller that holds one permit
+/// per in-flight operation can bound its own concurrency below it.
+pub fn admin_lock_admission_permits() -> usize {
+    admin_lock_admission_gate().permits
+}
+
+/// Admission gate for the flows that may wait on the admin-segment advisory
+/// locks. Without it, every waiter parks *inside* an open transaction and
+/// pins a pool connection while blocked on the lock, and at fleet scale that
+/// queue exhausts Postgres `max_connections`. Acquire this permit BEFORE
+/// opening the transaction and hold it until commit/rollback, so excess
+/// waiters queue in memory instead of on connections. Permits:
+/// `admin_lock_admission_permits` in the site configuration, else the
+/// `ADMIN_LOCK_ADMISSION` env var, default 16.
 pub async fn admin_lock_admission() -> tokio::sync::OwnedSemaphorePermit {
-    let sem = ADMIN_LOCK_ADMISSION.get_or_init(|| {
-        // Clamp to a sane range: 0 would deadlock every gated flow, and a
-        // value at or above the pool size defeats the gate's purpose (the
-        // waiters it is meant to keep off connections would all be admitted).
-        const DEFAULT_PERMITS: usize = 16;
-        const MAX_PERMITS: usize = 256;
-        let permits = std::env::var("ADMIN_LOCK_ADMISSION")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .map(|n| n.clamp(1, MAX_PERMITS))
-            .unwrap_or(DEFAULT_PERMITS);
-        std::sync::Arc::new(tokio::sync::Semaphore::new(permits))
-    });
-    sem.clone()
+    admin_lock_admission_gate()
+        .semaphore
+        .clone()
         .acquire_owned()
         .await
         .expect("admin-lock admission semaphore is never closed")
@@ -2381,7 +2599,6 @@ pub async fn allocate_svi_ip(
     let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
         Box::new(UsedAdminNetworkIpResolver {
             segment_id: segment.id,
-            busy_ips: vec![],
         });
 
     // Prevent other allocations from happening concurrently in this network segment
@@ -2410,12 +2627,15 @@ pub async fn find_optional_for_update_by_ip(
     txn: &mut PgConnection,
     remote_ip: IpAddr,
 ) -> Result<Option<MachineInterfaceSnapshot>, DatabaseError> {
+    // Keep `mi` before `mia`: expiry and allocation lock the interface before
+    // its addresses. `discovery_ip_lookup_locks_interface_before_address`
+    // protects this order.
     let query = r#"
         SELECT mi.id
         FROM machine_interface_addresses mia
         JOIN machine_interfaces mi ON mi.id = mia.interface_id
         WHERE mia.address = $1::inet
-        FOR UPDATE OF mia, mi
+        FOR UPDATE OF mi
     "#;
     let interface_ids: Vec<(MachineInterfaceId,)> = sqlx::query_as(query)
         .bind(remote_ip)
@@ -2425,7 +2645,23 @@ pub async fn find_optional_for_update_by_ip(
 
     match interface_ids.as_slice() {
         [] => Ok(None),
-        [(interface_id,)] => find_one(txn, *interface_id).await.map(Some),
+        [(interface_id,)] => {
+            // Assignment locks the interface before its address rows. The address
+            // may have been replaced while we waited, so recheck this exact owner
+            // before accepting it as the discovery source.
+            let query = "SELECT interface_id FROM machine_interface_addresses
+                WHERE interface_id = $1 AND address = $2::inet FOR UPDATE";
+            let owner = sqlx::query_scalar::<_, MachineInterfaceId>(query)
+                .bind(interface_id)
+                .bind(remote_ip)
+                .fetch_optional(&mut *txn)
+                .await
+                .map_err(|e| DatabaseError::query(query, e))?;
+            if owner.is_none() {
+                return Ok(None);
+            }
+            find_one(txn, *interface_id).await.map(Some)
+        }
         // The address uniqueness constraint makes this unreachable on a valid schema. Keep the
         // guard so discovery fails closed if database invariants are bypassed.
         _ => Err(DatabaseError::internal(format!(
@@ -2579,11 +2815,16 @@ pub async fn get_machine_interface_primary(
 
 /// Move an entry from predicted_machine_interfaces to machine_interfaces, using the given relay IP
 /// to know what network segment to assign.
+///
+/// The caller must acquire `locked_segment_ids` exclusively, including every
+/// admin segment, before updating interface rows. Reject a relay segment that
+/// appeared after that lookup so later DHCP allocation cannot lock it out of order.
 pub async fn move_predicted_machine_interface_to_machine(
     txn: &mut PgConnection,
     predicted_machine_interface: &PredictedMachineInterface,
     relay_ip: IpAddr,
     retained_window: Option<chrono::Duration>,
+    locked_segment_ids: &[NetworkSegmentId],
 ) -> Result<(), DatabaseError> {
     tracing::info!(
         machine_id=%predicted_machine_interface.machine_id,
@@ -2592,7 +2833,7 @@ pub async fn move_predicted_machine_interface_to_machine(
         "Got DHCP from predicted machine interface, moving to machine"
     );
     let Some(network_segment) = crate::network_segment::for_relay(txn, relay_ip).await? else {
-        return Err(DatabaseError::internal(format!(
+        return Err(DatabaseError::FailedPrecondition(format!(
             "No network segment defined for relay address: {relay_ip}"
         )));
     };
@@ -2605,6 +2846,13 @@ pub async fn move_predicted_machine_interface_to_machine(
             predicted_machine_interface.mac_address,
             network_segment.id,
             predicted_machine_interface.expected_network_segment_type,
+        )));
+    }
+
+    if !locked_segment_ids.contains(&network_segment.id) {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "network segment {} changed before predicted interface promotion",
+            network_segment.id,
         )));
     }
 
@@ -2756,35 +3004,44 @@ pub async fn move_predicted_machine_interface_to_machine(
     Ok(())
 }
 
-/// This function creates Proactive Host Machine Interface with all available information.
-/// Parsed Mac: Found in DPU's topology data
-/// Relay IP: Taken from fixed Admin network segment. Relay IP is used only to identify related
-/// segment.
-/// Returns: Machine Interface, True if new interface is created.
+/// Finds or creates the host admin interface from the DPU's topology MAC.
+///
+/// IPv6-only segments are eligible only when admin FNN is enabled. Segments with an IPv4
+/// prefix must have an IPv4 gateway. Existing candidate ownership and static addresses are
+/// preserved; an addressless static interface may move to a single eligible segment.
+/// Duplicate MAC rows and ownership on another managed segment are errors.
+///
+/// The caller must keep the transaction open through host association and address repair.
+/// This operation associates the interface with the DPU and may update its segment and DNS
+/// domain. Allocation takes segment locks before interface/address row locks.
+///
+/// Discovery already knows the candidate admin segments. Resolving them through synthetic
+/// DHCP relays would let unrelated DHCPv6 link-address metadata override that selection.
 pub async fn create_host_machine_dpu_interface_proactively(
     txn: &mut PgConnection,
     hardware_info: Option<&HardwareInfo>,
     dpu_id: &MachineId,
+    admin_fnn_enabled: bool,
     retained_window: Option<chrono::Duration>,
 ) -> Result<MachineInterfaceSnapshot, DatabaseError> {
-    let admin_networks = crate::network_segment::admin(txn).await?;
-
-    // Using gateway IP as relay IP. This is just to enable next algorithm to find related network
-    // segment.
-    let mut gateways = vec![];
-    let mut existing_machine = None;
-
-    for admin_network in admin_networks {
-        for prefix in admin_network.prefixes {
-            if let Some(gateway) = prefix.gateway {
-                gateways.push(gateway);
-            }
-        }
-    }
-
-    if gateways.is_empty() {
+    let mut admin_networks = crate::network_segment::admin(txn).await?;
+    // IPv6 FNN admin prefixes omit a gateway because the DPU provides the SVI and router
+    // advertisements. That does not remove the gateway requirement from an IPv4 sibling.
+    admin_networks.retain(|network| {
+        !network.prefixes.is_empty()
+            && network
+                .prefixes
+                .iter()
+                .all(|prefix| prefix.prefix.is_ipv6() || prefix.gateway.is_some())
+            && (admin_fnn_enabled
+                || network
+                    .prefixes
+                    .iter()
+                    .any(|prefix| prefix.prefix.is_ipv4()))
+    });
+    if admin_networks.is_empty() {
         return Err(DatabaseError::AdminNetworkNotConfigured);
-    };
+    }
 
     // Host mac is stored at DPU topology data.
     let host_mac = hardware_info
@@ -2794,24 +3051,39 @@ pub async fn create_host_machine_dpu_interface_proactively(
             id: dpu_id.to_string(),
         })??;
 
-    for gateway in gateways.iter() {
-        existing_machine =
-            crate::machine::find_existing_machine(txn, host_mac, gateway.to_owned()).await?;
-        if existing_machine.is_some() {
-            break;
+    let mut interfaces = find_by_mac_address(&mut *txn, host_mac).await?;
+    let machine_interface = match interfaces.len() {
+        0 => {
+            // Every eligible candidate must allow dynamic allocation. Selecting an available
+            // Dynamic pool must not bypass another candidate's reservation requirement.
+            for segment in &admin_networks {
+                validate_dynamic_allocation(segment, host_mac)?;
+            }
+            create(
+                txn,
+                &admin_networks,
+                &host_mac,
+                true,
+                AddressSelectionStrategy::Automatic,
+                retained_window,
+            )
+            .await?
         }
-    }
-
-    let machine_interface = find_or_create_machine_interface(
-        txn,
-        existing_machine,
-        host_mac,
-        &gateways,
-        None,
-        None,
-        retained_window,
-    )
-    .await?;
+        1 => {
+            let mut interface = interfaces.remove(0);
+            reconcile_interface_segment_candidates(txn, &mut interface, &admin_networks).await?;
+            interface
+        }
+        count => {
+            tracing::warn!(
+                mac_address = %host_mac,
+                matching_interface_count = count,
+                expected_interface_count = 1,
+                "Unexpected number of host admin interfaces for DPU topology MAC",
+            );
+            return Err(DatabaseError::NetworkSegmentDuplicateMacAddress(host_mac));
+        }
+    };
     associate_interface_with_dpu_machine(&machine_interface.id, dpu_id, txn).await?;
 
     Ok(machine_interface)
@@ -2837,12 +3109,283 @@ pub async fn create_host_machine_dpu_interface_proactively(
 /// state must be synchronized, or reconciliation should allocate a new primary address before
 /// deleting the old primary's DHCP address.
 ///
+/// Lock order: the unlocked pass only reads. When it finds a repair to make,
+/// the locked pass takes every admin segment advisory lock (in the
+/// allocators' mode) and then the host's interface and address row locks, so
+/// a transaction that may reach the locked pass must not already hold
+/// interface, address, or machine row locks. Call this first in a short
+/// transaction that commits right after it (`reconcile_admin_addresses_after_commit`),
+/// or after `lock_all_admin_segments`.
+///
 /// Returns `true` only when the externally visible active admin config changed. Dormant-interface
 /// cleanup is persisted but intentionally returns `false` by itself.
 pub async fn reconcile_admin_addresses_for_host(
     txn: &mut PgConnection,
     host_machine_id: &MachineId,
 ) -> DatabaseResult<bool> {
+    Ok(
+        match reconcile_admin_addresses(txn, host_machine_id).await? {
+            AdminReconcile::NoAdminInterfaces => false,
+            AdminReconcile::Done {
+                active_config_changed,
+            } => active_config_changed,
+        },
+    )
+}
+
+/// What a reconcile pass found for the host.
+enum AdminReconcile {
+    /// The host owns no admin interface. For a host whose DPU link the caller
+    /// just committed, its machine id was renamed or the host deleted since.
+    NoAdminInterfaces,
+    /// The host was reconciled; whether the active admin config changed.
+    Done { active_config_changed: bool },
+}
+
+async fn reconcile_admin_addresses(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<AdminReconcile> {
+    // Most calls find nothing to repair; deciding that from an unlocked
+    // snapshot keeps them off the admin segment locks. The locked pass
+    // re-reads and recomputes from the locked rows, so a stale answer here
+    // costs the lock or defers the repair to the next call.
+    let interfaces = find_host_admin_interfaces(txn, host_machine_id).await?;
+    if interfaces.is_empty() {
+        return Ok(AdminReconcile::NoAdminInterfaces);
+    }
+    if !has_dpu_backed_host_link(&interfaces) {
+        return Ok(AdminReconcile::Done {
+            active_config_changed: false,
+        });
+    }
+    let segments = load_admin_segments(txn).await?;
+    if !admin_addresses_need_repair(
+        txn,
+        host_machine_id,
+        &segments_by_id(&segments),
+        &interfaces,
+    )
+    .await?
+    {
+        return Ok(AdminReconcile::Done {
+            active_config_changed: false,
+        });
+    }
+
+    repair_admin_addresses_for_host(txn, host_machine_id).await
+}
+
+/// Reconciles a host's admin addresses in a transaction of its own on `pool`
+/// and bumps the host's visible network config when the active config
+/// changed. For callers that have already committed the rows the reconcile
+/// reads, so the locked pass holds no row lock when it takes the segment
+/// locks. A transient failure (`is_transient_reconcile_failure`) is retried
+/// after 50 ms and again after 100 ms, three attempts in all. If the last attempt fails
+/// transiently too, the host's BMC endpoint is flagged for exploration, so
+/// the next Site Explorer iteration revisits the host and retries the
+/// repair; a permanent failure leaves the endpoint alone, since repeating
+/// the reconcile cannot fix it. The error is returned for the caller to
+/// count.
+///
+/// Returns whether the active admin config changed.
+pub async fn reconcile_admin_addresses_after_commit(
+    pool: &sqlx::PgPool,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<bool> {
+    const RECONCILE_ATTEMPTS: u32 = 3;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let mut result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+    for retry in 1..RECONCILE_ATTEMPTS {
+        if !result.as_ref().is_err_and(is_transient_reconcile_failure) {
+            break;
+        }
+        tokio::time::sleep(RETRY_DELAY * retry).await;
+        result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+    }
+    if let Err(reconcile_error) = &result
+        && is_transient_reconcile_failure(reconcile_error)
+        && let Err(error) = request_host_exploration(pool, host_machine_id).await
+    {
+        tracing::warn!(
+            %host_machine_id,
+            error = %error,
+            "could not request exploration of the host after its admin address reconcile failed"
+        );
+    }
+    result
+}
+
+/// Whether a failed reconcile can succeed on a retry without the rows
+/// changing first: an allocation that lost a lock race, a network config
+/// bump that lost every swap, or a transaction Postgres aborted for a
+/// deadlock or serialization failure. Pool and connection errors stay
+/// permanent: flagging the host for exploration needs a connection too.
+fn is_transient_reconcile_failure(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::TryAgain | DatabaseError::NetworkConfigVersionChanged { .. }
+    ) || error.is_retryable_transaction_error()
+}
+
+/// Flags the host's BMC endpoint so the next Site Explorer iteration revisits
+/// the host and retries the reconcile.
+async fn request_host_exploration(
+    pool: &sqlx::PgPool,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<()> {
+    let mut txn = Transaction::begin(pool).await?;
+    crate::explored_endpoints::request_exploration_for_machine(host_machine_id, txn.as_pgconn())
+        .await?;
+    txn.commit().await
+}
+
+async fn reconcile_admin_addresses_in_own_transaction(
+    pool: &sqlx::PgPool,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<bool> {
+    let mut txn = Transaction::begin(pool).await?;
+    match reconcile_admin_addresses_and_network_config(txn.as_pgconn(), host_machine_id).await {
+        Ok(active_config_changed) => {
+            txn.commit().await?;
+            Ok(active_config_changed)
+        }
+        Err(error) => {
+            txn.rollback_or_log("admin address reconcile after commit")
+                .await;
+            Err(error)
+        }
+    }
+}
+
+/// Runs the reconcile and, when the active admin config changed, bumps the
+/// host's network config version so DPU agents fetch the new config.
+async fn reconcile_admin_addresses_and_network_config(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<bool> {
+    let active_config_changed = match reconcile_admin_addresses(txn, host_machine_id).await? {
+        AdminReconcile::NoAdminInterfaces => {
+            tracing::warn!(
+                %host_machine_id,
+                "host has no admin interfaces to reconcile"
+            );
+            return Ok(false);
+        }
+        AdminReconcile::Done {
+            active_config_changed,
+        } => active_config_changed,
+    };
+    if active_config_changed {
+        bump_network_config_version(txn, host_machine_id).await?;
+    }
+    Ok(active_config_changed)
+}
+
+/// Attempts of the read-then-swap that republishes a host's network config.
+const NETWORK_CONFIG_BUMP_ATTEMPTS: usize = 3;
+
+/// Republishes the host's current network config under a new version. The
+/// version is read without a lock, so a concurrent writer can advance it
+/// between the read and the swap; the repaired rows stay locked in this
+/// transaction, so the read and swap are simply repeated instead of rolling
+/// the repair back. Losing every attempt is transient
+/// (`NetworkConfigVersionChanged`): the caller retries the reconcile or flags
+/// the host for exploration.
+async fn bump_network_config_version(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<()> {
+    for _ in 0..NETWORK_CONFIG_BUMP_ATTEMPTS {
+        let (network_config, network_config_version) =
+            crate::machine::get_network_config(&mut *txn, host_machine_id)
+                .await?
+                .take();
+        if let crate::ConditionalWrite::Applied(()) = crate::machine::try_update_network_config(
+            &mut *txn,
+            host_machine_id,
+            network_config_version,
+            &network_config,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+    }
+    Err(DatabaseError::NetworkConfigVersionChanged {
+        machine_id: *host_machine_id,
+        attempts: NETWORK_CONFIG_BUMP_ATTEMPTS,
+    })
+}
+
+/// Whether the locked pass would write or fail, judged from an unlocked
+/// snapshot. Every condition is the predicate the locked pass decides its
+/// writes and errors with, applied to this snapshot.
+async fn admin_addresses_need_repair(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+    segments_by_id: &HashMap<NetworkSegmentId, &NetworkSegment>,
+    interfaces: &[AdminInterfaceForReconcile],
+) -> DatabaseResult<bool> {
+    let primary = match primary_admin_interface(txn, host_machine_id, segments_by_id, interfaces)
+        .await?
+    {
+        PrimaryAdminInterface::DpuBacked { index, segment } => Some((&interfaces[index], segment)),
+        PrimaryAdminInterface::NotDpuBacked => None,
+        PrimaryAdminInterface::Broken(_) => return Ok(true),
+    };
+
+    if let Some((primary, segment)) = primary
+        && (families_missing_on_primary(primary, segment)
+            .next()
+            .is_some()
+            || primary.addresses.is_empty())
+    {
+        return Ok(true);
+    }
+
+    if dormant_links(interfaces).any(has_dhcp_address) {
+        return Ok(true);
+    }
+
+    // No address change is pending, so the names the locked pass would derive
+    // follow from this snapshot. The preview derives them without the writes
+    // a strategy makes when it assigns a name.
+    for interface in dormant_links(interfaces).filter(|interface| interface.addresses.is_empty()) {
+        let hostname = host_naming::preview_hostname_for(
+            txn,
+            &dormant_naming_context(interface, host_machine_id),
+        )
+        .await?;
+        if dormant_naming_is_stale(interface, &hostname) {
+            return Ok(true);
+        }
+    }
+
+    if let Some((primary, segment)) = primary {
+        let active_addresses = addresses_of(primary);
+        let active_hostname = host_naming::preview_hostname_for(
+            txn,
+            &active_naming_context(primary, &active_addresses, host_machine_id),
+        )
+        .await?;
+        if primary_naming_is_stale(primary, segment, &active_hostname) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// The locked pass of `reconcile_admin_addresses_for_host`: takes the admin
+/// segment advisory locks and the host's row locks, re-reads the host's admin
+/// interfaces, re-checks the unlocked predicate on that read, and repairs what
+/// is left.
+async fn repair_admin_addresses_for_host(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<AdminReconcile> {
     let mut txn = Transaction::begin_inner(txn).await?;
 
     // Lock all admin segments up front instead of doing a precise pre-read of
@@ -2852,62 +3395,57 @@ pub async fn reconcile_admin_addresses_for_host(
     // ordering obvious and deadlock-safe.
     //
     // This matches allocator lock ordering: segment advisory lock first, then
-    // machine interface/address row locks.
-    let segments = load_and_lock_all_admin_segments(&mut txn).await?;
-    let segments_by_id = segments
-        .iter()
-        .map(|segment| (segment.id, segment))
-        .collect::<HashMap<_, _>>();
+    // machine interface/address row locks. The mode is the allocators' too:
+    // the writes below are protected by the row locks and by the allocator's
+    // per-IP locks, so the pass needs ordering against other allocators, not
+    // exclusion from them.
+    let segments = load_and_lock_all_admin_segments(txn.as_pgconn()).await?;
+    let segments_by_id = segments_by_id(&segments);
 
-    // Start from all host admin interfaces so a non-DPU primary admin NIC can remain the active
-    // config source while DPU-backed links are treated as dormant.
-    let mut interfaces =
-        find_host_admin_interfaces_for_update(txn.as_pgconn(), host_machine_id).await?;
-    if !interfaces
-        .iter()
-        .any(|interface| interface.is_dpu_backed_host_link)
-    {
-        txn.commit().await?;
-        return Ok(false);
-    }
-
-    // Lock existing address rows
-    let interface_ids = interfaces
-        .iter()
+    // Lock the interface rows, then their address rows. After a wait on a row
+    // another repair held, the locking read returns the interface tuples
+    // refreshed but the joined address rows from its pre-wait snapshot, so
+    // the rows are read again below once every lock is held.
+    let interface_ids = find_host_admin_interfaces_for_update(txn.as_pgconn(), host_machine_id)
+        .await?
+        .into_iter()
         .map(|interface| interface.id)
         .collect::<Vec<_>>();
     lock_admin_interface_addresses(txn.as_pgconn(), &interface_ids).await?;
 
-    // The active primary admin interface to repair, paired with its segment --
-    // present only when the host boots from a DPU admin link. A host that boots
-    // from a non-admin primary (a HostInband integrated NIC on a managed-DPU host)
-    // has no primary in the admin set, which is valid, not broken: every DPU
-    // admin link is then dormant and only gets cleaned up below. A host with no
-    // primary interface at all is the genuine error.
-    let primary_to_repair = match interfaces
-        .iter()
-        .position(|interface| interface.primary_interface)
+    // Start from all host admin interfaces so a non-DPU primary admin NIC can remain the active
+    // config source while DPU-backed links are treated as dormant.
+    let mut interfaces = find_host_admin_interfaces(txn.as_pgconn(), host_machine_id).await?;
+    if interfaces.is_empty() {
+        txn.commit().await?;
+        return Ok(AdminReconcile::NoAdminInterfaces);
+    }
+    if !has_dpu_backed_host_link(&interfaces)
+        || !admin_addresses_need_repair(
+            txn.as_pgconn(),
+            host_machine_id,
+            &segments_by_id,
+            &interfaces,
+        )
+        .await?
     {
-        Some(index) if interfaces[index].is_dpu_backed_host_link => {
-            let segment = *segments_by_id
-                .get(&interfaces[index].segment_id)
-                .ok_or_else(|| {
-                    DatabaseError::internal(format!(
-                        "Primary admin segment {} was not loaded for host {host_machine_id}",
-                        interfaces[index].segment_id
-                    ))
-                })?;
-            Some((index, segment))
-        }
-        Some(_) => None,
-        None => {
-            if !machine_has_primary_interface(host_machine_id, txn.as_pgconn()).await? {
-                return Err(DatabaseError::internal(format!(
-                    "Host {host_machine_id} has DPU-backed admin interfaces but no primary admin interface"
-                )));
-            }
-            None
-        }
+        txn.commit().await?;
+        return Ok(AdminReconcile::Done {
+            active_config_changed: false,
+        });
+    }
+
+    let primary_to_repair = match primary_admin_interface(
+        txn.as_pgconn(),
+        host_machine_id,
+        &segments_by_id,
+        &interfaces,
+    )
+    .await?
+    {
+        PrimaryAdminInterface::DpuBacked { index, segment } => Some((index, segment)),
+        PrimaryAdminInterface::NotDpuBacked => None,
+        PrimaryAdminInterface::Broken(error) => return Err(error),
     };
 
     let mut active_config_changed = false;
@@ -2916,23 +3454,10 @@ pub async fn reconcile_admin_addresses_for_host(
         // Repair the active interface first. If a dormant DPU-backed interface already owns a
         // same-segment DHCP address, move it so the host keeps its current admin IP across
         // primary-DPU changes. If there is no reusable address, allocate only the missing family.
-        for family in [IpAddressFamily::Ipv4, IpAddressFamily::Ipv6]
-            .into_iter()
-            .filter(|family| {
-                primary_segment
-                    .prefixes
-                    .iter()
-                    .any(|prefix| prefix.prefix.is_address_family(*family))
-            })
-        {
-            if interfaces[primary_index]
-                .addresses
-                .iter()
-                .any(|address| address.address.is_address_family(family))
-            {
-                continue;
-            }
-
+        let missing_families =
+            families_missing_on_primary(&interfaces[primary_index], primary_segment)
+                .collect::<Vec<_>>();
+        for family in missing_families {
             if let Some((donor_index, donor_address)) =
                 find_reusable_dhcp_address(&interfaces, primary_index, family)
             {
@@ -2963,11 +3488,18 @@ pub async fn reconcile_admin_addresses_for_host(
                     });
                 active_config_changed = true;
             } else {
+                // Existing addresses and donor transfers remain valid on Reserved segments;
+                // only a new pool allocation requires Dynamic allocation policy.
+                validate_dynamic_allocation(
+                    primary_segment,
+                    interfaces[primary_index].mac_address,
+                )?;
                 let allocated = allocate_address_for_family(
                     txn.as_pgconn(),
                     interfaces[primary_index].id,
                     primary_segment,
                     family,
+                    AllocationType::Dhcp,
                 )
                 .await?;
                 interfaces[primary_index]
@@ -2996,7 +3528,7 @@ pub async fn reconcile_admin_addresses_for_host(
     // reported as an active config change by itself.
     for interface in interfaces
         .iter_mut()
-        .filter(|interface| interface.is_dpu_backed_host_link && !interface.primary_interface)
+        .filter(|interface| is_dormant_link(interface))
     {
         let deleted = delete_dhcp_addresses_from_interface(txn.as_pgconn(), interface.id).await?;
         if !deleted.is_empty() {
@@ -3012,24 +3544,12 @@ pub async fn reconcile_admin_addresses_for_host(
             // serial is known. Either way we clear its domain so it drops out
             // of DNS, since with no address there's nothing for a name to
             // point at.
-            let ctx = NamingContext {
-                mac_address: interface.mac_address,
-                addresses: &[],
-                current_hostname: Some(&interface.hostname),
-                machine_id: Some(*host_machine_id),
-                // Should be always false here -- the above loop filters to
-                // non-primary links, but this should still read from the row
-                // so the context stays accurate (e.g. if the filter changes).
-                // In other words, a non-primary never takes the machine's
-                // (shared) bare serial.
-                is_primary: interface.primary_interface,
-                // DPU-backed host links are data interfaces by definition.
-                interface_type: InterfaceType::Data,
-                interface_id: Some(interface.id),
-                domain_id: interface.domain_id,
-            };
-            let hostname = host_naming::hostname_for(txn.as_pgconn(), &ctx).await?;
-            if interface.domain_id.is_some() || interface.hostname != hostname {
+            let hostname = host_naming::hostname_for(
+                txn.as_pgconn(),
+                &dormant_naming_context(interface, host_machine_id),
+            )
+            .await?;
+            if dormant_naming_is_stale(interface, &hostname) {
                 update_hostname_and_domain(txn.as_pgconn(), interface.id, &hostname, None).await?;
                 interface.hostname = hostname;
                 interface.domain_id = None;
@@ -3047,28 +3567,13 @@ pub async fn reconcile_admin_addresses_for_host(
                 primary.id
             )));
         }
-        let active_addresses: Vec<IpAddr> = primary
-            .addresses
-            .iter()
-            .map(|address| address.address)
-            .collect();
-        let ctx = NamingContext {
-            mac_address: primary.mac_address,
-            addresses: &active_addresses,
-            current_hostname: Some(&primary.hostname),
-            // The primary admin interface: where serial naming takes effect, once the
-            // machine's discovered serial is available.
-            machine_id: Some(*host_machine_id),
-            is_primary: true,
-            // The primary admin interface is a data interface by definition.
-            interface_type: InterfaceType::Data,
-            interface_id: Some(primary.id),
-            domain_id: primary.domain_id,
-        };
-        let active_hostname = host_naming::hostname_for(txn.as_pgconn(), &ctx).await?;
-        if primary.hostname != active_hostname
-            || primary.domain_id != primary_segment.config.subdomain_id
-        {
+        let active_addresses = addresses_of(primary);
+        let active_hostname = host_naming::hostname_for(
+            txn.as_pgconn(),
+            &active_naming_context(primary, &active_addresses, host_machine_id),
+        )
+        .await?;
+        if primary_naming_is_stale(primary, primary_segment, &active_hostname) {
             update_hostname_and_domain(
                 txn.as_pgconn(),
                 primary.id,
@@ -3081,15 +3586,173 @@ pub async fn reconcile_admin_addresses_for_host(
     }
 
     txn.commit().await?;
-    Ok(active_config_changed)
+    Ok(AdminReconcile::Done {
+        active_config_changed,
+    })
 }
 
-/// Finds host-owned admin interfaces and locks the interface rows.
-async fn find_host_admin_interfaces_for_update(
+/// Naming input for a dormant DPU-backed link that has lost every address.
+fn dormant_naming_context<'a>(
+    interface: &'a AdminInterfaceForReconcile,
+    host_machine_id: &MachineId,
+) -> NamingContext<'a> {
+    NamingContext {
+        mac_address: interface.mac_address,
+        addresses: &[],
+        current_hostname: Some(&interface.hostname),
+        machine_id: Some(*host_machine_id),
+        // Always false for a dormant link, but read from the row so the
+        // context stays accurate if a caller's filter changes. A non-primary
+        // never takes the machine's (shared) bare serial.
+        is_primary: interface.primary_interface,
+        // DPU-backed host links are data interfaces by definition.
+        interface_type: InterfaceType::Data,
+        interface_id: Some(interface.id),
+        domain_id: interface.domain_id,
+    }
+}
+
+/// Naming input for the active primary DPU-backed link and the addresses it
+/// will publish.
+fn active_naming_context<'a>(
+    primary: &'a AdminInterfaceForReconcile,
+    active_addresses: &'a [IpAddr],
+    host_machine_id: &MachineId,
+) -> NamingContext<'a> {
+    NamingContext {
+        mac_address: primary.mac_address,
+        addresses: active_addresses,
+        current_hostname: Some(&primary.hostname),
+        // The primary admin interface: where serial naming takes effect, once the
+        // machine's discovered serial is available.
+        machine_id: Some(*host_machine_id),
+        is_primary: true,
+        // The primary admin interface is a data interface by definition.
+        interface_type: InterfaceType::Data,
+        interface_id: Some(primary.id),
+        domain_id: primary.domain_id,
+    }
+}
+
+/// The primary admin interface of a host, as both reconcile passes classify it.
+enum PrimaryAdminInterface<'a> {
+    /// The primary is a DPU-backed link: the interface the locked pass repairs,
+    /// with the segment it allocates from.
+    DpuBacked {
+        index: usize,
+        segment: &'a NetworkSegment,
+    },
+    /// The host boots from a non-DPU NIC, in the admin set or outside it (a
+    /// HostInband integrated NIC on a managed-DPU host). Valid: every DPU
+    /// admin link is dormant and only gets cleaned up.
+    NotDpuBacked,
+    /// The locked pass fails on this host with the carried error: its primary
+    /// segment is not an admin segment, or it has no primary interface at all.
+    Broken(DatabaseError),
+}
+
+async fn primary_admin_interface<'a>(
     txn: &mut PgConnection,
     host_machine_id: &MachineId,
-) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
-    let query = r#"
+    segments_by_id: &HashMap<NetworkSegmentId, &'a NetworkSegment>,
+    interfaces: &[AdminInterfaceForReconcile],
+) -> DatabaseResult<PrimaryAdminInterface<'a>> {
+    let Some(index) = interfaces
+        .iter()
+        .position(|interface| interface.primary_interface)
+    else {
+        return Ok(
+            if machine_has_primary_interface(host_machine_id, txn).await? {
+                PrimaryAdminInterface::NotDpuBacked
+            } else {
+                PrimaryAdminInterface::Broken(DatabaseError::internal(format!(
+                    "Host {host_machine_id} has DPU-backed admin interfaces but no primary admin interface"
+                )))
+            },
+        );
+    };
+    if !interfaces[index].is_dpu_backed_host_link {
+        return Ok(PrimaryAdminInterface::NotDpuBacked);
+    }
+    Ok(match segments_by_id.get(&interfaces[index].segment_id) {
+        Some(segment) => PrimaryAdminInterface::DpuBacked { index, segment },
+        None => PrimaryAdminInterface::Broken(DatabaseError::internal(format!(
+            "Primary admin segment {} was not loaded for host {host_machine_id}",
+            interfaces[index].segment_id
+        ))),
+    })
+}
+
+fn has_dpu_backed_host_link(interfaces: &[AdminInterfaceForReconcile]) -> bool {
+    interfaces
+        .iter()
+        .any(|interface| interface.is_dpu_backed_host_link)
+}
+
+/// A DPU-backed host link that is not the host's primary interface.
+fn is_dormant_link(interface: &AdminInterfaceForReconcile) -> bool {
+    interface.is_dpu_backed_host_link && !interface.primary_interface
+}
+
+fn dormant_links(
+    interfaces: &[AdminInterfaceForReconcile],
+) -> impl Iterator<Item = &AdminInterfaceForReconcile> {
+    interfaces
+        .iter()
+        .filter(|interface| is_dormant_link(interface))
+}
+
+fn has_dhcp_address(interface: &AdminInterfaceForReconcile) -> bool {
+    interface
+        .addresses
+        .iter()
+        .any(|address| address.allocation_type == AllocationType::Dhcp)
+}
+
+fn addresses_of(interface: &AdminInterfaceForReconcile) -> Vec<IpAddr> {
+    interface
+        .addresses
+        .iter()
+        .map(|address| address.address)
+        .collect()
+}
+
+/// Address families `segment` serves that `primary` holds no address for.
+fn families_missing_on_primary<'a>(
+    primary: &'a AdminInterfaceForReconcile,
+    segment: &'a NetworkSegment,
+) -> impl Iterator<Item = IpAddressFamily> + 'a {
+    [IpAddressFamily::Ipv4, IpAddressFamily::Ipv6]
+        .into_iter()
+        .filter(move |family| {
+            segment
+                .prefixes
+                .iter()
+                .any(|prefix| prefix.prefix.is_address_family(*family))
+        })
+        .filter(move |family| {
+            !primary
+                .addresses
+                .iter()
+                .any(|address| address.address.is_address_family(*family))
+        })
+}
+
+/// An addressless dormant link must carry no domain and its derived name.
+fn dormant_naming_is_stale(interface: &AdminInterfaceForReconcile, hostname: &str) -> bool {
+    interface.domain_id.is_some() || interface.hostname != hostname
+}
+
+/// The primary must carry its derived name and its segment's subdomain.
+fn primary_naming_is_stale(
+    primary: &AdminInterfaceForReconcile,
+    segment: &NetworkSegment,
+    active_hostname: &str,
+) -> bool {
+    primary.hostname != active_hostname || primary.domain_id != segment.config.subdomain_id
+}
+
+const HOST_ADMIN_INTERFACES_QUERY: &str = r#"
 SELECT
     mi.id,
     mi.segment_id,
@@ -3106,9 +3769,34 @@ JOIN network_segments ns ON ns.id = mi.segment_id
 LEFT JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
 WHERE mi.machine_id = $1
   AND ns.network_segment_type = 'admin'
-ORDER BY mi.id, mia.address
-FOR UPDATE OF mi"#;
+ORDER BY mi.id, mia.address"#;
 
+/// Finds host-owned admin interfaces without locking them.
+async fn find_host_admin_interfaces(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
+    load_host_admin_interfaces(txn, host_machine_id, HOST_ADMIN_INTERFACES_QUERY).await
+}
+
+/// Finds host-owned admin interfaces and locks the interface rows.
+async fn find_host_admin_interfaces_for_update(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
+    load_host_admin_interfaces(
+        txn,
+        host_machine_id,
+        concatcp!(HOST_ADMIN_INTERFACES_QUERY, "\nFOR UPDATE OF mi"),
+    )
+    .await
+}
+
+async fn load_host_admin_interfaces(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+    query: &'static str,
+) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
     let rows: Vec<AdminInterfaceForReconcileRow> = sqlx::query_as(query)
         .bind(host_machine_id)
         .fetch_all(&mut *txn)
@@ -3184,17 +3872,10 @@ FOR UPDATE"#;
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// Loads and exclusively locks all admin segments before reconciliation takes row locks.
-///
-/// This intentionally locks more broadly than the specific host touches so reconciliation follows
-/// the same high-level lock order as address allocation: segment advisory lock first, then
-/// machine interface/address row locks.
-async fn load_and_lock_all_admin_segments(
-    txn: &mut Transaction<'_>,
-) -> DatabaseResult<Vec<NetworkSegment>> {
+/// Loads every admin segment, sorted by id, without locking.
+async fn load_admin_segments(txn: &mut PgConnection) -> DatabaseResult<Vec<NetworkSegment>> {
     let mut segment_ids =
-        db_network_segment::list_segment_ids(txn.as_pgconn(), Some(NetworkSegmentType::Admin))
-            .await?;
+        db_network_segment::list_segment_ids(&mut *txn, Some(NetworkSegmentType::Admin)).await?;
     segment_ids.sort();
     segment_ids.dedup();
 
@@ -3218,9 +3899,44 @@ async fn load_and_lock_all_admin_segments(
         )));
     }
 
-    lock_network_segments_exclusive(txn.as_pgconn(), &segment_ids).await?;
-
     Ok(segments)
+}
+
+/// Loads every admin segment and locks them all, ascending, in the mode the
+/// admin allocators use (see `segment_lock_mode`), before the caller takes
+/// row locks.
+///
+/// This intentionally locks more broadly than the specific host touches so reconciliation follows
+/// the same high-level lock order as address allocation: segment advisory lock first, then
+/// machine interface/address row locks.
+async fn load_and_lock_all_admin_segments(
+    txn: &mut PgConnection,
+) -> DatabaseResult<Vec<NetworkSegment>> {
+    let segments = load_admin_segments(txn).await?;
+    let segment_ids = segments
+        .iter()
+        .map(|segment| segment.id)
+        .collect::<Vec<_>>();
+    // One mode for the whole set: a single IPv6 admin prefix makes every
+    // admin segment exclusive, so an IPv6 allocation on that segment later in
+    // the transaction re-acquires a held key instead of upgrading one.
+    match segment_lock_mode(
+        segments
+            .iter()
+            .flat_map(|segment| &segment.prefixes)
+            .map(|prefix| &prefix.prefix),
+    ) {
+        SegmentLockMode::Shared => lock_network_segments_shared(txn, &segment_ids).await?,
+        SegmentLockMode::Exclusive => lock_network_segments_exclusive(txn, &segment_ids).await?,
+    }
+    Ok(segments)
+}
+
+fn segments_by_id(segments: &[NetworkSegment]) -> HashMap<NetworkSegmentId, &NetworkSegment> {
+    segments
+        .iter()
+        .map(|segment| (segment.id, segment))
+        .collect()
 }
 
 /// Finds an existing same-segment DHCP address that can be reused by the primary interface.
@@ -3279,12 +3995,21 @@ RETURNING mia.address"#;
         .bind(source_interface_id)
         .bind(address)
         .bind(AllocationType::Dhcp)
-        .fetch_optional(txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
     match moved {
-        Some(_) => Ok(()),
+        Some(_) => {
+            // The address now answers under the destination's name; both
+            // interfaces are on one segment but may publish into different zones.
+            crate::dns::domain::bump_serial_for_interfaces(
+                txn,
+                &[source_interface_id, destination_interface_id],
+            )
+            .await?;
+            record_allocation_removal(txn, source_interface_id, address.address_family()).await
+        }
         None => Err(DatabaseError::internal(format!(
             "Could not move DHCP address {address} from interface {source_interface_id} to {destination_interface_id}",
         ))),
@@ -3297,12 +4022,19 @@ async fn delete_dhcp_addresses_from_interface(
     interface_id: MachineInterfaceId,
 ) -> DatabaseResult<Vec<IpAddr>> {
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1 AND allocation_type = $2 RETURNING address";
-    sqlx::query_scalar(query)
+    let removed: Vec<IpAddr> = sqlx::query_scalar(query)
         .bind(interface_id)
         .bind(AllocationType::Dhcp)
-        .fetch_all(txn)
+        .fetch_all(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if !removed.is_empty() {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
+    for address in &removed {
+        record_allocation_removal(txn, interface_id, address.address_family()).await?;
+    }
+    Ok(removed)
 }
 
 /// Updates hostname and domain together for a machine interface.
@@ -3312,21 +4044,34 @@ async fn update_hostname_and_domain(
     hostname: &str,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<bool> {
+    // The old zone loses the name and the new zone gains it, so both serials
+    // advance when the row actually changed. The sub-select in RETURNING runs
+    // under the statement's snapshot, which cannot see the row this same
+    // statement modified, so it yields the domain_id from before the update.
     let query = r#"
 UPDATE machine_interfaces
 SET hostname = $1, domain_id = $2
 WHERE id = $3
   AND (hostname IS DISTINCT FROM $1 OR domain_id IS DISTINCT FROM $2)
-RETURNING id"#;
-    let updated: Option<MachineInterfaceId> = sqlx::query_scalar(query)
+RETURNING (SELECT domain_id FROM machine_interfaces WHERE id = $3)"#;
+    let previous_domain: Option<Option<DomainId>> = sqlx::query_scalar(query)
         .bind(hostname)
         .bind(domain_id)
         .bind(interface_id)
-        .fetch_optional(txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
+    let Some(previous_domain) = previous_domain else {
+        return Ok(false);
+    };
+    let changed_zones: Vec<DomainId> = previous_domain
+        .into_iter()
+        .chain(domain_id)
+        .unique()
+        .collect();
+    crate::dns::domain::bump_serial(txn, &changed_zones).await?;
 
-    Ok(updated.is_some())
+    Ok(true)
 }
 
 /// Syncs a machine interface's hostname to its current address state after an
@@ -3410,26 +4155,33 @@ pub async fn update_segment_id(
     segment_id: NetworkSegmentId,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<()> {
-    let query = "UPDATE machine_interfaces SET segment_id = $1, domain_id = $2 WHERE id = $3";
-    sqlx::query(query)
+    // The interface's names leave the old zone and appear in the new one, so
+    // both serials advance when the row actually changed. The sub-select in
+    // RETURNING sees the pre-update row, so it yields the old domain_id; see
+    // `update_hostname_and_domain`.
+    let query = "UPDATE machine_interfaces SET segment_id = $1, domain_id = $2
+                 WHERE id = $3
+                   AND (segment_id IS DISTINCT FROM $1 OR domain_id IS DISTINCT FROM $2)
+                 RETURNING (SELECT domain_id FROM machine_interfaces WHERE id = $3)";
+    let previous_domain: Option<Option<DomainId>> = sqlx::query_scalar(query)
         .bind(segment_id)
         .bind(domain_id)
         .bind(interface_id)
-        .execute(txn)
+        .fetch_optional(&mut *txn)
         .await
-        .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    let Some(previous_domain) = previous_domain else {
+        return Ok(());
+    };
+    let changed_zones: Vec<DomainId> = previous_domain
+        .into_iter()
+        .chain(domain_id)
+        .unique()
+        .collect();
+    crate::dns::domain::bump_serial(txn, &changed_zones).await
 }
 
-/// Reconcile an existing interface's segment with the DHCP relay address.
-///
-/// - If the segments match, nothing happens.
-/// - If the interface is on the static-assignments anchor segment with
-///   no addresses (static was removed), move it to the relay's segment.
-/// - If the interface is on static-assignments with addresses, leave it
-///   alone -- the operator's static assignment takes priority over DHCP.
-/// - If the interface is on a different managed segment, error -- this
-///   is a real network mismatch (wrong VLAN/port).
+/// Resolve authoritative DHCP candidates before reconciling existing interface ownership.
 async fn reconcile_interface_segment(
     txn: &mut PgConnection,
     existing_interface: &mut MachineInterfaceSnapshot,
@@ -3439,7 +4191,7 @@ async fn reconcile_interface_segment(
     // An explicit typed declaration guards an existing row. Legacy `nic_type`
     // only narrowed initial DHCP selection, so it must not invalidate a row
     // that earlier versions already placed on a different segment type.
-    let relay_segments = if expected_interface
+    let mut relay_segments = if expected_interface
         .and_then(ExpectedInterface::segment_type_guard)
         .is_some()
     {
@@ -3449,68 +4201,83 @@ async fn reconcile_interface_segment(
     };
 
     if relay_segments.is_empty() {
-        return Err(DatabaseError::internal(format!(
+        return Err(DatabaseError::FailedPrecondition(format!(
             "No network segment defined for DHCP relay addresses: {}",
             relays.iter().join(", ")
         )));
     };
     let exact_segment_ids = exact_dhcpv6_link_address_segment_ids(&relay_segments, relays);
-    let authoritative_segment_ids = if exact_segment_ids.is_empty() {
-        relay_segments
-            .iter()
-            .map(|segment| segment.id)
-            .collect::<Vec<_>>()
-    } else {
-        exact_segment_ids
-    };
-
     // Prefix fallback candidates remain useful for allocation fallback, but an
     // exact DHCPv6 link-address is authoritative for existing-MAC ownership.
+    if !exact_segment_ids.is_empty() {
+        relay_segments.retain(|segment| exact_segment_ids.contains(&segment.id));
+    }
+    reconcile_interface_segment_candidates(txn, existing_interface, &relay_segments).await
+}
+
+/// Preserve existing candidate ownership and addressed static assignments; reject other segments.
+///
+/// An addressless static interface may move to a single candidate. Lock and reread it first
+/// so a concurrent static assignment cannot be moved with a stale snapshot. Callers must keep
+/// the transaction open through the update and acquire any allocation segment locks first.
+async fn reconcile_interface_segment_candidates(
+    txn: &mut PgConnection,
+    existing_interface: &mut MachineInterfaceSnapshot,
+    segments: &[NetworkSegment],
+) -> DatabaseResult<()> {
+    let authoritative_segment_ids = segments
+        .iter()
+        .map(|segment| segment.id)
+        .collect::<Vec<_>>();
     if authoritative_segment_ids.contains(&existing_interface.segment_id) {
         return Ok(());
     }
 
-    let on_static_assignments = existing_interface.segment_id
-        == crate::network_segment::static_assignments(txn)
-            .await
-            .map(|s| s.id)
-            .unwrap_or_default();
+    let static_segment_id = match crate::network_segment::static_assignments(txn).await {
+        Ok(segment) => Some(segment.id),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return Err(error),
+    };
+
+    if Some(existing_interface.segment_id) == static_segment_id
+        && existing_interface.addresses.is_empty()
+    {
+        // Static assignment locks the interface before inserting an address.
+        // Wait for that writer, then refresh both the segment and addresses so
+        // an old addressless snapshot cannot move its new static allocation.
+        lock_for_address_assignment(txn, existing_interface.id).await?;
+        *existing_interface = find_one(&mut *txn, existing_interface.id).await?;
+        if authoritative_segment_ids.contains(&existing_interface.segment_id) {
+            return Ok(());
+        }
+    }
+    let on_static_assignments = Some(existing_interface.segment_id) == static_segment_id;
 
     // If the interface is on static-assignments with no addresses (as in
-    // the static address was removed), move it to the relay's segment
-    // so it can get a DHCP-allocated IP. The idea here being that someone
-    // removed the static allocation on purpose, and now we're waiting for
-    // the device to DHCP so we can see what segment it's coming in on.
+    // the static address was removed), move it to the discovered segment
+    // so it can get a DHCP-allocated IP.
     if on_static_assignments && existing_interface.addresses.is_empty() {
-        let [relay_segment_id] = authoritative_segment_ids.as_slice() else {
+        let [segment] = segments else {
             return Err(DatabaseError::internal(format!(
-                "Cannot move interface from static-assignments with multiple candidate relays: {} ",
-                relays.iter().join(", ")
+                "cannot move interface from static-assignments with multiple candidate segments: {}",
+                authoritative_segment_ids.iter().join(", ")
             )));
         };
-        let relay_segment = relay_segments
-            .iter()
-            .find(|segment| segment.id == *relay_segment_id)
-            .ok_or_else(|| {
-                DatabaseError::internal(format!(
-                    "Authoritative relay segment {relay_segment_id} was not present in relay candidates"
-                ))
-            })?;
 
         tracing::info!(
             mac_address = %existing_interface.mac_address,
             previous_network_segment_id = %existing_interface.segment_id,
-            next_network_segment_id = %relay_segment.id,
+            next_network_segment_id = %segment.id,
             "Moving interface from static-assignments into DHCP-managed segment"
         );
         update_segment_id(
             txn,
             existing_interface.id,
-            relay_segment.id,
-            relay_segment.config.subdomain_id,
+            segment.id,
+            segment.config.subdomain_id,
         )
         .await?;
-        existing_interface.segment_id = relay_segment.id;
+        existing_interface.segment_id = segment.id;
     } else if on_static_assignments {
         // ...and if the interface is on static-assignments and still has
         // an addresse, the static assignment takes priority, so we leave
@@ -3524,7 +4291,7 @@ async fn reconcile_interface_segment(
         // existing before the static-assigmnents and DHCP "reservation"
         // integration.
         return Err(DatabaseError::internal(format!(
-            "Network segment mismatch for existing MAC address: {} expected: {} actual from network switch: {}",
+            "Network segment mismatch for existing MAC address: {} stored segment: {} discovery candidates: {}",
             existing_interface.mac_address,
             existing_interface.segment_id,
             authoritative_segment_ids
@@ -3538,78 +4305,102 @@ async fn reconcile_interface_segment(
     Ok(())
 }
 
-/// Allocate new DHCP-based IP addresses for a specific address family
-/// on an existing interface that has lost its addresses (e.g. after a
-/// lease expiration, because maybe it was offline for a while, etc --
-/// basically anything that caused a lease expiration to be cleaned up,
-/// probably from ExpireDhcpLease being called). This uses the same
-/// allocation logic that we use for allocating initial addresses, and
-/// only allocates from prefixes matching the requested family (IPv4
-/// or IPv6).
+/// Allocate pool addresses of `allocation_type` for one missing family.
+///
+/// Other families and the caller's prior writes are unchanged. The interface must
+/// still belong to `segment` after locking, or this returns `FailedPrecondition`.
+/// Successful assignment updates its hostname and domain; no matching prefix
+/// returns an empty vector without those updates.
+///
+/// Ownership races retry within savepoints up to `HOST_ALLOCATION_MAX_ATTEMPTS`,
+/// then return `Internal`. Prefix exhaustion returns `ResourceExhausted`; candidate
+/// lock contention returns `TryAgain` at the end of the prefix or scan budget.
 pub async fn allocate_address_for_family(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,
     segment: &NetworkSegment,
     family: carbide_network::ip::IpAddressFamily,
+    allocation_type: AllocationType,
 ) -> DatabaseResult<Vec<IpAddr>> {
-    let mut fast_txn = Transaction::begin_inner(txn).await?;
+    for _ in 0..HOST_ALLOCATION_MAX_ATTEMPTS {
+        let mut allocation_txn = Transaction::begin_inner(txn).await?;
+        match try_allocate_address_for_family(
+            &mut allocation_txn,
+            interface_id,
+            segment,
+            family,
+            allocation_type,
+        )
+        .await
+        {
+            Ok(addresses) => {
+                allocation_txn.commit().await?;
+                // With no prefix for this family, leave the hostname and
+                // domain exactly as they were.
+                if !addresses.is_empty() {
+                    sync_hostname_after_address_assignment(
+                        txn,
+                        interface_id,
+                        segment.config.subdomain_id,
+                    )
+                    .await?;
+                }
+                return Ok(addresses);
+            }
+            Err(DatabaseError::AddressAlreadyInUse(_)) => {
+                // A writer can claim the address after selection. Release this
+                // attempt's locks and writes before selecting another address.
+                allocation_txn.rollback().await?;
+            }
+            Err(error) => {
+                allocation_txn.rollback().await?;
+                return Err(error);
+            }
+        }
+    }
+
+    Err(DatabaseError::internal(format!(
+        "unable to allocate {family:?} addresses for interface {interface_id} within {HOST_ALLOCATION_MAX_ATTEMPTS} attempts"
+    )))
+}
+
+async fn try_allocate_address_for_family(
+    allocation_txn: &mut PgTransaction<'_>,
+    interface_id: MachineInterfaceId,
+    segment: &NetworkSegment,
+    family: IpAddressFamily,
+    allocation_type: AllocationType,
+) -> DatabaseResult<Vec<IpAddr>> {
     if family == IpAddressFamily::Ipv6 {
-        lock_network_segment_exclusive(&mut fast_txn, segment).await?;
+        lock_network_segment_exclusive(allocation_txn, segment).await?;
     } else {
-        lock_network_segment_shared(&mut fast_txn, segment).await?;
+        lock_network_segments_shared(allocation_txn, std::slice::from_ref(&segment.id)).await?;
+    }
+    let current_segment_id =
+        lock_for_address_assignment(allocation_txn.as_mut(), interface_id).await?;
+    if current_segment_id != segment.id {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "interface {interface_id} belongs to segment {}, not allocation segment {}",
+            current_segment_id, segment.id,
+        )));
     }
 
     let mut allocated_addresses = Vec::new();
-    if family == IpAddressFamily::Ipv6 {
-        // Use a family-only segment view so lease recovery allocates exactly one
-        // address from each IPv6 prefix and does not disturb IPv4 ordering.
-        let ipv6_segment = NetworkSegment {
-            prefixes: segment
-                .prefixes
-                .iter()
-                .filter(|prefix| prefix.prefix.is_ipv6())
-                .cloned()
-                .collect(),
-            ..segment.clone()
-        };
-        allocated_addresses =
-            allocate_v6_addresses_via_ip_allocator(&mut fast_txn, &ipv6_segment).await?;
-        for address in &allocated_addresses {
-            crate::machine_interface_address::insert(
-                fast_txn.as_pgconn(),
-                interface_id,
-                *address,
-                AllocationType::Dhcp,
-            )
-            .await?;
-        }
-    } else {
-        for prefix in segment
-            .prefixes
-            .iter()
-            .filter(|p| p.prefix.is_address_family(family))
-        {
-            let address = allocate_next_ip_with_retry(&mut fast_txn, segment, prefix).await?;
-            allocated_addresses.push(address);
-            crate::machine_interface_address::insert(
-                fast_txn.as_pgconn(),
-                interface_id,
-                address,
-                AllocationType::Dhcp,
-            )
-            .await?;
-        }
+    for prefix in segment
+        .prefixes
+        .iter()
+        .filter(|prefix| prefix.prefix.is_address_family(family))
+    {
+        let address = allocate_next_ip_with_retry(allocation_txn, segment, prefix).await?;
+        crate::machine_interface_address::insert(
+            allocation_txn.as_mut(),
+            interface_id,
+            address,
+            allocation_type,
+        )
+        .await?;
+        allocated_addresses.push(address);
     }
-
-    fast_txn.commit().await?;
-
-    // Nothing allocated (no prefix for the requested family): leave the
-    // hostname and domain exactly as they were.
-    if allocated_addresses.is_empty() {
-        return Ok(allocated_addresses);
-    }
-
-    sync_hostname_after_address_assignment(txn, interface_id, segment.config.subdomain_id).await?;
 
     Ok(allocated_addresses)
 }
@@ -3634,12 +4425,26 @@ pub async fn update_last_dhcp(
     Ok(())
 }
 
+/// Delete an interface.
+///
+/// When `release_reserved_addresses` is `false` (the default teardown for
+/// `DeleteInterface` and non-wipe force deletion), any address the interface
+/// marked for preservation is parked as a reservation owned by its MAC so the
+/// same MAC can reclaim it on re-ingestion. Set it to `true` for an intentional
+/// permanent wipe, which deletes those addresses too.
 pub async fn delete(
     interface_id: &MachineInterfaceId,
     txn: &mut PgConnection,
+    release_reserved_addresses: bool,
 ) -> Result<(), DatabaseError> {
     let query =
         "DELETE FROM machine_interfaces WHERE id=$1 RETURNING mac_address, boot_interface_id";
+    // Park marked addresses before the row delete below removes the rest. A
+    // parked row clears its interface_id, so the delete's interface-scoped
+    // predicate no longer matches it. A wipe skips this so every address goes.
+    if !release_reserved_addresses {
+        crate::machine_interface_address::park_reserved(txn, *interface_id).await?;
+    }
     crate::machine_interface_address::delete(txn, interface_id).await?;
     crate::dhcp_entry::delete(txn, interface_id).await?;
     // `machine_boot_override` references this row with no ON DELETE CASCADE, so a
@@ -3676,18 +4481,6 @@ pub async fn record_deletion(txn: &mut PgConnection) -> Result<(), DatabaseError
         .map_err(|error| DatabaseError::query(QUERY, error))
 }
 
-pub async fn delete_by_ip(txn: &mut PgConnection, ip: IpAddr) -> Result<Option<()>, DatabaseError> {
-    let interface = find_by_ip(&mut *txn, ip).await?;
-
-    let Some(interface) = interface else {
-        return Ok(None);
-    };
-
-    delete(&interface.id, txn).await?;
-
-    Ok(Some(()))
-}
-
 /// Find all machine interface IDs associated with a switch.
 pub async fn find_ids_by_switch_id(
     txn: &mut PgConnection,
@@ -3719,14 +4512,6 @@ impl<DB> UsedIpResolver<DB> for UsedAdminNetworkIpResolver
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    // DEPRECATED
-    // With the introduction of `used_prefixes()` this is no
-    // longer an accurate approach for finding all allocated
-    // IPs in a segment, since used_ips() completely ignores
-    // the fact wider prefixes may have been allocated, even
-    // though in the case of machine interfaces, its probably
-    // always going to just be a /32.
-    //
     // used_ips returns globally owned machine-interface addresses contained by
     // this segment's prefixes. Filtering by the owning interface's segment
     // would miss a static assignment that predates its containing managed
@@ -3763,9 +4548,7 @@ WHERE np.segment_id = $1::uuid";
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
-        let mut ips: Vec<IpAddr> = containers.iter().map(|c| c.address).collect();
-        ips.extend(self.busy_ips.iter());
-        Ok(ips)
+        Ok(containers.iter().map(|c| c.address).collect())
     }
 
     // used_prefixes returns the used (or allocated) prefixes

@@ -27,6 +27,8 @@ use carbide_secrets::credentials::{CredentialKey, CredentialManager, Credentials
 use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{SwitchEndpoint, SwitchPasswordRotationState};
+use db::ConditionalWrite::{Applied, NotApplied};
+use db::credential_rotation::{RotationAttemptNotEligible, RotationStartNotEligible};
 use model::switch::Switch;
 use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
@@ -172,7 +174,7 @@ async fn complete_staged_rotation(
 
     let mut txn = ctx.services.db_pool.begin().await?;
 
-    let succeeded = db::credential_rotation::record_device_rotation_succeeded(
+    let completion = db::credential_rotation::record_device_rotation_succeeded(
         &mut txn,
         bmc_mac_address,
         db::credential_rotation::CredentialRotationType::Nvos,
@@ -184,12 +186,11 @@ async fn complete_staged_rotation(
 
     txn.commit().await?;
 
-    Ok(if succeeded {
-        NvosPasswordRotationOutcome::UpToDate
-    } else {
-        NvosPasswordRotationOutcome::Waiting(
+    Ok(match completion {
+        Applied(()) => NvosPasswordRotationOutcome::UpToDate,
+        NotApplied(RotationAttemptNotEligible) => NvosPasswordRotationOutcome::Waiting(
             "NVOS operation changed while recording backend completion".to_string(),
-        )
+        ),
     })
 }
 
@@ -235,7 +236,7 @@ async fn ensure_staged_rotation(
         Ok(job_id) => {
             let mut txn = ctx.services.db_pool.begin().await?;
 
-            let recorded = db::credential_rotation::record_device_rotation_submitted(
+            let submission = db::credential_rotation::record_device_rotation_submitted(
                 &mut txn,
                 bmc_mac_address,
                 db::credential_rotation::CredentialRotationType::Nvos,
@@ -247,15 +248,16 @@ async fn ensure_staged_rotation(
 
             txn.commit().await?;
 
-            if !recorded {
-                return Err(StateHandlerError::GenericError(eyre::eyre!(
-                    "switch {switch_id}: NVOS job returned after its staged attempt changed"
-                )));
+            match submission {
+                Applied(()) => Ok(NvosPasswordRotationOutcome::Waiting(format!(
+                    "NVOS job {job_id} was submitted"
+                ))),
+                NotApplied(RotationAttemptNotEligible) => {
+                    Err(StateHandlerError::GenericError(eyre::eyre!(
+                        "switch {switch_id}: NVOS job returned after its staged attempt changed"
+                    )))
+                }
             }
-
-            Ok(NvosPasswordRotationOutcome::Waiting(format!(
-                "NVOS job {job_id} was submitted"
-            )))
         }
         Err(ComponentManagerError::OperationOutcomeUnknown(error)) => {
             Ok(NvosPasswordRotationOutcome::Waiting(format!(
@@ -265,7 +267,7 @@ async fn ensure_staged_rotation(
         Err(ComponentManagerError::RejectedBeforeDispatch(error)) => {
             let mut txn = ctx.services.db_pool.begin().await?;
 
-            let failed = db::credential_rotation::record_device_rotation_failed(
+            let failure = db::credential_rotation::record_device_rotation_failed(
                 &mut txn,
                 bmc_mac_address,
                 db::credential_rotation::CredentialRotationType::Nvos,
@@ -277,15 +279,14 @@ async fn ensure_staged_rotation(
 
             txn.commit().await?;
 
-            if failed {
-                Err(StateHandlerError::GenericError(eyre::eyre!(
+            match failure {
+                Applied(()) => Err(StateHandlerError::GenericError(eyre::eyre!(
                     "switch {switch_id}: NVOS submission is not retryable without correction: \
                      {error}"
-                )))
-            } else {
-                Ok(NvosPasswordRotationOutcome::Waiting(
+                ))),
+                NotApplied(RotationAttemptNotEligible) => Ok(NvosPasswordRotationOutcome::Waiting(
                     "NVOS operation changed while recording failure".to_string(),
-                ))
+                )),
             }
         }
         Err(error) => Err(StateHandlerError::GenericError(eyre::eyre!(
@@ -318,13 +319,14 @@ async fn retry_staged_rotation(
 
     txn.commit().await?;
 
-    let Some(attempt) = attempt else {
-        return Ok(NvosPasswordRotationOutcome::Waiting(
+    match attempt {
+        Applied(attempt) => {
+            ensure_staged_rotation(switch_id, bmc_mac_address, target_version, attempt, ctx).await
+        }
+        NotApplied(RotationAttemptNotEligible) => Ok(NvosPasswordRotationOutcome::Waiting(
             "NVOS operation changed while retrying backend observation".to_string(),
-        ));
-    };
-
-    ensure_staged_rotation(switch_id, bmc_mac_address, target_version, attempt, ctx).await
+        )),
+    }
 }
 
 /// Polls work already staged before a prior dispatch.
@@ -432,13 +434,14 @@ async fn stage_rotation(
 
     txn.commit().await?;
 
-    let Some(attempt) = attempt else {
-        return Ok(NvosPasswordRotationOutcome::Waiting(
+    match attempt {
+        Applied(attempt) => {
+            ensure_staged_rotation(switch_id, bmc_mac_address, target_version, attempt, ctx).await
+        }
+        NotApplied(RotationStartNotEligible) => Ok(NvosPasswordRotationOutcome::Waiting(
             "NVOS rotation could not be claimed because target or device state changed".to_string(),
-        ));
-    };
-
-    ensure_staged_rotation(switch_id, bmc_mac_address, target_version, attempt, ctx).await
+        )),
+    }
 }
 
 /// Checks that the per-device credential uses the confirmed password, when known.

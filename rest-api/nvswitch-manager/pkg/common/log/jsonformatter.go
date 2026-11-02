@@ -57,7 +57,7 @@ func (f *JSONFormatter) Format(entry *log.Entry) ([]byte, error) {
 	if len(entry.Data) != 0 {
 		data, err := json.Marshal(entry.Data)
 		if err != nil {
-			return nil, fmt.Errorf("Failed to marshal fields to JSON, %w", err)
+			return nil, fmt.Errorf("failed to marshal fields to JSON, %w", err)
 		}
 
 		b.WriteString(" ")

@@ -116,7 +116,7 @@ func (apnnc *APIDpuNetworkConfig) FromProto(protoConfig *corev1.ManagedHostNetwo
 	}
 
 	apnnc.Asn = protoConfig.Asn
-	apnnc.DhcpServers = protoConfig.DhcpServers
+	apnnc.DhcpServers = append(make([]string, 0, len(protoConfig.DhcpServers)), protoConfig.DhcpServers...)
 	apnnc.VniDevice = protoConfig.VniDevice
 	apnnc.ManagedHostConfigVersion = protoConfig.ManagedHostConfigVersion
 	apnnc.UseAdminNetwork = protoConfig.UseAdminNetwork
@@ -131,17 +131,17 @@ func (apnnc *APIDpuNetworkConfig) FromProto(protoConfig *corev1.ManagedHostNetwo
 		nvt := protoConfig.GetNetworkVirtualizationType().String()
 		apnnc.NetworkVirtualizationType = &nvt
 	}
-	apnnc.RouteServers = protoConfig.RouteServers
+	apnnc.RouteServers = append(make([]string, 0, len(protoConfig.RouteServers)), protoConfig.RouteServers...)
 	apnnc.RemoteID = protoConfig.RemoteId
-	apnnc.DeprecatedDenyPrefixes = protoConfig.DeprecatedDenyPrefixes
-	apnnc.DenyPrefixes = protoConfig.DenyPrefixes
-	apnnc.SiteFabricPrefixes = protoConfig.SiteFabricPrefixes
+	apnnc.DeprecatedDenyPrefixes = append(make([]string, 0, len(protoConfig.DeprecatedDenyPrefixes)), protoConfig.DeprecatedDenyPrefixes...)
+	apnnc.DenyPrefixes = append(make([]string, 0, len(protoConfig.DenyPrefixes)), protoConfig.DenyPrefixes...)
+	apnnc.SiteFabricPrefixes = append(make([]string, 0, len(protoConfig.SiteFabricPrefixes)), protoConfig.SiteFabricPrefixes...)
 	apnnc.VpcIsolationBehavior = protoConfig.VpcIsolationBehavior.String()
 	apnnc.StatefulAclsEnabled = protoConfig.StatefulAclsEnabled
 	apnnc.EnableDhcp = protoConfig.EnableDhcp
 	apnnc.IsPrimaryDpu = protoConfig.IsPrimaryDpu
 	apnnc.DatacenterAsn = protoConfig.DatacenterAsn
-	apnnc.AnycastSitePrefixes = protoConfig.AnycastSitePrefixes
+	apnnc.AnycastSitePrefixes = append(make([]string, 0, len(protoConfig.AnycastSitePrefixes)), protoConfig.AnycastSitePrefixes...)
 	apnnc.TenantHostAsn = protoConfig.TenantHostAsn
 	apnnc.SiteGlobalVpcVni = protoConfig.SiteGlobalVpcVni
 
@@ -155,13 +155,11 @@ func (apnnc *APIDpuNetworkConfig) FromProto(protoConfig *corev1.ManagedHostNetwo
 		apnnc.AdminInterface.FromProto(protoConfig.AdminInterface)
 	}
 
-	if protoConfig.TenantInterfaces != nil {
-		apnnc.TenantInterfaces = make([]APIFlatInterfaceConfig, len(protoConfig.TenantInterfaces))
-		for i, protoInterface := range protoConfig.TenantInterfaces {
-			if protoInterface != nil {
-				apnnc.TenantInterfaces[i] = APIFlatInterfaceConfig{}
-				apnnc.TenantInterfaces[i].FromProto(protoInterface)
-			}
+	apnnc.TenantInterfaces = make([]APIFlatInterfaceConfig, len(protoConfig.TenantInterfaces))
+	for i, protoInterface := range protoConfig.TenantInterfaces {
+		if protoInterface != nil {
+			apnnc.TenantInterfaces[i] = APIFlatInterfaceConfig{}
+			apnnc.TenantInterfaces[i].FromProto(protoInterface)
 		}
 	}
 
@@ -447,7 +445,7 @@ type APIDpuMachine struct {
 	// Health is the health information for the DPU
 	Health *APIMachineHealth `json:"health"`
 	// Labels are the labels associated with the DPU
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// State is the lifecycle state of the DPU as reported by NICo Core
 	State string `json:"state"`
 	// DpuNetworkConfig contains the network configuration fields exposed by the REST API for the DPU.
@@ -457,6 +455,8 @@ type APIDpuMachine struct {
 	LastRebooted *time.Time `json:"lastRebooted"`
 	// PlacementInRack is the physical placement of the DPU Machine within its Rack
 	PlacementInRack *APIPlacementInRack `json:"placementInRack"`
+	// LldpNeighbors is the list of LLDP neighbors observed on the DPU's ports, as last reported by the DPU agent
+	LldpNeighbors []APIMachineLldpNeighbor `json:"lldpNeighbors"`
 }
 
 // APIDpuMachineProtoContext carries the host Machine ID, Site ID and
@@ -541,6 +541,7 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 		}
 	}
 
+	apd.Health = nil
 	if protoMachineStatus.GetHealth() != nil {
 		apd.Health = &APIMachineHealth{}
 		apd.Health.FromProto(protoMachineStatus.GetHealth())
@@ -548,7 +549,7 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 
 	var labels cdbm.Labels
 	labels.FromProto(protoMachine.GetMetadata().GetLabels())
-	apd.Labels = labels
+	apd.Labels = APILabels(labels)
 
 	apd.State = protoMachine.State
 
@@ -567,5 +568,16 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 			SlotNumber: placement.SlotNumber,
 			TrayIndex:  placement.TrayIndex,
 		}
+	}
+
+	// LLDP neighbors reported by the DPU agent
+	apd.LldpNeighbors = []APIMachineLldpNeighbor{}
+	for _, protoNeighbor := range protoMachine.GetStatus().GetLldpNeighbors() {
+		if protoNeighbor == nil {
+			continue
+		}
+		neighbor := APIMachineLldpNeighbor{}
+		neighbor.FromProto(protoNeighbor)
+		apd.LldpNeighbors = append(apd.LldpNeighbors, neighbor)
 	}
 }

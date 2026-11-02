@@ -53,9 +53,9 @@ The NICo deployment includes a number of core services:
   managed hosts at boot time. Currently, managed hosts are configured to always boot from PXE. If a local
   bootable device is found, the host will boot it. Hosts can also be configured to always boot from a
   particular image for stateless configurations.
-* **Hardware health**: Pulls
-  hardware health and configuration information emitted from a Prometheus `/metrics` endpoint on port 9009 and
-  reports that state information back to NICo.
+* **Hardware health**: Pulls hardware health and configuration information from BMCs, exposes service-level
+  Prometheus metrics on `/metrics` and per-sensor measurements on `/telemetry` on port 9009, and reports health
+  information back to NICo.
 * **SSH console**: Provides a virtual serial
   console logging and access over `ssh`, allowing console access to remote machines deployed on site.
   The `ssh-console` also logs the serial console output of each host into the logging system, where

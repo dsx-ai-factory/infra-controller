@@ -16,22 +16,23 @@
  */
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::net::IpAddr;
-use std::os::unix::process::ExitStatusExt;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use std::process::ExitStatus;
 
 use eyre::Context;
+use forge_dpu_agent_utils::FMDS_IPV6_GATEWAY;
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
-use tracing::error;
 
-use crate::dpu::Action;
-use crate::pretty_cmd;
+use crate::dpu::{Action, run_ip_command, use_networking_fixture};
 
 pub(crate) type DpuRoutePlan = HashMap<Action, Vec<IpRoute>>;
 
-/// IpRoute is a representation of a route in the system when it is deserializes from the output of `ip -j route show`
+const FMDS_HBN_IPV4: IpAddr = IpAddr::V4(Ipv4Addr::new(169, 254, 169, 253));
+const FMDS_HBN_IPV6: IpAddr = IpAddr::V6(FMDS_IPV6_GATEWAY);
+
+/// `IpRoute` describes an FMDS reply route after kernel destinations have been
+/// parsed, or a desired route to install through the metadata peer.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 pub struct IpRoute {
     pub dst: IpNetwork,
@@ -65,177 +66,171 @@ impl PartialOrd for IpRoute {
     }
 }
 
+impl IpRoute {
+    /// Compare the route fields we install, ignoring metadata reported by the kernel.
+    fn matches_route(&self, other: &Self, interface: &str) -> bool {
+        self.dst.network() == other.dst.network()
+            && self.dst.prefix() == other.dst.prefix()
+            && self.dev.as_deref().unwrap_or(interface) == other.dev.as_deref().unwrap_or(interface)
+            && self.gateway == other.gateway
+            && self.prefsrc == other.prefsrc
+    }
+
+    /// Build a family-specific route command without interpreting interface names as shell text.
+    fn command(&self, action: Action) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("ip");
+        command.args([
+            if self.dst.is_ipv6() { "-6" } else { "-4" },
+            "route",
+            match action {
+                Action::Add => "add",
+                Action::Remove => "del",
+            },
+        ]);
+        command.arg(format!("{}/{}", self.dst.network(), self.dst.prefix()));
+        if let Some(device) = &self.dev {
+            command.args(["dev", device]);
+        }
+        if let Some(gateway) = self.gateway {
+            command.arg("via").arg(gateway.to_string());
+        }
+        if let Some(source) = self.prefsrc {
+            command.arg("src").arg(source.to_string());
+        }
+        command
+    }
+}
+
+/// Keep the kernel's `default` destination as text until the route's family and ownership are known.
+#[derive(Deserialize)]
+struct ObservedRoute {
+    dst: String,
+    dev: Option<String>,
+    protocol: Option<String>,
+    gateway: Option<IpAddr>,
+    scope: Option<String>,
+    prefsrc: Option<IpAddr>,
+    #[serde(default)]
+    flags: Vec<String>,
+}
+
 impl Route {
+    /// Plan FMDS reply routes on `interface`, preserving routes outside the metadata path.
     pub async fn plan(interface: &str, desired: Vec<IpRoute>) -> eyre::Result<DpuRoutePlan> {
         let current = Self::current_routes(interface).await?;
+        Ok(Self::plan_from_routes(interface, &current, desired))
+    }
 
+    /// Plan additions and removals from observed routes without querying the
+    /// kernel, so tests can check reconciliation against explicit snapshots.
+    fn plan_from_routes(
+        interface: &str,
+        current: &[IpRoute],
+        desired: Vec<IpRoute>,
+    ) -> DpuRoutePlan {
         let mut plan = HashMap::new();
 
-        // Process desired routes
         for route in &desired {
-            if !current.contains(route) {
+            if !current
+                .iter()
+                .any(|current| current.matches_route(route, interface))
+            {
                 let entry = plan.entry(Action::Add).or_insert_with(Vec::new);
+                // Several tenant interfaces can share a prefix. Install it once.
+                if !entry
+                    .iter()
+                    .any(|added: &IpRoute| added.matches_route(route, interface))
+                {
+                    entry.push(route.clone());
+                }
+            }
+        }
+
+        for route in current {
+            if !desired
+                .iter()
+                .any(|desired| route.matches_route(desired, interface))
+            {
+                let entry = plan.entry(Action::Remove).or_insert_with(Vec::new);
                 entry.push(route.clone());
             }
         }
 
-        // Process routes to remove
-        for route in &current {
-            if !desired.contains(route) {
-                let entry = plan.entry(Action::Remove).or_insert_with(Vec::new);
-                entry.extend(current.clone());
-            }
-        }
-
-        // Combine into plan
-        let mut final_plan = HashMap::new();
-        for (action, routes) in &plan {
-            let entry = final_plan.entry(action).or_insert_with(Vec::new);
-            entry.extend(routes);
-        }
-
         tracing::trace!(route_plan = ?plan, "Route plan");
-        Ok(plan)
+        plan
     }
 
-    pub async fn apply(plan: DpuRoutePlan) -> eyre::Result<()> {
-        for (action, routes) in plan {
-            match action {
-                Action::Add => {
-                    if !routes.is_empty() {
-                        for r in routes {
-                            tracing::info!(route = ?r, "Adding route to Dpu");
-                            Self::ip_route_add(r.dst, r.dev.as_deref(), r.prefsrc, r.gateway)
-                                .await?;
-                        }
-                    }
-                }
-                Action::Remove => {
-                    if !routes.is_empty() {
-                        for r in routes {
-                            tracing::info!(route = ?r, "Removing route from Dpu");
-                            Self::ip_route_del(r.dst, r.dev.as_deref(), r.prefsrc, r.gateway)
-                                .await?;
-                        }
-                    }
+    /// Apply removals before additions so a changed source or gateway cannot collide with its old route.
+    /// Any failed command aborts the apply; the caller must reobserve routes before retrying.
+    pub async fn apply(mut plan: DpuRoutePlan) -> eyre::Result<()> {
+        for action in [Action::Remove, Action::Add] {
+            if let Some(routes) = plan.remove(&action) {
+                for route in routes {
+                    tracing::info!(?route, %action, "Updating FMDS reply route");
+                    run_ip_command(route.command(action)).await?;
                 }
             }
         }
         Ok(())
     }
 
-    async fn ip_route(interface: &str) -> eyre::Result<String> {
-        if cfg!(test) || std::env::var("NO_DPU_ARMOS_NETWORK").is_ok() {
-            let test_data_dir = PathBuf::from(crate::dpu::ARMOS_TEST_DATA_DIR);
-
-            std::fs::read_to_string(test_data_dir.join("iproute.json")).map_err(|e| {
-                error!(error = %e, "Could not read iproute.json");
-                eyre::eyre!("could not read iproute.json: {}", e)
-            })
-        } else {
-            let mut cmd = tokio::process::Command::new("bash");
-            cmd.args(vec!["-c", &format!("ip -j route show dev {interface}")]);
-            cmd.kill_on_drop(true);
-
-            let cmd_str = pretty_cmd(cmd.as_std());
-
-            let output = tokio::time::timeout(crate::dpu::COMMAND_TIMEOUT, cmd.output())
-                .await
-                .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
-
-            let fout = String::from_utf8_lossy(&output.stdout).to_string();
-            Ok(fout)
-        }
-    }
-
-    async fn ip_route_add(
-        net: IpNetwork,
-        device: Option<&str>,
-        source_ip: Option<IpAddr>,
-        gateway_ip: Option<IpAddr>,
-    ) -> eyre::Result<bool> {
-        let mut cmdargs = format!("ip route add {}/{}", net.network(), net.prefix());
-
-        if let Some(dev) = device {
-            cmdargs.push_str(&format!(" dev {dev}"));
-        }
-
-        if let Some(gateway_ip) = gateway_ip {
-            cmdargs.push_str(&format!(" via {gateway_ip}"));
-        }
-
-        if let Some(source_ip) = source_ip {
-            cmdargs.push_str(&format!(" src {source_ip}"));
-        }
-
-        let mut cmd = tokio::process::Command::new("bash");
-        cmd.args(vec!["-c", &cmdargs]);
-        cmd.kill_on_drop(true);
-
-        let cmd_str = pretty_cmd(cmd.as_std());
-        tracing::trace!(command = ?cmd_str, "Running command");
-
-        let output = tokio::time::timeout(crate::dpu::COMMAND_TIMEOUT, cmd.output())
-            .await
-            .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
-
-        let fout = String::from_utf8_lossy(&output.stdout).to_string();
-        if output.status.success() {
-            Ok(true)
-        } else {
-            tracing::error!(command_output = ?fout, "Failed to add route");
-            Ok(false)
-        }
-    }
-    async fn ip_route_del(
-        net: IpNetwork,
-        device: Option<&str>,
-        source_ip: Option<IpAddr>,
-        gateway_ip: Option<IpAddr>,
-    ) -> eyre::Result<bool> {
-        let mut cmdargs = format!("ip route del {}/{}", net.network(), net.prefix(),);
-
-        if let Some(dev) = device {
-            cmdargs.push_str(&format!(" dev {dev}"));
-        }
-
-        if let Some(gateway_ip) = gateway_ip {
-            cmdargs.push_str(&format!(" via {gateway_ip}"));
-        }
-
-        if let Some(source_ip) = source_ip {
-            cmdargs.push_str(&format!(" src {source_ip}"));
-        }
-
-        let mut cmd = tokio::process::Command::new("bash");
-        cmd.args(vec!["-c", &cmdargs]);
-        cmd.kill_on_drop(true);
-
-        let cmd_str = pretty_cmd(cmd.as_std());
-        tracing::trace!(command = ?cmd_str, "Running command");
-
-        let output = tokio::time::timeout(crate::dpu::COMMAND_TIMEOUT, cmd.output())
-            .await
-            .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
-
-        let fout = String::from_utf8_lossy(&output.stdout).to_string();
-        if output.status == ExitStatus::from_raw(0) {
-            Ok(true)
-        } else {
-            tracing::error!(command_output = ?fout, "Failed to remove route");
-            Ok(false)
-        }
-    }
-
+    /// Read FMDS routes through the metadata peers in both families, including after an agent restart.
+    /// Kernel, dynamic, direct, and routes through other gateways remain untouched.
     pub async fn current_routes(interface: &str) -> eyre::Result<Vec<IpRoute>> {
-        let data = Self::ip_route(interface).await?;
-        tracing::trace!(route_data = ?data, "route data from ip route show");
-        let mut data =
-            serde_json::from_str::<Vec<IpRoute>>(&data).map_err(|err| eyre::eyre!(err))?;
+        if use_networking_fixture("NO_DPU_ARMOS_NETWORK") {
+            let path = PathBuf::from(crate::dpu::ARMOS_TEST_DATA_DIR).join("iproute.json");
+            let data = std::fs::read_to_string(&path)
+                .wrap_err_with(|| format!("could not read route fixture {}", path.display()))?;
+            return Self::parse_fmds_routes(interface, &data);
+        }
+        let mut routes = Vec::new();
+        for family in ["-4", "-6"] {
+            let mut command = tokio::process::Command::new("ip");
+            command.args(["-j", family, "route", "show", "dev", interface]);
+            let data = run_ip_command(command).await?;
+            routes.extend(Self::parse_fmds_routes(interface, &data)?);
+        }
+        Ok(routes)
+    }
 
-        // Ignore routes provisioned by the kernel
-        data.retain(|d| d.protocol != Some("kernel".to_string()));
-        Ok(data)
+    /// Select FMDS routes before parsing destinations so unrelated default routes remain untouched.
+    fn parse_fmds_routes(interface: &str, data: &str) -> eyre::Result<Vec<IpRoute>> {
+        let routes: Vec<ObservedRoute> = serde_json::from_str(data)
+            .wrap_err_with(|| format!("could not parse routes on interface {interface}"))?;
+        routes
+            .into_iter()
+            .filter(|route| {
+                // We install routes without a dedicated protocol tag. Their metadata
+                // peer and explicit source identify them; an identical manual route
+                // is indistinguishable.
+                route
+                    .dev
+                    .as_deref()
+                    .is_none_or(|device| device == interface)
+                    && matches!(route.gateway, Some(FMDS_HBN_IPV4 | FMDS_HBN_IPV6))
+                    && route.prefsrc.is_some()
+                    && matches!(route.protocol.as_deref(), None | Some("boot" | "static"))
+            })
+            .map(|route| {
+                let destination = match route.dst.as_str() {
+                    "default" if route.gateway == Some(FMDS_HBN_IPV6) => "::/0",
+                    "default" => "0.0.0.0/0",
+                    destination => destination,
+                };
+                Ok(IpRoute {
+                    dst: destination.parse().wrap_err_with(|| {
+                        format!("invalid FMDS destination {destination} on interface {interface}")
+                    })?,
+                    // `ip route show dev` may omit `dev`; deletion must still name the interface.
+                    dev: Some(interface.to_string()),
+                    protocol: route.protocol,
+                    gateway: route.gateway,
+                    scope: route.scope,
+                    prefsrc: route.prefsrc,
+                    flags: route.flags,
+                })
+            })
+            .collect()
     }
 }
 
@@ -257,7 +252,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_route_plan() {
-        //let current = Route::current_routes().await.unwrap();
         let new_proposed_route1 = IpRoute {
             dst: IpNetwork::from_str("192.168.100.0/24").unwrap(),
             dev: Some(HBNDeviceNames::hbn_23().sfs[0].to_string()),
@@ -329,7 +323,7 @@ mod tests {
         // This route exists in the test json fixture data
         let route_to_remove = IpRoute {
             dst: IpNetwork::from_str("10.217.4.168/29").unwrap(),
-            dev: None,
+            dev: Some(HBNDeviceNames::hbn_23().sfs[0].to_string()),
             protocol: None,
             scope: None,
             gateway: Some(IpAddr::from([169, 254, 169, 253])),
@@ -363,5 +357,149 @@ mod tests {
         assert_eq!(remove[0], route_to_remove);
 
         tracing::trace!(route_plan = ?plan, "Full Plan");
+    }
+
+    /// Adding and retiring IPv6 reply routes must preserve IPv4 and routes installed by other owners.
+    #[test]
+    fn ipv6_route_reload_preserves_other_routes() {
+        let interface = HBNDeviceNames::hbn_23().sfs[0];
+        let ipv4 = IpRoute {
+            dst: "10.217.4.168/29".parse().expect("IPv4 tenant prefix"),
+            dev: None,
+            protocol: None,
+            gateway: Some(FMDS_HBN_IPV4),
+            scope: None,
+            // Explicitly configured source addresses must remain recognizable after restart.
+            prefsrc: Some("192.0.2.254".parse().expect("configured IPv4 source")),
+            flags: vec![],
+        };
+        let ipv6 = IpRoute {
+            dst: "2001:db8:1::/64".parse().expect("IPv6 tenant prefix"),
+            dev: Some(interface.to_string()),
+            protocol: None,
+            gateway: Some(FMDS_HBN_IPV6),
+            scope: None,
+            prefsrc: Some("fd00:76b9::254".parse().expect("IPv6 metadata source")),
+            flags: vec![],
+        };
+        let mut observed = vec![
+            // `ip` can report a device and protocol that were omitted from the desired route.
+            serde_json::json!({
+                "dst": "10.217.4.168/29", "dev": interface, "protocol": "boot",
+                "gateway": "169.254.169.253", "prefsrc": "192.0.2.254", "flags": []
+            }),
+            // A dynamic default is not ours even if it uses the same metadata peer and source.
+            serde_json::json!({
+                "dst": "default", "dev": interface, "protocol": "ra",
+                "gateway": "fd00:76b9::255", "prefsrc": "fd00:76b9::254", "flags": []
+            }),
+            // Connected routes must never enter the removal plan.
+            serde_json::json!({
+                "dst": "fd00:76b9::254/127", "dev": interface, "protocol": "kernel",
+                "prefsrc": "fd00:76b9::254", "scope": "link", "flags": []
+            }),
+            // A static route's source alone does not establish FMDS ownership.
+            serde_json::json!({
+                "dst": "2001:db8:2::/64", "dev": interface, "protocol": "static",
+                "gateway": "fd00:76b9::1", "prefsrc": "fd00:76b9::254", "flags": []
+            }),
+        ];
+
+        let current = Route::parse_fmds_routes(
+            interface,
+            &serde_json::to_string(&observed).expect("initial route observation"),
+        )
+        .expect("parse initial routes");
+        assert_eq!(current.len(), 1);
+        // Repeated tenant prefixes must not result in a second, failing `ip route add`.
+        assert_eq!(
+            Route::plan_from_routes(
+                interface,
+                &current,
+                vec![ipv4.clone(), ipv6.clone(), ipv6.clone()],
+            ),
+            HashMap::from([(Action::Add, vec![ipv6.clone()])])
+        );
+        let command = ipv6.command(Action::Add);
+        assert_eq!(
+            command
+                .as_std()
+                .get_args()
+                .map(|argument| argument.to_str().expect("UTF-8 ip argument"))
+                .collect::<Vec<_>>(),
+            [
+                "-6",
+                "route",
+                "add",
+                "2001:db8:1::/64",
+                "dev",
+                interface,
+                "via",
+                "fd00:76b9::255",
+                "src",
+                "fd00:76b9::254",
+            ]
+        );
+
+        // Reobserve the installed IPv6 route with kernel metadata, as an agent restart does.
+        observed.push(serde_json::json!({
+            "dst": "2001:db8:1::/64", "dev": interface, "protocol": "static",
+            "gateway": "fd00:76b9::255", "prefsrc": "fd00:76b9::254",
+            "scope": "global", "metric": 1024, "flags": []
+        }));
+        let current = Route::parse_fmds_routes(
+            interface,
+            &serde_json::to_string(&observed).expect("installed route observation"),
+        )
+        .expect("parse installed routes");
+        assert_eq!(current.len(), 2);
+        assert!(Route::plan_from_routes(interface, &current, vec![ipv4.clone(), ipv6]).is_empty());
+
+        // Removing one tenant family must not repeat the entire observed route list as removals.
+        assert_eq!(
+            Route::plan_from_routes(interface, &current, vec![ipv4]),
+            HashMap::from([(Action::Remove, vec![current[1].clone()])])
+        );
+    }
+
+    /// An owned default route must retain its address family when `ip` renders
+    /// the destination as `default`, so restart reconciliation can compare it.
+    #[test]
+    fn owned_default_routes_preserve_address_family() {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::{Case, check_cases};
+
+        let cases = [
+            // IPv4 defaults use the same metadata peer as explicit IPv4 prefixes.
+            Case {
+                scenario: "IPv4 default",
+                input: serde_json::json!([{
+                    "dst": "default", "gateway": "169.254.169.253",
+                    "prefsrc": "169.254.169.254", "protocol": "boot"
+                }]),
+                expect: Yields(vec![
+                    "0.0.0.0/0".parse::<IpNetwork>().expect("IPv4 default"),
+                ]),
+            },
+            // IPv6 defaults must not fall through to the IPv4 /0 conversion.
+            Case {
+                scenario: "IPv6 default",
+                input: serde_json::json!([{
+                    "dst": "default", "gateway": "fd00:76b9::255",
+                    "prefsrc": "fd00:76b9::254", "protocol": "static"
+                }]),
+                expect: Yields(vec!["::/0".parse::<IpNetwork>().expect("IPv6 default")]),
+            },
+        ];
+        check_cases(cases, |observed| {
+            Route::parse_fmds_routes("fmds0", &observed.to_string())
+                .map(|routes| {
+                    routes
+                        .into_iter()
+                        .map(|route| route.dst)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| error.to_string())
+        });
     }
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedmachine"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedpowershelf"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedrack"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedrackgroup"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedswitch"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/flowgrpc"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/infinibandpartition"
@@ -32,6 +33,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/operatingsystem"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/site"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/sku"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/spectrumxpartition"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/sshkeygroup"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/subnet"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/tenant"
@@ -55,6 +57,7 @@ func NewAPIHandlers() {
 		VPC:                    &vpc.API{},
 		VpcPrefix:              &vpcprefix.API{},
 		VpcPeering:             &vpcpeering.API{},
+		SpectrumXPartition:     &spectrumxpartition.API{},
 		Subnet:                 &subnet.API{},
 		Instance:               &instance.API{},
 		Machine:                &machine.API{},
@@ -70,6 +73,7 @@ func NewAPIHandlers() {
 		ExpectedMachine:        &expectedmachine.API{},
 		ExpectedPowerShelf:     &expectedpowershelf.API{},
 		ExpectedRack:           &expectedrack.API{},
+		ExpectedRackGroup:      &expectedrackgroup.API{},
 		ExpectedSwitch:         &expectedswitch.API{},
 		SKU:                    &sku.API{},
 		DpuExtensionService:    &dpuextensionservice.API{},
@@ -117,12 +121,14 @@ func (Managers *Manager) NewInstance() {
 	Managers.ExpectedMachine()
 	Managers.ExpectedPowerShelf()
 	Managers.ExpectedRack()
+	Managers.ExpectedRackGroup()
 	Managers.ExpectedSwitch()
 	Managers.SKU()
 	Managers.DpuExtensionService()
 	Managers.NVLinkLogicalPartition()
 	Managers.FlowGrpc()
 	Managers.VpcPeering()
+	Managers.SpectrumXPartition()
 	Managers.TenantIdentity()
 }
 
@@ -138,17 +144,23 @@ func (Managers *Manager) Init() {
 	prometheus.MustRegister(versionGauge)
 	// set the value once, since it does not change
 	versionGauge.WithLabelValues(metadata.Version, metadata.BuildTime).Set(1)
-	// register health status metric
+	health := func() float64 {
+		return float64(computils.SiteHealth(ManagerAccess.Data.EB))
+	}
 	prometheus.MustRegister(
+		// Keep `health_status` as a counter for compatibility. Health can
+		// decrease, so new consumers should use the `health` gauge.
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
 			Name:      "health_status",
 			Help:      "health status of the Site Agent",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.HealthStatus.Load())
-			}))
-	ManagerAccess.Data.EB.HealthStatus.Store(uint64(computils.CompUnhealthy))
+		}, health),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+			Name:      "health",
+			Help:      "Current aggregate health of the Site Agent: 0 unhealthy, 1 healthy",
+		}, health),
+	)
 
 	Managers.Orchestrator().Init()
 	Managers.Site().Init()
@@ -168,12 +180,14 @@ func (Managers *Manager) Init() {
 	Managers.ExpectedMachine().Init()
 	Managers.ExpectedPowerShelf().Init()
 	Managers.ExpectedRack().Init()
+	Managers.ExpectedRackGroup().Init()
 	Managers.ExpectedSwitch().Init()
 	Managers.SKU().Init()
 	Managers.DpuExtensionService().Init()
 	Managers.NVLinkLogicalPartition().Init()
 	Managers.FlowGrpc().Init()
 	Managers.VpcPeering().Init()
+	Managers.SpectrumXPartition().Init()
 	Managers.TenantIdentity().Init()
 }
 
@@ -185,13 +199,22 @@ func (Managers *Manager) Start() {
 	Managers.CoreGrpc().Start()
 	Managers.Bootstrap().Start()
 	Managers.Orchestrator().Start()
+	// Checks begin once Core gRPC and Temporal have made their first connection attempt.
+	go StartHealthChecker()
 	Managers.FlowGrpc().Start()
+}
+
+func newMetricsServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.Handler())
+	return mux
 }
 
 // StartMetricServer - Start serving Metric Server
 func StartMetricServer() {
 	log.Info().Msgf("Beginning to serve on port %v", ManagerAccess.Conf.EB.MetricsPort)
-	http.Handle("/metrics", promhttp.Handler())
 	port := ":" + ManagerAccess.Conf.EB.MetricsPort
-	http.ListenAndServe(port, nil)
+	mux := newMetricsServeMux()
+	err := http.ListenAndServe(port, mux)
+	log.Error().Err(err).Msg("Managers: metrics server stopped")
 }

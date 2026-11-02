@@ -56,6 +56,7 @@ func sampleRunCreateRequest() APITaskRunCreateRequest {
 				Version:                "1.2.3",
 				RuleID:                 &ruleID,
 				OverrideReadinessCheck: true,
+				OverrideVersionCheck:   true,
 				SubTargets:             []string{"bmc", "bios"},
 			},
 			ExcludeRunIDs: []string{"prev-1", "prev-2"},
@@ -230,6 +231,7 @@ func TestAPITaskRunCreateRequest_ToProto(t *testing.T) {
 	assert.Equal(t, "1.2.3", fw.GetTargetVersion())
 	assert.Equal(t, "rule-id", fw.GetRuleId().GetId())
 	assert.True(t, fw.GetOverrideReadinessCheck())
+	assert.True(t, fw.GetOverrideVersionCheck())
 	assert.Equal(t, []string{"bmc", "bios"}, fw.GetSubTargets())
 
 	// Target scope excludes.

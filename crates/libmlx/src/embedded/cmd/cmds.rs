@@ -29,7 +29,7 @@ use crate::device::cmd::device::cmds::handle as handle_device;
 use crate::embedded::cmd::args::{
     Cli, Commands, FirmwareAction, OutputFormat, ProfileCommands, RegistryAction, RunnerCommands,
 };
-use crate::firmware::config::{FirmwareFlasherProfile, FirmwareSpec, FlashSpec};
+use crate::firmware::config::{FirmwareFlasherProfile, FirmwareSpec, FlashOptions, FlashSpec};
 use crate::firmware::credentials::Credentials;
 use crate::firmware::flasher::FirmwareFlasher;
 use crate::lockdown::cmd::cmds::handle_lockdown;
@@ -243,6 +243,7 @@ fn cmd_registry_check(
         uefi_version_virtio_blk_current: None,
         uefi_version_virtio_net_current: None,
         base_mac: None,
+        base_guid: None,
         status: None,
         part_number,
         fw_version_current,
@@ -993,8 +994,118 @@ fn profile_compare_command(
     Ok(())
 }
 
-// run_firmware_command dispatches firmware subcommands.
 async fn run_firmware_command(
+    dry_run: bool,
+    work_dir: Option<std::path::PathBuf>,
+    action: FirmwareAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let durable_operation = match &action {
+        FirmwareAction::Flash {
+            operation_id,
+            device,
+            ..
+        }
+        | FirmwareAction::FlashConfig {
+            operation_id,
+            device,
+            ..
+        } if !dry_run => {
+            if work_dir.is_some() {
+                return Err(
+                    "durable firmware work uses MLX_FIRMWARE_STATE_DIRECTORY, not --work-dir"
+                        .into(),
+                );
+            }
+            let operation_id = operation_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or("--operation-id is required for firmware mutation")?;
+            Some((device.clone(), operation_id.to_string()))
+        }
+        FirmwareAction::Status {
+            device,
+            operation_id,
+        }
+        | FirmwareAction::Cancel {
+            device,
+            operation_id,
+        } => {
+            if dry_run || work_dir.is_some() {
+                return Err("status and cancel do not accept --dry-run or --work-dir".into());
+            }
+            Some((device.clone(), operation_id.clone()))
+        }
+        _ => None,
+    };
+    let recovery_command = if let Some((device, operation_id)) = &durable_operation {
+        // Print the recovery key before admission: losing the RPC response is
+        // not evidence that the supervisor rejected this operation.
+        let executable = std::env::current_exe()?;
+        let executable = executable
+            .to_str()
+            .ok_or("firmware CLI executable path is not UTF-8")?;
+        let command = firmware_status_command(executable, device, operation_id);
+        eprintln!("firmware operation {operation_id}; inspect with: {command}");
+        Some(command)
+    } else {
+        None
+    };
+
+    // `ConfigReset` uses the synchronous runner, which cannot yield to an
+    // async signal handler. Keep its existing signal behavior.
+    if matches!(action, FirmwareAction::ConfigReset { .. }) {
+        return execute_firmware_command(dry_run, work_dir, action).await;
+    }
+
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::Signal;
+        use tokio::signal::unix::{SignalKind, signal};
+
+        // Catchable signals stop this caller's wait. Durable execution remains
+        // owned by the supervisor; dropping an RPC never cancels that work.
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut hangup = signal(SignalKind::hangup())?;
+        let mut quit = signal(SignalKind::quit())?;
+        let (signal, received) = tokio::select! {
+            biased;
+            received = interrupt.recv() => (Signal::SIGINT, received),
+            received = terminate.recv() => (Signal::SIGTERM, received),
+            received = hangup.recv() => (Signal::SIGHUP, received),
+            received = quit.recv() => (Signal::SIGQUIT, received),
+            result = execute_firmware_command(dry_run, work_dir, action) => return result,
+        };
+        if received.is_none() {
+            return Err(format!("firmware {signal} handler closed").into());
+        }
+        if let Some(command) = recovery_command {
+            return Err(format!(
+                "stopped waiting for firmware operation after {signal}; accepted work continues; inspect with: {command}"
+            )
+            .into());
+        }
+        Err(format!(
+            "firmware operation cancelled by {signal}; process cleanup and hardware quiescence are not confirmed; inspect the device and any retained inputs before retrying"
+        )
+        .into())
+    }
+    #[cfg(not(unix))]
+    {
+        drop(recovery_command);
+        execute_firmware_command(dry_run, work_dir, action).await
+    }
+}
+
+fn firmware_status_command(executable: &str, device: &str, operation_id: &str) -> String {
+    // Operation IDs allow shell metacharacters. Quote each argument so copying
+    // the recovery command preserves the accepted ID without executing it.
+    let [executable, device, operation_id] = [executable, device, operation_id]
+        .map(|argument| format!("'{}'", argument.replace('\'', "'\\''")));
+    format!("{executable} firmware status -- {device} {operation_id}")
+}
+
+async fn execute_firmware_command(
     dry_run: bool,
     work_dir: Option<std::path::PathBuf>,
     action: FirmwareAction,
@@ -1002,6 +1113,7 @@ async fn run_firmware_command(
     match action {
         FirmwareAction::Flash {
             device,
+            operation_id,
             part_number,
             psid,
             version,
@@ -1021,8 +1133,6 @@ async fn run_firmware_command(
                 psid,
                 version,
             };
-            let flasher = FirmwareFlasher::new(&device, &spec)?.with_dry_run(dry_run);
-
             let firmware_credentials = build_credentials(
                 firmware_bearer_token.as_deref(),
                 firmware_basic_auth.as_deref(),
@@ -1050,19 +1160,65 @@ async fn run_firmware_command(
                 cache_dir: work_dir,
             };
 
-            flasher.flash(&flash_spec).await?;
+            if dry_run {
+                FirmwareFlasher::new(&device, &spec)
+                    .await?
+                    .with_dry_run(true)
+                    .flash(&flash_spec)
+                    .await?
+                    .finish();
+            } else {
+                run_durable_firmware(
+                    &device,
+                    operation_id
+                        .as_deref()
+                        .ok_or("--operation-id is required")?,
+                    FirmwareFlasherProfile {
+                        firmware_spec: spec,
+                        flash_spec,
+                        flash_options: FlashOptions::default(),
+                    },
+                )
+                .await?;
+            }
         }
 
         FirmwareAction::FlashConfig {
             device,
+            operation_id,
             config_file,
         } => {
-            let profile = FirmwareFlasherProfile::from_file(&config_file)?;
-            let flasher =
-                FirmwareFlasher::new(&device, &profile.firmware_spec)?.with_dry_run(dry_run);
-
-            flasher.apply(&profile).await?;
+            let mut profile = FirmwareFlasherProfile::from_file(&config_file)?;
+            if dry_run {
+                if let Some(work_dir) = work_dir {
+                    profile.flash_spec.cache_dir = Some(work_dir);
+                }
+                FirmwareFlasher::new(&device, &profile.firmware_spec)
+                    .await?
+                    .with_dry_run(true)
+                    .apply(&profile)
+                    .await?;
+            } else {
+                run_durable_firmware(
+                    &device,
+                    operation_id
+                        .as_deref()
+                        .ok_or("--operation-id is required")?,
+                    profile,
+                )
+                .await?;
+            }
         }
+
+        FirmwareAction::Status {
+            device,
+            operation_id,
+        } => run_firmware_receipt(&device, &operation_id, false).await?,
+
+        FirmwareAction::Cancel {
+            device,
+            operation_id,
+        } => run_firmware_receipt(&device, &operation_id, true).await?,
 
         FirmwareAction::VerifyImage {
             device,
@@ -1080,7 +1236,9 @@ async fn run_firmware_command(
                 psid,
                 version,
             };
-            let flasher = FirmwareFlasher::new(&device, &spec)?.with_dry_run(dry_run);
+            let flasher = FirmwareFlasher::new(&device, &spec)
+                .await?
+                .with_dry_run(dry_run);
 
             let firmware_credentials = build_credentials(
                 bearer_token.as_deref(),
@@ -1112,9 +1270,11 @@ async fn run_firmware_command(
                 psid,
                 version,
             };
-            let flasher = FirmwareFlasher::new(&device, &spec)?.with_dry_run(dry_run);
+            let flasher = FirmwareFlasher::new(&device, &spec)
+                .await?
+                .with_dry_run(dry_run);
 
-            flasher.verify_version()?;
+            flasher.verify_version().await?;
         }
 
         FirmwareAction::Reset {
@@ -1129,9 +1289,11 @@ async fn run_firmware_command(
                 psid,
                 version,
             };
-            let flasher = FirmwareFlasher::new(&device, &spec)?.with_dry_run(dry_run);
+            let flasher = FirmwareFlasher::new(&device, &spec)
+                .await?
+                .with_dry_run(dry_run);
 
-            flasher.reset_with_level(level)?;
+            flasher.reset_with_level(level).await?;
         }
 
         FirmwareAction::ConfigReset { device } => {
@@ -1145,6 +1307,88 @@ async fn run_firmware_command(
     }
 
     Ok(())
+}
+
+/// `run_durable_firmware` submits one immutable request, then observes it until
+/// terminal. CLI exit stops observation without canceling the accepted work.
+async fn run_durable_firmware(
+    device: &str,
+    operation_id: &str,
+    profile: FirmwareFlasherProfile,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::firmware::operation::{
+            FirmwareOperationState, ObserverExitBehavior, SupervisorConfig, connect_or_launch,
+        };
+
+        let config = SupervisorConfig::from_env()?;
+        let mut client = connect_or_launch(device, &config).await?;
+        // Submission compares the complete request even for an existing ID.
+        // CLI retries must not silently replace an earlier profile or options.
+        let mut operation = client
+            .submit(operation_id, Some(profile), ObserverExitBehavior::Continue)
+            .await?;
+        loop {
+            match operation.state {
+                FirmwareOperationState::Accepted
+                | FirmwareOperationState::Running
+                | FirmwareOperationState::CancelRequested => {
+                    // Execution can outlive this caller; only each receipt RPC
+                    // has a deadline. Polling stops when the CLI exits or the
+                    // supervisor reports a terminal state or a read failure.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    operation = client.get(operation_id).await?;
+                }
+                _ => {
+                    println!("{}", serde_json::to_string_pretty(&operation)?);
+                    return if operation.is_complete() {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "firmware operation {operation_id} ended in {:?}; inspect its receipt before requesting more work",
+                            operation.state
+                        )
+                        .into())
+                    };
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (device, operation_id, profile);
+        Err("durable firmware operations require Linux".into())
+    }
+}
+
+/// `run_firmware_receipt` reads or requests a safe stop without running tools.
+/// A cancellation receipt can still show active work; callers inspect it again
+/// with `status` rather than interpreting the request as a completed stop.
+async fn run_firmware_receipt(
+    device: &str,
+    operation_id: &str,
+    cancel: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::firmware::operation::{SupervisorConfig, connect_or_launch};
+
+        let config = SupervisorConfig::from_env()?;
+        let mut client = connect_or_launch(device, &config).await?;
+        let operation = if cancel {
+            client.cancel(operation_id).await?
+        } else {
+            client.get(operation_id).await?
+        };
+        println!("{}", serde_json::to_string_pretty(&operation)?);
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (device, operation_id, cancel);
+        Err("durable firmware operations require Linux".into())
+    }
 }
 
 // build_credentials constructs an optional Credentials from CLI flags.
@@ -1177,6 +1421,21 @@ mod tests {
     use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn firmware_recovery_command_preserves_shell_arguments() {
+        value_scenarios!(
+            run = |(executable, device, operation_id)| firmware_status_command(executable, device, operation_id);
+            "installed executable and ordinary operation" {
+                ("/opt/forge/mlxconfig-embedded", "0000:4b:00.0", "maintenance-1") =>
+                    "'/opt/forge/mlxconfig-embedded' firmware status -- '0000:4b:00.0' 'maintenance-1'".to_string(),
+            }
+            "paths and IDs retain shell metacharacters as data" {
+                ("/opt/NIC tools/mlxconfig-embedded", "4b:00.0", "--operator's;$(id)") =>
+                    "'/opt/NIC tools/mlxconfig-embedded' firmware status -- '4b:00.0' '--operator'\\''s;$(id)'".to_string(),
+            }
+        );
+    }
 
     // parse_assignments splits each "VAR=value" on the first '=', trims and skips
     // blank entries, and reports precise errors for malformed input.

@@ -20,32 +20,32 @@ type SiteCreateRequest struct {
 	FCOrg string `json:"fcorg,omitempty"`
 }
 
-// SiteGetResponse defines a site get response
+// SiteGetResponse defines a site get response. Empty fields are returned as empty strings.
 type SiteGetResponse struct {
 	// SiteUUID is the uuid for the site
-	SiteUUID string `json:"siteuuid,omitempty"`
+	SiteUUID string `json:"siteuuid"`
 
 	// Name is an optional name for the site
-	Name string `json:"name,omitempty"`
+	Name string `json:"name"`
 
 	// Provider is the name of the service provider the site belongs to
-	Provider string `json:"provider,omitempty"`
+	Provider string `json:"provider"`
 
 	// FCOrg is the name of the Fleetcommand org corresponding to
 	// the service provider
-	FCOrg string `json:"fcorg,omitempty"`
+	FCOrg string `json:"fcorg"`
 
 	// BootstrapState is the current bootstrap state of the site
-	BootstrapState string `json:"bootstrapstate,omitempty"`
+	BootstrapState string `json:"bootstrapstate"`
 
 	// ControlPlaneStatus is the current status of the site control plane
-	ControlPlaneStatus string `json:"controlplanestatus,omitempty"`
+	ControlPlaneStatus string `json:"controlplanestatus"`
 
 	// OTP is the current one time passcode
-	OTP string `json:"otp,omitempty"`
+	OTP string `json:"otp"`
 
 	// OTPExpiry is the expiry timestamp
-	OTPExpiry string `json:"otpexpiry,omitempty"`
+	OTPExpiry string `json:"otpexpiry"`
 }
 
 // SiteCredsRequest defines a site credentials request

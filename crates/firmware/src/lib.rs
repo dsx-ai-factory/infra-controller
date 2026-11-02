@@ -36,4 +36,4 @@ pub use artifact_resolution::{
     ResolvedFirmwareArtifact, ResolvedFirmwareArtifactSource, resolve_files_firmware_artifact,
 };
 pub use config::{FirmwareConfig, FirmwareConfigSnapshot};
-pub use downloader::FirmwareDownloader;
+pub use downloader::{ArtifactStatus, FirmwareDownloader};

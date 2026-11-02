@@ -197,13 +197,55 @@ tests:
               rack_profile_id: NVL72
               ids:
                 - rack-001
-              oob_dhcp_relay_address: 10.96.64.1
-              admin_dhcp_relay_address: 192.168.176.1
+              bmc_dhcp_relay_address: 10.96.64.1
+              underlay_dhcp_relay_address: 192.168.176.1
     asserts:
       - equal:
           path: metadata.name
           value: nico-machine-a-tron-rack-sim
         template: deployment.yaml
+
+  - it: should render no topology spread constraint by default
+    template: deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.topologySpreadConstraints
+
+  - it: should spread every pod of the release across nodes when enabled
+    template: deployment.yaml
+    set:
+      topologySpread:
+        enabled: true
+      mat-k8s-controller:
+        enabled: true
+      pods:
+        mat-0:
+          machines:
+            compute:
+              hwType: supermicro_gb300_nvl
+              hostCount: 5
+        mat-1:
+          machines:
+            compute:
+              hwType: supermicro_gb300_nvl
+              hostCount: 5
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: spec.template.spec.topologySpreadConstraints
+          value:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: DoNotSchedule
+              nodeTaintsPolicy: Honor
+              # The shared labels only: a selector with the per-Deployment
+              # pod-name label would match one pod and spread nothing.
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: nico-machine-a-tron
+                  app.kubernetes.io/component: machine-a-tron
+        documentIndex: 1
 
   - it: should render startupProbe by default to prevent liveness killing during registration
     template: deployment.yaml
@@ -215,7 +257,10 @@ tests:
           value: redfish
       - equal:
           path: spec.template.spec.containers[0].startupProbe.failureThreshold
-          value: 20
+          value: 120
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 30
 
   - it: should fail when startupProbe is explicitly nulled (recreates issue 4298)
     template: deployment.yaml

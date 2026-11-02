@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The configuration Job is a post-upgrade hook, so its KV seeds must never
+# overwrite a value an operator stored after install (the UEFI site defaults
+# are seeded empty on purpose and filled in with `credential add-uefi`).
+suite: Vault configuration job seeds are first-write only
+templates:
+  - templates/vault-config-job.yaml
+tests:
+  - it: seeds each key through seed_once with cas=0 and keeps keys that already have a value
+    documentIndex: 3
+    set:
+      vault.kvMount: secrets
+      vault.kvSeeds:
+        - path: machines/all_hosts/site_default/uefi-metadata-items/auth
+          data:
+            UsernamePassword:
+              username: ""
+              password: ""
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "seed_once secrets/machines/all_hosts/site_default/uefi-metadata-items/auth <<'KVSEED'"
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'vault kv put -cas=0 "[$]_path" -'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'Keeping [$]_path [(]already set; seeds never overwrite[)]'
+
+  - it: treats only "No value found" as an absent key and fails on other kv get errors
+    documentIndex: 3
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "grep -q 'No value found'"
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'ERROR: could not read [$]_path'
+
+  - it: keeps a key written concurrently when cas=0 refuses the put
+    documentIndex: 3
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'Keeping [$]_path [(]written concurrently; seeds never overwrite[)]'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'ERROR: seeding [$]_path failed'
+
+  - it: names a soft-deleted key for what it is instead of "already set"
+    documentIndex: 3
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "grep -Eq .*deletion_time [+]n/a"
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'has version history but no live value'
+
+  - it: still runs on upgrades, where the guard matters
+    documentIndex: 3
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: post-install,post-upgrade

@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: cross-subchart Site Manager to cert-manager wiring
+templates:
+  - validate-subchart-wiring.yaml
+release:
+  namespace: nico-rest
+tests:
+  - it: accepts the defaults, where both subcharts agree
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects a signing Secret override that Site Manager was not told about
+    set:
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
+    asserts:
+      - failedTemplate:
+          errorPattern: 'caSigningSecret is "site-ca".*still the default "ca-signing-secret"'
+
+  - it: accepts a signing Secret override once Site Manager trusts it
+    set:
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
+      nico-rest-site-manager.credsManagerCa.secretName: site-ca
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects a Vault-signed listener that Site Manager was not told about
+    set:
+      nico-rest-cert-manager.config.caCertFile: /vault/secrets/vault-root-ca-certificate/certificate
+      nico-rest-cert-manager.config.caKeyFile: /vault/secrets/vault-root-ca-private-key/privatekey
+    asserts:
+      - failedTemplate:
+          errorPattern: 'signs its listener from "/vault/secrets/vault-root-ca-certificate/certificate".*cannot see'
+
+  - it: accepts a Vault-signed listener once Site Manager trusts a matching bundle
+    set:
+      nico-rest-cert-manager.config.caCertFile: /vault/secrets/vault-root-ca-certificate/certificate
+      nico-rest-cert-manager.config.caKeyFile: /vault/secrets/vault-root-ca-private-key/privatekey
+      nico-rest-site-manager.args.credsManagerCaPath: /vault/secrets/vault-root-ca-certificate/certificate
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: ignores a half-configured primary pair, which falls back to the mount
+    set:
+      nico-rest-cert-manager.config.caCertFile: ""
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: leaves a deliberately separate trust Secret alone
+    set:
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
+      nico-rest-site-manager.credsManagerCa.secretName: site-ca-bundle
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects relocating cert-manager while site-manager derives its endpoint
+    set:
+      nico-rest-cert-manager.namespaceOverride: nico-rest-staging
+    asserts:
+      - failedTemplate:
+          errorPattern: 'namespaceOverride is "nico-rest-staging".*release namespace "nico-rest"'
+
+  - it: rejects SANs that omit the host site-manager dials
+    set:
+      nico-rest-cert-manager.config.dnsNames:
+        - credsmgr.override.example.com
+    asserts:
+      - failedTemplate:
+          errorPattern: 'covers neither "nico-rest-cert-manager.nico-rest".*nor "\*.nico-rest"'
+
+  - it: accepts overridden SANs that keep that host
+    set:
+      nico-rest-cert-manager.config.dnsNames:
+        - nico-rest-cert-manager.nico-rest
+        - localhost
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: accepts a wildcard SAN that x509.VerifyHostname would honour
+    set:
+      nico-rest-cert-manager.config.dnsNames:
+        - '*.nico-rest'
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects a wildcard too deep to match, as Go would
+    set:
+      nico-rest-cert-manager.config.dnsNames:
+        - '*.nico-rest.svc'
+    asserts:
+      - failedTemplate:
+          errorPattern: 'covers neither "nico-rest-cert-manager.nico-rest".*nor "\*.nico-rest"'
+
+  - it: accepts an explicit endpoint, which is the documented escape hatch
+    set:
+      nico-rest-cert-manager.namespaceOverride: nico-rest-staging
+      nico-rest-cert-manager.config.dnsNames:
+        - credsmgr.override.example.com
+      nico-rest-site-manager.args.credsManagerUrl: https://credsmgr.override.example.com:8000
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: stays quiet when cert-manager is not deployed by this release
+    set:
+      nico-rest-cert-manager.enabled: false
+      nico-rest-cert-manager.namespaceOverride: nico-rest-staging
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
+    asserts:
+      - hasDocuments:
+          count: 0

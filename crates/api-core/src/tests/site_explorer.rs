@@ -19,18 +19,21 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use carbide_instrument::testing::MetricsCapture;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use carbide_site_explorer::MachineCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use common::api_fixtures::TestEnv;
 use db::{self};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::hardware_info::HardwareInfo;
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::site_explorer::{
-    Chassis, EndpointExplorationError, EndpointExplorationReport, MachineSetupStatus,
+    Chassis, EndpointExplorationError, EndpointExplorationReport, ExploredDpu, ExploredManagedHost,
+    MachineSetupStatus,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
@@ -103,6 +106,158 @@ async fn test_disable_machine_creation_outside_site_explorer(
 
     // assert!(dm_response.is_err_and(|e| e.message().contains("was not discovered by site-explore")));
 
+    Ok(())
+}
+
+/// The admin address reconcile runs in its own transaction after the
+/// managed-host commit. When its network config bump loses to a concurrent
+/// writer, it re-reads the winning config and swaps again: the row repairs
+/// commit, the winning config is republished under the next version, the
+/// creation call still succeeds, no failure is counted, and the host BMC is
+/// not flagged for exploration.
+#[sqlx_test]
+async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = api_fixtures::create_test_env(pool).await;
+    let host_config = ManagedHostConfig::default();
+    let bmc_mac_address = host_config.bmc_mac_address;
+    let mh = api_fixtures::create_managed_host_with_config(&env, host_config).await;
+    let host_id = mh.host().id;
+    let creator = MachineCreator::new(
+        env.pool.clone(),
+        (&env.config.site_explorer).into(),
+        env.common_pools.clone(),
+        Arc::new(env.config.rack_profiles.clone()),
+        None,
+        false,
+    );
+    let host_bmc_ip = host_bmc_ip(&env, &mh).await?;
+    let mut host_report = explored_endpoint(&env, host_bmc_ip).await?.report;
+
+    let mut txn = env.pool.begin().await?;
+    let expected_machine =
+        db::expected_machine::find_by_bmc_mac_address(&mut *txn, bmc_mac_address)
+            .await?
+            .unwrap();
+    let dpu_bmc_ip = mh.dpu().bmc_ip(&mut txn).await.unwrap();
+    let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[host_id]).await?;
+    let primary = interfaces[&host_id]
+        .iter()
+        .find(|interface| interface.primary_interface)
+        .unwrap();
+    assert_eq!(primary.attached_dpu_machine_id, Some(mh.dpu().id));
+    assert!(!primary.addresses.is_empty());
+
+    // Leave the existing host needing an admin address and DNS metadata repair.
+    sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id = $1")
+        .bind(primary.id)
+        .execute(&mut *txn)
+        .await?;
+    sqlx::query(
+        "UPDATE machine_interfaces SET hostname = 'needs-reconciliation', domain_id = NULL
+         WHERE id = $1",
+    )
+    .bind(primary.id)
+    .execute(&mut *txn)
+    .await?;
+    let before = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    assert!(before.addresses.is_empty());
+    txn.commit().await?;
+
+    let explored_host = ExploredManagedHost {
+        host_bmc_ip,
+        dpus: vec![ExploredDpu {
+            bmc_ip: dpu_bmc_ip,
+            host_pf_mac_address: Some(primary.mac_address),
+            host_chassis_id: None,
+            report: Arc::new(explored_endpoint(&env, dpu_bmc_ip).await?.report),
+        }],
+    };
+    let mut writer = env.db_txn().await;
+    let writer_pid: i32 =
+        sqlx::query_scalar("SELECT pg_backend_pid() FROM machines WHERE id = $1 FOR UPDATE")
+            .bind(host_id)
+            .fetch_one(&mut *writer)
+            .await?;
+    let network_config = db::machine::get_network_config(&mut *writer, &host_id).await?;
+    let mut winning_config = network_config.value.clone();
+    winning_config.use_admin_network = Some(!winning_config.use_admin_network.unwrap_or(true));
+
+    let metrics = MetricsCapture::start();
+    let reconcile = creator.create_managed_host(
+        &explored_host,
+        &mut host_report,
+        Some(&expected_machine),
+        &env.pool,
+    );
+    let competing_write = async {
+        // Reconciliation has repaired the address rows and read the old version.
+        // Change the config before releasing the machine row it needs to update.
+        common::postgres::wait_for_blocked_query(
+            &env.pool,
+            writer_pid,
+            "UPDATE machines SET network_config_version",
+        )
+        .await;
+        assert_eq!(
+            db::machine::try_update_network_config(
+                &mut writer,
+                &host_id,
+                network_config.version,
+                &winning_config,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
+        );
+        let winning_version = db::machine::get_network_config(&mut *writer, &host_id)
+            .await
+            .unwrap()
+            .version;
+        writer.commit().await.unwrap();
+        winning_version
+    };
+    let (result, winning_version) =
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(reconcile, competing_write)
+        })
+        .await
+        .expect("admin address reconciliation should finish after the competing writer commits");
+    let created =
+        result.expect("the managed-host transaction commits before the admin address reconcile");
+    assert!(!created, "an existing host is not created again");
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+            &[]
+        ),
+        0.0,
+        "a lost swap is retried, not counted as a failure"
+    );
+    assert!(
+        !explored_endpoint(&env, host_bmc_ip)
+            .await?
+            .exploration_requested,
+        "a retried network config swap must not flag the host BMC for exploration"
+    );
+
+    let mut txn = env.pool.begin().await?;
+    let after = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    assert!(!after.addresses.is_empty(), "the address repair commits");
+    assert_ne!(
+        after.hostname, before.hostname,
+        "the hostname repair commits"
+    );
+    assert!(after.domain_id.is_some(), "the domain repair commits");
+    let after_config = db::machine::get_network_config(&mut *txn, &host_id).await?;
+    assert_eq!(after_config.value, winning_config);
+    assert_eq!(
+        after_config.version.version_nr(),
+        winning_version.version_nr() + 1,
+        "the winning config is republished under the next version"
+    );
+    txn.commit().await?;
     Ok(())
 }
 
@@ -324,9 +479,10 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         ..ManagedHostConfig::default()
     };
     api_fixtures::site_explorer::register_expected_machine(&env, &mock_host, None).await;
+    let inband_mac = *mock_host.non_dpu_macs.first().unwrap();
     let mock_explored_host = MockExploredHost::new(&env, mock_host);
 
-    let snapshot: ManagedHostStateSnapshot = mock_explored_host
+    let mock_explored_host = mock_explored_host
         // Run host BMC DHCP first
         .discover_dhcp_host_bmc(|result, _| {
             let response = result.unwrap().into_inner();
@@ -341,14 +497,28 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         .mark_preingestion_complete()
         .await?
         .run_site_explorer_iteration()
-        .await
-        // Get DHCP on the host in-band NIC
+        .await;
+
+    let mut txn = pool.begin().await?;
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+        .await?
+        .expect("the host should have a pending interface prediction");
+    assert!(
+        db::machine_interface::find_by_mac_address(&mut *txn, inband_mac)
+            .await?
+            .is_empty()
+    );
+    txn.commit().await?;
+
+    let mock_explored_host = mock_explored_host
         .discover_dhcp_host_primary_iface(|result, _| {
             let response = result.unwrap().into_inner();
-            assert!(response.machine_id.is_some());
+            assert_eq!(response.machine_id, Some(predicted.machine_id));
             Ok(())
         })
-        .await?
+        .await?;
+
+    let snapshot: ManagedHostStateSnapshot = mock_explored_host
         // Run discovery
         .discover_machine(|result, _| {
             assert!(result.is_ok());
@@ -528,12 +698,17 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
         revision_id: Some(3),
         ..Default::default()
     }];
-    report.physical_slot_number = Some(5);
-    report.compute_tray_index = Some(2);
-    report.topology_id = Some(10);
-    report.revision_id = Some(3);
-    db::explored_endpoints::try_update(bmc_ip, existing.report_version, &report, false, &mut txn)
-        .await?;
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            bmc_ip,
+            existing.report_version,
+            &report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await?;
 
     // Call the API
@@ -718,66 +893,214 @@ async fn prepare_endpoint_exploration_case(
 }
 
 #[sqlx_test]
-async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
+async fn test_manual_exploration_respects_site_explorer_suppression(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = carbide_instrument::testing::MetricsCapture::start();
     let env = common::api_fixtures::create_test_env(pool.clone()).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
     let bmc_ip = host_bmc_ip(&env, &mh).await?;
 
-    let mut txn = env.pool.begin().await?;
-    let bmc_interface = db::machine_interface::find_by_ip(txn.as_mut(), bmc_ip)
-        .await?
-        .ok_or_else(|| format!("expected BMC interface at {bmc_ip}"))?;
-    db::bmc_suppression::upsert(
-        txn.as_mut(),
-        &NewBmcSuppression {
-            bmc_mac_address: bmc_interface.mac_address,
-            reason: "manual refresh rejection test".to_string(),
-            subsystem: BmcSuppressionSubsystem::SiteExplorer,
-        },
-    )
-    .await?;
-    txn.commit().await?;
+    for (sources, paused_for_dpf) in [
+        (&[BmcSuppressionSource::Decommissioning][..], false),
+        (&[BmcSuppressionSource::DpfProvisioning][..], true),
+        (
+            &[
+                BmcSuppressionSource::DpfProvisioning,
+                BmcSuppressionSource::Decommissioning,
+            ][..],
+            true,
+        ),
+    ] {
+        let mut txn = env.pool.begin().await?;
+        let bmc_interface = db::machine_interface::find_by_ip(txn.as_mut(), bmc_ip)
+            .await?
+            .ok_or_else(|| format!("expected BMC interface at {bmc_ip}"))?;
+        for &source in sources {
+            db::bmc_suppression::upsert(
+                txn.as_mut(),
+                &NewBmcSuppression {
+                    bmc_mac_address: bmc_interface.mac_address,
+                    reason: "manual refresh rejection test".to_string(),
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source,
+                },
+            )
+            .await?;
+        }
+        txn.commit().await?;
 
-    let re_explore_error = env
-        .api
-        .re_explore_endpoint(Request::new(rpc::forge::ReExploreEndpointRequest {
-            ip_address: bmc_ip.to_string(),
-            if_version_match: None,
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(re_explore_error.code(), tonic::Code::FailedPrecondition);
-    assert!(
-        re_explore_error
-            .message()
-            .contains(&bmc_interface.mac_address.to_string())
-    );
-    assert!(
-        !explored_endpoint(&env, bmc_ip).await?.exploration_requested,
-        "a rejected re-exploration must not remain queued"
-    );
+        let re_explore_error = env
+            .api
+            .re_explore_endpoint(Request::new(rpc::forge::ReExploreEndpointRequest {
+                ip_address: bmc_ip.to_string(),
+                if_version_match: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(re_explore_error.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            re_explore_error
+                .message()
+                .contains(&bmc_interface.mac_address.to_string())
+        );
+        assert!(
+            !explored_endpoint(&env, bmc_ip).await?.exploration_requested,
+            "a rejected re-exploration must not remain queued"
+        );
 
-    let calls_before_refresh = endpoint_explore_call_count(&env, bmc_ip);
-    let refresh_error = env
-        .api
-        .refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
-            ip_address: bmc_ip.to_string(),
-        }))
-        .await
-        .unwrap_err();
-    assert_eq!(refresh_error.code(), tonic::Code::FailedPrecondition);
-    assert!(
-        refresh_error
-            .message()
-            .contains(&bmc_interface.mac_address.to_string())
-    );
-    assert_eq!(
-        endpoint_explore_call_count(&env, bmc_ip),
-        calls_before_refresh,
-        "a rejected immediate refresh must not probe the BMC"
-    );
+        let calls_before_refresh = endpoint_explore_call_count(&env, bmc_ip);
+        let mut before_refresh = explored_endpoint(&env, bmc_ip).await?;
+        let concurrent_update = if paused_for_dpf && sources.len() == 1 {
+            let mut txn = env.pool.begin().await?;
+            assert!(matches!(
+                db::explored_endpoints::try_update(
+                    bmc_ip,
+                    before_refresh.report_version,
+                    &before_refresh.report,
+                    false,
+                    txn.as_mut(),
+                )
+                .await?,
+                db::ConditionalWrite::Applied(())
+            ));
+            before_refresh = db::explored_endpoints::find_all_by_ip(bmc_ip, txn.as_mut())
+                .await?
+                .remove(0);
+            Some(txn)
+        } else {
+            None
+        };
+        let api = env.api.clone();
+        let refresh = tokio::spawn(async move {
+            api.refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
+                ip_address: bmc_ip.to_string(),
+            }))
+            .await
+        });
+        if let Some(txn) = concurrent_update {
+            // Let refresh read the older report, then commit a newer version
+            // while its queue write waits for the endpoint row.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                         WHERE datname = current_database() AND wait_event_type = 'Lock'
+                         AND query LIKE '%UPDATE explored_endpoints SET exploration_requested%')",
+                    )
+                    .fetch_one(&env.pool)
+                    .await?;
+                    if blocked {
+                        break Ok::<(), sqlx::Error>(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await??;
+            txn.commit().await?;
+        }
+        let refresh = refresh.await?;
+        if paused_for_dpf {
+            let queued = refresh?.into_inner();
+            assert!(queued.exploration_requested);
+            assert_eq!(
+                queued.report_version,
+                before_refresh.report_version.to_string()
+            );
+            let persisted = explored_endpoint(&env, bmc_ip).await?;
+            assert!(persisted.exploration_requested);
+            assert_eq!(persisted.report, before_refresh.report);
+            assert_eq!(persisted.report_version, before_refresh.report_version);
+        } else {
+            let error = refresh.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                error
+                    .message()
+                    .contains(&bmc_interface.mac_address.to_string())
+            );
+            assert!(!explored_endpoint(&env, bmc_ip).await?.exploration_requested);
+        }
+        assert_eq!(
+            endpoint_explore_call_count(&env, bmc_ip),
+            calls_before_refresh,
+            "suppressed refresh requests must not probe the BMC"
+        );
+
+        let status = env
+            .api
+            .find_explored_endpoints_by_ids(Request::new(
+                rpc::site_explorer::ExploredEndpointsByIdsRequest {
+                    endpoint_ids: vec![bmc_ip.to_string()],
+                },
+            ))
+            .await?
+            .into_inner();
+        assert_eq!(
+            status.endpoints[0].exploration_paused_for_dpf,
+            paused_for_dpf
+        );
+        if paused_for_dpf {
+            assert!(
+                re_explore_error.message().contains(
+                    "resumes automatically when all site explorer suppressions are cleared"
+                )
+            );
+            for request in ["re_explore", "refresh"] {
+                assert!(
+                    metrics.counter_delta(
+                        "carbide_site_explorer_dpf_explorations_deferred_total",
+                        &[("request", request)],
+                    ) >= 1.0
+                );
+            }
+        }
+        if sources.len() > 1 {
+            let mut txn = env.pool.begin().await?;
+            db::bmc_suppression::delete(
+                txn.as_mut(),
+                bmc_interface.mac_address,
+                BmcSuppressionSubsystem::SiteExplorer,
+                BmcSuppressionSource::DpfProvisioning,
+            )
+            .await?;
+            txn.commit().await?;
+            let still_suppressed = env
+                .api
+                .refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
+                    ip_address: bmc_ip.to_string(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(still_suppressed.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                still_suppressed
+                    .message()
+                    .contains("endpoint exploration is suppressed")
+            );
+        }
+        let mut txn = env.pool.begin().await?;
+        for &source in sources {
+            db::bmc_suppression::delete(
+                txn.as_mut(),
+                bmc_interface.mac_address,
+                BmcSuppressionSubsystem::SiteExplorer,
+                source,
+            )
+            .await?;
+        }
+        txn.commit().await?;
+        env.api
+            .refresh_endpoint_report(Request::new(rpc::forge::RefreshEndpointReportRequest {
+                ip_address: bmc_ip.to_string(),
+            }))
+            .await?;
+        assert!(!explored_endpoint(&env, bmc_ip).await?.exploration_requested);
+        assert_eq!(
+            endpoint_explore_call_count(&env, bmc_ip),
+            calls_before_refresh + 1
+        );
+    }
 
     Ok(())
 }
@@ -1023,7 +1346,7 @@ async fn test_refresh_endpoint_report_rejects_concurrent_report_update(
         evaluated_boot_interface: Some(concurrent_target.clone()),
     });
     let mut txn = env.pool.begin().await?;
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             bmc_ip,
             baseline.report_version,
@@ -1032,6 +1355,7 @@ async fn test_refresh_endpoint_report_rejects_concurrent_report_update(
             &mut txn,
         )
         .await?,
+        db::ConditionalWrite::Applied(()),
         "concurrent report update should succeed"
     );
     txn.commit().await?;
@@ -1079,7 +1403,7 @@ async fn test_refresh_endpoint_report_failure_persists_error_and_bumps_version(
         evaluated_boot_interface: Some(preserved_target.clone()),
     });
     let mut txn = env.pool.begin().await?;
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             bmc_ip,
             initial.report_version,
@@ -1087,7 +1411,8 @@ async fn test_refresh_endpoint_report_failure_persists_error_and_bumps_version(
             initial.waiting_for_explorer_refresh,
             &mut txn,
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
     txn.commit().await?;
     let initial_version = explored_endpoint(&env, bmc_ip).await?.report_version;

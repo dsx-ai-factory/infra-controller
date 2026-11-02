@@ -4,8 +4,6 @@
 package workflow
 
 import (
-	"fmt"
-
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -33,55 +31,55 @@ func (wflow *API) Init() {
 
 	CertExpirationMetric = promauto.NewGauge(prometheus.GaugeOpts{
 		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-		Name:      "temporal_cert_expiration",
-		Help:      "The expiration date of the Temporal certificate",
+		Name:      "temporal_cert_expiration_timestamp_seconds",
+		Help:      "Unix timestamp in seconds when the Temporal client certificate expires",
 	})
 
+	health := func() float64 {
+		return float64(ManagerAccess.Data.EB.Managers.Workflow.State.HealthStatus.Load())
+	}
 	prometheus.MustRegister(
+		// Keep `temporal_connection_status` as a counter for compatibility.
+		// Health can decrease, so new consumers should use the
+		// `temporal_connection_health` gauge.
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
 			Name:      MetricTemporalConnStatus,
 			Help:      "Temporal health status of the Site Agent",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.Managers.Workflow.State.HealthStatus.Load())
-			}))
+		}, health),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+			Name:      "temporal_connection_health",
+			Help:      "Current Temporal connection health of the Site Agent: 0 unhealthy, 1 healthy; 2 reserved for unknown",
+		}, health),
+	)
 	ManagerAccess.Data.EB.Managers.Workflow.State.HealthStatus.Store(uint64(computils.CompUnhealthy))
 
-	prometheus.MustRegister(
-		prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-			Name:      MetricTemporalConnAttempted,
-			Help:      "Temporal connections attempted by the Site Agent",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionAttempted.Load())
-			}))
+	// The `_total` names identify cumulative counters. Retain the legacy
+	// names for existing dashboards and alerts.
+	for _, name := range []string{MetricTemporalConnAttempted, "temporal_connection_attempted_total"} {
+		prometheus.MustRegister(
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+				Name:      name,
+				Help:      "Temporal connections attempted by the Site Agent",
+			},
+				func() float64 {
+					return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionAttempted.Load())
+				}))
+	}
 
-	prometheus.MustRegister(
-		prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-			Name:      MetricTemporalConnSucc,
-			Help:      "Temporal connections succeeded by the Site Agent",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionSucc.Load())
-			}))
-}
-
-// GetState - handle http request
-func (wflow *API) GetState() []string {
-	wc := ManagerAccess.Conf.EB.Temporal
-	wt := ManagerAccess.Data.EB.Managers.Workflow
-	var strs []string
-	strs = append(strs, fmt.Sprintln("Temporal Host: ", wc.Host, wc.Port))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Attempted: ", wt.State.ConnectionAttempted.Load()))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Succeeded: ", wt.State.ConnectionSucc.Load()))
-	strs = append(strs, fmt.Sprintln("Temporal Status: ", computils.CompStatus(wt.State.HealthStatus.Load()).String()))
-	strs = append(strs, fmt.Sprintln("Temporal Last Error: ", wt.State.Err()))
-	strs = append(strs, fmt.Sprintln("Temporal Connection Time: ", wt.State.ConnectionTime()))
-
-	return strs
+	for _, name := range []string{MetricTemporalConnSucc, "temporal_connection_succeeded_total"} {
+		prometheus.MustRegister(
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+				Name:      name,
+				Help:      "Temporal connections succeeded by the Site Agent",
+			},
+				func() float64 {
+					return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionSucc.Load())
+				}))
+	}
 }
 
 // Start the workflow orchestrator

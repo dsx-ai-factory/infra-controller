@@ -1,6 +1,6 @@
 # `nico-admin-cli firmware`
 
-_[Hardware commands](../../hardware.md) › **firmware**_
+*[Hardware commands](../../hardware.md) › **firmware***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-firmware - Firmware related actions
 
 ## SYNOPSIS
 
-**nico-admin-cli firmware** \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli firmware [--extended] [--sort-by]
+[-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -17,32 +19,35 @@ Firmware related actions
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Subcommands
 
 | Subcommand | Description |
 |---|---|
+| [`nic`](./firmware-nic.md) | Manage NIC firmware |
 | [`show`](./firmware-show.md) | Show available firmware |
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

@@ -99,7 +99,6 @@ func (s *PostgresStore) Get(
 
 	q := s.idb(ctx).NewSelect().
 		Model(&row).
-		ColumnExpr("orun.*").
 		Where("orun.id = ?", id)
 	err := q.Scan(ctx)
 	if err != nil {
@@ -122,7 +121,6 @@ func (s *PostgresStore) LockOperationRun(
 
 	q := s.idb(ctx).NewSelect().
 		Model(&row).
-		ColumnExpr("orun.*").
 		Where("orun.id = ?", id).
 		For("UPDATE")
 	err := q.Scan(ctx)
@@ -178,7 +176,7 @@ func (s *PostgresStore) List(
 		"started_at",
 		"finished_at",
 	).
-		OrderExpr("orun.created_at DESC")
+		OrderExpr("orun.created_at DESC, orun.id DESC")
 	if opts.Pagination != nil {
 		q = q.Offset(opts.Pagination.Offset).Limit(opts.Pagination.Limit)
 	}

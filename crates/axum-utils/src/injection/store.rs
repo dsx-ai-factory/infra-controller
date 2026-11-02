@@ -28,6 +28,7 @@ use rand::RngExt;
 use serde_json::Value;
 
 use super::{Action, Rule, RuleId, Selector};
+use crate::is_json_response;
 
 #[derive(Debug, Default)]
 pub struct InjectionStore {
@@ -166,6 +167,11 @@ impl InjectionStore {
 
     /// Modify response body
     pub async fn post_handle(&self, path: &str, response: Response) -> Response {
+        // Only eligible JSON responses consume body-mutation rules. In
+        // particular, never buffer an SSE body or spend its finite rules.
+        if !response.status().is_success() || !is_json_response(&response) {
+            return response;
+        }
         let snapshot = self.rules.load_full();
         if snapshot.is_empty() {
             return response;
@@ -194,12 +200,6 @@ impl InjectionStore {
         }
 
         if replace.is_none() && merges.is_empty() {
-            return response;
-        }
-        if !response.status().is_success() {
-            return response;
-        }
-        if !is_json_response(&response) {
             return response;
         }
 
@@ -302,15 +302,6 @@ fn json_patch(target: &mut Value, patch: Value) {
         }
         (target_slot, patch_value) => *target_slot = patch_value,
     }
-}
-
-fn is_json_response(response: &Response) -> bool {
-    let Some(value) = response.headers().get(axum::http::header::CONTENT_TYPE) else {
-        return false;
-    };
-    let Ok(s) = value.to_str() else { return false };
-    let mime = s.split(';').next().unwrap_or(s).trim();
-    mime.eq_ignore_ascii_case("application/json") || mime.to_ascii_lowercase().ends_with("+json")
 }
 
 fn selector_matches(selector: &Selector, method: Option<&str>, path: &str) -> bool {
@@ -629,11 +620,12 @@ mod tests {
         // its path — otherwise the original error semantics would be silently
         // overwritten by injected JSON.
         let store = InjectionStore::new();
-        store.put(vec![rule(
-            "merge",
-            Selector::OdataId("/r".into()),
-            Action::JsonMerge(json!({ "added": true })),
-        )]);
+        store.put(vec![Rule {
+            id: "merge".into(),
+            selector: Selector::OdataId("/r".into()),
+            action: Action::JsonMerge(json!({ "added": true })),
+            remaining: Some(1),
+        }]);
 
         let mut err = Response::new(Body::from(r#"{"error":"oops"}"#));
         *err.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
@@ -645,43 +637,33 @@ mod tests {
         assert_eq!(out.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(out).await;
         assert_eq!(body, json!({ "error": "oops" }));
+        assert_eq!(store.list()[0].remaining, Some(1));
     }
 
-    #[test]
-    fn is_json_response_accepts_application_json_and_plus_json_only() {
-        for ct in [
-            "application/json",
-            "Application/JSON",
-            "application/json; charset=utf-8",
-            "application/problem+json",
-            "application/vnd.redfish+json; charset=utf-8",
-        ] {
-            let mut resp = Response::new(Body::empty());
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_str(ct).unwrap(),
-            );
-            assert!(
-                super::is_json_response(&resp),
-                "{ct} must be treated as JSON"
-            );
-        }
-        for ct in [
-            "text/plain",
-            "text/json",
-            "application/octet-stream",
-            "application/json-garbage",
-        ] {
-            let mut resp = Response::new(Body::empty());
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_str(ct).unwrap(),
-            );
-            assert!(
-                !super::is_json_response(&resp),
-                "{ct} must NOT be treated as JSON"
-            );
-        }
+    #[tokio::test]
+    async fn sse_responses_preserve_finite_json_rule_budget() {
+        let store = InjectionStore::new();
+        store.put(vec![Rule {
+            id: "once".into(),
+            selector: Selector::OdataId("/r".into()),
+            action: Action::Replace(json!({"replaced": true})),
+            remaining: Some(1),
+        }]);
+        let response = ([("content-type", "text/event-stream")], "data: {}\n\n").into_response();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            store.post_handle("/r", response),
+        )
+        .await
+        .expect("stream must not be buffered");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes, "data: {}\n\n");
+        assert_eq!(store.list()[0].remaining, Some(1));
+        let json = body_json(store.post_handle("/r", json_ok(json!({}))).await).await;
+        assert_eq!(json, json!({"replaced": true}));
+        assert!(store.list().is_empty());
     }
 
     #[tokio::test]

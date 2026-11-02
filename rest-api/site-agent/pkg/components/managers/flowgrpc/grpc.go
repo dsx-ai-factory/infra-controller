@@ -32,6 +32,7 @@ func (flowgrpc *API) CreateGrpcClient() error {
 		ClientCertPath: ManagerAccess.Conf.EB.FlowGrpc.ClientCertPath,
 		ClientKeyPath:  ManagerAccess.Conf.EB.FlowGrpc.ClientKeyPath,
 		ClientMetrics:  makeGrpcClientMetrics(),
+		OnRPCFinish:    flowgrpc.UpdateGrpcClientState,
 	}
 	logger.Info().Interface("GrpcConfig", ManagerAccess.Data.EB.Managers.FlowGrpc.Client.Config).Msg("Creating Flow gRPC client")
 
@@ -80,14 +81,13 @@ func isGrpcUp(c codes.Code) bool {
 
 // UpdateGrpcClientState updates the Flow gRPC client state
 func (flowgrpc *API) UpdateGrpcClientState(err error) {
-	defer computils.UpdateState(ManagerAccess.Data.EB)
 	if err == nil {
 		ManagerAccess.Data.EB.Managers.FlowGrpc.State.GrpcSucc.Inc()
 		ManagerAccess.Data.EB.Managers.FlowGrpc.State.HealthStatus.Store(uint64(computils.CompHealthy))
 		return
 	}
 	ManagerAccess.Data.EB.Managers.FlowGrpc.State.GrpcFail.Inc()
-	ManagerAccess.Data.EB.Managers.FlowGrpc.State.Err = err.Error()
+	ManagerAccess.Data.EB.Managers.FlowGrpc.State.Err.Store(err.Error())
 	log.Error().Err(err).Msg("Flow gRPC: Failed to send request to server")
 	st, ok := status.FromError(err)
 	if ok {

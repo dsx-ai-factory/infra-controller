@@ -381,7 +381,7 @@ async fn search(
 
         // Loopback IP of a DPU
         LoopbackIp => {
-            let out = db::machine::find_by_loopback_ip(db, ip).await?;
+            let out = db::machine::find_by_loopback_ip(db, addr).await?;
             out.map(|machine| rpc::IpAddressMatch {
                 ip_type: rpc::IpType::LoopbackIp as i32,
                 owner_id: Some(machine.id.to_string()),

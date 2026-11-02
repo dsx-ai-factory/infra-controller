@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use carbide_uuid::rack::RackId;
+use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::expected_power_shelf::{
@@ -34,7 +34,10 @@ pub async fn find_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_address: MacAddress,
 ) -> DatabaseResult<Option<ExpectedPowerShelf>> {
-    let sql = "SELECT * FROM expected_power_shelves WHERE bmc_mac_address=$1";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE bmc_mac_address=$1";
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
         .fetch_optional(txn)
@@ -46,7 +49,10 @@ pub async fn find_by_id(
     txn: &mut PgConnection,
     id: Uuid,
 ) -> Result<Option<ExpectedPowerShelf>, DatabaseError> {
-    let sql = "SELECT * FROM expected_power_shelves WHERE expected_power_shelf_id=$1";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE expected_power_shelf_id=$1";
     sqlx::query_as(sql)
         .bind(id)
         .fetch_optional(txn)
@@ -54,11 +60,30 @@ pub async fn find_by_id(
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
+/// `find_by_id_for_update` holds the selected shelf until its patch commits.
+pub async fn find_by_id_for_update(
+    txn: &mut PgConnection,
+    expected_power_shelf_id: Uuid,
+) -> DatabaseResult<Option<ExpectedPowerShelf>> {
+    let query = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE expected_power_shelf_id=$1 FOR UPDATE";
+    sqlx::query_as(query)
+        .bind(expected_power_shelf_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 pub async fn find_many_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],
 ) -> DatabaseResult<HashMap<MacAddress, ExpectedPowerShelf>> {
-    let sql = "SELECT * FROM expected_power_shelves WHERE bmc_mac_address=ANY($1)";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE bmc_mac_address=ANY($1)";
     let v: Vec<ExpectedPowerShelf> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
         .fetch_all(txn)
@@ -86,7 +111,10 @@ pub async fn find_many_by_bmc_mac_address(
 }
 
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedPowerShelf>> {
-    let sql = "SELECT * FROM expected_power_shelves";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves";
     sqlx::query_as(sql)
         .fetch_all(txn)
         .await
@@ -98,7 +126,10 @@ pub async fn find_all_by_rack_id(
     txn: &mut PgConnection,
     rack_id: &RackId,
 ) -> DatabaseResult<Vec<ExpectedPowerShelf>> {
-    let sql = "SELECT * FROM expected_power_shelves WHERE rack_id=$1";
+    let sql = "SELECT expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+        serial_number, bmc_ip_address, metadata_name, metadata_description,
+        metadata_labels, rack_id, bmc_retain_credentials
+        FROM expected_power_shelves WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
         .fetch_all(txn)
@@ -106,6 +137,11 @@ pub async fn find_all_by_rack_id(
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
+/// Lists every expected power shelf with its ingested shelf, if any.
+///
+/// An expected shelf links to a power shelf by `bmc_mac_address`. An ingested
+/// shelf always has `power_shelves.bmc_mac_address` recorded, so the stored MAC
+/// is never NULL.
 pub async fn find_all_linked(
     txn: &mut PgConnection,
 ) -> DatabaseResult<Vec<LinkedExpectedPowerShelf>> {
@@ -118,7 +154,7 @@ pub async fn find_all_linked(
  ee.address AS address,
  eps.rack_id
 FROM expected_power_shelves eps
- LEFT JOIN power_shelves ps ON eps.serial_number = ps.config->>'name'
+ LEFT JOIN power_shelves ps ON eps.bmc_mac_address = ps.bmc_mac_address
  LEFT JOIN machine_interfaces mi ON eps.bmc_mac_address = mi.mac_address
  LEFT JOIN machine_interface_addresses mia ON mi.id = mia.interface_id
  LEFT JOIN explored_endpoints ee ON mia.address = ee.address
@@ -142,7 +178,10 @@ pub async fn create(
     let query = "INSERT INTO expected_power_shelves
             (expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password, serial_number, bmc_ip_address, metadata_name, metadata_description, metadata_labels, rack_id, bmc_retain_credentials)
             VALUES
-            ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::inet, $7, $8, $9::jsonb, $10, $11) RETURNING *";
+            ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::inet, $7, $8, $9::jsonb, $10, $11)
+            RETURNING expected_power_shelf_id, bmc_mac_address, bmc_username, bmc_password,
+                serial_number, bmc_ip_address, metadata_name, metadata_description,
+                metadata_labels, rack_id, bmc_retain_credentials";
 
     sqlx::query_as(query)
         .bind(id)
@@ -325,6 +364,51 @@ pub async fn create_missing_from(
     }
 
     Ok(())
+}
+
+/// RMS rack identity for a power shelf that does not yet have a `power_shelves`
+/// row, resolved from the expected inventory. Every power shelf is rack-scale
+/// (RMS-managed), so this serves the pre-ingestion power and firmware paths for
+/// any shelf.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PreIngestionPowerShelfRmsIdentity {
+    pub bmc_mac_address: MacAddress,
+    pub rack_id: RackId,
+    pub rack_profile_id: Option<RackProfileId>,
+}
+
+/// Resolve RMS rack identities for pre-ingestion power shelves by PMC MAC.
+///
+/// Every power shelf is rack-scale (RMS-managed), so its expected record is
+/// expected to declare a `rack_id`; that rack is required to build the RMS node
+/// descriptor. The rack profile is taken from the live `racks` row when it
+/// exists and otherwise from the `expected_racks` declaration, so the descriptor
+/// resolves before the rack row is created. Rows missing a `rack_id` are a
+/// misconfiguration and are omitted (they cannot resolve an RMS identity).
+/// Mirrors `expected_switch::find_rms_identities_by_bmc_macs`.
+pub async fn find_rms_identities_by_bmc_macs(
+    db: impl crate::db_read::DbReader<'_>,
+    bmc_macs: &[MacAddress],
+) -> DatabaseResult<Vec<PreIngestionPowerShelfRmsIdentity>> {
+    let sql = r#"
+        SELECT
+            eps.bmc_mac_address AS bmc_mac_address,
+            eps.rack_id AS rack_id,
+            COALESCE(r.rack_profile_id, er.rack_profile_id) AS rack_profile_id
+        FROM expected_power_shelves eps
+        LEFT JOIN racks r ON r.id = eps.rack_id
+        LEFT JOIN expected_racks er ON er.rack_id = eps.rack_id
+        WHERE eps.bmc_mac_address = ANY($1)
+          AND eps.rack_id IS NOT NULL
+    "#;
+
+    sqlx::query_as(sql)
+        .bind(bmc_macs)
+        .fetch_all(db)
+        .await
+        .map_err(|err| {
+            DatabaseError::new("expected_power_shelf::find_rms_identities_by_bmc_macs", err)
+        })
 }
 
 #[cfg(test)]

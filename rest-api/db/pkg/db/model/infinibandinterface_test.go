@@ -8,14 +8,14 @@ import (
 	"fmt"
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
+
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 func testInfiniBandInterfaceSetupSchema(t *testing.T, dbSession *db.Session) {
@@ -155,8 +155,6 @@ func TestInfiniBandInterfaceSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -498,8 +496,6 @@ func TestInfiniBandInterface_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -662,8 +658,6 @@ func TestInfiniBandInterfaceSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -793,8 +787,6 @@ func TestInfiniBandInterfaceSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -856,8 +848,7 @@ func TestInfiniBandInterfaceSQLDAO_Clear(t *testing.T) {
 	_, _, ctx = testCommonTraceProviderSetup(t, context.Background())
 
 	type fields struct {
-		dbSession  *db.Session
-		tracerSpan *stracer.TracerSpan
+		dbSession *db.Session
 	}
 	type args struct {
 		ctx               context.Context
@@ -891,8 +882,7 @@ func TestInfiniBandInterfaceSQLDAO_Clear(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ibifsd := InfiniBandInterfaceSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: tt.fields.tracerSpan,
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := ibifsd.Clear(
 				tt.args.ctx,
@@ -1022,8 +1012,6 @@ func TestInfiniBandInterfaceSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1149,8 +1137,6 @@ func TestInfiniBandInterfaceSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1276,6 +1262,4 @@ func TestInfiniBandInterfaceSQLDAO_DeleteAllBySiteID(t *testing.T) {
 	// Verify the active span is propagated through the call.
 	span := otrace.SpanFromContext(ctx)
 	assert.True(t, span.SpanContext().IsValid())
-	_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-	assert.True(t, ok)
 }

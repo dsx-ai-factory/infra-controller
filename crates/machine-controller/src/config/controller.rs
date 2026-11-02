@@ -100,6 +100,12 @@ pub struct MachineStateControllerConfig {
     /// retained for configuration compatibility.
     #[serde(default = "MachineStateControllerConfig::max_bios_config_retries_default")]
     pub max_bios_config_retries: u32,
+    /// Allow new Lenovo GB300 full-lockdown recovery states. Enable only after
+    /// all state readers support RestoreFullLockdown. Disabling new entries
+    /// does not stop recovery already in progress. See the host firmware guide
+    /// for the additional state-drain requirements before an older-code rollback.
+    #[serde(default)]
+    pub full_lockdown_recovery_enabled: bool,
     /// How long PollingBiosSetup may sit on Ok(false) before escalating into
     /// HandleBiosJobFailure recovery.
     #[serde(
@@ -132,6 +138,7 @@ impl MachineStateControllerConfig {
             uefi_boot_wait: Duration::seconds(0),
             max_bios_config_retries: MachineStateControllerConfig::max_bios_config_retries_default(
             ),
+            full_lockdown_recovery_enabled: false,
             polling_bios_setup_stuck_threshold:
                 MachineStateControllerConfig::polling_bios_setup_stuck_threshold_default(),
             // Keep periodic Redfish reads out of unrelated controller tests.
@@ -197,6 +204,7 @@ impl Default for MachineStateControllerConfig {
             uefi_boot_wait: MachineStateControllerConfig::uefi_boot_wait_default(),
             max_bios_config_retries: MachineStateControllerConfig::max_bios_config_retries_default(
             ),
+            full_lockdown_recovery_enabled: false,
             polling_bios_setup_stuck_threshold:
                 MachineStateControllerConfig::polling_bios_setup_stuck_threshold_default(),
             boot_interface_observation_interval:

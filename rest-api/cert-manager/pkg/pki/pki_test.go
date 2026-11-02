@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewCA(t *testing.T) {
@@ -48,62 +51,114 @@ func TestNewCA(t *testing.T) {
 }
 
 func TestCA_IssueCertificate(t *testing.T) {
-	ca, err := NewTestCA(CAOptions{
-		CommonName:   "Test CA",
-		Organization: "Test Org",
-	})
-	if err != nil {
-		t.Fatalf("NewTestCA failed: %v", err)
+	tests := []struct {
+		name          string
+		commonName    string
+		extraDNSNames []string
+		ttlHours      int
+		wantDNSNames  []string
+		// wantVerifyFails are hostnames the certificate must not vouch for.
+		wantVerifyFails []string
+	}{
+		{
+			name:            "common name becomes the only SAN when no extras are given",
+			commonName:      "my-service.namespace.svc.cluster.local",
+			ttlHours:        24,
+			wantDNSNames:    []string{"my-service.namespace.svc.cluster.local"},
+			wantVerifyFails: []string{"my-service.namespace"},
+		},
+		{
+			name:       "every service name a client may dial is carried as a SAN",
+			commonName: "nico-rest-cert-manager",
+			extraDNSNames: []string{
+				"nico-rest-cert-manager.nico-rest",
+				"nico-rest-cert-manager.nico-rest.svc",
+				"nico-rest-cert-manager.nico-rest.svc.cluster.local",
+				"localhost",
+			},
+			ttlHours: 48,
+			wantDNSNames: []string{
+				"nico-rest-cert-manager",
+				"nico-rest-cert-manager.nico-rest",
+				"nico-rest-cert-manager.nico-rest.svc",
+				"nico-rest-cert-manager.nico-rest.svc.cluster.local",
+				"localhost",
+			},
+			wantVerifyFails: []string{"credsmgr.csm"},
+		},
+		{
+			name:          "repeated and empty names are dropped",
+			commonName:    "svc.ns",
+			extraDNSNames: []string{"svc.ns", "", "localhost"},
+			ttlHours:      24,
+			wantDNSNames:  []string{"svc.ns", "localhost"},
+		},
 	}
 
-	// Issue a certificate
-	certPEM, keyPEM, err := ca.IssueCertificate("test.example.com", 24)
-	if err != nil {
-		t.Fatalf("IssueCertificate failed: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ca, err := NewTestCA(CAOptions{
+				CommonName:   "Test CA",
+				Organization: "Test Org",
+			})
+			require.NoError(t, err, "NewTestCA")
 
-	// Verify certificate is valid PEM
-	if !strings.HasPrefix(certPEM, "-----BEGIN CERTIFICATE-----") {
-		t.Errorf("Certificate should be PEM encoded")
-	}
+			certPEM, keyPEM, err := ca.IssueCertificate(tt.commonName, tt.extraDNSNames, tt.ttlHours)
+			require.NoError(t, err, "IssueCertificate")
 
-	// Verify key is valid PEM
-	if !strings.HasPrefix(keyPEM, "-----BEGIN RSA PRIVATE KEY-----") {
-		t.Errorf("Key should be PEM encoded")
-	}
+			// Verify certificate and key are valid PEM
+			assert.True(t, strings.HasPrefix(certPEM, "-----BEGIN CERTIFICATE-----"), "certificate should be PEM encoded")
+			assert.True(t, strings.HasPrefix(keyPEM, "-----BEGIN RSA PRIVATE KEY-----"), "key should be PEM encoded")
 
-	// Parse and verify certificate
-	block, _ := pem.Decode([]byte(certPEM))
-	if block == nil {
-		t.Fatal("Failed to decode certificate PEM")
-	}
+			// Parse and verify certificate
+			block, _ := pem.Decode([]byte(certPEM))
+			require.NotNil(t, block, "certificate should decode as PEM")
 
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatalf("Failed to parse certificate: %v", err)
-	}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			require.NoError(t, err, "ParseCertificate")
 
-	if cert.Subject.CommonName != "test.example.com" {
-		t.Errorf("Expected CommonName 'test.example.com', got '%s'", cert.Subject.CommonName)
-	}
+			assert.Equal(t, tt.commonName, cert.Subject.CommonName)
+			assert.False(t, cert.IsCA, "issued certificate should not be a CA")
+			assert.Equal(t, tt.wantDNSNames, cert.DNSNames)
 
-	if cert.IsCA {
-		t.Error("Issued certificate should not be a CA")
-	}
+			// A serving certificate is useless without these, and they do not
+			// vary by case, so they are asserted on every issued certificate.
+			assert.NotZero(t, cert.KeyUsage&x509.KeyUsageDigitalSignature, "DigitalSignature key usage")
+			assert.NotZero(t, cert.KeyUsage&x509.KeyUsageKeyEncipherment, "KeyEncipherment key usage")
+			assert.Contains(t, cert.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
+			assert.Contains(t, cert.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
 
-	// Verify certificate is signed by CA
-	caBlock, _ := pem.Decode([]byte(ca.GetCACertificatePEM()))
-	caCert, _ := x509.ParseCertificate(caBlock.Bytes)
+			// The validity window has to honour the requested TTL; a minute of
+			// tolerance absorbs the clock read between NotBefore and NotAfter.
+			assert.WithinDuration(t, cert.NotBefore.Add(time.Duration(tt.ttlHours)*time.Hour),
+				cert.NotAfter, time.Minute)
 
-	roots := x509.NewCertPool()
-	roots.AddCert(caCert)
+			// VerifyHostname is what a TLS client applies, so assert against it
+			// rather than only on the SAN list.
+			for _, host := range tt.wantDNSNames {
+				assert.NoError(t, cert.VerifyHostname(host), "VerifyHostname(%q)", host)
+			}
+			for _, host := range tt.wantVerifyFails {
+				assert.Error(t, cert.VerifyHostname(host), "VerifyHostname(%q) should report a hostname mismatch", host)
+			}
 
-	opts := x509.VerifyOptions{
-		Roots: roots,
-	}
+			// Verify certificate is signed by CA
+			caBlock, _ := pem.Decode([]byte(ca.GetCACertificatePEM()))
+			require.NotNil(t, caBlock, "CA certificate should decode as PEM")
 
-	if _, err := cert.Verify(opts); err != nil {
-		t.Errorf("Certificate verification failed: %v", err)
+			caCert, err := x509.ParseCertificate(caBlock.Bytes)
+			require.NoError(t, err, "ParseCertificate(CA)")
+
+			roots := x509.NewCertPool()
+			roots.AddCert(caCert)
+
+			opts := x509.VerifyOptions{
+				Roots: roots,
+			}
+
+			_, err = cert.Verify(opts)
+			assert.NoError(t, err, "certificate should chain to the CA")
+		})
 	}
 }
 
@@ -145,77 +200,6 @@ func TestNewCA_Defaults(t *testing.T) {
 	}
 }
 
-func TestCA_IssueCertificate_KeyUsage(t *testing.T) {
-	ca, err := NewTestCA(CAOptions{})
-	if err != nil {
-		t.Fatalf("NewTestCA failed: %v", err)
-	}
-
-	certPEM, _, err := ca.IssueCertificate("server.test.local", 24)
-	if err != nil {
-		t.Fatalf("IssueCertificate failed: %v", err)
-	}
-
-	block, _ := pem.Decode([]byte(certPEM))
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	// Check key usage
-	if cert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
-		t.Error("Certificate should have DigitalSignature key usage")
-	}
-	if cert.KeyUsage&x509.KeyUsageKeyEncipherment == 0 {
-		t.Error("Certificate should have KeyEncipherment key usage")
-	}
-
-	// Check extended key usage
-	hasServerAuth := false
-	hasClientAuth := false
-	for _, eku := range cert.ExtKeyUsage {
-		if eku == x509.ExtKeyUsageServerAuth {
-			hasServerAuth = true
-		}
-		if eku == x509.ExtKeyUsageClientAuth {
-			hasClientAuth = true
-		}
-	}
-	if !hasServerAuth {
-		t.Error("Certificate should have ServerAuth extended key usage")
-	}
-	if !hasClientAuth {
-		t.Error("Certificate should have ClientAuth extended key usage")
-	}
-}
-
-func TestCA_IssueCertificate_DNSNames(t *testing.T) {
-	ca, err := NewTestCA(CAOptions{})
-	if err != nil {
-		t.Fatalf("NewTestCA failed: %v", err)
-	}
-
-	certPEM, _, err := ca.IssueCertificate("my-service.namespace.svc.cluster.local", 24)
-	if err != nil {
-		t.Fatalf("IssueCertificate failed: %v", err)
-	}
-
-	block, _ := pem.Decode([]byte(certPEM))
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	if len(cert.DNSNames) == 0 {
-		t.Error("Certificate should have DNS SANs")
-	}
-
-	found := false
-	for _, dns := range cert.DNSNames {
-		if dns == "my-service.namespace.svc.cluster.local" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("Certificate DNS SANs should contain the common name, got: %v", cert.DNSNames)
-	}
-}
-
 func TestCA_Concurrent(t *testing.T) {
 	ca, err := NewTestCA(CAOptions{})
 	if err != nil {
@@ -226,7 +210,7 @@ func TestCA_Concurrent(t *testing.T) {
 	done := make(chan bool, 10)
 	for i := 0; i < 10; i++ {
 		go func(n int) {
-			_, _, err := ca.IssueCertificate("concurrent-test.local", 24)
+			_, _, err := ca.IssueCertificate("concurrent-test.local", nil, 24)
 			if err != nil {
 				t.Errorf("Concurrent IssueCertificate %d failed: %v", n, err)
 			}
@@ -240,31 +224,6 @@ func TestCA_Concurrent(t *testing.T) {
 	}
 }
 
-func TestCA_CertificateValidity(t *testing.T) {
-	ca, err := NewTestCA(CAOptions{})
-	if err != nil {
-		t.Fatalf("NewTestCA failed: %v", err)
-	}
-
-	ttlHours := 48
-	certPEM, _, err := ca.IssueCertificate("validity-test.local", ttlHours)
-	if err != nil {
-		t.Fatalf("IssueCertificate failed: %v", err)
-	}
-
-	block, _ := pem.Decode([]byte(certPEM))
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	// Check validity period is approximately correct (within 1 minute tolerance)
-	expectedDuration := time.Duration(ttlHours) * time.Hour
-	actualDuration := cert.NotAfter.Sub(cert.NotBefore)
-
-	tolerance := time.Minute
-	if actualDuration < expectedDuration-tolerance || actualDuration > expectedDuration+tolerance {
-		t.Errorf("Certificate validity period incorrect. Expected ~%v, got %v", expectedDuration, actualDuration)
-	}
-}
-
 func BenchmarkCA_IssueCertificate(b *testing.B) {
 	ca, err := NewTestCA(CAOptions{})
 	if err != nil {
@@ -273,7 +232,7 @@ func BenchmarkCA_IssueCertificate(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _, err := ca.IssueCertificate("benchmark.test.local", 24)
+		_, _, err := ca.IssueCertificate("benchmark.test.local", nil, 24)
 		if err != nil {
 			b.Fatalf("IssueCertificate failed: %v", err)
 		}
@@ -304,7 +263,7 @@ func TestLoadCAFromPEM(t *testing.T) {
 	}
 
 	// Issue a cert with the original CA
-	issuedCert1, _, err := ca2.IssueCertificate("test.example.com", 24)
+	issuedCert1, _, err := ca2.IssueCertificate("test.example.com", nil, 24)
 	if err != nil {
 		t.Fatalf("IssueCertificate failed: %v", err)
 	}

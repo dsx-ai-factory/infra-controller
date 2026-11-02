@@ -27,6 +27,7 @@ func StatusHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to construct health check response", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	_, err = w.Write(bytes)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to return health check response")

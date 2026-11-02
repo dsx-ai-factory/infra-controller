@@ -10,6 +10,7 @@
 # matches a real command.
 
 hardware:
+  - backend
   - machine
   - managed-host
   - host
@@ -59,6 +60,7 @@ network:
   - resource-pool
   - nvl-domain
   - spx-partition
+  - spx-maintenance
 
 tenant:
   - tenant
@@ -69,6 +71,8 @@ tenant:
   - expected-machine
   - expected-power-shelf
   - expected-rack
+  - expected-rack-group
+  - expected-nvlink-domain
   - expected-switch
   - operating-system
   - os-image

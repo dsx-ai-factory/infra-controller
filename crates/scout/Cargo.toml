@@ -42,6 +42,7 @@ carbide-version = { path = "../version" }
 carbide-utils = { path = "../utils" }
 carbide-machine-validation = { path = "../machine-validation" }
 carbide-libmlx = { path = "../libmlx" }
+carbide-libmlx-model = { path = "../libmlx-model" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 
 chrono = { workspace = true }
@@ -60,6 +61,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 tonic = { workspace = true }
 tryhard = { workspace = true }
 tss-esapi = { workspace = true }

@@ -56,7 +56,10 @@ var RackFilterFieldMap = map[string]flowv1.RackFilterField{
 	"model":        flowv1.RackFilterField_RACK_FILTER_FIELD_MODEL,
 }
 
-// RackOrderByFieldMap maps API field names to Flow protobuf order by enum
+// RackDefaultOrderBy is the deterministic REST ordering used when orderBy is omitted.
+const RackDefaultOrderBy = "NAME_ASC"
+
+// RackOrderByFieldMap maps API field names to Flow protobuf order by enum.
 var RackOrderByFieldMap = map[string]flowv1.RackOrderByField{
 	"name":         flowv1.RackOrderByField_RACK_ORDER_BY_FIELD_NAME,
 	"manufacturer": flowv1.RackOrderByField_RACK_ORDER_BY_FIELD_MANUFACTURER,
@@ -252,12 +255,15 @@ type APIRack struct {
 	Model        string `json:"model"`
 	SerialNumber string `json:"serialNumber"`
 	Description  string `json:"description"`
+	// OperationStatus is the operability phase aggregated from trays.
+	OperationStatus string `json:"operationStatus"`
 	// NVLinkDomainIDs identifies the NVLink Domains containing the Rack.
 	// It is empty when the Rack is not assigned to an NVLink Domain.
 	NVLinkDomainIDs []string            `json:"nvLinkDomainIds"`
 	Location        *APIRackLocation    `json:"location,omitempty"`
 	Components      []*APIRackComponent `json:"components,omitempty"`
 	TaskStats       APITaskStats        `json:"taskStats"`
+	Health          *APIAggregateHealth `json:"health"`
 }
 
 // FromProto converts an Flow protobuf Rack to an APIRack
@@ -267,6 +273,7 @@ func (ar *APIRack) FromProto(protoRack *flowv1.Rack, includeComponents bool) {
 	}
 
 	ar.ID = protoRack.GetExternalId()
+	ar.OperationStatus = enumOr(ProtoToAPIPhaseName, protoRack.GetOperationStatus(), "Unknown")
 	// Get info from DeviceInfo
 	if protoRack.GetInfo() != nil {
 		info := protoRack.GetInfo()
@@ -280,13 +287,13 @@ func (ar *APIRack) FromProto(protoRack *flowv1.Rack, includeComponents bool) {
 			ar.Description = *info.Description
 		}
 	}
-	ar.NVLinkDomainIDs = make([]string, 0, len(protoRack.GetNvlDomainIds()))
-	for _, domainID := range protoRack.GetNvlDomainIds() {
-		if domainID != nil {
-			ar.NVLinkDomainIDs = append(ar.NVLinkDomainIDs, domainID.GetId())
-		}
-	}
+	ar.NVLinkDomainIDs = append([]string{}, protoRack.GetNvlDomainExternalIds()...)
 	ar.TaskStats.FromProto(protoRack.GetTaskStats())
+	ar.Health = nil
+	if protoRack.GetHealth() != nil {
+		ar.Health = &APIAggregateHealth{}
+		ar.Health.FromFlowProto(protoRack.GetHealth())
+	}
 
 	// Get location
 	if protoRack.GetLocation() != nil {
@@ -353,22 +360,24 @@ func (ab *APIBMC) FromProto(protoBMC *flowv1.BMCInfo) {
 
 // APIRackComponent represents a component within a rack
 type APIRackComponent struct {
-	ID              string    `json:"id"`
-	RackID          string    `json:"rackId"`
-	Type            string    `json:"type"`
-	Name            string    `json:"name"`
-	SerialNumber    string    `json:"serialNumber"`
-	Manufacturer    string    `json:"manufacturer"`
-	Model           string    `json:"model"`
-	Description     string    `json:"description"`
-	FirmwareVersion string    `json:"firmwareVersion"`
-	SlotID          int32     `json:"slotId"`
-	TrayIdx         int32     `json:"trayIdx"`
-	HostID          int32     `json:"hostId"`
-	BMCs            []*APIBMC `json:"bmcs"`
-	PowerState      string    `json:"powerState"`
-	OperationStatus string    `json:"operationStatus"`
-	LeakStatus      string    `json:"leakStatus"`
+	ID                 string                `json:"id"`
+	RackID             string                `json:"rackId"`
+	Type               string                `json:"type"`
+	Name               string                `json:"name"`
+	SerialNumber       string                `json:"serialNumber"`
+	Manufacturer       string                `json:"manufacturer"`
+	Model              string                `json:"model"`
+	Description        string                `json:"description"`
+	FirmwareVersion    string                `json:"firmwareVersion"`
+	SlotID             int32                 `json:"slotId"`
+	TrayIdx            int32                 `json:"trayIdx"`
+	HostID             int32                 `json:"hostId"`
+	BMCs               []*APIBMC             `json:"bmcs"`
+	PowerState         string                `json:"powerState"`
+	OperationStatus    string                `json:"operationStatus"`
+	LeakStatus         string                `json:"leakStatus"`
+	LeakHandlingStatus APILeakHandlingStatus `json:"leakHandlingStatus"`
+	Health             *APIAggregateHealth   `json:"health"`
 }
 
 // FromProto converts a proto Component to an APIRackComponent
@@ -382,6 +391,16 @@ func (arc *APIRackComponent) FromProto(protoComponent *flowv1.Component) {
 	arc.PowerState = protoComponent.GetPowerState()
 	arc.OperationStatus = enumOr(ProtoToAPIPhaseName, protoComponent.GetStatus().GetPhase(), "Unknown")
 	arc.LeakStatus = enumOr(ProtoToAPILeakStatusName, protoComponent.GetLeakStatus(), "Unknown")
+	arc.LeakHandlingStatus = enumOr(
+		ProtoToAPILeakHandlingStatusName,
+		protoComponent.GetLeakHandlingStatus(),
+		APILeakHandlingStatusUnknown,
+	)
+	arc.Health = nil
+	if protoComponent.GetHealth() != nil {
+		arc.Health = &APIAggregateHealth{}
+		arc.Health.FromFlowProto(protoComponent.GetHealth())
+	}
 
 	// Get rack ID
 	arc.RackID = protoComponent.GetRackExternalId()

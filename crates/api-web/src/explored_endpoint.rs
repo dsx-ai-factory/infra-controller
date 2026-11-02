@@ -16,6 +16,7 @@
  */
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::{Form, Json};
 use carbide_api_core::{Api, DefaultCredential};
+use carbide_utils::HostPortPair;
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc, BmcEndpointRequest, admin_power_control_request};
@@ -142,6 +144,7 @@ struct ExploredManagedHostDisplay {
 }
 
 struct ExploredEndpointDisplay {
+    exploration_paused_for_dpf: bool,
     address: String,
     endpoint_type: String,
     last_exploration_latency: Option<i64>,
@@ -159,6 +162,7 @@ impl From<&ExploredEndpoint> for ExploredEndpointDisplay {
     fn from(ep: &ExploredEndpoint) -> Self {
         let report_ref = ep.report.as_ref();
         Self {
+            exploration_paused_for_dpf: ep.exploration_paused_for_dpf,
             address: ep.address.clone(),
             endpoint_type: report_ref
                 .map(|report| report.endpoint_type.clone())
@@ -430,6 +434,7 @@ async fn fetch_explored_endpoints(api: &Api) -> Result<SiteExplorationReport, to
 #[template(path = "explored_endpoint_detail.html")]
 struct ExploredEndpointDetail<'a> {
     endpoint: ExploredEndpoint,
+    redfish_url: String,
     has_exploration_error: bool,
     last_exploration_error: String,
     machine_setup_status: String,
@@ -491,6 +496,12 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
             lockdown_status: lockdown_status_to_string(
                 report_ref.and_then(|report| report.lockdown_status.as_ref()),
             ),
+            redfish_url: format!(
+                "https://{}/redfish/v1",
+                HostPortPair::HostOnly(endpoint_info.endpoint.address.clone())
+                    .url_host()
+                    .expect("HostOnly always contains a host")
+            ),
             endpoint: endpoint_info.endpoint,
             credentials_set: endpoint_info.credentials_set,
             has_machine: endpoint_info.has_machine,
@@ -521,11 +532,16 @@ async fn fetch_explored_endpoint(
         }
     };
 
-    let endpoint: ExploredEndpoint = match report
-        .endpoints
-        .into_iter()
-        .find(|ep| ep.address.trim() == endpoint_ip.trim())
-    {
+    let Ok(endpoint_address) = endpoint_ip.trim().parse::<IpAddr>() else {
+        return Err(super::not_found_response(endpoint_ip).into_response());
+    };
+
+    let endpoint: ExploredEndpoint = match report.endpoints.into_iter().find(|ep| {
+        ep.address
+            .trim()
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address == endpoint_address)
+    }) {
         Some(ep) => ep,
         None => {
             return Err(super::not_found_response(endpoint_ip).into_response());
@@ -689,7 +705,10 @@ pub(super) async fn refresh_endpoint(
                 .unwrap_or_default();
             (
                 StatusCode::OK,
-                Json(serde_json::json!({ "has_exploration_error": has_error })),
+                Json(serde_json::json!({
+                    "has_exploration_error": has_error,
+                    "exploration_requested": ep.exploration_requested,
+                })),
             )
                 .into_response()
         }
@@ -1348,9 +1367,13 @@ mod tests {
     use std::collections::HashMap;
 
     use askama::Template;
+    use carbide_test_support::value_scenarios;
     use rpc::site_explorer::{EndpointExplorationReport, ExploredEndpoint, OperatorErrorSchema};
 
-    use super::{ExploredEndpointDisplay, ExploredEndpointsShow, query_filter_for};
+    use super::{
+        ExploredEndpointDetail, ExploredEndpointDisplay, ExploredEndpointInfo,
+        ExploredEndpointsShow, query_filter_for,
+    };
     use crate::pagination::PageContext;
 
     fn endpoint(address: &str, schema: Option<OperatorErrorSchema>) -> ExploredEndpoint {
@@ -1362,6 +1385,38 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn detail_form_uses_ipv4_and_ipv6_redfish_urls() {
+        value_scenarios!(run = |address| {
+            let rendered = ExploredEndpointDetail::from(ExploredEndpointInfo {
+                endpoint: endpoint(address, None),
+                credentials_set: "Not Configured".to_string(),
+                has_machine: false,
+            })
+            .render()
+            .expect("detail template renders");
+            assert!(
+                rendered.contains(&format!("<h1>Endpoint {address}</h1>")),
+                "detail heading preserves bare address {address}",
+            );
+            let url = rendered
+                .split_once(r#"name="url" value=""#)
+                .expect("Redfish URL input exists")
+                .1
+                .split_once('"')
+                .expect("Redfish URL value closes")
+                .0;
+            url.to_string()
+        };
+            "IPv4" {
+                "192.0.2.10" => "https://192.0.2.10/redfish/v1".to_string(),
+            }
+            "IPv6" {
+                "2001:db8::10" => "https://[2001:db8::10]/redfish/v1".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1402,5 +1457,41 @@ mod tests {
         assert!(rendered.contains("192.0.2.20"));
         assert!(rendered.contains("192.0.2.21"));
         assert_eq!(rendered.matches("clearlasterror_action").count(), 1);
+    }
+    #[test]
+    fn provisioning_pause_allows_queued_refresh_but_disables_re_exploration() {
+        for paused in [false, true] {
+            let mut ep = endpoint("192.0.2.10", None);
+            ep.exploration_paused_for_dpf = paused;
+            let html = ExploredEndpointDetail::from(ExploredEndpointInfo {
+                endpoint: ep,
+                credentials_set: "Configured".to_string(),
+                has_machine: true,
+            })
+            .render()
+            .unwrap();
+            assert_eq!(html.contains("Queue refresh"), paused);
+            let refresh_label = if paused {
+                "Queue refresh of endpoint report"
+            } else {
+                "Explore endpoint report"
+            };
+            assert!(html.contains(&format!("aria-label=\"{refresh_label}\"")));
+            assert_eq!(
+                html.contains(
+                    "queued refresh requests run after all Site Explorer suppressions are cleared"
+                ),
+                paused
+            );
+            assert_eq!(
+                html.contains("disabled title=\"Exploration paused during DPU provisioning\""),
+                paused
+            );
+            assert!(html.contains("<a id=\"refresh-endpoint\""));
+            assert_eq!(
+                html.contains("Re-exploration requests are rejected"),
+                paused
+            );
+        }
     }
 }

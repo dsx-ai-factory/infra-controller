@@ -1,0 +1,35 @@
+suite: DPF RBAC
+templates:
+  - dpf-rbac.yaml
+tests:
+  - it: scopes shared BMC Secret updates to the derived Secret
+    documentIndex: 0
+    set:
+      dpf.rbacCreate: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["create"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            resourceNames: ["bmc-shared-password"]
+            verbs: ["get", "patch"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["get", "create"]
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            resourceNames: ["bmc-shared-password"]
+            verbs: ["delete"]

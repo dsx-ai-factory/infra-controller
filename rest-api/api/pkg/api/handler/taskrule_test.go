@@ -20,7 +20,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -30,7 +29,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
@@ -84,8 +82,6 @@ func TestCreateRuleHandler_Handle(t *testing.T) {
 	tenantUser := testRackBuildUser(t, dbSession, "tenant-user-rule-create", org, []string{authz.TenantAdminRole})
 
 	handler := NewCreateTaskRuleHandler(dbSession, nil, scp, cfg)
-
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	tests := []struct {
 		name           string
@@ -172,9 +168,6 @@ func TestCreateRuleHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
-
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
 
@@ -227,8 +220,6 @@ func TestGetRuleHandler_Handle(t *testing.T) {
 		CreatedAt:          timestamppb.Now(),
 		UpdatedAt:          timestamppb.Now(),
 	}
-
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	tests := []struct {
 		name           string
@@ -300,8 +291,6 @@ func TestGetRuleHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(org, tt.ruleID)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -348,8 +337,6 @@ func TestListRulesHandler_Handle(t *testing.T) {
 			UpdatedAt:          timestamppb.Now(),
 		},
 	}
-
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	tests := []struct {
 		name           string
@@ -436,8 +423,6 @@ func TestListRulesHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(org)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -470,7 +455,6 @@ func TestUpdateRuleHandler_Handle(t *testing.T) {
 	handler := NewUpdateTaskRuleHandler(dbSession, nil, scp, cfg)
 
 	ruleID := uuid.New().String()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	name := "renamed"
 	tests := []struct {
@@ -546,8 +530,6 @@ func TestUpdateRuleHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(org, tt.ruleID)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -582,7 +564,6 @@ func TestDeleteRuleHandler_Handle(t *testing.T) {
 	handler := NewDeleteTaskRuleHandler(dbSession, nil, scp, cfg)
 
 	ruleID := uuid.New().String()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	tests := []struct {
 		name           string
@@ -642,8 +623,6 @@ func TestDeleteRuleHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(org, tt.ruleID)
 			ec.Set("user", tt.user)
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			_ = handler.Handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())

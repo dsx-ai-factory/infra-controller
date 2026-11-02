@@ -9,6 +9,7 @@ metadata:
     app: {{ include "nico-api.name" . }}
     app.kubernetes.io/metrics: {{ include "nico-api.name" . }}-object-metrics
 spec:
+  ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-api.selectorLabels" . | nindent 4 }}
   ports:

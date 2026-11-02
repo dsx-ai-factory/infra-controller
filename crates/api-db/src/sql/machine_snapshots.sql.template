@@ -6,6 +6,7 @@
 
 SELECT
 m.*,
+COALESCE(nic_firmware.json, '[]') AS nic_firmware_card_selections,
 boot_interface.desired_mac_address AS desired_boot_interface_mac,
 boot_interface.desired_interface_id AS desired_boot_interface_id,
 boot_interface.desired_version AS desired_boot_interface_version,
@@ -20,6 +21,14 @@ COALESCE(t.json, '[]') AS topology,
 COALESCE(bmc.json, t.bmc_info - 'ip' - 'mac', '{}'::jsonb) AS bmc_info
 __HISTORY_SELECT__
 FROM machines m
+LEFT JOIN LATERAL (
+    SELECT json_agg(json_build_object(
+        'selector', card.selector,
+        'profile_id', card.profile_id
+    ) ORDER BY card.selector) AS json
+    FROM machine_nic_firmware_overrides card
+    WHERE card.machine_id = m.id
+) AS nic_firmware ON true
 LEFT JOIN machine_boot_interfaces boot_interface
     ON boot_interface.machine_id = m.id
 LEFT JOIN machine_skus sku on  m.hw_sku = sku.id
@@ -41,7 +50,7 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) AS t ON true
 
--- (2) Read the linked BMC interface as JSON
+-- (2) Read the BMC interface selected by topology as JSON
 LEFT JOIN LATERAL (
     SELECT jsonb_strip_nulls(
         COALESCE(t.bmc_info, '{}'::jsonb) ||
@@ -61,6 +70,10 @@ LEFT JOIN LATERAL (
     ) AS bmc_addr ON true
     WHERE bmc_i.machine_id = m.id
       AND bmc_i.interface_type = 'Bmc'
+      AND (
+          t.bmc_info->>'machine_interface_id' IS NULL
+          OR bmc_i.id::text = t.bmc_info->>'machine_interface_id'
+      )
     ORDER BY bmc_i.created ASC
     LIMIT 1
 ) AS bmc ON true

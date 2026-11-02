@@ -15,11 +15,10 @@
  * limitations under the License.
  */
 
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
 use mac_address::MacAddress;
 use uuid::Uuid;
-
-use crate::errors::CarbideCliError;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -38,20 +37,28 @@ Show one expected power shelf by ID:
 pub(crate) struct Args {
     #[clap(
         default_value(None),
-        help = "BMC MAC address of the expected power shelf to show. Leave unset for all."
+        help = "BMC MAC address of the expected power shelf to show. Omit both this address and --id to list all expected power shelves."
     )]
     bmc_mac_address: Option<MacAddress>,
 
-    #[clap(long, help = "ID (UUID) of the expected power shelf to show.")]
+    #[clap(
+        long,
+        help = "ID (UUID) of the expected power shelf to show. Cannot be combined with a BMC MAC address."
+    )]
     id: Option<Uuid>,
 }
 
 impl TryFrom<Args> for Option<rpc::forge::ExpectedPowerShelfRequest> {
-    type Error = CarbideCliError;
+    type Error = clap::Error;
 
     fn try_from(args: Args) -> Result<Self, Self::Error> {
         match (args.bmc_mac_address, args.id) {
-            (Some(_), Some(_)) => Err(CarbideCliError::ChooseOneError("--bmc-mac-address", "--id")),
+            (Some(_), Some(_)) => Err(Args::command()
+                .bin_name("nico-admin-cli expected-power-shelf show")
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "cannot specify both a BMC MAC address and --id; provide only one",
+                )),
             (None, Some(id)) => Ok(Some(rpc::forge::ExpectedPowerShelfRequest {
                 bmc_mac_address: String::new(),
                 expected_power_shelf_id: Some(::rpc::common::Uuid {

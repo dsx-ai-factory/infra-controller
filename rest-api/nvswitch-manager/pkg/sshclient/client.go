@@ -9,9 +9,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/objects/nvos"
@@ -54,7 +56,7 @@ func NewWithPort(ctx context.Context, n *nvos.NVOS, port int) (*NVOSClient, erro
 		Timeout:         30 * time.Second,
 	}
 
-	addr := fmt.Sprintf("%s:%d", n.IP.String(), port)
+	addr := net.JoinHostPort(n.IP.String(), strconv.Itoa(port))
 	client, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NVOS at %s: %v", addr, err)

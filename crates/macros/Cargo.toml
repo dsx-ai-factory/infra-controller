@@ -32,5 +32,9 @@ quote = { workspace = true, default-features = false }
 sqlx-macros-core = { workspace = true }
 syn = { workspace = true }
 
+[dev-dependencies]
+carbide-test-support = { path = "../test-support" }
+carbide-uuid = { path = "../uuid" }
+
 [lints]
 workspace = true

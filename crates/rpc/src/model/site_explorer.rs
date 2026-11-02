@@ -28,10 +28,22 @@ use model::site_explorer::{
 };
 
 use crate as rpc;
+use crate::errors::RpcDataConversionError;
+use crate::model::machine::machine_id::try_parse_machine_id;
 
-impl From<rpc::site_explorer::ExploredEndpointSearchFilter> for ExploredEndpointSearchFilter {
-    fn from(_filter: rpc::site_explorer::ExploredEndpointSearchFilter) -> Self {
-        ExploredEndpointSearchFilter {}
+impl TryFrom<rpc::site_explorer::ExploredEndpointSearchFilter> for ExploredEndpointSearchFilter {
+    type Error = RpcDataConversionError;
+
+    fn try_from(
+        filter: rpc::site_explorer::ExploredEndpointSearchFilter,
+    ) -> Result<Self, Self::Error> {
+        Ok(ExploredEndpointSearchFilter {
+            machine_id: filter
+                .machine_id
+                .as_deref()
+                .map(try_parse_machine_id)
+                .transpose()?,
+        })
     }
 }
 
@@ -74,6 +86,7 @@ impl From<ExploredEndpoint> for rpc::site_explorer::ExploredEndpoint {
             report: Some(endpoint.report.into()),
             report_version: endpoint.report_version.to_string(),
             exploration_requested: endpoint.exploration_requested,
+            exploration_paused_for_dpf: false,
             preingestion_state: format!("{:?}", endpoint.preingestion_state),
             last_redfish_bmc_reset: endpoint
                 .last_redfish_bmc_reset
@@ -1165,6 +1178,7 @@ mod tests {
                     description: Some("BMC firmware".to_string()),
                     version: Some("25.06-2".to_string()),
                     release_date: Some("2026-06-01".to_string()),
+                    drive: None,
                 } => rpc::site_explorer::Inventory {
                     id: "inventory-1".to_string(),
                     description: Some("BMC firmware".to_string()),
@@ -1346,6 +1360,7 @@ mod tests {
                     description: Some("BMC firmware".to_string()),
                     version: Some("25.06-2".to_string()),
                     release_date: Some("2026-06-01".to_string()),
+                    drive: None,
                 }],
             }],
             machine_id: Some(machine_id),

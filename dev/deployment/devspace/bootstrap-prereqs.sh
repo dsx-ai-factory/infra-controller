@@ -158,6 +158,20 @@ metadata:
   name: forge-system
 ---
 apiVersion: v1
+kind: Service
+metadata:
+  name: nico-ntp-client
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app.kubernetes.io/name: nico-ntp
+  ports:
+    - name: ntp
+      port: 123
+      targetPort: 123
+      protocol: UDP
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: nico-system.nico.nico-pg-cluster.credentials
@@ -166,7 +180,7 @@ type: Opaque
 stringData:
   username: ${POSTGRES_USER}
   password: ${POSTGRES_PASSWORD}
-  host: ${POSTGRES_HOST}
+  host: "${POSTGRES_HOST}"
   port: "${POSTGRES_PORT}"
   dbname: ${POSTGRES_DB}
   uri: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
@@ -177,7 +191,7 @@ metadata:
   name: nico-system-nico-database-config
   namespace: ${NAMESPACE}
 data:
-  DB_HOST: ${POSTGRES_HOST}
+  DB_HOST: "${POSTGRES_HOST}"
   DB_PORT: "${POSTGRES_PORT}"
   DB_NAME: ${POSTGRES_DB}
 ---
@@ -339,14 +353,15 @@ spec:
         - name: vault
           image: hashicorp/vault:1.20.2
           imagePullPolicy: IfNotPresent
+          # Vault's IPv6 wildcard serves IPv6 probes and IPv4 bootstrap requests.
           args:
             - server
             - -dev
-            - -dev-listen-address=0.0.0.0:8200
+            - -dev-listen-address=[::]:8200
             - -dev-root-token-id=${VAULT_TOKEN}
           env:
             - name: VAULT_DEV_LISTEN_ADDRESS
-              value: 0.0.0.0:8200
+              value: "[::]:8200"
           ports:
             - containerPort: 8200
               name: http
@@ -686,11 +701,17 @@ install_keycloak() {
 
 write_generated_values() {
   local disable_tls_enforcement=""
+  local core_extra_env
   local automount="true"
 
   if [[ "${POSTGRES_SSL_MODE}" == "disable" ]]; then
     disable_tls_enforcement=$'  extraEnv:\n    - name: DISABLE_TLS_ENFORCEMENT\n      value: "1"'
   fi
+
+  # Generated Helm values replace extraEnv lists from values.base.yaml.
+  # Unoptimized ARM64 Core builds need a larger Tokio worker-thread stack.
+  core_extra_env="${disable_tls_enforcement:-  extraEnv:}"
+  core_extra_env+=$'\n    - name: RUST_MIN_STACK\n      value: "8388608"'
 
   if [[ "${VAULT_AUTH_MODE}" == "root-token" ]]; then
     automount="false"
@@ -724,7 +745,7 @@ EOF
     NICO_VAULT_MOUNT: ${VAULT_KV_MOUNT}
     NICO_VAULT_PKI_MOUNT: ${VAULT_PKI_MOUNT}
   databaseConfig: {}
-${disable_tls_enforcement}
+${core_extra_env}
 
 nico-bmc-proxy:
   automountServiceAccountToken: ${automount}
@@ -739,6 +760,10 @@ EOF
 }
 
 print_summary() {
+  local profile="full"
+  if [[ "${INSTALL_REST_PREREQS}" == "0" ]]; then
+    profile="core-only"
+  fi
   cat <<EOF
 
 Bootstrap complete.
@@ -751,8 +776,9 @@ Cert issuer: ${CERT_ISSUER_KIND}/${CERT_ISSUER_NAME}
 REST prerequisites: ${INSTALL_REST_PREREQS}
 
 Next step:
-  cd ${REPO_ROOT} && devspace deploy -n ${NAMESPACE}
 EOF
+  printf '  cd %q && devspace deploy -n %q --profile %q\n' \
+    "${REPO_ROOT}" "${NAMESPACE}" "${profile}"
 }
 
 main() {
@@ -762,6 +788,7 @@ main() {
 
   install_cert_manager
   apply_core_objects
+  bash "${REPO_ROOT}/helm-prereqs/bootstrap_ssh_host_key.sh" "${NAMESPACE}"
   apply_local_postgres
   apply_local_vault
   load_admin_root_cert_pem

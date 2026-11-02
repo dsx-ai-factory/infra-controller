@@ -395,18 +395,17 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                     string
-		fields                   fields
-		args                     args
-		updatedVpcPrefix         *cdbm.VpcPrefix
-		deletingVpcPrefixes      []*cdbm.VpcPrefix
-		readyVpcPrefixes         []*cdbm.VpcPrefix
-		deletedStatusVpcPrefixes []*cdbm.VpcPrefix
-		deletedVpcPrefixes       []*cdbm.VpcPrefix
-		missingVpcPrefixes       []*cdbm.VpcPrefix
-		restoredVpcPrefixes      []*cdbm.VpcPrefix
-		unpairedVpcPrefixes      []*cdbm.VpcPrefix
-		wantErr                  bool
+		name                string
+		fields              fields
+		args                args
+		updatedVpcPrefix    *cdbm.VpcPrefix
+		deletingVpcPrefixes []*cdbm.VpcPrefix
+		readyVpcPrefixes    []*cdbm.VpcPrefix
+		deletedVpcPrefixes  []*cdbm.VpcPrefix
+		missingVpcPrefixes  []*cdbm.VpcPrefix
+		restoredVpcPrefixes []*cdbm.VpcPrefix
+		unpairedVpcPrefixes []*cdbm.VpcPrefix
+		wantErr             bool
 	}{
 		{
 			name: "test Vpc Prefix inventory processing error, non-existent Site",
@@ -482,13 +481,12 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 					},
 				},
 			},
-			updatedVpcPrefix:         vpcPrefix12,
-			deletingVpcPrefixes:      []*cdbm.VpcPrefix{vpcPrefix3, vpcPrefix4, vpcPrefix10, vpcPrefix13},
-			deletedStatusVpcPrefixes: []*cdbm.VpcPrefix{vpcPrefix14},
-			deletedVpcPrefixes:       []*cdbm.VpcPrefix{vpcPrefix5, vpcPrefix6},
-			missingVpcPrefixes:       []*cdbm.VpcPrefix{vpcPrefix7, vpcPrefix11},
-			restoredVpcPrefixes:      []*cdbm.VpcPrefix{vpcPrefix8},
-			wantErr:                  false,
+			updatedVpcPrefix:    vpcPrefix12,
+			deletingVpcPrefixes: []*cdbm.VpcPrefix{vpcPrefix3, vpcPrefix4, vpcPrefix10, vpcPrefix13, vpcPrefix14},
+			deletedVpcPrefixes:  []*cdbm.VpcPrefix{vpcPrefix5, vpcPrefix6},
+			missingVpcPrefixes:  []*cdbm.VpcPrefix{vpcPrefix7, vpcPrefix11},
+			restoredVpcPrefixes: []*cdbm.VpcPrefix{vpcPrefix8},
+			wantErr:             false,
 		},
 		{
 			name: "test paged Vpc Prefix inventory processing, empty inventory",
@@ -595,12 +593,6 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 				rv, _ := vpcPrefixDAO.GetByID(ctx, nil, vpcPrefix.ID, nil)
 				assert.False(t, rv.IsMissingOnSite)
 				assert.Equal(t, cdbm.VpcPrefixStatusDeleting, rv.Status)
-			}
-
-			for _, vpcPrefix := range tt.deletedStatusVpcPrefixes {
-				rv, _ := vpcPrefixDAO.GetByID(ctx, nil, vpcPrefix.ID, nil)
-				assert.False(t, rv.IsMissingOnSite)
-				assert.Equal(t, cdbm.VpcPrefixStatusDeleted, rv.Status)
 			}
 
 			for _, vpcPrefix := range tt.deletedVpcPrefixes {
@@ -1058,6 +1050,25 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 		ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
 	)
 	require.NoError(t, err)
+	_, err = cdbm.NewIPBlockDAO(dbSession).Create(
+		ctx,
+		nil,
+		cdbm.IPBlockCreateInput{
+			Name:                     "tenant-site-prefix",
+			SiteID:                   site.ID,
+			InfrastructureProviderID: provider.ID,
+			TenantID:                 &authorizedTenant.ID,
+			SitePrefixID:             cutil.GetPtr(uuid.New()),
+			Managed:                  cutil.GetPtr(false),
+			RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+			Prefix:                   "10.6.0.0",
+			PrefixLength:             16,
+			ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
+			Status:                   cdbm.IPBlockStatusReady,
+			CreatedBy:                &authorizedTenantUser.ID,
+		},
+	)
+	require.NoError(t, err)
 	ipamer := cipam.NewWithStorage(ipamStorage)
 	ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
 		ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
@@ -1182,6 +1193,19 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 			},
 			wantVpcPrefix: true,
 			wantName:      "rest-id-parent-vpc-prefix",
+		},
+		{
+			name: "ignores a more-specific TenantManaged SitePrefix without legacy IPAM",
+			controllerVpcPrefix: &corev1.VpcPrefix{
+				Id:    &corev1.VpcPrefixId{Value: uuid.NewString()},
+				VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+				Config: &corev1.VpcPrefixConfig{
+					Prefix: "10.6.1.0/24",
+				},
+				Metadata: &corev1.Metadata{Name: "tenant-site-prefix-child"},
+			},
+			wantVpcPrefix: true,
+			wantName:      "tenant-site-prefix-child",
 		},
 	}
 

@@ -20,11 +20,13 @@
 #include <dhcp/option6_ia.h>
 #include <dhcp/option6_iaaddr.h>
 #include <dhcp/option6_status_code.h>
+#include <vector>
 
 isc::log::Logger logger("carbide-callouts");
 
 const int IPV4_ADDR_SIZEB = 4;
 const int IPV6_ADDR_SIZEB = 16;
+const char REQUESTED_PREFIX_IAIDS[] = "requested_prefix_iaids";
 
 const uint8_t *nullable_data(const OptionBuffer &buffer) {
   return buffer.empty() ? nullptr : buffer.data();
@@ -386,13 +388,6 @@ update_discovery_parameters(Pkt4Ptr query4_ptr, DiscoveryBuilderFFI *discovery,
   if (option_val) {
     LOG_INFO(logger, isc::log::LOG_CARBIDE_GENERIC).arg(option_val->toText());
     return update_discovery_parameters(discovery, option, option_val);
-  } else {
-    if (option != DHO_DHCP_AGENT_OPTIONS) {
-      // TODO: Does this mean we rather should return an error here?
-      LOG_ERROR(logger,
-                "LOG_CARBIDE_PKT4_RECEIVE: Missing option [%1] in packet")
-          .arg(option);
-    }
   }
 
   return DiscoveryBuilderResult::Success;
@@ -450,7 +445,8 @@ void set_options(CalloutHandle &handle, Pkt4Ptr response4_ptr,
 }
 
 void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
-                    Pkt6Ptr response6_ptr, Machine *machine) {
+                    Pkt6Ptr response6_ptr, Machine *machine,
+                    bool rapid_commit) {
   try {
     // DNS servers: DHCPv6 option 23 is a flat IPv6 address list.
     add_or_replace_option6(response6_ptr, D6O_NAME_SERVERS,
@@ -469,8 +465,32 @@ void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
     // because the response payload depends on the client's requested flags.
     add_client_fqdn_option6(query6_ptr, response6_ptr, machine);
 
-    if (machine_get_rapid_commit_v6(machine)) {
-      response6_ptr->delOption(D6O_RAPID_COMMIT);
+    // Kea copies the selected payloads. Empty selections leave any independently
+    // configured native Kea option-data unchanged.
+    if (query6_ptr) {
+      DhcpV6BootOptions boot = machine_get_boot_options_ipv6(
+          machine, nullable_data(query6_ptr->data_), query6_ptr->data_.size());
+      DhcpByteBufferGuard url(boot.url);
+      DhcpByteBufferGuard vendor(boot.vendor_class);
+      DhcpByteBufferGuard architecture(boot.architecture);
+      if (!url.empty()) {
+        add_or_replace_option6(response6_ptr, D6O_BOOTFILE_URL,
+                               url.optionBuffer());
+      }
+      if (!vendor.empty()) {
+        add_or_replace_option6(response6_ptr, D6O_VENDOR_CLASS,
+                               vendor.optionBuffer());
+      }
+      if (!architecture.empty()) {
+        add_or_replace_option6(response6_ptr, D6O_CLIENT_ARCH_TYPE,
+                               architecture.optionBuffer());
+      }
+    }
+
+    // The receive-side decision is authoritative; replace any Kea-provided
+    // copy so an eligible REPLY carries option 14 exactly once.
+    response6_ptr->delOption(D6O_RAPID_COMMIT);
+    if (rapid_commit) {
       response6_ptr->addOption(OptionPtr(new Option(Option::V6, D6O_RAPID_COMMIT)));
     }
   } catch (exception &e) {
@@ -504,6 +524,12 @@ int get_carbide_lease6_address(CalloutHandle &handle, Lease6Ptr lease6,
   if (!lease6) {
     LOG_ERROR(logger, "LOG_CARBIDE_LEASE6_OVERRIDE: %1")
         .arg(hook_name + ": Missing lease6 argument");
+    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+    return 1;
+  }
+
+  // Lease-type policy must precede address comparison on every allocation path.
+  if (lease6->type_ != Lease::TYPE_NA) {
     handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
     return 1;
   }
@@ -1217,6 +1243,22 @@ int pkt6_receive(CalloutHandle &handle) {
     return 0;
   }
 
+  const bool rapid_commit =
+      hook_get_config_rapid_commit_v6() &&
+      query6_ptr->getType() == DHCPV6_SOLICIT &&
+      query6_ptr->getOption(D6O_IA_NA) &&
+      query6_ptr->getOption(D6O_RAPID_COMMIT);
+  handle.setContext("rapid_commit_v6", rapid_commit);
+
+  // Kea must not enter its native two-message flow unless both the server
+  // gate and the client's stateful opt-in are present. The original wire
+  // bytes remain available to Rust for the API message-kind decision.
+  if (!rapid_commit) {
+    // Kea stores DHCPv6 options in a multimap and removes one per call.
+    while (query6_ptr->delOption(D6O_RAPID_COMMIT)) {
+    }
+  }
+
   uint8_t hop_count = 0;
   OptionBuffer relay_link;
   OptionBuffer interface_id;
@@ -1243,6 +1285,26 @@ int pkt6_receive(CalloutHandle &handle) {
       machine_free(ptr);
     });
     handle.setContext("machine", machinePtr);
+    // Existing leases can bypass lease6_select, and renewal SKIP still lets
+    // Kea return an old prefix. Keep IA_PD out of allocation entirely, then
+    // return an IA-scoped refusal without disrupting the address exchange.
+    std::vector<uint32_t> prefix_iaids;
+    const auto message_type = query6_ptr->getType();
+    if (query6_ptr->getOption(D6O_IA_NA) &&
+        (message_type == DHCPV6_SOLICIT || message_type == DHCPV6_REQUEST ||
+         message_type == DHCPV6_RENEW || message_type == DHCPV6_REBIND)) {
+      while (OptionPtr option = query6_ptr->getOption(D6O_IA_PD)) {
+        Option6IAPtr ia_pd = boost::dynamic_pointer_cast<Option6IA>(option);
+        if (!ia_pd) {
+          handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+          record_dropped_v6_request("invalid_packet");
+          return 1;
+        }
+        prefix_iaids.push_back(ia_pd->getIAID());
+        query6_ptr->delOption(D6O_IA_PD);
+      }
+    }
+    handle.setContext(REQUESTED_PREFIX_IAIDS, prefix_iaids);
     // CONFIRM cache hits must be visible as top-level Success in pkt6_send.
     if (query6_ptr->getType() == DHCPV6_CONFIRM) {
       handle.setContext("confirm_on_link", true);
@@ -1326,6 +1388,24 @@ int pkt6_send(CalloutHandle &handle) {
     return 1;
   }
 
+  bool rapid_commit = false;
+  try {
+    handle.getContext("rapid_commit_v6", rapid_commit);
+  } catch (...) {
+    rapid_commit = false;
+  }
+
+  // Core already used committed-request semantics for this exchange. Never
+  // send a response unless Kea completed the corresponding native transition.
+  if (rapid_commit && response6_ptr->getType() != DHCPV6_REPLY) {
+    LOG_ERROR(
+        logger,
+        "LOG_CARBIDE_PKT6_SEND: dropping Rapid Commit exchange because Kea produced DHCPv6 message type %1 instead of REPLY")
+        .arg(static_cast<unsigned int>(response6_ptr->getType()));
+    handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+    return 1;
+  }
+
   // CONFIRM cache validation can produce a status-only response without a
   // Machine context.
   bool confirm_not_on_link = false;
@@ -1396,7 +1476,17 @@ int pkt6_send(CalloutHandle &handle) {
     add_status6(response6_ptr, STATUS_Success, "success");
   }
 
-  set_options_v6(handle, query6_ptr, response6_ptr, machine.get());
+  std::vector<uint32_t> prefix_iaids;
+  handle.getContext(REQUESTED_PREFIX_IAIDS, prefix_iaids);
+  for (const auto iaid : prefix_iaids) {
+    Option6IAPtr ia_pd(new Option6IA(D6O_IA_PD, iaid));
+    ia_pd->addOption(OptionPtr(new Option6StatusCode(
+        STATUS_NoPrefixAvail, "prefix delegation is not supported")));
+    response6_ptr->addOption(ia_pd);
+  }
+
+  set_options_v6(handle, query6_ptr, response6_ptr, machine.get(),
+                 rapid_commit);
 
   // Record the final outbound packet after hook-managed options/status have
   // been applied.

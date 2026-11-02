@@ -15,13 +15,16 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use carbide_instrument::{Event, emit, red};
 use carbide_rack::firmware_object::{
-    ANY_RACK_HARDWARE_TYPE, profile_hardware_type_wire_value, rms_access_token_or_noauth,
+    ANY_RACK_HARDWARE_TYPE, RMS_NOAUTH_ACCESS_TOKEN, profile_hardware_type_wire_value,
+    rms_access_token_or_noauth,
 };
 use carbide_rack::firmware_update::{build_new_node_info, firmware_type_for_profile};
 use carbide_rack::rms_node_type::{
@@ -30,42 +33,54 @@ use carbide_rack::rms_node_type::{
     switch_node_identity_for_profile,
 };
 use carbide_secrets::credentials::Credentials;
-use carbide_uuid::rack::RackProfileId;
+use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::switch::SwitchId;
 use db::direct_dispatch_firmware_job::FirmwareJobKind;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
 use mac_address::MacAddress;
 use model::component_manager::{
     ComputeTrayComponent, ConfigureSwitchCertificateState, FirmwareState, NvSwitchComponent,
-    PowerAction, PowerShelfComponent,
+    PowerAction, PowerShelfComponent, SwitchCertificateFailure, SwitchCertificateNodeFailure,
 };
-use model::rack::{NvosUpdateJob, NvosUpdateSwitchStatus};
+use model::machine::PowerState;
+use model::rack::{
+    FirmwareProgressState, FirmwareUpgradeDeviceInfo, FirmwareUpgradeDeviceStatus,
+    FirmwareUpgradeJob, NvosUpdateJob, NvosUpdateSwitchStatus,
+};
 use model::rack_type::{RackHardwareTopology, RackProfile, RackProfileConfig};
 use model::switch::{FabricManagerState, FabricManagerStatus};
 use serde::Deserialize;
 use sqlx::PgPool;
+use tokio::time::{Instant, timeout_at};
 use tracing::instrument;
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::compute_tray_manager::{
     Backend as ComputeTrayBackend, ComputeTrayEndpoint, ComputeTrayFirmwareUpdateStatus,
     ComputeTrayManager, ComputeTrayResult,
 };
 use crate::config::ComponentManagerConfig;
 use crate::error::ComponentManagerError;
+use crate::machine_info_provider::{
+    MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
+};
 use crate::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
     ScaleUpFabricManagerJobStatus, ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses,
-    ScaleUpFabricStatus, ScaleUpFabricSwitchStatus, SwitchComponentResult, SwitchEndpoint,
-    SwitchFactoryResetJobStatus, SwitchFactoryResetState, SwitchFirmwareUpdateStatus,
-    SwitchPasswordRotationState, SwitchPowerStateResult, SwitchSlotAndTrayResult,
+    ScaleUpFabricStatus, ScaleUpFabricSwitchStatus, SwitchCertificateEndpoint,
+    SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
+    SwitchFirmwareUpdateStatus, SwitchMtlsDisableJobStatus, SwitchMtlsDisableState,
+    SwitchPasswordRotationState, SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     Backend as PowerShelfBackend, PowerShelfComponentResult, PowerShelfEndpoint,
     PowerShelfFirmwareUpdateStatus, PowerShelfFirmwareVersions, PowerShelfManager,
-    PowerShelfPowerStateResult,
 };
 use crate::types::FirmwareUpdateOptions;
-use crate::{NvosUpdateManager, NvosUpdateRequest};
+use crate::{
+    NvosUpdateManager, NvosUpdateRequest, RackFirmwareUpdateManager, RackFirmwareUpdateRequest,
+};
 
 /// Common RMS identity needed to address a device in RMS.
 #[derive(Clone)]
@@ -81,6 +96,20 @@ struct RmsIdentity {
 /// rack identity comes straight from the expected inventory.
 impl From<db::expected_switch::PreIngestionSwitchRmsIdentity> for RmsIdentity {
     fn from(row: db::expected_switch::PreIngestionSwitchRmsIdentity) -> Self {
+        Self {
+            node_id: row.bmc_mac_address.to_string(),
+            rack_id: row.rack_id.to_string(),
+            rack_profile_id: row.rack_profile_id,
+        }
+    }
+}
+
+/// A pre-ingestion power shelf has no `power_shelves` row, so its PMC MAC is the
+/// opaque RMS `node_id` (RMS treats `node_id` as a string, and the request also
+/// carries the full node descriptor and endpoints). Every power shelf is
+/// rack-scale, so the rack identity comes straight from the expected inventory.
+impl From<db::expected_power_shelf::PreIngestionPowerShelfRmsIdentity> for RmsIdentity {
+    fn from(row: db::expected_power_shelf::PreIngestionPowerShelfRmsIdentity) -> Self {
         Self {
             node_id: row.bmc_mac_address.to_string(),
             rack_id: row.rack_id.to_string(),
@@ -146,6 +175,15 @@ const RMS_SWITCH_SYSTEM_IMAGE_SOFTWARE_TYPE: &str = "prod";
 const RMS_FIRMWARE_OBJECT_HARDWARE_TYPE: &str = "any";
 const RMS_IDENTITY_LOOKUP_ERROR: &str = "could not resolve RMS identity from database";
 
+// Limit the work sent to RMS in one request. This is our application cap;
+// the SDK does not declare a maximum batch size.
+const RMS_POWER_READ_BATCH_SIZE: usize = 64;
+// Keep an unavailable database or RMS connection from holding up a controller
+// iteration. Preparation and all batches share this budget; it is not an RMS
+// server timeout for each device.
+const RMS_POWER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const RMS_POWER_READ_TIMEOUT_ERROR: &str = "RMS power read deadline exceeded";
+
 /// Validates rack profile fields required by RMS component-manager backends.
 ///
 /// Descriptor-based RMS requests require a product family and the per-role
@@ -203,6 +241,38 @@ fn rms_node_descriptor_config_error(
     ))
 }
 
+/// `RmsBackend` implements component operations through RMS.
+///
+/// # Power reads
+///
+/// Compute, switch, and shelf power reads return one result per endpoint in
+/// input order, including duplicates. Operational failures are returned in
+/// those results; a preparation failure marks every endpoint as failed.
+/// Missing RMS state is an error, while explicit `Unknown` is an observation.
+/// Valid per-node observations survive an aggregate batch failure.
+/// Empty input returns an empty vector without database or RMS requests.
+///
+/// Identical descriptors for one `(rack_id, node_id)` share a query; conflicting
+/// descriptors fail every copy. Requests contain at most 64 nodes from one rack
+/// and run sequentially in rack/node order. Database preparation, connection
+/// waits, and all RPCs share a ten-second deadline. Completed observations are
+/// retained when it expires; in-flight and unattempted nodes receive errors.
+/// A slow batch can therefore leave later nodes unqueried. Cancellation drops
+/// the local waits without spawning work or retrying individual devices.
+///
+/// Compute and shelf reads also use expected inventory when an ingested
+/// identity is unavailable; this fallback requires a declared rack. Switch
+/// reads require an ingested switch. Reads pass endpoint details directly to
+/// RMS without registering devices or changing their power state.
+///
+/// # Compute power and firmware commands
+///
+/// If the machine lookup finds a different MAC at a requested BMC IP, the
+/// command returns a failure under the requested IP and MAC with no job ID.
+/// That endpoint is not sent to RMS and its firmware tracking is unchanged;
+/// other valid endpoints can proceed. The check uses the machine ownership
+/// found during lookup, including machines without a rack. It does not check
+/// other inventory kinds or prevent reassignment after the lookup.
 pub struct RmsBackend {
     client: Arc<dyn RmsApi>,
     switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
@@ -211,6 +281,88 @@ pub struct RmsBackend {
 
     /// Tracks firmware update job IDs keyed by device MAC address.
     firmware_jobs: Mutex<HashMap<MacAddress, Vec<RmsTrackedFirmwareJob>>>,
+
+    /// The firmware-object phase of each switch's in-flight mixed update,
+    /// keyed by BMC MAC, from the NVOS submission until a status poll resolves
+    /// it. Held only in memory, including the artifact access token: a
+    /// nico-api restart mid-update drops the firmware-object phase, and the
+    /// update then reports its NVOS job's result alone.
+    staged_firmware_objects: Mutex<HashMap<MacAddress, StagedFirmwareObject>>,
+}
+
+/// The firmware-object phase of a switch update that also covers NVOS.
+///
+/// RMS runs one job per node, so such an update cannot submit both applies at
+/// once: the second is rejected while the first is still active. NVOS goes
+/// first, because a BMC upgraded ahead of it can expose a management port that
+/// the running NVOS does not know about, leaving NVOS unable to reach the BMC
+/// until it is itself upgraded. So the NVOS apply goes out from
+/// `queue_firmware_updates` and the firmware-object apply waits here for the
+/// status poll that observes NVOS finish.
+#[derive(Clone)]
+enum StagedFirmwareObject {
+    /// Waiting on `system_image_job`, holding the apply to submit once that
+    /// job completes.
+    Staged {
+        system_image_job: String,
+        config_json: String,
+        component_filters: Vec<String>,
+        options: FirmwareUpdateOptions,
+    },
+
+    /// One status poll is submitting the apply that follows
+    /// `system_image_job`, or is still recording the job RMS returned.
+    ///
+    /// The phase stays in the map for that whole window rather than being
+    /// removed, because nothing else records that the switch still owes a
+    /// firmware-object apply: another poll would otherwise read the NVOS job's
+    /// success as the whole update's result and report the switch done. A poll
+    /// dropped mid-submission (a cancelled status request) leaves the marker
+    /// behind, and the switch reports an unfinished update until the next
+    /// update for it clears the phase.
+    Submitting { system_image_job: String },
+
+    /// Ended without dispatching, for this reason. Kept so later polls report
+    /// the failed phase rather than the NVOS job's success alone; no RMS job
+    /// id exists to read the outcome back from.
+    Failed(String),
+}
+
+impl StagedFirmwareObject {
+    /// Whether this phase is the firmware-object half of `system_image_job`'s
+    /// update.
+    ///
+    /// Fences the writes a status poll makes after it has awaited RMS. A newer
+    /// update for the same switch installs a phase naming its own NVOS job, so
+    /// a poll finishing an update the switch has moved past sees no match and
+    /// leaves the newer phase alone. A `Failed` phase names no job: it is
+    /// already terminal, and only a new update replaces it.
+    fn follows(&self, system_image_job: &str) -> bool {
+        match self {
+            StagedFirmwareObject::Staged {
+                system_image_job: job,
+                ..
+            }
+            | StagedFirmwareObject::Submitting {
+                system_image_job: job,
+            } => job == system_image_job,
+            StagedFirmwareObject::Failed(_) => false,
+        }
+    }
+}
+
+/// What a status poll should report for a staged firmware-object apply.
+enum StagedFirmwareObjectOutcome {
+    /// The apply has not finished: its NVOS job is still running, or another
+    /// poll is submitting it. Reported as an unfinished job, since once the
+    /// NVOS job completes its own state stops saying the update has work left.
+    Waiting,
+
+    /// The apply was submitted and is now tracked as this job.
+    Submitted(RmsTrackedFirmwareJob),
+
+    /// The apply will not be dispatched, for this reason.
+    Abandoned(String),
 }
 
 #[async_trait::async_trait]
@@ -228,6 +380,511 @@ impl RmsSwitchSystemImageStatusApi for librms::RackManagerApi {
         cmd: rms::GetSwitchSystemImageJobStatusRequest,
     ) -> Result<rms::GetSwitchSystemImageJobStatusResponse, RackManagerError> {
         Ok(self.client.get_switch_system_image_job_status(cmd).await?)
+    }
+}
+
+/// RMS implementation of durable rack-level firmware-object operations.
+struct RmsRackFirmwareUpdateManager {
+    client: Arc<dyn RmsApi>,
+}
+
+/// RMS implementation of machine slot and tray discovery.
+struct RmsMachineInfoProvider {
+    client: Arc<dyn RmsApi>,
+}
+
+impl crate::machine_info_provider::sealed::Sealed for RmsMachineInfoProvider {}
+
+#[async_trait::async_trait]
+impl MachineInfoProvider for RmsMachineInfoProvider {
+    fn validate_profile(&self, profile: &RackProfile) -> Result<(), MachineLocationError> {
+        compute_node_identity_for_profile(profile)
+            .map(|_| ())
+            .map_err(MachineLocationError::new)
+    }
+
+    async fn get_machine_locations(
+        &self,
+        targets: Vec<MachineLocationTarget<'_>>,
+    ) -> Result<Vec<MachineLocationObservation>, MachineLocationError> {
+        let nodes = targets
+            .into_iter()
+            .map(machine_location_node_info)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let response = self
+            .client
+            .batch_get_node_device_info(rms::BatchGetNodeDeviceInfoRequest {
+                nodes: Some(rms::NodeSet { nodes }),
+            })
+            .await
+            .map_err(MachineLocationError::new)?;
+
+        Ok(response
+            .node_device_details
+            .into_iter()
+            .map(|details| MachineLocationObservation {
+                node_id: details.node_id,
+                slot_number: details.slot_number,
+                tray_index: details.tray_index,
+            })
+            .collect())
+    }
+}
+
+fn machine_location_node_info(
+    target: MachineLocationTarget<'_>,
+) -> Result<rms::NodeInfo, MachineLocationError> {
+    let node_identity =
+        compute_node_identity_for_profile(target.profile).map_err(MachineLocationError::new)?;
+
+    let credentials = target.credentials.map(|credentials| match credentials {
+        Credentials::UsernamePassword { username, password } => rms::Credentials {
+            auth: Some(rms::credentials::Auth::UserPass(rms::UsernamePassword {
+                username,
+                password,
+            })),
+        },
+    });
+
+    let mut node = rms::NodeInfo {
+        node_id: target.node_id,
+        rack_id: target.rack_id.to_string(),
+        bmc_endpoint: Some(rms::Endpoint {
+            interface: Some(rms::NetworkInterface {
+                ip_address: target.bmc_ip.to_string(),
+                mac_address: target.bmc_mac.to_string(),
+                host_name: None,
+            }),
+            port: 443,
+            credentials,
+        }),
+        ..Default::default()
+    };
+
+    node_identity.apply_to_node_info(&mut node);
+
+    Ok(node)
+}
+
+impl crate::rack_firmware_update_manager::sealed::Sealed for RmsRackFirmwareUpdateManager {}
+
+#[async_trait::async_trait]
+impl RackFirmwareUpdateManager for RmsRackFirmwareUpdateManager {
+    async fn start_firmware_update(
+        &self,
+        request: RackFirmwareUpdateRequest<'_>,
+    ) -> Result<FirmwareUpgradeJob, ComponentManagerError> {
+        let started_at = chrono::Utc::now();
+        let rack_id = request.rack_id.to_string();
+        let machine_count = request.machines.len();
+        let switch_count = request.switches.len();
+        let firmware_type = firmware_type_for_profile(request.profile);
+        let hardware_type = profile_hardware_type_wire_value(request.profile);
+
+        let hardware_type = if hardware_type.trim().is_empty() {
+            ANY_RACK_HARDWARE_TYPE.to_string()
+        } else {
+            hardware_type
+        };
+
+        tracing::info!(
+            rack_id = %rack_id,
+            firmware_type,
+            hardware_type = %hardware_type,
+            force_update = request.force_update,
+            machine_count,
+            switch_count,
+            "Rack firmware object JSON apply starting",
+        );
+
+        let apply_request = rack_firmware_apply_request(&request, firmware_type, hardware_type)?;
+
+        let response = self
+            .client
+            .apply_firmware_object(apply_request)
+            .await
+            .map_err(|error| match error {
+                RackManagerError::ApiInvocationError(status)
+                    if status.code() == tonic::Code::InvalidArgument =>
+                {
+                    ComponentManagerError::InvalidArgument(format!(
+                        "failed to submit firmware object JSON apply to RMS: {status}"
+                    ))
+                }
+                RackManagerError::ApiInvocationError(status) => ComponentManagerError::Internal(
+                    format!("failed to submit firmware object JSON apply to RMS: {status}"),
+                ),
+                error => ComponentManagerError::Internal(format!(
+                    "failed to submit firmware object JSON apply to RMS: {error}"
+                )),
+            })?;
+
+        let job = rack_firmware_job_from_response(request, started_at, response)?;
+
+        tracing::info!(
+            rack_id = %rack_id,
+            parent_job_id = ?job.job_id,
+            object_id = ?job.firmware_id,
+            machine_count,
+            switch_count,
+            "RMS firmware object JSON apply submitted",
+        );
+
+        Ok(finish_rack_firmware_job(job))
+    }
+
+    async fn get_firmware_update_status(
+        &self,
+        job: &FirmwareUpgradeJob,
+    ) -> Result<FirmwareUpgradeJob, ComponentManagerError> {
+        let mut updated = job.clone();
+
+        for device in updated.all_devices_mut() {
+            if device.status.is_terminal() {
+                continue;
+            }
+
+            let Some(job_id) = device.job_id.clone() else {
+                device.status = FirmwareProgressState::Failed;
+
+                if device.error_message.is_none() {
+                    device.error_message = Some("Device has no firmware job ID to poll".into());
+                }
+
+                continue;
+            };
+
+            let response = self
+                .client
+                .get_firmware_job_status(rms::GetFirmwareJobStatusRequest {
+                    job_id: job_id.clone(),
+                })
+                .await;
+
+            apply_rack_firmware_job_status_response(device, &job_id, response);
+        }
+
+        Ok(finish_rack_firmware_job(updated))
+    }
+}
+
+fn rack_firmware_apply_request(
+    request: &RackFirmwareUpdateRequest<'_>,
+    firmware_type: &str,
+    hardware_type: String,
+) -> Result<rms::ApplyFirmwareObjectRequest, ComponentManagerError> {
+    let mut nodes = Vec::with_capacity(request.machines.len() + request.switches.len());
+
+    // Resolve every identity before dispatch so a mixed-device request
+    // cannot submit a partial rack update.
+    let compute_node_identity = if request.machines.is_empty() {
+        None
+    } else {
+        Some(
+            compute_node_identity_for_profile(request.profile).map_err(|error| {
+                ComponentManagerError::InvalidArgument(format!(
+                    "failed to resolve RMS compute descriptor: {error}"
+                ))
+            })?,
+        )
+    };
+
+    let switch_node_identity = if request.switches.is_empty() {
+        None
+    } else {
+        Some(
+            switch_node_identity_for_profile(request.profile).map_err(|error| {
+                ComponentManagerError::InvalidArgument(format!(
+                    "failed to resolve RMS switch descriptor: {error}"
+                ))
+            })?,
+        )
+    };
+
+    if let Some(node_identity) = &compute_node_identity {
+        nodes.extend(
+            request
+                .machines
+                .iter()
+                .map(|device| build_new_node_info(request.rack_id, device, node_identity)),
+        );
+    }
+
+    if let Some(node_identity) = &switch_node_identity {
+        nodes.extend(
+            request
+                .switches
+                .iter()
+                .map(|device| build_new_node_info(request.rack_id, device, node_identity)),
+        );
+    }
+
+    let (component_filters, node_descriptor_component_filters) =
+        firmware_object_component_filters_for_node_identities(
+            request.components,
+            compute_node_identity
+                .iter()
+                .chain(switch_node_identity.iter()),
+        );
+
+    Ok(rms::ApplyFirmwareObjectRequest {
+        rack_id: request.rack_id.to_string(),
+        config_json: request.config_json.to_string(),
+        access_token: Some(rms_access_token_or_noauth(request.access_token)),
+        firmware_type: firmware_type.to_string(),
+        hardware_type,
+        nodes: Some(rms::NodeSet { nodes }),
+        force_update: request.force_update,
+        component_filters,
+        node_descriptor_component_filters,
+    })
+}
+
+fn rack_firmware_job_from_response(
+    request: RackFirmwareUpdateRequest<'_>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    response: rms::ApplyFirmwareObjectResponse,
+) -> Result<FirmwareUpgradeJob, ComponentManagerError> {
+    let batch_response = response.response.as_ref();
+
+    let batch_status = batch_response
+        .map(|batch_response| batch_response.status)
+        .unwrap_or(rms::ReturnCode::Failure as i32);
+
+    let batch_job_id = batch_response
+        .map(|batch_response| batch_response.job_id.as_str())
+        .unwrap_or_default();
+
+    if batch_status != rms::ReturnCode::Success as i32
+        && batch_job_id.is_empty()
+        && response.jobs.is_empty()
+    {
+        let message = batch_response
+            .map(|batch_response| batch_response.message.as_str())
+            .unwrap_or_default();
+
+        let message = if message.is_empty() {
+            "RMS returned failure for ApplyFirmwareObject".to_string()
+        } else {
+            message.to_string()
+        };
+
+        return Err(ComponentManagerError::RejectedBeforeDispatch(message));
+    }
+
+    let parent_job_id = (!batch_job_id.is_empty()).then(|| batch_job_id.to_string());
+
+    let child_jobs = response
+        .jobs
+        .iter()
+        .map(|child| (child.node_id.clone(), child.job_id.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let node_errors = batch_response
+        .map(|batch_response| {
+            batch_response
+                .node_results
+                .iter()
+                .filter(|result| {
+                    result.status != rms::ReturnCode::Success as i32
+                        || !result.error_message.is_empty()
+                })
+                .map(|result| (result.node_id.clone(), result.error_message.clone()))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let batch_error = batch_response.and_then(|batch_response| {
+        if batch_response.status == rms::ReturnCode::Success as i32
+            || batch_response.message.is_empty()
+        {
+            None
+        } else {
+            Some(batch_response.message.clone())
+        }
+    });
+
+    Ok(FirmwareUpgradeJob {
+        job_id: parent_job_id.clone(),
+        firmware_id: Some(response.object_id),
+        started_at: Some(started_at),
+        batch_job_ids: parent_job_id.iter().cloned().collect(),
+        machines: request
+            .machines
+            .into_iter()
+            .map(|device| {
+                rack_firmware_device_status(
+                    device,
+                    parent_job_id.clone(),
+                    &child_jobs,
+                    &node_errors,
+                    batch_error.as_deref(),
+                )
+            })
+            .collect(),
+        switches: request
+            .switches
+            .into_iter()
+            .map(|device| {
+                rack_firmware_device_status(
+                    device,
+                    parent_job_id.clone(),
+                    &child_jobs,
+                    &node_errors,
+                    batch_error.as_deref(),
+                )
+            })
+            .collect(),
+        ..Default::default()
+    })
+}
+
+fn rack_firmware_device_status(
+    device: FirmwareUpgradeDeviceInfo,
+    parent_job_id: Option<String>,
+    child_jobs: &HashMap<String, String>,
+    node_errors: &HashMap<String, String>,
+    batch_error: Option<&str>,
+) -> FirmwareUpgradeDeviceStatus {
+    let mut status = FirmwareUpgradeDeviceStatus {
+        node_id: device.node_id.clone(),
+        mac: device.mac,
+        bmc_ip: device.bmc_ip,
+        status: FirmwareProgressState::InProgress,
+        job_id: None,
+        parent_job_id,
+        error_message: None,
+    };
+
+    if let Some(error_message) = node_errors.get(&device.node_id) {
+        status.status = FirmwareProgressState::Failed;
+        status.error_message = Some(error_message.clone());
+    } else if let Some(job_id) = child_jobs.get(&device.node_id) {
+        status.job_id = Some(job_id.clone());
+    } else {
+        status.status = FirmwareProgressState::Failed;
+
+        status.error_message = Some(
+            batch_error
+                .unwrap_or("RMS did not return a child firmware job for this device")
+                .to_string(),
+        );
+    }
+
+    status
+}
+
+fn finish_rack_firmware_job(mut job: FirmwareUpgradeJob) -> FirmwareUpgradeJob {
+    let total = job.all_devices().count();
+
+    let completed = job
+        .all_devices()
+        .filter(|device| device.status == FirmwareProgressState::Completed)
+        .count();
+
+    let failed = job
+        .all_devices()
+        .filter(|device| device.status == FirmwareProgressState::Failed)
+        .count();
+
+    let terminal = completed + failed;
+
+    job.status = Some(if total > 0 && terminal < total {
+        FirmwareProgressState::InProgress
+    } else if failed > 0 {
+        FirmwareProgressState::Failed
+    } else {
+        FirmwareProgressState::Completed
+    });
+
+    if total > 0 && terminal == total {
+        job.completed_at.get_or_insert_with(chrono::Utc::now);
+    } else {
+        job.completed_at = None;
+    }
+
+    job
+}
+
+fn apply_rack_firmware_job_status_response(
+    device: &mut FirmwareUpgradeDeviceStatus,
+    job_id: &str,
+    response: Result<rms::GetFirmwareJobStatusResponse, RackManagerError>,
+) {
+    match response {
+        Ok(response) if response.status == rms::ReturnCode::Success as i32 => {
+            if !response.node_id.is_empty() {
+                device.node_id = response.node_id.clone();
+            }
+
+            match rms::FirmwareJobState::try_from(response.job_state) {
+                Ok(rms::FirmwareJobState::Queued) => {
+                    device.status = FirmwareProgressState::Pending;
+                    device.error_message = None;
+                }
+                Ok(rms::FirmwareJobState::Running) => {
+                    device.status = FirmwareProgressState::InProgress;
+                    device.error_message = None;
+                }
+                Ok(rms::FirmwareJobState::Completed) => {
+                    device.status = FirmwareProgressState::Completed;
+                    device.error_message = None;
+                }
+                Ok(rms::FirmwareJobState::Failed) => {
+                    device.status = FirmwareProgressState::Failed;
+
+                    device.error_message = Some(if response.error_message.is_empty() {
+                        response.state_description
+                    } else {
+                        response.error_message
+                    });
+                }
+                Ok(rms::FirmwareJobState::Unspecified) | Err(_) => {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        job_state = response.job_state,
+                        "RMS returned unknown firmware job state; keeping previous device status",
+                    );
+
+                    device.error_message = Some(format!(
+                        "Unknown RMS firmware job state {}",
+                        response.job_state
+                    ));
+                }
+            }
+        }
+        Ok(response) => {
+            let message = if response.error_message.is_empty() {
+                if response.state_description.is_empty() {
+                    format!("RMS could not report status for firmware job {job_id}")
+                } else {
+                    response.state_description
+                }
+            } else {
+                response.error_message
+            };
+
+            tracing::warn!(
+                job_id = %job_id,
+                job_status = response.status,
+                error = %message,
+                "RMS returned a non-success firmware job status lookup; retrying later",
+            );
+
+            device.error_message = Some(message);
+        }
+        Err(error) => {
+            let error = carbide_rack::rack_manager_error("get_firmware_job_status", error);
+
+            tracing::warn!(
+                job_id = %job_id,
+                error = %error,
+                "Transient RMS firmware job polling error; retrying later",
+            );
+
+            device.error_message = Some(error.to_string());
+        }
     }
 }
 
@@ -266,6 +923,7 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
         let response = self
             .client
             .apply_switch_system_image(rms::ApplySwitchSystemImageRequest {
+                allow_onie_recovery: false,
                 rack_id: request.rack_id.to_string(),
                 config_json: request.config_json.to_string(),
                 access_token: Some(rms_access_token_or_noauth(Some(request.access_token))),
@@ -346,6 +1004,7 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
                         .cloned()
                         .or_else(|| parent_job_id.clone()),
                     error_message: None,
+                    ..Default::default()
                 };
 
                 if status.job_id.is_none() {
@@ -454,6 +1113,49 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
 
         Ok(updated)
     }
+
+    async fn start_nvos_password_update(
+        &self,
+        rack_id: &RackId,
+        profile: &RackProfile,
+        switch_id: &SwitchId,
+        nvos_ip: IpAddr,
+        credentials: &Credentials,
+    ) -> Result<String, ComponentManagerError> {
+        let switch_identity = switch_node_identity_for_profile(profile)
+            .map_err(|error| ComponentManagerError::InvalidArgument(error.to_string()))?;
+
+        let Credentials::UsernamePassword { password, .. } = credentials;
+
+        let mut node = rms::NodeInfo {
+            node_id: switch_id.to_string(),
+            rack_id: rack_id.to_string(),
+            host_endpoint: Some(rms::Endpoint {
+                interface: Some(rms::NetworkInterface {
+                    ip_address: nvos_ip.to_string(),
+                    ..Default::default()
+                }),
+                credentials: Some(credentials_to_rms(credentials)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        switch_identity.apply_to_node_info(&mut node);
+
+        // RMS image work and job tracking are process-local. After an RMS
+        // restart, sending the desired password as both the current and target
+        // password is safe: RMS verifies it first, then uses the factory admin
+        // credential only when recovery is needed.
+        rms_ensure_switch_password_rotation(self.client.as_ref(), node, credentials, password).await
+    }
+
+    async fn get_nvos_password_update_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchPasswordRotationState, ComponentManagerError> {
+        rms_get_switch_password_rotation_job_status(self.client.as_ref(), job_id).await
+    }
 }
 
 fn apply_nvos_job_status_response(
@@ -514,14 +1216,16 @@ fn apply_nvos_job_status_response(
                 response.error_message
             };
 
-            tracing::warn!(
-                job_id = %job_id,
-                job_status = response.status,
-                error = %message,
-                "RMS returned a non-success switch image job status lookup; retrying later",
-            );
-
+            // RMS reports a missing process-local job as an ordinary failure
+            // response. Its image outcome is unknown, so run password recovery.
+            switch.status = "failed".into();
             switch.error_message = Some(message);
+        }
+        Err(RackManagerError::ApiInvocationError(status))
+            if status.code() == tonic::Code::NotFound =>
+        {
+            switch.status = "failed".into();
+            switch.error_message = Some(format!("RMS lost NVOS image job {job_id}"));
         }
         Err(error) => {
             let cause = match error {
@@ -543,6 +1247,16 @@ fn apply_nvos_job_status_response(
 /// Creates the RMS implementation of durable rack-level NVOS operations.
 pub fn rms_nvos_update_manager(client: Arc<dyn RmsApi>) -> impl NvosUpdateManager {
     RmsNvosUpdateManager { client }
+}
+
+/// Creates the RMS implementation of machine slot and tray discovery.
+pub fn rms_machine_info_provider(client: Arc<dyn RmsApi>) -> impl MachineInfoProvider {
+    RmsMachineInfoProvider { client }
+}
+
+/// Creates the RMS implementation of durable rack-level firmware-object operations.
+pub fn rms_rack_firmware_update_manager(client: Arc<dyn RmsApi>) -> impl RackFirmwareUpdateManager {
+    RmsRackFirmwareUpdateManager { client }
 }
 
 impl std::fmt::Debug for RmsBackend {
@@ -567,6 +1281,316 @@ impl RmsBackend {
             db,
             rack_profiles,
             firmware_jobs: Mutex::new(HashMap::new()),
+            staged_firmware_objects: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Installs `jobs` as the full set of firmware jobs tracked for `bmc_mac`,
+    /// in memory and in the database, so a status query still finds them after
+    /// a nico-api restart. An empty set clears the switch.
+    async fn track_switch_firmware_jobs(
+        &self,
+        bmc_mac: MacAddress,
+        jobs: Vec<RmsTrackedFirmwareJob>,
+    ) {
+        let persisted: Vec<(FirmwareJobKind, String)> = jobs
+            .iter()
+            .map(|job| (job.kind(), job.job_id().to_owned()))
+            .collect();
+        if let Err(e) =
+            db::direct_dispatch_firmware_job::replace(&self.db, bmc_mac, &persisted).await
+        {
+            tracing::warn!(
+                bmc_mac_address = %bmc_mac,
+                error = %e,
+                "failed to persist switch firmware job IDs to database"
+            );
+        }
+
+        let mut firmware_jobs = self.firmware_jobs.lock().unwrap();
+        if jobs.is_empty() {
+            firmware_jobs.remove(&bmc_mac);
+        } else {
+            firmware_jobs.insert(bmc_mac, jobs);
+        }
+    }
+
+    /// Adds `job` to the firmware jobs tracked for `bmc_mac`, replacing any job
+    /// of the same kind, in memory and in the database.
+    ///
+    /// Reads the switch's current set rather than taking one from the caller,
+    /// unlike [`Self::track_switch_firmware_jobs`]: a status poll that has been
+    /// awaiting RMS holds a snapshot that a newer update for the same switch
+    /// may already have replaced.
+    async fn add_tracked_switch_firmware_job(
+        &self,
+        bmc_mac: MacAddress,
+        job: RmsTrackedFirmwareJob,
+    ) {
+        if let Err(e) =
+            db::direct_dispatch_firmware_job::save(&self.db, bmc_mac, job.kind(), job.job_id())
+                .await
+        {
+            tracing::warn!(
+                bmc_mac_address = %bmc_mac,
+                error = %e,
+                "failed to persist switch firmware job ID to database"
+            );
+        }
+
+        let mut firmware_jobs = self.firmware_jobs.lock().unwrap();
+        let tracked = firmware_jobs.entry(bmc_mac).or_default();
+        match tracked
+            .iter_mut()
+            .find(|existing| existing.kind() == job.kind())
+        {
+            Some(existing) => *existing = job,
+            None => tracked.push(job),
+        }
+    }
+
+    /// Records `error` as the outcome of the NVOS phase that follows
+    /// `system_image_job`, and reports it.
+    ///
+    /// The phase is kept, holding the reason, so every later poll reports the
+    /// failed firmware-object phase instead of the NVOS job's success alone. A
+    /// newer update for this switch has its own phase, which this one does not
+    /// overwrite: the failure is still reported, but it belongs to an update
+    /// the switch has moved past.
+    fn abandon_staged_firmware_object(
+        &self,
+        bmc_mac: MacAddress,
+        system_image_job: &str,
+        error: String,
+    ) -> StagedFirmwareObjectOutcome {
+        let mut staged = self.staged_firmware_objects.lock().unwrap();
+        if staged
+            .get(&bmc_mac)
+            .is_some_and(|phase| phase.follows(system_image_job))
+        {
+            staged.insert(bmc_mac, StagedFirmwareObject::Failed(error.clone()));
+        }
+        StagedFirmwareObjectOutcome::Abandoned(error)
+    }
+
+    /// Advances the firmware-object apply staged for `endpoint`, submitting it
+    /// once the NVOS job it waits on is terminal.
+    ///
+    /// `system_image_state` is that job's state, or `None` when the switch has
+    /// no NVOS job left to sequence behind. An NVOS job that failed or was
+    /// cancelled abandons the staged apply rather than upgrading the BMC out
+    /// from under the NVOS version still running on the switch. Returns `None`
+    /// when the switch has nothing staged.
+    async fn advance_staged_firmware_object(
+        &self,
+        endpoint: &SwitchEndpoint,
+        system_image_state: Option<FirmwareState>,
+    ) -> Option<StagedFirmwareObjectOutcome> {
+        let bmc_mac = endpoint.bmc_mac;
+        let system_image_job = {
+            let staged = self.staged_firmware_objects.lock().unwrap();
+            match staged.get(&bmc_mac)? {
+                // Terminal, and this is its only record, so keep reporting it.
+                StagedFirmwareObject::Failed(error) => {
+                    return Some(StagedFirmwareObjectOutcome::Abandoned(error.clone()));
+                }
+                // Another poll is already dispatching this apply.
+                StagedFirmwareObject::Submitting { .. } => {
+                    return Some(StagedFirmwareObjectOutcome::Waiting);
+                }
+                StagedFirmwareObject::Staged {
+                    system_image_job, ..
+                } => system_image_job.clone(),
+            }
+        };
+
+        match system_image_state {
+            Some(FirmwareState::Completed) => {}
+            Some(FirmwareState::Failed | FirmwareState::Cancelled) => {
+                return Some(
+                    self.abandon_staged_firmware_object(
+                        bmc_mac,
+                        &system_image_job,
+                        "firmware-object update was skipped because the NVOS update for this \
+                     switch did not complete"
+                            .to_owned(),
+                    ),
+                );
+            }
+            Some(_) => return Some(StagedFirmwareObjectOutcome::Waiting),
+            None => {
+                return Some(
+                    self.abandon_staged_firmware_object(
+                        bmc_mac,
+                        &system_image_job,
+                        "firmware-object update was not submitted: the NVOS job it waits on is \
+                     no longer tracked"
+                            .to_owned(),
+                    ),
+                );
+            }
+        }
+
+        // Claim the dispatch by marking the phase in flight. Of two concurrent
+        // polls only one replaces `Staged`, so the apply is submitted once, and
+        // leaving the marker in place keeps the unfinished NVOS phase visible
+        // to the other poll for the whole submission.
+        let claimed = {
+            let mut staged = self.staged_firmware_objects.lock().unwrap();
+            let claimable = matches!(
+                staged.get(&bmc_mac),
+                Some(StagedFirmwareObject::Staged {
+                    system_image_job: job,
+                    ..
+                }) if *job == system_image_job
+            );
+            if claimable {
+                staged.insert(
+                    bmc_mac,
+                    StagedFirmwareObject::Submitting {
+                        system_image_job: system_image_job.clone(),
+                    },
+                )
+            } else {
+                None
+            }
+        };
+        let Some(StagedFirmwareObject::Staged {
+            config_json,
+            component_filters,
+            options,
+            ..
+        }) = claimed
+        else {
+            return Some(StagedFirmwareObjectOutcome::Waiting);
+        };
+
+        let submitted = self
+            .submit_staged_firmware_object(endpoint, &config_json, &component_filters, &options)
+            .await;
+        let job_id = match submitted {
+            Ok(Some(job_id)) => job_id,
+            Ok(None) => {
+                return Some(self.abandon_staged_firmware_object(
+                    bmc_mac,
+                    &system_image_job,
+                    "RMS accepted the firmware-object update without a job id, so its progress \
+                     cannot be tracked"
+                        .to_owned(),
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    bmc_mac_address = %bmc_mac,
+                    %error,
+                    "staged switch firmware-object update failed to submit"
+                );
+                return Some(self.abandon_staged_firmware_object(
+                    bmc_mac,
+                    &system_image_job,
+                    error,
+                ));
+            }
+        };
+
+        // Release the phase only while it is still the one this poll claimed.
+        // A newer update for this switch owns its staged phase and its tracked
+        // jobs now, and both of this poll's are stale.
+        let released = {
+            let mut staged = self.staged_firmware_objects.lock().unwrap();
+            let mine = matches!(
+                staged.get(&bmc_mac),
+                Some(StagedFirmwareObject::Submitting {
+                    system_image_job: job,
+                }) if *job == system_image_job
+            );
+            if mine {
+                staged.remove(&bmc_mac);
+            }
+            mine
+        };
+        if !released {
+            tracing::warn!(
+                bmc_mac_address = %bmc_mac,
+                backend_job_id = %job_id,
+                "a newer switch update superseded this firmware-object update after RMS \
+                 accepted it, so its job is not tracked"
+            );
+            return Some(StagedFirmwareObjectOutcome::Waiting);
+        }
+
+        tracing::info!(
+            bmc_mac_address = %bmc_mac,
+            backend_job_id = %job_id,
+            "Submitted the staged switch firmware-object update after its NVOS job completed"
+        );
+        let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
+        self.add_tracked_switch_firmware_job(bmc_mac, job.clone())
+            .await;
+        Some(StagedFirmwareObjectOutcome::Submitted(job))
+    }
+
+    /// Submits one staged firmware-object apply, returning its backend job id.
+    ///
+    /// `Ok(None)` means RMS accepted the apply but returned no job id, so there
+    /// is nothing to poll.
+    async fn submit_staged_firmware_object(
+        &self,
+        endpoint: &SwitchEndpoint,
+        config_json: &str,
+        component_filters: &[String],
+        options: &FirmwareUpdateOptions,
+    ) -> Result<Option<String>, String> {
+        let macs = [endpoint.bmc_mac];
+        let mut ids = resolve_switch_identities(&self.db, &macs)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !ids.contains_key(&endpoint.bmc_mac) {
+            ids.extend(
+                resolve_pre_ingestion_switch_identities(&self.db, &macs)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        let resolved = self.resolve_switch_or_power_shelf_node(
+            &ids,
+            endpoint.bmc_mac,
+            SwitchOrPowerShelfRole::Switch,
+        )?;
+
+        let hostnames =
+            resolve_switch_machine_interface_hostnames(&self.db, std::slice::from_ref(endpoint))
+                .await
+                .map_err(|error| error.to_string())?;
+        let device = build_switch_node_info(
+            endpoint,
+            &resolved,
+            hostnames.get(&endpoint.nvos_mac).cloned(),
+        );
+
+        let request = apply_firmware_object_request(
+            device,
+            &resolved,
+            config_json,
+            options,
+            component_filters,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let response = red::instrumented(
+            "rms",
+            "apply_firmware_object",
+            self.client.apply_firmware_object(request),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        let (success, error, job_id) =
+            summarize_firmware_object_apply_response(response, &resolved.identity.node_id);
+        if success {
+            Ok(job_id)
+        } else {
+            Err(error.unwrap_or_else(|| "RMS switch firmware-object update failed".to_owned()))
         }
     }
 
@@ -639,8 +1663,11 @@ impl RmsBackend {
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<rms::NodeInfo>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
+
         let identities = resolve_switch_identities(&self.db, &macs).await?;
+
         let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
+
         let mut nodes = Vec::with_capacity(endpoints.len());
 
         for endpoint in endpoints {
@@ -657,6 +1684,33 @@ impl RmsBackend {
                 &resolved,
                 hostnames.get(&endpoint.nvos_mac).cloned(),
             ));
+        }
+
+        Ok(nodes)
+    }
+
+    async fn resolve_switch_certificate_nodes(
+        &self,
+        endpoints: &[SwitchCertificateEndpoint],
+    ) -> Result<Vec<rms::NodeInfo>, ComponentManagerError> {
+        let macs = endpoints
+            .iter()
+            .map(|endpoint| endpoint.bmc_mac)
+            .collect::<Vec<_>>();
+
+        let identities = resolve_switch_identities(&self.db, &macs).await?;
+        let mut nodes = Vec::with_capacity(endpoints.len());
+
+        for endpoint in endpoints {
+            let resolved = self
+                .resolve_switch_or_power_shelf_node(
+                    &identities,
+                    endpoint.bmc_mac,
+                    SwitchOrPowerShelfRole::Switch,
+                )
+                .map_err(ComponentManagerError::Internal)?;
+
+            nodes.push(build_switch_certificate_node_info(endpoint, &resolved));
         }
 
         Ok(nodes)
@@ -694,10 +1748,71 @@ async fn resolve_power_shelf_identities(
     Ok(map)
 }
 
+/// Resolve RMS identities for pre-ingestion (row-less) power shelves from the
+/// expected inventory, keyed by PMC MAC.
+///
+/// Every power shelf is rack-scale (RMS-managed), so its expected record is
+/// expected to declare a `rack_id`; that rack is required to build the RMS node
+/// descriptor. A record missing a `rack_id` is a misconfiguration and is omitted
+/// here, surfacing as an identity-lookup error at dispatch. The PMC MAC doubles
+/// as the RMS node id because no power shelf id exists yet — RMS treats `node_id`
+/// as an opaque string and the request also carries the full node descriptor and
+/// endpoints. Mirrors `resolve_pre_ingestion_switch_identities`.
+async fn resolve_pre_ingestion_power_shelf_identities(
+    db: &PgPool,
+    macs: &[MacAddress],
+) -> Result<HashMap<MacAddress, RmsIdentity>, ComponentManagerError> {
+    if macs.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = db::expected_power_shelf::find_rms_identities_by_bmc_macs(db, macs)
+        .await
+        .map_err(|e| {
+            ComponentManagerError::Internal(format!(
+                "failed to resolve pre-ingestion power shelf RMS identities: {e}"
+            ))
+        })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.bmc_mac_address, row.into()))
+        .collect())
+}
+
 /// Resolved RMS identity for a compute tray, keyed by BMC IP.
 struct ComputeTrayRmsIdentity {
     identity: RmsIdentity,
     bmc_mac: MacAddress,
+}
+
+/// `ComputeTrayIdentityLookup` keeps every current BMC IP owner alongside the
+/// identities eligible for RMS. A machine without a rack still owns its IP,
+/// so RMS operations must check ownership before using expected inventory.
+struct ComputeTrayIdentityLookup {
+    /// Rack-associated identities accepted by the existing RMS operations.
+    rms_identities: HashMap<IpAddr, ComputeTrayRmsIdentity>,
+    /// Current BMC MAC for each occupied IP, including machines without a rack.
+    current_owners: HashMap<IpAddr, MacAddress>,
+}
+
+impl ComputeTrayIdentityLookup {
+    /// `check_owner` rejects a different known MAC because the IP may have
+    /// changed owners since the endpoint was collected. A matching or unknown
+    /// owner is allowed; a matching owner without a rack can still use expected
+    /// inventory for its RMS identity.
+    fn check_owner(&self, endpoint: &ComputeTrayEndpoint) -> Result<(), String> {
+        if let Some(owner_mac) = self.current_owners.get(&endpoint.bmc_ip)
+            && *owner_mac != endpoint.bmc_mac
+        {
+            return Err(format!(
+                "RMS compute identity for BMC IP {} has MAC {}, expected {}",
+                endpoint.bmc_ip, owner_mac, endpoint.bmc_mac
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// A row-less compute tray has no machine id; like a pre-ingestion switch its
@@ -717,11 +1832,12 @@ impl From<db::expected_machine::PreIngestionComputeRmsIdentity> for ComputeTrayR
     }
 }
 
-/// Resolve compute tray BMC IP addresses to RMS identities via the api-db layer.
+/// `resolve_compute_tray_identities` loads BMC IP owners and eligible RMS
+/// identities, retaining owners whose machine has no `rack_id`.
 async fn resolve_compute_tray_identities(
     db: &PgPool,
     bmc_ips: &[IpAddr],
-) -> Result<HashMap<IpAddr, ComputeTrayRmsIdentity>, ComponentManagerError> {
+) -> Result<ComputeTrayIdentityLookup, ComponentManagerError> {
     let rows = db::machine::find_rms_identities_by_bmc_ips(db, bmc_ips)
         .await
         .map_err(|e| {
@@ -730,13 +1846,15 @@ async fn resolve_compute_tray_identities(
             ))
         })?;
 
-    let mut map = HashMap::with_capacity(rows.len());
+    let mut rms_identities = HashMap::with_capacity(rows.len());
+    let mut current_owners = HashMap::with_capacity(rows.len());
     for row in rows {
+        current_owners.insert(row.bmc_ip, row.bmc_mac_address);
         let Some(rack_id) = row.rack_id else {
             tracing::warn!(bmc_ip_address = %row.bmc_ip, "compute tray has no rack_id, skipping");
             continue;
         };
-        map.insert(
+        rms_identities.insert(
             row.bmc_ip,
             ComputeTrayRmsIdentity {
                 identity: RmsIdentity {
@@ -748,7 +1866,10 @@ async fn resolve_compute_tray_identities(
             },
         );
     }
-    Ok(map)
+    Ok(ComputeTrayIdentityLookup {
+        rms_identities,
+        current_owners,
+    })
 }
 
 /// Resolve switch MAC addresses to RMS identities via the api-db layer.
@@ -815,7 +1936,8 @@ async fn resolve_pre_ingestion_switch_identities(
 fn to_rms_power_operation(action: PowerAction) -> i32 {
     match action {
         PowerAction::On => rms::PowerOperation::On as i32,
-        PowerAction::GracefulShutdown | PowerAction::ForceOff => rms::PowerOperation::Off as i32,
+        PowerAction::GracefulShutdown => rms::PowerOperation::Off as i32,
+        PowerAction::ForceOff => rms::PowerOperation::ForceOff as i32,
         PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
             rms::PowerOperation::Reset as i32
         }
@@ -889,6 +2011,7 @@ fn build_power_shelf_node_info(
     resolved: &ResolvedRmsNode<'_>,
 ) -> rms::NodeInfo {
     let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: resolved.identity.node_id.clone(),
         rack_id: resolved.identity.rack_id.clone(),
         r#type: None,
@@ -912,6 +2035,10 @@ fn build_power_shelf_node_info(
 
 #[async_trait::async_trait]
 impl PowerShelfManager for RmsBackend {
+    fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
+        Some(crate::component_common::PowerStateSource::Rms)
+    }
+
     fn name(&self) -> &str {
         "rms"
     }
@@ -927,7 +2054,19 @@ impl PowerShelfManager for RmsBackend {
         action: PowerAction,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
-        let ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
+        // to the expected inventory keyed by PMC MAC. Every power shelf is
+        // rack-scale, so a declared rack_id is expected; the PMC MAC doubles as
+        // the RMS node id since no power shelf id exists.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(
+            resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
+        );
         let operation = to_rms_power_operation(action);
         let mut results = Vec::with_capacity(endpoints.len());
 
@@ -1000,7 +2139,19 @@ impl PowerShelfManager for RmsBackend {
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
-        let ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
+        // to the expected inventory keyed by PMC MAC. Every power shelf is
+        // rack-scale, so a declared rack_id is expected; the PMC MAC doubles as
+        // the RMS node id since no power shelf id exists.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(
+            resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
+        );
         let component_filters = power_shelf_firmware_object_component_filters(components);
 
         let mut results = Vec::with_capacity(endpoints.len());
@@ -1055,17 +2206,53 @@ impl PowerShelfManager for RmsBackend {
                         &resolved.identity.node_id,
                     );
 
-                    if success {
-                        if let Some(job_id) = job_id {
-                            self.firmware_jobs.lock().unwrap().insert(
-                                ep.pmc_mac,
-                                vec![RmsTrackedFirmwareJob::FirmwareObject(job_id)],
+                    if let (true, Some(job_id)) = (success, job_id) {
+                        // Track both in memory and in the DB keyed by PMC MAC
+                        // so status queries survive a nico-api restart, for
+                        // both ingested and pre-ingestion power shelves. A
+                        // row-less pre-ingestion shelf has no state-controller
+                        // status to fall back to, so without this it returns
+                        // Unknown forever after a restart.
+                        self.firmware_jobs.lock().unwrap().insert(
+                            ep.pmc_mac,
+                            vec![RmsTrackedFirmwareJob::FirmwareObject(job_id.clone())],
+                        );
+                        if let Err(e) = db::direct_dispatch_firmware_job::save(
+                            &self.db,
+                            ep.pmc_mac,
+                            FirmwareJobKind::FirmwareObject,
+                            &job_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                pmc_mac_address = %ep.pmc_mac,
+                                job_id = %job_id,
+                                error = %e,
+                                "failed to persist power shelf firmware job ID to database"
                             );
-                        } else {
-                            self.firmware_jobs.lock().unwrap().remove(&ep.pmc_mac);
                         }
                     } else {
+                        // This submission produced no durable job (a failed
+                        // apply, or a success the backend assigned no job to).
+                        // Clear both the in-memory tracking and any job a prior
+                        // update persisted, otherwise a later status query
+                        // (which, after a restart, reads the DB) would recover
+                        // the stale job and report its state for this request.
                         self.firmware_jobs.lock().unwrap().remove(&ep.pmc_mac);
+                        if let Err(e) = db::direct_dispatch_firmware_job::delete(
+                            &self.db,
+                            ep.pmc_mac,
+                            FirmwareJobKind::FirmwareObject,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                pmc_mac_address = %ep.pmc_mac,
+                                error = %e,
+                                "failed to clear persisted power shelf firmware job ID from database"
+                            );
+                        }
                     }
 
                     results.push(PowerShelfComponentResult {
@@ -1117,8 +2304,33 @@ impl PowerShelfManager for RmsBackend {
 
         let mut statuses = Vec::with_capacity(endpoints.len());
 
-        for (pmc_mac, job_id) in &endpoint_jobs {
-            let Some(job_id) = job_id else {
+        for (pmc_mac, in_memory_job) in &endpoint_jobs {
+            // When the in-memory map has no job (e.g. after a pod restart), fall
+            // back to the DB-persisted job id written by update_firmware, keyed
+            // by PMC MAC for both ingested and pre-ingestion power shelves.
+            let resolved_job_id: Option<String> = if in_memory_job.is_some() {
+                in_memory_job.clone()
+            } else {
+                match db::direct_dispatch_firmware_job::get(
+                    &self.db,
+                    *pmc_mac,
+                    FirmwareJobKind::FirmwareObject,
+                )
+                .await
+                {
+                    Ok(db_job_id) => db_job_id,
+                    Err(e) => {
+                        tracing::warn!(
+                            pmc_mac_address = %pmc_mac,
+                            error = %e,
+                            "failed to fetch persisted power shelf firmware job ID from database"
+                        );
+                        None
+                    }
+                }
+            };
+
+            let Some(job_id) = resolved_job_id else {
                 statuses.push(PowerShelfFirmwareUpdateStatus {
                     pmc_mac: *pmc_mac,
                     state: FirmwareState::Unknown,
@@ -1186,7 +2398,19 @@ impl PowerShelfManager for RmsBackend {
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfFirmwareVersions>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
-        let ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
+        // to the expected inventory keyed by PMC MAC. Every power shelf is
+        // rack-scale, so a declared rack_id is expected; the PMC MAC doubles as
+        // the RMS node id since no power shelf id exists.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(
+            resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
+        );
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
@@ -1251,50 +2475,36 @@ impl PowerShelfManager for RmsBackend {
         Ok(results)
     }
 
-    #[instrument(skip(self), fields(backend = "rms"))]
+    #[instrument(skip(self, endpoints), fields(backend = "rms"))]
     async fn get_power_state(
         &self,
         endpoints: &[PowerShelfEndpoint],
-    ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError> {
-        let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
-        let ids = resolve_power_shelf_identities(&self.db, &macs).await?;
-        let mut results = Vec::with_capacity(endpoints.len());
-
-        for ep in endpoints {
-            let resolved = match self.resolve_switch_or_power_shelf_node(
-                &ids,
-                ep.pmc_mac,
-                SwitchOrPowerShelfRole::PowerShelf,
-            ) {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    results.push(PowerShelfPowerStateResult {
-                        pmc_mac: ep.pmc_mac,
-                        power_state: None,
-                        error: Some(error),
-                    });
-                    continue;
-                }
-            };
-
-            let device = build_power_shelf_node_info(ep, &resolved);
-
-            let observed = query_rms_power_state(
-                self.client.as_ref(),
-                device,
-                &resolved.identity.node_id,
-                ep.pmc_mac,
-                "power shelf",
-            )
-            .await;
-            results.push(PowerShelfPowerStateResult {
-                pmc_mac: ep.pmc_mac,
-                power_state: observed.power_state,
-                error: observed.error,
-            });
-        }
-
-        Ok(results)
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
+        let deadline = Instant::now() + RMS_POWER_READ_TIMEOUT;
+        let macs: Vec<_> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
+        let prepare_nodes = async {
+            let mut identities = resolve_power_shelf_identities(&self.db, &macs).await?;
+            let pre_ingestion_macs: Vec<_> = macs
+                .iter()
+                .copied()
+                .filter(|mac| !identities.contains_key(mac))
+                .collect();
+            identities.extend(
+                resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
+            );
+            Ok(endpoints
+                .iter()
+                .map(|ep| {
+                    self.resolve_switch_or_power_shelf_node(
+                        &identities,
+                        ep.pmc_mac,
+                        SwitchOrPowerShelfRole::PowerShelf,
+                    )
+                    .map(|resolved| build_power_shelf_node_info(ep, &resolved))
+                })
+                .collect())
+        };
+        Ok(query_rms_power_states(self.client.as_ref(), &macs, prepare_nodes, deadline).await)
     }
 }
 
@@ -1344,6 +2554,7 @@ fn build_switch_node_info(
     nvos_host_name: Option<String>,
 ) -> rms::NodeInfo {
     let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: resolved.identity.node_id.clone(),
         rack_id: resolved.identity.rack_id.clone(),
         r#type: None,
@@ -1388,6 +2599,37 @@ fn build_switch_password_rotation_node_info(
         bmc_endpoint: None,
         ..node
     }
+}
+
+/// Builds the host-only node description required for certificate rotation.
+///
+/// RMS installs certificate material through NVOS, so the request must not
+/// include a BMC endpoint or BMC credentials.
+fn build_switch_certificate_node_info(
+    endpoint: &SwitchCertificateEndpoint,
+    resolved: &ResolvedRmsNode<'_>,
+) -> rms::NodeInfo {
+    let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
+        node_id: resolved.identity.node_id.clone(),
+        rack_id: resolved.identity.rack_id.clone(),
+        r#type: None,
+        bmc_endpoint: None,
+        host_endpoint: Some(rms::Endpoint {
+            interface: Some(rms::NetworkInterface {
+                ip_address: endpoint.nvos_ip.to_string(),
+                mac_address: endpoint.nvos_mac.to_string(),
+                host_name: endpoint.nvos_host_name.clone(),
+            }),
+            port: 0,
+            credentials: Some(credentials_to_rms(&endpoint.nvos_credentials)),
+        }),
+        node_descriptor: None,
+    };
+
+    resolved.node_identity.apply_to_node_info(&mut node);
+
+    node
 }
 
 async fn resolve_switch_machine_interface_hostnames(
@@ -1458,75 +2700,238 @@ fn summarize_power_batch(batch: rms::NodeBatchResponse) -> (bool, Option<String>
     (false, Some(error))
 }
 
-#[derive(Debug, Clone)]
-struct RmsObservedPowerState {
-    power_state: Option<String>,
-    error: Option<String>,
+struct RmsPowerRead {
+    node: rms::NodeInfo,
+    input_indexes: Vec<usize>,
+    conflicting: bool,
 }
 
-async fn query_rms_power_state(
+/// `query_rms_power_states` keeps one observation slot per requested MAC.
+/// `prepare_nodes` must return one entry per MAC in the same order, retaining
+/// individual preparation errors as entries. Whole-preparation errors fail all
+/// slots; failures after dispatch preserve observations from completed batches.
+async fn query_rms_power_states(
     client: &dyn RmsApi,
-    device: rms::NodeInfo,
-    node_id: &str,
-    device_mac: MacAddress,
-    device_kind: &str,
-) -> RmsObservedPowerState {
-    let request = rms::BatchGetPowerStateRequest {
-        nodes: Some(rms::NodeSet {
-            nodes: vec![device],
-        }),
+    macs: &[MacAddress],
+    prepare_nodes: impl Future<
+        Output = Result<Vec<Result<rms::NodeInfo, String>>, ComponentManagerError>,
+    >,
+    deadline: Instant,
+) -> Vec<ComponentPowerStateResult> {
+    // Keep one slot per input, including duplicates. Completed observations
+    // replace these errors and remain intact if a later request times out.
+    let mut results: Vec<_> = macs
+        .iter()
+        .map(|mac| ComponentPowerStateResult {
+            mac_address: *mac,
+            power_state: Err(RMS_POWER_READ_TIMEOUT_ERROR.to_owned()),
+        })
+        .collect();
+    if macs.is_empty() {
+        return results;
+    }
+    let nodes = match timeout_at(deadline, prepare_nodes).await {
+        Ok(Ok(nodes)) => nodes,
+        Ok(Err(error)) => {
+            // Keep the failed stage visible without dumping persisted values
+            // that a database decoding error could include.
+            tracing::debug!(
+                component_count = macs.len(),
+                "RMS power inventory preparation failed"
+            );
+            for result in &mut results {
+                result.power_state = Err(error.to_string());
+            }
+            return results;
+        }
+        Err(_) => {
+            tracing::debug!(
+                component_count = macs.len(),
+                "RMS power inventory preparation timed out"
+            );
+            return results;
+        }
     };
 
-    match red::instrumented(
-        "rms",
-        "batch_get_power_state",
-        client.batch_get_power_state(request),
-    )
-    .await
-    {
-        Ok(response) => {
-            let batch = response.response.clone().unwrap_or_default();
-            let stats = batch.stats.unwrap_or_default();
-
-            if batch.status != rms::ReturnCode::Success as i32 || stats.failed_nodes != 0 {
-                let summary = if batch.message.is_empty() {
-                    format!(
-                        "batch status {}, failed_nodes {}",
-                        batch.status, stats.failed_nodes
-                    )
-                } else {
-                    batch.message
-                };
-                return RmsObservedPowerState {
-                    power_state: None,
-                    error: Some(summary),
-                };
+    // RMS node IDs are rack-local, but response entries omit the rack ID.
+    // Keep racks in separate calls so a response identifies exactly one node.
+    let mut racks: BTreeMap<String, BTreeMap<String, RmsPowerRead>> = BTreeMap::new();
+    for (index, node) in nodes.into_iter().enumerate() {
+        let node = match node {
+            Ok(node) => node,
+            Err(error) => {
+                // Identify the failed local identity/profile step. Neither
+                // arbitrary error text nor credential-bearing NodeInfo is safe
+                // to include in the diagnostic.
+                tracing::debug!(management_mac_address = %macs[index], "RMS power node identity/profile preparation failed");
+                results[index].power_state = Err(error);
+                continue;
             }
-
-            let power_state = response
-                .node_power_states
-                .iter()
-                .find(|node| node.node_id == node_id)
-                .map(|node| node.pstate.to_lowercase());
-
-            RmsObservedPowerState {
-                power_state,
-                error: None,
+        };
+        let reads = racks.entry(node.rack_id.clone()).or_default();
+        match reads.entry(node.node_id.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(RmsPowerRead {
+                    node,
+                    input_indexes: vec![index],
+                    conflicting: false,
+                });
             }
-        }
-        Err(error) => {
-            tracing::warn!(
-                device_mac_address = %device_mac,
-                error = %error,
-                device_kind,
-                "RMS get power state failed"
-            );
-            RmsObservedPowerState {
-                power_state: None,
-                error: Some(error.to_string()),
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let read = entry.get_mut();
+                read.conflicting |= read.node != node;
+                read.input_indexes.push(index);
             }
         }
     }
+
+    for reads in racks.values_mut() {
+        reads.retain(|_, read| {
+            if read.conflicting {
+                tracing::debug!(
+                    rack_id = %read.node.rack_id,
+                    node_id = %read.node.node_id,
+                    "RMS power read has conflicting request descriptors"
+                );
+                for index in &read.input_indexes {
+                    results[*index].power_state = Err(format!(
+                        "conflicting RMS request descriptors for rack {} node {}",
+                        read.node.rack_id, read.node.node_id
+                    ));
+                }
+            }
+            !read.conflicting
+        });
+    }
+    for reads in racks.values() {
+        let reads: Vec<_> = reads.values().collect();
+        for chunk in reads.chunks(RMS_POWER_READ_BATCH_SIZE) {
+            // `timeout_at` polls its future first. Check before creating an RPC
+            // so an expired budget cannot start another batch.
+            if Instant::now() >= deadline {
+                return results;
+            }
+            let request = rms::BatchGetPowerStateRequest {
+                nodes: Some(rms::NodeSet {
+                    nodes: chunk.iter().map(|read| read.node.clone()).collect(),
+                }),
+            };
+            let response = red::instrumented("rms", "batch_get_power_state", async {
+                timeout_at(deadline, client.batch_get_power_state(request))
+                    .await
+                    .map_err(|_| RMS_POWER_READ_TIMEOUT_ERROR.to_owned())?
+                    // RMS can echo endpoint credentials in a transport error.
+                    // Strip that text before RED logs and returns the failure.
+                    .map_err(|error| match error {
+                        RackManagerError::ApiInvocationError(status) => {
+                            format!("RMS power read RPC failed: {:?}", status.code())
+                        }
+                        RackManagerError::TlsError(_) => "RMS power read TLS failed".to_owned(),
+                    })
+            })
+            .await;
+            for read in chunk {
+                let observed = match &response {
+                    Ok(response) => rms_power_state_for_node(response, &read.node.node_id),
+                    Err(error) => Err(error.clone()),
+                };
+                for index in &read.input_indexes {
+                    results[*index].power_state = observed.clone();
+                }
+            }
+        }
+    }
+    results
+}
+
+/// Validate one node's evidence independently of its peers. Diagnostics keep
+/// the failure category and node identity, excluding untrusted response text.
+fn rms_power_state_for_node(
+    response: &rms::BatchGetPowerStateResponse,
+    node_id: &str,
+) -> Result<Option<PowerState>, String> {
+    let batch = response.response.as_ref().ok_or_else(|| {
+        tracing::debug!(node_id, "RMS power response envelope is missing");
+        "missing RMS power response envelope".to_owned()
+    })?;
+    let mut states = response
+        .node_power_states
+        .iter()
+        .filter(|node| node.node_id == node_id);
+    let state = states.next();
+    if states.next().is_some() {
+        tracing::debug!(node_id, "RMS power response has duplicate states");
+        return Err(format!("duplicate RMS power states for node {node_id}"));
+    }
+    let mut node_results = batch
+        .node_results
+        .iter()
+        .filter(|result| result.node_id == node_id);
+    let node_result = node_results.next();
+    if node_results.next().is_some() {
+        tracing::debug!(
+            node_id,
+            "RMS power response has duplicate operation results"
+        );
+        return Err(format!(
+            "duplicate RMS operation results for node {node_id}"
+        ));
+    }
+    if let Some(result) = node_result
+        && (result.status != rms::ReturnCode::Success as i32 || !result.error_message.is_empty())
+    {
+        tracing::debug!(
+            node_id,
+            rms_return_code = result.status,
+            has_error_message = !result.error_message.is_empty(),
+            has_conflicting_state = state.is_some(),
+            "RMS power node reported failure"
+        );
+        let mut detail = format!("status {}", result.status);
+        let message = if result.error_message.is_empty() {
+            &batch.message
+        } else {
+            &result.error_message
+        };
+        if !message.is_empty() {
+            detail.push_str(": ");
+            detail.push_str(message);
+        }
+        if state.is_some() {
+            return Err(format!(
+                "conflicting RMS power state and failure for node {node_id}: {detail}"
+            ));
+        }
+        return Err(format!(
+            "RMS power read failed for node {node_id}: {detail}"
+        ));
+    }
+
+    // The SDK defines this list as successful observations. Aggregate failure
+    // can describe a different node and must not erase this node's evidence.
+    let Some(state) = state else {
+        tracing::debug!(node_id, "RMS power response has no node state");
+        let mut error = format!("missing RMS power state for node {node_id}");
+        if !batch.message.is_empty() {
+            error.push_str(": ");
+            error.push_str(&batch.message);
+        }
+        return Err(error);
+    };
+    let power_state = match state.pstate.to_ascii_lowercase().as_str() {
+        "on" => PowerState::On,
+        "off" => PowerState::Off,
+        "poweringon" => PowerState::PoweringOn,
+        "poweringoff" => PowerState::PoweringOff,
+        "paused" => PowerState::Paused,
+        "reset" => PowerState::Reset,
+        "unknown" => PowerState::Unknown,
+        _ => {
+            tracing::debug!(node_id, "RMS power response has an unrecognized state");
+            return Err(format!("unrecognized RMS power state: {:?}", state.pstate));
+        }
+    };
+    Ok(Some(power_state))
 }
 
 fn apply_firmware_object_request(
@@ -1536,7 +2941,14 @@ fn apply_firmware_object_request(
     options: &FirmwareUpdateOptions,
     components: &[String],
 ) -> Result<rms::ApplyFirmwareObjectRequest, ComponentManagerError> {
-    let access_token = Some(rms_access_token_or_noauth(options.access_token.as_deref()));
+    // Callers normalize interactive API input before constructing the options.
+    // Stored artifact tokens are opaque and must reach RMS byte-for-byte.
+    let access_token = Some(
+        options
+            .access_token
+            .clone()
+            .unwrap_or_else(|| RMS_NOAUTH_ACCESS_TOKEN.to_string()),
+    );
 
     if config_json.trim().is_empty() {
         return Err(ComponentManagerError::InvalidArgument(
@@ -1580,6 +2992,7 @@ fn apply_switch_system_image_request(
     }
 
     Ok(rms::ApplySwitchSystemImageRequest {
+        allow_onie_recovery: false,
         rack_id: identity.rack_id.clone(),
         config_json: config_json.to_owned(),
         access_token,
@@ -1647,6 +3060,7 @@ fn build_compute_tray_node_info(
     bmc_mac: MacAddress,
 ) -> rms::NodeInfo {
     let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: resolved.identity.node_id.clone(),
         rack_id: resolved.identity.rack_id.clone(),
         r#type: None,
@@ -1776,7 +3190,9 @@ async fn query_tracked_firmware_job_status(
                     let state = if status_success {
                         map_rms_firmware_job_state(response.job_state)
                     } else {
-                        FirmwareState::Unknown
+                        // RMS returns a non-success response when the requested
+                        // firmware-object job ID is no longer tracked.
+                        FirmwareState::Failed
                     };
                     let error = if response.error_message.is_empty() {
                         (!status_success).then(|| {
@@ -2043,6 +3459,10 @@ pub fn scale_up_fabric_service_statuses_from_rms(
 
 #[async_trait::async_trait]
 impl NvSwitchManager for RmsBackend {
+    fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
+        Some(crate::component_common::PowerStateSource::Rms)
+    }
+
     fn name(&self) -> &str {
         "rms"
     }
@@ -2160,6 +3580,14 @@ impl NvSwitchManager for RmsBackend {
         let include_firmware_object = switch_update_includes_firmware_object(components);
         let include_system_image = switch_update_includes_system_image(components);
         let component_filters = switch_firmware_object_component_filters(components);
+        // RMS runs one job per node, so an update covering both kinds cannot
+        // submit both applies here: the second would be rejected while the
+        // first is still active. NVOS goes first, because a BMC upgraded ahead
+        // of it can expose a management port the running NVOS does not know
+        // about, leaving NVOS unable to reach the BMC until it is itself
+        // upgraded. Submit the NVOS apply and stage the firmware-object one for
+        // the status poll that observes NVOS finish.
+        let stage_firmware_object = include_firmware_object && include_system_image;
 
         let mut results = Vec::with_capacity(endpoints.len());
         let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
@@ -2186,8 +3614,91 @@ impl NvSwitchManager for RmsBackend {
             let mut errors = Vec::new();
             let mut tracked_jobs = Vec::new();
 
-            if include_firmware_object {
+            if include_system_image {
                 let device = build_switch_node_info(ep, &resolved, nvos_host_name.clone());
+                match apply_switch_system_image_request(
+                    device,
+                    resolved.identity,
+                    bundle_version,
+                    options,
+                ) {
+                    Ok(request) => match red::instrumented(
+                        "rms",
+                        "apply_switch_system_image",
+                        self.client.apply_switch_system_image(request),
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            let (operation_success, error, job_id) =
+                                summarize_switch_system_image_apply_response(
+                                    response,
+                                    &resolved.identity.node_id,
+                                );
+
+                            if !operation_success {
+                                success = false;
+                            }
+                            if let Some(error) = error {
+                                errors.push(error);
+                            }
+                            if operation_success {
+                                if let Some(job_id) = job_id {
+                                    tracked_jobs
+                                        .push(RmsTrackedFirmwareJob::SwitchSystemImage(job_id));
+                                }
+                            } else if job_id.is_some() {
+                                tracing::debug!(
+                                    bmc_mac_address = %ep.bmc_mac,
+                                    "RMS returned a switch system-image job id for a failed switch update; not tracking it"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                bmc_mac_address = %ep.bmc_mac,
+                                error = %e,
+                                "RMS switch system-image update failed for switch"
+                            );
+                            success = false;
+                            errors.push(e.to_string());
+                        }
+                    },
+                    Err(e) => {
+                        success = false;
+                        errors.push(e.to_string());
+                    }
+                }
+            }
+
+            let mut staged_firmware_object = None;
+            if stage_firmware_object {
+                let system_image_job = tracked_jobs.iter().find_map(|job| match job {
+                    RmsTrackedFirmwareJob::SwitchSystemImage(job_id) => Some(job_id.clone()),
+                    _ => None,
+                });
+                if let Some(system_image_job) = system_image_job {
+                    staged_firmware_object = Some(StagedFirmwareObject::Staged {
+                        system_image_job,
+                        config_json: bundle_version.to_owned(),
+                        component_filters: component_filters.clone(),
+                        options: options.clone(),
+                    });
+                } else {
+                    // Nothing to sequence the firmware-object apply behind, so
+                    // it would race the node's lock exactly as before. Report
+                    // it instead.
+                    success = false;
+                    errors.push(
+                        "firmware-object update was not submitted: the NVOS update for this \
+                         switch produced no job to sequence it behind"
+                            .to_owned(),
+                    );
+                }
+            }
+
+            if include_firmware_object && !stage_firmware_object {
+                let device = build_switch_node_info(ep, &resolved, nvos_host_name);
                 match apply_firmware_object_request(
                     device,
                     &resolved,
@@ -2244,63 +3755,6 @@ impl NvSwitchManager for RmsBackend {
                 }
             }
 
-            if include_system_image {
-                let device = build_switch_node_info(ep, &resolved, nvos_host_name);
-                match apply_switch_system_image_request(
-                    device,
-                    resolved.identity,
-                    bundle_version,
-                    options,
-                ) {
-                    Ok(request) => match red::instrumented(
-                        "rms",
-                        "apply_switch_system_image",
-                        self.client.apply_switch_system_image(request),
-                    )
-                    .await
-                    {
-                        Ok(response) => {
-                            let (operation_success, error, job_id) =
-                                summarize_switch_system_image_apply_response(
-                                    response,
-                                    &resolved.identity.node_id,
-                                );
-
-                            if !operation_success {
-                                success = false;
-                            }
-                            if let Some(error) = error {
-                                errors.push(error);
-                            }
-                            if operation_success {
-                                if let Some(job_id) = job_id {
-                                    tracked_jobs
-                                        .push(RmsTrackedFirmwareJob::SwitchSystemImage(job_id));
-                                }
-                            } else if job_id.is_some() {
-                                tracing::debug!(
-                                    bmc_mac_address = %ep.bmc_mac,
-                                    "RMS returned a switch system-image job id for a failed switch update; not tracking it"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                bmc_mac_address = %ep.bmc_mac,
-                                error = %e,
-                                "RMS switch system-image update failed for switch"
-                            );
-                            success = false;
-                            errors.push(e.to_string());
-                        }
-                    },
-                    Err(e) => {
-                        success = false;
-                        errors.push(e.to_string());
-                    }
-                }
-            }
-
             // Persist the tracked jobs keyed by BMC MAC + kind (replacing any
             // prior set for this switch, including clearing it when empty) so
             // status queries survive a nico-api restart, for both ingested and
@@ -2309,28 +3763,19 @@ impl NvSwitchManager for RmsBackend {
             // TODO: modify the behavior of the in memory map to only delete the relevant job and not clear all jobs for a given switch on every fw update.
             // For example, if we want to just update the System Image, we shouldnt clear the firmware object job ID from the in memory table (or in the DB)
             // Leave it as is for now.
-            let persisted_jobs: Vec<(FirmwareJobKind, String)> = tracked_jobs
-                .iter()
-                .map(|job| (job.kind(), job.job_id().to_owned()))
-                .collect();
-            if let Err(e) =
-                db::direct_dispatch_firmware_job::replace(&self.db, ep.bmc_mac, &persisted_jobs)
-                    .await
-            {
-                tracing::warn!(
-                    bmc_mac_address = %ep.bmc_mac,
-                    error = %e,
-                    "failed to persist switch firmware job IDs to database"
-                );
-            }
+            self.track_switch_firmware_jobs(ep.bmc_mac, tracked_jobs)
+                .await;
 
-            if !tracked_jobs.is_empty() {
-                self.firmware_jobs
-                    .lock()
-                    .unwrap()
-                    .insert(ep.bmc_mac, tracked_jobs);
-            } else {
-                self.firmware_jobs.lock().unwrap().remove(&ep.bmc_mac);
+            // The staged firmware-object phase is per switch and the latest
+            // update owns it: install this update's, or clear one a superseded
+            // update left behind, so the switch never has more than one
+            // pending.
+            {
+                let mut staged = self.staged_firmware_objects.lock().unwrap();
+                match staged_firmware_object {
+                    Some(phase) => staged.insert(ep.bmc_mac, phase),
+                    None => staged.remove(&ep.bmc_mac),
+                };
             }
 
             results.push(SwitchComponentResult {
@@ -2348,29 +3793,25 @@ impl NvSwitchManager for RmsBackend {
         &self,
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<SwitchFirmwareUpdateStatus>, ComponentManagerError> {
-        let endpoint_jobs: Vec<(MacAddress, Vec<RmsTrackedFirmwareJob>)> = {
+        let endpoint_jobs: Vec<Vec<RmsTrackedFirmwareJob>> = {
             let jobs = self.firmware_jobs.lock().unwrap();
             endpoints
                 .iter()
-                .map(|ep| {
-                    (
-                        ep.bmc_mac,
-                        jobs.get(&ep.bmc_mac).cloned().unwrap_or_default(),
-                    )
-                })
+                .map(|ep| jobs.get(&ep.bmc_mac).cloned().unwrap_or_default())
                 .collect()
         };
 
         let mut statuses = Vec::with_capacity(endpoints.len());
 
-        for (bmc_mac, in_memory_jobs) in &endpoint_jobs {
+        for (ep, in_memory_jobs) in endpoints.iter().zip(&endpoint_jobs) {
+            let bmc_mac = ep.bmc_mac;
             // When the in-memory map has no jobs (e.g. after a pod restart), fall
             // back to the DB-persisted set written by queue_firmware_updates,
             // keyed by BMC MAC for both ingested and pre-ingestion switches.
             let jobs: Vec<RmsTrackedFirmwareJob> = if !in_memory_jobs.is_empty() {
                 in_memory_jobs.clone()
             } else {
-                match db::direct_dispatch_firmware_job::get_all(&self.db, *bmc_mac).await {
+                match db::direct_dispatch_firmware_job::get_all(&self.db, bmc_mac).await {
                     Ok(rows) => rows
                         .into_iter()
                         .map(|(kind, job_id)| RmsTrackedFirmwareJob::from_persisted(kind, job_id))
@@ -2385,16 +3826,6 @@ impl NvSwitchManager for RmsBackend {
                     }
                 }
             };
-
-            if jobs.is_empty() {
-                statuses.push(SwitchFirmwareUpdateStatus {
-                    bmc_mac: *bmc_mac,
-                    state: FirmwareState::Unknown,
-                    target_version: String::new(),
-                    error: Some("no firmware job tracked for this switch".into()),
-                });
-                continue;
-            }
 
             let mut states = Vec::with_capacity(jobs.len());
             let mut errors = Vec::new();
@@ -2411,8 +3842,49 @@ impl NvSwitchManager for RmsBackend {
                 }
             }
 
+            // This poll owns the second half of an NVOS-then-firmware update:
+            // it is the only place that observes the NVOS job finish and can
+            // release the firmware-object apply staged behind it.
+            let system_image_state = jobs
+                .iter()
+                .position(|job| matches!(job, RmsTrackedFirmwareJob::SwitchSystemImage(_)))
+                .map(|index| states[index]);
+            match self
+                .advance_staged_firmware_object(ep, system_image_state)
+                .await
+            {
+                Some(StagedFirmwareObjectOutcome::Submitted(job)) => {
+                    let (state, error) = query_tracked_firmware_job_status(
+                        self.client.as_ref(),
+                        self.switch_system_image_client.as_deref(),
+                        &job,
+                    )
+                    .await;
+                    states.push(state);
+                    if let Some(error) = error {
+                        errors.push(error);
+                    }
+                }
+                Some(StagedFirmwareObjectOutcome::Abandoned(error)) => {
+                    states.push(FirmwareState::Failed);
+                    errors.push(error);
+                }
+                // The firmware-object apply has not finished. Say so, because
+                // the NVOS job stops speaking for the switch the moment it
+                // completes, and the switch is not done until its
+                // firmware-object half is submitted and tracked.
+                Some(StagedFirmwareObjectOutcome::Waiting) => {
+                    states.push(FirmwareState::InProgress)
+                }
+                None => {}
+            }
+
+            if states.is_empty() {
+                continue;
+            }
+
             statuses.push(SwitchFirmwareUpdateStatus {
-                bmc_mac: *bmc_mac,
+                bmc_mac,
                 state: aggregate_firmware_job_states(&states),
                 target_version: String::new(),
                 error: (!errors.is_empty()).then(|| errors.join("; ")),
@@ -2427,52 +3899,31 @@ impl NvSwitchManager for RmsBackend {
         list_firmware_object_ids(self.client.as_ref()).await
     }
 
-    #[instrument(skip(self), fields(backend = "rms"))]
+    #[instrument(skip(self, endpoints), fields(backend = "rms"))]
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
-        let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.bmc_mac).collect();
-        let ids = resolve_switch_identities(&self.db, &macs).await?;
-        let mut results = Vec::with_capacity(endpoints.len());
-        let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
-
-        for ep in endpoints {
-            let resolved = match self.resolve_switch_or_power_shelf_node(
-                &ids,
-                ep.bmc_mac,
-                SwitchOrPowerShelfRole::Switch,
-            ) {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    results.push(SwitchPowerStateResult {
-                        bmc_mac: ep.bmc_mac,
-                        power_state: None,
-                        error: Some(error),
-                    });
-                    continue;
-                }
-            };
-
-            let device =
-                build_switch_node_info(ep, &resolved, hostnames.get(&ep.nvos_mac).cloned());
-
-            let observed = query_rms_power_state(
-                self.client.as_ref(),
-                device,
-                &resolved.identity.node_id,
-                ep.bmc_mac,
-                "switch",
-            )
-            .await;
-            results.push(SwitchPowerStateResult {
-                bmc_mac: ep.bmc_mac,
-                power_state: observed.power_state,
-                error: observed.error,
-            });
-        }
-
-        Ok(results)
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
+        let deadline = Instant::now() + RMS_POWER_READ_TIMEOUT;
+        let macs: Vec<_> = endpoints.iter().map(|ep| ep.bmc_mac).collect();
+        let prepare_nodes = async {
+            let identities = resolve_switch_identities(&self.db, &macs).await?;
+            let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
+            Ok(endpoints
+                .iter()
+                .map(|ep| {
+                    self.resolve_switch_or_power_shelf_node(
+                        &identities,
+                        ep.bmc_mac,
+                        SwitchOrPowerShelfRole::Switch,
+                    )
+                    .map(|resolved| {
+                        build_switch_node_info(ep, &resolved, hostnames.get(&ep.nvos_mac).cloned())
+                    })
+                })
+                .collect())
+        };
+        Ok(query_rms_power_states(self.client.as_ref(), &macs, prepare_nodes, deadline).await)
     }
 
     #[instrument(skip(self), fields(backend = "rms"))]
@@ -2593,7 +4044,41 @@ impl NvSwitchManager for RmsBackend {
             &resolved,
             hostnames.get(&endpoint.nvos_mac).cloned(),
         );
-        rms_configure_switch_certificate(self.client.as_ref(), device, domain_name, services).await
+
+        let node_id = device.node_id.clone();
+
+        rms_configure_switch_certificate(
+            self.client.as_ref(),
+            vec![device],
+            Some(&node_id),
+            domain_name,
+            services,
+        )
+        .await
+    }
+
+    #[instrument(skip(self, endpoints, domain_name, services), fields(backend = "rms"))]
+    async fn batch_configure_switch_certificate(
+        &self,
+        endpoints: &[SwitchCertificateEndpoint],
+        domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        if endpoints.is_empty() {
+            return Err(ComponentManagerError::RejectedBeforeDispatch(
+                "switch certificate configuration requires at least one endpoint".to_string(),
+            ));
+        }
+
+        // Node resolution completes before RMS receives the mutation, so a
+        // preparation failure is safe for the rack controller to retry.
+        let nodes = self
+            .resolve_switch_certificate_nodes(endpoints)
+            .await
+            .map_err(|error| ComponentManagerError::RejectedBeforeDispatch(error.to_string()))?;
+
+        rms_configure_switch_certificate(self.client.as_ref(), nodes, None, domain_name, services)
+            .await
     }
 
     #[instrument(skip(self), fields(backend = "rms", job_id))]
@@ -2648,6 +4133,65 @@ impl NvSwitchManager for RmsBackend {
         rms_get_switch_factory_reset_job_status(self.client.as_ref(), job_id).await
     }
 
+    #[instrument(skip(self, endpoints, services), fields(backend = "rms"))]
+    async fn batch_disable_switch_mtls(
+        &self,
+        endpoints: &[SwitchEndpoint],
+        services: &[i32],
+    ) -> Result<String, ComponentManagerError> {
+        if endpoints.is_empty() {
+            return Err(ComponentManagerError::RejectedBeforeDispatch(
+                "switch mTLS disable requires at least one endpoint".to_string(),
+            ));
+        }
+
+        if services.is_empty() {
+            return Err(ComponentManagerError::RejectedBeforeDispatch(
+                "switch mTLS disable requires at least one service".to_string(),
+            ));
+        }
+
+        // Node resolution completes before RMS receives the mutation, so a
+        // preparation failure is safe for the caller to retry.
+        let reject = |error: ComponentManagerError| {
+            ComponentManagerError::RejectedBeforeDispatch(error.to_string())
+        };
+        let macs: Vec<MacAddress> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
+        let identities = resolve_switch_identities(&self.db, &macs)
+            .await
+            .map_err(reject)?;
+        let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints)
+            .await
+            .map_err(reject)?;
+        let mut nodes = Vec::with_capacity(endpoints.len());
+
+        for endpoint in endpoints {
+            let resolved = self
+                .resolve_switch_or_power_shelf_node(
+                    &identities,
+                    endpoint.bmc_mac,
+                    SwitchOrPowerShelfRole::Switch,
+                )
+                .map_err(ComponentManagerError::RejectedBeforeDispatch)?;
+
+            nodes.push(build_switch_node_info(
+                endpoint,
+                &resolved,
+                hostnames.get(&endpoint.nvos_mac).cloned(),
+            ));
+        }
+
+        rms_batch_disable_switch_mtls(self.client.as_ref(), nodes, services).await
+    }
+
+    #[instrument(skip(self), fields(backend = "rms", job_id))]
+    async fn get_disable_switch_mtls_job_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+        rms_get_switch_mtls_disable_job_status(self.client.as_ref(), job_id).await
+    }
+
     #[instrument(skip(self, endpoints, topology), fields(backend = "rms"))]
     async fn configure_scale_up_fabric_manager(
         &self,
@@ -2661,6 +4205,7 @@ impl NvSwitchManager for RmsBackend {
             "configure_scale_up_fabric_manager_v2",
             self.client.configure_scale_up_fabric_manager_v2(
                 rms_v2::ConfigureScaleUpFabricManagerRequest {
+                    layout: None,
                     nodes: Some(rms::NodeSet { nodes }),
                     // RMS selects the V2 primary across the supplied fabric.
                     primary_switch_node_id: None,
@@ -2878,16 +4423,19 @@ fn map_rms_password_rotation_state(job: &rms::JobStatus) -> SwitchPasswordRotati
     }
 }
 
-/// Submits one destructive factory-reset batch and requires a durable job handle.
+/// Submits a factory-reset batch and requires RMS to return a job ID.
 ///
-/// The backend-neutral TLS server domain maps to the RMS `domain` field. RMS uses its
-/// configured switch domain when this value is absent.
+/// `tls_server_domain` overrides the RMS switch domain. If omitted, RMS uses its
+/// configured domain.
+/// The request enables SSH fallback for NVUE connection or TLS failures before
+/// reset submission.
 async fn rms_batch_reset_switch_factory_default(
     client: &dyn RmsApi,
     nodes: Vec<rms::NodeInfo>,
     tls_server_domain: Option<&str>,
 ) -> Result<String, ComponentManagerError> {
     let request = rms::BatchResetSwitchFactoryDefaultRequest {
+        allow_ssh_fallback: true,
         nodes: Some(rms::NodeSet { nodes }),
         domain: tls_server_domain.map(str::to_owned),
     };
@@ -2931,7 +4479,55 @@ async fn rms_batch_reset_switch_factory_default(
     )))
 }
 
-fn rms_switch_factory_reset_job_failure(job: &rms::JobStatus) -> String {
+/// Names an asynchronous switch operation in aggregated RMS job diagnostics.
+#[derive(Clone, Copy)]
+struct RmsSwitchJobLabels {
+    /// Operation description used in messages, such as `switch factory-reset`.
+    operation: &'static str,
+
+    /// Noun for the outcome that cannot be established, such as `reset`.
+    outcome: &'static str,
+}
+
+const FACTORY_RESET_JOB_LABELS: RmsSwitchJobLabels = RmsSwitchJobLabels {
+    operation: "switch factory-reset",
+    outcome: "reset",
+};
+
+const MTLS_DISABLE_JOB_LABELS: RmsSwitchJobLabels = RmsSwitchJobLabels {
+    operation: "switch mTLS-disable",
+    outcome: "disable",
+};
+
+/// Aggregate state of an RMS parent job and its per-switch children.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RmsSwitchJobTreeState {
+    Pending,
+    Completed,
+    Failed,
+}
+
+impl From<RmsSwitchJobTreeState> for SwitchFactoryResetState {
+    fn from(state: RmsSwitchJobTreeState) -> Self {
+        match state {
+            RmsSwitchJobTreeState::Pending => Self::Pending,
+            RmsSwitchJobTreeState::Completed => Self::Completed,
+            RmsSwitchJobTreeState::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<RmsSwitchJobTreeState> for SwitchMtlsDisableState {
+    fn from(state: RmsSwitchJobTreeState) -> Self {
+        match state {
+            RmsSwitchJobTreeState::Pending => Self::Pending,
+            RmsSwitchJobTreeState::Completed => Self::Completed,
+            RmsSwitchJobTreeState::Failed => Self::Failed,
+        }
+    }
+}
+
+fn rms_switch_job_failure(labels: RmsSwitchJobLabels, job: &rms::JobStatus) -> String {
     let error_code = rms::JobError::try_from(job.error_code).map_or_else(
         |_| format!("unknown({})", job.error_code),
         |error| error.as_str_name().to_string(),
@@ -2950,8 +4546,8 @@ fn rms_switch_factory_reset_job_failure(job: &rms::JobStatus) -> String {
     };
 
     format!(
-        "switch factory-reset job {}{node} failed with {error_code}: {message}",
-        job.job_id
+        "{} job {}{node} failed with {error_code}: {message}",
+        labels.operation, job.job_id
     )
 }
 
@@ -2962,16 +4558,18 @@ fn rms_switch_factory_reset_job_failure(job: &rms::JobStatus) -> String {
 /// be present and completed. A missing child remains pending because RMS may expose it
 /// on a later poll. A missing parent or unknown execution state cannot establish the
 /// outcome and is reported as [`ComponentManagerError::OperationOutcomeUnknown`].
-fn summarize_rms_switch_factory_reset_jobs(
+fn summarize_rms_switch_job_tree(
+    labels: RmsSwitchJobLabels,
     job_id: &str,
     jobs: &[rms::JobStatus],
-) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
+) -> Result<(RmsSwitchJobTreeState, Option<String>), ComponentManagerError> {
     let parent = jobs
         .iter()
         .find(|job| job.job_id == job_id)
         .ok_or_else(|| {
             ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS returned no state for switch factory-reset job {job_id}; the reset outcome is unknown"
+                "RMS returned no state for {} job {job_id}; the {} outcome is unknown",
+                labels.operation, labels.outcome
             ))
         })?;
 
@@ -2995,20 +4593,20 @@ fn summarize_rms_switch_factory_reset_jobs(
             Ok(rms::JobExecutionState::Failed)
         )
     }) {
-        return Ok(SwitchFactoryResetJobStatus {
-            state: SwitchFactoryResetState::Failed,
-            error: Some(rms_switch_factory_reset_job_failure(failed)),
-        });
+        return Ok((
+            RmsSwitchJobTreeState::Failed,
+            Some(rms_switch_job_failure(labels, failed)),
+        ));
     }
 
     if matches!(
         rms::JobExecutionState::try_from(parent.execution_state),
         Ok(rms::JobExecutionState::Failed)
     ) {
-        return Ok(SwitchFactoryResetJobStatus {
-            state: SwitchFactoryResetState::Failed,
-            error: Some(rms_switch_factory_reset_job_failure(parent)),
-        });
+        return Ok((
+            RmsSwitchJobTreeState::Failed,
+            Some(rms_switch_job_failure(labels, parent)),
+        ));
     }
 
     // A successful reset must include per-switch evidence. Keep polling when RMS has
@@ -3027,38 +4625,68 @@ fn summarize_rms_switch_factory_reset_jobs(
             }
             Ok(rms::JobExecutionState::Completed) => {}
             Ok(rms::JobExecutionState::Failed) => {
-                return Ok(SwitchFactoryResetJobStatus {
-                    state: SwitchFactoryResetState::Failed,
-                    error: Some(rms_switch_factory_reset_job_failure(job)),
-                });
+                return Ok((
+                    RmsSwitchJobTreeState::Failed,
+                    Some(rms_switch_job_failure(labels, job)),
+                ));
             }
             Ok(rms::JobExecutionState::Unspecified) | Err(_) => {
                 return Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-                    "RMS switch factory-reset job {} returned unknown execution state {}; the reset outcome is unknown",
-                    job.job_id, job.execution_state
+                    "RMS {} job {} returned unknown execution state {}; the {} outcome is unknown",
+                    labels.operation, job.job_id, job.execution_state, labels.outcome
                 )));
             }
         }
     }
 
     let state = if pending {
-        SwitchFactoryResetState::Pending
+        RmsSwitchJobTreeState::Pending
     } else {
-        SwitchFactoryResetState::Completed
+        RmsSwitchJobTreeState::Completed
     };
 
-    Ok(SwitchFactoryResetJobStatus { state, error: None })
+    Ok((state, None))
 }
 
-/// Reads and aggregates the RMS parent and child states for a factory reset.
-async fn rms_get_switch_factory_reset_job_status(
-    client: &dyn RmsApi,
+fn summarize_rms_switch_factory_reset_jobs(
     job_id: &str,
+    jobs: &[rms::JobStatus],
 ) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
+    let (state, error) = summarize_rms_switch_job_tree(FACTORY_RESET_JOB_LABELS, job_id, jobs)?;
+
+    Ok(SwitchFactoryResetJobStatus {
+        state: state.into(),
+        error,
+    })
+}
+
+fn summarize_rms_switch_mtls_disable_jobs(
+    job_id: &str,
+    jobs: &[rms::JobStatus],
+) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+    let (state, error) = summarize_rms_switch_job_tree(MTLS_DISABLE_JOB_LABELS, job_id, jobs)?;
+
+    Ok(SwitchMtlsDisableJobStatus {
+        state: state.into(),
+        error,
+    })
+}
+
+/// Reads the RMS parent and child job states for one asynchronous switch operation.
+///
+/// Once submission returned a durable handle, a rejected or missing observation does
+/// not prove that the operation never started, so those cases preserve the unknown
+/// outcome.
+async fn rms_get_switch_job_tree(
+    client: &dyn RmsApi,
+    labels: RmsSwitchJobLabels,
+    job_id: &str,
+) -> Result<Vec<rms::JobStatus>, ComponentManagerError> {
     if job_id.trim().is_empty() {
-        return Err(ComponentManagerError::InvalidArgument(
-            "switch factory-reset job ID must be non-empty".to_string(),
-        ));
+        return Err(ComponentManagerError::InvalidArgument(format!(
+            "{} job ID must be non-empty",
+            labels.operation
+        )));
     }
 
     let request = rms::GetJobStatusRequest {
@@ -3067,35 +4695,133 @@ async fn rms_get_switch_factory_reset_job_status(
     };
 
     match red::instrumented("rms", "get_job_status", client.get_job_status(request)).await {
-        Ok(response) => summarize_rms_switch_factory_reset_jobs(job_id, &response.job_states),
+        Ok(response) => Ok(response.job_states),
         Err(RackManagerError::ApiInvocationError(status)) => match status.code() {
-            // Once submission returned a durable handle, a rejected or missing
-            // observation does not prove that the destructive job never started.
             tonic::Code::NotFound => Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-                "RMS has no state for switch factory-reset job {job_id}; the reset outcome is unknown"
+                "RMS has no state for {} job {job_id}; the {} outcome is unknown",
+                labels.operation, labels.outcome
             ))),
             tonic::Code::InvalidArgument => {
                 Err(ComponentManagerError::OperationOutcomeUnknown(format!(
-                    "RMS rejected observation of switch factory-reset job {job_id}; the reset outcome is unknown"
+                    "RMS rejected observation of {} job {job_id}; the {} outcome is unknown",
+                    labels.operation, labels.outcome
                 )))
             }
-            tonic::Code::Unimplemented => Err(ComponentManagerError::Unsupported(
-                "RMS does not support switch factory-reset job status".to_string(),
-            )),
+            tonic::Code::Unimplemented => Err(ComponentManagerError::Unsupported(format!(
+                "RMS does not support {} job status",
+                labels.operation
+            ))),
             tonic::Code::Unavailable
             | tonic::Code::DeadlineExceeded
             | tonic::Code::Cancelled
-            | tonic::Code::ResourceExhausted => Err(ComponentManagerError::Unavailable(
-                "RMS switch factory-reset job status is temporarily unavailable".to_string(),
-            )),
+            | tonic::Code::ResourceExhausted => Err(ComponentManagerError::Unavailable(format!(
+                "RMS {} job status is temporarily unavailable",
+                labels.operation
+            ))),
             _ => Err(ComponentManagerError::Rms(format!(
-                "RMS could not read switch factory-reset job {job_id}: {status}"
+                "RMS could not read {} job {job_id}: {status}",
+                labels.operation
             ))),
         },
-        Err(RackManagerError::TlsError(_)) => Err(ComponentManagerError::Unavailable(
-            "RMS switch factory-reset job status is temporarily unavailable".to_string(),
-        )),
+        Err(RackManagerError::TlsError(_)) => Err(ComponentManagerError::Unavailable(format!(
+            "RMS {} job status is temporarily unavailable",
+            labels.operation
+        ))),
     }
+}
+
+/// Reads and aggregates the RMS parent and child states for a factory reset.
+async fn rms_get_switch_factory_reset_job_status(
+    client: &dyn RmsApi,
+    job_id: &str,
+) -> Result<SwitchFactoryResetJobStatus, ComponentManagerError> {
+    let jobs = rms_get_switch_job_tree(client, FACTORY_RESET_JOB_LABELS, job_id).await?;
+
+    summarize_rms_switch_factory_reset_jobs(job_id, &jobs)
+}
+
+/// Reads and aggregates the RMS parent and child states for an mTLS disable.
+async fn rms_get_switch_mtls_disable_job_status(
+    client: &dyn RmsApi,
+    job_id: &str,
+) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+    let jobs = rms_get_switch_job_tree(client, MTLS_DISABLE_JOB_LABELS, job_id).await?;
+
+    summarize_rms_switch_mtls_disable_jobs(job_id, &jobs)
+}
+
+/// Submits one mTLS-disable batch and requires a durable job handle.
+async fn rms_batch_disable_switch_mtls(
+    client: &dyn RmsApi,
+    nodes: Vec<rms::NodeInfo>,
+    services: &[i32],
+) -> Result<String, ComponentManagerError> {
+    let request = rms::BatchDisableSwitchMtlsRequest {
+        nodes: Some(rms::NodeSet { nodes }),
+        services: services.to_vec(),
+    };
+
+    let response = red::instrumented(
+        "rms",
+        "batch_disable_switch_mtls",
+        client.batch_disable_switch_mtls(request),
+    )
+    .await
+    .map_err(|error| match error {
+        // The contract guarantees that an unimplemented RPC accepted no work. Other
+        // status or transport failures can arrive after dispatch, so they must not
+        // invite an automatic retry.
+        RackManagerError::ApiInvocationError(status)
+            if status.code() == tonic::Code::Unimplemented =>
+        {
+            ComponentManagerError::Unsupported(
+                "RMS does not support switch mTLS disable".to_string(),
+            )
+        }
+        // Report the full RMS error: callers have no other way to judge why the
+        // outcome is unknown. This relies on RMS not echoing credentials in its
+        // error text.
+        error => ComponentManagerError::OperationOutcomeUnknown(format!(
+            "RMS switch mTLS-disable submission failed and returned no durable job ID: {error}"
+        )),
+    })?;
+
+    let batch = response.response.ok_or_else(|| {
+        ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch mTLS-disable submission returned no operation response or job ID"
+                .to_string(),
+        )
+    })?;
+
+    let status = batch.status;
+    let (success, error, job_id) = summarize_firmware_batch(
+        Some(batch),
+        None,
+        "",
+        "RMS switch mTLS-disable batch failed",
+    );
+    let job_id = job_id.filter(|job_id| !job_id.trim().is_empty());
+
+    if !success {
+        // A failed batch can still have accepted work. Its parent job covers only
+        // accepted children, so completion cannot prove every requested switch was
+        // reset. Retain the ID for operator reconciliation without letting
+        // certificate installation proceed.
+        let error = error.unwrap_or_else(|| "RMS switch mTLS-disable batch failed".to_owned());
+
+        return Err(ComponentManagerError::OperationOutcomeUnknown(
+            match job_id {
+                Some(job_id) => format!("{error}; RMS job ID: {job_id}"),
+                None => error,
+            },
+        ));
+    }
+
+    job_id.ok_or_else(|| {
+        ComponentManagerError::OperationOutcomeUnknown(format!(
+            "RMS switch mTLS-disable submission returned no job ID (status {status}); the operation outcome is unknown"
+        ))
+    })
 }
 
 /// Summarizes parent and child job observations for one password rotation.
@@ -3242,37 +4968,23 @@ fn map_rms_configure_switch_certificate_job_state(
     }
 }
 
-fn summarize_configure_switch_certificate_response(
-    response: rms::ConfigureSwitchCertificateResponse,
-    node_id: &str,
-) -> (bool, Option<String>, Option<String>) {
-    let node_job_id = response
-        .jobs
-        .iter()
-        .find(|j| j.node_id == node_id && !j.job_id.is_empty())
-        .map(|j| j.job_id.clone());
-
-    summarize_firmware_batch(
-        response.response,
-        node_job_id,
-        node_id,
-        "RMS switch certificate configuration failed",
-    )
-}
-
 async fn rms_configure_switch_certificate(
     client: &dyn RmsApi,
-    device: rms::NodeInfo,
+    nodes: Vec<rms::NodeInfo>,
+    node_id: Option<&str>,
     domain_name: Option<&str>,
     services: Option<&[i32]>,
 ) -> Result<String, ComponentManagerError> {
-    let node_id = device.node_id.clone();
+    // RMS has no Hello probe for a telemetry-only certificate binding.
+    let test_hello = !matches!(
+        services,
+        Some([service]) if *service == rms::SwitchService::ScaleUpFabricTelemetry as i32
+    );
+
     let request = rms::ConfigureSwitchCertificateRequest {
-        nodes: Some(rms::NodeSet {
-            nodes: vec![device],
-        }),
+        nodes: Some(rms::NodeSet { nodes }),
         services: services.map(<[i32]>::to_vec).unwrap_or_default(),
-        test_hello: true,
+        test_hello,
         domain: domain_name.map(str::to_owned),
     };
 
@@ -3283,25 +4995,143 @@ async fn rms_configure_switch_certificate(
     )
     .await
     .map_err(|e| {
-        ComponentManagerError::Internal(format!(
+        ComponentManagerError::OperationOutcomeUnknown(format!(
             "failed to start RMS switch certificate configuration: {e}"
         ))
     })?;
 
-    let (success, error, job_id) =
-        summarize_configure_switch_certificate_response(response, &node_id);
+    let node_job_id = node_id.and_then(|node_id| {
+        response
+            .jobs
+            .iter()
+            .find(|job| job.node_id == node_id && !job.job_id.is_empty())
+            .map(|job| job.job_id.clone())
+    });
 
-    if success {
+    let batch = response.response.ok_or_else(|| {
+        let jobs = response
+            .jobs
+            .iter()
+            .filter(|job| !job.job_id.trim().is_empty())
+            .map(|job| format!("node {}: job {}", job.node_id, job.job_id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut message = "RMS switch certificate submission returned no batch result".to_string();
+        if !jobs.is_empty() {
+            message.push_str(&format!("; returned node jobs: {jobs}"));
+        }
+        ComponentManagerError::OperationOutcomeUnknown(message)
+    })?;
+    let job_id = node_job_id
+        .or_else(|| (!batch.job_id.trim().is_empty()).then_some(batch.job_id))
+        .filter(|id| !id.trim().is_empty());
+    let mut node_failures: Vec<_> = batch
+        .node_results
+        .into_iter()
+        .filter(|result| result.status != rms::ReturnCode::Success as i32)
+        .map(|result| SwitchCertificateNodeFailure {
+            job_id: response
+                .jobs
+                .iter()
+                .find(|job| job.node_id == result.node_id && !job.job_id.is_empty())
+                .map(|job| job.job_id.clone()),
+            node_id: result.node_id,
+            error_code: None,
+            message: result.error_message,
+        })
+        .collect();
+    node_failures.sort_by(|a, b| {
+        (&a.node_id, &a.job_id, a.error_code, &a.message).cmp(&(
+            &b.node_id,
+            &b.job_id,
+            b.error_code,
+            &b.message,
+        ))
+    });
+    if batch.status == rms::ReturnCode::Success as i32
+        && batch.stats.is_none_or(|stats| stats.failed_nodes == 0)
+        && node_failures.is_empty()
+    {
         job_id.ok_or_else(|| {
-            ComponentManagerError::Internal(
+            ComponentManagerError::OperationOutcomeUnknown(
                 "RMS switch certificate configuration succeeded but returned no job id".into(),
             )
         })
     } else {
-        Err(ComponentManagerError::Internal(error.unwrap_or_else(
-            || "RMS switch certificate configuration failed".to_owned(),
-        )))
+        // The parent may cover accepted children only. Retain its handle for
+        // reconciliation without treating partial acceptance as a successful batch.
+        Err(ComponentManagerError::SwitchCertificateSubmission {
+            summary: batch.message,
+            failure: Box::new(SwitchCertificateFailure {
+                job_id,
+                node_failures,
+            }),
+        })
     }
+}
+
+fn certificate_node_failures(
+    job_id: &str,
+    jobs: &[rms::JobStatus],
+) -> Result<Vec<SwitchCertificateNodeFailure>, ComponentManagerError> {
+    let mut pending = vec![job_id];
+    let mut visited = HashSet::new();
+    let mut failures = Vec::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(job) = jobs.iter().find(|job| job.job_id == id) else {
+            if id == job_id {
+                return Err(ComponentManagerError::Unavailable(format!(
+                    "RMS certificate job {id} results are not yet available"
+                )));
+            }
+            failures.push(SwitchCertificateNodeFailure {
+                node_id: String::new(),
+                job_id: Some(id.to_string()),
+                error_code: None,
+                message: "RMS returned no status for this child job".to_string(),
+            });
+            continue;
+        };
+        match rms::JobExecutionState::try_from(job.execution_state) {
+            Ok(rms::JobExecutionState::Completed | rms::JobExecutionState::Failed) => {}
+            state => {
+                let state_name = state.map_or("unknown", |state| state.as_str_name());
+                return Err(ComponentManagerError::Unavailable(format!(
+                    "RMS certificate job {id} has execution state {state_name} ({}); waiting for a known terminal state",
+                    job.execution_state
+                )));
+            }
+        }
+        pending.extend(job.child_job_ids.iter().map(String::as_str));
+        pending.extend(
+            jobs.iter()
+                .filter(|child| child.parent_job_id.as_deref() == Some(id))
+                .map(|child| child.job_id.as_str()),
+        );
+        if job.execution_state == rms::JobExecutionState::Failed as i32
+            && (job.node_id.as_ref().is_some_and(|id| !id.is_empty())
+                || (id != job_id && job.child_job_ids.is_empty()))
+        {
+            failures.push(SwitchCertificateNodeFailure {
+                node_id: job.node_id.clone().unwrap_or_default(),
+                job_id: Some(job.job_id.clone()),
+                error_code: Some(job.error_code),
+                message: job.error_message.clone(),
+            });
+        }
+    }
+    failures.sort_by(|a, b| {
+        (&a.node_id, &a.job_id, a.error_code, &a.message).cmp(&(
+            &b.node_id,
+            &b.job_id,
+            b.error_code,
+            &b.message,
+        ))
+    });
+    Ok(failures)
 }
 
 async fn rms_get_configure_switch_certificate_job_status(
@@ -3325,19 +5155,18 @@ async fn rms_get_configure_switch_certificate_job_status(
     })?;
 
     if response.status != rms::ReturnCode::Success as i32 {
-        let error = if response.error_message.is_empty() {
+        let detail = if response.error_message.is_empty() {
             if response.message.is_empty() {
-                format!("RMS could not report status for switch certificate job {job_id}")
+                "job was not found".to_string()
             } else {
                 response.message
             }
         } else {
             response.error_message
         };
-        return Ok(ConfigureSwitchCertificateJobStatus {
-            state: ConfigureSwitchCertificateState::Failed,
-            error: Some(error),
-        });
+        return Err(ComponentManagerError::NotFound(format!(
+            "RMS could not report status for switch certificate job {job_id}: {detail}"
+        )));
     }
 
     let state =
@@ -3345,18 +5174,41 @@ async fn rms_get_configure_switch_certificate_job_status(
             emit(RmsSwitchCertificateJobStateUnrecognized);
             ConfigureSwitchCertificateState::InProgress
         });
-    let error = if matches!(state, ConfigureSwitchCertificateState::Failed) {
-        Some(
-            (!response.error_message.is_empty())
-                .then_some(response.error_message)
-                .or((!response.message.is_empty()).then_some(response.message))
-                .unwrap_or_else(|| "switch certificate configuration failed".to_owned()),
+    let (error, failure) = if state == ConfigureSwitchCertificateState::Failed {
+        let jobs = red::instrumented(
+            "rms",
+            "get_job_status",
+            client.get_job_status(rms::GetJobStatusRequest {
+                job_id: job_id.to_string(),
+                include_child_job_states: true,
+            }),
+        )
+        .await
+        .map_err(|error| {
+            ComponentManagerError::Unavailable(format!(
+                "failed to read RMS certificate node failures; retrying observation: {error}"
+            ))
+        })?;
+        let node_failures = certificate_node_failures(job_id, &jobs.job_states)?;
+        let error = (!response.error_message.is_empty())
+            .then_some(response.error_message)
+            .or_else(|| (!response.message.is_empty()).then_some(response.message));
+        (
+            error,
+            Some(SwitchCertificateFailure {
+                job_id: Some(job_id.to_string()),
+                node_failures,
+            }),
         )
     } else {
-        None
+        (None, None)
     };
 
-    Ok(ConfigureSwitchCertificateJobStatus { state, error })
+    Ok(ConfigureSwitchCertificateJobStatus {
+        state,
+        error,
+        failure,
+    })
 }
 
 impl RmsBackend {
@@ -3391,9 +5243,10 @@ impl RmsBackend {
     /// Apply a firmware object to one compute node and record the resulting job.
     ///
     /// Shared by the ingested and pre-ingestion paths of `update_firmware`. The
-    /// resulting backend job id is persisted to `compute_firmware_object_jobs`
-    /// keyed by BMC MAC so status queries survive a nico-api restart, whether or
-    /// not the tray has a `machines` row yet.
+    /// resulting backend job id is persisted to
+    /// `direct_dispatch_firmware_update_jobs` under the BMC MAC and
+    /// `FirmwareJobKind::FirmwareObject`, so status queries survive a nico-api
+    /// restart whether or not the tray has a `machines` row yet.
     async fn apply_compute_firmware_object(
         &self,
         ep: &ComputeTrayEndpoint,
@@ -3410,6 +5263,7 @@ impl RmsBackend {
                     bmc_mac: ep.bmc_mac,
                     success: false,
                     error: Some(error),
+                    backend_job_id: None,
                 };
             }
         };
@@ -3430,6 +5284,7 @@ impl RmsBackend {
                     bmc_mac: ep.bmc_mac,
                     success: false,
                     error: Some(e.to_string()),
+                    backend_job_id: None,
                 };
             }
         };
@@ -3483,6 +5338,7 @@ impl RmsBackend {
                     bmc_mac: ep.bmc_mac,
                     success,
                     error,
+                    backend_job_id: job_id,
                 }
             }
             Err(e) => {
@@ -3496,6 +5352,7 @@ impl RmsBackend {
                     bmc_mac: ep.bmc_mac,
                     success: false,
                     error: Some(e.to_string()),
+                    backend_job_id: None,
                 }
             }
         }
@@ -3504,12 +5361,53 @@ impl RmsBackend {
 
 #[async_trait::async_trait]
 impl ComputeTrayManager for RmsBackend {
+    fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
+        Some(crate::component_common::PowerStateSource::Rms)
+    }
+
     fn name(&self) -> &str {
         "rms"
     }
 
     fn backend(&self) -> ComputeTrayBackend {
         ComputeTrayBackend::Rms
+    }
+
+    #[instrument(skip(self, endpoints), fields(backend = "rms"))]
+    async fn get_power_state(
+        &self,
+        endpoints: &[ComputeTrayEndpoint],
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
+        let deadline = Instant::now() + RMS_POWER_READ_TIMEOUT;
+        let macs: Vec<_> = endpoints.iter().map(|ep| ep.bmc_mac).collect();
+        let prepare_nodes = async {
+            let bmc_ips: Vec<_> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
+            let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips).await?;
+            let pre_ingestion_macs: Vec<_> = endpoints
+                .iter()
+                .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
+                .map(|ep| ep.bmc_mac)
+                .collect();
+            let pre_ingestion = self
+                .resolve_pre_ingestion_compute_identities(&pre_ingestion_macs)
+                .await?;
+            Ok(endpoints
+                .iter()
+                .map(|ep| {
+                    ingested.check_owner(ep)?;
+
+                    let identity = ingested
+                        .rms_identities
+                        .get(&ep.bmc_ip)
+                        .or_else(|| pre_ingestion.get(&ep.bmc_mac))
+                        .ok_or_else(|| RMS_IDENTITY_LOOKUP_ERROR.to_owned())?;
+                    self.resolve_compute_node(identity).map(|resolved| {
+                        build_compute_tray_node_info(ep, &resolved, identity.bmc_mac)
+                    })
+                })
+                .collect())
+        };
+        Ok(query_rms_power_states(self.client.as_ref(), &macs, prepare_nodes, deadline).await)
     }
 
     #[instrument(skip(self), fields(backend = "rms"))]
@@ -3523,13 +5421,12 @@ impl ComputeTrayManager for RmsBackend {
         let bmc_ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
         let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips).await?;
 
-        // Trays with no machine row yet (pre-ingestion) fall back to the
-        // expected inventory keyed by BMC MAC. Only rack-scale (RMS-managed)
-        // trays — those with a declared rack_id — resolve here; the BMC MAC
-        // doubles as the RMS node id since no machine id exists.
+        // Trays without a managed rack identity fall back to expected inventory
+        // keyed by BMC MAC, including matching owners without a rack. Expected
+        // inventory must declare a rack; its BMC MAC becomes the RMS node ID.
         let pre_ingestion_macs: Vec<MacAddress> = endpoints
             .iter()
-            .filter(|ep| !ingested.contains_key(&ep.bmc_ip))
+            .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
             .map(|ep| ep.bmc_mac)
             .collect();
         let pre_ingestion = self
@@ -3540,7 +5437,19 @@ impl ComputeTrayManager for RmsBackend {
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
+            if let Err(error) = ingested.check_owner(ep) {
+                results.push(ComputeTrayResult {
+                    bmc_ip: ep.bmc_ip,
+                    bmc_mac: ep.bmc_mac,
+                    success: false,
+                    error: Some(error),
+                    backend_job_id: None,
+                });
+                continue;
+            }
+
             let identity = match ingested
+                .rms_identities
                 .get(&ep.bmc_ip)
                 .or_else(|| pre_ingestion.get(&ep.bmc_mac))
             {
@@ -3554,6 +5463,7 @@ impl ComputeTrayManager for RmsBackend {
                             "could not resolve RMS identity from database or expected inventory"
                                 .into(),
                         ),
+                        backend_job_id: None,
                     });
                     continue;
                 }
@@ -3567,6 +5477,7 @@ impl ComputeTrayManager for RmsBackend {
                         bmc_mac: ep.bmc_mac,
                         success: false,
                         error: Some(error),
+                        backend_job_id: None,
                     });
                     continue;
                 }
@@ -3596,6 +5507,7 @@ impl ComputeTrayManager for RmsBackend {
                         bmc_mac: ep.bmc_mac,
                         success,
                         error,
+                        backend_job_id: None,
                     });
                 }
                 Err(e) => {
@@ -3609,6 +5521,7 @@ impl ComputeTrayManager for RmsBackend {
                         bmc_mac: ep.bmc_mac,
                         success: false,
                         error: Some(e.to_string()),
+                        backend_job_id: None,
                     });
                 }
             }
@@ -3630,13 +5543,12 @@ impl ComputeTrayManager for RmsBackend {
         let bmc_ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
         let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips).await?;
 
-        // Trays with no machine row yet (pre-ingestion) fall back to the
-        // expected inventory keyed by BMC MAC. Only rack-scale (RMS-managed)
-        // trays — those with a declared rack_id — resolve here; the BMC MAC
-        // doubles as the RMS node id since no machine id exists.
+        // Trays without a managed rack identity fall back to expected inventory
+        // keyed by BMC MAC, including matching owners without a rack. Expected
+        // inventory must declare a rack; its BMC MAC becomes the RMS node ID.
         let pre_ingestion_macs: Vec<MacAddress> = endpoints
             .iter()
-            .filter(|ep| !ingested.contains_key(&ep.bmc_ip))
+            .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
             .map(|ep| ep.bmc_mac)
             .collect();
         let pre_ingestion = self
@@ -3647,11 +5559,24 @@ impl ComputeTrayManager for RmsBackend {
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
-            // Ingested trays resolve their RMS identity from the machine row by
-            // BMC IP; pre-ingestion trays fall back to expected inventory by BMC
-            // MAC. Either way the resulting job id is persisted uniformly to
-            // compute_firmware_object_jobs (keyed by BMC MAC).
+            // Reject a stale endpoint before dispatch can replace the job
+            // tracked under its requested MAC.
+            if let Err(error) = ingested.check_owner(ep) {
+                results.push(ComputeTrayResult {
+                    bmc_ip: ep.bmc_ip,
+                    bmc_mac: ep.bmc_mac,
+                    success: false,
+                    error: Some(error),
+                    backend_job_id: None,
+                });
+                continue;
+            }
+
+            // Either identity source persists the resulting job ID to
+            // `direct_dispatch_firmware_update_jobs`, keyed by BMC MAC and
+            // `FirmwareJobKind::FirmwareObject`.
             let identity = match ingested
+                .rms_identities
                 .get(&ep.bmc_ip)
                 .or_else(|| pre_ingestion.get(&ep.bmc_mac))
             {
@@ -3665,6 +5590,7 @@ impl ComputeTrayManager for RmsBackend {
                             "could not resolve RMS identity from database or expected inventory"
                                 .into(),
                         ),
+                        backend_job_id: None,
                     });
                     continue;
                 }
@@ -3743,63 +5669,46 @@ impl ComputeTrayManager for RmsBackend {
                     target_version: String::new(),
                     error: Some("no firmware job tracked for this compute tray".into()),
                 });
+
                 continue;
             };
-            let job_id = &job_id;
 
-            let request = rms::GetFirmwareJobStatusRequest {
-                job_id: job_id.clone(),
-            };
+            let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
 
-            match red::instrumented(
-                "rms",
-                "get_firmware_job_status",
-                self.client.get_firmware_job_status(request),
-            )
-            .await
-            {
-                Ok(response) => {
-                    let status_success = response.status == rms::ReturnCode::Success as i32;
-                    let state = if status_success {
-                        map_rms_firmware_job_state(response.job_state)
-                    } else {
-                        FirmwareState::Unknown
-                    };
-                    let error = if response.error_message.is_empty() {
-                        (!status_success).then(|| {
-                            format!("RMS could not report status for firmware job {job_id}")
-                        })
-                    } else {
-                        Some(response.error_message)
-                    };
+            let (state, error) =
+                query_tracked_firmware_job_status(self.client.as_ref(), None, &job).await;
 
-                    statuses.push(ComputeTrayFirmwareUpdateStatus {
-                        bmc_ip: ep.bmc_ip,
-                        bmc_mac: ep.bmc_mac,
-                        state,
-                        target_version: String::new(),
-                        error,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        bmc_ip_address = %ep.bmc_ip,
-                        job_id = %job_id,
-                        error = %e,
-                        "RMS firmware job status query failed"
-                    );
-                    statuses.push(ComputeTrayFirmwareUpdateStatus {
-                        bmc_ip: ep.bmc_ip,
-                        bmc_mac: ep.bmc_mac,
-                        state: FirmwareState::Unknown,
-                        target_version: String::new(),
-                        error: Some(e.to_string()),
-                    });
-                }
-            }
+            statuses.push(ComputeTrayFirmwareUpdateStatus {
+                bmc_ip: ep.bmc_ip,
+                bmc_mac: ep.bmc_mac,
+                state,
+                target_version: String::new(),
+                error,
+            });
         }
 
         Ok(statuses)
+    }
+
+    #[instrument(skip(self), fields(backend = "rms", %job_id))]
+    async fn get_firmware_job_status(
+        &self,
+        bmc_ip: IpAddr,
+        bmc_mac: MacAddress,
+        job_id: &str,
+    ) -> Result<ComputeTrayFirmwareUpdateStatus, ComponentManagerError> {
+        let job = RmsTrackedFirmwareJob::FirmwareObject(job_id.to_string());
+
+        let (state, error) =
+            query_tracked_firmware_job_status(self.client.as_ref(), None, &job).await;
+
+        Ok(ComputeTrayFirmwareUpdateStatus {
+            bmc_ip,
+            bmc_mac,
+            state,
+            target_version: String::new(),
+            error,
+        })
     }
 
     #[instrument(skip(self), fields(backend = "rms"))]
@@ -3812,7 +5721,8 @@ impl ComputeTrayManager for RmsBackend {
 mod tests {
     use api_test_helper::mock_rms::MockRmsApi;
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
-    use carbide_test_support::{Check, check_values, value_scenarios};
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
     use carbide_uuid::machine::MachineId;
     use carbide_uuid::power_shelf::PowerShelfId;
     use carbide_uuid::rack::RackId;
@@ -3850,6 +5760,221 @@ mod tests {
     // ---- Mapping unit tests ----
 
     #[test]
+    fn rack_firmware_device_status_uses_batch_error_when_child_job_missing() {
+        let status = rack_firmware_device_status(
+            FirmwareUpgradeDeviceInfo {
+                node_id: "node-1".into(),
+                mac: "00:11:22:33:44:55".into(),
+                bmc_ip: "192.0.2.10".into(),
+                bmc_username: "admin".into(),
+                bmc_password: "password".into(),
+                os_mac: None,
+                os_ip: None,
+                os_username: None,
+                os_password: None,
+                os_hostname: None,
+            },
+            Some("parent-job".into()),
+            &HashMap::new(),
+            &HashMap::new(),
+            Some("invalid SOT JSON"),
+        );
+
+        assert_eq!(status.status, FirmwareProgressState::Failed);
+        assert_eq!(status.error_message.as_deref(), Some("invalid SOT JSON"));
+    }
+
+    #[tokio::test]
+    async fn rack_firmware_submission_classifies_invalid_and_rejected_requests() {
+        let mock = Arc::new(MockRmsApi::new());
+
+        let manager = RmsRackFirmwareUpdateManager {
+            client: mock.clone(),
+        };
+
+        let rack_id = RackId::new("rack-1");
+        let profile = test_rms_profile();
+
+        let request = || RackFirmwareUpdateRequest {
+            rack_id: &rack_id,
+            profile: &profile,
+            config_json: r#"{"Id":"fw-default"}"#,
+            access_token: Some("token"),
+            force_update: false,
+            components: &[],
+            machines: Vec::new(),
+            switches: Vec::new(),
+        };
+
+        mock.enqueue_apply_firmware_object(Err(RackManagerError::ApiInvocationError(
+            tonic::Status::invalid_argument("unsupported node descriptor"),
+        )))
+        .await;
+
+        let result = manager.start_firmware_update(request()).await;
+
+        assert!(matches!(
+            result,
+            Err(ComponentManagerError::InvalidArgument(cause))
+                if cause.contains("unsupported node descriptor")
+        ));
+
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_fail(
+            "node-1",
+            "unsupported firmware object",
+        )))
+        .await;
+
+        let result = manager.start_firmware_update(request()).await;
+
+        assert!(matches!(
+            result,
+            Err(ComponentManagerError::RejectedBeforeDispatch(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn machine_location_maps_request_and_response() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mock = Arc::new(MockRmsApi::new());
+
+        let provider = RmsMachineInfoProvider {
+            client: mock.clone(),
+        };
+
+        let profile = test_rms_profile();
+        let rack_id = RackId::new("rack-1");
+
+        mock.enqueue_batch_get_node_device_info(Ok(rms::BatchGetNodeDeviceInfoResponse {
+            status: rms::ReturnCode::Failure as i32,
+            message: "ignored top-level status".into(),
+            node_device_details: vec![rms::NodeDeviceInfo {
+                node_id: "node-1".into(),
+                slot_number: Some(u32::MAX),
+                tray_index: Some(3),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await;
+
+        let observations = provider
+            .get_machine_locations(vec![MachineLocationTarget {
+                node_id: "node-1".into(),
+                rack_id: rack_id.clone(),
+                profile: &profile,
+                bmc_ip: CT_IP_1.parse()?,
+                bmc_mac: CT_MAC_1.parse()?,
+                credentials: Some(Credentials::new("admin", "password")),
+            }])
+            .await?;
+
+        assert_eq!(
+            observations,
+            vec![MachineLocationObservation {
+                node_id: "node-1".into(),
+                slot_number: Some(u32::MAX),
+                tray_index: Some(3),
+            }]
+        );
+
+        let calls = mock.batch_get_node_device_info_calls().await;
+
+        let [call] = calls.as_slice() else {
+            panic!("expected one RMS machine-location request");
+        };
+
+        let Some(nodes) = &call.nodes else {
+            panic!("expected RMS request nodes");
+        };
+
+        let [node] = nodes.nodes.as_slice() else {
+            panic!("expected one RMS request node");
+        };
+
+        assert_eq!(node.node_id, "node-1");
+        assert_eq!(node.rack_id, rack_id.to_string());
+        assert_eq!(node.r#type, Some(rms::NodeType::ComputeGb200Nvidia as i32));
+
+        let endpoint = node.bmc_endpoint.as_ref().expect("BMC endpoint");
+        let interface = endpoint.interface.as_ref().expect("BMC interface");
+
+        assert_eq!(interface.ip_address, CT_IP_1);
+        assert_eq!(interface.mac_address, CT_MAC_1);
+        assert_eq!(endpoint.port, 443);
+        assert!(endpoint.credentials.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn machine_location_preserves_rms_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mock = Arc::new(MockRmsApi::new());
+
+        let provider = RmsMachineInfoProvider {
+            client: mock.clone(),
+        };
+
+        let profile = test_rms_profile();
+
+        let error =
+            RackManagerError::ApiInvocationError(tonic::Status::unavailable("RMS unavailable"));
+
+        let expected = error.to_string();
+
+        mock.enqueue_batch_get_node_device_info(Err(error)).await;
+
+        let result = provider
+            .get_machine_locations(vec![MachineLocationTarget {
+                node_id: "node-1".into(),
+                rack_id: RackId::new("rack-1"),
+                profile: &profile,
+                bmc_ip: CT_IP_1.parse()?,
+                bmc_mac: CT_MAC_1.parse()?,
+                credentials: None,
+            }])
+            .await;
+
+        let Err(error) = result else {
+            panic!("expected RMS machine-location lookup failure");
+        };
+
+        assert_eq!(error.to_string(), expected);
+
+        let source = std::error::Error::source(&error).ok_or_else(|| {
+            std::io::Error::other("machine-location error source was not retained")
+        })?;
+
+        assert_eq!(source.to_string(), expected);
+        assert!(source.downcast_ref::<RackManagerError>().is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn rack_firmware_repoll_preserves_completion_timestamp() {
+        let completed_at = chrono::Utc::now();
+
+        let job = FirmwareUpgradeJob {
+            completed_at: Some(completed_at),
+            machines: vec![FirmwareUpgradeDeviceStatus {
+                node_id: "node-1".into(),
+                mac: "00:11:22:33:44:55".into(),
+                bmc_ip: "192.0.2.10".into(),
+                status: FirmwareProgressState::Completed,
+                job_id: Some("child-job".into()),
+                parent_job_id: Some("parent-job".into()),
+                error_message: None,
+            }],
+            ..Default::default()
+        };
+
+        let repolled = finish_rack_firmware_job(job);
+
+        assert_eq!(repolled.completed_at, Some(completed_at));
+    }
+
+    #[test]
     fn power_action_maps_to_rms_operation() {
         value_scenarios!(to_rms_power_operation:
             "power on" {
@@ -3858,7 +5983,7 @@ mod tests {
 
             "power off" {
                 PowerAction::GracefulShutdown => rms::PowerOperation::Off as i32,
-                PowerAction::ForceOff => rms::PowerOperation::Off as i32,
+                PowerAction::ForceOff => rms::PowerOperation::ForceOff as i32,
             }
 
             "reset" {
@@ -3925,6 +6050,7 @@ mod tests {
                 status: "pending".into(),
                 job_id: Some("child-job".into()),
                 error_message: Some("stale error".into()),
+                ..Default::default()
             }],
         };
 
@@ -3978,6 +6104,7 @@ mod tests {
             status: "in_progress".into(),
             job_id: Some("job-2".into()),
             error_message: None,
+            ..Default::default()
         };
 
         apply_nvos_job_status_response(
@@ -4009,6 +6136,7 @@ mod tests {
             status: "pending".into(),
             job_id: Some("job-3".into()),
             error_message: None,
+            ..Default::default()
         };
 
         apply_nvos_job_status_response(
@@ -4027,6 +6155,88 @@ mod tests {
             switch.error_message.as_deref(),
             Some("Unknown RMS switch image job state mystery")
         );
+    }
+
+    #[test]
+    fn nvos_polling_treats_missing_rms_job_as_unknown_image_failure() {
+        let mut switch = NvosUpdateSwitchStatus {
+            status: "in_progress".into(),
+            job_id: Some("lost-job".into()),
+            ..Default::default()
+        };
+
+        apply_nvos_job_status_response(
+            &mut switch,
+            "lost-job",
+            Ok(rms::GetSwitchSystemImageJobStatusResponse {
+                message: "job lost-job not found".into(),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(switch.status, "failed");
+
+        assert_eq!(
+            switch.error_message.as_deref(),
+            Some("job lost-job not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn rack_nvos_password_recovery_uses_desired_password() {
+        let mock = Arc::new(MockRmsApi::new());
+
+        mock.enqueue_update_switch_system_password(Ok(rms::UpdateSwitchSystemPasswordResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "password-job".into(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+
+        let manager = RmsNvosUpdateManager {
+            client: mock.clone(),
+        };
+
+        let credentials = Credentials::UsernamePassword {
+            username: "admin".into(),
+            password: "desired-password".into(),
+        };
+
+        let job_id = manager
+            .start_nvos_password_update(
+                &RackId::new("rack-1"),
+                &test_rms_profile(),
+                &crate::test_support::test_switch_id("switch-1"),
+                "192.0.2.20".parse().unwrap(),
+                &credentials,
+            )
+            .await
+            .unwrap();
+
+        let calls = mock.update_switch_system_password_calls().await;
+        let request = &calls[0];
+
+        let endpoint = request.nodes.as_ref().unwrap().nodes[0]
+            .host_endpoint
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(job_id, "password-job");
+        assert_eq!(request.password, "desired-password");
+
+        assert!(
+            request.nodes.as_ref().unwrap().nodes[0]
+                .bmc_endpoint
+                .is_none()
+        );
+
+        assert!(matches!(
+            endpoint.credentials.as_ref().and_then(|value| value.auth.as_ref()),
+            Some(rms::credentials::Auth::UserPass(value))
+                if value.password == "desired-password"
+        ));
     }
 
     #[tokio::test]
@@ -4104,6 +6314,7 @@ mod tests {
         assert_eq!(call.access_token.as_deref(), Some("token"));
         assert_eq!(call.software_type, "prod");
         assert_eq!(call.hardware_type, ANY_RACK_HARDWARE_TYPE);
+        assert!(!call.allow_onie_recovery);
 
         let nodes = call.nodes.as_ref().expect("request nodes");
 
@@ -4503,6 +6714,7 @@ mod tests {
         for job_id in ["", " \t"] {
             let result = scale_up_fabric_manager_job_id_from_rms(
                 rms_v2::ConfigureScaleUpFabricManagerResponse {
+                    selected_fabrics: Vec::new(),
                     job_id: job_id.to_string(),
                 },
             );
@@ -4583,6 +6795,277 @@ mod tests {
             .await;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].job_id, "cert-job-1");
+    }
+
+    #[tokio::test]
+    async fn switch_certificate_submission_error_has_unknown_outcome() {
+        let responses = [
+            (
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unavailable("connection lost"),
+                )),
+                None,
+            ),
+            (
+                Ok(rms::ConfigureSwitchCertificateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Failure as i32,
+                        message: "certificate configuration failed".to_string(),
+                        ..Default::default()
+                    }),
+                    jobs: Vec::new(),
+                }),
+                None,
+            ),
+            (
+                Ok(rms::ConfigureSwitchCertificateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Failure as i32,
+                        job_id: "partial-certificate-job".to_string(),
+                        message: "certificate configuration partially accepted".to_string(),
+                        ..Default::default()
+                    }),
+                    jobs: Vec::new(),
+                }),
+                Some("partial-certificate-job"),
+            ),
+        ];
+
+        for (response, expected_job_id) in responses {
+            let mock = MockRmsApi::new();
+
+            mock.enqueue_configure_switch_certificate(response).await;
+
+            let error = rms_configure_switch_certificate(
+                &mock,
+                vec![rms::NodeInfo::default()],
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("RMS did not accept the complete certificate batch");
+
+            match error {
+                ComponentManagerError::OperationOutcomeUnknown(_) => {
+                    assert!(expected_job_id.is_none())
+                }
+                ComponentManagerError::SwitchCertificateSubmission { failure, .. } => {
+                    assert_eq!(failure.job_id.as_deref(), expected_job_id);
+                }
+                other => panic!("unexpected submission error: {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_certificate_missing_batch_preserves_returned_job_handles() {
+        let mock = MockRmsApi::new();
+        mock.enqueue_configure_switch_certificate(Ok(rms::ConfigureSwitchCertificateResponse {
+            response: None,
+            jobs: vec![
+                rms::ConfigureSwitchCertificateJobInfo {
+                    node_id: "switch-a".to_string(),
+                    job_id: "child-a".to_string(),
+                },
+                rms::ConfigureSwitchCertificateJobInfo {
+                    node_id: "switch-b".to_string(),
+                    job_id: "child-b".to_string(),
+                },
+            ],
+        }))
+        .await;
+
+        let error = rms_configure_switch_certificate(
+            &mock,
+            vec![rms::NodeInfo::default()],
+            Some("switch-a"),
+            None,
+            None,
+        )
+        .await
+        .expect_err("child handles alone do not prove successful submission");
+
+        let ComponentManagerError::OperationOutcomeUnknown(message) = error else {
+            panic!("missing batch result must preserve the unknown outcome");
+        };
+        assert!(message.contains("returned no batch result"));
+        for expected in ["node switch-a: job child-a", "node switch-b: job child-b"] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+    }
+
+    #[test]
+    fn switch_certificate_nested_jobs_keep_multiple_failures_for_one_node() {
+        let jobs = vec![
+            rms::JobStatus {
+                job_id: "gateway".into(),
+                child_job_ids: vec!["parent".into()],
+                execution_state: rms::JobExecutionState::Failed as i32,
+                ..Default::default()
+            },
+            rms::JobStatus {
+                job_id: "parent".into(),
+                child_job_ids: vec!["a".into(), "b".into()],
+                execution_state: rms::JobExecutionState::Failed as i32,
+                ..Default::default()
+            },
+            rms::JobStatus {
+                job_id: "b".into(),
+                node_id: Some("node".into()),
+                execution_state: rms::JobExecutionState::Failed as i32,
+                error_code: 999,
+                ..Default::default()
+            },
+            rms::JobStatus {
+                job_id: "a".into(),
+                node_id: Some("node".into()),
+                execution_state: rms::JobExecutionState::Failed as i32,
+                error_code: rms::JobError::Timeout as i32,
+                ..Default::default()
+            },
+        ];
+        let failures = certificate_node_failures("gateway", &jobs).unwrap();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].job_id.as_deref(), Some("a"));
+        assert_eq!(failures[1].job_id.as_deref(), Some("b"));
+        assert_eq!(failures[1].error_code, Some(999));
+    }
+
+    #[test]
+    fn switch_certificate_children_preserve_each_failure_and_require_terminal_results() {
+        let parent = rms::JobStatus {
+            job_id: "parent".into(),
+            child_job_ids: vec!["a".into(), "b".into()],
+            execution_state: rms::JobExecutionState::Failed as i32,
+            ..Default::default()
+        };
+        let child = |id: &str, code: i32| rms::JobStatus {
+            job_id: id.into(),
+            node_id: Some(format!("node-{id}")),
+            parent_job_id: Some("parent".into()),
+            execution_state: rms::JobExecutionState::Failed as i32,
+            error_code: code,
+            error_message: format!("certificate installation failed on node-{id}"),
+            ..Default::default()
+        };
+        let a = child("a", rms::JobError::Timeout as i32);
+        let b = child("b", rms::JobError::Unauthenticated as i32);
+        let failure_a = SwitchCertificateNodeFailure {
+            node_id: "node-a".into(),
+            job_id: Some("a".into()),
+            error_code: Some(rms::JobError::Timeout as i32),
+            message: "certificate installation failed on node-a".into(),
+        };
+        let failure_b = SwitchCertificateNodeFailure {
+            node_id: "node-b".into(),
+            job_id: Some("b".into()),
+            error_code: Some(rms::JobError::Unauthenticated as i32),
+            message: "certificate installation failed on node-b".into(),
+        };
+        let cases = [
+            (
+                "both failures despite reversed response order",
+                vec![parent.clone(), b.clone(), a.clone()],
+                Ok(vec![failure_a.clone(), failure_b]),
+            ),
+            (
+                "missing declared child",
+                vec![parent.clone(), a.clone()],
+                Ok(vec![
+                    SwitchCertificateNodeFailure {
+                        node_id: String::new(),
+                        job_id: Some("b".into()),
+                        error_code: None,
+                        message: "RMS returned no status for this child job".into(),
+                    },
+                    failure_a,
+                ]),
+            ),
+            (
+                "child still running",
+                vec![
+                    parent.clone(),
+                    a.clone(),
+                    rms::JobStatus {
+                        execution_state: rms::JobExecutionState::Running as i32,
+                        ..b.clone()
+                    },
+                ],
+                Err("RMS certificate job b has execution state JOB_EXECUTION_STATE_RUNNING (2)"),
+            ),
+            (
+                "parent absent",
+                vec![a.clone(), b.clone()],
+                Err("RMS certificate job parent results are not yet available"),
+            ),
+            (
+                "unknown child state",
+                vec![
+                    parent,
+                    a,
+                    rms::JobStatus {
+                        execution_state: 999,
+                        ..b
+                    },
+                ],
+                Err("RMS certificate job b has execution state unknown (999)"),
+            ),
+        ];
+        for (scenario, jobs, expected) in cases {
+            let result = certificate_node_failures("parent", &jobs);
+            match expected {
+                Err(expected_error) => {
+                    let Err(ComponentManagerError::Unavailable(message)) = result else {
+                        panic!("{scenario}: expected a retryable diagnostic lookup failure");
+                    };
+                    assert!(message.contains(expected_error), "{scenario}: {message}");
+                }
+                Ok(failures) => assert_eq!(result.unwrap(), failures, "{scenario}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_certificate_job_not_found_is_reported() {
+        for (error_message, message, expected) in [
+            (
+                "job expired from RMS history",
+                "lookup failed",
+                "job expired from RMS history",
+            ),
+            (
+                "",
+                "job not found in RMS history",
+                "job not found in RMS history",
+            ),
+            ("", "", "job was not found"),
+        ] {
+            let mock = MockRmsApi::new();
+            mock.enqueue_get_configure_switch_certificate_job_status(Ok(
+                rms::GetConfigureSwitchCertificateJobStatusResponse {
+                    status: rms::ReturnCode::Failure as i32,
+                    error_message: error_message.to_string(),
+                    message: message.to_string(),
+                    ..Default::default()
+                },
+            ))
+            .await;
+
+            let error = rms_get_configure_switch_certificate_job_status(&mock, "cert-job-1")
+                .await
+                .expect_err("a missing RMS job must be reported");
+
+            let ComponentManagerError::NotFound(detail) = error else {
+                panic!("expected a missing RMS job error");
+            };
+            assert_eq!(
+                detail,
+                format!(
+                    "RMS could not report status for switch certificate job cert-job-1: {expected}"
+                )
+            );
+        }
     }
 
     #[test]
@@ -4919,52 +7402,910 @@ mod tests {
         assert_eq!(job_id.as_deref(), Some("job-1"));
     }
 
+    #[test]
+    fn rms_power_observations_preserve_states_and_reject_invalid_values() {
+        check_cases(
+            [
+                ("on", "ON", Yields(Some(PowerState::On))),
+                ("off", "Off", Yields(Some(PowerState::Off))),
+                (
+                    "powering on",
+                    "pOwErInGoN",
+                    Yields(Some(PowerState::PoweringOn)),
+                ),
+                (
+                    "powering off",
+                    "PoweringOff",
+                    Yields(Some(PowerState::PoweringOff)),
+                ),
+                ("paused", "Paused", Yields(Some(PowerState::Paused))),
+                ("reset", "Reset", Yields(Some(PowerState::Reset))),
+                (
+                    "explicit unknown",
+                    "UNKNOWN",
+                    Yields(Some(PowerState::Unknown)),
+                ),
+                (
+                    "unrecognized state",
+                    "sleeping",
+                    FailsWith("unrecognized RMS power state: \"sleeping\"".to_owned()),
+                ),
+                (
+                    "empty state",
+                    "",
+                    FailsWith("unrecognized RMS power state: \"\"".to_owned()),
+                ),
+            ]
+            .map(|(scenario, input, expect)| Case {
+                scenario,
+                input,
+                expect,
+            }),
+            |state| rms_power_state_for_node(&power_read_response(&[("node-1", state)]), "node-1"),
+        );
+    }
+
+    fn power_read_response(states: &[(&str, &str)]) -> rms::BatchGetPowerStateResponse {
+        rms::BatchGetPowerStateResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                node_results: states
+                    .iter()
+                    .map(|(node_id, _)| rms::NodeOperationResult {
+                        node_id: (*node_id).to_owned(),
+                        status: rms::ReturnCode::Success as i32,
+                        error_message: String::new(),
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            node_power_states: states
+                .iter()
+                .map(|(node_id, pstate)| rms::NodePowerState {
+                    node_id: (*node_id).to_owned(),
+                    pstate: (*pstate).to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn power_observations_identify_management_macs_in_endpoint_order(pool: sqlx::PgPool) {
+        let (mock, backend, rack_id, ps1, ps2, sw1, sw2) = make_backend(&pool).await;
+        let mut txn = pool.begin().await.expect("begin compute setup");
+        let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
+        let ct2 = seed_machine(&mut txn, CT_MAC_2, CT_IP_2, "CT-002", &rack_id).await;
+        txn.commit().await.expect("commit compute setup");
+        for (first, second) in [
+            (sw1.to_string(), sw2.to_string()),
+            (ps1.to_string(), ps2.to_string()),
+            (ct1.to_string(), ct2.to_string()),
+        ] {
+            mock.enqueue_batch_get_power_state(Ok(power_read_response(&[
+                (&first, "OFF"),
+                (&second, "ON"),
+            ])))
+            .await;
+        }
+
+        let connections = [
+            (
+                sw2.to_string(),
+                SW_MAC_2,
+                "10.0.2.2",
+                "switch-2",
+                "switch-password-2",
+            ),
+            (
+                sw1.to_string(),
+                SW_MAC_1,
+                "10.0.2.1",
+                "switch-1",
+                "switch-password-1",
+            ),
+            (
+                ps2.to_string(),
+                PS_MAC_2,
+                "10.0.3.2",
+                "shelf-2",
+                "shelf-password-2",
+            ),
+            (
+                ps1.to_string(),
+                PS_MAC_1,
+                "10.0.3.1",
+                "shelf-1",
+                "shelf-password-1",
+            ),
+            (
+                ct2.to_string(),
+                CT_MAC_2,
+                CT_IP_2,
+                "compute-2",
+                "compute-password-2",
+            ),
+            (
+                ct1.to_string(),
+                CT_MAC_1,
+                CT_IP_1,
+                "compute-1",
+                "compute-password-1",
+            ),
+        ];
+        let mut switches = [
+            make_sw_endpoint(SW_MAC_2),
+            make_sw_endpoint(SW_MAC_1),
+            make_sw_endpoint(UNKNOWN_MAC),
+        ];
+        for (endpoint, (_, _, ip, username, password)) in switches.iter_mut().zip(&connections[..2])
+        {
+            endpoint.bmc_ip = ip.parse().expect("switch BMC IP");
+            endpoint.bmc_credentials = Credentials::UsernamePassword {
+                username: (*username).to_owned(),
+                password: (*password).to_owned(),
+            };
+        }
+        let mut shelves = [
+            make_ps_endpoint(PS_MAC_2),
+            make_ps_endpoint(PS_MAC_1),
+            make_ps_endpoint(UNKNOWN_MAC),
+        ];
+        for (endpoint, (_, _, ip, username, password)) in shelves.iter_mut().zip(&connections[2..4])
+        {
+            endpoint.pmc_ip = ip.parse().expect("shelf PMC IP");
+            endpoint.pmc_credentials = Credentials::UsernamePassword {
+                username: (*username).to_owned(),
+                password: (*password).to_owned(),
+            };
+        }
+        let mut compute = [
+            make_ct_endpoint(CT_IP_2, CT_MAC_2),
+            make_ct_endpoint(CT_IP_1, CT_MAC_1),
+            make_ct_endpoint(CT_IP_2, CT_MAC_1),
+            make_ct_endpoint("10.9.9.9", UNKNOWN_MAC),
+        ];
+        for (endpoint, (_, _, _, username, password)) in compute.iter_mut().zip(&connections[4..]) {
+            endpoint.bmc_credentials = Credentials::UsernamePassword {
+                username: (*username).to_owned(),
+                password: (*password).to_owned(),
+            };
+        }
+        let observations = [
+            (
+                NvSwitchManager::get_power_state(&backend, &switches)
+                    .await
+                    .expect("switch power states"),
+                vec![SW_MAC_2, SW_MAC_1, UNKNOWN_MAC],
+                vec![RMS_IDENTITY_LOOKUP_ERROR.to_owned()],
+                ROLE_SWITCH,
+            ),
+            (
+                PowerShelfManager::get_power_state(&backend, &shelves)
+                    .await
+                    .expect("shelf power states"),
+                vec![PS_MAC_2, PS_MAC_1, UNKNOWN_MAC],
+                vec![RMS_IDENTITY_LOOKUP_ERROR.to_owned()],
+                ROLE_POWER_SHELF,
+            ),
+            (
+                ComputeTrayManager::get_power_state(&backend, &compute)
+                    .await
+                    .expect("compute power states"),
+                vec![CT_MAC_2, CT_MAC_1, CT_MAC_1, UNKNOWN_MAC],
+                vec![
+                    format!(
+                        "RMS compute identity for BMC IP {CT_IP_2} has MAC {CT_MAC_2}, expected {CT_MAC_1}"
+                    ),
+                    RMS_IDENTITY_LOOKUP_ERROR.to_owned(),
+                ],
+                ROLE_COMPUTE,
+            ),
+        ];
+        let calls = mock.batch_get_power_state_calls().await;
+        assert_eq!(calls.len(), 3);
+        for ((results, macs, errors, role), call) in observations.into_iter().zip(&calls) {
+            assert_eq!(results.len(), macs.len());
+            assert_eq!(
+                results
+                    .iter()
+                    .map(|result| result.mac_address)
+                    .collect::<Vec<_>>(),
+                macs.iter()
+                    .map(|mac| mac.parse::<MacAddress>().expect("management MAC"))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(results[0].power_state, Ok(Some(PowerState::On)));
+            assert_eq!(results[1].power_state, Ok(Some(PowerState::Off)));
+            for (result, error) in results[2..].iter().zip(errors) {
+                assert_eq!(result.power_state, Err(error));
+            }
+            let nodes = &call.nodes.as_ref().expect("request nodes").nodes;
+            assert_eq!(nodes.len(), 2);
+            for node in nodes {
+                assert_eq!(node.rack_id, rack_id.to_string());
+                assert_descriptor_node(node, role);
+                let endpoint = node.bmc_endpoint.as_ref().expect("management endpoint");
+                let interface = endpoint.interface.as_ref().expect("management interface");
+                let (_, mac, ip, username, password) = connections
+                    .iter()
+                    .find(|(node_id, _, _, _, _)| *node_id == node.node_id)
+                    .expect("requested node identity");
+                assert_eq!(interface.mac_address, *mac);
+                assert_eq!(interface.ip_address, *ip);
+                let Some(rms::credentials::Auth::UserPass(credentials)) = endpoint
+                    .credentials
+                    .as_ref()
+                    .and_then(|credentials| credentials.auth.as_ref())
+                else {
+                    panic!("expected supplied username and password");
+                };
+                assert_eq!(credentials.username, *username);
+                assert_eq!(credentials.password, *password);
+            }
+        }
+        assert!(mock.create_nodes_calls().await.is_empty());
+        assert!(mock.update_node_calls().await.is_empty());
+        assert!(mock.set_power_state_calls().await.is_empty());
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn compute_power_read_resolves_expected_inventory(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        let rack_id = RackId::new("expected-compute-rack");
+        let mut txn = pool.begin().await.expect("begin expected compute setup");
+        seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_1, &rack_id, false).await;
+        txn.commit().await.expect("commit expected compute setup");
+        let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
+        let node_id = endpoint.bmc_mac.to_string();
+        mock.enqueue_batch_get_power_state(Ok(power_read_response(&[(&node_id, "ON")])))
+            .await;
+        let results = ComputeTrayManager::get_power_state(&backend, &[endpoint])
+            .await
+            .expect("expected compute read");
+        assert_eq!(results[0].power_state, Ok(Some(PowerState::On)));
+        let calls = mock.batch_get_power_state_calls().await;
+        let node = &calls[0].nodes.as_ref().expect("request nodes").nodes[0];
+        assert_eq!(node.node_id, node_id);
+        assert_eq!(node.rack_id, rack_id.to_string());
+        assert_descriptor_node(node, ROLE_COMPUTE);
+        assert!(mock.create_nodes_calls().await.is_empty());
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
+    }
+
+    /// Expected inventory must not let a passive read use another machine's
+    /// BMC IP. An owner without a managed rack can still use its own expected
+    /// rack identity when the requested MAC matches.
+    #[carbide_macros::sqlx_test]
+    async fn compute_power_read_rejects_ip_owner_without_rack(pool: sqlx::PgPool) {
+        let (mock, backend, owner_rack_id, _, _, _, _) = make_backend(&pool).await;
+        let expected_rack_id = RackId::new("expected-compute-rack");
+        let mut txn = pool.begin().await.expect("begin conflicting owner setup");
+
+        // The requested MAC has valid expected inventory, while a different
+        // machine owns its supplied IP without belonging to any managed rack.
+        seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_1, &expected_rack_id, false).await;
+        let owner_id = seed_machine(&mut txn, CT_MAC_2, CT_IP_1, "CT-002", &owner_rack_id).await;
+        let update = sqlx::query("UPDATE machines SET rack_id = NULL WHERE id = $1")
+            .bind(owner_id)
+            .execute(&mut *txn)
+            .await
+            .expect("clear the current owner's rack");
+        assert_eq!(update.rows_affected(), 1);
+        txn.commit().await.expect("commit conflicting owner setup");
+
+        let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
+        let results = ComputeTrayManager::get_power_state(&backend, &[endpoint])
+            .await
+            .expect("return the requested tray's read failure");
+
+        // Keep the requested identity in exactly one result slot and stop
+        // before sending the occupied endpoint to RMS.
+        assert_eq!(
+            results,
+            [ComponentPowerStateResult {
+                mac_address: CT_MAC_1.parse().expect("requested BMC MAC"),
+                power_state: Err(format!(
+                    "RMS compute identity for BMC IP {CT_IP_1} has MAC {CT_MAC_2}, expected {CT_MAC_1}"
+                )),
+            }]
+        );
+        assert!(mock.batch_get_power_state_calls().await.is_empty());
+
+        // The same owner has expected rack inventory from `seed_machine`.
+        // A matching MAC must retain that fallback instead of rejecting every
+        // owner whose managed `rack_id` is absent.
+        mock.enqueue_batch_get_power_state(Ok(power_read_response(&[(CT_MAC_2, "ON")])))
+            .await;
+        let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_2);
+        let results = ComputeTrayManager::get_power_state(&backend, &[endpoint])
+            .await
+            .expect("read the matching owner's expected RMS identity");
+
+        assert_eq!(
+            results,
+            [ComponentPowerStateResult {
+                mac_address: CT_MAC_2.parse().expect("current owner's BMC MAC"),
+                power_state: Ok(Some(PowerState::On)),
+            }]
+        );
+        let calls = mock.batch_get_power_state_calls().await;
+        assert_eq!(calls.len(), 1);
+        let nodes = &calls[0].nodes.as_ref().expect("request nodes").nodes;
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, CT_MAC_2);
+        assert_eq!(nodes[0].rack_id, owner_rack_id.to_string());
+        let interface = nodes[0]
+            .bmc_endpoint
+            .as_ref()
+            .expect("BMC endpoint")
+            .interface
+            .as_ref()
+            .expect("BMC interface");
+        assert_eq!(interface.ip_address, CT_IP_1);
+        assert_eq!(interface.mac_address, CT_MAC_2);
+        assert!(mock.create_nodes_calls().await.is_empty());
+        assert!(mock.update_node_calls().await.is_empty());
+        assert!(mock.set_power_state_calls().await.is_empty());
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn shelf_power_read_resolves_expected_inventory(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        let rack_id = RackId::new("expected-shelf-rack");
+        let mut txn = pool.begin().await.expect("begin expected shelf setup");
+        seed_pre_ingestion_power_shelf(&mut txn, UNKNOWN_MAC, &rack_id, false).await;
+        txn.commit().await.expect("commit expected shelf setup");
+        let endpoint = make_ps_endpoint(UNKNOWN_MAC);
+        let node_id = endpoint.pmc_mac.to_string();
+        mock.enqueue_batch_get_power_state(Ok(power_read_response(&[(&node_id, "ON")])))
+            .await;
+        let results = PowerShelfManager::get_power_state(&backend, &[endpoint])
+            .await
+            .expect("expected shelf read");
+        assert_eq!(
+            results,
+            [ComponentPowerStateResult {
+                mac_address: UNKNOWN_MAC.parse().expect("shelf PMC MAC"),
+                power_state: Ok(Some(PowerState::On)),
+            }]
+        );
+        let calls = mock.batch_get_power_state_calls().await;
+        assert_eq!(calls.len(), 1);
+        let nodes = &calls[0].nodes.as_ref().expect("request nodes").nodes;
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, node_id);
+        assert_eq!(nodes[0].rack_id, rack_id.to_string());
+        assert_descriptor_node(&nodes[0], ROLE_POWER_SHELF);
+        assert!(mock.create_nodes_calls().await.is_empty());
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
+    }
+
+    #[test]
+    fn rms_power_response_integrity_is_per_node() {
+        use rms::ReturnCode::{Failure, Success};
+
+        let failed = rms::NodeOperationResult {
+            node_id: "node-1".to_owned(),
+            status: rms::ReturnCode::Failure as i32,
+            error_message: "unavailable".to_owned(),
+        };
+        let succeeded = rms::NodeOperationResult {
+            status: rms::ReturnCode::Success as i32,
+            error_message: String::new(),
+            ..failed.clone()
+        };
+        check_cases([
+            (
+                "missing envelope",
+                vec![("node-1", "ON")],
+                None,
+                (Failure, ""),
+                FailsWith("missing RMS power response envelope".to_owned()),
+            ),
+            (
+                "aggregate failure preserves evidence",
+                vec![("node-1", "ON")],
+                Some(vec![]),
+                (Failure, "another node failed"),
+                Yields(Some(PowerState::On)),
+            ),
+            (
+                "failed peer preserves evidence",
+                vec![("node-1", "ON")],
+                Some(vec![rms::NodeOperationResult {
+                    node_id: "peer".to_owned(),
+                    ..failed.clone()
+                }]),
+                (Success, ""),
+                Yields(Some(PowerState::On)),
+            ),
+            (
+                "node failure",
+                vec![],
+                Some(vec![failed.clone()]),
+                (Failure, "rack unavailable"),
+                FailsWith("RMS power read failed for node node-1: status 2: unavailable".to_owned()),
+            ),
+            (
+                "node failure preserves batch message when node detail is absent",
+                vec![],
+                Some(vec![rms::NodeOperationResult {
+                    error_message: String::new(),
+                    ..failed.clone()
+                }]),
+                (Failure, "rack unavailable"),
+                FailsWith("RMS power read failed for node node-1: status 2: rack unavailable".to_owned()),
+            ),
+            (
+                "status-only node failure",
+                vec![],
+                Some(vec![rms::NodeOperationResult {
+                    error_message: String::new(),
+                    ..failed.clone()
+                }]),
+                (Failure, ""),
+                FailsWith("RMS power read failed for node node-1: status 2".to_owned()),
+            ),
+            (
+                "failure contradicts state",
+                vec![("node-1", "ON")],
+                Some(vec![failed.clone()]),
+                (Failure, ""),
+                FailsWith("conflicting RMS power state and failure for node node-1: status 2: unavailable".to_owned()),
+            ),
+            (
+                "success with error text contradicts state",
+                vec![("node-1", "ON")],
+                Some(vec![rms::NodeOperationResult {
+                    status: rms::ReturnCode::Success as i32,
+                    ..failed.clone()
+                }]),
+                (Failure, ""),
+                FailsWith("conflicting RMS power state and failure for node node-1: status 1: unavailable".to_owned()),
+            ),
+            (
+                "duplicate states",
+                vec![("node-1", "ON"), ("node-1", "ON")],
+                Some(vec![]),
+                (Failure, ""),
+                FailsWith("duplicate RMS power states for node node-1".to_owned()),
+            ),
+            (
+                "conflicting states",
+                vec![("node-1", "ON"), ("node-1", "OFF")],
+                Some(vec![]),
+                (Failure, ""),
+                FailsWith("duplicate RMS power states for node node-1".to_owned()),
+            ),
+            (
+                "duplicate results",
+                vec![("node-1", "ON")],
+                Some(vec![succeeded.clone(), succeeded.clone()]),
+                (Failure, ""),
+                FailsWith("duplicate RMS operation results for node node-1".to_owned()),
+            ),
+            (
+                "conflicting results",
+                vec![("node-1", "ON")],
+                Some(vec![succeeded.clone(), failed]),
+                (Failure, ""),
+                FailsWith("duplicate RMS operation results for node node-1".to_owned()),
+            ),
+            (
+                "missing requested node",
+                vec![("peer", "ON")],
+                Some(vec![succeeded]),
+                (Failure, ""),
+                FailsWith("missing RMS power state for node node-1".to_owned()),
+            ),
+            (
+                "failed envelope preserves human message",
+                vec![],
+                Some(vec![]),
+                (Failure, "rack unavailable"),
+                FailsWith("missing RMS power state for node node-1: rack unavailable".to_owned()),
+            ),
+        ].map(|(scenario, states, node_results, (status, message), expect)| {
+            let mut response = power_read_response(&states);
+            response.response = node_results.map(|node_results| rms::NodeBatchResponse {
+                status: status as i32,
+                message: message.to_owned(),
+                stats: Some(rms::NodeOperationStats {
+                    failed_nodes: 1,
+                    ..Default::default()
+                }),
+                node_results,
+                ..Default::default()
+            });
+            Case { scenario, input: response, expect }
+        }), |response| rms_power_state_for_node(&response, "node-1"));
+    }
+
+    fn power_read_nodes(count: usize) -> Vec<rms::NodeInfo> {
+        (0..count)
+            .map(|index| rms::NodeInfo {
+                node_id: format!("node-{index:03}"),
+                rack_id: "rack-1".to_owned(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    async fn query_test_power_nodes(
+        mock: &MockRmsApi,
+        nodes: Vec<rms::NodeInfo>,
+        deadline: Instant,
+    ) -> Vec<ComponentPowerStateResult> {
+        let macs = vec![PS_MAC_1.parse().expect("management MAC"); nodes.len()];
+        query_rms_power_states(
+            mock,
+            &macs,
+            async { Ok(nodes.into_iter().map(Ok).collect()) },
+            deadline,
+        )
+        .await
+    }
+
     #[tokio::test]
-    async fn rms_calls_record_the_external_call_histogram_by_outcome() {
-        use carbide_instrument::testing::MetricsCapture;
+    async fn rms_power_reads_deduplicate_and_separate_rack_local_ids() {
+        let mock = MockRmsApi::new();
+        let first = power_read_nodes(1).remove(0);
+        let second_rack = rms::NodeInfo {
+            rack_id: "rack-2".to_owned(),
+            ..first.clone()
+        };
+        let mut original = power_read_nodes(2).remove(1);
+        original.bmc_endpoint = Some(rms::Endpoint {
+            credentials: Some(credentials_to_rms(&Credentials::UsernamePassword {
+                username: "admin".to_owned(),
+                password: "password".to_owned(),
+            })),
+            ..Default::default()
+        });
+        let mut conflicting = original.clone();
+        conflicting
+            .bmc_endpoint
+            .as_mut()
+            .expect("BMC endpoint")
+            .credentials = Some(credentials_to_rms(&Credentials::UsernamePassword {
+            username: "admin".to_owned(),
+            password: "different-password".to_owned(),
+        }));
+        mock.enqueue_batch_get_power_state(Ok(power_read_response(&[(&first.node_id, "ON")])))
+            .await;
+        mock.enqueue_batch_get_power_state(Ok(power_read_response(&[(&first.node_id, "OFF")])))
+            .await;
+        let nodes = vec![first.clone(), second_rack, first, original, conflicting];
+        let macs = [PS_MAC_1, PS_MAC_2, SW_MAC_1, SW_MAC_2, CT_MAC_1]
+            .map(|mac| mac.parse::<MacAddress>().expect("management MAC"));
+        let results = query_rms_power_states(
+            &mock,
+            &macs,
+            async { Ok(nodes.into_iter().map(Ok).collect()) },
+            Instant::now() + RMS_POWER_READ_TIMEOUT,
+        )
+        .await;
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.mac_address)
+                .collect::<Vec<_>>(),
+            macs
+        );
+        assert_eq!(results[0].power_state, Ok(Some(PowerState::On)));
+        assert_eq!(results[1].power_state, Ok(Some(PowerState::Off)));
+        assert_eq!(results[2].power_state, results[0].power_state);
+        assert_eq!(
+            results[3].power_state,
+            Err("conflicting RMS request descriptors for rack rack-1 node node-001".to_owned())
+        );
+        assert_eq!(results[4].power_state, results[3].power_state);
+        let calls = mock.batch_get_power_state_calls().await;
+        assert_eq!(calls.len(), 2);
+        for (call, rack) in calls.iter().zip(["rack-1", "rack-2"]) {
+            let nodes = &call.nodes.as_ref().expect("request nodes").nodes;
+            assert_eq!(nodes.len(), 1);
+            assert_eq!(nodes[0].rack_id, rack);
+        }
+    }
+
+    /// A failed chunk must preserve successful peers and report its failure
+    /// without exposing credentials echoed in the RMS transport error.
+    #[tokio::test]
+    async fn rms_power_reads_bound_chunks_and_preserve_peers_after_transport_failure() {
+        const PRIVATE_PAYLOAD: &str = "power-read-credential-must-not-be-reported";
+        const TRANSPORT_ERROR: &str = "RMS power read RPC failed: Unavailable";
 
         let mock = MockRmsApi::new();
-        mock.enqueue_batch_get_power_state(Ok(rms::BatchGetPowerStateResponse::default()))
-            .await;
-        mock.enqueue_batch_get_power_state(Err(RackManagerError::ApiInvocationError(
-            tonic::Status::unavailable("down"),
+        let mut nodes = power_read_nodes(RMS_POWER_READ_BATCH_SIZE * 2 + 1);
+
+        // Supply the fake secret to the failed chunk so the reply models RMS
+        // echoing part of the request, rather than an unrelated log string.
+        nodes[RMS_POWER_READ_BATCH_SIZE].bmc_endpoint = Some(rms::Endpoint {
+            credentials: Some(credentials_to_rms(&Credentials::UsernamePassword {
+                username: "admin".to_owned(),
+                password: PRIVATE_PAYLOAD.to_owned(),
+            })),
+            ..Default::default()
+        });
+        for (index, chunk) in nodes.chunks(RMS_POWER_READ_BATCH_SIZE).enumerate() {
+            let response = if index == 1 {
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unavailable(format!("read failed: {PRIVATE_PAYLOAD}")),
+                ))
+            } else {
+                let mut response = power_read_response(
+                    &chunk
+                        .iter()
+                        .rev()
+                        .map(|node| (node.node_id.as_str(), "ON"))
+                        .collect::<Vec<_>>(),
+                );
+                if index == 0 {
+                    let failed = response.node_power_states.pop().expect("first chunk state");
+                    let batch = response.response.as_mut().expect("batch response");
+                    batch.status = rms::ReturnCode::Failure as i32;
+                    let result = batch
+                        .node_results
+                        .iter_mut()
+                        .find(|result| result.node_id == failed.node_id)
+                        .expect("failed node operation result");
+                    result.status = rms::ReturnCode::Failure as i32;
+                    result.error_message = "node unavailable".to_owned();
+                }
+                Ok(response)
+            };
+            mock.enqueue_batch_get_power_state(response).await;
+        }
+
+        let (results, logs) = capture_logs_async(query_test_power_nodes(
+            &mock,
+            nodes.clone(),
+            Instant::now() + RMS_POWER_READ_TIMEOUT,
+        ))
+        .await;
+
+        assert_eq!(results.len(), nodes.len());
+        for (index, result) in results.iter().enumerate() {
+            if let Err(error) = &result.power_state {
+                assert!(!error.contains(PRIVATE_PAYLOAD));
+            }
+            if index == 0 {
+                assert!(
+                    result
+                        .power_state
+                        .as_ref()
+                        .expect_err("failed node")
+                        .contains("node unavailable")
+                );
+            } else if (RMS_POWER_READ_BATCH_SIZE..RMS_POWER_READ_BATCH_SIZE * 2).contains(&index) {
+                assert_eq!(
+                    result.power_state.as_ref().expect_err("failed chunk"),
+                    TRANSPORT_ERROR,
+                );
+            } else {
+                assert_eq!(result.power_state, Ok(Some(PowerState::On)));
+            }
+        }
+
+        // RED must retain a useful warning while keeping the server's text
+        // out of both the message and every structured field.
+        assert!(logs.iter().all(|log| {
+            !log.message.contains(PRIVATE_PAYLOAD)
+                && log.fields.iter().all(|(name, value)| {
+                    !name.contains(PRIVATE_PAYLOAD) && !value.contains(PRIVATE_PAYLOAD)
+                })
+        }));
+        let failure_log = logs
+            .iter()
+            .find(|log| {
+                log.message == "external call failed"
+                    && log.field("operation") == Some("batch_get_power_state")
+            })
+            .expect("RED reports the transport failure");
+        assert_eq!(failure_log.level, tracing::Level::WARN);
+        assert_eq!(failure_log.field("backend"), Some("rms"));
+        assert_eq!(failure_log.field("error"), Some(TRANSPORT_ERROR));
+
+        let calls = mock.batch_get_power_state_calls().await;
+        assert_eq!(calls.len(), 3);
+        for (call, chunk) in calls.iter().zip(nodes.chunks(RMS_POWER_READ_BATCH_SIZE)) {
+            assert_eq!(call.nodes.as_ref().expect("request nodes").nodes, chunk);
+        }
+    }
+
+    /// TLS client errors may contain private connection details. Keep them out
+    /// of per-device errors and logs while retaining a useful failure warning.
+    #[tokio::test]
+    async fn rms_power_reads_sanitize_tls_errors_in_results_and_logs() {
+        const PRIVATE_PAYLOAD: &str = "power-read-tls-detail-must-not-be-reported";
+        const TLS_ERROR: &str = "RMS power read TLS failed";
+
+        let mock = MockRmsApi::new();
+        let nodes = power_read_nodes(1);
+        // TLS errors can contain private connection details before RMS replies.
+        mock.enqueue_batch_get_power_state(Err(RackManagerError::TlsError(
+            librms::RmsTlsClientError::Connection(PRIVATE_PAYLOAD.to_owned()),
         )))
         .await;
 
-        let device_mac: MacAddress = PS_MAC_1.parse().unwrap();
-        let metrics = MetricsCapture::start();
-        let mut observed = Vec::new();
-        for _ in 0..2 {
-            observed.push(
-                query_rms_power_state(
-                    &mock,
-                    rms::NodeInfo::default(),
-                    "node-1",
-                    device_mac,
-                    "power shelf",
-                )
-                .await,
-            );
-        }
-        assert!(
-            observed[1].error.is_some(),
-            "transport failure surfaces as an error"
-        );
+        let (results, logs) = capture_logs_async(query_test_power_nodes(
+            &mock,
+            nodes.clone(),
+            Instant::now() + RMS_POWER_READ_TIMEOUT,
+        ))
+        .await;
 
-        for outcome in ["ok", "error"] {
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].mac_address,
+            PS_MAC_1.parse::<MacAddress>().expect("management MAC")
+        );
+        assert_eq!(results[0].power_state, Err(TLS_ERROR.to_owned()));
+
+        // RED must report the failure, but none of the captured fields or
+        // messages may include the original TLS client error.
+        let failure_log = logs
+            .iter()
+            .find(|log| {
+                log.message == "external call failed"
+                    && log.field("operation") == Some("batch_get_power_state")
+            })
+            .expect("RED reports the TLS failure");
+        assert_eq!(failure_log.level, tracing::Level::WARN);
+        assert_eq!(failure_log.field("backend"), Some("rms"));
+        assert_eq!(failure_log.field("error"), Some(TLS_ERROR));
+        assert!(logs.iter().all(|log| {
+            !log.message.contains(PRIVATE_PAYLOAD)
+                && log.fields.iter().all(|(name, value)| {
+                    !name.contains(PRIVATE_PAYLOAD) && !value.contains(PRIVATE_PAYLOAD)
+                })
+        }));
+
+        let calls = mock.batch_get_power_state_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].nodes.as_ref().expect("request nodes").nodes, nodes);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rms_power_read_deadline_includes_preparation() {
+        tokio::time::timeout(RMS_POWER_READ_TIMEOUT * 2, async {
+            let mock = MockRmsApi::new();
+            let macs = [PS_MAC_1, PS_MAC_2].map(|mac| mac.parse().expect("management MAC"));
+            let error = ComponentManagerError::Internal("identity query failed".to_owned());
+            let expected_error = error.to_string();
+            let results = query_rms_power_states(
+                &mock,
+                &macs,
+                async { Err(error) },
+                Instant::now() + RMS_POWER_READ_TIMEOUT,
+            )
+            .await;
             assert_eq!(
-                metrics.histogram_count_delta(
-                    "carbide_external_call_duration_milliseconds",
-                    &[
-                        ("backend", "rms"),
-                        ("operation", "batch_get_power_state"),
-                        ("outcome", outcome),
-                    ],
-                ),
-                1,
-                "{outcome}"
+                results,
+                macs.map(|mac_address| ComponentPowerStateResult {
+                    mac_address,
+                    power_state: Err(expected_error.clone()),
+                })
             );
+            assert!(mock.batch_get_power_state_calls().await.is_empty());
+            let deadline = Instant::now() + RMS_POWER_READ_TIMEOUT;
+            let results =
+                query_rms_power_states(&mock, &macs, std::future::pending(), deadline).await;
+            assert_eq!(Instant::now(), deadline);
+            assert_eq!(
+                results,
+                macs.map(|mac_address| ComponentPowerStateResult {
+                    mac_address,
+                    power_state: Err(RMS_POWER_READ_TIMEOUT_ERROR.to_owned()),
+                })
+            );
+            assert!(mock.batch_get_power_state_calls().await.is_empty());
+        })
+        .await
+        .expect("preparation failure and deadline proof must finish within the watchdog");
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn compute_power_read_deadline_bounds_identity_pool_wait(pool: sqlx::PgPool) {
+        let limited_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(RMS_POWER_READ_TIMEOUT * 3)
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .expect("connect single-connection pool");
+        let held_connection = limited_pool.acquire().await.expect("hold sole connection");
+        let mock = Arc::new(MockRmsApi::new());
+        let backend = RmsBackend::new(
+            mock.clone(),
+            Some(mock.clone()),
+            limited_pool.clone(),
+            Arc::new(rack_profile_config()),
+            true,
+        );
+        let endpoint = make_ct_endpoint(CT_IP_1, CT_MAC_1);
+
+        // Complete actual database setup before pausing time. The getter must
+        // bound pool acquisition as part of identity resolution.
+        tokio::time::pause();
+        let deadline = Instant::now() + RMS_POWER_READ_TIMEOUT;
+        let response = tokio::time::timeout(
+            RMS_POWER_READ_TIMEOUT * 2,
+            ComputeTrayManager::get_power_state(&backend, &[endpoint]),
+        )
+        .await;
+        let finished_at = Instant::now();
+        tokio::time::resume();
+        drop(held_connection);
+        limited_pool.close().await;
+
+        // Tokio rounds timer deadlines up to the next millisecond.
+        assert!((deadline..=deadline + Duration::from_millis(1)).contains(&finished_at));
+        let results = response
+            .expect("public read must finish before watchdog")
+            .expect("return per-device deadline result");
+        assert_eq!(
+            results,
+            [ComponentPowerStateResult {
+                mac_address: CT_MAC_1.parse().expect("compute BMC MAC"),
+                power_state: Err(RMS_POWER_READ_TIMEOUT_ERROR.to_owned()),
+            }]
+        );
+        assert!(mock.batch_get_power_state_calls().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rms_power_reads_stop_in_flight_and_later_chunks() {
+        tokio::time::timeout(RMS_POWER_READ_TIMEOUT * 2, async {
+        for cancel in [false, true] {
+            let mock = MockRmsApi::new();
+            let nodes = power_read_nodes(RMS_POWER_READ_BATCH_SIZE * 2 + 1);
+            mock.enqueue_batch_get_power_state(Ok(power_read_response(
+                &nodes[..RMS_POWER_READ_BATCH_SIZE]
+                    .iter()
+                    .map(|node| (node.node_id.as_str(), "ON"))
+                    .collect::<Vec<_>>(),
+            )))
+            .await;
+            let (first_entered, first_release) = mock.block_next_batch_get_power_state().await;
+            let deadline = Instant::now() + RMS_POWER_READ_TIMEOUT;
+            let macs = vec![PS_MAC_1.parse().expect("management MAC"); nodes.len()];
+            let mut read = Box::pin(query_rms_power_states(&mock, &macs, async {
+                tokio::time::sleep(RMS_POWER_READ_TIMEOUT / 4).await;
+                Ok(nodes.into_iter().map(Ok).collect())
+            }, deadline));
+            tokio::select! {
+                result = &mut read => panic!("read completed before first release: {result:?}"),
+                entered = first_entered => entered.expect("first request arrived"),
+            }
+            let (second_entered, second_release) = mock.block_next_batch_get_power_state().await;
+            tokio::time::advance(RMS_POWER_READ_TIMEOUT / 4).await;
+            first_release.send(()).expect("release first request");
+            tokio::select! {
+                result = &mut read => panic!("read completed before second release: {result:?}"),
+                entered = second_entered => entered.expect("second request arrived"),
+            }
+            if cancel {
+                drop(read);
+            } else {
+                tokio::time::advance(RMS_POWER_READ_TIMEOUT / 2).await;
+                let results = read.await;
+                assert_eq!(Instant::now(), deadline);
+                assert!(
+                    results[..RMS_POWER_READ_BATCH_SIZE]
+                        .iter()
+                        .all(|result| result.power_state == Ok(Some(PowerState::On)))
+                );
+                assert!(results[RMS_POWER_READ_BATCH_SIZE..].iter().all(
+                    |result| result.power_state == Err(RMS_POWER_READ_TIMEOUT_ERROR.to_owned())
+                ));
+            }
+            assert!(second_release.is_closed(), "in-flight RPC must be dropped");
+            assert_eq!(mock.batch_get_power_state_calls().await.len(), 2);
         }
+        }).await.expect("power read timeout and cancellation proof must finish within the watchdog");
     }
 
     // ---- Test helpers ----
@@ -5138,6 +8479,7 @@ mod tests {
         db::expected_rack::create(
             &mut *txn,
             &model::expected_rack::ExpectedRack {
+                rack_group_id: None,
                 rack_id: rack_id.clone(),
                 rack_profile_id: rack_profile_id.clone(),
                 metadata: model::metadata::Metadata::default(),
@@ -5172,6 +8514,59 @@ mod tests {
         )
         .await
         .expect("failed to create expected machine");
+    }
+
+    /// Seed a rack-scale power shelf that has an expected record and rack but no
+    /// `power_shelves` row, mirroring a device present before ingestion
+    /// completes. When `create_rack_row` is false the rack profile is only
+    /// discoverable through `expected_racks`, exercising that fallback.
+    async fn seed_pre_ingestion_power_shelf(
+        txn: &mut sqlx::PgConnection,
+        mac: &str,
+        rack_id: &RackId,
+        create_rack_row: bool,
+    ) {
+        let rack_profile_id = RackProfileId::new(TEST_RACK_PROFILE_ID);
+        db::expected_rack::create(
+            &mut *txn,
+            &model::expected_rack::ExpectedRack {
+                rack_group_id: None,
+                rack_id: rack_id.clone(),
+                rack_profile_id: rack_profile_id.clone(),
+                metadata: model::metadata::Metadata::default(),
+            },
+        )
+        .await
+        .expect("failed to create expected rack");
+
+        if create_rack_row {
+            db::rack::create(
+                &mut *txn,
+                rack_id,
+                Some(&rack_profile_id),
+                &model::rack::RackConfig::default(),
+                None,
+            )
+            .await
+            .expect("failed to create rack");
+        }
+
+        db::expected_power_shelf::create(
+            &mut *txn,
+            model::expected_power_shelf::ExpectedPowerShelf {
+                expected_power_shelf_id: None,
+                bmc_mac_address: mac.parse().unwrap(),
+                serial_number: "PRE-PS-001".to_owned(),
+                bmc_username: "admin".to_owned(),
+                bmc_password: "pass".to_owned(),
+                bmc_ip_address: None,
+                metadata: model::metadata::Metadata::default(),
+                rack_id: Some(rack_id.clone()),
+                bmc_retain_credentials: None,
+            },
+        )
+        .await
+        .expect("failed to create expected power shelf");
     }
 
     fn make_ct_endpoint(bmc_ip: &str, bmc_mac: &str) -> ComputeTrayEndpoint {
@@ -5341,10 +8736,9 @@ mod tests {
     }
 
     #[test]
-    fn direct_rms_firmware_object_json_request_defaults_missing_access_token_to_noauth() {
+    fn direct_rms_firmware_object_json_request_preserves_explicit_access_tokens() {
         let identity = test_rms_identity();
         let profile = test_rms_profile();
-
         let node_identity = switch_node_identity_for_profile(&profile).unwrap();
 
         let resolved = ResolvedRmsNode {
@@ -5352,22 +8746,25 @@ mod tests {
             node_identity,
         };
 
-        let request = apply_firmware_object_request(
-            rms::NodeInfo::default(),
-            &resolved,
-            r#"{"Id":"fw-json"}"#,
-            &FirmwareUpdateOptions {
-                access_token: None,
-                force_update: false,
-            },
-            &[],
-        )
-        .unwrap();
+        for (access_token, expected) in [
+            (None, RMS_NOAUTH_ACCESS_TOKEN),
+            (Some(" \n"), " \n"),
+            (Some(" opaque token\n"), " opaque token\n"),
+        ] {
+            let request = apply_firmware_object_request(
+                rms::NodeInfo::default(),
+                &resolved,
+                r#"{"Id":"fw-json"}"#,
+                &FirmwareUpdateOptions {
+                    access_token: access_token.map(str::to_string),
+                    force_update: false,
+                },
+                &[],
+            )
+            .unwrap();
 
-        assert_eq!(
-            request.access_token.as_deref(),
-            Some(carbide_rack::firmware_object::RMS_NOAUTH_ACCESS_TOKEN)
-        );
+            assert_eq!(request.access_token.as_deref(), Some(expected));
+        }
     }
 
     #[carbide_macros::sqlx_test]
@@ -5461,6 +8858,50 @@ mod tests {
         assert!(dev0.host_endpoint.is_none());
         let dev1 = &calls[1].nodes.as_ref().unwrap().nodes[0];
         assert_eq!(dev1.node_id, ps2.to_string());
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn ps_power_control_pre_ingestion_dispatches_via_expected_rack(pool: sqlx::PgPool) {
+        // No power_shelves row and no live racks row: the RMS identity must
+        // resolve entirely from the expected inventory, with the node id
+        // synthesized from the PMC MAC. This is the default RMS backend path for
+        // a pre-ingestion power shelf, which previously failed with an
+        // identity-lookup error.
+        let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+        let mut txn = pool.begin().await.unwrap();
+        seed_pre_ingestion_power_shelf(&mut txn, PS_MAC_1, &rack_id, false).await;
+        txn.commit().await.unwrap();
+
+        let mock = Arc::new(MockRmsApi::new());
+        let backend = RmsBackend::new(
+            mock.clone(),
+            Some(mock.clone()),
+            pool.clone(),
+            Arc::new(rack_profile_config()),
+            true,
+        );
+
+        let pmc_mac: MacAddress = PS_MAC_1.parse().unwrap();
+        // Row-less shelves use the PMC MAC directly as the RMS node id.
+        let node_id = pmc_mac.to_string();
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(&node_id)))
+            .await;
+
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+        let results = PowerShelfManager::power_control(&backend, &eps, PowerAction::On)
+            .await
+            .unwrap();
+
+        assert!(results[0].success);
+
+        let calls = mock.batch_set_power_state_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].operation, rms::PowerOperation::On as i32);
+        let dev0 = &calls[0].nodes.as_ref().unwrap().nodes[0];
+        assert_eq!(dev0.node_id, node_id);
+        assert_eq!(dev0.rack_id, rack_id.to_string());
+        assert_descriptor_node(dev0, ROLE_POWER_SHELF);
+        assert!(dev0.bmc_endpoint.is_some());
     }
 
     #[carbide_macros::sqlx_test]
@@ -5685,6 +9126,79 @@ mod tests {
     }
 
     #[carbide_macros::sqlx_test]
+    async fn ps_firmware_status_after_failed_resubmit_and_restart_reports_no_job(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+
+        // A successful update persists job-a to the DB.
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+            &ps1.to_string(),
+            "job-a",
+        )))
+        .await;
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // A later submission fails and produces no durable job.
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_fail(
+            &ps1.to_string(),
+            "bad firmware file",
+        )))
+        .await;
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // The failed submission must clear the persisted job, not just the
+        // in-memory entry, so a restart cannot resurrect it.
+        assert_eq!(
+            db::direct_dispatch_firmware_job::get(
+                &pool,
+                PS_MAC_1.parse::<MacAddress>().unwrap(),
+                FirmwareJobKind::FirmwareObject,
+            )
+            .await
+            .unwrap(),
+            None
+        );
+
+        // Simulate a nico-api restart: the in-memory map is empty, so status
+        // falls back to the DB. With the persisted job cleared, the shelf
+        // reports no tracked job rather than stale job-a's state, and no status
+        // query is issued for it.
+        backend.firmware_jobs.lock().unwrap().clear();
+
+        let statuses = PowerShelfManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        assert_eq!(statuses[0].state, FirmwareState::Unknown);
+        assert!(
+            statuses[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("no firmware job")
+        );
+        assert!(mock.get_firmware_job_status_calls().await.is_empty());
+    }
+
+    #[carbide_macros::sqlx_test]
     async fn ps_firmware_status_running(pool: sqlx::PgPool) {
         let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
 
@@ -5737,6 +9251,80 @@ mod tests {
                 .unwrap()
                 .contains("no firmware job")
         );
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn ps_update_firmware_persists_job_id_to_db(pool: sqlx::PgPool) {
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+            &ps1.to_string(),
+            "job-persist",
+        )))
+        .await;
+
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // The job id is persisted under the PMC MAC so a restart can recover it.
+        assert_eq!(
+            db::direct_dispatch_firmware_job::get(
+                &pool,
+                PS_MAC_1.parse::<MacAddress>().unwrap(),
+                FirmwareJobKind::FirmwareObject,
+            )
+            .await
+            .unwrap(),
+            Some("job-persist".to_string())
+        );
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn ps_firmware_status_falls_back_to_db_after_restart(pool: sqlx::PgPool) {
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+            &ps1.to_string(),
+            "job-reload",
+        )))
+        .await;
+
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // Simulate a nico-api restart: the in-memory job map is empty, but the
+        // DB row written by update_firmware survives.
+        backend.firmware_jobs.lock().unwrap().clear();
+
+        mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
+            rms::FirmwareJobState::Running,
+        )))
+        .await;
+
+        let statuses = PowerShelfManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        // Status recovers the persisted job id from the DB and reports the real
+        // backend state instead of a permanent Unknown.
+        assert_eq!(statuses[0].state, FirmwareState::InProgress);
+        assert!(statuses[0].error.is_none());
+        let calls = mock.get_firmware_job_status_calls().await;
+        assert_eq!(calls[0].job_id, "job-reload");
     }
 
     #[carbide_macros::sqlx_test]
@@ -5968,6 +9556,256 @@ mod tests {
     }
 
     #[carbide_macros::sqlx_test]
+    async fn sw_batch_disable_switch_mtls_maps_endpoints_and_services(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+
+        mock.enqueue_batch_disable_switch_mtls(Ok(rms::BatchDisableSwitchMtlsResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "disable-mtls-job-1".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+        let services = [rms::SwitchService::NvueApi as i32];
+
+        let job_id = NvSwitchManager::batch_disable_switch_mtls(
+            &backend,
+            std::slice::from_ref(&endpoint),
+            &services,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(job_id, "disable-mtls-job-1");
+
+        let calls = mock.batch_disable_switch_mtls_calls().await;
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].services, services);
+
+        let nodes = calls[0]
+            .nodes
+            .as_ref()
+            .expect("the RMS request should include target nodes");
+
+        assert_eq!(nodes.nodes.len(), 1);
+        assert_eq!(nodes.nodes[0].node_id, sw1.to_string());
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_batch_disable_switch_mtls_db_failure_is_rejected_before_dispatch(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        pool.close().await;
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+
+        let error = NvSwitchManager::batch_disable_switch_mtls(
+            &backend,
+            std::slice::from_ref(&endpoint),
+            &[rms::SwitchService::NvueApi as i32],
+        )
+        .await
+        .expect_err("a closed database must prevent RMS dispatch");
+
+        assert!(matches!(
+            error,
+            ComponentManagerError::RejectedBeforeDispatch(_)
+        ));
+
+        assert!(mock.batch_disable_switch_mtls_calls().await.is_empty());
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_batch_disable_switch_mtls_rejects_empty_input_before_dispatch(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+        let services = [rms::SwitchService::NvueApi as i32];
+
+        let cases: [(&str, &[SwitchEndpoint], &[i32]); 2] = [
+            ("no endpoints", &[], &services),
+            ("no services", std::slice::from_ref(&endpoint), &[]),
+        ];
+
+        for (scenario, endpoints, services) in cases {
+            let error = NvSwitchManager::batch_disable_switch_mtls(&backend, endpoints, services)
+                .await
+                .expect_err(scenario);
+
+            assert!(
+                matches!(error, ComponentManagerError::RejectedBeforeDispatch(_)),
+                "{scenario}: {error:?}"
+            );
+        }
+
+        assert!(mock.batch_disable_switch_mtls_calls().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sw_batch_disable_switch_mtls_submission_failures_report_dispatch_certainty() {
+        let no_job = |response| Ok(rms::BatchDisableSwitchMtlsResponse { response });
+
+        let cases = [
+            (
+                "older RMS without the RPC accepted no work",
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unimplemented("unknown method"),
+                )),
+                true,
+            ),
+            (
+                "transport failure may follow dispatch",
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unavailable("connection lost"),
+                )),
+                false,
+            ),
+            ("missing response", no_job(None), false),
+            (
+                "empty job ID",
+                no_job(Some(rms::NodeBatchResponse::default())),
+                false,
+            ),
+        ];
+
+        for (scenario, response, expect_unsupported) in cases {
+            let mock = MockRmsApi::new();
+            mock.enqueue_batch_disable_switch_mtls(response).await;
+
+            let error = rms_batch_disable_switch_mtls(
+                &mock,
+                vec![rms::NodeInfo::default()],
+                &[rms::SwitchService::NvueApi as i32],
+            )
+            .await
+            .expect_err(scenario);
+
+            assert_eq!(
+                matches!(error, ComponentManagerError::Unsupported(_)),
+                expect_unsupported,
+                "{scenario}"
+            );
+
+            assert_eq!(
+                matches!(error, ComponentManagerError::OperationOutcomeUnknown(_)),
+                !expect_unsupported,
+                "{scenario}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sw_batch_disable_switch_mtls_submission_error_reports_full_status() {
+        let mock = MockRmsApi::new();
+        mock.enqueue_batch_disable_switch_mtls(Err(RackManagerError::ApiInvocationError(
+            tonic::Status::unavailable("connection lost"),
+        )))
+        .await;
+
+        let error = rms_batch_disable_switch_mtls(
+            &mock,
+            vec![rms::NodeInfo::default()],
+            &[rms::SwitchService::NvueApi as i32],
+        )
+        .await
+        .expect_err("submission failure");
+
+        let ComponentManagerError::OperationOutcomeUnknown(message) = error else {
+            panic!("expected OperationOutcomeUnknown, got {error:?}");
+        };
+        assert!(message.contains("currently unavailable"), "{message}");
+        assert!(message.contains("connection lost"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn sw_batch_disable_switch_mtls_failed_batch_with_job_id_is_not_accepted() {
+        let mock = MockRmsApi::new();
+
+        mock.enqueue_batch_disable_switch_mtls(Ok(rms::BatchDisableSwitchMtlsResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Failure as i32,
+                job_id: "disable-mtls-partial".to_string(),
+                message: "one switch rejected".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+
+        let error = rms_batch_disable_switch_mtls(
+            &mock,
+            vec![rms::NodeInfo::default()],
+            &[rms::SwitchService::NvueApi as i32],
+        )
+        .await
+        .expect_err("a failed batch must not report an accepted job");
+
+        assert!(
+            matches!(
+                &error,
+                ComponentManagerError::OperationOutcomeUnknown(message)
+                    if message.contains("one switch rejected")
+                        && message.contains("disable-mtls-partial")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sw_mtls_disable_job_status_reports_failures_and_unobservable_jobs() {
+        let mock = MockRmsApi::new();
+
+        mock.enqueue_get_job_status(Ok(rms::GetJobStatusResponse {
+            job_states: vec![
+                rms::JobStatus {
+                    job_id: "disable-mtls-job-1".to_string(),
+                    child_job_ids: vec!["disable-child-1".to_string()],
+                    execution_state: rms::JobExecutionState::Running as i32,
+                    ..Default::default()
+                },
+                rms::JobStatus {
+                    job_id: "disable-child-1".to_string(),
+                    parent_job_id: Some("disable-mtls-job-1".to_string()),
+                    execution_state: rms::JobExecutionState::Failed as i32,
+                    error_message: "ssh login failed".to_string(),
+                    node_id: Some("switch-1".to_string()),
+                    ..Default::default()
+                },
+            ],
+        }))
+        .await;
+
+        mock.enqueue_get_job_status(Err(RackManagerError::ApiInvocationError(
+            tonic::Status::not_found("expired disable-mtls-job-1"),
+        )))
+        .await;
+
+        let status = rms_get_switch_mtls_disable_job_status(&mock, "disable-mtls-job-1")
+            .await
+            .expect("a failed child job is an observed terminal status");
+
+        assert_eq!(status.state, SwitchMtlsDisableState::Failed);
+
+        assert!(status.error.as_deref().is_some_and(|error| {
+            error.contains("mTLS-disable")
+                && error.contains("switch-1")
+                && error.contains("ssh login failed")
+        }));
+
+        let error = rms_get_switch_mtls_disable_job_status(&mock, "disable-mtls-job-1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ComponentManagerError::OperationOutcomeUnknown(message)
+                if message.contains("disable outcome is unknown")
+        ));
+    }
+
+    #[carbide_macros::sqlx_test]
     async fn sw_batch_reset_switch_factory_default_maps_endpoints_and_returns_job_id(
         pool: sqlx::PgPool,
     ) {
@@ -6002,6 +9840,7 @@ mod tests {
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].domain.as_deref(), Some(tls_server_domain));
+        assert!(calls[0].allow_ssh_fallback);
 
         let nodes = calls[0]
             .nodes
@@ -6157,6 +9996,37 @@ mod tests {
             calls[0].services,
             crate::config::switch_mtls_services_as_i32(&SwitchMtlsService::default_services())
         );
+
+        assert!(calls[0].test_hello);
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_batch_configure_switch_certificate_db_failure_is_rejected_before_dispatch(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        pool.close().await;
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+
+        let endpoint = SwitchCertificateEndpoint {
+            bmc_mac: endpoint.bmc_mac,
+            nvos_ip: endpoint.nvos_ip,
+            nvos_mac: endpoint.nvos_mac,
+            nvos_credentials: endpoint.nvos_credentials,
+            nvos_host_name: endpoint.nvos_host_name,
+        };
+
+        let error =
+            NvSwitchManager::batch_configure_switch_certificate(&backend, &[endpoint], None, None)
+                .await
+                .expect_err("a closed database must prevent RMS dispatch");
+
+        assert!(matches!(
+            error,
+            ComponentManagerError::RejectedBeforeDispatch(_)
+        ));
+
+        assert!(mock.configure_switch_certificate_calls().await.is_empty());
     }
 
     #[carbide_macros::sqlx_test]
@@ -6560,7 +10430,7 @@ mod tests {
 
         let calls = mock.batch_set_power_state_calls().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].operation, rms::PowerOperation::Off as i32);
+        assert_eq!(calls[0].operation, rms::PowerOperation::ForceOff as i32);
     }
 
     #[carbide_macros::sqlx_test]
@@ -6675,6 +10545,7 @@ mod tests {
         assert_eq!(calls[0].access_token.as_deref(), Some("token"));
         assert_eq!(calls[0].software_type, "prod");
         assert_eq!(calls[0].hardware_type, "any");
+        assert!(!calls[0].allow_onie_recovery);
         assert_eq!(calls[0].rack_id, rack_id.to_string());
         let dev0 = &calls[0].nodes.as_ref().unwrap().nodes[0];
         assert_eq!(dev0.node_id, sw1.to_string());
@@ -6691,52 +10562,217 @@ mod tests {
         );
     }
 
+    fn tracked_jobs(backend: &RmsBackend, mac: &str) -> Vec<RmsTrackedFirmwareJob> {
+        backend
+            .firmware_jobs
+            .lock()
+            .unwrap()
+            .get(&mac.parse::<MacAddress>().unwrap())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Submits a mixed NVOS + firmware-object update for `SW_MAC_1` whose NVOS
+    /// apply succeeds as `system_image_job`, leaving the firmware-object apply
+    /// staged behind it.
+    async fn queue_mixed_switch_update(
+        mock: &MockRmsApi,
+        backend: &RmsBackend,
+        node_id: &str,
+        endpoints: &[SwitchEndpoint],
+        options: &FirmwareUpdateOptions,
+        system_image_job: &str,
+    ) {
+        mock.enqueue_apply_switch_system_image(Ok(MockRmsApi::switch_system_image_apply_ok(
+            node_id,
+            system_image_job,
+        )))
+        .await;
+        let results = backend
+            .queue_firmware_updates(
+                endpoints,
+                r#"{"Id":"fw-json"}"#,
+                &[NvSwitchComponent::Bmc, NvSwitchComponent::Nvos],
+                options,
+            )
+            .await
+            .unwrap();
+        assert!(results[0].success);
+    }
+
+    // RMS runs one job per node, so a mixed NVOS + firmware-object update must
+    // not submit both applies at once: the second is rejected while the first
+    // is still active. NVOS goes first so the switch is never left running an
+    // NVOS version that cannot reach a freshly upgraded BMC, and the status
+    // poll that observes the NVOS job finish releases the firmware-object
+    // apply.
     #[carbide_macros::sqlx_test]
-    async fn sw_queue_firmware_updates_mixed_tracks_both_jobs(pool: sqlx::PgPool) {
+    async fn sw_mixed_update_defers_firmware_object_until_nvos_completes(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        let eps = vec![make_sw_endpoint(SW_MAC_1)];
+        queue_mixed_switch_update(
+            &mock,
+            &backend,
+            &sw1.to_string(),
+            &eps,
+            &firmware_update_options(),
+            "sw-nvos-job",
+        )
+        .await;
+
+        assert_eq!(mock.apply_switch_system_image_calls().await.len(), 1);
+        assert!(mock.apply_firmware_object_calls().await.is_empty());
+        assert_eq!(
+            tracked_jobs(&backend, SW_MAC_1),
+            vec![RmsTrackedFirmwareJob::SwitchSystemImage(
+                "sw-nvos-job".to_string()
+            )]
+        );
+
+        // A poll while the NVOS job runs leaves the firmware-object apply
+        // staged.
+        mock.enqueue_get_switch_system_image_job_status(Ok(
+            MockRmsApi::switch_system_image_job_status_ok("running"),
+        ))
+        .await;
+        let statuses = NvSwitchManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+        assert_eq!(statuses[0].state, FirmwareState::InProgress);
+        assert!(mock.apply_firmware_object_calls().await.is_empty());
+
+        // The poll that observes completion submits the firmware-object apply
+        // with the original request's JSON, token, and component filters, and
+        // starts tracking it.
+        mock.enqueue_get_switch_system_image_job_status(Ok(
+            MockRmsApi::switch_system_image_job_status_ok("completed"),
+        ))
+        .await;
         mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
             &sw1.to_string(),
             "sw-fw-job",
         )))
         .await;
-        mock.enqueue_apply_switch_system_image(Ok(MockRmsApi::switch_system_image_apply_ok(
-            &sw1.to_string(),
-            "sw-nvos-job",
+        mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
+            rms::FirmwareJobState::Running,
         )))
         .await;
 
-        let eps = vec![make_sw_endpoint(SW_MAC_1)];
-        let results = backend
-            .queue_firmware_updates(
-                &eps,
-                r#"{"Id":"fw-json"}"#,
-                &[NvSwitchComponent::Bmc, NvSwitchComponent::Nvos],
-                &firmware_update_options(),
-            )
+        let statuses = NvSwitchManager::get_firmware_status(&backend, &eps)
             .await
             .unwrap();
 
-        assert!(results[0].success);
-        assert_eq!(mock.apply_firmware_object_calls().await.len(), 1);
-        assert_eq!(mock.apply_switch_system_image_calls().await.len(), 1);
+        assert_eq!(statuses[0].state, FirmwareState::InProgress);
+        let apply_calls = mock.apply_firmware_object_calls().await;
+        assert_eq!(apply_calls.len(), 1);
+        assert_eq!(apply_calls[0].config_json, r#"{"Id":"fw-json"}"#);
+        assert_eq!(apply_calls[0].access_token.as_deref(), Some("token"));
+        assert_eq!(
+            apply_calls[0].nodes.as_ref().unwrap().nodes[0].node_id,
+            sw1.to_string()
+        );
+        // Without the request's filters the staged apply would ask RMS for
+        // every firmware-object component, not just the ones requested.
+        let descriptor_filters = &apply_calls[0].node_descriptor_component_filters;
+        assert_eq!(descriptor_filters.len(), 1);
+        assert_eq!(
+            descriptor_filters[0]
+                .component_filter
+                .as_ref()
+                .unwrap()
+                .components,
+            vec!["BMC".to_string()]
+        );
+        assert_eq!(
+            tracked_jobs(&backend, SW_MAC_1),
+            vec![
+                RmsTrackedFirmwareJob::SwitchSystemImage("sw-nvos-job".to_string()),
+                RmsTrackedFirmwareJob::FirmwareObject("sw-fw-job".to_string()),
+            ]
+        );
+    }
 
-        {
-            let jobs = backend.firmware_jobs.lock().unwrap();
-            assert_eq!(
-                jobs.get(&SW_MAC_1.parse::<MacAddress>().unwrap()),
-                Some(&vec![
-                    RmsTrackedFirmwareJob::FirmwareObject("sw-fw-job".to_string()),
-                    RmsTrackedFirmwareJob::SwitchSystemImage("sw-nvos-job".to_string()),
-                ])
-            );
+    // The staged apply is held in one map, so two status polls landing
+    // together on a switch whose NVOS job has just completed must still
+    // produce exactly one firmware-object submission.
+    #[carbide_macros::sqlx_test]
+    async fn sw_concurrent_polls_submit_the_staged_firmware_object_once(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        let eps = vec![make_sw_endpoint(SW_MAC_1)];
+        queue_mixed_switch_update(
+            &mock,
+            &backend,
+            &sw1.to_string(),
+            &eps,
+            &firmware_update_options(),
+            "sw-nvos-job",
+        )
+        .await;
+
+        for _ in 0..2 {
+            mock.enqueue_get_switch_system_image_job_status(Ok(
+                MockRmsApi::switch_system_image_job_status_ok("completed"),
+            ))
+            .await;
         }
-
-        mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-            rms::FirmwareJobState::Completed,
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+            &sw1.to_string(),
+            "sw-fw-job",
         )))
         .await;
+        mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
+            rms::FirmwareJobState::Running,
+        )))
+        .await;
+
+        let (first, second) = tokio::join!(
+            NvSwitchManager::get_firmware_status(&backend, &eps),
+            NvSwitchManager::get_firmware_status(&backend, &eps),
+        );
+
+        // Neither poll may call the switch done while the firmware-object
+        // apply is still being submitted, however the two interleave.
+        for statuses in [first.unwrap(), second.unwrap()] {
+            assert_ne!(statuses[0].state, FirmwareState::Completed);
+        }
+        assert_eq!(mock.apply_firmware_object_calls().await.len(), 1);
+        assert_eq!(
+            tracked_jobs(&backend, SW_MAC_1),
+            vec![
+                RmsTrackedFirmwareJob::SwitchSystemImage("sw-nvos-job".to_string()),
+                RmsTrackedFirmwareJob::FirmwareObject("sw-fw-job".to_string()),
+            ]
+        );
+    }
+
+    // Submitting the apply takes a round trip to RMS, and nothing but the
+    // staged phase records that the switch still owes one. A poll landing in
+    // that window must not read the completed NVOS job as the whole update's
+    // result.
+    #[carbide_macros::sqlx_test]
+    async fn sw_poll_during_staged_firmware_object_submission_is_not_complete(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        let eps = vec![make_sw_endpoint(SW_MAC_1)];
+        queue_mixed_switch_update(
+            &mock,
+            &backend,
+            &sw1.to_string(),
+            &eps,
+            &firmware_update_options(),
+            "sw-nvos-job",
+        )
+        .await;
+
+        // Stand in for the poll that claimed the apply and is inside
+        // apply_firmware_object.
+        backend.staged_firmware_objects.lock().unwrap().insert(
+            SW_MAC_1.parse::<MacAddress>().unwrap(),
+            StagedFirmwareObject::Submitting {
+                system_image_job: "sw-nvos-job".to_owned(),
+            },
+        );
         mock.enqueue_get_switch_system_image_job_status(Ok(
-            MockRmsApi::switch_system_image_job_status_ok("running"),
+            MockRmsApi::switch_system_image_job_status_ok("completed"),
         ))
         .await;
 
@@ -6745,48 +10781,147 @@ mod tests {
             .unwrap();
 
         assert_eq!(statuses[0].state, FirmwareState::InProgress);
-        assert_eq!(
-            mock.get_firmware_job_status_calls().await[0].job_id,
-            "sw-fw-job"
-        );
-        let status_calls = mock.get_switch_system_image_job_status_calls().await;
-        assert_eq!(status_calls[0].job_id, "sw-nvos-job");
+        assert!(mock.apply_firmware_object_calls().await.is_empty());
     }
 
+    // A poll reaches its writes only after awaiting RMS, by which time the
+    // switch may have been re-queued. The newer update owns the staged phase,
+    // so the older poll's failure must not replace it.
     #[carbide_macros::sqlx_test]
-    async fn sw_queue_firmware_updates_mixed_failure_keeps_submitted_job(pool: sqlx::PgPool) {
+    async fn sw_staged_firmware_object_failure_does_not_replace_a_newer_update(pool: sqlx::PgPool) {
         let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
-        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+        let eps = vec![make_sw_endpoint(SW_MAC_1)];
+        for system_image_job in ["sw-nvos-job", "sw-nvos-job-2"] {
+            queue_mixed_switch_update(
+                &mock,
+                &backend,
+                &sw1.to_string(),
+                &eps,
+                &firmware_update_options(),
+                system_image_job,
+            )
+            .await;
+        }
+
+        backend.abandon_staged_firmware_object(
+            SW_MAC_1.parse::<MacAddress>().unwrap(),
+            "sw-nvos-job",
+            "first update's firmware-object apply was rejected".to_owned(),
+        );
+
+        let staged = backend.staged_firmware_objects.lock().unwrap();
+        assert!(matches!(
+            staged.get(&SW_MAC_1.parse::<MacAddress>().unwrap()),
+            Some(StagedFirmwareObject::Staged {
+                system_image_job,
+                ..
+            }) if system_image_job == "sw-nvos-job-2"
+        ));
+    }
+
+    // A BMC upgraded behind an NVOS image that did not land is the breakage
+    // the ordering exists to avoid, so a failed NVOS job drops the staged
+    // apply instead of submitting it.
+    #[carbide_macros::sqlx_test]
+    async fn sw_mixed_update_skips_firmware_object_when_nvos_fails(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        let eps = vec![make_sw_endpoint(SW_MAC_1)];
+        queue_mixed_switch_update(
+            &mock,
+            &backend,
             &sw1.to_string(),
-            "sw-fw-job",
-        )))
-        .await;
-        mock.enqueue_apply_switch_system_image(Ok(MockRmsApi::switch_system_image_apply_fail(
-            &sw1.to_string(),
-            "bad system image",
-        )))
+            &eps,
+            &firmware_update_options(),
+            "sw-nvos-job",
+        )
         .await;
 
-        let eps = vec![make_sw_endpoint(SW_MAC_1)];
-        let results = backend
-            .queue_firmware_updates(
-                &eps,
-                r#"{"Id":"fw-json"}"#,
-                &[NvSwitchComponent::Bmc, NvSwitchComponent::Nvos],
-                &firmware_update_options(),
-            )
+        mock.enqueue_get_switch_system_image_job_status(Ok(
+            MockRmsApi::switch_system_image_job_status_ok("failed"),
+        ))
+        .await;
+        let statuses = NvSwitchManager::get_firmware_status(&backend, &eps)
             .await
             .unwrap();
 
-        assert!(!results[0].success);
-
-        let jobs = backend.firmware_jobs.lock().unwrap();
-        assert_eq!(
-            jobs.get(&SW_MAC_1.parse::<MacAddress>().unwrap()),
-            Some(&vec![RmsTrackedFirmwareJob::FirmwareObject(
-                "sw-fw-job".to_string()
-            )])
+        assert_eq!(statuses[0].state, FirmwareState::Failed);
+        assert!(
+            statuses[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("firmware-object update was skipped")
         );
+        assert!(mock.apply_firmware_object_calls().await.is_empty());
+    }
+
+    // A staged apply that RMS rejects when it is finally submitted surfaces on
+    // the switch's status rather than disappearing, and leaves the NVOS job
+    // tracked so its own result stays pollable.
+    #[carbide_macros::sqlx_test]
+    async fn sw_staged_firmware_object_submit_failure_is_reported(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        let eps = vec![make_sw_endpoint(SW_MAC_1)];
+        queue_mixed_switch_update(
+            &mock,
+            &backend,
+            &sw1.to_string(),
+            &eps,
+            &firmware_update_options(),
+            "sw-nvos-job",
+        )
+        .await;
+
+        mock.enqueue_get_switch_system_image_job_status(Ok(
+            MockRmsApi::switch_system_image_job_status_ok("completed"),
+        ))
+        .await;
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_fail(
+            &sw1.to_string(),
+            "bad firmware object",
+        )))
+        .await;
+
+        let statuses = NvSwitchManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        assert_eq!(statuses[0].state, FirmwareState::Failed);
+        assert!(
+            statuses[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("bad firmware object")
+        );
+        assert_eq!(
+            tracked_jobs(&backend, SW_MAC_1),
+            vec![RmsTrackedFirmwareJob::SwitchSystemImage(
+                "sw-nvos-job".to_string()
+            )]
+        );
+
+        // No firmware-object job id exists for a later poll to read the failure
+        // back from, so the staged phase has to keep reporting it. Otherwise
+        // the NVOS job's success alone would stand for the whole update, and
+        // the poll would retry an apply RMS already rejected.
+        mock.enqueue_get_switch_system_image_job_status(Ok(
+            MockRmsApi::switch_system_image_job_status_ok("completed"),
+        ))
+        .await;
+        let statuses = NvSwitchManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        assert_eq!(statuses[0].state, FirmwareState::Failed);
+        assert!(
+            statuses[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("bad firmware object")
+        );
+        assert_eq!(mock.apply_firmware_object_calls().await.len(), 1);
     }
 
     #[carbide_macros::sqlx_test]
@@ -6856,7 +10991,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(statuses[0].state, FirmwareState::Unknown);
+        assert_eq!(statuses[0].state, FirmwareState::Failed);
+
         assert!(
             statuses[0]
                 .error
@@ -6875,14 +11011,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(statuses[0].state, FirmwareState::Unknown);
-        assert!(
-            statuses[0]
-                .error
-                .as_ref()
-                .unwrap()
-                .contains("no firmware job")
-        );
+        assert!(statuses.is_empty());
     }
 
     #[carbide_macros::sqlx_test]
@@ -6901,6 +11030,267 @@ mod tests {
     }
 
     // ---- ComputeTrayManager tests ----
+
+    /// A stale MAC must not send a power command to the current IP owner,
+    /// including when expected inventory would otherwise supply an identity.
+    /// Rejecting that endpoint must still allow a healthy peer to proceed,
+    /// including a matching owner that needs expected-inventory fallback.
+    #[carbide_macros::sqlx_test]
+    async fn ct_power_control_rejects_conflicting_ip_owner(pool: sqlx::PgPool) {
+        let (_, _, rack_id, ct1, ct2) = make_compute_tray_backend(&pool).await;
+        let endpoints = [
+            make_ct_endpoint(CT_IP_2, CT_MAC_1),
+            make_ct_endpoint(CT_IP_1, CT_MAC_1),
+        ];
+        let expected_error = format!(
+            "RMS compute identity for BMC IP {CT_IP_2} has MAC {CT_MAC_2}, expected {CT_MAC_1}"
+        );
+
+        for (scenario, owner_rack, healthy_node_id) in [
+            // The IP lookup must not substitute another managed machine.
+            ("rack-associated owner", Some(&rack_id), ct1.to_string()),
+            // Expected inventory must reject the conflict but allow a matching
+            // rackless owner to use its MAC as the RMS node ID.
+            ("rackless owner", None, CT_MAC_1.to_owned()),
+        ] {
+            // Both owners lose their managed rack in the fallback case; the
+            // healthy endpoint must therefore resolve through expected data.
+            let update = sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2 OR id = $3")
+                .bind(owner_rack)
+                .bind(ct1)
+                .bind(ct2)
+                .execute(&pool)
+                .await
+                .expect("set the current owners' rack associations");
+            assert_eq!(update.rows_affected(), 2);
+
+            let mock = Arc::new(MockRmsApi::new());
+            let backend = RmsBackend::new(
+                mock.clone(),
+                Some(mock.clone()),
+                pool.clone(),
+                Arc::new(rack_profile_config()),
+                true,
+            );
+
+            // Power responses summarize batch success. Queue enough successes
+            // for even an incorrect dispatch, so an absent mock response cannot
+            // masquerade as the ownership rejection.
+            for _ in &endpoints {
+                mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+                    &healthy_node_id,
+                )))
+                .await;
+            }
+
+            let results = ComputeTrayManager::power_control(&backend, &endpoints, PowerAction::On)
+                .await
+                .expect("return per-endpoint power results");
+
+            let [rejected, healthy] = results.as_slice() else {
+                panic!("{scenario}: expected one result per endpoint");
+            };
+            assert_eq!(rejected.bmc_ip, endpoints[0].bmc_ip, "{scenario}");
+            assert_eq!(rejected.bmc_mac, endpoints[0].bmc_mac, "{scenario}");
+            assert!(!rejected.success, "{scenario}");
+            assert_eq!(
+                rejected.error.as_deref(),
+                Some(expected_error.as_str()),
+                "{scenario}"
+            );
+            assert_eq!(rejected.backend_job_id, None, "{scenario}");
+            assert_eq!(healthy.bmc_ip, endpoints[1].bmc_ip, "{scenario}");
+            assert_eq!(healthy.bmc_mac, endpoints[1].bmc_mac, "{scenario}");
+            assert!(healthy.success, "{scenario}");
+            assert_eq!(healthy.error, None, "{scenario}");
+
+            // Only the healthy endpoint may reach RMS, even though both
+            // requested endpoints use the same MAC.
+            let calls = mock.batch_set_power_state_calls().await;
+            let [call] = calls.as_slice() else {
+                panic!("{scenario}: expected only the healthy endpoint's command");
+            };
+            assert_eq!(call.operation, rms::PowerOperation::On as i32, "{scenario}");
+            let nodes = &call.nodes.as_ref().expect("power request nodes").nodes;
+            let [node] = nodes.as_slice() else {
+                panic!("{scenario}: expected one healthy node");
+            };
+            assert_eq!(node.node_id, healthy_node_id, "{scenario}");
+            assert_eq!(node.rack_id, rack_id.to_string(), "{scenario}");
+            let interface = node
+                .bmc_endpoint
+                .as_ref()
+                .expect("BMC endpoint")
+                .interface
+                .as_ref()
+                .expect("BMC interface");
+            assert_eq!(interface.ip_address, CT_IP_1, "{scenario}");
+            assert_eq!(interface.mac_address, CT_MAC_1, "{scenario}");
+        }
+    }
+
+    /// A rejected firmware target must preserve its prior in-memory and stored
+    /// jobs. Both managed identity selection and expected-inventory fallback
+    /// must stop before dispatch or replacement of the requested MAC's job,
+    /// while a later valid endpoint can start and track its own update.
+    #[carbide_macros::sqlx_test]
+    async fn ct_update_firmware_rejects_conflicting_ip_owner(pool: sqlx::PgPool) {
+        let (_, _, rack_id, _, ct2) = make_compute_tray_backend(&pool).await;
+        let endpoint = make_ct_endpoint(CT_IP_2, CT_MAC_1);
+        let endpoints = [endpoint.clone(), make_ct_endpoint(CT_IP_2, CT_MAC_2)];
+        let expected_error = format!(
+            "RMS compute identity for BMC IP {CT_IP_2} has MAC {CT_MAC_2}, expected {CT_MAC_1}"
+        );
+
+        for (scenario, owner_rack, unexpected_node_id, endpoints) in [
+            // The stale request must not substitute the IP owner's ID. A later
+            // request using that owner's correct MAC must still succeed.
+            (
+                "rack-associated owner",
+                Some(&rack_id),
+                ct2.to_string(),
+                &endpoints[..],
+            ),
+            // Without a managed rack, it instead selects the requested MAC.
+            ("rackless owner", None, CT_MAC_1.to_owned(), &endpoints[..1]),
+        ] {
+            let update = sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
+                .bind(owner_rack)
+                .bind(ct2)
+                .execute(&pool)
+                .await
+                .expect("set the current owner's rack association");
+            assert_eq!(update.rows_affected(), 1);
+
+            let mock = Arc::new(MockRmsApi::new());
+            let backend = RmsBackend::new(
+                mock.clone(),
+                Some(mock.clone()),
+                pool.clone(),
+                Arc::new(rack_profile_config()),
+                true,
+            );
+
+            // A command rejected before dispatch must preserve both job stores.
+            // A successful mock for the wrong identity would overwrite them,
+            // so an unrelated RMS error cannot make this regression pass.
+            let existing_jobs = vec![RmsTrackedFirmwareJob::FirmwareObject("existing-job".into())];
+            backend
+                .firmware_jobs
+                .lock()
+                .unwrap()
+                .insert(endpoint.bmc_mac, existing_jobs.clone());
+            db::direct_dispatch_firmware_job::save(
+                &pool,
+                endpoint.bmc_mac,
+                FirmwareJobKind::FirmwareObject,
+                "existing-job",
+            )
+            .await
+            .expect("persist the existing firmware job");
+            for _ in endpoints {
+                mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+                    &unexpected_node_id,
+                    "new-job",
+                )))
+                .await;
+            }
+
+            let results = ComputeTrayManager::update_firmware(
+                &backend,
+                endpoints,
+                r#"{"Id":"fw-json"}"#,
+                &[ComputeTrayComponent::Bmc],
+                &firmware_update_options(),
+            )
+            .await
+            .expect("return per-endpoint firmware results");
+
+            assert_eq!(results.len(), endpoints.len(), "{scenario}");
+            let rejected = &results[0];
+            assert_eq!(rejected.bmc_ip, endpoint.bmc_ip, "{scenario}");
+            assert_eq!(rejected.bmc_mac, endpoint.bmc_mac, "{scenario}");
+            assert!(!rejected.success, "{scenario}");
+            assert_eq!(
+                rejected.error.as_deref(),
+                Some(expected_error.as_str()),
+                "{scenario}"
+            );
+            assert_eq!(rejected.backend_job_id, None, "{scenario}");
+
+            assert_eq!(
+                backend.firmware_jobs.lock().unwrap().get(&endpoint.bmc_mac),
+                Some(&existing_jobs),
+                "{scenario}"
+            );
+            assert_eq!(
+                db::direct_dispatch_firmware_job::get(
+                    &pool,
+                    endpoint.bmc_mac,
+                    FirmwareJobKind::FirmwareObject,
+                )
+                .await
+                .expect("reload the existing firmware job")
+                .as_deref(),
+                Some("existing-job"),
+                "{scenario}"
+            );
+
+            let calls = mock.apply_firmware_object_calls().await;
+            assert_eq!(calls.len(), endpoints.len() - 1, "{scenario}");
+            if let Some(peer) = endpoints.get(1) {
+                // The only dispatched update belongs to the later, valid MAC.
+                // Its new job must not replace the rejected MAC's existing job.
+                let healthy = &results[1];
+                assert_eq!(healthy.bmc_ip, peer.bmc_ip, "{scenario}");
+                assert_eq!(healthy.bmc_mac, peer.bmc_mac, "{scenario}");
+                assert!(healthy.success, "{scenario}");
+                assert_eq!(healthy.error, None, "{scenario}");
+                assert_eq!(
+                    healthy.backend_job_id.as_deref(),
+                    Some("new-job"),
+                    "{scenario}"
+                );
+
+                let call = &calls[0];
+                assert_eq!(call.rack_id, rack_id.to_string(), "{scenario}");
+                let nodes = &call.nodes.as_ref().expect("firmware request nodes").nodes;
+                let [node] = nodes.as_slice() else {
+                    panic!("{scenario}: expected only the healthy node");
+                };
+                assert_eq!(node.node_id, ct2.to_string(), "{scenario}");
+                let interface = node
+                    .bmc_endpoint
+                    .as_ref()
+                    .expect("BMC endpoint")
+                    .interface
+                    .as_ref()
+                    .expect("BMC interface");
+                assert_eq!(interface.ip_address, CT_IP_2, "{scenario}");
+                assert_eq!(interface.mac_address, CT_MAC_2, "{scenario}");
+
+                assert_eq!(
+                    backend.firmware_jobs.lock().unwrap().get(&peer.bmc_mac),
+                    Some(&vec![RmsTrackedFirmwareJob::FirmwareObject(
+                        "new-job".into()
+                    )]),
+                    "{scenario}"
+                );
+                assert_eq!(
+                    db::direct_dispatch_firmware_job::get(
+                        &pool,
+                        peer.bmc_mac,
+                        FirmwareJobKind::FirmwareObject,
+                    )
+                    .await
+                    .expect("reload the healthy endpoint's firmware job")
+                    .as_deref(),
+                    Some("new-job"),
+                    "{scenario}"
+                );
+            }
+        }
+    }
 
     #[carbide_macros::sqlx_test]
     async fn ct_power_control_success(pool: sqlx::PgPool) {
@@ -7018,6 +11408,7 @@ mod tests {
         .unwrap();
 
         assert!(results[0].success);
+        assert_eq!(results[0].backend_job_id.as_deref(), Some("ct-pre-job-1"));
 
         let calls = mock.apply_firmware_object_calls().await;
         assert_eq!(calls.len(), 1);
@@ -7103,5 +11494,24 @@ mod tests {
 
         assert_eq!(statuses[0].state, FirmwareState::Completed);
         assert!(statuses[0].error.is_none());
+
+        mock.enqueue_get_firmware_job_status(Ok(rms::GetFirmwareJobStatusResponse {
+            status: rms::ReturnCode::Failure as i32,
+            ..Default::default()
+        }))
+        .await;
+
+        let statuses = ComputeTrayManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        assert_eq!(statuses[0].state, FirmwareState::Failed);
+
+        assert!(
+            statuses[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("ct-job-status"))
+        );
     }
 }

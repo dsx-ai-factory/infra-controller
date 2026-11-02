@@ -1,6 +1,6 @@
 # `nico-admin-cli bmc-machine bmc-reset`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **bmc-reset**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **bmc-reset***
 
 ## NAME
 
@@ -8,59 +8,70 @@ nico-admin-cli-bmc-machine-bmc-reset - Reset BMC
 
 ## SYNOPSIS
 
-**nico-admin-cli bmc-machine bmc-reset** \[**--machine**\]
-\[**--switch**\] \[**--power-shelf**\] \[**--reset-type**\]
-\[**-u**\|**--use-ipmitool**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli bmc-machine bmc-reset [--machine]
+[--switch] [--power-shelf] [--reset-type]
+[-u|--use-ipmitool] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
-Reset BMC
+Reset a BMC.
+
+Exactly one target must be specified: --machine, --switch, or
+--power-shelf. Providing more than one target is rejected.
 
 ## OPTIONS
 
-**--machine** *\<MACHINE\>*  
+`--machine <MACHINE>`
+
 ID of the machine whose BMC to reset
 
-**--switch** *\<SWITCH\>*  
+`--switch <SWITCH>`
+
 ID of the switch whose BMC to reset
 
-**--power-shelf** *\<POWER_SHELF\>*  
+`--power-shelf <POWER_SHELF>`
+
 ID of the power shelf whose PMC to reset
 
-**--reset-type** *\<RESET_TYPE\>*  
-Redfish Manager.Reset type. Omit for the vendor default. Ignored with
---use-ipmitool.\
+`--reset-type <RESET_TYPE>`
 
-\
+Redfish Manager.Reset type. Omit for the vendor default. Ignored with
+--use-ipmitool.
+
 *Possible values:*
 
-- graceful
+> - graceful
+>
+> - force
 
-- force
+`-u, --use-ipmitool`
 
-**-u**, **--use-ipmitool**  
 Use ipmitool instead of Redfish to reset the BMC. ipmitool bmc reset
 requests may be silently ignored if the BMC is in lockdown mode.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Examples
@@ -74,4 +85,4 @@ nico-admin-cli bmc-machine bmc-reset --machine fm100ht038bg3qsho433vkg684heguv28
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

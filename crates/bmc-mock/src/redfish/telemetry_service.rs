@@ -26,7 +26,7 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch};
-use crate::{http, redfish};
+use crate::{Callbacks, http, redfish};
 
 /// Id of the aggregated report the mock publishes.
 const REPORT_ID: &str = "PlatformEnvironmentMetrics";
@@ -90,7 +90,7 @@ fn metric_definition_resource<'a>(definition_id: &'a str) -> redfish::Resource<'
     }
 }
 
-pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
+pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     const REPORT_ID_PARAM: &str = "{report_id}";
     const DEFINITION_ID_PARAM: &str = "{definition_id}";
     r.route(&resource().odata_id, get(get_telemetry_service))
@@ -100,15 +100,15 @@ pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
         )
         .route(
             &metric_report_resource(REPORT_ID_PARAM).odata_id,
-            get(get_metric_report),
+            get(get_metric_report::<C>),
         )
         .route(
             &metric_definitions_collection().odata_id,
-            get(get_metric_definitions),
+            get(get_metric_definitions::<C>),
         )
         .route(
             &metric_definition_resource(DEFINITION_ID_PARAM).odata_id,
-            get(get_metric_definition),
+            get(get_metric_definition::<C>),
         )
 }
 
@@ -134,8 +134,8 @@ async fn get_metric_reports() -> Response {
         .into_ok_response()
 }
 
-async fn get_metric_report(
-    State(state): State<BmcState>,
+async fn get_metric_report<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(report_id): Path<String>,
 ) -> Response {
     let stale = match report_id.as_str() {
@@ -154,17 +154,18 @@ async fn get_metric_report(
             "MetricValues@odata.count": metric_values.len(),
             "MetricValues": metric_values,
             "Oem": {
-                "Nvidia": {
-                    "@odata.type": "#NvidiaMetricReport.v1_0_0.NvidiaMetricReport",
-                    "SensingIntervalMilliseconds": SENSING_INTERVAL_MS,
-                    "MetricValueStale": stale,
-                }
+                "Nvidia": redfish::oem::object(
+                    "#NvidiaMetricReport.v1_0_0.NvidiaMetricReport",
+                    redfish::schema::nvidia_metric_report::NvidiaMetricReport::new()
+                        .sensing_interval_milliseconds(i64::from(SENSING_INTERVAL_MS))
+                        .metric_value_stale(stale)
+                )
             }
         }))
         .into_ok_response()
 }
 
-async fn get_metric_definitions(State(state): State<BmcState>) -> Response {
+async fn get_metric_definitions<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let paths: Vec<_> = metric_definition_units(&state)
         .into_keys()
         .map(|id| metric_definition_resource(&id).entity_ref())
@@ -174,8 +175,8 @@ async fn get_metric_definitions(State(state): State<BmcState>) -> Response {
         .into_ok_response()
 }
 
-async fn get_metric_definition(
-    State(state): State<BmcState>,
+async fn get_metric_definition<C: Callbacks>(
+    State(state): State<BmcState<C>>,
     Path(definition_id): Path<String>,
 ) -> Response {
     let Some(units) = metric_definition_units(&state).remove(&definition_id) else {
@@ -201,7 +202,7 @@ async fn get_metric_definition(
 /// still producing one `MetricValue` per chassis in the report. That is
 /// the shape real platforms publish, and the reason `MetricProperty`
 /// rather than `MetricId` is what identifies a reading.
-fn metric_definition_units(state: &BmcState) -> BTreeMap<String, String> {
+fn metric_definition_units<C: Callbacks>(state: &BmcState<C>) -> BTreeMap<String, String> {
     sensors(state)
         .filter_map(|(_, sensor)| {
             let units = sensor
@@ -214,7 +215,9 @@ fn metric_definition_units(state: &BmcState) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn sensors(state: &BmcState) -> impl Iterator<Item = (&str, &redfish::sensor::Sensor)> {
+fn sensors<C: Callbacks>(
+    state: &BmcState<C>,
+) -> impl Iterator<Item = (&str, &redfish::sensor::Sensor)> {
     state.chassis_state.iter().flat_map(|chassis| {
         let id = chassis.config.id.as_ref();
         chassis
@@ -226,8 +229,8 @@ fn sensors(state: &BmcState) -> impl Iterator<Item = (&str, &redfish::sensor::Se
     })
 }
 
-fn sensor_metric_values<'a>(
-    state: &'a BmcState,
+fn sensor_metric_values<'a, C: Callbacks>(
+    state: &'a BmcState<C>,
     timestamp: &'a str,
 ) -> impl Iterator<Item = serde_json::Value> + 'a {
     sensors(state).filter_map(move |(chassis_id, sensor)| {
@@ -244,19 +247,19 @@ fn sensor_metric_values<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use axum::Router;
     use nv_redfish::bmc_http::{BmcCredentials, HttpClient};
+    use nv_redfish::core::NoRepair;
     use serde_json::json;
     use url::Url;
 
     use super::{REPORT_ID, SENSING_INTERVAL_MS, STALE_REPORT_ID};
     use crate::test_support::axum_http_client::AxumRouterHttpClient;
-    use crate::test_support::{NoopCallbacks, TEST_MAC_POOL};
+    use crate::test_support::{TEST_MAC_POOL, TestBmcConfig, create_test_bmc};
     use crate::{
         DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo,
-        MachineRouterOptions, machine_router,
+        MachineRouterOptions,
     };
 
     fn test_host_mock() -> Router {
@@ -264,7 +267,7 @@ mod tests {
         let hw_type = HardwareType::DellPowerEdgeR750;
         let ranges_config = mac_pool.allocate_range_config().unwrap();
 
-        machine_router(
+        create_test_bmc(
             &MachineInfo::Host(HostMachineInfo::new(
                 hw_type,
                 vec![DpuMachineInfo::new(
@@ -275,7 +278,7 @@ mod tests {
                 &mut mac_pool,
                 ranges_config,
             )),
-            Arc::new(NoopCallbacks),
+            TestBmcConfig::default(),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),
@@ -294,6 +297,7 @@ mod tests {
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
+                &NoRepair,
             )
             .await
     }

@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager get-firmware-update-status power-shelf`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [get-firmware-update-status](./component-manager-get-firmware-update-status.md) › **power-shelf**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [get-firmware-update-status](./component-manager-get-firmware-update-status.md) › **power-shelf***
 
 ## NAME
 
@@ -9,9 +9,11 @@ Target power shelves
 
 ## SYNOPSIS
 
-**nico-admin-cli component-manager get-firmware-update-status
-power-shelf** \<**--power-shelf-id**\> \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli component-manager get-firmware-update-status
+power-shelf [--power-shelf-id] [--mac-address]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,29 +21,37 @@ Target power shelves
 
 ## OPTIONS
 
-**--power-shelf-id** *\<POWER_SHELF_IDS\>...*  
+`--power-shelf-id <POWER_SHELF_IDS>...`
+
 Power shelf IDs to target
 
-**--extended**  
+`--mac-address <MAC_ADDRESSES>...`
+
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
+
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

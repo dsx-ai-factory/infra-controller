@@ -29,12 +29,16 @@
 
 use std::collections::HashSet;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::secret::SecretId;
 use model::secrets::SecretRow;
 use sqlx::{PgConnection, PgTransaction};
 
 use crate::db_read::DbReader;
-use crate::{BIND_LIMIT, DatabaseError, DatabaseResult};
+use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError, DatabaseResult};
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 const SECRET_ENTRY_BINDS: usize = 7;
 
@@ -52,13 +56,15 @@ pub struct NewSecretEntry<'a> {
 
 /// Return the newest entry for a path.
 pub async fn get_latest(txn: impl DbReader<'_>, path: &str) -> DatabaseResult<Option<SecretRow>> {
-    let sql = "SELECT * FROM secrets WHERE path = $1
-         ORDER BY seq DESC LIMIT 1";
-    sqlx::query_as(sql)
+    let sql = format!(
+        "SELECT {} FROM secrets WHERE path = $1 ORDER BY seq DESC LIMIT 1",
+        SecretRow::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(path)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(sql, e))
+        .map_err(|e| DatabaseError::query(&sql, e))
 }
 
 /// Append a new journal entry.
@@ -154,8 +160,12 @@ pub async fn lock_for_bulk_write(txn: &mut PgTransaction<'_>) -> DatabaseResult<
     Ok(())
 }
 
-/// Append a new journal entry only if the path has no entries yet. Returns
-/// true when the row was inserted, false when entries already existed.
+/// `SecretAlreadyExists` means the path already has a journal entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretAlreadyExists;
+
+/// `insert_if_missing` appends a journal entry only if the path has no entries.
+/// An existing path returns `NotApplied(SecretAlreadyExists)`.
 ///
 /// The check and the insert are two statements, so this takes a transaction
 /// and serializes concurrent callers on a per-path advisory lock -- without
@@ -164,13 +174,13 @@ pub async fn lock_for_bulk_write(txn: &mut PgTransaction<'_>) -> DatabaseResult<
 pub async fn insert_if_missing(
     txn: &mut PgTransaction<'_>,
     entry: &NewSecretEntry<'_>,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), SecretAlreadyExists>> {
     lock_path(txn, entry.path).await?;
     if exists(&mut **txn, entry.path).await? {
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(SecretAlreadyExists));
     }
     insert(txn, entry).await?;
-    Ok(true)
+    Ok(ConditionalWrite::Applied(()))
 }
 
 /// Serialize a check-then-write operation for one path. There is no unique
@@ -251,13 +261,15 @@ pub async fn delete_by_id(txn: &mut PgConnection, secret_id: SecretId) -> Databa
 
 /// Return every journal entry for a path, newest first.
 pub async fn get_history(txn: impl DbReader<'_>, path: &str) -> DatabaseResult<Vec<SecretRow>> {
-    let sql = "SELECT * FROM secrets WHERE path = $1
-         ORDER BY seq DESC";
-    sqlx::query_as(sql)
+    let sql = format!(
+        "SELECT {} FROM secrets WHERE path = $1 ORDER BY seq DESC",
+        SecretRow::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(path)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(sql, e))
+        .map_err(|e| DatabaseError::query(&sql, e))
 }
 
 /// Return one journal entry by id.
@@ -265,12 +277,15 @@ pub async fn get_by_id(
     txn: impl DbReader<'_>,
     secret_id: SecretId,
 ) -> DatabaseResult<Option<SecretRow>> {
-    let sql = "SELECT * FROM secrets WHERE secret_id = $1";
-    sqlx::query_as(sql)
+    let sql = format!(
+        "SELECT {} FROM secrets WHERE secret_id = $1",
+        SecretRow::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(secret_id)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(sql, e))
+        .map_err(|e| DatabaseError::query(&sql, e))
 }
 
 /// Return every credential journal entry whose DEK is wrapped by the given
@@ -280,14 +295,17 @@ pub async fn get_all_for_kek_id(
     txn: impl DbReader<'_>,
     kek_id: &str,
 ) -> DatabaseResult<Vec<SecretRow>> {
-    let sql = "SELECT * FROM secrets
-         WHERE kek_id = $1 AND left(path, 1) <> '/'
-         ORDER BY seq DESC";
-    sqlx::query_as(sql)
+    let sql = format!(
+        "SELECT {} FROM secrets
+        WHERE kek_id = $1 AND left(path, 1) <> '/'
+        ORDER BY seq DESC",
+        SecretRow::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(kek_id)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(sql, e))
+        .map_err(|e| DatabaseError::query(&sql, e))
 }
 
 /// Return the credentials whose newest journal entry is wrapped by the
@@ -297,18 +315,21 @@ pub async fn get_latest_with_kek_id(
     txn: impl DbReader<'_>,
     kek_id: &str,
 ) -> DatabaseResult<Vec<SecretRow>> {
-    let sql = "SELECT * FROM (
-             SELECT DISTINCT ON (path) *
-             FROM secrets
-             WHERE left(path, 1) <> '/'
-             ORDER BY path, seq DESC
-         ) latest
-         WHERE latest.kek_id = $1";
-    sqlx::query_as(sql)
+    let sql = format!(
+        "SELECT {columns} FROM (
+            SELECT DISTINCT ON (path) {columns}
+            FROM secrets
+            WHERE left(path, 1) <> '/'
+            ORDER BY path, seq DESC
+        ) latest
+        WHERE latest.kek_id = $1",
+        columns = SecretRow::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(kek_id)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(sql, e))
+        .map_err(|e| DatabaseError::query(&sql, e))
 }
 
 /// Return one page of the whole table in journal order. Pass the last
@@ -320,21 +341,25 @@ pub async fn find_batch_after(
     after_seq: Option<i64>,
     limit: i64,
 ) -> DatabaseResult<Vec<SecretRow>> {
-    let sql = "SELECT * FROM secrets
-         WHERE ($1::bigint IS NULL OR seq > $1)
-         ORDER BY seq LIMIT $2";
-    sqlx::query_as(sql)
+    let sql = format!(
+        "SELECT {} FROM secrets
+        WHERE ($1::bigint IS NULL OR seq > $1)
+        ORDER BY seq LIMIT $2",
+        SecretRow::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(after_seq)
         .bind(limit)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(sql, e))
+        .map_err(|e| DatabaseError::query(&sql, e))
 }
 
 /// Count the rows whose DEK is wrapped by a KEK outside the given set.
-/// After a re-wrap, a zero here is the operator's signal that every KEK
-/// absent from the routing config can be retired; nonzero right after a
-/// re-wrap means concurrent writers landed rows mid-walk -- run it again.
+/// After a re-wrap, zero means no live row requires a KEK outside the set;
+/// retained backups and rollback windows are not inspected. Nonzero right
+/// after a re-wrap means concurrent writers landed rows mid-walk -- run it
+/// again.
 pub async fn count_wrapped_outside(
     txn: impl DbReader<'_>,
     kek_ids: &[String],

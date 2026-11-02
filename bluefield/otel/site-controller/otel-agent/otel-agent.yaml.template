@@ -4,10 +4,8 @@ metadata:
   name: otel-agent-service
 spec:
   hostNetwork: true
-  hostAliases:
-    - ip: ${CARBIDE_API_IP_ADDR}
-      hostnames:
-        - carbide-api.forge
+  # Filled with resolved API addresses by render_pod.py.
+  hostAliases: []
   containers:
     - name: otel-agent
       image: otel-agent

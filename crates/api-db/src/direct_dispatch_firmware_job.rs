@@ -105,6 +105,30 @@ pub async fn save(
     Ok(())
 }
 
+/// Delete the persisted job for one `(bmc_mac, job_kind)`, if present.
+///
+/// A submission that produces no durable job (a failed dispatch, or a success
+/// the backend assigned no job to) calls this to drop a job persisted by a
+/// prior update, so a status query after a restart does not recover the stale
+/// job and report its state for the later request. Deleting an absent row is a
+/// no-op. Jobs of other kinds for the device are untouched; use [`replace`] to
+/// set a device's full job set atomically.
+pub async fn delete(
+    db: &sqlx::PgPool,
+    bmc_mac: MacAddress,
+    job_kind: FirmwareJobKind,
+) -> Result<(), DatabaseError> {
+    let sql = "DELETE FROM direct_dispatch_firmware_update_jobs \
+               WHERE bmc_mac = $1 AND job_kind = $2";
+    sqlx::query(sql)
+        .bind(bmc_mac)
+        .bind(job_kind.as_str())
+        .execute(db)
+        .await
+        .map_err(|e| DatabaseError::new(sql, e))?;
+    Ok(())
+}
+
 /// Fetch the persisted job ID for one `(bmc_mac, job_kind)`, if any.
 pub async fn get(
     db: &sqlx::PgPool,
@@ -213,7 +237,7 @@ mod tests {
 
     use mac_address::MacAddress;
 
-    use super::{FirmwareJobKind, find_macs_with_job, get, get_all, replace, save};
+    use super::{FirmwareJobKind, delete, find_macs_with_job, get, get_all, replace, save};
 
     const FW_OBJECT: FirmwareJobKind = FirmwareJobKind::FirmwareObject;
     const SYS_IMAGE: FirmwareJobKind = FirmwareJobKind::SwitchSystemImage;
@@ -241,6 +265,23 @@ mod tests {
             get(&pool, mac(1), FW_OBJECT).await.unwrap(),
             Some("job-b".to_string())
         );
+    }
+
+    #[crate::sqlx_test]
+    async fn delete_removes_only_the_named_kind(pool: sqlx::PgPool) {
+        save(&pool, mac(1), FW_OBJECT, "job-fw").await.unwrap();
+        save(&pool, mac(1), SYS_IMAGE, "job-img").await.unwrap();
+
+        // Deleting one kind leaves the device's other kinds untouched.
+        delete(&pool, mac(1), FW_OBJECT).await.unwrap();
+        assert_eq!(get(&pool, mac(1), FW_OBJECT).await.unwrap(), None);
+        assert_eq!(
+            get(&pool, mac(1), SYS_IMAGE).await.unwrap(),
+            Some("job-img".to_string())
+        );
+
+        // Deleting an absent (MAC, kind) is a no-op, not an error.
+        delete(&pool, mac(1), FW_OBJECT).await.unwrap();
     }
 
     #[crate::sqlx_test]

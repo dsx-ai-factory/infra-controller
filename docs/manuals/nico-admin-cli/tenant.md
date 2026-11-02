@@ -2,14 +2,16 @@
 
 Tenants and tenant keysets, instances and instance types, compute allocations, the declarative `expected-*` inventory, operating systems and OS images, iPXE templates, extension services, and the site explorer.
 
-For global flags and setup, see [the overview](./README.md) and [`setup.md`](./setup.md). For task-oriented sequences see [`workflows.md`](./workflows.md).
+For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). Browse all command groups in the [CLI reference index](./README.md).
 
 | Command | Description |
 |---|---|
 | [`compute-allocation`](./commands/compute-allocation/compute-allocation.md) | Compute allocation management. |
 | [`expected-machine`](./commands/expected-machine/expected-machine.md) | Expected machine handling. |
+| [`expected-nvlink-domain`](./commands/expected-nvlink-domain/expected-nvlink-domain.md) | Administrator-owned expected NVLink domain declarations. |
 | [`expected-power-shelf`](./commands/expected-power-shelf/expected-power-shelf.md) | Expected power shelf handling. |
 | [`expected-rack`](./commands/expected-rack/expected-rack.md) | Expected rack handling. |
+| [`expected-rack-group`](./commands/expected-rack-group/expected-rack-group.md) | Expected rack group handling. |
 | [`expected-switch`](./commands/expected-switch/expected-switch.md) | Expected switch handling. |
 | [`extension-service`](./commands/extension-service/extension-service.md) | Extension service management. |
 | [`instance`](./commands/instance/instance.md) | Instance related handling. |

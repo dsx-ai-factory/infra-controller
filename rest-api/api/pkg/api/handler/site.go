@@ -29,12 +29,12 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	siteWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/site"
 )
@@ -51,21 +51,19 @@ const (
 
 // CreateSiteHandler is the API Handler for creating new Tenant
 type CreateSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	tnc        tClient.NamespaceClient
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	tnc       tClient.NamespaceClient
+	cfg       *config.Config
 }
 
 // NewCreateSiteHandler initializes and returns a new handler for creating Tenant
 func NewCreateSiteHandler(dbSession *cdb.Session, tc tClient.Client, tnc tClient.NamespaceClient, cfg *config.Config) CreateSiteHandler {
 	return CreateSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		tnc:        tnc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		tnc:       tnc,
+		cfg:       cfg,
 	}
 }
 
@@ -81,7 +79,7 @@ func NewCreateSiteHandler(dbSession *cdb.Session, tc tClient.Client, tnc tClient
 // @Success 201 {object} model.APISite
 // @Router /v2/org/{org}/nico/site [post]
 func (csh CreateSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Create", c, csh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -136,7 +134,7 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 
 	// Check for name uniqueness for the Site within the scope of the Provider
 	stDAO := cdbm.NewSiteDAO(csh.dbSession)
-	sts, tot, err := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Name: &apiRequest.Name, InfrastructureProviderIDs: []uuid.UUID{ip.ID}}, paginator.PageInput{}, nil)
+	sts, tot, err := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Name: &apiRequest.Name, InfrastructureProviderIDs: []uuid.UUID{ip.ID}}, cdbp.PageInput{}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("db error checking for name uniqueness of Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Site, error reading from data store", nil)
@@ -240,7 +238,7 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 			}
 
 			// Refresh Site object
-			refreshedSite, serr := stDAO.GetByID(ctx, tx, st.ID, nil, false)
+			refreshedSite, serr := stDAO.GetByID(ctx, tx, st.ID, nil, false, false)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error retrieving Site from DB")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to refresh Site data with registration token, error communicating with data store", nil)
@@ -288,19 +286,17 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 
 // UpdateSiteHandler is the API Handler for updating a Site
 type UpdateSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateSiteHandler initializes and returns a new handler for updating Site
 func NewUpdateSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Config) UpdateSiteHandler {
 	return UpdateSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -317,7 +313,7 @@ func NewUpdateSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config
 // @Success 200 {object} model.APISite
 // @Router /v2/org/{org}/nico/site/{id} [patch]
 func (ush UpdateSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Update", c, ush.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -333,7 +329,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	// Get application instance ID from URL param
 	siteStrID := c.Param("id")
 
-	ush.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", siteStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", siteStrID))
 
 	siteID, err := uuid.Parse(siteStrID)
 	if err != nil {
@@ -359,7 +355,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	}
 
 	// Check that Site exists
-	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Site DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site to update", nil)
@@ -422,7 +418,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 
 	// Check for name uniqueness for the Site
 	if apiRequest.Name != nil && *apiRequest.Name != es.Name {
-		sts, tot, serr := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Name: apiRequest.Name, InfrastructureProviderIDs: []uuid.UUID{es.InfrastructureProviderID}}, paginator.PageInput{}, nil)
+		sts, tot, serr := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Name: apiRequest.Name, InfrastructureProviderIDs: []uuid.UUID{es.InfrastructureProviderID}}, cdbp.PageInput{}, nil)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("db error checking for name uniqueness of Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to update Site, error reading from data store", nil)
@@ -506,7 +502,6 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 				siteUpdateInput.Config = &cdbm.SiteConfigUpdateInput{
 					NativeNetworking:          apiRequest.Capabilities.NativeNetworking,
 					NetworkSecurityGroup:      apiRequest.Capabilities.NetworkSecurityGroup,
-					NVLinkPartition:           apiRequest.Capabilities.NVLinkPartition,
 					Flow:                      apiRequest.Capabilities.Flow,
 					ImageBasedOperatingSystem: apiRequest.Capabilities.ImageBasedOperatingSystem,
 					DPSPowerManagement:        apiRequest.Capabilities.DPSPowerManagement,
@@ -558,19 +553,17 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 
 // GetSiteHandler is the API Handler for getting a Site
 type GetSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	cfg       *config.Config
 }
 
 // NewGetSiteHandler initializes and returns a new handler for getting Site
 func NewGetSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Config) GetSiteHandler {
 	return GetSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -587,7 +580,7 @@ func NewGetSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Co
 // @Success 200 {object} model.APISite
 // @Router /v2/org/{org}/nico/site/{id} [get]
 func (gsh GetSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Get", c, gsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -611,7 +604,7 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 	// Get Site ID from URL param
 	stStrID := c.Param("id")
 
-	gsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", stStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", stStrID))
 
 	stID, err := uuid.Parse(stStrID)
 	if err != nil {
@@ -621,7 +614,7 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gsh.dbSession)
 
-	st, err := stDAO.GetByID(ctx, nil, stID, qIncludeRelations, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, qIncludeRelations, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Site with specified ID", nil)
@@ -649,11 +642,10 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 		}
 		if tsCount > 0 {
 			ts = &tss[0]
-			isAssociated = true
 		}
 
 		if !isAssociated {
-			enabled, serr := common.TenantHasTargetedInstanceCreation(ctx, nil, gsh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &st.ID})
+			enabled, serr := common.TenantHasSiteAccess(ctx, nil, gsh.dbSession, tenant, st.ID)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
@@ -685,19 +677,17 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 
 // GetAllSiteHandler is the API Handler for retrieving all Sites
 type GetAllSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllSiteHandler initializes and returns a new handler for retrieving all Sites
 func NewGetAllSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Config) GetAllSiteHandler {
 	return GetAllSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -719,7 +709,7 @@ func NewGetAllSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config
 // @Success 200 {array} []model.APISite
 // @Router /v2/org/{org}/nico/site [get]
 func (gash GetAllSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "GetAll", c, gash.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -759,13 +749,13 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 		filter.SearchQuery = searchQuery
 	}
 
 	// Get status from query param
 	if statusQuery := qParams["status"]; len(statusQuery) > 0 {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery))
 		for _, status := range statusQuery {
 			_, ok := cdbm.SiteStatusMap[status]
 			if !ok {
@@ -856,7 +846,7 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 
 	if provider != nil {
 		// Retrieve Sites from Provider perspective
-		sites, _, serr := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{InfrastructureProviderIDs: []uuid.UUID{provider.ID}}, paginator.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		sites, _, serr := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{InfrastructureProviderIDs: []uuid.UUID{provider.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("error retrieving all Sites by param from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites", nil)
@@ -876,18 +866,16 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 		}
 
 		for _, ts := range tss {
-			siteIDs.Add(ts.SiteID)
 			tsMap[ts.SiteID] = &ts
 		}
 
-		// Add the Sites where the Tenant has effective TargetedInstanceCreation,
-		// honoring per-site TenantSite.config overrides.
-		privilegedSiteIDs, serr := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, gash.dbSession, tenant)
+		// Add the Sites the Tenant can access through an Allocation or effective TargetedInstanceCreation.
+		accessibleSiteIDs, serr := getTenantSiteIDs(ctx, gash.dbSession, tenant)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("error resolving privileged Site access for Tenant")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability, DB error", nil)
 		}
-		for _, siteID := range privilegedSiteIDs {
+		for _, siteID := range accessibleSiteIDs {
 			siteIDs.Add(siteID)
 		}
 	}
@@ -895,7 +883,7 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 	filter.SiteIDs = siteIDs.ToSlice()
 
 	// Get Sites from DB
-	sites, total, err := stDAO.GetAll(ctx, nil, filter, paginator.PageInput{Offset: pageRequest.Offset, Limit: pageRequest.Limit, OrderBy: pageRequest.OrderBy}, qIncludeRelations)
+	sites, total, err := stDAO.GetAll(ctx, nil, filter, cdbp.PageInput{Offset: pageRequest.Offset, Limit: pageRequest.Limit, OrderBy: pageRequest.OrderBy}, qIncludeRelations)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Sites from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites, DB error", nil)
@@ -925,8 +913,13 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 	apiSites := []model.APISite{}
 	for _, site := range sites {
 		apiSite := model.NewAPISite(site, ssdMap[site.ID.String()], tsMap[site.ID])
-		// Attach machine stats for the site if they exist.
-		apiSite.MachineStats = machineStats[site.ID]
+		// Requested stats are populated even when the Site has nothing to count.
+		if includeMachineStats {
+			apiSite.MachineStats = machineStats[site.ID]
+			if apiSite.MachineStats == nil {
+				apiSite.MachineStats = model.NewAPISiteMachineStats()
+			}
+		}
 		// Attach GPU stats when requested. Sites with no GPUs get an empty
 		// array (not null), matching the single-site GPU stats endpoint.
 		if includeGpuStats {
@@ -958,19 +951,17 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 
 // DeleteSiteHandler is the API Handler for deleting a Site
 type DeleteSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteSiteHandler initializes and returns a new handler for deleting Site
 func NewDeleteSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Config) DeleteSiteHandler {
 	return DeleteSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -987,7 +978,7 @@ func NewDeleteSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config
 // @Success 204
 // @Router /v2/org/{org}/nico/site/{id} [delete]
 func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Delete", c, dsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1016,7 +1007,7 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 	// Get Site ID from URL param
 	stStrID := c.Param("id")
 
-	dsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", stStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", stStrID))
 
 	stID, err := uuid.Parse(stStrID)
 	if err != nil {
@@ -1046,7 +1037,7 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(dsh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Site from DB by ID")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site with ID in URL", nil)
@@ -1125,15 +1116,13 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 
 // GetSiteStatusDetailsHandler is the API Handler for getting Site StatusDetail records
 type GetSiteStatusDetailsHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetSiteStatusDetailsHandler initializes and returns a new handler to retrieve Site StatusDetail records
 func NewGetSiteStatusDetailsHandler(dbSession *cdb.Session) GetSiteStatusDetailsHandler {
 	return GetSiteStatusDetailsHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -1149,7 +1138,7 @@ func NewGetSiteStatusDetailsHandler(dbSession *cdb.Session) GetSiteStatusDetails
 // @Success 200 {object} []model.APIStatusDetail
 // @Router /v2/org/{org}/nico/Site/{id}/status-history [get]
 func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Get", c, gssdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1164,7 +1153,7 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Site ID from URL param
 	stStrID := c.Param("id")
-	gssdh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", stStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", stStrID))
 	stID, err := uuid.Parse(stStrID)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Site ID in URL", nil)
@@ -1172,7 +1161,7 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gssdh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Site with specified ID", nil)
@@ -1189,25 +1178,12 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 	}
 
 	if !isAssociated && tenant != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(gssdh.dbSession)
-
-		_, tsCount, serr := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{stID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		enabled, serr := common.TenantHasSiteAccess(ctx, nil, gssdh.dbSession, tenant, st.ID)
 		if serr != nil {
-			logger.Error().Err(serr).Msg("error retrieving TenantSite from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant/Site association to determine access to Site, DB error", nil)
+			logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
 		}
-		if tsCount > 0 {
-			isAssociated = true
-		}
-
-		if !isAssociated {
-			enabled, serr := common.TenantHasTargetedInstanceCreation(ctx, nil, gssdh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &st.ID})
-			if serr != nil {
-				logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
-				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
-			}
-			isAssociated = enabled
-		}
+		isAssociated = enabled
 	}
 
 	if !isAssociated {

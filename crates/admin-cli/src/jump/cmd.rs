@@ -21,6 +21,7 @@ use std::str::FromStr;
 use ::rpc::forge as forgerpc;
 use carbide_uuid::machine::MachineId;
 use dpa::ShowDpa;
+use eyre::WrapErr;
 use mac_address::MacAddress;
 
 use super::args::Cmd;
@@ -134,6 +135,13 @@ pub(super) async fn jump(args: Cmd, ctx: &mut RuntimeContext) -> color_eyre::Res
                 }
 
                 ExploredEndpoint => {
+                    let address = m
+                        .owner_id
+                        .ok_or_else(|| CarbideCliError::GenericError(
+                            "IP type is explored-endpoint but returned owner_id is empty".to_string()
+                        ))?
+                        .parse()
+                        .wrap_err("invalid BMC IP address returned for explored endpoint")?;
                     site_explorer::show_site_explorer_discovered_managed_host(
                         &ctx.api_client,
                         &mut ctx.output_file,
@@ -141,13 +149,7 @@ pub(super) async fn jump(args: Cmd, ctx: &mut RuntimeContext) -> color_eyre::Res
                         ctx.config.page_size,
                         site_explorer::GetReportMode::Endpoint(
                             site_explorer::EndpointInfo {
-                                address: if m.owner_id.is_some() {
-                                    m.owner_id
-                                } else {
-                                    color_eyre::eyre::bail!(CarbideCliError::GenericError(
-                                        "IP type is explored-endpoint but returned owner_id is empty".to_string()
-                                    ))
-                                },
+                                address: Some(address),
                                 erroronly: false,
                                 successonly: false,
                                 unpairedonly: false,

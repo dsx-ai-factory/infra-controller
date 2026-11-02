@@ -1,6 +1,6 @@
 # `nico-admin-cli site-prefix state-history`
 
-_[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **state-history**_
+*[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **state-history***
 
 ## NAME
 
@@ -9,8 +9,10 @@ history for a SitePrefix, or an empty collection
 
 ## SYNOPSIS
 
-**nico-admin-cli site-prefix state-history** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*SITE_PREFIX_ID*\>
+```text
+nico-admin-cli site-prefix state-history [--extended]
+[--sort-by] [-h|--help] <SITE_PREFIX_ID>
+```
 
 ## DESCRIPTION
 
@@ -19,27 +21,30 @@ collection
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
-\<*SITE_PREFIX_ID*\>  
+`<SITE_PREFIX_ID>`
+
 SitePrefix history to show
 
 ## Examples
@@ -50,4 +55,4 @@ nico-admin-cli site-prefix state-history 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**Related:** [Network commands](../../network.md) · [CLI reference index](../../README.md)

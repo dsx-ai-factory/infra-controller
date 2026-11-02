@@ -33,6 +33,7 @@ impl Run for Args {
                     options,
                     ctx.config.format,
                     ctx.config.extended,
+                    &mut ctx.output_file,
                 )
                 .await
             }

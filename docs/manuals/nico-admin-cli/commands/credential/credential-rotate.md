@@ -1,6 +1,6 @@
 # `nico-admin-cli credential rotate`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **rotate**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **rotate***
 
 ## NAME
 
@@ -9,9 +9,11 @@ nico-admin-cli-credential-rotate - Stage a site-wide credential rotation
 
 ## SYNOPSIS
 
-**nico-admin-cli credential rotate** \<**--type**\> \[**--password**\]
-\[**--reason**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli credential rotate <--type> [--password]
+[--reason] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -20,49 +22,53 @@ password)
 
 ## OPTIONS
 
-**--type**=*\<CREDENTIAL_TYPE\>*  
-Credential family to rotate\
+`--type=<CREDENTIAL_TYPE>`
 
-\
+Credential family to rotate
+
 *Possible values:*
 
-- bmc
+> - bmc
+>
+> - host-uefi
+>
+> - dpu-uefi
+>
+> - nvos
+>
+> - lockdown-ikm
+>
+> - dpu-bmc-service
 
-- host-uefi
+`--password=<PASSWORD>`
 
-- dpu-uefi
-
-- nvos
-
-- lockdown-ikm
-
-- dpu-bmc-service
-
-**--password**=*\<PASSWORD\>*  
 Explicit rotate-to password. Omit to have the server auto-generate a
 strong one.
 
-**--reason** *\<REASON\>*  
+`--reason <REASON>`
+
 Free-form note recorded with the rotation (must not contain secrets)
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
-- primary-id: Sort by the primary ID
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
-- state: Sort by state
+`-h, --help`
 
-**-h**, **--help**  
 Print help (see a summary with -h)
 
 ## Examples
@@ -77,4 +83,4 @@ nico-admin-cli credential rotate --type=dpu-bmc-service
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

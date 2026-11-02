@@ -270,7 +270,7 @@ Example:
 
 		fileName := filepath.Base(usFirmwareFile)
 		remotePath := filepath.Join(usRemoteDir, fileName)
-		targetAddr := fmt.Sprintf("%s@%s:%s", usNvosUsername, usNvosIP, remotePath)
+		targetAddr := sshclient.SCPDestination(usNvosUsername, usNvosIP, remotePath)
 
 		fmt.Printf("Copying %s to %s\n", usFirmwareFile, targetAddr)
 

@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use anyhow::{Context, Result, bail};
-use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
+    CustomResourceDefinition, JSONSchemaProps,
+};
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
@@ -63,8 +65,11 @@ fn main() -> Result<()> {
 
         let content = fs::read_to_string(&crd_path)
             .with_context(|| format!("failed to read {}", crd_path.display()))?;
-        let crd: CustomResourceDefinition = serde_yaml::from_str(&content)
+        let mut crd: CustomResourceDefinition = serde_yaml::from_str(&content)
             .with_context(|| format!("failed to parse CRD YAML {}", crd_path.display()))?;
+        if crd.spec.names.plural == "bluefieldsoftwares" {
+            make_bluefield_software_pldm_fields_wire_compatible(&mut crd)?;
+        }
 
         let module_name = format!("{}_generated", crd.spec.names.plural.to_lowercase());
         if !generated_modules.insert(module_name.clone()) {
@@ -87,6 +92,56 @@ fn main() -> Result<()> {
     write_module_index(&out_dir, &generated_modules)?;
 
     Ok(())
+}
+
+fn make_bluefield_software_pldm_fields_wire_compatible(
+    crd: &mut CustomResourceDefinition,
+) -> Result<()> {
+    let schema = crd
+        .spec
+        .versions
+        .iter_mut()
+        .find(|version| version.storage)
+        .and_then(|version| version.schema.as_mut())
+        .and_then(|validation| validation.open_api_v3_schema.as_mut())
+        .context("BlueFieldSoftware storage-version schema is missing")?;
+
+    for path in [
+        &["spec", "pldmFwBundle"][..],
+        &["status", "downloadedComponents", "pldmFwBundle"][..],
+    ] {
+        let field = schema_at_path(schema, path)
+            .with_context(|| format!("BlueFieldSoftware schema is missing {}", path.join(".")))?;
+
+        // DPF changed this wire field from a URL string to a PSID-to-URL map.
+        // Broaden only Kopium's input so the client can read either shape; the
+        // checked-in CRD remains strict and is what gets installed in clusters.
+        *field = JSONSchemaProps {
+            one_of: Some(vec![
+                JSONSchemaProps {
+                    type_: Some("string".to_string()),
+                    ..Default::default()
+                },
+                JSONSchemaProps {
+                    type_: Some("object".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+    }
+
+    Ok(())
+}
+
+fn schema_at_path<'a>(
+    mut schema: &'a mut JSONSchemaProps,
+    path: &[&str],
+) -> Option<&'a mut JSONSchemaProps> {
+    for segment in path {
+        schema = schema.properties.as_mut()?.get_mut(*segment)?;
+    }
+    Some(schema)
 }
 
 fn discover_yaml_files(crd_dir: &Path) -> Result<Vec<PathBuf>> {

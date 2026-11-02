@@ -14,6 +14,14 @@ import (
 const (
 	// DpuExtensionServiceTypeKubernetesPod is the type of the DPU extension service for Kubernetes Pod
 	DpuExtensionServiceTypeKubernetesPod = "KubernetesPod"
+	// DpuExtensionServiceTypeDpfHelmChart is the type of a DPF-managed Helm chart extension service
+	DpuExtensionServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
+	DpuExtensionServiceDpuTargetPrimary = "Primary"
+	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
+	DpuExtensionServiceDpuTargetAllActive = "AllActive"
+	// DpuExtensionServiceDpuTargetAll targets every attached DPU
+	DpuExtensionServiceDpuTargetAll = "All"
 )
 
 // DpuExtensionService represents a simplified DPU Extension Service
@@ -22,6 +30,7 @@ type DpuExtensionService struct {
 	Name           string    `json:"name"`
 	Description    *string   `json:"description"`
 	ServiceType    string    `json:"serviceType"`
+	DpuTarget      *string   `json:"dpuTarget"`
 	Version        *string   `json:"version"`
 	ActiveVersions []string  `json:"activeVersions"`
 	Status         string    `json:"status"`
@@ -34,6 +43,7 @@ type DpuExtensionServiceCreateRequest struct {
 	Name        string  `json:"name"`
 	Description *string `json:"description"`
 	ServiceType string  `json:"serviceType"`
+	DpuTarget   *string `json:"dpuTarget"`
 	Data        string  `json:"data"`
 }
 
@@ -70,6 +80,12 @@ func dpuExtensionServiceFromStandard(api standard.DpuExtensionService) DpuExtens
 	if api.ServiceType != nil {
 		des.ServiceType = *api.ServiceType
 	}
+	if api.DpuTarget.IsSet() {
+		if target := api.DpuTarget.Get(); target != nil {
+			value := string(*target)
+			des.DpuTarget = &value
+		}
+	}
 	if api.Version.IsSet() {
 		des.Version = api.Version.Get()
 	}
@@ -90,14 +106,19 @@ func (dm DpuExtensionServiceManager) Create(ctx context.Context, request DpuExte
 	ctx = WithLogger(ctx, dm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, dm.client.Config.Token)
 
+	// Select the string alternative required by the REST handler.
 	apiReq := standard.DpuExtensionServiceCreateRequest{
 		Name:        request.Name,
 		ServiceType: request.ServiceType,
 		SiteId:      dm.client.apiMetadata.SiteID,
-		Data:        request.Data,
+		Data:        standard.StringAsDpuExtensionServiceCreateRequestData(&request.Data),
 	}
 	if request.Description != nil {
 		apiReq.Description.Set(request.Description)
+	}
+	if request.DpuTarget != nil {
+		target := standard.DpuExtensionServiceDpuTarget(*request.DpuTarget)
+		apiReq.DpuTarget.Set(&target)
 	}
 	apiDes, resp, err := dm.client.apiClient.DPUExtensionServiceAPI.CreateDpuExtensionService(ctx, dm.client.apiMetadata.Organization).
 		DpuExtensionServiceCreateRequest(apiReq).Execute()
@@ -177,7 +198,9 @@ func (dm DpuExtensionServiceManager) Update(ctx context.Context, id string, requ
 		apiReq.Description.Set(request.Description)
 	}
 	if request.Data != nil {
-		apiReq.Data.Set(request.Data)
+		// Keep updates serialized as strings despite the documentation's object alternative.
+		data := standard.StringAsDpuExtensionServiceUpdateRequestData(request.Data)
+		apiReq.Data.Set(&data)
 	}
 	apiDes, resp, err := dm.client.apiClient.DPUExtensionServiceAPI.UpdateDpuExtensionService(ctx, dm.client.apiMetadata.Organization, id).
 		DpuExtensionServiceUpdateRequest(apiReq).Execute()

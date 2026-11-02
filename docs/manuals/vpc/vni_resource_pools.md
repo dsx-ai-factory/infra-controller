@@ -10,7 +10,7 @@ configure the API server's resource pools correctly.
 
 - `docs/manuals/vpc/vpc_routing_profiles.md` — how the `internal` flag on a routing profile
   determines which VNI pool is used
-- `docs/manuals/networking_requirements.md` — site-wide networking prerequisites, including
+- `docs/getting-started/prerequisites/network.md` — site-wide networking prerequisites, including
   general VNI and ASN allocation guidance
 - `docs/manuals/networking/ip_resource_pools.md` — IP resource pool configuration
 - `docs/manuals/vpc/vpc_network_virtualization.md` — end-to-end VPC network virtualization
@@ -34,9 +34,7 @@ Because the VNI feeds directly into the route-target, VNI ranges must be coordin
 network team before a site goes live. VNI ranges for internal and external VPCs must be distinct
 from each other and from any other pool on the site.
 
-The VNI assigned at creation is permanent. A VPC cannot change its routing profile after creation,
-and therefore cannot change which pool it was allocated from. VNI release happens automatically
-when a VPC is deleted.
+A supported FNN VPC can change to a routing profile that uses the other VNI pool. Core selects a destination VNI and retains the previous allocation until the operator explicitly releases it after verifying convergence. Refer to [Changing a VPC Routing Profile](changing_vpc_routing_profiles.md) for prerequisites and the procedure. Core blocks VPC deletion while an inactive allocation remains retained.
 
 ---
 
@@ -102,8 +100,9 @@ IP address pools and is not relevant here.
   the pool.
 - `auto_assign` — optional boolean, defaults to `true`. When `true`, values in this range are
   eligible for automatic allocation. When `false`, values are reserved for explicit requests only.
-  Explicit requests are not used in standard VPC creation, so ranges with `auto_assign = false`
-  are not drawn from during normal operation.
+  During a VPC routing-profile change, an exact VNI request can select a free entry with either
+  `auto_assign` setting. Automatic selection uses only automatically assignable entries unless
+  the VPC already owns a retained destination allocation, which it reuses.
 
 Multiple ranges may be provided for a single pool. The API server treats them as a single logical
 pool. Ranges within a pool must not overlap, and a pool's ranges must not overlap with the ranges
@@ -139,25 +138,19 @@ ranges = [{ start = "2024500", end = "2024550" }]
 
 ## Sizing pools
 
-Each VPC consumes exactly one VNI for its entire lifetime. Pool size is therefore equal to the
-maximum number of simultaneously active VPCs of that type that the site must support.
+Each VPC normally consumes one active VNI. A VPC with an unreleased routing-profile transition consumes two allocations, one in each pool. Size each pool for its active VPCs, retained allocations from VPCs that changed to the other pool, and headroom for ordinary creation and planned changes.
 
 Use the following approach to determine the required pool size for each pool.
 
 1. Estimate the maximum number of simultaneously active VPCs of each type (internal or external).
-2. Add headroom. A margin of 10–20% is recommended to allow for burst creation without triggering
-   emergency pool-grow operations.
+2. Add capacity for retained transition allocations and planned changes, then headroom for burst creation.
 3. Coordinate the resulting ranges with the network team. VNI values map directly to BGP
    route-targets, so the network team must configure import and export policies that reference the
    same ranges you define in the pool.
 
-The `docs/manuals/networking_requirements.md` document states the general rule: one VNI is
-required per expected VPC. The pools defined here are the mechanism that enforces and tracks that
-allocation.
+The [Network Prerequisites](../../getting-started/prerequisites/network.md) describe the baseline of one VNI per expected VPC. Retained transition allocations require additional capacity in these pools.
 
-**Pool exhaustion.** When a pool is exhausted, VPC creation requests that would draw from that
-pool fail immediately with a resource-exhausted error. No partial allocations occur. The only
-recovery is to grow the pool (see the section below) and retry the creation.
+**Pool exhaustion.** When a pool is exhausted, VPC creation requests that would draw from that pool fail immediately with a resource-exhausted error. No partial allocations occur. Recover by growing the pool or freeing allocations through normal VPC deletion or verified inactive-VNI release, then retry creation. Do not release an unverified inactive VNI to make space.
 
 The API server enforces a maximum pool size of 250,000 values per pool. VNI pools are 24-bit integers, so the theoretical maximum
 VNI value is 16,777,215, but the enforced maximum pool size is 250,000 values per pool regardless
@@ -184,54 +177,67 @@ The practical consequence is that pools can only grow, never shrink, through con
 alone. To reduce a pool, a manual database operation would be required. This is intentional: it
 prevents accidental deallocation of VNIs that may be in active use.
 
-When `listen_only = true` is set in the configuration, the API server does not register pool definitions at startup. It reads pool state from the
-database only, on the assumption that
-another instance has already populated the pools. Pool changes in this mode must be applied using
-the `admin-cli resource-pool grow` command described below.
+When `listen_only = true` is set in the configuration, the API server skips registration of the configured pool inventory at startup.
+It uses existing pools in the database, assuming another instance has already populated them. Pool changes in this mode must be applied using
+the `nico-admin-cli resource-pool grow` command described below.
 
 ---
 
 ## Runtime operations
 
-### Listing pools
+### Listing Pools
 
-To inspect the current state of all resource pools:
+Run the following command to inspect resource pools:
 
+```bash
+nico-admin-cli resource-pool list
 ```
-admin-cli resource-pool list
-```
 
-This queries the API server for the current state of all pools. The response includes the
-following fields for each pool.
+In v2.4, `nico-api` fails to start if a pool selects a gRPC backend. Integrated pools report known counts. The remote statuses below describe the inspection API for internal testing; [gRPC lifecycle integration](https://github.com/dsx-ai-factory/infra-controller/issues/7140) is tracked separately.
 
-| Field | Description |
+The [pool inspection API](https://github.com/dsx-ai-factory/infra-controller/issues/7138) lists pools that have local inventory or a saved record of which backend they use, ordered by NICo pool name. When connected to an older server without inspection support, the CLI falls back to local inventory only. That view labels pools `Integrated` and `Known`, omits saved backend names, and cannot show a pool with no inventory rows.
+
+The resource pool table contains the following columns:
+
+| Column | Description |
 |---|---|
-| Name | The pool name, matching the key in the configuration file |
-| Min | The lowest value currently in the pool (allocated or free) |
-| Max | The highest value currently in the pool (allocated or free) |
-| Size | Total number of values in the pool |
-| Used | Number of allocated values, followed by the percentage of total used |
+| Name | NICo's logical pool name |
+| Backend | Allocator type, `Integrated` or `gRPC`, followed by the backend name saved for the pool in parentheses when present |
+| Remote Pool | Name used to look up the pool at its backend; Integrated pools repeat `Name` |
+| Min | Lowest value in stored local inventory, allocated or free; blank when absent |
+| Max | Highest value in stored local inventory, allocated or free; blank when absent |
+| Size | Total allocated and free values when statistics are known; otherwise `Unknown` or `Unavailable` |
+| Used | Allocated values, with a rounded whole-number usage percentage when `Size` is greater than zero |
+| Status | `Known`, `Unknown`, or `Unavailable`, as described below |
 
-Sample output:
+Use `Status` to interpret the counts:
 
+- `Known`: NICo obtained valid counts. An empty pool has `Size` and `Used` equal to `0`. There is no percentage because total capacity is zero.
+- `Unknown`: The `Stats` request returned `Unimplemented`. The backend might not support statistics, or the endpoint might not serve the expected RPC. Both count cells display `Unknown`.
+- `Unavailable`: NICo could not read or validate the statistics, for example because no accepted pool definition exists or the provider cannot be reached. Both count cells display `Unavailable`.
+
+Unknown and unavailable counts have no percentage because total capacity is unknown. When a diagnostic is available, the command writes it to standard error as `<pool-name>: <message>`. A failed statistics observation for one pool does not prevent other rows from being displayed or make the command exit unsuccessfully. A failure of the listing request itself does make the command fail.
+
+`Min` and `Max` are blank for an empty Integrated pool or a remote pool. Remote allocation ranges do not describe observed inventory bounds. Remote counts apply to the pool definition the provider accepted. `Size` and `Used` include both automatic and manual allocation values: a pool can still have free manual values after its automatic values are used up.
+
+This excerpt from a captured test run shows a pool named `local` with 2 of its 10 values allocated:
+
+```text
++-------------+---------------+-------------+-----+-----+-------------+-------------+-------------+
+| Name        | Backend       | Remote Pool | Min | Max | Size        | Used        | Status      |
++=============+===============+=============+=====+=====+=============+=============+=============+
+| local       | Integrated    | local       | 1   | 10  | 10          | 2 (20%)     | Known       |
++-------------+---------------+-------------+-----+-----+-------------+-------------+-------------+
 ```
-+---------------------+---------+---------+------+----------+
-| Name                | Min     | Max     | Size | Used     |
-+---------------------+---------+---------+------+----------+
-| external-vpc-vni    | 3024500 | 3025499 | 1000 | 12 (1%)  |
-| vpc-vni             | 2024500 | 2025499 | 1000 | 47 (5%)  |
-+---------------------+---------+---------+------+----------+
-```
 
-Monitor the `Used` column. When it approaches 100%, VPC creation for that pool will begin
-failing. Plan pool-grow operations before the pool is exhausted rather than after.
+Monitor `Used` when `Status` is `Known`, and grow the required allocation range before it is exhausted. VPC creation fails when the selected pool has no eligible free value. If no pools are returned, the command prints `No resource pools defined` and exits unsuccessfully.
 
 ### Growing a pool
 
 To add capacity to an existing pool at runtime without restarting the API server:
 
-```
-admin-cli resource-pool grow -f <toml-file>
+```bash
+nico-admin-cli resource-pool grow -f <toml-file>
 ```
 
 The argument to `-f` is the path to a TOML file containing the updated pool definition.
@@ -257,14 +263,14 @@ ranges = [{ start = "2025500", end = "2026000" }]
 
 Then run:
 
-```
-admin-cli resource-pool grow -f grow-vpc-vni.toml
+```bash
+nico-admin-cli resource-pool grow -f grow-vpc-vni.toml
 ```
 
 The server will insert values 2025500 through 2025999 into the `vpc-vni` pool. The previously
 defined range (2024500–2025499) is not affected.
 
-After the grow operation completes, run `admin-cli resource-pool list` to confirm the new size
+After the grow operation completes, run `nico-admin-cli resource-pool list` to confirm the new size
 is reflected in the output.
 
 > **Network team coordination required.** Before growing a VNI pool, confirm with the network
@@ -288,10 +294,7 @@ External VPCs will have native route-targets in the form
 `<asn>:<value-from-external-vpc-vni>`. The network team must configure their EVPN policies
 accordingly.
 
-Because VNI allocation is tied to the routing profile at creation time, the routing profile of a
-VPC cannot be changed after it is created. Changing it would require releasing the VNI and
-reallocating from the other pool, which is not supported. If a VPC needs a different routing
-profile, it must be deleted and recreated.
+For supported FNN VPCs, [Changing a VPC Routing Profile](changing_vpc_routing_profiles.md) updates the active profile and VNI without deleting the VPC. The old VNI remains allocated until the operator verifies every affected consumer and explicitly releases it. Retention permits conditional reuse of that VNI; it does not guarantee that a reverse change passes current authorization and configuration checks.
 
 For full details on how routing profiles are configured and resolved, see
 `docs/manuals/vpc/vpc_routing_profiles.md`.
@@ -325,12 +328,12 @@ reference.
 
 ### VPC creation fails with a resource-exhausted error
 
-The pool that would have served the allocation is empty. The VNI pool selected depends on the
+The selected pool has no eligible automatic VNI available. The VNI pool selected depends on the
 routing profile of the VPC being created.
 
-1. Run `admin-cli resource-pool list` and identify which pool is at or near 100% used.
+1. Run `nico-admin-cli resource-pool list` and check `Status`. For `Known` counts, `Used` equal to `Size` confirms there are no free values, including when both are zero. A lower `Used` count does not rule out automatic allocation exhaustion: the remaining values may be manual-only. Check that the range being grown allows automatic allocation (`auto_assign = true`, the default).
 2. Coordinate a new range with the network team.
-3. Run `admin-cli resource-pool grow -f <file>` with the new range.
+3. Run `nico-admin-cli resource-pool grow -f <file>` with the new range.
 4. Retry the VPC creation.
 
 If the pool appears to have free capacity but creation is still failing, verify that the routing
@@ -344,11 +347,11 @@ to be defined. However, if the API server is started without this pool and a req
 an external VPC, the request will fail.
 
 If you need to add this pool after the site is already running, add the definition to the
-configuration file and restart the server, or use `admin-cli resource-pool grow -f <file>` to
+configuration file and restart the server, or use `nico-admin-cli resource-pool grow -f <file>` to
 populate the pool without a restart.
 
 ### Pool size appears smaller than expected after a config change
 
 Reducing or removing a range in the configuration file has no effect at startup. Only new values
-are inserted. Verify the effective pool state with `admin-cli resource-pool list`, not the
+are inserted. Verify the effective pool state with `nico-admin-cli resource-pool list`, not the
 configuration file alone.

@@ -39,7 +39,9 @@ type PowerController interface {
 // Required descriptor capability: capability.CapabilityPowerStatus.
 type PowerStatusReader interface {
 	// GetPowerStatus queries the current power state of each component in the
-	// target. Returns a map of component ID to PowerStatus.
+	// target. Keys are the requested Core IDs or MAC addresses. Missing or failed
+	// responses are omitted; an Unknown value means a response was received but
+	// its power state could not be determined.
 	GetPowerStatus(ctx context.Context, target common.Target) (map[string]operations.PowerStatus, error) //nolint
 }
 
@@ -51,6 +53,14 @@ type FirmwareController interface {
 	// FirmwareControl initiates a firmware update without waiting for completion.
 	// Returns immediately after the update request is accepted.
 	FirmwareControl(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error //nolint
+}
+
+// FirmwareControlValidator is implemented by component managers whose
+// supported firmware request options depend on the active implementation.
+// Validation must be deterministic and free of external side effects so it
+// can run both at task admission and again at the activity boundary.
+type FirmwareControlValidator interface {
+	ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error
 }
 
 // FirmwareStatusReader is implemented by component managers that can report

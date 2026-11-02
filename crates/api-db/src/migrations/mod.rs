@@ -20,6 +20,11 @@ use std::sync::LazyLock;
 use sqlx::PgPool;
 use sqlx::migrate::{MigrateError, Migrator};
 
+#[cfg(test)]
+mod prefix_overlap_scope;
+#[cfg(test)]
+mod resource_pool_allocation;
+
 static MIGRATION_LAYOUT: LazyLock<MigrationLayout> = LazyLock::new(|| {
     MigrationLayout::new(
         sqlx::migrate!("./migrations.pre-squash.20260708172302"),
@@ -154,6 +159,30 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
     let applied = load_and_validate_history(pool, &MIGRATION_LAYOUT).await?;
     let applied_versions: HashSet<_> = applied.into_iter().map(|(version, _)| version).collect();
     MIGRATION_LAYOUT.run(pool, applied_versions).await
+}
+
+/// Rebuild a test database at the predecessor of `version`, applying the current
+/// epoch's squash before filtering its post-squash migrations.
+#[cfg(test)]
+pub(crate) async fn migrate_before(pool: &PgPool, version: i64) {
+    sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+        .execute(pool)
+        .await
+        .unwrap();
+    let epoch = MIGRATION_LAYOUT.epochs.last().unwrap();
+    epoch.squash.run(pool).await.unwrap();
+    Migrator::with_migrations(
+        epoch
+            .post_squash
+            .iter()
+            .filter(|migration| migration.version < version)
+            .cloned()
+            .collect(),
+    )
+    .ignoring_missing()
+    .run(pool)
+    .await
+    .unwrap();
 }
 
 async fn load_and_validate_history(
@@ -338,7 +367,18 @@ mod tests {
         .await
         .unwrap();
 
-        migrate(&pool).await.unwrap();
+        // Compare only the authority rename; later migrations can add columns.
+        let rename_migration = current_epoch
+            .post_squash
+            .iter()
+            .find(|migration| migration.version == RENAME_SITE_PREFIX_AUTHORITY_VERSION)
+            .unwrap()
+            .clone();
+        Migrator::with_migrations(vec![rename_migration])
+            .ignoring_missing()
+            .run(&pool)
+            .await
+            .unwrap();
 
         let row_after: serde_json::Value = sqlx::query_scalar(
             "SELECT to_jsonb(site_prefixes) - 'authority' \

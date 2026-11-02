@@ -285,6 +285,7 @@ pub fn build_new_node_info(
     };
 
     let mut node = rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: device.node_id.clone(),
         rack_id: rack_id.to_string(),
         r#type: None,

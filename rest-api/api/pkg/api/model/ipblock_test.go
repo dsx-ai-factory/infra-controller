@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
@@ -25,9 +27,10 @@ func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
 	prefLen19 := 19
 
 	tests := []struct {
-		desc      string
-		obj       APIIPBlockCreateRequest
-		expectErr bool
+		desc           string
+		obj            APIIPBlockCreateRequest
+		expectErr      bool
+		expectedPrefix string
 	}{
 		{
 			desc:      "error when Name is not provided",
@@ -62,6 +65,26 @@ func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
 		{
 			desc:      "error when Prefix is not valid ipv4 address",
 			obj:       APIIPBlockCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "::2001", PrefixLength: prefLen, ProtocolVersion: cdbm.IPBlockProtocolVersionV4},
+			expectErr: true,
+		},
+		{
+			desc:      "error when dotted-tail IPv6 prefix is declared IPv4",
+			obj:       APIIPBlockCreateRequest{Name: "ab", SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "2001:db8::0.0.0.0", PrefixLength: 32, ProtocolVersion: cdbm.IPBlockProtocolVersionV4},
+			expectErr: true,
+		},
+		{
+			desc:      "error when Prefix is not valid ipv6 address",
+			obj:       APIIPBlockCreateRequest{Name: "ab", SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "192.164.10.0", PrefixLength: prefLen, ProtocolVersion: cdbm.IPBlockProtocolVersionV6},
+			expectErr: true,
+		},
+		{
+			desc:           "ok with expanded uppercase IPv6 network address",
+			obj:            APIIPBlockCreateRequest{Name: "ab", SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "2001:0DB8:0:0:0:0:0:0", PrefixLength: 64, ProtocolVersion: cdbm.IPBlockProtocolVersionV6},
+			expectedPrefix: "2001:db8::",
+		},
+		{
+			desc:      "error when expanded IPv6 prefix has nonzero host bits",
+			obj:       APIIPBlockCreateRequest{Name: "ab", SiteID: uuid.New().String(), RoutingType: cdbm.IPBlockRoutingTypePublic, Prefix: "2001:0DB8:0:0:0:0:0:1", PrefixLength: 64, ProtocolVersion: cdbm.IPBlockProtocolVersionV6},
 			expectErr: true,
 		},
 		{
@@ -112,8 +135,13 @@ func TestAPIIPBlockCreateRequest_Validate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			expectedPrefix := tc.expectedPrefix
+			if expectedPrefix == "" {
+				expectedPrefix = tc.obj.Prefix
+			}
 			err := tc.obj.Validate()
 			assert.Equal(t, tc.expectErr, err != nil)
+			assert.Equal(t, expectedPrefix, tc.obj.Prefix)
 			if err != nil {
 				fmt.Println(err.Error())
 			}
@@ -168,6 +196,7 @@ func TestAPIIPBlockNew(t *testing.T) {
 	dbObj := &cdbm.IPBlock{
 		ID:                       uuid.New(),
 		Name:                     "test",
+		Managed:                  true,
 		SiteID:                   uuid.New(),
 		InfrastructureProviderID: uuid.New(),
 		TenantID:                 cutil.GetPtr(uuid.New()),
@@ -179,6 +208,8 @@ func TestAPIIPBlockNew(t *testing.T) {
 		Created:                  cdb.GetCurTime(),
 		Updated:                  cdb.GetCurTime(),
 	}
+	unmanaged := *dbObj
+	unmanaged.Managed = false
 	dbsds := []cdbm.StatusDetail{
 		{
 			ID:       uuid.New(),
@@ -213,6 +244,7 @@ func TestAPIIPBlockNew(t *testing.T) {
 			apiObj: &APIIPBlock{
 				ID:                       dbObj.ID.String(),
 				Name:                     dbObj.Name,
+				Managed:                  true,
 				Description:              dbObj.Description,
 				SiteID:                   dbObj.SiteID.String(),
 				InfrastructureProviderID: dbObj.InfrastructureProviderID.String(),
@@ -235,8 +267,8 @@ func TestAPIIPBlockNew(t *testing.T) {
 			},
 		},
 		{
-			desc:       "test creating API IPBlock nil usage stats",
-			dbObj:      dbObj,
+			desc:       "test creating unmanaged API IPBlock with nil usage stats",
+			dbObj:      &unmanaged,
 			sdObj:      dbsds,
 			dbUsageObj: nil,
 			apiObj: &APIIPBlock{
@@ -262,6 +294,13 @@ func TestAPIIPBlockNew(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			got := NewAPIIPBlock(tc.dbObj, tc.sdObj, tc.dbUsageObj)
 			assert.Equal(t, tc.apiObj, got)
+			data, err := json.Marshal(got)
+			require.NoError(t, err)
+			var fields map[string]interface{}
+			require.NoError(t, json.Unmarshal(data, &fields))
+			value, present := fields["managed"]
+			require.True(t, present, "false is a supported value, not an omitted field")
+			require.Equal(t, tc.dbObj.Managed, value)
 		})
 	}
 }
@@ -270,6 +309,7 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 	dbObj := &cdbm.IPBlock{
 		ID:                       uuid.New(),
 		Name:                     "test",
+		Managed:                  true,
 		SiteID:                   uuid.New(),
 		InfrastructureProviderID: uuid.New(),
 		TenantID:                 cutil.GetPtr(uuid.New()),
@@ -281,6 +321,8 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 		Created:                  cdb.GetCurTime(),
 		Updated:                  cdb.GetCurTime(),
 	}
+	unmanaged := *dbObj
+	unmanaged.Managed = false
 	tests := []struct {
 		desc   string
 		dbObj  *cdbm.IPBlock
@@ -289,6 +331,19 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 		{
 			desc:  "test creating API IPBlockSummary",
 			dbObj: dbObj,
+			apiObj: &APIIPBlockSummary{
+				ID:           dbObj.ID.String(),
+				Name:         dbObj.Name,
+				Managed:      true,
+				RoutingType:  dbObj.RoutingType,
+				Prefix:       dbObj.Prefix,
+				PrefixLength: dbObj.PrefixLength,
+				Status:       dbObj.Status,
+			},
+		},
+		{
+			desc:  "test creating unmanaged API IPBlockSummary",
+			dbObj: &unmanaged,
 			apiObj: &APIIPBlockSummary{
 				ID:           dbObj.ID.String(),
 				Name:         dbObj.Name,
@@ -303,6 +358,13 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			got := NewAPIIPBlockSummary(tc.dbObj)
 			assert.Equal(t, tc.apiObj, got)
+			data, err := json.Marshal(got)
+			require.NoError(t, err)
+			var fields map[string]interface{}
+			require.NoError(t, json.Unmarshal(data, &fields))
+			value, present := fields["managed"]
+			require.True(t, present, "false is a supported value, not an omitted field")
+			require.Equal(t, tc.dbObj.Managed, value)
 		})
 	}
 }

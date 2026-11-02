@@ -174,18 +174,24 @@ fn set_nonblocking(fd: &OwnedFd) -> nix::Result<()> {
 
 /// Run an instance of ipmi_sim and a corresponding instance of a mock serial console, for tests to
 /// use. Accepts a `prompt` parameter which will be echoed back when the clients send data (for
-/// tests to assert that it's the expected host.)
-pub(super) async fn run(prompt: String) -> eyre::Result<IpmiSimHandle> {
+/// tests to assert that it's the expected host), and the machine-owned controller that supplies
+/// simulated boot output.
+pub(super) async fn run(
+    prompt: String,
+    console_output: machine_a_tron::ConsoleOutputController,
+) -> eyre::Result<IpmiSimHandle> {
     let bmc = bmc_mock::test_support::generic_supermicro_bmc().await;
     bmc.state
         .account_service_state
         .change_factory_default_password("password");
+    let console_output = Box::new(move || console_output.stream());
     bmc_mock::ipmi_sim::start(
         &bmc.state,
         bmc_mock::ipmi_sim::IpmiSimConfig {
             stable_id: prompt.clone(),
             console_prompt: prompt,
         },
+        Some(console_output),
     )
     .await
     .map_err(Into::into)

@@ -11,7 +11,12 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   internalTrafficPolicy: Local
   selector:
     {{- include "nico-dhcp.selectorLabels" . | nindent 4 }}

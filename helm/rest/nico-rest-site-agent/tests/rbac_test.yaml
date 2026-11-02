@@ -22,25 +22,27 @@ tests:
               resources:
                 - secrets
               resourceNames:
-                - bootstrap-info
+                - site-registration
                 - temporal-client-site-agent-certs
               verbs:
                 - get
                 - update
 
-  - it: follows the configured Temporal Secret name instead of a generic environment value
+  - it: follows the configured Secret names instead of generic environment values
     template: rbac.yaml
     set:
       secrets:
+        siteRegistration: custom-site-registration
         temporalClientCerts: custom-temporal-client-certs
       envConfig:
+        BOOTSTRAP_SECRET_NAME: unrelated-secret
         TEMPORAL_CERT: unrelated-secret
     documentIndex: 1
     asserts:
       - equal:
           path: rules[0].resourceNames
           value:
-            - bootstrap-info
+            - custom-site-registration
             - custom-temporal-client-certs
 
   - it: renders the configured Temporal Secret name

@@ -77,7 +77,7 @@ data:
                 version: "{{ $.Values.elasticsearch.version }}"
                 url:
                     scheme: "{{ $.Values.elasticsearch.scheme }}"
-                    host: "{{ $.Values.elasticsearch.host }}:{{ $.Values.elasticsearch.port }}"
+                    host: "{{ include "temporal.elasticsearch.address" $ }}"
                 username: "{{ $.Values.elasticsearch.username }}"
                 password: "{{ $.Values.elasticsearch.password }}"
                 logLevel: "{{ $.Values.elasticsearch.logLevel }}"

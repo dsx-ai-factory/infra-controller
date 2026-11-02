@@ -48,6 +48,7 @@
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
+use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
 use libredfish::{Redfish, SystemPowerControl};
 use model::machine::{ManagedHostState, ManagedHostStateSnapshot, UefiSetupInfo, UefiSetupState};
@@ -55,7 +56,7 @@ use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
-use super::{current_site_uefi_target, handler_host_power_control, resolve_site_uefi_credentials};
+use super::{current_site_uefi_target, handler_host_power_control, read_site_uefi_credentials};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 
 /// Whether a Ready host should enter `ManagedHostState::RotatingHostUefi` now.
@@ -163,6 +164,7 @@ fn rotating_host_uefi_step(
     StateHandlerOutcome::transition(ManagedHostState::RotatingHostUefi {
         uefi_setup_info: UefiSetupInfo {
             uefi_password_jid,
+            credential_version: None,
             uefi_setup_state,
         },
     })
@@ -185,8 +187,8 @@ fn rotating_host_uefi_step(
 /// Failure handling keeps the host from wedging in the state: transient infra
 /// errors return `Err` so the state framework retries (bounded by the state
 /// SLA), while a device-level password-change failure is quarantined with
-/// exponential backoff and returns to `Ready` (the passive gate then skips the
-/// device until the window elapses).
+/// exponential backoff and returns to `Ready` after restoring required Lenovo
+/// BMC locks (the passive gate then skips the device until the window elapses).
 pub(crate) async fn handle_rotating_host_uefi(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &ManagedHostStateSnapshot,
@@ -272,22 +274,27 @@ pub(crate) async fn handle_rotating_host_uefi(
             }
             finish_rotating_host_uefi(ctx, state, host_bmc_mac, redfish_client.as_ref()).await
         }
-        // Deprecated ingestion-only step: the terminal `finish` re-enables the
-        // BMC lockdown that `UnlockHost` disabled, so treat this as completion
-        // for any host that somehow carries it.
+        // Lenovo failure cleanup retries only the re-lock. The failed rotation
+        // is already quarantined; do not promote its credential version.
         UefiSetupState::LockdownHost => {
             let redfish_client = ctx
                 .services
                 .create_redfish_client_from_machine(&state.host_snapshot)
                 .await?;
-            finish_rotating_host_uefi(ctx, state, host_bmc_mac, redfish_client.as_ref()).await
+            if state.host_snapshot.bmc_vendor().is_lenovo() {
+                reenable_host_bmc_lockdown_after_rotation(state, redfish_client.as_ref()).await?;
+                Ok(StateHandlerOutcome::transition(ManagedHostState::Ready))
+            } else {
+                finish_rotating_host_uefi(ctx, state, host_bmc_mac, redfish_client.as_ref()).await
+            }
         }
     }
 }
 
 /// Stage and dispatch the host UEFI password change (the SET step). On a
 /// successful dispatch, advance to the job-scheduling wait; on a device-level
-/// failure, quarantine the device with backoff and return to `Ready`.
+/// failure, quarantine with backoff and restore required Lenovo BMC locks
+/// before returning to `Ready`.
 async fn set_rotating_host_uefi_password(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &ManagedHostStateSnapshot,
@@ -321,7 +328,7 @@ async fn set_rotating_host_uefi_password(
     let Credentials::UsernamePassword {
         password: new_password,
         ..
-    } = resolve_site_uefi_credentials(db_pool, reader, HostUefi).await?;
+    } = read_site_uefi_credentials(reader, HostUefi, target).await?;
 
     // Stage the target before dispatch (crash-safe), in its own short
     // transaction so no lock is held across the Redfish round-trip.
@@ -367,10 +374,9 @@ async fn set_rotating_host_uefi_password(
                 db::credential_rotation::backoff_until(prior_attempts, chrono::Utc::now());
             // Restore the BMC lockdown that `UnlockHost` disabled: the host
             // returns to Ready and must not be left unlocked just because the
-            // rotation failed. Best-effort and outside the quarantine txn -- a
-            // re-lock failure must neither hold a lock across a Redfish call nor
-            // mask the quarantine record (which would tighten the retry loop), so
-            // we log and continue.
+            // rotation failed. Keep the network call outside the quarantine txn.
+            // A Lenovo re-lock failure persists a cleanup step with the failed
+            // rotation record, so retries cannot repeat the password change.
             let relock = async {
                 let client = ctx
                     .services
@@ -380,11 +386,12 @@ async fn set_rotating_host_uefi_password(
                     .map_err(StateHandlerError::from)?;
                 reenable_host_bmc_lockdown_after_rotation(state, client.as_ref()).await
             };
-            if let Err(relock_err) = relock.await {
+            let relock_result = relock.await;
+            if let Err(relock_err) = &relock_result {
                 tracing::warn!(
                     mac = %host_bmc_mac,
                     error = %relock_err,
-                    "failed to re-enable BMC lockdown after a failed host UEFI rotation; host left unlocked"
+                    "failed to re-enable BMC lockdown after a failed host UEFI rotation"
                 );
             }
             let mut txn = db_pool.begin().await?;
@@ -414,18 +421,23 @@ async fn set_rotating_host_uefi_password(
                 )
                 .await?;
             }
-            Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
+            let outcome = if relock_result.is_err() && state.host_snapshot.bmc_vendor().is_lenovo()
+            {
+                rotating_host_uefi_step(None, UefiSetupState::LockdownHost)
+            } else {
+                StateHandlerOutcome::transition(ManagedHostState::Ready)
+            };
+            Ok(outcome.with_txn(txn))
         }
     }
 }
 
-/// Re-enable the Dell BMC System Lockdown that the `UnlockHost` step disabled to
+/// Re-enable the BMC lockdown that the `UnlockHost` step disabled to
 /// apply the UEFI password, so a rotated host returns to `Ready` with the same
 /// lockdown posture it had before. Mirrors the unlock exactly -- `lockdown_bmc`,
-/// Dell only -- and honors the `disable_lockdown` host profile (a host
-/// configured to stay unlocked is left unlocked, matching the ingestion
-/// `WaitingForLockdown`/`SetLockdown` guard). Unlike the ingestion re-lock, BMC
-/// lockdown is a live manager attribute, so no reboot is required here.
+/// for BMCs that can lock BIOS settings -- and honors the `disable_lockdown`
+/// host profile (a host configured to stay unlocked is left unlocked, matching the ingestion
+/// `WaitingForLockdown`/`SetLockdown` guard).
 async fn reenable_host_bmc_lockdown_after_rotation(
     state: &ManagedHostStateSnapshot,
     redfish_client: &dyn Redfish,
@@ -444,11 +456,9 @@ async fn reenable_host_bmc_lockdown_after_rotation(
 /// Record host UEFI convergence and return to `Ready`. First re-enables the BMC
 /// lockdown that `UnlockHost` disabled (retry-safe: on failure the tick errors
 /// and re-enters here, since the completed job still reports `Completed`).
-/// Promotes the staged `rotating_to_version`; for a row predating the staged
-/// flow (no marker), falls back to
-/// [`record_device_converged`](db::credential_rotation::record_device_converged),
-/// mirroring the BMC engine. Clears a one-shot force request on the same
-/// transaction.
+/// Promotes the staged `rotating_to_version` and clears a one-shot force request
+/// in the same transaction. Without a staged version, keep the existing record:
+/// job completion alone does not identify the password version.
 async fn finish_rotating_host_uefi(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &ManagedHostStateSnapshot,
@@ -466,14 +476,17 @@ async fn finish_rotating_host_uefi(
             .map_err(|e| {
                 StateHandlerError::GenericError(eyre!("promote host uefi rotating_to_version: {e}"))
             })?;
-    if !promoted {
-        db::credential_rotation::record_device_converged(&mut txn, host_bmc_mac, HostUefi)
-            .await
-            .map_err(|e| {
-                StateHandlerError::GenericError(eyre!("record host uefi convergence: {e}"))
-            })?;
+    if let db::ConditionalWrite::NotApplied(NoStagedCredentialRotation) = promoted {
+        tracing::warn!(
+            mac = %host_bmc_mac,
+            "host UEFI job completed without a staged credential version; keeping existing rotation bookkeeping"
+        );
+    } else {
+        tracing::info!(
+            mac = %host_bmc_mac,
+            "host UEFI converged to its staged credential version"
+        );
     }
-    tracing::info!(mac = %host_bmc_mac, "host UEFI converged to site-wide rotation target");
     if state.host_snapshot.uefi_credential_rotation_requested {
         db::machine::clear_uefi_credential_rotation_requested(
             &mut txn,

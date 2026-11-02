@@ -20,6 +20,7 @@
  *  tables in the database, leveraging the journal-specific record types.
  */
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{
     MeasurementBundleId, MeasurementJournalId, MeasurementReportId, MeasurementSystemProfileId,
@@ -199,8 +200,11 @@ pub async fn get_latest_journal_for_id(
     txn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> DatabaseResult<Option<MeasurementJournal>> {
-    let query = "select distinct on (machine_id) * from measurement_journal where machine_id = $1 order by machine_id,ts desc";
-    match sqlx::query_as::<_, MeasurementJournalRecord>(query)
+    let query = format!(
+        "select distinct on (machine_id) {} from measurement_journal where machine_id = $1 order by machine_id,ts desc",
+        MeasurementJournalRecord::db_table_columns(),
+    );
+    match sqlx::query_as::<_, MeasurementJournalRecord>(sqlx::AssertSqlSafe(query))
         .bind(machine_id)
         .fetch_optional(txn)
         .await

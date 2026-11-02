@@ -261,7 +261,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 
 	stDAO := cdbm.NewSiteDAO(mskg.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received SSH Key Group inventory for unknown or deleted Site")
@@ -302,6 +302,10 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 			reportedSSHKeyGroupIDMap[strId] = true
 		}
 	}
+
+	// Absence only means anything once every reported ID has arrived. Acting on a page that
+	// carries no list would read every SSH Key Group it does not hold as missing from the Site.
+	reconcileDeletions := util.ShouldReconcileDeletions(sshKeyGroupInventory.GetInventoryPage())
 
 	existingSkgsaTkMap := map[string]*corev1.TenantKeyset{}
 
@@ -355,7 +359,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 
 		tenantKeyset, ok := existingSkgsaTkMap[skgID]
 		if !ok {
-			if !reportedSSHKeyGroupIDMap[skgID] {
+			if reconcileDeletions && !reportedSSHKeyGroupIDMap[skgID] {
 				// SSH Key Group was not found on Site
 				if skgsa.Status == cdbm.SSHKeyGroupSiteAssociationStatusDeleting {
 					// If the SSHKeyGroupSiteAssociation was being deleted, we can proceed with removing it from the DB
@@ -426,7 +430,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 	}
 
 	updatedSkgStrIDs := []string{}
-	for skgID, _ := range updatedSkgMap {
+	for skgID := range updatedSkgMap {
 		updatedSkgStrIDs = append(updatedSkgStrIDs, skgID)
 	}
 

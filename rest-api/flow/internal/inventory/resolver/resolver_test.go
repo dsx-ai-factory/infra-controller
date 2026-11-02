@@ -319,6 +319,68 @@ func TestRackByName(t *testing.T) {
 	}
 }
 
+func TestRackByExternalID(t *testing.T) {
+	rackID := uuid.New()
+	inventoryErr := errors.New("inventory unavailable")
+	tests := map[string]struct {
+		externalID     string
+		withComponents bool
+		inventory      *fakeInventory
+		wantErr        error
+		wantMessage    string
+	}{
+		"found": {
+			externalID:     "D09",
+			withComponents: true,
+			inventory: &fakeInventory{
+				rack: rack.New(deviceinfo.DeviceInfo{ID: rackID}, location.Location{}),
+			},
+		},
+		"missing external ID": {
+			inventory: &fakeInventory{},
+			wantErr:   ErrUnresolvable,
+		},
+		"inventory failure": {
+			externalID:  "D09",
+			inventory:   &fakeInventory{err: inventoryErr},
+			wantErr:     inventoryErr,
+			wantMessage: `rack external id "D09"`,
+		},
+		"nil rack": {
+			externalID:  "D09",
+			inventory:   &fakeInventory{},
+			wantErr:     ErrUnresolvable,
+			wantMessage: "has no canonical id",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			resolved, err := New(test.inventory).RackByExternalID(
+				context.Background(),
+				test.externalID,
+				test.withComponents,
+			)
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+				if test.wantMessage != "" {
+					require.ErrorContains(t, err, test.wantMessage)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, rackID, resolved.Info.ID)
+			require.Equal(
+				t,
+				identifier.Identifier{ExternalID: "D09"},
+				test.inventory.rackIdentifier,
+			)
+			require.Equal(t, test.withComponents, test.inventory.withComponents)
+		})
+	}
+}
+
 func testComponent(
 	id uuid.UUID,
 	rackID uuid.UUID,

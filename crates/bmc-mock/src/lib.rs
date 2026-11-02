@@ -14,21 +14,69 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! Mock BMCs with hardware-specific Redfish inventories and stateful management operations.
+//!
+//! # Architecture and extension rules
+//!
+//! Select the hardware representation and its capabilities when constructing the BMC:
+//!
+//! ```text
+//! HardwareType / MachineInfo
+//!     -> hw::<platform> profile
+//!     -> redfish resource/service configs
+//!     -> resource/service state
+//!     -> Redfish request handlers
+//! ```
+//!
+//! `machine_info` selects profiles and supplies machine identity and caller-provided settings.
+//! `hw` owns the platform's inventory, resource IDs, initial values, and choice of supported
+//! protocol behavior. `redfish` owns resource schemas, builders, HTTP handling, and the state
+//! transitions of the configured features. `mock_machine_router` assembles configs, state,
+//! callbacks, and routes before serving requests. See `hw/mod.rs` and `redfish/mod.rs` for
+//! the corresponding extension templates.
+//!
+//! Hardware code uses Redfish configs and builders. Keep new Redfish code independent of
+//! hardware profile types: handlers must not inspect `HardwareType`, recognize platforms
+//! from model strings or resource IDs, or construct hardware profiles during a request.
+//! A new platform should reuse existing protocol implementations through configuration.
+//!
+//! State may contain platform-specific or OEM features. Select and fully initialize those
+//! features before serving requests, using an explicit config, capability, or OEM state
+//! variant. During requests, dispatch on that configured behavior. Runtime operations may
+//! change values and perform configured transitions; they must not infer missing platform
+//! capabilities or lazily install them. Simulator integration may supply runtime values
+//! through explicit APIs with documented support and lifecycle semantics.
+//!
+//! Distinguish feature support from its mutable value. Use an optional feature config/state
+//! for optional support, and make advertised links and endpoint availability follow the same
+//! source of truth. A disabled feature value is different from an unsupported feature.
+//! Constructors must return ready-to-use state without a separate platform-specific fix-up.
+//!
+//! Keep external machine effects behind callbacks and explicit events. Protocol handlers
+//! should not acquire dependencies on machine-a-tron or a particular simulation backend.
+//!
+//! These rules govern additions and changes even where existing code has exceptions.
+//! Do not copy an exception as an extension template; keep unrelated architectural cleanup
+//! in a separate refactor.
+
 use std::borrow::Cow;
 use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
+pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
 pub mod libvirt;
+pub mod persistence;
 pub mod simulated;
 
 mod auth_router;
 pub mod availability;
 mod bmc_state;
 mod combined_server;
+mod event_controls;
 mod http;
 mod hw;
 pub mod infiniband;
@@ -37,30 +85,63 @@ pub mod mac_address_pool;
 mod machine_info;
 mod middleware_router;
 mod mock_machine_router;
+mod nvue;
+mod power_state;
 mod rack_info;
 mod redfish;
+mod sse;
 mod tar_router;
 pub mod test_support;
 pub mod tls;
 
 pub use bmc_state::{BmcEvent, BmcState};
-pub use carbide_axum_utils::authority_router::authority_router as combined_router;
+/// Builds the authority-based router from shared device routes.
+/// Registry wrappers can retain ownership metadata while exposing these routes.
+pub fn combined_router(
+    routes: impl Into<
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, axum::Router>>>,
+    >,
+) -> axum::Router {
+    carbide_axum_utils::authority_router::authority_router(routes.into())
+}
 pub use carbide_axum_utils::injection;
 pub use combined_server::{CombinedServer, ListenerOrAddress};
-pub use hw::rack::{RackElevation, RackPlacement, RackUnit};
+pub use http::redfish_error_envelope;
+pub use hw::rack::{RackElevation, RackPlacement, RackUnit, TrayPlacement};
 pub use machine_info::{
     DpuFirmwareVersions, DpuMachineInfo, DpuSettings, HostFirmwareVersions, HostMachineInfo,
     MachineInfo,
 };
 pub use mock_machine_router::{
-    BmcCommand, MachineRouterOptions, SetSystemPowerError, SetSystemPowerResult, machine_router,
-    machine_router_with_injection_store,
+    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
 };
+pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
+/// A switch's NVUE REST API, served at its NVOS address, and the simulation
+/// controls over what it reports.
+pub use nvue::{
+    LeakState, NvueState, SystemHealthStatus, UnknownLeakSensor, UnknownUser, nvue_router,
+};
+pub use power_state::validate_power_reset;
 pub use rack_info::RackInfo;
-pub use redfish::virtual_media::DeviceConfig as VirtualMediaDeviceConfig;
+/// BMC account state and the credential snapshot type used to persist and
+/// restore rotated passwords across a mock rebuild.
+pub use redfish::account_service::AccountServiceState;
+pub use redfish::event_service::{
+    EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
+};
+pub use redfish::update_service::{
+    BmcTaskState, DpuOsImage, DpuOsStatus, DpuOsStatusSource, UnknownBmcTaskState,
+};
+pub use redfish::virtual_media::{
+    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaUpdate,
+};
+pub use sse::StreamStep;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
 pub const DUMMY_FACTORY_PASSWORD: &str = "factory_password";
+/// The NVOS administrator of a simulated switch, with
+/// [`DUMMY_FACTORY_PASSWORD`] until a rotation changes it.
+pub const DUMMY_NVOS_USERNAME: &str = "admin";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum RackType {
@@ -174,54 +255,98 @@ impl HardwareType {
     }
 }
 
-#[derive(Debug, Copy, Clone, Default)]
-pub enum MockPowerState {
-    #[default]
-    On,
-    Off,
-    PowerCycling {
-        since: Instant,
-    },
-}
-
-impl fmt::Display for MockPowerState {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::On => "On".fmt(f),
-            Self::Off => "Off".fmt(f),
-            Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),
-        }
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum ActionError {
+    #[error("bad request: {0}")]
+    BadRequest(eyre::Error),
+    #[error("internal error: {0}")]
+    Internal(eyre::Error),
 }
 
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
-pub trait Callbacks: std::fmt::Debug + Send + Sync {
-    fn get_power_state(&self) -> MockPowerState;
-    fn send_power_command(&self, reset_type: SystemPowerControl)
-    -> Result<(), SetSystemPowerError>;
-    fn set_power_state(&self, reset_type: SystemPowerControl) -> Result<(), SetSystemPowerError> {
-        type C = SystemPowerControl;
-        match (reset_type, self.get_power_state()) {
-            (
-                C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
-                MockPowerState::Off,
-            ) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power off machine, it is already off".to_string(),
-            )),
-            (C::On | C::ForceOn, MockPowerState::On) => Err(SetSystemPowerError::BadRequest(
-                "bmc-mock: cannot power on machine, it is already on".to_string(),
-            )),
-            (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
-                Err(SetSystemPowerError::BadRequest(format!(
-                    "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
-                    since.elapsed()
-                )))
-            }
-            _ => Ok(()),
-        }?;
-        self.send_power_command(reset_type)
+/// A physical effect that a BMC action has on the device behind the BMC, beyond the
+/// Redfish state the BMC itself serves.
+///
+/// This is the contract between bmc-mock and the backend that owns the simulated
+/// device (for example machine-a-tron's power actors). bmc-mock validates the
+/// request and reports the effect through [`Callbacks::device_effect`]. The backend
+/// applies it to everything the real action would reach, and the BMC then serves
+/// the observed result back through its usual state, such as the system `PowerState`.
+///
+/// Add a variant for each action whose effect leaves the BMC. The enum is not
+/// `non_exhaustive`: a new variant must fail to compile in every backend until it
+/// decides what the effect means for its device.
+#[derive(Debug)]
+pub enum DeviceEffect {
+    /// Chassis AC power cycle (`NvidiaChassis.AuxPowerReset` with `ResetType`
+    /// `AuxPowerCycle`). It drops all power to the compute tray, so the host and
+    /// every DPU in it lose power together. The backend applies it whatever the
+    /// current power state is, and it leaves the device `Off`: the BMC has no power
+    /// restore policy of its own, and the controller powers the host on again.
+    AuxPowerCycle,
+    /// Restore BMC factory accounts and restart BMC DHCP without changing system power.
+    /// The backend owns the update and admits DHCP recovery before reporting success.
+    ResetBmcToDefaults(BmcResetUpdate),
+}
+
+/// An owned, serialized BMC factory reset. Dropping it before commit changes no state.
+/// Transfer it to the device actor so an HTTP cancellation cannot interrupt publication.
+pub struct BmcResetUpdate {
+    apply: futures::future::BoxFuture<'static, Result<Duration, ActionError>>,
+}
+
+impl fmt::Debug for BmcResetUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BmcResetUpdate").finish_non_exhaustive()
+    }
+}
+
+impl BmcResetUpdate {
+    /// Synchronizes attached password backends, restores accounts, invalidates sessions
+    /// and starts the BMC outage. Returns the delay before BMC DHCP should resume.
+    pub async fn commit(self) -> Result<Duration, ActionError> {
+        self.apply.await
+    }
+}
+
+/// Backend operations for one BMC, selected by the router's concrete callback type.
+pub trait Callbacks: Send + Sync + 'static {
+    fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send;
+
+    /// Accepts a [`DeviceEffect`] into the owning device's execution path.
+    /// Chassis power may complete asynchronously after acceptance. Factory reset
+    /// must publish BMC state and admit actor-owned DHCP recovery before reporting
+    /// success. Callers observe the result through the state the BMC serves.
+    ///
+    /// The default rejects every effect, so a backend that does not model the
+    /// device fails the action instead of answering success without an effect.
+    fn device_effect(
+        &self,
+        effect: DeviceEffect,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        std::future::ready(Err(ActionError::BadRequest(eyre::eyre!(
+            "bmc-mock: backend does not support device effect {effect:?}"
+        ))))
+    }
+
+    /// Applies one virtual-media operation before reporting success.
+    ///
+    /// External backends must complete their I/O, then commit the update before
+    /// returning `Ok(())`. On failure, drop it without committing and return an
+    /// error. Actor implementations must transfer the whole update to retain
+    /// serialization and state publication if the requesting future is cancelled.
+    /// Backends without external media effects publish the requested state directly.
+    fn set_virtual_media(
+        &self,
+        update: VirtualMediaUpdate,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        update.commit();
+        std::future::ready(Ok(()))
     }
 
     fn state_refresh_indication(&self);
@@ -229,66 +354,6 @@ pub trait Callbacks: std::fmt::Debug + Send + Sync {
 
 pub trait HostnameQuerying: std::fmt::Debug + Send + Sync {
     fn get_hostname(&'_ self) -> Cow<'_, str>;
-}
-
-// https://www.dmtf.org/sites/default/files/standards/documents/DSP2046_2023.3.html
-// 6.5.5.1 ResetType
-#[derive(Debug, Deserialize, Serialize, PartialEq, Clone, Copy)]
-pub enum SystemPowerControl {
-    /// Power on a machine
-    On,
-    /// Graceful host shutdown
-    GracefulShutdown,
-    /// Forcefully powers a machine off
-    ForceOff,
-    /// Graceful restart. Asks the OS to restart via ACPI
-    /// - Might restart DPUs if no OS is running
-    /// - Will not apply pending BIOS/UEFI setting changes
-    GracefulRestart,
-    /// Force restart. This is equivalent to pressing the reset button on the front panel.
-    /// - Will not restart DPUs
-    /// - Will apply pending BIOS/UEFI setting changes
-    ForceRestart,
-
-    //
-    // libredfish doesn't support these yet, and not all vendors provide them
-    //
-
-    // Cut then restore the power
-    PowerCycle,
-
-    // Forcefully power a machine on (?)
-    ForceOn,
-
-    // Like it says, pretend the button got pressed
-    PushPowerButton,
-
-    // Non-maskable interrupt then power off
-    Nmi,
-
-    // Write state to disk and power off
-    Suspend,
-
-    // VM / Hypervisor
-    Pause,
-    Resume,
-}
-
-trait LogServices: Send + Sync {
-    fn services(&self) -> Vec<&(dyn LogService + '_)>;
-
-    fn find(&self, id: &str) -> Option<&(dyn LogService + '_)> {
-        self.services()
-            .iter()
-            .find(|service| service.id() == id)
-            .copied()
-    }
-}
-
-trait LogService: Send + Sync {
-    fn id(&self) -> &str;
-
-    fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<serde_json::Value>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -88,6 +89,9 @@ type CoreGrpcClientConfig struct {
 	ClientKeyPath string
 	// client metrics interface
 	ClientMetrics Metrics
+	// OnRPCFinish observes each completed RPC once, including stream termination.
+	// It must be safe for concurrent calls; nil disables the callback.
+	OnRPCFinish func(error) `json:"-"`
 }
 
 // NewCoreGrpcClient creates a new Core gRPC client, this is called by Site Agent startup code and cert reload routine
@@ -181,6 +185,10 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 
 	client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(coreGrpcMaxRecvMsgSize)))
 
+	if config.OnRPCFinish != nil {
+		client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.OnFinish(config.OnRPCFinish)))
+	}
+
 	// configure interceptors
 	var unaryInterceptors []grpc.UnaryClientInterceptor
 	if config.ClientMetrics != nil {
@@ -190,9 +198,10 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 	if config.ClientMetrics != nil {
 		streamInterceptors = append(streamInterceptors, newGrpcStreamMetricsInterceptor(config.ClientMetrics))
 	}
-	// Unconditional: was gated on LS_SERVICE_NAME, which no chart sets.
-	handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
-	client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
+	if cotel.TransportEnabled() {
+		handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
+		client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
+	}
 	if len(unaryInterceptors) > 0 {
 		client.dialOpts = append(client.dialOpts, grpc.WithUnaryInterceptor(grpcmw.ChainUnaryClient(unaryInterceptors...)))
 	}
@@ -269,16 +278,21 @@ func (cac *CoreGrpcAtomicClient) SwapClient(newClient *CoreGrpcClient) *CoreGrpc
 	// Atomically replace the current client with the new one and return the old client.
 	oldClientInterface := cac.value.Swap(newClient)
 
+	// Increment the version number. Every successful swap advances it, including the
+	// initial creation, where there is no previous client to hand back.
+	cac.version.Add(1)
+
+	if oldClientInterface == nil {
+		return nil
+	}
+
 	// Type assert the returned value to *CoreGrpcClient.
-	// This should always succeed if the correct type was stored initially.
+	// This should always succeed once a client has been stored.
 	oldClient, ok := oldClientInterface.(*CoreGrpcClient)
 	if !ok {
 		log.Error().Msg("SwapClient: Type assertion failed for the old client")
 		return nil
 	}
-
-	// Increment the version number
-	cac.version.Add(1)
 
 	return oldClient
 }
@@ -325,14 +339,14 @@ func (cac *CoreGrpcAtomicClient) CheckAndReloadCerts(initialClientCertMD5, initi
 			reloadStarted = time.Now()
 			reloadBackoff = CoreGrpcConnectionBackoffInitial
 		} else if time.Since(reloadStarted) >= CoreGrpcConnectionRetryTimeout {
-			panic(fmt.Errorf("Core gRPC: failed to reinitialize gRPC client with new certificates within %s",
+			panic(fmt.Errorf("core gRPC: failed to reinitialize gRPC client with new certificates within %s",
 				CoreGrpcConnectionRetryTimeout))
 		}
 
 		newClient, err := NewCoreGrpcClient(cac.Config)
 		if err != nil {
 			if time.Since(reloadStarted) >= CoreGrpcConnectionRetryTimeout {
-				panic(fmt.Errorf("Core gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
+				panic(fmt.Errorf("core gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
 					CoreGrpcConnectionRetryTimeout, err))
 			}
 			logger.Error().Err(err).Dur("RetryIn", reloadBackoff).Msg("Failed to reinitialize gRPC client with new certificates, retrying")
@@ -453,11 +467,7 @@ func equalMD5(a, b []byte) bool {
 
 func SliceToChunks[T any](slice []T, chunkSize int) (chunks [][]T) {
 	chunks = [][]T{}
-	for {
-		if len(slice) == 0 {
-			break
-		}
-
+	for len(slice) != 0 {
 		if len(slice) < chunkSize {
 			chunkSize = len(slice)
 		}

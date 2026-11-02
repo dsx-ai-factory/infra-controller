@@ -750,6 +750,7 @@ mod tests {
                 },
             ],
             auto_config: None,
+            service_interfaces: vec![],
         }
     }
 
@@ -838,6 +839,7 @@ mod tests {
                 },
             ],
             auto_config: None,
+            service_interfaces: vec![],
         }
     }
 

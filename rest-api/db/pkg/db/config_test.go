@@ -4,53 +4,72 @@
 package db
 
 import (
+	"net/url"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func validConfig() Config {
-	return Config{
-		Host:       "db.example.internal",
-		Port:       5432,
-		DBName:     "forge",
-		Credential: credential.New("forge", "s3cr3t"),
+func TestConfig_BuildDSN(t *testing.T) {
+	// Keep local PostgreSQL environment settings out of the parser checks.
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "PG") {
+			t.Setenv(name, "")
+		}
 	}
-}
 
-// TestBuildDSN_NoCACert_UsesSSlModePrefer is a regression test for the bug
-// introduced in v1.3.1 (PR #193) where BuildDSN started appending
-// sslmode=disable when no CA certificate path is configured.
-//
-// In v1.0.4, NewSession built the DSN with no sslmode parameter at all, so
-// pgx defaulted to "prefer" (try TLS, fall back to plaintext). This allowed
-// connections to PostgreSQL clusters whose pg_hba.conf only contains hostssl
-// rules (e.g. CloudNativePG defaults). The explicit sslmode=disable introduced
-// by the refactor causes pg_hba.conf to reject those connections with:
-//
-//	FATAL: pg_hba.conf rejects connection for host "...", no encryption (SQLSTATE 28000)
-func TestBuildDSN_NoCACert_UsesSSlModePrefer(t *testing.T) {
-	cfg := validConfig()
-	// No CACertificatePath set — mirrors the production API deployment, which
-	// mounts no DB CA cert and therefore leaves CACertificatePath empty.
+	tests := []struct {
+		name              string
+		host              string
+		wantHost          string
+		caCertificatePath string
+	}{
+		{name: "hostname", host: "db.example.internal", wantHost: "db.example.internal"},
+		{name: "IPv4", host: "192.0.2.1", wantHost: "192.0.2.1"},
+		{name: "IPv6", host: "2001:db8::1", wantHost: "2001:db8::1"},
+		{name: "bracketed IPv6", host: "[2001:db8::1]", wantHost: "2001:db8::1"},
+		{name: "CA certificate", host: "db.example.internal", caCertificatePath: "/var/secrets/db/ca.crt"},
+	}
 
-	dsn := cfg.BuildDSN()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Host:              tt.host,
+				Port:              6432,
+				DBName:            "forge",
+				Credential:        credential.New("forge+%/?", "s3cr3t:@+%/?"),
+				CACertificatePath: tt.caCertificatePath,
+			}
 
-	assert.Contains(t, dsn, "sslmode=prefer",
-		"DSN must use sslmode=prefer when no CA cert is configured so that "+
-			"TLS negotiation succeeds against servers with hostssl pg_hba rules")
-	assert.NotContains(t, dsn, "sslmode=disable",
-		"sslmode=disable breaks connections to CloudNativePG clusters whose "+
-			"pg_hba.conf requires encrypted connections (regression since v1.3.1)")
-}
+			dsn := cfg.BuildDSN()
+			parsedURL, err := url.Parse(dsn)
+			require.NoError(t, err)
 
-func TestBuildDSN_WithCACert_UsesSSlModePreferAndRootCert(t *testing.T) {
-	cfg := validConfig()
-	cfg.CACertificatePath = "/var/secrets/db/ca.crt"
+			wantQuery := url.Values{"sslmode": {"prefer"}}
+			if tt.caCertificatePath != "" {
+				wantQuery.Set("sslrootcert", tt.caCertificatePath)
+			}
+			assert.Equal(t, wantQuery, parsedURL.Query())
 
-	dsn := cfg.BuildDSN()
+			if tt.caCertificatePath != "" {
+				// pgx opens the CA file while parsing; this row only checks
+				// that the configured path is included in the URL.
+				return
+			}
 
-	assert.Contains(t, dsn, "sslmode=prefer")
-	assert.Contains(t, dsn, "sslrootcert=/var/secrets/db/ca.crt")
+			parsed, err := pgx.ParseConfig(dsn)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantHost, parsed.Host)
+			assert.EqualValues(t, cfg.Port, parsed.Port)
+			assert.Equal(t, cfg.Credential.User, parsed.User)
+			assert.Equal(t, cfg.Credential.Password.Value, parsed.Password)
+			assert.Equal(t, cfg.DBName, parsed.Database)
+		})
+	}
 }

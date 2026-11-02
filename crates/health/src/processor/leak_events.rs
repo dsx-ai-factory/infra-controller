@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use super::{EventContext, EventProcessor};
 use crate::sink::{
-    Classification, CollectorEvent, HealthReport, HealthReportAlert, HealthReportSuccess,
-    HealthReportTarget, Probe, ReportSource,
+    Classification, CollectorEvent, HealthReport, HealthReportAlert, HealthReportSuccess, Probe,
+    ReportSource,
 };
 
 pub struct LeakEventProcessor {
@@ -69,21 +69,18 @@ impl EventProcessor for LeakEventProcessor {
 
         // Normalize each source's leak signal into the derived tray leak report
         // consumed by rack leak aggregation.
-        let (target, leak_classification, alert_kind, detail_kind) = match report.source {
-            ReportSource::BmcLeakDetectors => (
-                HealthReportTarget::Machine,
-                Classification::LeakDetector,
-                "leak-detector",
-                "detectors",
-            ),
-            ReportSource::NvueLeakage => (
-                HealthReportTarget::Switch,
-                Classification::Leak,
-                "nvue-leakage",
-                "leakage sensors",
-            ),
+        let (leak_classification, alert_kind, detail_kind) = match report.source {
+            ReportSource::BmcLeakDetectors => {
+                (Classification::LeakDetector, "leak-detector", "detectors")
+            }
+            ReportSource::NvueLeakage => (Classification::Leak, "nvue-leakage", "leakage sensors"),
             _ => return Vec::new(),
         };
+        // The derived report addresses whatever the source report addressed.
+        // BMC leak detectors are collected from power shelves as well as
+        // machine trays, and a power-shelf report forced onto the machine
+        // target is rejected by the machine sink for lack of a machine id.
+        let target = report.target;
 
         let leak_alerts: Vec<&HealthReportAlert> = report
             .alerts
@@ -110,6 +107,7 @@ impl EventProcessor for LeakEventProcessor {
             (
                 vec![],
                 vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                     message: format!(
@@ -120,12 +118,17 @@ impl EventProcessor for LeakEventProcessor {
                         detail_kind,
                         details
                     ),
-                    classifications: vec![Classification::Leak],
+                    classifications: vec![
+                        Classification::TrayLeak,
+                        Classification::SensorCritical,
+                        Classification::PreventAllocations,
+                    ],
                 }],
             )
         } else {
             (
                 vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 }],
@@ -135,7 +138,7 @@ impl EventProcessor for LeakEventProcessor {
 
         let leak_report = HealthReport {
             source: ReportSource::TrayLeakDetection,
-            target: Some(target),
+            target,
             observed_at: Some(chrono::Utc::now()),
             successes,
             alerts,
@@ -155,6 +158,7 @@ mod tests {
 
     use super::*;
     use crate::endpoint::BmcAddr;
+    use crate::sink::HealthReportTarget;
 
     fn context() -> EventContext {
         EventContext {
@@ -162,7 +166,7 @@ mod tests {
             addr: BmcAddr {
                 ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 port: Some(443),
-                mac: MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac"),
+                mac: Some(MacAddress::from_str("42:9e:b1:bd:9d:dd").expect("valid mac")),
             },
             collector_type: "leak_detector_collector",
             metadata: None,
@@ -173,6 +177,7 @@ mod tests {
 
     fn leak_alert(target: &str) -> HealthReportAlert {
         HealthReportAlert {
+            attribution: None,
             probe_id: Probe::LeakDetection,
             target: Some(target.to_string()),
             message: "LeakDetector found leak".to_string(),
@@ -227,11 +232,13 @@ mod tests {
         assert_eq!(derived.target, Some(HealthReportTarget::Machine));
         assert_eq!(derived.alerts.len(), 1);
         assert_eq!(derived.alerts[0].probe_id, Probe::LeakDetection);
-        assert!(
-            derived.alerts[0]
-                .classifications
-                .iter()
-                .any(|classification| classification == &Classification::Leak)
+        assert_eq!(
+            derived.alerts[0].classifications,
+            vec![
+                Classification::TrayLeak,
+                Classification::SensorCritical,
+                Classification::PreventAllocations,
+            ]
         );
     }
 
@@ -245,6 +252,7 @@ mod tests {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: Some("LEAK1".to_string()),
                 message: "NVUE leakage sensor state".to_string(),
@@ -265,10 +273,13 @@ mod tests {
         assert_eq!(derived.target, Some(HealthReportTarget::Switch));
         assert_eq!(derived.alerts.len(), 1);
 
-        assert!(
-            derived.alerts[0]
-                .classifications
-                .contains(&Classification::Leak)
+        assert_eq!(
+            derived.alerts[0].classifications,
+            vec![
+                Classification::TrayLeak,
+                Classification::SensorCritical,
+                Classification::PreventAllocations,
+            ]
         );
     }
 
@@ -281,6 +292,7 @@ mod tests {
             target: Some(HealthReportTarget::Switch),
             observed_at: Some(chrono::Utc::now()),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: Some("LEAK1".to_string()),
             }],
@@ -312,6 +324,7 @@ mod tests {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: Some("LEAK1".to_string()),
                 message: "NVUE leakage sensor state".to_string(),
@@ -325,8 +338,47 @@ mod tests {
         assert!(emitted.is_empty());
     }
 
+    /// The derived report inherits the source report's target. Machine and
+    /// switch trays are covered above; this pins the targets a hard-coded
+    /// mapping got wrong or could not express.
+    #[test]
+    fn derived_report_inherits_source_target() {
+        check_values(
+            [
+                Check {
+                    scenario: "power shelf leak detectors stay on the power shelf target",
+                    input: Some(HealthReportTarget::PowerShelf),
+                    expect: Some(HealthReportTarget::PowerShelf),
+                },
+                Check {
+                    scenario: "an endpoint without metadata derives no target",
+                    input: None,
+                    expect: None,
+                },
+            ],
+            |target| {
+                let processor = LeakEventProcessor::new(1);
+                let report = HealthReport {
+                    source: ReportSource::BmcLeakDetectors,
+                    target,
+                    observed_at: Some(chrono::Utc::now()),
+                    successes: Vec::new(),
+                    alerts: vec![leak_alert("Detector_0")],
+                };
+
+                let emitted = processor
+                    .process_event(&context(), &CollectorEvent::HealthReport(Arc::new(report)));
+                let [CollectorEvent::HealthReport(derived)] = emitted.as_slice() else {
+                    panic!("expected exactly one derived health report");
+                };
+                derived.target
+            },
+        );
+    }
+
     fn unreadable_detector_alert(target: &str) -> HealthReportAlert {
         HealthReportAlert {
+            attribution: None,
             probe_id: Probe::LeakDetection,
             target: Some(target.to_string()),
             message: format!("Leak detector '{target}' could not be read"),
@@ -399,6 +451,7 @@ mod tests {
         let processor = LeakEventProcessor::new(1);
         let metric_event = CollectorEvent::Metric(
             crate::sink::MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "k".to_string(),
                 name: "n".to_string(),
                 metric_type: "gauge".to_string(),
@@ -420,6 +473,7 @@ mod tests {
             source: ReportSource::BmcSensors,
             observed_at: Some(chrono::Utc::now()),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("Voltage_1".to_string()),
             }],

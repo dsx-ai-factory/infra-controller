@@ -39,6 +39,10 @@ pub(crate) struct NvidiaDgxH100<'a> {
 }
 
 impl NvidiaDgxH100<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC";
         let bmc_eth_builder = |eth| {
@@ -53,11 +57,11 @@ impl NvidiaDgxH100<'_> {
                     id: bmc_manager_id,
                     eth_interfaces: Some(vec![
                         bmc_eth_builder("eth0")
-                            .mac_address(self.bmc_mac_address_eth0)
+                            .mac_address((self.bmc_mac_address_eth0).to_string())
                             .interface_enabled(true)
                             .build(),
                         bmc_eth_builder("usb0")
-                            .mac_address(self.bmc_mac_address_usb0)
+                            .mac_address((self.bmc_mac_address_usb0).to_string())
                             .interface_enabled(true)
                             .build(),
                     ]),
@@ -78,7 +82,7 @@ impl NvidiaDgxH100<'_> {
                         redfish::ethernet_interface::builder(
                             &redfish::ethernet_interface::manager_resource("HGX_BMC_0", "usb0"),
                         )
-                        .mac_address(self.hgx_bmc_mac_address_usb0)
+                        .mac_address((self.hgx_bmc_mac_address_usb0).to_string())
                         .interface_enabled(true)
                         .build(),
                     ]),
@@ -99,12 +103,11 @@ impl NvidiaDgxH100<'_> {
         }
     }
 
-    pub(crate) fn system_config(
+    pub(crate) fn system_config<C: Callbacks>(
         &self,
-        callbacks: Arc<dyn Callbacks>,
-    ) -> redfish::computer_system::Config {
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "DGX";
-        let callbacks = Some(callbacks);
         let storage_nic0_ports = self.storage_nic0.ethernet_nics();
         let storage_nic1_ports = self.storage_nic1.ethernet_nics();
 
@@ -124,7 +127,7 @@ impl NvidiaDgxH100<'_> {
                     system_id,
                     &format!("EthernetInterface{index}"),
                 ))
-                .mac_address(nic.mac_address)
+                .mac_address((nic.mac_address).to_string())
                 .interface_enabled(false)
                 .build()
             })
@@ -144,30 +147,24 @@ impl NvidiaDgxH100<'_> {
             let id = format!("{:04X}", n + 10); // Starting with 000A
             // TODO should be taken from NIC:
             let pci_path = "PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)";
-            redfish::boot_option::builder(
-                &redfish::boot_option::resource(system_id, &id),
-                BootOptionKind::Network,
-            )
-            .boot_option_reference(&format!("Boot{id}"))
-            // Real DisplayName: "UEFI P0: HTTP IPv4 Nvidia Network Adapter - 94:6D:AE:00:00:00"
-            .display_name(&format!("UEFI Pn: HTTP IPv4 - {}", nic.mac_address))
-            .alias("UefiHttp")
-            .uefi_device_path(&format!(
-                "{pci_path}/MAC({},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()",
-                nic.mac_address.to_string().replace(":", "")
-            ))
-            // libredfish model requires @odata.etag field.
-            .odata_etag("MakeLibRedfishHappy")
-            .build()
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, &id))
+                .boot_option_reference(format!("Boot{id}"))
+                // Real DisplayName: "UEFI P0: HTTP IPv4 Nvidia Network Adapter - 94:6D:AE:00:00:00"
+                .display_name(format!("UEFI Pn: HTTP IPv4 - {}", nic.mac_address))
+                .alias(redfish::schema::computer_system::BootSource::UefiHttp)
+                .uefi_device_path(format!(
+                    "{pci_path}/MAC({},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()",
+                    nic.mac_address.to_string().replace(":", "")
+                ))
+                // libredfish model requires @odata.etag field.
+                .odata_etag("MakeLibRedfishHappy")
+                .build(BootOptionKind::Network)
         })
         .chain(std::iter::once(
-            redfish::boot_option::builder(
-                &redfish::boot_option::resource(system_id, "0030"),
-                BootOptionKind::Disk,
-            )
-            .boot_option_reference("Boot0030")
-            .display_name("UEFI OS")
-            .build(),
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, "0030"))
+                .boot_option_reference("Boot0030")
+                .display_name("UEFI OS")
+                .build(BootOptionKind::Disk),
         ))
         .collect::<Vec<_>>();
 
@@ -181,7 +178,7 @@ impl NvidiaDgxH100<'_> {
                     eth_interfaces,
                     serial_number: Some(self.dgx_system_serial_number.to_string().into()),
                     boot_order_mode: redfish::computer_system::BootOrderMode::ViaSettings,
-                    callbacks,
+                    callbacks: Some(callbacks),
                     chassis: vec!["BMC".into()],
                     boot_options: Some(boot_options),
                     bios_mode: redfish::computer_system::BiosMode::Generic,
@@ -237,7 +234,7 @@ impl NvidiaDgxH100<'_> {
                         .odata_id
                         .as_ref(),
                     &redfish::processor::GpuIdentity {
-                        uuid: &gpu_uuid(index),
+                        uuid: gpu_uuid(index),
                         serial_number: &self.gpu_serial[index - 1],
                         model: GPU_MODEL,
                     },
@@ -307,7 +304,7 @@ impl NvidiaDgxH100<'_> {
             chassis: [
                 redfish::chassis::SingleChassisConfig {
                     id: Cow::Borrowed("CPUBaseboard"),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some("NVIDIA".into()),
                     part_number: Some("965-24387-0002-000".into()),
                     model: Some("DGXH100".into()),
@@ -324,7 +321,7 @@ impl NvidiaDgxH100<'_> {
                 },
                 redfish::chassis::SingleChassisConfig {
                     id: dgx_chassis_id.into(),
-                    chassis_type: "Other".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Other,
                     manufacturer: Some("NVIDIA".into()),
                     part_number: Some("965-24387-0002-000".into()),
                     model: Some("DGXH100".into()),
@@ -386,7 +383,7 @@ impl NvidiaDgxH100<'_> {
                 redfish::software_inventory::builder(
                     &redfish::software_inventory::firmware_inventory_resource(id),
                 )
-                .version(version)
+                .version(*version)
                 .build()
             })
             .collect(),
@@ -399,7 +396,7 @@ impl NvidiaDgxH100<'_> {
 
 fn base_bios(system_id: &str) -> serde_json::Value {
     redfish::bios::builder(&redfish::bios::resource(system_id))
-        .attributes(json!({
+        .with_attributes(json!({
             "AcpiSpcrConsoleRedirectionEnable": true,
             "ConsoleRedirectionEnable0": true,
             "AcpiSpcrPort": "COM0",
@@ -414,7 +411,6 @@ fn base_bios(system_id: &str) -> serde_json::Value {
             "Ipv6Pxe": "Disabled",
             "NvidiaInfiniteboot": "Enable",
         }))
-        .build()
         // For some reasons libredfish requires @odata.context. This
         // patch makes it happy.
         .patch(json!({
@@ -429,19 +425,21 @@ const GPU_MODEL: &str = "H100 80GB HBM3";
 ///
 /// Hardware reports one UUID per GPU on the GPU's `Processor`, its enclosing
 /// `Chassis` and its `PCIeDevice` alike, so every fixture for a slot uses this.
-fn gpu_uuid(index: usize) -> String {
+fn gpu_uuid(index: usize) -> redfish::schema::resource::Uuid {
     format!("beea8cdf-7b7d-035c-ed07-360e311fcb{index:02x}")
+        .parse()
+        .expect("fixture GPU UUID")
 }
 
 fn hgx_gpu_sxm_chassis(index: usize, serial: &str) -> redfish::chassis::SingleChassisConfig {
     let id = format!("HGX_GPU_SXM_{index}");
     redfish::chassis::SingleChassisConfig {
-        chassis_type: "Other".into(),
+        chassis_type: redfish::schema::chassis::ChassisType::Other,
         manufacturer: Some("NVIDIA".into()),
         part_number: Some("2330-885-A1".into()),
         model: Some(GPU_MODEL.into()),
         serial_number: Some(serial.to_string().into()),
-        uuid: Some(gpu_uuid(index).into()),
+        uuid: Some(gpu_uuid(index)),
         pcie_devices: Some(vec![
             redfish::pcie_device::builder(&redfish::pcie_device::chassis_resource(
                 &id,
@@ -451,7 +449,7 @@ fn hgx_gpu_sxm_chassis(index: usize, serial: &str) -> redfish::chassis::SingleCh
             .model(GPU_MODEL)
             .part_number("2330-885-A1")
             .serial_number(serial)
-            .uuid(&gpu_uuid(index))
+            .uuid(gpu_uuid(index))
             .build(),
         ]),
         sensors: Some(redfish::sensor::generate_chassis_sensors(

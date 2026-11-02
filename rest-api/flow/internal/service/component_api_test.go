@@ -13,7 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
+	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
 	inventorystore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/store"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
@@ -23,6 +25,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 // --- Minimal mock for inventorymanager.Manager ---
@@ -35,6 +38,7 @@ type mockManager struct {
 	racks           map[uuid.UUID]*rack.Rack
 	domainRacks     map[uuid.UUID][]*rack.Rack
 	drifts          []inventorystore.ComponentDrift
+	componentPatch  inventorymanager.ComponentPatch
 }
 
 func newMockManager() *mockManager {
@@ -65,6 +69,7 @@ func (m *mockManager) GetRackByIdentifier(
 func (m *mockManager) GetRacksForNVLDomain(
 	_ context.Context,
 	id identifier.Identifier,
+	_ bool,
 ) ([]*rack.Rack, error) {
 	return m.domainRacks[id.ID], nil
 }
@@ -162,9 +167,63 @@ func (m *mockManager) AddComponent(_ context.Context, comp *component.Component)
 	return comp.Info.ID, nil
 }
 
-func (m *mockManager) PatchComponent(_ context.Context, comp *component.Component) error {
-	m.components[comp.Info.ID] = comp
+func (m *mockManager) PatchComponent(_ context.Context, patch inventorymanager.ComponentPatch) error {
+	comp := m.components[patch.ID]
+	if patch.FirmwareVersion != nil {
+		comp.FirmwareVersion = *patch.FirmwareVersion
+	}
+	if patch.Description != nil {
+		comp.Info.Description = *patch.Description
+	}
+	if patch.RackID != nil {
+		comp.RackID = *patch.RackID
+	}
+	if patch.SlotID != nil {
+		comp.Position.SlotID = *patch.SlotID
+	}
+	if patch.TrayIndex != nil {
+		comp.Position.TrayIndex = *patch.TrayIndex
+	}
+	if patch.HostID != nil {
+		comp.Position.HostID = *patch.HostID
+	}
+	if len(patch.BMCsByType) > 0 {
+		comp.BmcsByType = mergeBMCs(comp.BmcsByType, patch.BMCsByType)
+	}
+	m.componentPatch = patch
 	return nil
+}
+
+func mergeBMCs(
+	current map[devicetypes.BMCType][]bmc.BMC,
+	updates map[devicetypes.BMCType][]bmc.BMC,
+) map[devicetypes.BMCType][]bmc.BMC {
+	if current == nil {
+		current = make(map[devicetypes.BMCType][]bmc.BMC)
+	}
+	for bmcType, updatedBMCs := range updates {
+		for _, updatedBMC := range updatedBMCs {
+			matched := false
+			for existingType, existingBMCs := range current {
+				for i := range existingBMCs {
+					if existingBMCs[i].MAC.String() != updatedBMC.MAC.String() {
+						continue
+					}
+					existingBMCs[i] = updatedBMC
+					current[existingType] = existingBMCs
+					matched = true
+					break
+				}
+				if matched {
+					break
+				}
+			}
+			if !matched {
+				current[bmcType] = append(current[bmcType], updatedBMC)
+			}
+		}
+	}
+	return current
 }
 
 func (m *mockManager) DeleteComponent(_ context.Context, id uuid.UUID) error {
@@ -202,8 +261,9 @@ func TestGetRackInfoByIDPrefersExternalID(t *testing.T) {
 	mgr := newMockManager()
 	internalID := uuid.New()
 	mgr.racks[internalID] = &rack.Rack{
-		Info:       deviceinfo.DeviceInfo{ID: internalID, Name: "rack-1"},
-		ExternalID: "core-rack-01",
+		Info:            deviceinfo.DeviceInfo{ID: internalID, Name: "rack-1"},
+		ExternalID:      "core-rack-01",
+		OperationStatus: types.PhaseError,
 	}
 
 	response, err := (&FlowServerImpl{inventoryManager: mgr}).GetRackInfoByID(
@@ -214,6 +274,7 @@ func TestGetRackInfoByIDPrefersExternalID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, response.GetRack())
 	assert.Equal(t, "core-rack-01", response.GetRack().GetExternalId())
+	assert.Equal(t, pb.Phase_PHASE_ERROR, response.GetRack().GetOperationStatus())
 }
 
 func TestGetRackInfoByIDDoesNotResolveFlowUUID(t *testing.T) {
@@ -499,6 +560,101 @@ func TestPatchComponent_Success(t *testing.T) {
 	assert.Equal(t, 3, updated.Position.SlotID)
 	assert.Equal(t, 2, updated.Position.TrayIndex)
 	assert.Equal(t, 5, updated.Position.HostID)
+	assert.Equal(t, compID, mgr.componentPatch.ID)
+	require.NotNil(t, mgr.componentPatch.FirmwareVersion)
+	require.NotNil(t, mgr.componentPatch.SlotID)
+	require.NotNil(t, mgr.componentPatch.TrayIndex)
+	require.NotNil(t, mgr.componentPatch.HostID)
+	assert.Equal(t, newFW, *mgr.componentPatch.FirmwareVersion)
+	assert.Equal(t, 3, *mgr.componentPatch.SlotID)
+	assert.Equal(t, 2, *mgr.componentPatch.TrayIndex)
+	assert.Equal(t, 5, *mgr.componentPatch.HostID)
+	assert.Nil(t, mgr.componentPatch.Description)
+	assert.Nil(t, mgr.componentPatch.RackID)
+}
+
+func TestPatchComponent_PositionMask(t *testing.T) {
+	mustNotApply := "must-not-be-applied"
+	for _, tc := range []struct {
+		name            string
+		position        *pb.RackPosition
+		updateMask      *fieldmaskpb.FieldMask
+		firmwareVersion *string
+		wantPosition    component.InRackPosition
+		wantCode        codes.Code
+	}{
+		{
+			name:         "slot only",
+			position:     &pb.RackPosition{},
+			updateMask:   &fieldmaskpb.FieldMask{Paths: []string{"position.slot_id"}},
+			wantPosition: component.InRackPosition{SlotID: 0, TrayIndex: 2, HostID: 3},
+		},
+		{
+			name:         "tray only",
+			position:     &pb.RackPosition{},
+			updateMask:   &fieldmaskpb.FieldMask{Paths: []string{"position.tray_idx"}},
+			wantPosition: component.InRackPosition{SlotID: 1, TrayIndex: 0, HostID: 3},
+		},
+		{
+			name:         "host only",
+			position:     &pb.RackPosition{},
+			updateMask:   &fieldmaskpb.FieldMask{Paths: []string{"position.host_id"}},
+			wantPosition: component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 0},
+		},
+		{
+			name:            "empty mask",
+			position:        &pb.RackPosition{},
+			updateMask:      &fieldmaskpb.FieldMask{},
+			firmwareVersion: &mustNotApply,
+			wantPosition:    component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			wantCode:        codes.InvalidArgument,
+		},
+		{
+			name:            "unsupported path",
+			position:        &pb.RackPosition{},
+			updateMask:      &fieldmaskpb.FieldMask{Paths: []string{"position.unknown"}},
+			firmwareVersion: &mustNotApply,
+			wantPosition:    component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			wantCode:        codes.InvalidArgument,
+		},
+		{
+			name:            "missing position",
+			updateMask:      &fieldmaskpb.FieldMask{Paths: []string{"position.slot_id"}},
+			firmwareVersion: &mustNotApply,
+			wantPosition:    component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			wantCode:        codes.InvalidArgument,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newMockManager()
+			compID := uuid.New()
+			mgr.components[compID] = &component.Component{
+				Info:            deviceinfo.DeviceInfo{ID: compID},
+				FirmwareVersion: "original",
+				Position:        component.InRackPosition{SlotID: 1, TrayIndex: 2, HostID: 3},
+			}
+
+			server := &FlowServerImpl{inventoryManager: mgr}
+			_, err := server.PatchComponent(context.Background(), &pb.PatchComponentRequest{
+				Id:              &pb.UUID{Id: compID.String()},
+				FirmwareVersion: tc.firmwareVersion,
+				Position:        tc.position,
+				UpdateMask:      tc.updateMask,
+			})
+			require.Equal(t, tc.wantCode, status.Code(err))
+			assert.Equal(t, tc.wantPosition, mgr.components[compID].Position)
+			if tc.wantCode != codes.OK {
+				assert.Equal(t, "original", mgr.components[compID].FirmwareVersion)
+				assert.Empty(t, mgr.componentPatch)
+			} else {
+				path := tc.updateMask.Paths[0]
+				assert.Equal(t, compID, mgr.componentPatch.ID)
+				assert.Equal(t, path == "position.slot_id", mgr.componentPatch.SlotID != nil)
+				assert.Equal(t, path == "position.tray_idx", mgr.componentPatch.TrayIndex != nil)
+				assert.Equal(t, path == "position.host_id", mgr.componentPatch.HostID != nil)
+			}
+		})
+	}
 }
 
 func TestPatchComponent_MissingID(t *testing.T) {
@@ -579,12 +735,16 @@ func TestPatchComponent_WithBMCs(t *testing.T) {
 	compID := uuid.New()
 	rackID := uuid.New()
 	mac, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+	otherMAC, _ := net.ParseMAC("aa:bb:cc:dd:ee:00")
 	mgr.components[compID] = &component.Component{
 		Type:   devicetypes.ComponentTypeCompute,
 		Info:   deviceinfo.DeviceInfo{ID: compID, Name: "node-01"},
 		RackID: rackID,
 		BmcsByType: map[devicetypes.BMCType][]bmc.BMC{
-			devicetypes.BMCTypeHost: {{MAC: bmc.MACAddress{HardwareAddr: mac}, IP: net.ParseIP("10.0.0.1")}},
+			devicetypes.BMCTypeHost: {
+				{MAC: bmc.MACAddress{HardwareAddr: mac}, IP: net.ParseIP("10.0.0.1")},
+				{MAC: bmc.MACAddress{HardwareAddr: otherMAC}, IP: net.ParseIP("10.0.0.2")},
+			},
 		},
 	}
 
@@ -607,8 +767,9 @@ func TestPatchComponent_WithBMCs(t *testing.T) {
 	require.NotNil(t, resp)
 
 	updated := mgr.components[compID]
-	require.Len(t, updated.BmcsByType[devicetypes.BMCTypeHost], 1)
+	require.Len(t, updated.BmcsByType[devicetypes.BMCTypeHost], 2)
 	assert.Equal(t, "10.0.0.99", updated.BmcsByType[devicetypes.BMCTypeHost][0].IP.String())
+	assert.Equal(t, "10.0.0.2", updated.BmcsByType[devicetypes.BMCTypeHost][1].IP.String())
 }
 
 func TestPatchComponent_BMCsNotProvidedPreservesExisting(t *testing.T) {
@@ -645,6 +806,45 @@ func TestPatchComponent_BMCsNotProvidedPreservesExisting(t *testing.T) {
 }
 
 // --- GetComponents Tests ---
+
+func TestFlowServerImpl_GetListOfRacks(t *testing.T) {
+	_, err := (&FlowServerImpl{inventoryManager: newMockManager()}).GetListOfRacks(
+		t.Context(),
+		&pb.GetListOfRacksRequest{OrderBy: &pb.OrderBy{
+			Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+			Direction: "ASC",
+		}},
+	)
+
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestFlowServerImpl_GetComponents(t *testing.T) {
+	_, err := (&FlowServerImpl{inventoryManager: newMockManager()}).GetComponents(
+		t.Context(),
+		&pb.GetComponentsRequest{OrderBy: &pb.OrderBy{
+			Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+			Direction: "ASC",
+		}},
+	)
+
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestFlowServerImpl_ValidateComponents(t *testing.T) {
+	_, err := (&FlowServerImpl{inventoryManager: newMockManager()}).ValidateComponents(
+		t.Context(),
+		&pb.ValidateComponentsRequest{OrderBy: &pb.OrderBy{
+			Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+			Direction: "ASC",
+		}},
+	)
+
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
 
 func TestGetComponents_TargetSpecNoPagination(t *testing.T) {
 	mgr := newMockManager()
@@ -691,6 +891,43 @@ func TestGetComponents_TargetSpecWithPagination(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, int32(3), resp.Total)
 	assert.Equal(t, 2, len(resp.Components))
+}
+
+func TestFlowServerImpl_sortComponents(t *testing.T) {
+	lowID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	highID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	tests := []struct {
+		name    string
+		orderBy *dbquery.OrderBy
+		wantIDs []uuid.UUID
+	}{
+		{
+			name:    "default name order uses ID tie breaker",
+			wantIDs: []uuid.UUID{lowID, highID},
+		},
+		{
+			name: "descending requested order still uses ascending ID tie breaker",
+			orderBy: &dbquery.OrderBy{
+				Column: "manufacturer", Direction: dbquery.OrderDescending,
+			},
+			wantIDs: []uuid.UUID{lowID, highID},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			components := []*component.Component{
+				{Info: deviceinfo.DeviceInfo{ID: highID, Name: "same", Manufacturer: "same"}},
+				{Info: deviceinfo.DeviceInfo{ID: lowID, Name: "same", Manufacturer: "same"}},
+			}
+
+			err := (&FlowServerImpl{}).sortComponents(components, test.orderBy)
+
+			require.NoError(t, err)
+			assert.Equal(t, test.wantIDs, []uuid.UUID{components[0].Info.ID, components[1].Info.ID})
+		})
+	}
 }
 
 func TestGetComponents_NVLinkDomainTarget(t *testing.T) {
@@ -970,6 +1207,38 @@ func TestValidateComponents_WithPagination(t *testing.T) {
 	require.NotNil(t, resp2)
 	assert.Equal(t, int32(3), resp2.TotalDiffs) // total is still 3
 	assert.Equal(t, 1, len(resp2.Diffs))        // only 1 remaining
+}
+
+func TestValidateComponents_StableDriftOrderBeforePagination(t *testing.T) {
+	mgr := newMockManager()
+	server := &FlowServerImpl{inventoryManager: mgr}
+	driftIDs := []uuid.UUID{
+		uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+		uuid.MustParse("00000000-0000-0000-0000-000000000003"),
+	}
+	externalIDs := []string{"tray-1", "tray-2", "tray-3"}
+	mgr.drifts = []inventorystore.ComponentDrift{
+		{ID: driftIDs[2], ExternalID: &externalIDs[2], DriftType: "missing_in_expected"},
+		{ID: driftIDs[0], ExternalID: &externalIDs[0], DriftType: "missing_in_expected"},
+		{ID: driftIDs[1], ExternalID: &externalIDs[1], DriftType: "missing_in_expected"},
+	}
+
+	first, err := server.ValidateComponents(t.Context(), &pb.ValidateComponentsRequest{
+		Pagination: &pb.Pagination{Offset: 0, Limit: 2},
+	})
+	require.NoError(t, err)
+	second, err := server.ValidateComponents(t.Context(), &pb.ValidateComponentsRequest{
+		Pagination: &pb.Pagination{Offset: 2, Limit: 2},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, first.Diffs, 2)
+	require.Len(t, second.Diffs, 1)
+	assert.Equal(t, []string{"tray-1", "tray-2"}, []string{
+		first.Diffs[0].GetComponentId(), first.Diffs[1].GetComponentId(),
+	})
+	assert.Equal(t, "tray-3", second.Diffs[0].GetComponentId())
 }
 
 func TestValidateComponents_NoTargetSpec_GetAllDrifts(t *testing.T) {

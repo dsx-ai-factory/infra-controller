@@ -4,17 +4,26 @@
 package expectedpowershelf
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"go.temporal.io/sdk/testsuite"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -26,7 +35,6 @@ import (
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -70,6 +78,57 @@ func testExpectedPowerShelfSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
 	assert.Nil(t, err)
+}
+
+type testExpectedPowerShelfReconcileContextKey struct{}
+
+type testExpectedPowerShelfAfterReadHook struct {
+	afterRead    func()
+	beforeCommit func()
+	rowID        uuid.UUID
+}
+
+func (h *testExpectedPowerShelfAfterReadHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if ctx.Value(testExpectedPowerShelfReconcileContextKey{}) == h && event.Operation() == "COMMIT" && h.beforeCommit != nil {
+		h.beforeCommit()
+	}
+	return ctx
+}
+
+func (h *testExpectedPowerShelfAfterReadHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if h.rowID != uuid.Nil && (ctx.Value(testExpectedPowerShelfReconcileContextKey{}) != h || !strings.Contains(event.Query, h.rowID.String())) {
+		return
+	}
+	if h.afterRead == nil || event.Err != nil || event.Operation() != "SELECT" ||
+		strings.HasPrefix(event.Query, "SELECT count(") || !strings.Contains(event.Query, `FROM "expected_power_shelf"`) {
+		return
+	}
+	afterRead := h.afterRead
+	h.afterRead = nil
+	afterRead()
+}
+
+type testExpectedPowerShelfBeforeDeleteHook struct {
+	rowID        uuid.UUID
+	beforeDelete func()
+	fired        bool
+	err          error
+}
+
+func (h *testExpectedPowerShelfBeforeDeleteHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !h.fired && event.Operation() == "DELETE" && strings.Contains(event.Query, `FROM "expected_power_shelf"`) && strings.Contains(event.Query, h.rowID.String()) {
+		h.fired = true
+		if h.beforeDelete != nil {
+			h.beforeDelete()
+		}
+	}
+	return ctx
+}
+
+func (h *testExpectedPowerShelfBeforeDeleteHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if event.Operation() == "DELETE" && strings.Contains(event.Query, `FROM "expected_power_shelf"`) && strings.Contains(event.Query, h.rowID.String()) {
+		h.err = event.Err
+	}
 }
 
 func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
@@ -126,8 +185,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 
 		// Update creation and update timestamp to be earlier than inventory processing interval
 		_, uerr := dbSession.DB.Exec("UPDATE expected_power_shelf SET created = ?, updated = ? WHERE id = ?",
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
 			eps.ID.String())
 		assert.NoError(t, uerr)
 
@@ -177,7 +236,8 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 		}
 
 		// Test label updates: add/modify labels for some power shelves
-		if i == 1 {
+		switch i {
+		case 1:
 			// Add labels to a power shelf that didn't have them before
 			ctrlExpectedPowerShelf.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -185,7 +245,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				},
 			}
 			expectedPowerShelvesToUpdate = append(expectedPowerShelvesToUpdate, pagedExpectedPowerShelves[i])
-		} else if i == 5 {
+		case 5:
 			// Modify existing labels
 			ctrlExpectedPowerShelf.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -195,13 +255,13 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				},
 			}
 			expectedPowerShelvesToUpdate = append(expectedPowerShelvesToUpdate, pagedExpectedPowerShelves[i])
-		} else if i == 10 {
+		case 10:
 			// Remove labels (set to empty labels array)
 			ctrlExpectedPowerShelf.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{},
 			}
 			expectedPowerShelvesToUpdate = append(expectedPowerShelvesToUpdate, pagedExpectedPowerShelves[i])
-		} else if i == 15 {
+		case 15:
 			// Remove labels (set metadata to nil)
 			ctrlExpectedPowerShelf.Metadata = nil
 			expectedPowerShelvesToUpdate = append(expectedPowerShelvesToUpdate, pagedExpectedPowerShelves[i])
@@ -230,12 +290,18 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 		expectedPowerShelfInventory *corev1.ExpectedPowerShelfInventory
 	}
 
+	unsupportedNewID := uuid.New()
+
 	tests := []struct {
 		name                         string
 		fields                       fields
 		args                         args
 		expectedPowerShelvesToUpdate []*cdbm.ExpectedPowerShelf
 		expectedPowerShelvesToDelete []*cdbm.ExpectedPowerShelf
+		unchangedID                  uuid.UUID
+		notCreatedID                 uuid.UUID
+		wantWarning                  string
+		wantInventoryStatus          string
 		wantErr                      bool
 	}{
 		{
@@ -263,6 +329,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				ctx:    ctx,
 				siteID: uuid.New(),
 				expectedPowerShelfInventory: &corev1.ExpectedPowerShelfInventory{
+					InventoryStatus:      corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 					ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{},
 				},
 			},
@@ -284,7 +351,56 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 					InventoryStatus:      corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
 				},
 			},
-			wantErr: false,
+			unchangedID: pagedExpectedPowerShelves[7].ID,
+			wantErr:     false,
+			wantWarning: "received failed inventory status from Site Agent, skipping inventory processing",
+		},
+		{
+			name: "test ExpectedPowerShelf inventory processing, unspecified inventory status",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:                         ctx,
+				siteID:                      st.ID,
+				expectedPowerShelfInventory: &corev1.ExpectedPowerShelfInventory{},
+			},
+			unchangedID:         pagedExpectedPowerShelves[7].ID,
+			wantWarning:         "received unsupported inventory status, skipping inventory processing",
+			wantInventoryStatus: "INVENTORY_STATUS_UNSPECIFIED",
+		},
+		{
+			name: "test ExpectedPowerShelf inventory processing, unknown inventory status",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st.ID,
+				expectedPowerShelfInventory: &corev1.ExpectedPowerShelfInventory{
+					InventoryStatus: corev1.InventoryStatus(99),
+					ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{
+						{
+							ExpectedPowerShelfId: &corev1.UUID{Value: pagedExpectedPowerShelves[7].ID.String()},
+							BmcMacAddress:        "00:11:22:33:66:07",
+							ShelfSerialNumber:    pagedExpectedPowerShelves[7].ShelfSerialNumber,
+						},
+						{
+							ExpectedPowerShelfId: &corev1.UUID{Value: unsupportedNewID.String()},
+							BmcMacAddress:        "00:11:22:33:66:FF",
+							ShelfSerialNumber:    "SN-UNSUPPORTED",
+						},
+					},
+				},
+			},
+			unchangedID:         pagedExpectedPowerShelves[7].ID,
+			wantWarning:         "received unsupported inventory status, skipping inventory processing",
+			wantInventoryStatus: "99",
+			notCreatedID:        unsupportedNewID,
 		},
 		{
 			name: "test paged ExpectedPowerShelf inventory processing, empty inventory",
@@ -335,6 +451,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 			},
 			expectedPowerShelvesToUpdate: expectedPowerShelvesToUpdate,
 			expectedPowerShelvesToDelete: []*cdbm.ExpectedPowerShelf{},
+			unchangedID:                  pagedExpectedPowerShelves[7].ID,
 		},
 		{
 			name: "test paged ExpectedPowerShelf inventory processing, last page",
@@ -403,8 +520,36 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 				siteClientPool: tt.fields.siteClientPool,
 			}
 
+			var beforeUnchanged *cdbm.ExpectedPowerShelf
+			if tt.unchangedID != uuid.Nil {
+				var err error
+				beforeUnchanged, err = epsDAO.Get(ctx, nil, tt.unchangedID, nil, false)
+				require.NoError(t, err)
+				require.Nil(t, beforeUnchanged.Labels)
+				require.False(t, st.IsTimeWithinStaleInventoryThreshold(beforeUnchanged.Updated))
+			}
+
+			var logOutput bytes.Buffer
+			if tt.wantWarning != "" {
+				originalLogger := log.Logger
+				log.Logger = zerolog.New(&logOutput).Level(zerolog.WarnLevel)
+				t.Cleanup(func() { log.Logger = originalLogger })
+			}
+
 			err := mei.UpdateExpectedPowerShelvesInDB(tt.args.ctx, tt.args.siteID, tt.args.expectedPowerShelfInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
+
+			if tt.wantWarning != "" {
+				var warning map[string]any
+				require.NoError(t, json.Unmarshal(logOutput.Bytes(), &warning))
+				assert.Equal(t, "warn", warning["level"])
+				assert.Equal(t, tt.wantWarning, warning["message"])
+				assert.Equal(t, "UpdateExpectedPowerShelvesInDB", warning["Activity"])
+				assert.Equal(t, tt.args.siteID.String(), warning["Site ID"])
+				if tt.wantInventoryStatus != "" {
+					assert.Equal(t, tt.wantInventoryStatus, warning["inventory_status"])
+				}
+			}
 
 			if tt.wantErr {
 				return
@@ -420,6 +565,16 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 			powerShelvesByID := map[uuid.UUID]*cdbm.ExpectedPowerShelf{}
 			for i := range allPowerShelves {
 				powerShelvesByID[allPowerShelves[i].ID] = &allPowerShelves[i]
+			}
+
+			if tt.notCreatedID != uuid.Nil {
+				assert.NotContains(t, powerShelvesByID, tt.notCreatedID)
+			}
+
+			if beforeUnchanged != nil {
+				unchanged := powerShelvesByID[beforeUnchanged.ID]
+				require.NotNil(t, unchanged)
+				assert.Equal(t, beforeUnchanged, unchanged, "stored row must keep every field, including Updated")
 			}
 
 			for _, eps := range tt.expectedPowerShelvesToUpdate {
@@ -487,65 +642,498 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 			}
 		})
 	}
-}
+	t.Run("API write after inventory read survives reconciliation", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "concurrent-update-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        "00:11:22:33:99:01",
+			ShelfSerialNumber:    "SN-CONCURRENT",
+			Name:                 cutil.GetPtr("original-name"),
+			Description:          cutil.GetPtr("original-description"),
+			CreatedBy:            ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
 
-func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB_RaceCondition(t *testing.T) {
-	ctx := context.Background()
-
-	dbSession := testExpectedPowerShelfInitDB(t)
-	defer dbSession.Close()
-
-	testExpectedPowerShelfSetupSchema(t, dbSession)
-
-	ipOrg := "test-provider-org"
-	ipRoles := []string{"FORGE_PROVIDER_ADMIN"}
-
-	ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, ipRoles)
-	ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
-	st := cwu.TestBuildSite(t, dbSession, ip, "test-site-race", cdbm.SiteStatusRegistered, nil, ipu)
-
-	// Create an ExpectedPowerShelf: newly create record will have a timestamp within race condition window
-	epsDAO := cdbm.NewExpectedPowerShelfDAO(dbSession)
-	recentEPS, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
-		ExpectedPowerShelfID: uuid.New(),
-		SiteID:               st.ID,
-		BmcMacAddress:        "00:11:22:33:44:AA",
-		ShelfSerialNumber:    "SHELF-SN-RECENT",
-		CreatedBy:            ipu.ID,
-	})
-	assert.NoError(t, err)
-
-	tSiteClientPool := testTemporalSiteClientPool(t)
-
-	mei := ManageExpectedPowerShelf{
-		dbSession:      dbSession,
-		siteClientPool: tSiteClientPool,
-	}
-
-	// Send inventory without this power shelf - it should NOT be deleted due to race condition
-	inventory := &corev1.ExpectedPowerShelfInventory{
-		ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{},
-		Timestamp:            timestamppb.Now(),
-		InventoryStatus:      corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-	}
-
-	err = mei.UpdateExpectedPowerShelvesInDB(ctx, st.ID, inventory)
-	assert.NoError(t, err)
-
-	// Verify the power shelf was NOT deleted
-	filterInput := cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{st.ID}}
-	allPowerShelves, _, gerr := epsDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	assert.NoError(t, gerr)
-
-	// Check if the recent power shelf still exists
-	found := false
-	for _, eps := range allPowerShelves {
-		if eps.ID == recentEPS.ID {
-			found = true
-			break
+		// Commit the API edit after the inventory read has cached the old row.
+		var newer *cdbm.ExpectedPowerShelf
+		var writeErr error
+		fired := false
+		hook := &testExpectedPowerShelfAfterReadHook{afterRead: func() {
+			fired = true
+			newer, writeErr = epsDAO.Update(ctx, nil, cdbm.ExpectedPowerShelfUpdateInput{
+				ExpectedPowerShelfID: row.ID,
+				Name:                 cutil.GetPtr("API-name"),
+				Description:          cutil.GetPtr("API-description"),
+			})
+		}}
+		dbSession.DB.AddQueryHook(hook)
+		defer func() { hook.afterRead = nil }()
+		inventory := &corev1.ExpectedPowerShelfInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{{
+				ExpectedPowerShelfId: &corev1.UUID{Value: row.ID.String()},
+				BmcMacAddress:        row.BmcMacAddress,
+				ShelfSerialNumber:    row.ShelfSerialNumber,
+				Metadata:             &corev1.Metadata{Name: "inventory-name", Description: "inventory-description"},
+			}},
 		}
-	}
-	assert.True(t, found, "Recently updated ExpectedPowerShelf should NOT be deleted due to race condition")
+		mei := ManageExpectedPowerShelf{dbSession: dbSession}
+		err = mei.UpdateExpectedPowerShelvesInDB(ctx, site.ID, inventory)
+		require.True(t, fired)
+		require.NoError(t, writeErr)
+		require.NoError(t, err)
+		stored, err := epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, newer, stored, "both API values and Updated must survive")
+
+		// A later inventory can still replace the supplied metadata.
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
+		err = mei.UpdateExpectedPowerShelvesInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+		stored, err = epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr("inventory-name"), stored.Name)
+		assert.Equal(t, cutil.GetPtr("inventory-description"), stored.Description)
+	})
+
+	t.Run("API write after inventory read survives deletion", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "concurrent-delete-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        "00:11:22:33:99:03",
+			ShelfSerialNumber:    "SN-CONCURRENT-DELETE",
+			Name:                 cutil.GetPtr("original-name"),
+			Description:          cutil.GetPtr("original-description"),
+			CreatedBy:            ipu.ID,
+		})
+		require.NoError(t, err)
+		companion, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        "00:11:22:33:99:04",
+			ShelfSerialNumber:    "SN-UNCHANGED-DELETE",
+			CreatedBy:            ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
+		beforeRead, err := epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeRead.Updated))
+
+		// Commit the API edit immediately before `DELETE` executes. An unlocked
+		// version recheck followed by an unconditional delete would lose it.
+		var newer *cdbm.ExpectedPowerShelf
+		var writeErr error
+		hook := &testExpectedPowerShelfBeforeDeleteHook{rowID: row.ID, beforeDelete: func() {
+			newer, writeErr = epsDAO.Update(ctx, nil, cdbm.ExpectedPowerShelfUpdateInput{
+				ExpectedPowerShelfID: row.ID,
+				Name:                 cutil.GetPtr("API-name"),
+				Description:          cutil.GetPtr("API-description"),
+			})
+		}}
+		dbSession.DB.AddQueryHook(hook)
+		defer func() { hook.beforeDelete = nil }()
+		inventory := &corev1.ExpectedPowerShelfInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		}
+		mei := ManageExpectedPowerShelf{dbSession: dbSession}
+		err = mei.UpdateExpectedPowerShelvesInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+		require.True(t, hook.fired)
+		require.NoError(t, hook.err)
+		require.NoError(t, writeErr)
+		require.True(t, newer.Updated.After(beforeRead.Updated))
+		stored, err := epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, newer, stored, "both API values and Updated must survive")
+		_, err = epsDAO.Get(ctx, nil, companion.ID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	})
+
+	t.Run("delete failure allows other deletions and retries on later inventory", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "failed-delete-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        "00:11:22:33:99:05",
+			ShelfSerialNumber:    "SN-FAILED-DELETE",
+			CreatedBy:            ipu.ID,
+		})
+		require.NoError(t, err)
+		companion, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        "00:11:22:33:99:06",
+			ShelfSerialNumber:    "SN-CONTINUE-DELETE",
+			CreatedBy:            ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
+		// `GetAll` orders by `created`, so process the failing row first.
+		_, err = dbSession.DB.NewUpdate().Model((*cdbm.ExpectedPowerShelf)(nil)).
+			Set("created = ?", companion.Created.Add(-time.Hour)).Where("id = ?", row.ID).Exec(ctx)
+		require.NoError(t, err)
+		rows, _, err := epsDAO.GetAll(ctx, nil, cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{site.ID}}, cdbp.PageInput{}, nil)
+		require.NoError(t, err)
+		require.Len(t, rows, 2)
+		require.Equal(t, row.ID, rows[0].ID)
+		require.Equal(t, companion.ID, rows[1].ID)
+
+		_, err = dbSession.DB.ExecContext(ctx, `CREATE FUNCTION fail_expected_power_shelf_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected database failure'; END $$`)
+		require.NoError(t, err)
+		defer func() {
+			_, cleanupErr := dbSession.DB.ExecContext(ctx, "DROP FUNCTION fail_expected_power_shelf_delete() CASCADE")
+			require.NoError(t, cleanupErr)
+		}()
+		_, err = dbSession.DB.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER fail_delete BEFORE DELETE ON expected_power_shelf FOR EACH ROW WHEN (OLD.id = '%s') EXECUTE FUNCTION fail_expected_power_shelf_delete()", row.ID))
+		require.NoError(t, err)
+		deleted, err := epsDAO.DeleteIfUnchanged(ctx, nil, row.ID, rows[0].Updated)
+		require.False(t, deleted)
+		require.ErrorContains(t, err, "injected database failure")
+		hook := &testExpectedPowerShelfBeforeDeleteHook{rowID: row.ID}
+		dbSession.DB.AddQueryHook(hook)
+		inventory := &corev1.ExpectedPowerShelfInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS}
+		mei := ManageExpectedPowerShelf{dbSession: dbSession}
+		require.NoError(t, mei.UpdateExpectedPowerShelvesInDB(ctx, site.ID, inventory))
+		require.True(t, hook.fired)
+		require.ErrorContains(t, hook.err, "injected database failure")
+		stored, err := epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, &rows[0], stored)
+		_, err = epsDAO.Get(ctx, nil, companion.ID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+		// A later inventory retries the row once the database accepts writes.
+		_, err = dbSession.DB.ExecContext(ctx, "DROP TRIGGER fail_delete ON expected_power_shelf")
+		require.NoError(t, err)
+		require.NoError(t, mei.UpdateExpectedPowerShelvesInDB(ctx, site.ID, inventory))
+		_, err = epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	})
+
+	t.Run("row lock protects reconciliation through commit", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		site := cwu.TestBuildSite(t, dbSession, ip, "locked-update-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        "00:11:22:33:99:02",
+			ShelfSerialNumber:    "SN-LOCKED",
+			Name:                 cutil.GetPtr("original-name"),
+			Description:          cutil.GetPtr("original-description"),
+			CreatedBy:            ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
+
+		readReached, commitReached := make(chan struct{}), make(chan struct{})
+		continueRead, continueCommit := make(chan struct{}), make(chan struct{})
+		releaseRead := sync.OnceFunc(func() { close(continueRead) })
+		releaseCommit := sync.OnceFunc(func() { close(continueCommit) })
+		var workers sync.WaitGroup
+		defer func() {
+			releaseRead()
+			releaseCommit()
+			cancel()
+			workers.Wait()
+		}()
+		hook := &testExpectedPowerShelfAfterReadHook{
+			rowID: row.ID,
+			afterRead: func() {
+				close(readReached)
+				select {
+				case <-continueRead:
+				case <-ctx.Done():
+				}
+			},
+			beforeCommit: func() {
+				close(commitReached)
+				select {
+				case <-continueCommit:
+				case <-ctx.Done():
+				}
+			},
+		}
+		dbSession.DB.AddQueryHook(hook)
+		inventory := &corev1.ExpectedPowerShelfInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{{
+				ExpectedPowerShelfId: &corev1.UUID{Value: row.ID.String()},
+				BmcMacAddress:        row.BmcMacAddress,
+				ShelfSerialNumber:    row.ShelfSerialNumber,
+				Metadata:             &corev1.Metadata{Name: "inventory-name", Description: "inventory-description"},
+			}},
+		}
+		mei := ManageExpectedPowerShelf{dbSession: dbSession}
+		var activityErr, writerErr error
+		workers.Go(func() {
+			activityErr = mei.UpdateExpectedPowerShelvesInDB(context.WithValue(ctx, testExpectedPowerShelfReconcileContextKey{}, hook), site.ID, inventory)
+		})
+		select {
+		case <-readReached:
+		case <-ctx.Done():
+			t.Fatal("activity did not reach its row reload: ", ctx.Err())
+		}
+
+		writerReady := make(chan int, 1)
+		workers.Go(func() {
+			writerErr = cdb.WithTx(ctx, dbSession, func(tx *cdb.Tx) error {
+				var pid int
+				err := tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid)
+				if err != nil {
+					return err
+				}
+				writerReady <- pid
+				_, err = epsDAO.Update(ctx, tx, cdbm.ExpectedPowerShelfUpdateInput{
+					ExpectedPowerShelfID: row.ID,
+					Name:                 cutil.GetPtr("API-name"),
+				})
+				return err
+			})
+		})
+		var writerPID int
+		select {
+		case writerPID = <-writerReady:
+		case <-ctx.Done():
+			t.Fatal("API writer did not start: ", ctx.Err())
+		}
+		assertWriterBlocked := func() {
+			t.Helper()
+			require.Eventually(t, func() bool {
+				var blockers int
+				err := dbSession.DB.NewSelect().ColumnExpr("cardinality(pg_blocking_pids(?))", writerPID).Scan(ctx, &blockers)
+				return err == nil && blockers > 0
+			}, 5*time.Second, 10*time.Millisecond, "API write did not wait for reconciliation")
+		}
+		assertWriterBlocked()
+		releaseRead()
+		select {
+		case <-commitReached:
+		case <-ctx.Done():
+			t.Fatal("activity did not reach commit: ", ctx.Err())
+		}
+		// The writer must still wait after reconciliation has written the row.
+		assertWriterBlocked()
+		releaseCommit()
+		workers.Wait()
+		require.NoError(t, activityErr)
+		require.NoError(t, writerErr)
+		stored, err := epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr("API-name"), stored.Name)
+		assert.Equal(t, cutil.GetPtr("inventory-description"), stored.Description)
+	})
+
+	t.Run("sync supplied fields and preserve Cloud metadata", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "snapshot-site", cdbm.SiteStatusRegistered, nil, ipu)
+		id := uuid.New()
+		mei := ManageExpectedPowerShelf{dbSession: dbSession}
+		cases := []struct {
+			name     string
+			prepare  func(t *testing.T)
+			reported *corev1.ExpectedPowerShelf
+			want     cdbm.ExpectedPowerShelf
+		}{
+			{
+				name: "create supplied Core fields",
+				reported: &corev1.ExpectedPowerShelf{
+					BmcIpAddress: "192.0.2.10",
+					RackId:       &corev1.RackId{Id: "initial-rack"},
+					Metadata: &corev1.Metadata{
+						Name:        "initial-name",
+						Description: "initial-description",
+						Labels: []*corev1.Label{
+							{Key: "model", Value: cutil.GetPtr("initial-model")},
+						},
+					},
+				},
+				want: cdbm.ExpectedPowerShelf{
+					BmcIpAddress: cutil.GetPtr("192.0.2.10"),
+					RackID:       cutil.GetPtr("initial-rack"),
+					Name:         cutil.GetPtr("initial-name"),
+					Description:  cutil.GetPtr("initial-description"),
+					Labels:       cdbm.Labels{"model": "initial-model"},
+				},
+			},
+		}
+		for _, field := range []struct {
+			name  string
+			apply func(*corev1.ExpectedPowerShelf, *cdbm.ExpectedPowerShelf)
+		}{
+			{"rack", func(reported *corev1.ExpectedPowerShelf, want *cdbm.ExpectedPowerShelf) {
+				reported.RackId.Id = "updated-rack"
+				want.RackID = cutil.GetPtr("updated-rack")
+			}},
+			{"name", func(reported *corev1.ExpectedPowerShelf, want *cdbm.ExpectedPowerShelf) {
+				reported.Metadata.Name = "updated-name"
+				reported.Metadata.Description = ""
+				want.Name = cutil.GetPtr("updated-name")
+			}},
+			{"description", func(reported *corev1.ExpectedPowerShelf, want *cdbm.ExpectedPowerShelf) {
+				reported.Metadata.Name = ""
+				reported.Metadata.Description = "updated-description"
+				want.Description = cutil.GetPtr("updated-description")
+			}},
+		} {
+			next := cases[len(cases)-1]
+			next.name = "replace only " + field.name
+			next.reported = proto.Clone(next.reported).(*corev1.ExpectedPowerShelf)
+			field.apply(next.reported, &next.want)
+			cases = append(cases, next)
+		}
+
+		preserved := cases[len(cases)-1]
+		preserved.name = "preserve Cloud metadata when Core omits it"
+		preserved.reported = &corev1.ExpectedPowerShelf{Metadata: &corev1.Metadata{Labels: []*corev1.Label{
+			{Key: "model", Value: cutil.GetPtr("updated-model-label")},
+		}}}
+		preserved.want.Name = cutil.GetPtr("Cloud-name")
+		preserved.want.Description = cutil.GetPtr("Cloud-description")
+		preserved.want.RackID = cutil.GetPtr("Cloud-rack")
+		preserved.want.Manufacturer = cutil.GetPtr("Cloud-manufacturer")
+		preserved.want.Model = cutil.GetPtr("Cloud-model")
+		preserved.want.SlotID = cutil.GetPtr(int32(3))
+		preserved.want.TrayIdx = cutil.GetPtr(int32(4))
+		preserved.want.HostID = cutil.GetPtr(int32(5))
+		preserved.want.Labels = cdbm.Labels{"model": "updated-model-label"}
+		preserved.prepare = func(t *testing.T) {
+			_, err := epsDAO.Update(ctx, nil, cdbm.ExpectedPowerShelfUpdateInput{
+				ExpectedPowerShelfID: id,
+				Name:                 preserved.want.Name,
+				Description:          preserved.want.Description,
+				RackID:               preserved.want.RackID,
+				Manufacturer:         preserved.want.Manufacturer,
+				Model:                preserved.want.Model,
+				SlotID:               preserved.want.SlotID,
+				TrayIdx:              preserved.want.TrayIdx,
+				HostID:               preserved.want.HostID,
+			})
+			require.NoError(t, err)
+		}
+		cases = append(cases, preserved)
+
+		withoutLabels := preserved
+		withoutLabels.name = "clear omitted labels without clearing Cloud metadata"
+		withoutLabels.prepare = nil
+		withoutLabels.reported = &corev1.ExpectedPowerShelf{}
+		withoutLabels.want.Labels = cdbm.Labels{}
+		cases = append(cases, withoutLabels)
+
+		var created time.Time
+		createdBy := site.ID
+		for i, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				if i != 0 {
+					_, err := epsDAO.Get(ctx, nil, id, nil, false)
+					require.NoError(t, err, "update snapshot requires the preceding create step")
+				}
+				if tc.prepare != nil {
+					tc.prepare(t)
+				}
+				tc.reported.ExpectedPowerShelfId = &corev1.UUID{Value: id.String()}
+				tc.reported.BmcMacAddress = "00:11:22:33:88:01"
+				tc.reported.ShelfSerialNumber = "SN-SNAPSHOT"
+				inventory := &corev1.ExpectedPowerShelfInventory{
+					ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{tc.reported},
+					InventoryStatus:      corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
+				err := mei.UpdateExpectedPowerShelvesInDB(ctx, site.ID, inventory)
+				require.NoError(t, err)
+				stored, err := epsDAO.Get(ctx, nil, id, nil, false)
+				require.NoError(t, err)
+				if created.IsZero() {
+					created = stored.Created
+				}
+				tc.want.ID = id
+				tc.want.SiteID = site.ID
+				tc.want.BmcMacAddress = tc.reported.BmcMacAddress
+				tc.want.ShelfSerialNumber = tc.reported.ShelfSerialNumber
+				tc.want.Created = created
+				tc.want.CreatedBy = createdBy
+				tc.want.Updated = stored.Updated
+				assert.Equal(t, tc.want, *stored)
+
+				// Repeating an aged snapshot must not refresh `Updated`.
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
+				beforeRepeat, err := epsDAO.Get(ctx, nil, id, nil, false)
+				require.NoError(t, err)
+				err = mei.UpdateExpectedPowerShelvesInDB(ctx, site.ID, inventory)
+				require.NoError(t, err)
+				afterRepeat, err := epsDAO.Get(ctx, nil, id, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, beforeRepeat.Updated, afterRepeat.Updated)
+
+				// Subsequent snapshots must preserve the Cloud creator.
+				createdBy = ipu.ID
+				_, err = dbSession.DB.Exec("UPDATE expected_power_shelf SET created_by = ? WHERE id = ?", createdBy, id)
+				require.NoError(t, err)
+			})
+		}
+	})
+
+	t.Run("recent row survives omitted inventory", func(t *testing.T) {
+		ctx := context.Background()
+
+		dbSession := testExpectedPowerShelfInitDB(t)
+		defer dbSession.Close()
+
+		testExpectedPowerShelfSetupSchema(t, dbSession)
+
+		ipOrg := "test-provider-org"
+		ipRoles := []string{"FORGE_PROVIDER_ADMIN"}
+
+		ipu := cwu.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, ipRoles)
+		ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
+		st := cwu.TestBuildSite(t, dbSession, ip, "test-site-race", cdbm.SiteStatusRegistered, nil, ipu)
+
+		// Create an ExpectedPowerShelf: newly create record will have a timestamp within race condition window
+		epsDAO := cdbm.NewExpectedPowerShelfDAO(dbSession)
+		recentEPS, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               st.ID,
+			BmcMacAddress:        "00:11:22:33:44:AA",
+			ShelfSerialNumber:    "SHELF-SN-RECENT",
+			CreatedBy:            ipu.ID,
+		})
+		assert.NoError(t, err)
+
+		tSiteClientPool := testTemporalSiteClientPool(t)
+
+		mei := ManageExpectedPowerShelf{
+			dbSession:      dbSession,
+			siteClientPool: tSiteClientPool,
+		}
+
+		// Send inventory without this power shelf - it should NOT be deleted due to race condition
+		inventory := &corev1.ExpectedPowerShelfInventory{
+			ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{},
+			Timestamp:            timestamppb.Now(),
+			InventoryStatus:      corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		}
+
+		err = mei.UpdateExpectedPowerShelvesInDB(ctx, st.ID, inventory)
+		assert.NoError(t, err)
+
+		// Verify the power shelf was NOT deleted
+		filterInput := cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{st.ID}}
+		allPowerShelves, _, gerr := epsDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		assert.NoError(t, gerr)
+
+		// Check if the recent power shelf still exists
+		found := false
+		for _, eps := range allPowerShelves {
+			if eps.ID == recentEPS.ID {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "Recently updated ExpectedPowerShelf should NOT be deleted due to race condition")
+	})
 }
 
 func TestNewManageExpectedPowerShelf(t *testing.T) {

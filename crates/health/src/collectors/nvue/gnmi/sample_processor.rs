@@ -16,17 +16,18 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Instant;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::rack::RackId;
 
 use super::client::{typed_value_to_f64, typed_value_to_string};
 use super::proto::{self, PathElem};
+use super::reconciliation::{MetricReconciler, MetricSnapshot, SourcePath};
 use super::subscriber::GnmiStreamMetrics;
-use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
+use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics};
 
 pub(crate) const NVUE_GNMI_SAMPLE_STREAM_ID: &str = "nvue_gnmi";
 
@@ -34,9 +35,158 @@ pub(crate) struct GnmiSampleProcessor {
     pub(crate) data_sink: Option<Arc<dyn DataSink>>,
     pub(crate) event_context: EventContext,
     pub(crate) switch_id: String,
+    pub(crate) diagnostic_stream: Option<&'static str>,
+    pub(super) reconciliation: Option<Arc<MetricReconciler>>,
+    counter_epochs: Mutex<InterfaceCounterEpochs>,
 }
 
 impl GnmiSampleProcessor {
+    pub(super) fn new(
+        data_sink: Option<Arc<dyn DataSink>>,
+        event_context: EventContext,
+        switch_id: String,
+        diagnostic_stream: Option<&'static str>,
+        reconciliation_enabled: bool,
+    ) -> Self {
+        Self {
+            reconciliation: reconciliation_enabled.then(|| {
+                Arc::new(MetricReconciler::new(
+                    data_sink.clone(),
+                    event_context.clone(),
+                    None,
+                ))
+            }),
+            data_sink,
+            event_context,
+            switch_id,
+            diagnostic_stream,
+            counter_epochs: Mutex::default(),
+        }
+    }
+
+    /// Discards metadata and replay history before opening a new subscription.
+    pub(super) fn clear_counter_epochs(&self) {
+        let mut epochs = self
+            .counter_epochs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Replacing the entire tracker restores its invariants after a panic.
+        *epochs = InterfaceCounterEpochs::default();
+        self.counter_epochs.clear_poison();
+    }
+
+    #[cfg(test)]
+    pub(super) fn counter_epoch_start(
+        &self,
+        interface: &str,
+        observed_at: i64,
+    ) -> Option<SystemTime> {
+        self.counter_epochs
+            .lock()
+            .expect("counter epochs")
+            .start_time(interface, observed_at)
+    }
+
+    /// Tracks epochs backed by metric sources when this snapshot begins.
+    pub(super) fn begin_reconciliation(
+        &self,
+        request: &proto::SubscribeRequest,
+    ) -> Option<MetricSnapshot> {
+        let reconciliation = self.reconciliation.as_ref()?;
+        let snapshot = reconciliation.begin(request)?;
+        let mut epochs = self
+            .counter_epochs
+            .lock()
+            .expect("counter epoch mutex poisoned; source metadata may be inconsistent");
+        let mut candidates = HashSet::new();
+
+        reconciliation.for_each_source(|source| {
+            if let Some(interface) = source_interface(source)
+                && epochs.interfaces.contains_key(interface)
+            {
+                candidates.insert(interface.to_string());
+            }
+        });
+        epochs.reconciliation_candidates = candidates;
+        Some(snapshot)
+    }
+
+    /// Completes cleanup; `None` discards a failed or cancelled snapshot.
+    /// Returns the removed metric count, excluding epoch invalidations.
+    pub(super) fn finish_reconciliation(&self, snapshot: Option<MetricSnapshot>) -> usize {
+        let Some(reconciliation) = &self.reconciliation else {
+            return 0;
+        };
+        let completed = snapshot.is_some();
+        let removed = reconciliation.finish(snapshot);
+        let mut epochs = self
+            .counter_epochs
+            .lock()
+            .expect("counter epoch mutex poisoned; source metadata may be inconsistent");
+        let mut candidates = std::mem::take(&mut epochs.reconciliation_candidates);
+
+        if completed {
+            // Retained metric sources keep their interface epochs. Live metadata
+            // also protects its epoch, even when no metric source remains.
+            reconciliation.for_each_source(|source| {
+                if let Some(interface) = source_interface(source) {
+                    candidates.remove(interface);
+                }
+            });
+            for interface in candidates {
+                // No source timestamp exists for inferred absence. Preserve the
+                // replay boundary while requiring newer metadata to restore a start.
+                epochs.record(&interface, 0, None);
+            }
+        }
+        removed
+    }
+
+    fn update_counter_epochs(&self, notification: &proto::Notification, prefix: &[PathElem]) {
+        let mut epochs = self
+            .counter_epochs
+            .lock()
+            .expect("counter epoch mutex poisoned; source metadata may be inconsistent");
+
+        // Deletes invalidate old epochs before replacements in the same notification.
+        for path in &notification.delete {
+            let combined = prefix.iter().chain(&path.elem).collect::<Vec<_>>();
+            epochs.delete(&combined, notification.timestamp);
+        }
+
+        // Learn metadata before projecting counters. Even an unusable counter
+        // reading proves the interface is live and protects its retained epoch.
+        for update in &notification.update {
+            let path = update
+                .path
+                .as_ref()
+                .map(|path| path.elem.as_slice())
+                .unwrap_or_default();
+            let combined = prefix.iter().chain(path).collect::<Vec<_>>();
+
+            let Some(interface) = openconfig_interface(&combined) else {
+                continue;
+            };
+            let tail = &combined[2..];
+            if tail.iter().map(|element| element.name.as_str()).eq([
+                "state",
+                "counters",
+                "last-clear",
+            ]) {
+                epochs.reconciliation_candidates.remove(interface);
+                epochs.record(
+                    interface,
+                    notification.timestamp,
+                    update.val.as_ref().and_then(last_clear_time),
+                );
+            } else if numeric_interface_leaf(tail).is_some_and(|metric| {
+                matches!(metric.semantics, MetricSemantics::CumulativeCounter { .. })
+            }) {
+                epochs.reconciliation_candidates.remove(interface);
+            }
+        }
+    }
+
     #[allow(deprecated)]
     pub(crate) fn process_subscribe_response(
         &self,
@@ -51,6 +201,7 @@ impl GnmiSampleProcessor {
                 tracing::warn!(
                     grpc_status_code = e.code,
                     error = %e.message,
+                    stream = self.diagnostic_stream,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "nvue_gnmi SAMPLE: server error in stream"
                 );
@@ -60,9 +211,7 @@ impl GnmiSampleProcessor {
         };
 
         stream_metrics.notifications_received_total.inc();
-        stream_metrics
-            .last_notification_timestamp
-            .set(now_unix_secs());
+        stream_metrics.set_last_notification_timestamp(now_unix_secs());
 
         let start = Instant::now();
         let entity_count = self.process_notification(notification);
@@ -81,12 +230,80 @@ impl GnmiSampleProcessor {
 
         let mut entities: HashSet<(&str, &str)> = HashSet::new();
 
-        for update in &notification.update {
-            let val = match update.val.as_ref() {
-                Some(v) => v,
-                None => continue,
+        self.update_counter_epochs(notification, prefix_elems);
+
+        // Apply live Deletes to tracked source keys and existing metric selectors
+        // before processing replacement updates.
+        for path in &notification.delete {
+            let combined = prefix_elems.iter().chain(&path.elem).collect::<Vec<_>>();
+
+            if let Some(reconciliation) = &self.reconciliation {
+                reconciliation.delete(&combined);
+            }
+
+            let Some(sink) = &self.data_sink else {
+                continue;
             };
 
+            let prune = |metric_type, labels: &[crate::metrics::MetricLabel]| {
+                sink.prune_metrics(&self.event_context, metric_type, labels, None, None);
+            };
+
+            let entity = [
+                ("interface", "name", "interface_name"),
+                ("component", "name", "component_name"),
+                ("leak-sensor", "id", "sensor"),
+            ]
+            .into_iter()
+            .find_map(|(element, key, label)| {
+                find_elem_key_ref(&combined, element, key)
+                    .map(|value| (element, (Cow::Borrowed(label), value.to_string())))
+            });
+
+            let labels = entity
+                .as_ref()
+                .map(|(_, label)| std::slice::from_ref(label))
+                .unwrap_or(&[]);
+
+            if entity.as_ref().is_some_and(|(element, _)| {
+                combined.last().is_some_and(|last| last.name == *element)
+            }) {
+                prune(None, labels);
+                continue;
+            }
+
+            for mapping in numeric_interface_leaves() {
+                if delete_covers_metric(
+                    &combined,
+                    ["interfaces", "interface"]
+                        .into_iter()
+                        .chain(mapping.tail.iter().copied()),
+                ) {
+                    prune(Some(mapping.name), labels);
+                }
+            }
+
+            for (index, name) in FEC_HIST_NAMES.iter().enumerate() {
+                let leaf = format!("rs-num-corr-err-bin{index}");
+
+                if delete_covers_metric(
+                    &combined,
+                    ["interfaces", "interface", "phy-diag", "state", &leaf],
+                ) {
+                    prune(Some(name), labels);
+                }
+            }
+
+            for (metric_path, metric_type) in OTHER_SAMPLE_METRIC_PATHS {
+                if !delete_covers_metric(&combined, metric_path.split('/')) {
+                    continue;
+                }
+
+                prune(Some(metric_type), labels);
+            }
+        }
+
+        for update in &notification.update {
             let update_elems: &[PathElem] = update
                 .path
                 .as_ref()
@@ -95,22 +312,52 @@ impl GnmiSampleProcessor {
 
             let combined: Vec<&PathElem> = prefix_elems.iter().chain(update_elems.iter()).collect();
 
+            if let Some(reconciliation) = &self.reconciliation {
+                reconciliation.touch(&combined);
+            }
+
             if let Some(iface) = find_elem_key_ref(&combined, "interface", "name") {
+                let Some(val) = update.val.as_ref() else {
+                    continue;
+                };
+
                 entities.insert(("interface", iface));
-                self.process_interface_metric(&combined, iface, val);
+                self.process_interface_metric(&combined, iface, val, notification.timestamp);
             } else if let Some(comp) = find_elem_key_ref(&combined, "component", "name") {
+                let Some(val) = update.val.as_ref() else {
+                    continue;
+                };
+
                 entities.insert(("component", comp));
                 self.process_component_metric(&combined, comp, val);
             } else if let Some(sensor) = find_elem_key_ref(&combined, "leak-sensor", "id") {
+                let is_state = leaf_matches(&combined, &["leak-sensor", "state", "state"]);
+
+                if update.val.is_none() && !is_state {
+                    continue;
+                }
+
                 entities.insert(("leak-sensor", sensor));
 
-                if leaf_matches(&combined, &["leak-sensor", "state", "state"]) {
-                    let current = leakage_state_to_state(typed_value_to_string(val).as_deref());
+                if is_state {
+                    // Missing sensor values replace retained readings with unknown.
+                    let value = update.val.as_ref().and_then(typed_value_to_string);
+                    let current = leakage_state_to_state(value.as_deref());
 
-                    self.emit_state_set("leakage_state", "sensor", sensor, current, LEAKAGE_STATES);
+                    self.emit_state_set(
+                        &combined,
+                        "leakage_state",
+                        "sensor",
+                        sensor,
+                        current,
+                        LEAKAGE_STATES,
+                    );
                 }
             } else if combined.iter().any(|e| e.name == "platform-general") {
-                // switch-level singleton: no name key, counted as one entity.
+                let Some(val) = update.val.as_ref() else {
+                    continue;
+                };
+
                 entities.insert(("platform-general", ""));
                 self.process_platform_general_metric(&combined, val);
             }
@@ -124,115 +371,174 @@ impl GnmiSampleProcessor {
         elems: &[&PathElem],
         iface_name: &str,
         val: &proto::TypedValue,
+        observed_at: i64,
     ) {
-        if leaf_matches(elems, &["state", "oper-status"]) {
-            let current = oper_status_to_state(typed_value_to_string(val).as_deref());
-            self.emit_state_set(
+        // Prefix and update paths can split at different points. Classify the
+        // complete path after `interface` for both broad and selected streams.
+        let Some(interface_index) = elems.iter().position(|elem| elem.name == "interface") else {
+            return;
+        };
+
+        let Some(leaf) = elems.get(interface_index + 1..) else {
+            return;
+        };
+
+        match classify_interface_leaf(leaf) {
+            Some(InterfaceLeaf::OperStatus) => self.emit_state_set(
+                elems,
                 "interface_oper_status",
                 "interface_name",
                 iface_name,
-                current,
+                oper_status_to_state(typed_value_to_string(val).as_deref()),
                 OPER_STATUS_STATES,
-            );
-        } else if let Some(metric_type) = numeric_interface_leaf(elems) {
-            match typed_value_to_f64(val) {
-                Some(v) => self.emit_iface(metric_type.name, iface_name, v, metric_type.unit),
-                None => {
-                    debug_unmapped_value(elems, val, metric_type.name, self.event_context.rack_id())
+            ),
+            Some(InterfaceLeaf::Numeric(mut metric)) => match typed_value_to_f64(val) {
+                Some(value) => {
+                    // The seven OpenConfig `state/counters/*` leaves use their
+                    // interface's `last-clear` from this stream. Match the rooted
+                    // interface used when learning metadata; InfiniBand starts
+                    // stay unknown. Selected `interface_paths` cannot request
+                    // `last-clear`; their starts remain unknown unless the device
+                    // sends it on that stream.
+                    let is_openconfig_counter =
+                        leaf.len() == 3 && leaf[0].name == "state" && leaf[1].name == "counters";
+                    if let Some(interface) = openconfig_interface(elems)
+                        && is_openconfig_counter
+                        && let MetricSemantics::CumulativeCounter { start_time, .. } =
+                            &mut metric.semantics
+                    {
+                        *start_time = self
+                            .counter_epochs
+                            .lock()
+                            .expect(
+                                "counter epoch mutex poisoned; source metadata may be inconsistent",
+                            )
+                            .start_time(interface, observed_at);
+                    }
+                    self.emit_iface(elems, metric, iface_name, value);
                 }
-            }
-        } else if leaf_matches(elems, &["infiniband", "state", "physical-port-state"]) {
-            let current = physical_port_to_state(typed_value_to_string(val).as_deref());
-            self.emit_state_set(
+                None => debug_unmapped_value(elems, val, metric.name, self.event_context.rack_id()),
+            },
+            Some(InterfaceLeaf::PhysicalPortState) => self.emit_state_set(
+                elems,
                 "interface_physical_port_state",
                 "interface_name",
                 iface_name,
-                current,
+                physical_port_to_state(typed_value_to_string(val).as_deref()),
                 PHYSICAL_PORT_STATES,
-            );
-        } else if leaf_matches(elems, &["infiniband", "state", "logical-port-state"]) {
-            let current = logical_port_to_state(typed_value_to_string(val).as_deref());
-            self.emit_state_set(
+            ),
+            Some(InterfaceLeaf::LogicalPortState) => self.emit_state_set(
+                elems,
                 "interface_logical_port_state",
                 "interface_name",
                 iface_name,
-                current,
+                logical_port_to_state(typed_value_to_string(val).as_deref()),
                 LOGICAL_PORT_STATES,
-            );
-        } else if leaf_matches(elems, &["infiniband", "state", "speed"]) {
-            match link_speed_to_gbps(typed_value_to_string(val).as_deref()) {
-                Some(v) => self.emit_iface("interface_link_speed_active", iface_name, v, "gbps"),
-                None => debug_unmapped_value(
-                    elems,
-                    val,
-                    "interface_link_speed_active",
-                    self.event_context.rack_id(),
-                ),
+            ),
+            Some(InterfaceLeaf::Speed) => {
+                match link_speed_to_gbps(typed_value_to_string(val).as_deref()) {
+                    Some(value) => self.emit_iface(
+                        elems,
+                        NumericLeaf {
+                            name: "interface_link_speed_active",
+                            unit: "gbps",
+                            semantics: MetricSemantics::Gauge,
+                        },
+                        iface_name,
+                        value,
+                    ),
+                    None => debug_unmapped_value(
+                        elems,
+                        val,
+                        "interface_link_speed_active",
+                        self.event_context.rack_id(),
+                    ),
+                }
             }
-        } else if leaf_matches(elems, &["infiniband", "state", "width"]) {
-            match link_width_to_f64(typed_value_to_string(val).as_deref()) {
-                Some(v) => self.emit_iface("interface_link_width_active", iface_name, v, "lanes"),
-                None => debug_unmapped_value(
-                    elems,
-                    val,
-                    "interface_link_width_active",
-                    self.event_context.rack_id(),
-                ),
+            Some(InterfaceLeaf::Width) => {
+                match link_width_to_f64(typed_value_to_string(val).as_deref()) {
+                    Some(value) => self.emit_iface(
+                        elems,
+                        NumericLeaf {
+                            name: "interface_link_width_active",
+                            unit: "lanes",
+                            semantics: MetricSemantics::Gauge,
+                        },
+                        iface_name,
+                        value,
+                    ),
+                    None => debug_unmapped_value(
+                        elems,
+                        val,
+                        "interface_link_width_active",
+                        self.event_context.rack_id(),
+                    ),
+                }
             }
-        } else if leaf_matches(elems, &["infiniband", "state", "supported-widths"]) {
-            match link_width_to_f64(typed_value_to_string(val).as_deref()) {
-                Some(v) => self.emit_iface("interface_supported_width", iface_name, v, "lanes"),
-                None => debug_unmapped_value(
-                    elems,
-                    val,
-                    "interface_supported_width",
-                    self.event_context.rack_id(),
-                ),
+            Some(InterfaceLeaf::SupportedWidths) => {
+                match link_width_to_f64(typed_value_to_string(val).as_deref()) {
+                    Some(value) => self.emit_iface(
+                        elems,
+                        NumericLeaf {
+                            name: "interface_supported_width",
+                            unit: "lanes",
+                            semantics: MetricSemantics::Gauge,
+                        },
+                        iface_name,
+                        value,
+                    ),
+                    None => debug_unmapped_value(
+                        elems,
+                        val,
+                        "interface_supported_width",
+                        self.event_context.rack_id(),
+                    ),
+                }
             }
-        } else if leaf_matches(elems, &["phy-diag", "state", "phy-manager-state"]) {
-            let current = phy_manager_to_state(typed_value_to_string(val).as_deref());
-            self.emit_state_set(
+            Some(InterfaceLeaf::PhyManagerState) => self.emit_state_set(
+                elems,
                 "interface_phy_manager_state",
                 "interface_name",
                 iface_name,
-                current,
+                phy_manager_to_state(typed_value_to_string(val).as_deref()),
                 PHY_MANAGER_STATES,
-            );
-        } else if leaf_matches(elems, &["infiniband", "state", "vl-capabilities"])
-            && let Some(caps) = typed_value_to_string(val).none_if_empty()
-        {
-            self.emit_entity_info(
-                "interface_vl_capabilities_info",
-                iface_name,
-                "interface_name",
-                "vl_capabilities",
-                &caps,
-            );
+            ),
+            Some(InterfaceLeaf::VlCapabilities) => {
+                if let Some(caps) = typed_value_to_string(val).none_if_empty() {
+                    self.emit_entity_info(
+                        elems,
+                        "interface_vl_capabilities_info",
+                        iface_name,
+                        "interface_name",
+                        "vl_capabilities",
+                        &caps,
+                    );
+                }
+            }
+            None => {}
         }
     }
 
-    fn emit_iface(&self, metric_type: &str, iface_name: &str, value: f64, unit: &str) {
+    fn emit_iface(&self, source: &[&PathElem], metric: NumericLeaf, iface_name: &str, value: f64) {
         self.emit_data_metric(
-            metric_type,
+            source,
+            metric,
             iface_name,
             value,
-            unit,
-            "interface_name",
-            iface_name,
+            ("interface_name", iface_name),
         );
     }
 
     /// The information value is excluded from the key so updates replace the prior sample.
     fn emit_entity_info(
         &self,
+        source: &[&PathElem],
         metric_type: &str,
         entity_id: &str,
         entity_label_name: &'static str,
         info_label_name: &'static str,
         info_label_value: &str,
     ) {
-        let Some(sink) = &self.data_sink else { return };
-
         let mut key = String::with_capacity(metric_type.len() + 1 + entity_id.len());
         key.push_str(metric_type);
         key.push(':');
@@ -243,9 +549,10 @@ impl GnmiSampleProcessor {
             (Cow::Borrowed(info_label_name), info_label_value.to_string()),
         ];
 
-        sink.handle_event(
-            &self.event_context,
-            &CollectorEvent::Metric(Box::new(MetricSample {
+        self.emit_sample(
+            source,
+            MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -253,7 +560,7 @@ impl GnmiSampleProcessor {
                 value: 1.0,
                 labels,
                 context: None,
-            })),
+            },
         );
     }
 
@@ -268,7 +575,9 @@ impl GnmiSampleProcessor {
         // to `state/oper-status`)
         if leaf_matches(elems, &["healthz", "state", "status"]) {
             let current = component_health_to_state(typed_value_to_string(val).as_deref());
+
             self.emit_state_set(
+                elems,
                 "component_health_status",
                 "component_name",
                 comp_name,
@@ -278,11 +587,18 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["state", "temperature", "instant"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_temperature_celsius", comp_name, v, "celsius");
+            self.emit_comp(
+                elems,
+                "component_temperature_celsius",
+                comp_name,
+                v,
+                "celsius",
+            );
         } else if leaf_matches(elems, &["state", "last-reboot-reason"])
             && let Some(reason) = typed_value_to_string(val).none_if_empty()
         {
             self.emit_entity_info(
+                elems,
                 "component_last_reboot_reason",
                 comp_name,
                 "component_name",
@@ -292,7 +608,9 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["state", "oper-status"]) {
             // FAN-STATE (row 966) and CPU-STATE (row 1174) share this leaf.
             let current = oper_status_to_state(typed_value_to_string(val).as_deref());
+
             self.emit_state_set(
+                elems,
                 "component_oper_status",
                 "component_name",
                 comp_name,
@@ -302,11 +620,12 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["fan", "state", "speed"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_fan_speed", comp_name, v, "rpm");
+            self.emit_comp(elems, "component_fan_speed", comp_name, v, "rpm");
         } else if leaf_matches(elems, &["power-supply", "state", "output-current"])
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
+                elems,
                 "component_power_supply_output_current",
                 comp_name,
                 v,
@@ -316,6 +635,7 @@ impl GnmiSampleProcessor {
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
+                elems,
                 "component_power_supply_input_current",
                 comp_name,
                 v,
@@ -325,6 +645,7 @@ impl GnmiSampleProcessor {
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
+                elems,
                 "component_power_supply_input_voltage",
                 comp_name,
                 v,
@@ -333,11 +654,18 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["power-supply", "state", "output-power"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_power_supply_output_power", comp_name, v, "watts");
+            self.emit_comp(
+                elems,
+                "component_power_supply_output_power",
+                comp_name,
+                v,
+                "watts",
+            );
         } else if leaf_matches(elems, &["power-supply", "state", "output-voltage"])
             && let Some(v) = typed_value_to_f64(val)
         {
             self.emit_comp(
+                elems,
                 "component_power_supply_output_voltage",
                 comp_name,
                 v,
@@ -346,27 +674,32 @@ impl GnmiSampleProcessor {
         } else if leaf_matches(elems, &["asic", "state", "asic-temp"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp(
-                "component_asic_temperature_celsius",
-                comp_name,
-                v,
-                "celsius",
-            );
+            self.emit_comp(elems, "component_asic_temperature", comp_name, v, "celsius");
         } else if leaf_matches(elems, &["cpu", "utilization", "state", "avg"])
             && let Some(v) = typed_value_to_f64(val)
         {
-            self.emit_comp("component_cpu_utilization", comp_name, v, "percent");
+            self.emit_comp(elems, "component_cpu_utilization", comp_name, v, "percent");
         }
     }
 
-    fn emit_comp(&self, metric_type: &str, comp_name: &str, value: f64, unit: &str) {
+    fn emit_comp(
+        &self,
+        source: &[&PathElem],
+        metric_type: &'static str,
+        comp_name: &str,
+        value: f64,
+        unit: &'static str,
+    ) {
         self.emit_data_metric(
-            metric_type,
+            source,
+            NumericLeaf {
+                name: metric_type,
+                unit,
+                semantics: MetricSemantics::Gauge,
+            },
             comp_name,
             value,
-            unit,
-            "component_name",
-            comp_name,
+            ("component_name", comp_name),
         );
     }
 
@@ -388,7 +721,7 @@ impl GnmiSampleProcessor {
         };
         if let Some((metric_type, info_label_name)) = info {
             if let Some(s) = typed_value_to_string(val).none_if_empty() {
-                self.emit_switch_info(metric_type, info_label_name, &s);
+                self.emit_switch_info(elems, metric_type, info_label_name, &s);
             }
             return;
         }
@@ -408,18 +741,17 @@ impl GnmiSampleProcessor {
         };
 
         match typed_value_to_f64(val) {
-            Some(v) => self.emit_switch(metric_type, v, unit),
+            Some(v) => self.emit_switch(elems, metric_type, v, unit),
             None => debug_unmapped_value(elems, val, metric_type, self.event_context.rack_id()),
         }
     }
 
     /// switch-level singleton series: no per-entity name, endpoint identity added by PrometheusSink.
-    fn emit_switch(&self, metric_type: &str, value: f64, unit: &str) {
-        let Some(sink) = &self.data_sink else { return };
-
-        sink.handle_event(
-            &self.event_context,
-            &CollectorEvent::Metric(Box::new(MetricSample {
+    fn emit_switch(&self, source: &[&PathElem], metric_type: &str, value: f64, unit: &str) {
+        self.emit_sample(
+            source,
+            MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: metric_type.to_string(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -427,24 +759,24 @@ impl GnmiSampleProcessor {
                 value,
                 labels: Vec::new(),
                 context: None,
-            })),
+            },
         );
     }
 
     /// switch-level info-metric: constant `1.0` sample carrying a single string label.
     fn emit_switch_info(
         &self,
+        source: &[&PathElem],
         metric_type: &str,
         info_label_name: &'static str,
         info_label_value: &str,
     ) {
-        let Some(sink) = &self.data_sink else { return };
-
         let labels = vec![(Cow::Borrowed(info_label_name), info_label_value.to_string())];
 
-        sink.handle_event(
-            &self.event_context,
-            &CollectorEvent::Metric(Box::new(MetricSample {
+        self.emit_sample(
+            source,
+            MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: metric_type.to_string(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -452,42 +784,37 @@ impl GnmiSampleProcessor {
                 value: 1.0,
                 labels,
                 context: None,
-            })),
+            },
         );
     }
 
     fn emit_data_metric(
         &self,
-        metric_type: &str,
+        source: &[&PathElem],
+        metric: NumericLeaf,
         entity_id: &str,
         value: f64,
-        unit: &str,
-        entity_label_name: &'static str,
-        entity_label_value: &str,
+        entity_label: (&'static str, &str),
     ) {
-        let Some(sink) = &self.data_sink else { return };
-
-        let mut key = String::with_capacity(metric_type.len() + 1 + entity_id.len());
-        key.push_str(metric_type);
+        let mut key = String::with_capacity(metric.name.len() + 1 + entity_id.len());
+        key.push_str(metric.name);
         key.push(':');
         key.push_str(entity_id);
 
-        let labels = vec![(
-            Cow::Borrowed(entity_label_name),
-            entity_label_value.to_string(),
-        )];
+        let labels = vec![(Cow::Borrowed(entity_label.0), entity_label.1.to_string())];
 
-        sink.handle_event(
-            &self.event_context,
-            &CollectorEvent::Metric(Box::new(MetricSample {
+        self.emit_sample(
+            source,
+            MetricSample {
+                semantics: metric.semantics,
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
-                metric_type: metric_type.to_string(),
-                unit: unit.to_string(),
+                metric_type: metric.name.to_string(),
+                unit: metric.unit.to_string(),
                 value,
                 labels,
                 context: None,
-            })),
+            },
         );
     }
 
@@ -495,14 +822,13 @@ impl GnmiSampleProcessor {
     /// label.
     fn emit_state_set(
         &self,
+        source: &[&PathElem],
         metric_type: &str,
         entity_label_name: &'static str,
         entity_id: &str,
         current_state: &str,
         all_states: &[&'static str],
     ) {
-        let Some(sink) = &self.data_sink else { return };
-
         for state in all_states {
             let mut key =
                 String::with_capacity(metric_type.len() + 1 + entity_id.len() + 1 + state.len());
@@ -517,9 +843,10 @@ impl GnmiSampleProcessor {
                 (Cow::Borrowed("state"), state.to_string()),
             ];
 
-            sink.handle_event(
-                &self.event_context,
-                &CollectorEvent::Metric(Box::new(MetricSample {
+            self.emit_sample(
+                source,
+                MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key,
                     name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                     metric_type: metric_type.to_string(),
@@ -527,10 +854,182 @@ impl GnmiSampleProcessor {
                     value: if *state == current_state { 1.0 } else { 0.0 },
                     labels,
                     context: None,
-                })),
+                },
             );
         }
     }
+
+    fn emit_sample(&self, source: &[&PathElem], sample: MetricSample) {
+        let Some(sink) = &self.data_sink else { return };
+
+        if let Some(reconciliation) = &self.reconciliation {
+            reconciliation.record(&sample, source);
+        }
+
+        sink.handle_event(
+            &self.event_context,
+            &CollectorEvent::Metric(Box::new(sample)),
+        );
+    }
+}
+
+fn source_interface(source: &SourcePath) -> Option<&str> {
+    let [(root, _), (element, keys), ..] = source.as_slice() else {
+        return None;
+    };
+    (root == "interfaces" && element == "interface")
+        .then(|| keys.get("name").map(String::as_str))
+        .flatten()
+}
+
+fn openconfig_interface<'a>(elems: &[&'a PathElem]) -> Option<&'a str> {
+    let [root, interface, ..] = elems else {
+        return None;
+    };
+    if root.name != "interfaces" || interface.name != "interface" {
+        return None;
+    }
+    interface.key.get("name").map(String::as_str)
+}
+
+/// `InterfaceCounterEpochs` keeps each interface's supplied `last-clear` for
+/// OpenConfig `state/counters` cumulative counters. `observed_at` is
+/// `Notification.timestamp` in Unix nanoseconds. Starts after their metadata
+/// observation are discarded; the accepted observation is retained. Counters
+/// observed before the metadata receive no start.
+///
+/// Positive timestamp ties allow replacement unless a nonpositive timestamp
+/// invalidated the epoch. Keyed deletes retain a tombstone to reject older replay.
+///
+/// Nonpositive timestamps (including the proto3 default) invalidate known starts
+/// and require newer metadata. An untimed covering delete uses the maximum retained
+/// interface and deletion history as a conservative floor for every interface.
+/// Without retained history, it cannot establish a replay boundary.
+///
+/// Successful snapshots invalidate candidates that lose every metric source.
+/// Live counter or metadata updates protect their interface, and each new
+/// subscription discards all retained epochs and replay history.
+#[derive(Default)]
+struct InterfaceCounterEpochs {
+    interfaces: HashMap<String, CounterEpoch>,
+    deleted_at: Option<i64>,
+    invalidated_through: Option<i64>,
+    reconciliation_candidates: HashSet<String>,
+}
+
+struct CounterEpoch {
+    observed_at: i64,
+    start_time: Option<SystemTime>,
+    requires_newer_observation: bool,
+}
+
+impl InterfaceCounterEpochs {
+    fn record(&mut self, interface: &str, observed_at: i64, start_time: Option<SystemTime>) {
+        if observed_at <= 0 {
+            if let Some(previous) = self.interfaces.get_mut(interface) {
+                previous.start_time = None;
+                previous.requires_newer_observation = true;
+            }
+            return;
+        }
+
+        if self.deleted_at.is_some_and(|deleted| observed_at < deleted)
+            || self
+                .invalidated_through
+                .is_some_and(|invalidated| observed_at <= invalidated)
+            || self.interfaces.get(interface).is_some_and(|previous| {
+                observed_at < previous.observed_at
+                    || (previous.requires_newer_observation && observed_at == previous.observed_at)
+            })
+        {
+            return;
+        }
+
+        let observation =
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_nanos(observed_at as u64));
+
+        self.interfaces.insert(
+            interface.to_string(),
+            CounterEpoch {
+                observed_at,
+                start_time: start_time.filter(|start| observation.is_some_and(|end| *start <= end)),
+                requires_newer_observation: false,
+            },
+        );
+    }
+
+    fn delete(&mut self, path: &[&PathElem], observed_at: i64) {
+        if !delete_covers_metric(
+            path,
+            ["interfaces", "interface", "state", "counters", "last-clear"],
+        ) {
+            return;
+        }
+
+        if let Some(interface) =
+            find_elem_key_ref(path, "interface", "name").filter(|name| *name != "*")
+        {
+            self.record(interface, observed_at, None);
+            return;
+        }
+
+        // An unusable delete time cannot permit replay of the observations
+        // it invalidates, including replay at their exact timestamps.
+        if observed_at <= 0 {
+            if let Some(latest) = self
+                .interfaces
+                .values()
+                .map(|epoch| epoch.observed_at)
+                .chain(self.deleted_at)
+                .max()
+            {
+                self.invalidated_through = Some(
+                    self.invalidated_through
+                        .map_or(latest, |old| old.max(latest)),
+                );
+            }
+            self.interfaces.clear();
+            return;
+        }
+        let deleted_at = self
+            .deleted_at
+            .map_or(observed_at, |old| old.max(observed_at));
+        self.deleted_at = Some(deleted_at);
+        self.interfaces.retain(|_, epoch| {
+            epoch.observed_at > observed_at
+                || (epoch.requires_newer_observation && epoch.observed_at == observed_at)
+        });
+    }
+
+    fn start_time(&self, interface: &str, observed_at: i64) -> Option<SystemTime> {
+        let epoch = self.interfaces.get(interface)?;
+        (epoch.observed_at <= observed_at)
+            .then_some(epoch.start_time)
+            .flatten()
+    }
+}
+
+/// `last_clear_time` decodes OpenConfig `last-clear` Unix nanoseconds exactly.
+fn last_clear_time(value: &proto::TypedValue) -> Option<SystemTime> {
+    use proto::typed_value::Value;
+
+    // Unix nanoseconds exceed f64's exact integer range. Decode the source
+    // integer directly before constructing its accumulation timestamp.
+    let nanos = match value.value.as_ref()? {
+        Value::UintVal(value) => Some(*value),
+        Value::IntVal(value) => u64::try_from(*value).ok(),
+        Value::StringVal(value) => value.parse().ok(),
+        Value::JsonVal(value) | Value::JsonIetfVal(value) => {
+            match serde_json::from_slice::<serde_json::Value>(value).ok()? {
+                serde_json::Value::Number(value) => value.as_u64(),
+                serde_json::Value::String(value) => value.parse().ok(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }?;
+
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_nanos(nanos))
 }
 
 fn find_elem_key_ref<'a>(
@@ -555,62 +1054,278 @@ fn leaf_matches(elems: &[&PathElem], expected: &[&str]) -> bool {
         .all(|(elem, name)| elem.name == *name)
 }
 
+/// An ancestor delete covers every mapped descendant; labels narrow keyed lists.
+fn delete_covers_metric<'a>(
+    deleted: &[&PathElem],
+    mapped: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let mut mapped = mapped.into_iter();
+
+    deleted
+        .iter()
+        .all(|element| mapped.next() == Some(element.name.as_str()))
+}
+
+// The nonnumeric update branches above define these path-to-metric pairs.
+// Numeric interface leaves reuse their update dispatch table below.
+const OTHER_SAMPLE_METRIC_PATHS: &[(&str, &str)] = &[
+    (
+        "interfaces/interface/state/oper-status",
+        "interface_oper_status",
+    ),
+    (
+        "interfaces/interface/infiniband/state/physical-port-state",
+        "interface_physical_port_state",
+    ),
+    (
+        "interfaces/interface/infiniband/state/logical-port-state",
+        "interface_logical_port_state",
+    ),
+    (
+        "interfaces/interface/infiniband/state/speed",
+        "interface_link_speed_active",
+    ),
+    (
+        "interfaces/interface/infiniband/state/width",
+        "interface_link_width_active",
+    ),
+    (
+        "interfaces/interface/infiniband/state/supported-widths",
+        "interface_supported_width",
+    ),
+    (
+        "interfaces/interface/phy-diag/state/phy-manager-state",
+        "interface_phy_manager_state",
+    ),
+    (
+        "interfaces/interface/infiniband/state/vl-capabilities",
+        "interface_vl_capabilities_info",
+    ),
+    (
+        "components/component/healthz/state/status",
+        "component_health_status",
+    ),
+    (
+        "components/component/state/temperature/instant",
+        "component_temperature_celsius",
+    ),
+    (
+        "components/component/state/last-reboot-reason",
+        "component_last_reboot_reason",
+    ),
+    (
+        "components/component/state/oper-status",
+        "component_oper_status",
+    ),
+    (
+        "components/component/fan/state/speed",
+        "component_fan_speed",
+    ),
+    (
+        "components/component/power-supply/state/output-current",
+        "component_power_supply_output_current",
+    ),
+    (
+        "components/component/power-supply/state/input-current",
+        "component_power_supply_input_current",
+    ),
+    (
+        "components/component/power-supply/state/input-voltage",
+        "component_power_supply_input_voltage",
+    ),
+    (
+        "components/component/power-supply/state/output-power",
+        "component_power_supply_output_power",
+    ),
+    (
+        "components/component/power-supply/state/output-voltage",
+        "component_power_supply_output_voltage",
+    ),
+    (
+        "components/component/asic/state/asic-temp",
+        "component_asic_temperature",
+    ),
+    (
+        "components/component/cpu/utilization/state/avg",
+        "component_cpu_utilization",
+    ),
+    (
+        "platform-general/leak-sensors/leak-sensor/state/state",
+        "leakage_state",
+    ),
+    ("platform-general/state/contact", "platform_contact_info"),
+    ("platform-general/state/location", "platform_location_info"),
+    (
+        "platform-general/state/platform-name",
+        "platform_node_description_info",
+    ),
+    (
+        "platform-general/versions/state/nos-version",
+        "platform_os_version_info",
+    ),
+    (
+        "platform-general/versions/state/fw-version-bmc",
+        "platform_bmc_version_info",
+    ),
+    (
+        "platform-general/versions/state/fw-version-erot",
+        "platform_erot_version_info",
+    ),
+    ("platform-general/state/memory-used", "platform_memory_used"),
+    (
+        "platform-general/state/memory-total-size",
+        "platform_memory_total",
+    ),
+    (
+        "platform-general/state/disk-total-size",
+        "platform_disk_total",
+    ),
+    ("platform-general/state/disk-used", "platform_disk_used"),
+    (
+        "platform-general/state/ambient-temperature",
+        "platform_ambient_temperature",
+    ),
+];
+
 struct NumericLeafMapping {
     tail: &'static [&'static str],
     name: &'static str,
     unit: &'static str,
+    semantics: MetricSemantics,
 }
 
 struct NumericLeaf {
     name: &'static str,
     unit: &'static str,
+    semantics: MetricSemantics,
+}
+
+enum InterfaceLeaf {
+    OperStatus,
+    Numeric(NumericLeaf),
+    PhysicalPortState,
+    LogicalPortState,
+    Speed,
+    Width,
+    SupportedWidths,
+    PhyManagerState,
+    VlCapabilities,
+}
+
+/// Uses the same leaf classification for configured paths and incoming updates.
+/// Configured paths are exact leaves so an unknown or broad path cannot silently
+/// receive telemetry that the built-in processor does not export.
+pub(super) fn supports_interface_path(path: &[String]) -> bool {
+    let elements = path
+        .iter()
+        .map(|name| PathElem {
+            name: name.clone(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
+    let leaf = elements.iter().collect::<Vec<_>>();
+
+    classify_interface_leaf(&leaf).is_some()
+}
+
+fn classify_interface_leaf(elems: &[&PathElem]) -> Option<InterfaceLeaf> {
+    let matches =
+        |expected: &[&str]| elems.len() == expected.len() && leaf_matches(elems, expected);
+
+    if matches(&["state", "oper-status"]) {
+        Some(InterfaceLeaf::OperStatus)
+    } else if let Some(metric) = numeric_interface_leaf(elems) {
+        Some(InterfaceLeaf::Numeric(metric))
+    } else if matches(&["infiniband", "state", "physical-port-state"]) {
+        Some(InterfaceLeaf::PhysicalPortState)
+    } else if matches(&["infiniband", "state", "logical-port-state"]) {
+        Some(InterfaceLeaf::LogicalPortState)
+    } else if matches(&["infiniband", "state", "speed"]) {
+        Some(InterfaceLeaf::Speed)
+    } else if matches(&["infiniband", "state", "width"]) {
+        Some(InterfaceLeaf::Width)
+    } else if matches(&["infiniband", "state", "supported-widths"]) {
+        Some(InterfaceLeaf::SupportedWidths)
+    } else if matches(&["phy-diag", "state", "phy-manager-state"]) {
+        Some(InterfaceLeaf::PhyManagerState)
+    } else if matches(&["infiniband", "state", "vl-capabilities"]) {
+        Some(InterfaceLeaf::VlCapabilities)
+    } else {
+        None
+    }
+}
+
+// Static mappings start unknown. Source metadata is applied by
+// `process_interface_metric`; connection time does not establish a start.
+const fn interface_total(description: &'static str) -> MetricSemantics {
+    MetricSemantics::CumulativeCounter {
+        description,
+        start_time: None,
+    }
 }
 
 /// Table-driven dispatch for numeric `/interfaces/interface` leaves. The
 /// expected leaf path tail is matched against the live gNMI tree.
-fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
+fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
     const TABLE: &[NumericLeafMapping] = &[
         // OpenConfig interface counters (`/state/counters/*`)
         NumericLeafMapping {
             tail: &["state", "counters", "in-errors"],
             name: "interface_in_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of inbound packets with errors reported by the interface",
+            ),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "out-errors"],
             name: "interface_out_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of outbound packets with errors reported by the interface",
+            ),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "out-discards"],
             name: "interface_out_discards",
             unit: "count",
+            semantics: interface_total(
+                "Number of outbound packets discarded by the interface without detected errors",
+            ),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "in-octets"],
             name: "interface_in_octets",
             unit: "bytes",
+            semantics: interface_total("Number of octets received by the interface"),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "out-octets"],
             name: "interface_out_octets",
             unit: "bytes",
+            semantics: interface_total("Number of octets transmitted by the interface"),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "in-pkts"],
             name: "interface_in_packets",
             unit: "count",
+            semantics: interface_total("Number of packets received by the interface"),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "out-pkts"],
             name: "interface_out_packets",
             unit: "count",
+            semantics: interface_total("Number of packets transmitted by the interface"),
         },
         // InfiniBand port counters (`/infiniband/state/counters/port/*`)
         NumericLeafMapping {
             tail: &["infiniband", "state", "counters", "port", "link-downed"],
             name: "interface_link_downed",
             unit: "count",
+            semantics: interface_total(
+                "Number of link down events reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -622,6 +1337,9 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
             ],
             name: "interface_link_error_recovery",
             unit: "count",
+            semantics: interface_total(
+                "Number of link error recovery events reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -633,6 +1351,9 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
             ],
             name: "interface_rcv_remote_physical_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of receive remote physical errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -644,6 +1365,9 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
             ],
             name: "interface_rcv_switch_relay_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of receive switch relay errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -655,6 +1379,9 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
             ],
             name: "interface_rcv_constraint_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of receive constraint errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -666,6 +1393,9 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
             ],
             name: "interface_local_link_integrity_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of local link integrity errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -677,182 +1407,224 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
             ],
             name: "interface_port_buffer_overrun_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of excessive buffer overrun errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &["infiniband", "state", "counters", "port", "qp1-dropped"],
             name: "interface_qp1_dropped",
             unit: "count",
+            semantics: interface_total("Number of QP1 packets dropped by the InfiniBand port"),
         },
         NumericLeafMapping {
             tail: &["infiniband", "state", "counters", "port", "vl15-dropped"],
             name: "interface_vl15_dropped",
             unit: "count",
+            semantics: interface_total("Number of VL15 packets dropped by the InfiniBand port"),
         },
         NumericLeafMapping {
             tail: &["infiniband", "state", "counters", "port", "xmit-wait"],
             name: "interface_port_xmit_wait",
             unit: "count",
+            semantics: interface_total(concat!(
+                "Number of ticks during which the InfiniBand port had data to transmit ",
+                "but sent none for the entire tick"
+            )),
         },
+        // InfiniBand state (`/infiniband/state/*`)
         NumericLeafMapping {
             tail: &["infiniband", "state", "mtu"],
             name: "interface_mtu",
             unit: "bytes",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["infiniband", "state", "max-supported-mtus"],
             name: "interface_max_supported_mtu",
             unit: "bytes",
+            semantics: MetricSemantics::Gauge,
         },
-        // phy-diag counters and ratios (`/phy-diag/state/*`)
+        // PHY diagnostic readings (`/phy-diag/state/*`)
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-ber"],
             name: "interface_raw_ber",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "effective-ber"],
             name: "interface_effective_ber",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "symbol-ber"],
             name: "interface_symbol_ber",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-ber-ch-1"],
             name: "interface_raw_ber_lane0",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-ber-ch-2"],
             name: "interface_raw_ber_lane1",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-errors-ch-1"],
             name: "interface_phy_raw_errors_lane0",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-errors-ch-2"],
             name: "interface_phy_raw_errors_lane1",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "effective-errors"],
             name: "interface_phy_effective_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "zero-hist"],
             name: "interface_zero_hist",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "phy-received-bits"],
             name: "interface_phy_received_bits",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-malformed-packet-errors"],
             name: "interface_port_malformed_packet_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-neighbor-mtu-discards"],
             name: "interface_port_neighbor_mtu_discards",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-multi-cast-rcv-pkts"],
             name: "interface_port_multicast_rcv_packets",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-multi-cast-xmit-pkts"],
             name: "interface_port_multicast_xmit_packets",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-uni-cast-rcv-pkts"],
             name: "interface_port_unicast_rcv_packets",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-uni-cast-xmit-pkts"],
             name: "interface_port_unicast_xmit_packets",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-local-physical-errors"],
             name: "interface_port_local_physical_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "sync-header-error-counter"],
             name: "interface_sync_header_error_counter",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-dlid-mapping-errors"],
             name: "interface_port_dlid_mapping_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-vl-mapping-errors"],
             name: "interface_port_vl_mapping_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-looping-errors"],
             name: "interface_port_looping_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-inactive-discards"],
             name: "interface_port_inactive_discards",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "rq-general-error"],
             name: "interface_rq_general_error",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-rcv-codes"],
             name: "interface_plr_rcv_codes",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-rcv-code-err"],
             name: "interface_plr_rcv_codes_err",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-rcv-uncorrectable-code"],
             name: "interface_plr_rcv_uncorrectables_code",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-xmit-codes"],
             name: "interface_plr_xmit_codes",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-xmit-retry-codes"],
             name: "interface_plr_xmit_retrys_codes",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-xmit-retry-events"],
             name: "interface_plr_xmit_retrys_events",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-sync-events"],
             name: "interface_plr_sync_events",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &[
@@ -862,38 +1634,112 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
             ],
             name: "interface_plr_xmit_retry_events_within_minute",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-bw-loss-percent"],
             name: "interface_plr_bw_loss_percent",
             unit: "percent",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "unintentional-link-down-events"],
             name: "interface_link_down_events",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
     ];
 
+    TABLE
+}
+
+fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
     // FEC histogram bins 0..=15 -> interface_fec_hist_{n}
     if let Some(leaf) = elems.last().map(|e| e.name.as_str())
         && let Some(bin) = leaf.strip_prefix("rs-num-corr-err-bin")
         && let Ok(n) = bin.parse::<usize>()
         && n <= 15
+        && elems.len() == 3
         && leaf_matches(elems, &["phy-diag", "state", leaf])
     {
         return Some(NumericLeaf {
             name: FEC_HIST_NAMES[n],
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         });
     }
 
-    TABLE.iter().find_map(|m| {
-        leaf_matches(elems, m.tail).then_some(NumericLeaf {
+    numeric_interface_leaves().iter().find_map(|m| {
+        (elems.len() == m.tail.len() && leaf_matches(elems, m.tail)).then_some(NumericLeaf {
             name: m.name,
             unit: m.unit,
+            semantics: m.semantics,
         })
     })
+}
+
+/// `emit_catalogue_samples` exercises interface source paths through notification
+/// processing for the metric catalogue. Literal paths stay independent of
+/// `numeric_interface_leaves` so missing mappings remain detectable. Callers must
+/// verify received samples: `handle_event` logs sink errors without returning them.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn emit_catalogue_samples(sink: Arc<dyn DataSink>, context: EventContext) {
+    let processor =
+        GnmiSampleProcessor::new(Some(sink), context, "catalogue-switch".into(), None, false);
+    let update = [
+        "state/counters/in-errors",
+        "state/counters/out-errors",
+        "state/counters/out-discards",
+        "state/counters/in-octets",
+        "state/counters/out-octets",
+        "state/counters/in-pkts",
+        "state/counters/out-pkts",
+        "infiniband/state/counters/port/link-downed",
+        "infiniband/state/counters/port/link-error-recovery",
+        "infiniband/state/counters/port/rcv-remote-phy-errors",
+        "infiniband/state/counters/port/rcv-switch-relay-errors",
+        "infiniband/state/counters/port/rcv-constraints-errors",
+        "infiniband/state/counters/port/local-link-integrity-errors",
+        "infiniband/state/counters/port/excessive-buffer-overrun",
+        "infiniband/state/counters/port/qp1-dropped",
+        "infiniband/state/counters/port/vl15-dropped",
+        "infiniband/state/counters/port/xmit-wait",
+    ]
+    .into_iter()
+    .map(|path| proto::Update {
+        path: Some(proto::Path {
+            elem: path
+                .split('/')
+                .map(|name| PathElem {
+                    name: name.into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }),
+        val: Some(proto::TypedValue {
+            value: Some(proto::typed_value::Value::UintVal(7)),
+        }),
+        ..Default::default()
+    })
+    .collect();
+    processor.process_notification(&proto::Notification {
+        prefix: Some(proto::Path {
+            elem: vec![
+                PathElem {
+                    name: "interfaces".into(),
+                    ..Default::default()
+                },
+                PathElem {
+                    name: "interface".into(),
+                    key: HashMap::from([("name".into(), "catalogue0".into())]),
+                },
+            ],
+            ..Default::default()
+        }),
+        update,
+        ..Default::default()
+    });
 }
 
 /// FEC histogram bins 0..=15
@@ -1075,10 +1921,36 @@ pub(crate) fn now_unix_secs() -> f64 {
 }
 
 #[cfg(test)]
+pub(super) fn test_interface_update(
+    interface: &str,
+    tail: &[&str],
+    value: proto::TypedValue,
+) -> proto::Update {
+    let mut elem = ["interfaces", "interface"]
+        .into_iter()
+        .chain(tail.iter().copied())
+        .map(|name| PathElem {
+            name: name.into(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    elem[1].key.insert("name".into(), interface.into());
+    proto::Update {
+        path: Some(proto::Path {
+            elem,
+            ..Default::default()
+        }),
+        val: Some(value),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use carbide_test_support::{Check, check_values, value_scenarios};
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 
@@ -1088,6 +1960,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingSink {
         events: Mutex<Vec<(EventContext, CollectorEvent)>>,
+        prunes: Mutex<Vec<(Option<String>, Vec<crate::metrics::MetricLabel>)>>,
     }
 
     impl DataSink for CapturingSink {
@@ -1106,6 +1979,20 @@ mod tests {
                 .push((context.clone(), event.clone()));
             Ok(())
         }
+
+        fn prune_metrics(
+            &self,
+            _context: &EventContext,
+            metric_type: Option<&str>,
+            labels: &[crate::metrics::MetricLabel],
+            _unit: Option<&str>,
+            _label_names: Option<&[&str]>,
+        ) {
+            self.prunes
+                .lock()
+                .expect("capture mutex")
+                .push((metric_type.map(str::to_string), labels.to_vec()));
+        }
     }
 
     #[test]
@@ -1123,6 +2010,32 @@ mod tests {
         assert!(leaf_matches(&refs, &["oper-status"]));
         assert!(!leaf_matches(&refs, &["counters", "oper-status"]));
         assert!(!leaf_matches(&refs, &["a", "b", "c", "d", "e"]));
+    }
+
+    #[test]
+    fn selective_paths_accept_only_exported_interface_leaves() {
+        for path in [
+            vec!["state", "oper-status"],
+            vec!["infiniband", "state", "physical-port-state"],
+            vec!["phy-diag", "state", "raw-ber"],
+            vec!["phy-diag", "state", "rs-num-corr-err-bin15"],
+        ] {
+            assert!(supports_interface_path(
+                &path.into_iter().map(str::to_string).collect::<Vec<_>>()
+            ));
+        }
+
+        for path in [
+            vec!["state", "counters"],
+            vec!["state", "counters", "last-clear"],
+            vec!["phy-diag", "state", "unknown-leaf"],
+            vec!["unexpected", "state", "oper-status"],
+            vec!["phy-diag", "state", "rs-num-corr-err-bin16"],
+        ] {
+            assert!(!supports_interface_path(
+                &path.into_iter().map(str::to_string).collect::<Vec<_>>()
+            ));
+        }
     }
 
     #[test]
@@ -1187,6 +2100,318 @@ mod tests {
         }
     }
 
+    #[test]
+    fn last_clear_decodes_exact_nanoseconds() {
+        use proto::typed_value::Value;
+
+        let nanos = 1_700_000_000_000_000_123_u64;
+        let start = Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos));
+
+        value_scenarios! {
+            run = |value| last_clear_time(&proto::TypedValue { value });
+            "exact source integers" {
+                Some(Value::UintVal(nanos)) => start,
+                Some(Value::IntVal(nanos as i64)) => start,
+                Some(Value::StringVal(nanos.to_string())) => start,
+                Some(Value::JsonVal(nanos.to_string().into_bytes())) => start,
+                Some(Value::JsonIetfVal(format!("\"{nanos}\"").into_bytes())) => start,
+                Some(Value::UintVal(0)) => Some(SystemTime::UNIX_EPOCH),
+            }
+            "missing or invalid encoding" {
+                None => None,
+                Some(Value::IntVal(-1)) => None,
+                Some(Value::JsonVal(b"1.25".to_vec())) => None,
+                Some(Value::JsonVal(b"\"123".to_vec())) => None,
+                Some(Value::JsonIetfVal(b"\"abc\"".to_vec())) => None,
+                Some(Value::JsonVal(b"true".to_vec())) => None,
+                Some(Value::DoubleVal(nanos as f64)) => None,
+            }
+            "decimal beyond u64" {
+                Some(Value::StringVal("18446744073709551616".into())) => None,
+            }
+        }
+    }
+
+    #[test]
+    fn last_clear_epochs_reject_stale_and_invalidated_metadata() {
+        enum Action {
+            Record(&'static str, i64, Option<SystemTime>),
+            Delete(i64, Vec<PathElem>),
+        }
+
+        let start = |nanos| Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos));
+        let metadata = |timestamp, value: Option<u64>| {
+            Action::Record("swp1", timestamp, value.and_then(start))
+        };
+        let path = |interface: &str, tail: &[&str]| {
+            [
+                make_path_elem("interfaces", &[]),
+                make_path_elem("interface", &[("name", interface)]),
+            ]
+            .into_iter()
+            .chain(tail.iter().map(|name| make_path_elem(name, &[])))
+            .collect::<Vec<_>>()
+        };
+        let swp1_path = |tail: &[&str]| path("swp1", tail);
+        let delete = |timestamp, path| Action::Delete(timestamp, path);
+
+        // Every row starts with swp1 cleared at 100 and observed at 200.
+        check_values(
+            [
+                Check {
+                    scenario: "older metadata cannot replace newer epoch",
+                    input: (
+                        vec![metadata(300, Some(250)), metadata(250, Some(150))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "older counter cannot borrow newer metadata",
+                    input: (vec![metadata(300, Some(250))], "swp1", 250),
+                    expect: None,
+                },
+                Check {
+                    scenario: "keyed ancestor deletion rejects older metadata",
+                    input: (
+                        vec![delete(300, swp1_path(&[])), metadata(250, Some(150))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "wildcard interface deletion rejects older metadata",
+                    input: (
+                        vec![delete(200, path("*", &[])), metadata(199, Some(50))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "metadata at root deletion time establishes a new epoch",
+                    input: (
+                        vec![delete(300, Vec::new()), metadata(300, Some(250))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "keyed deletion preserves another interface epoch",
+                    input: (vec![delete(300, path("swp2", &[]))], "swp1", 400),
+                    expect: start(100),
+                },
+                Check {
+                    scenario: "root delete without a timestamp rejects old and exact replay",
+                    input: (
+                        vec![
+                            Action::Record("swp2", 300, start(250)),
+                            delete(0, Vec::new()),
+                            Action::Record("swp2", 299, start(250)),
+                            Action::Record("swp2", 300, start(250)),
+                        ],
+                        "swp2",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "untimed covering delete retains the previous deletion boundary",
+                    input: (
+                        vec![
+                            metadata(300, Some(250)),
+                            delete(300, Vec::new()),
+                            delete(0, Vec::new()),
+                            metadata(300, Some(250)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "negative covering delete rejects exact replay",
+                    input: (
+                        vec![delete(-1, Vec::new()), metadata(200, Some(100))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "negative metadata timestamp rejects old and exact replay",
+                    input: (
+                        vec![
+                            metadata(-1, Some(50)),
+                            metadata(199, Some(50)),
+                            metadata(200, Some(100)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "covering delete preserves a keyed exclusive replay boundary",
+                    input: (
+                        vec![
+                            delete(0, swp1_path(&[])),
+                            metadata(199, Some(50)),
+                            delete(200, Vec::new()),
+                            metadata(200, Some(100)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "newer metadata recovers after an unusable record timestamp",
+                    input: (
+                        vec![metadata(0, None), metadata(201, Some(150))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(150),
+                },
+                Check {
+                    scenario: "newer metadata recovers after an unusable covering delete timestamp",
+                    input: (
+                        vec![
+                            metadata(300, Some(250)),
+                            delete(300, Vec::new()),
+                            delete(-1, Vec::new()),
+                            metadata(301, Some(250)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "counter leaf deletion leaves sibling metadata",
+                    input: (
+                        vec![delete(300, swp1_path(&["state", "counters", "in-errors"]))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(100),
+                },
+                Check {
+                    scenario: "replacement follows deletion at the same positive timestamp",
+                    input: (
+                        vec![
+                            delete(300, swp1_path(&["state", "counters", "last-clear"])),
+                            metadata(300, Some(250)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "exact last-clear deletion rejects older metadata",
+                    input: (
+                        vec![
+                            delete(300, swp1_path(&["state", "counters", "last-clear"])),
+                            metadata(250, Some(150)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "delayed keyed deletion preserves newer metadata",
+                    input: (vec![delete(150, swp1_path(&[]))], "swp1", 400),
+                    expect: start(100),
+                },
+                Check {
+                    scenario: "delayed covering deletion preserves newer metadata",
+                    input: (
+                        vec![
+                            delete(300, Vec::new()),
+                            metadata(300, Some(250)),
+                            delete(250, Vec::new()),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "delayed covering deletion cannot weaken the replay boundary",
+                    input: (
+                        vec![
+                            delete(300, Vec::new()),
+                            delete(250, Vec::new()),
+                            Action::Record("swp2", 270, start(150)),
+                        ],
+                        "swp2",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "start and counter may equal the metadata observation",
+                    input: (vec![metadata(300, Some(300))], "swp1", 300),
+                    expect: start(300),
+                },
+                Check {
+                    scenario: "valid keyed deletion rejects replay for an unseen interface",
+                    input: (
+                        vec![
+                            delete(300, path("swp2", &[])),
+                            Action::Record("swp2", 250, start(150)),
+                        ],
+                        "swp2",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "interface observation ordering is independent",
+                    input: (
+                        vec![
+                            metadata(300, Some(250)),
+                            Action::Record("swp2", 250, start(150)),
+                        ],
+                        "swp2",
+                        400,
+                    ),
+                    expect: start(150),
+                },
+                Check {
+                    scenario: "future clear advances observation ordering without a start",
+                    input: (
+                        vec![metadata(300, Some(350)), metadata(250, Some(150))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+            ],
+            |(actions, interface, observed_at)| {
+                let mut epochs = InterfaceCounterEpochs::default();
+                epochs.record("swp1", 200, start(100));
+                for action in actions {
+                    match action {
+                        Action::Record(interface, timestamp, start_time) => {
+                            epochs.record(interface, timestamp, start_time);
+                        }
+                        Action::Delete(timestamp, path) => {
+                            epochs.delete(&path.iter().collect::<Vec<_>>(), timestamp);
+                        }
+                    }
+                }
+                epochs.start_time(interface, observed_at)
+            },
+        );
+    }
+
     fn test_processor() -> GnmiSampleProcessor {
         use std::str::FromStr;
 
@@ -1197,7 +2422,7 @@ mod tests {
         let addr = BmcAddr {
             ip: "10.0.0.1".parse().unwrap(),
             port: None,
-            mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+            mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
         };
         let event_context = EventContext {
             endpoint_key: "aa:bb:cc:dd:ee:ff".to_string(),
@@ -1207,11 +2432,8 @@ mod tests {
             rack_id: None,
             labels: Default::default(),
         };
-        GnmiSampleProcessor {
-            data_sink: None,
-            event_context,
-            switch_id: "serial-abc".to_string(),
-        }
+
+        GnmiSampleProcessor::new(None, event_context, "serial-abc".to_string(), None, false)
     }
 
     fn test_switch_id(label: &str) -> SwitchId {
@@ -1261,20 +2483,22 @@ mod tests {
 
         let sink = Arc::new(CapturingSink::default());
         let switch_id = test_switch_id("switch-a");
-        let proc = GnmiSampleProcessor {
-            data_sink: Some(sink.clone()),
-            event_context: EventContext {
+
+        let proc = GnmiSampleProcessor::new(
+            Some(sink.clone()),
+            EventContext {
                 endpoint_key: "aa:bb:cc:dd:ee:ff".to_string(),
                 addr: BmcAddr {
                     ip: "10.0.0.1".parse().unwrap(),
                     port: None,
-                    mac: MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap(),
+                    mac: Some(MacAddress::from_str("AA:BB:CC:DD:EE:FF").unwrap()),
                 },
                 collector_type: NVUE_GNMI_SAMPLE_STREAM_ID,
                 labels: Default::default(),
                 metadata: Some(EndpointMetadata::Switch(SwitchData {
+                    log_checkpoint_identity: None,
                     id: Some(switch_id),
-                    serial: "SN-SWITCH-001".to_string(),
+                    serial: Some("SN-SWITCH-001".to_string()),
                     slot_number: Some(7),
                     tray_index: Some(3),
                     nvlink_domain_uuid: None,
@@ -1285,8 +2509,11 @@ mod tests {
                 })),
                 rack_id: Some(RackId::new("RACK_2")),
             },
-            switch_id: "SN-SWITCH-001".to_string(),
-        };
+            "SN-SWITCH-001".to_string(),
+            None,
+            false,
+        );
+
         let notification = proto::Notification {
             timestamp: 0,
             prefix: Some(proto::Path {
@@ -1365,14 +2592,20 @@ mod tests {
         let mut proc = test_processor();
         proc.data_sink = Some(sink.clone());
 
-        let cases = [("LEAK0", "ok"), ("LEAK1", "leak"), ("LEAK2", "unknown")];
+        let cases = [
+            ("LEAK0", Some(make_typed_value_string("ok")), "ok"),
+            ("LEAK1", Some(make_typed_value_string("leak")), "leak"),
+            ("LEAK2", Some(make_typed_value_string("unknown")), "unknown"),
+            ("absent", None, "unknown"),
+            ("empty", Some(proto::TypedValue::default()), "unknown"),
+        ];
 
         let notification = proto::Notification {
             timestamp: 0,
             prefix: None,
             update: cases
                 .iter()
-                .map(|(sensor, state)| proto::Update {
+                .map(|(sensor, value, _)| proto::Update {
                     path: Some(proto::Path {
                         elem: vec![
                             make_path_elem("platform-general", &[]),
@@ -1383,7 +2616,7 @@ mod tests {
                         ],
                         ..Default::default()
                     }),
-                    val: Some(make_typed_value_string(state)),
+                    val: value.clone(),
                     ..Default::default()
                 })
                 .collect(),
@@ -1405,7 +2638,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        for (sensor, state) in cases {
+        for (sensor, _, state) in cases {
             let sensor_samples = samples
                 .iter()
                 .copied()
@@ -1426,6 +2659,459 @@ mod tests {
                 LEAKAGE_STATES,
                 state,
             );
+        }
+    }
+
+    #[test]
+    fn notification_metadata_scopes_counter_starts() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut processor = test_processor();
+        processor.data_sink = Some(sink.clone());
+        let mut metadata = test_interface_update(
+            "nvl0",
+            &["state", "counters", "last-clear"],
+            make_typed_value_uint(100),
+        );
+        let mut prefix = metadata.path.take().expect("metadata path");
+        metadata.path = Some(proto::Path {
+            elem: prefix.elem.split_off(4),
+            ..Default::default()
+        });
+        let notification = proto::Notification {
+            timestamp: 200,
+            prefix: Some(prefix),
+            delete: vec![proto::Path::default()],
+            update: vec![metadata],
+            ..Default::default()
+        };
+
+        processor.process_notification(&proto::Notification {
+            timestamp: 150,
+            update: vec![test_interface_update(
+                "nvl1",
+                &["state", "counters", "last-clear"],
+                make_typed_value_uint(100),
+            )],
+            ..Default::default()
+        });
+
+        // The prefix makes this an entire counter subtree delete. Its replacement
+        // metadata must survive at the same timestamp, without emitting a metric.
+        processor.process_notification(&notification);
+        let start = Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(100));
+        assert_eq!(processor.counter_epoch_start("nvl0", 200), start);
+        assert_eq!(processor.counter_epoch_start("nvl1", 200), start);
+
+        let mut unrelated = notification.clone();
+        unrelated.delete.clear();
+        unrelated.prefix.as_mut().expect("prefix").elem[0].name = "components".into();
+        unrelated.update[0].val = Some(make_typed_value_uint(150));
+        processor.process_notification(&unrelated);
+        assert_eq!(processor.counter_epoch_start("nvl0", 200), start);
+
+        let mut unusable = notification.clone();
+        unusable.delete.clear();
+        for value in [None, Some(make_typed_value_string("invalid"))] {
+            unusable.update[0].val = value;
+            processor.process_notification(&unusable);
+            assert_eq!(processor.counter_epoch_start("nvl0", 200), None);
+            processor.process_notification(&notification);
+        }
+        assert!(sink.events.lock().expect("events").is_empty());
+
+        // A counter under another root cannot borrow the valid OpenConfig epoch,
+        // even when its interface name and leaf match.
+        unrelated.update[0].path.as_mut().expect("leaf path").elem[0].name = "in-errors".into();
+        unrelated.update[0].val = Some(make_typed_value_uint(6));
+        processor.process_notification(&unrelated);
+
+        // The counter appears before replacement metadata, but both belong to
+        // the same observation and must use the replacement start.
+        let mut replacement = notification.clone();
+        replacement.timestamp = 300;
+        replacement.update[0].val = Some(make_typed_value_uint(150));
+        replacement.update.insert(
+            0,
+            proto::Update {
+                path: Some(proto::Path {
+                    elem: vec![make_path_elem("in-errors", &[])],
+                    ..Default::default()
+                }),
+                val: Some(make_typed_value_uint(7)),
+                ..Default::default()
+            },
+        );
+        processor.process_notification(&replacement);
+
+        let mut nested = test_interface_update(
+            "nvl2",
+            &[
+                "subinterfaces",
+                "subinterface",
+                "state",
+                "counters",
+                "last-clear",
+            ],
+            make_typed_value_uint(175),
+        );
+        nested.path.as_mut().expect("nested path").elem[3]
+            .key
+            .insert("index".into(), "0".into());
+        processor.process_notification(&proto::Notification {
+            timestamp: 300,
+            update: vec![nested],
+            ..Default::default()
+        });
+
+        // Older observations cannot borrow newer metadata. Other interfaces
+        // keep their own starts, and subinterface metadata cannot supply one.
+        for (timestamp, interface, value) in [(250, "nvl0", 8), (300, "nvl1", 9), (300, "nvl2", 10)]
+        {
+            processor.process_notification(&proto::Notification {
+                timestamp,
+                update: vec![test_interface_update(
+                    interface,
+                    &["state", "counters", "in-errors"],
+                    make_typed_value_uint(value),
+                )],
+                ..Default::default()
+            });
+        }
+        let events = sink.events.lock().expect("events");
+        let samples = events
+            .iter()
+            .map(|(_, event)| {
+                let CollectorEvent::Metric(sample) = event else {
+                    panic!("expected a counter reading");
+                };
+                let MetricSemantics::CumulativeCounter { start_time, .. } = sample.semantics else {
+                    panic!("expected cumulative semantics");
+                };
+                (sample.key.as_str(), sample.value, start_time)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            samples,
+            [
+                ("interface_in_errors:nvl0", 6.0, None),
+                (
+                    "interface_in_errors:nvl0",
+                    7.0,
+                    Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(150))
+                ),
+                ("interface_in_errors:nvl0", 8.0, None),
+                ("interface_in_errors:nvl1", 9.0, start),
+                ("interface_in_errors:nvl2", 10.0, None),
+            ]
+        );
+        drop(events);
+
+        // A new subscription must accept metadata older than the prior stream's
+        // deletion history, since that history no longer describes the new source.
+        processor.process_notification(&proto::Notification {
+            timestamp: 300,
+            delete: vec![proto::Path::default()],
+            ..Default::default()
+        });
+        assert_eq!(processor.counter_epoch_start("nvl0", 300), None);
+        processor.clear_counter_epochs();
+        processor.process_notification(&notification);
+        assert_eq!(processor.counter_epoch_start("nvl0", 200), start);
+    }
+
+    #[test]
+    fn successful_snapshots_preserve_live_and_present_interface_epochs() {
+        use super::super::client::{build_sample_subscribe_request, build_snapshot_request};
+
+        // A live counter or metadata update may preserve an epoch without
+        // retaining a metric; snapshot presence preserves the last source.
+        let start = |nanos| Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos));
+        let run = |live_tail: Option<[&str; 3]>| {
+            let sink = Arc::new(CapturingSink::default());
+            let processor = GnmiSampleProcessor::new(
+                Some(sink.clone()),
+                test_processor().event_context,
+                "serial-abc".into(),
+                None,
+                true,
+            );
+            let notification = |interface, leaf, value, observed_at| proto::Notification {
+                timestamp: observed_at,
+                update: vec![test_interface_update(
+                    interface,
+                    &["state", "counters", leaf],
+                    make_typed_value_uint(value),
+                )],
+                ..Default::default()
+            };
+            for interface in ["removed", "survivor", "metadata-only"] {
+                processor.process_notification(&notification(interface, "last-clear", 100, 200));
+            }
+            for (interface, leaf) in [
+                ("removed", "in-errors"),
+                ("survivor", "in-errors"),
+                ("survivor", "out-pkts"),
+            ] {
+                processor.process_notification(&notification(interface, leaf, 7, 200));
+            }
+            let request = build_snapshot_request(build_sample_subscribe_request(
+                &[proto::Path::default()],
+                1,
+            ));
+            let mut snapshot = processor
+                .begin_reconciliation(&request)
+                .expect("retained sources");
+            if let Some(tail) = live_tail {
+                let mut update =
+                    test_interface_update("survivor", &tail, make_typed_value_uint(250));
+                if tail.last() != Some(&"last-clear") {
+                    update.val = None;
+                }
+                processor.process_notification(&proto::Notification {
+                    timestamp: 300,
+                    update: vec![update],
+                    ..Default::default()
+                });
+            } else {
+                snapshot
+                    .process_response(&proto::SubscribeResponse {
+                        response: Some(proto::subscribe_response::Response::Update(notification(
+                            "survivor",
+                            "in-errors",
+                            7,
+                            300,
+                        ))),
+                        ..Default::default()
+                    })
+                    .expect("present source");
+            }
+            assert_eq!(
+                sink.events.lock().expect("events").len(),
+                3,
+                "metadata and unusable values emit no samples"
+            );
+            let removed = processor.finish_reconciliation(Some(snapshot));
+            let result = (
+                removed,
+                processor.counter_epoch_start("removed", 400),
+                processor.counter_epoch_start("survivor", 400),
+            );
+            assert_eq!(
+                processor.counter_epoch_start("metadata-only", 400),
+                start(100)
+            );
+            assert!(
+                processor
+                    .counter_epochs
+                    .lock()
+                    .expect("counter epochs")
+                    .reconciliation_candidates
+                    .is_empty()
+            );
+
+            if live_tail.is_none() {
+                // Inferred absence must preserve the replay boundary, then
+                // permit fresh metadata to establish a new start.
+                for (observed_at, expected) in [(200, None), (201, start(100))] {
+                    processor.process_notification(&notification(
+                        "removed",
+                        "last-clear",
+                        100,
+                        observed_at,
+                    ));
+                    assert_eq!(processor.counter_epoch_start("removed", 400), expected);
+                }
+            }
+            result
+        };
+        value_scenarios! {
+            run = run;
+            "live counter or metadata protects the interface" {
+                Some(["state", "counters", "out-errors"]) => (3, None, start(100)),
+                Some(["state", "counters", "last-clear"]) => (3, None, start(250)),
+            }
+            "unmapped leaves and gauges do not protect counter epochs" {
+                Some(["state", "counters", "unmapped"]) => (3, None, None),
+                Some(["phy-diag", "state", "raw-ber"]) => (3, None, None),
+            }
+            "snapshot presence preserves an interface with one of its two sources" {
+                None => (2, None, start(100)),
+            }
+        }
+    }
+
+    #[test]
+    fn sample_counter_aliases_follow_snapshot_reconciliation_and_live_deletes() {
+        use crate::metrics::MetricsManager;
+        use crate::sink::PrometheusSink;
+
+        for enabled in [false, true] {
+            let metrics = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+
+            let sink =
+                Arc::new(PrometheusSink::new(metrics.clone(), "test").expect("Prometheus sink"));
+
+            let processor = GnmiSampleProcessor::new(
+                Some(sink),
+                test_processor().event_context,
+                "serial-abc".to_string(),
+                None,
+                enabled,
+            );
+
+            let path = proto::Path {
+                elem: vec![
+                    make_path_elem("interfaces", &[]),
+                    make_path_elem("interface", &[("name", "nvl0")]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("counters", &[]),
+                    make_path_elem("in-pkts", &[]),
+                ],
+                ..Default::default()
+            };
+
+            let update = proto::Notification {
+                update: vec![proto::Update {
+                    path: Some(path.clone()),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::UintVal(7)),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            assert_eq!(processor.reconciliation.is_some(), enabled);
+            let assert_exported = |present| {
+                let telemetry = metrics.export_telemetry().expect("telemetry");
+                for name in [
+                    "test_nvue_gnmi_interface_in_packets_count",
+                    "test_nvue_gnmi_interface_in_packets_count_total",
+                ] {
+                    let points = telemetry
+                        .lines()
+                        .filter(|line| line.starts_with(&format!("{name}{{")))
+                        .collect::<Vec<_>>();
+                    assert_eq!(points.len(), usize::from(present), "{name}: {telemetry}");
+                    for point in points {
+                        let (_, value) = point.rsplit_once(' ').expect("sample reading");
+                        assert_eq!(value.parse::<f64>().expect("numeric reading"), 7.0);
+                    }
+                }
+            };
+
+            processor.process_notification(&update);
+            assert_exported(true);
+
+            if let Some(reconciliation) = &processor.reconciliation {
+                let request = proto::SubscribeRequest {
+                    request: Some(proto::subscribe_request::Request::Subscribe(
+                        proto::SubscriptionList {
+                            subscription: vec![proto::Subscription {
+                                path: Some(path.clone()),
+                                ..Default::default()
+                            }],
+                            mode: proto::subscription_list::Mode::Once as i32,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                };
+                let mut snapshot = reconciliation.begin(&request).expect("retained metric");
+
+                // A completed snapshot with no samples removes both exported series.
+                assert!(
+                    snapshot
+                        .process_response(&proto::SubscribeResponse {
+                            response: Some(proto::subscribe_response::Response::SyncResponse(true)),
+                            ..Default::default()
+                        })
+                        .expect("completed snapshot")
+                );
+                assert_eq!(reconciliation.finish(Some(snapshot)), 1);
+                assert_exported(false);
+
+                processor.process_notification(&update);
+                assert_exported(true);
+            }
+
+            processor.process_notification(&proto::Notification {
+                delete: vec![path],
+                ..Default::default()
+            });
+
+            assert_exported(false);
+        }
+    }
+
+    #[test]
+    fn absent_leak_value_replaces_exported_state() {
+        use crate::metrics::MetricsManager;
+        use crate::sink::PrometheusSink;
+
+        let metrics = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+
+        let mut proc = test_processor();
+
+        proc.data_sink = Some(Arc::new(
+            PrometheusSink::new(metrics.clone(), "test").expect("Prometheus sink"),
+        ));
+
+        let mut notification = proto::Notification {
+            prefix: Some(proto::Path {
+                elem: vec![
+                    make_path_elem("platform-general", &[]),
+                    make_path_elem("leak-sensors", &[]),
+                ],
+                ..Default::default()
+            }),
+            update: ["affected", "unaffected"]
+                .into_iter()
+                .map(|sensor| proto::Update {
+                    path: Some(proto::Path {
+                        elem: vec![
+                            make_path_elem("leak-sensor", &[("id", sensor)]),
+                            make_path_elem("state", &[]),
+                            make_path_elem("state", &[]),
+                        ],
+                        ..Default::default()
+                    }),
+                    val: Some(make_typed_value_string("leak")),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        for expected in ["leak", "unknown"] {
+            proc.process_notification(&notification);
+
+            let exposition = metrics.export_telemetry().expect("telemetry");
+
+            for (sensor, current) in [("affected", expected), ("unaffected", "leak")] {
+                let series = exposition
+                    .lines()
+                    .filter(|line| line.starts_with("test_nvue_gnmi_leakage_state_state{"))
+                    .filter(|line| line.contains(&format!("sensor=\"{sensor}\"")))
+                    .collect::<Vec<_>>();
+
+                assert_eq!(series.len(), 3, "{sensor}: {exposition}");
+
+                for state in LEAKAGE_STATES {
+                    let sample = series
+                        .iter()
+                        .find(|line| line.contains(&format!("state=\"{state}\"")))
+                        .expect("state series");
+
+                    let expected_value = format!(" {}", u8::from(*state == current));
+
+                    assert!(sample.ends_with(&expected_value), "{sample}");
+                }
+            }
+
+            notification.update.truncate(1);
+
+            notification.update[0].val = None;
         }
     }
 
@@ -1519,38 +3205,216 @@ mod tests {
     }
 
     #[test]
-    fn test_process_notification_update_without_val_is_skipped() {
-        let proc = test_processor();
-        let notification = proto::Notification {
-            timestamp: 0,
-            prefix: Some(proto::Path {
-                elem: vec![
-                    make_path_elem("interfaces", &[]),
-                    make_path_elem("interface", &[("name", "nvl0")]),
-                ],
-                ..Default::default()
-            }),
-            update: vec![proto::Update {
-                path: Some(proto::Path {
-                    elem: vec![
-                        make_path_elem("state", &[]),
-                        make_path_elem("oper-status", &[]),
-                    ],
+    fn unmapped_updates_without_values_are_skipped() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut proc = test_processor();
+        proc.data_sink = Some(sink.clone());
+
+        for (element, keys, leaf) in [
+            (
+                "interface",
+                vec![("name", "nvl0")],
+                vec!["state", "oper-status"],
+            ),
+            (
+                "component",
+                vec![("name", "FAN-1")],
+                vec!["healthz", "state", "status"],
+            ),
+            ("platform-general", vec![], vec!["state", "contact"]),
+            (
+                "leak-sensor",
+                vec![("id", "LEAK0")],
+                vec!["state", "description"],
+            ),
+            ("leak-sensor", vec![], vec!["state", "state"]),
+        ] {
+            let notification = proto::Notification {
+                prefix: Some(proto::Path {
+                    elem: vec![make_path_elem(element, &keys)],
                     ..Default::default()
                 }),
-                val: None,
+                update: vec![proto::Update {
+                    path: Some(proto::Path {
+                        elem: leaf.iter().map(|name| make_path_elem(name, &[])).collect(),
+                        ..Default::default()
+                    }),
+                    val: None,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            let count = proc.process_notification(&notification);
+
+            assert_eq!(count, 0, "{element}: {leaf:?}");
+            assert!(sink.events.lock().expect("captured events").is_empty());
+        }
+    }
+
+    #[test]
+    fn sample_container_delete_prunes_only_descendant_metrics() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut processor = test_processor();
+        processor.data_sink = Some(sink.clone());
+
+        let interface = vec![
+            make_path_elem("interfaces", &[]),
+            make_path_elem("interface", &[("name", "nvl0")]),
+        ];
+
+        processor.process_notification(&proto::Notification {
+            timestamp: 10,
+            update: ["in-errors", "out-errors", "oper-status"]
+                .into_iter()
+                .map(|leaf| proto::Update {
+                    path: Some(proto::Path {
+                        elem: interface
+                            .iter()
+                            .cloned()
+                            .chain([make_path_elem("state", &[])])
+                            .chain((leaf != "oper-status").then(|| make_path_elem("counters", &[])))
+                            .chain([make_path_elem(leaf, &[])])
+                            .collect(),
+                        ..Default::default()
+                    }),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::UintVal(1)),
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        });
+
+        processor.process_notification(&proto::Notification {
+            timestamp: 20,
+            delete: vec![proto::Path {
+                elem: interface
+                    .into_iter()
+                    .chain([
+                        make_path_elem("state", &[]),
+                        make_path_elem("counters", &[]),
+                    ])
+                    .collect(),
                 ..Default::default()
             }],
             ..Default::default()
-        };
+        });
 
-        let count = proc.process_notification(&notification);
-        assert_eq!(count, 0);
+        let prunes = sink.prunes.lock().expect("capture mutex");
+
+        assert!(
+            prunes
+                .iter()
+                .any(|(kind, _)| kind.as_deref() == Some("interface_in_errors"))
+        );
+
+        assert!(
+            prunes
+                .iter()
+                .any(|(kind, _)| kind.as_deref() == Some("interface_out_errors"))
+        );
+
+        assert!(prunes.iter().all(|(kind, labels)| {
+            kind.as_deref() != Some("interface_oper_status")
+                && labels == &[(Cow::Borrowed("interface_name"), "nvl0".to_string())]
+        }));
+    }
+
+    #[test]
+    fn sample_deletes_prune_only_covered_metrics() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut processor = test_processor();
+        processor.data_sink = Some(sink.clone());
+
+        let cases = [
+            (
+                vec![
+                    make_path_elem("interfaces", &[]),
+                    make_path_elem("interface", &[("name", "nvl0")]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("oper-status", &[]),
+                ],
+                1,
+                Some("interface_oper_status"),
+                vec![(Cow::Borrowed("interface_name"), "nvl0".to_string())],
+            ),
+            (
+                vec![
+                    make_path_elem("interfaces", &[]),
+                    make_path_elem("interface", &[("name", "nvl0")]),
+                ],
+                1,
+                None,
+                vec![(Cow::Borrowed("interface_name"), "nvl0".to_string())],
+            ),
+            (
+                vec![
+                    make_path_elem("components", &[]),
+                    make_path_elem("component", &[("name", "FAN-1")]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("oper-status", &[]),
+                ],
+                0,
+                Some("component_oper_status"),
+                vec![(Cow::Borrowed("component_name"), "FAN-1".to_string())],
+            ),
+            (
+                vec![
+                    make_path_elem("platform-general", &[]),
+                    make_path_elem("leak-sensors", &[]),
+                    make_path_elem("leak-sensor", &[("id", "7")]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("state", &[]),
+                ],
+                0,
+                Some("leakage_state"),
+                vec![(Cow::Borrowed("sensor"), "7".to_string())],
+            ),
+            (
+                vec![
+                    make_path_elem("platform-general", &[]),
+                    make_path_elem("state", &[]),
+                    make_path_elem("location", &[]),
+                ],
+                0,
+                Some("platform_location_info"),
+                Vec::new(),
+            ),
+        ];
+
+        for (path, prefix_len, kind, labels) in cases {
+            let (prefix, deleted) = path.split_at(prefix_len);
+
+            processor.process_notification(&proto::Notification {
+                prefix: Some(proto::Path {
+                    elem: prefix.to_vec(),
+                    ..Default::default()
+                }),
+                delete: vec![proto::Path {
+                    elem: deleted.to_vec(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+            let actual = sink
+                .prunes
+                .lock()
+                .expect("capture mutex")
+                .drain(..)
+                .collect::<Vec<_>>();
+
+            assert_eq!(actual, vec![(kind.map(str::to_string), labels)]);
+        }
     }
 
     #[test]
     fn test_process_notification_symbol_ber_and_link_down_events() {
-        let proc = test_processor();
+        let sink = Arc::new(CapturingSink::default());
+        let mut proc = test_processor();
+        proc.data_sink = Some(sink.clone());
         let notification = proto::Notification {
             timestamp: 0,
             prefix: Some(proto::Path {
@@ -1593,6 +3457,21 @@ mod tests {
 
         let count = proc.process_notification(&notification);
         assert_eq!(count, 1);
+
+        let events = sink.events.lock().expect("capture mutex");
+        assert_eq!(events.len(), 2);
+        for ((_, event), (name, unit, value)) in events.iter().zip([
+            ("interface_symbol_ber", "ratio", 3.2e-10),
+            ("interface_link_down_events", "count", 7.0),
+        ]) {
+            let CollectorEvent::Metric(sample) = event else {
+                panic!("expected a Metric event");
+            };
+            assert_eq!(sample.metric_type, name);
+            assert_eq!(sample.unit, unit);
+            assert_eq!(sample.value, value);
+            assert_eq!(sample.semantics, MetricSemantics::Gauge);
+        }
     }
 
     fn test_stream_metrics() -> super::super::subscriber::GnmiStreamMetrics {
@@ -1600,11 +3479,16 @@ mod tests {
         super::super::subscriber::GnmiStreamMetrics {
             connection_state: IntGauge::new("test_conn_state", "test").unwrap(),
             connected: IntGauge::new("test_connected", "test").unwrap(),
+            synchronized: IntGauge::new("test_synchronized", "test").unwrap(),
             reconnections_total: Counter::new("test_reconn", "test").unwrap(),
             server_initiated_closures_total: Counter::new("test_closures", "test").unwrap(),
             connection_established_timestamp: Gauge::new("test_conn_ts", "test").unwrap(),
+            connection_established_timestamp_seconds: Gauge::new("test_conn_ts_seconds", "test")
+                .unwrap(),
             notifications_received_total: Counter::new("test_notif_total", "test").unwrap(),
             last_notification_timestamp: Gauge::new("test_last_notif_ts", "test").unwrap(),
+            last_notification_timestamp_seconds: Gauge::new("test_last_notif_ts_seconds", "test")
+                .unwrap(),
             notification_processing_seconds: Histogram::with_opts(HistogramOpts::new(
                 "test_proc_secs",
                 "test",
@@ -1682,7 +3566,7 @@ mod tests {
         elems.extend(tail.iter().map(|n| make_path_elem(n, &[])));
 
         let notification = proto::Notification {
-            timestamp: 0,
+            timestamp: 1_000_000_000,
             prefix: None,
             update: vec![proto::Update {
                 path: Some(proto::Path {
@@ -1883,6 +3767,152 @@ mod tests {
     }
 
     #[test]
+    fn interface_counters_emit_cumulative_samples_with_openconfig_starts() {
+        let start = SystemTime::UNIX_EPOCH + Duration::from_nanos(100);
+        let mut expected = [
+            ("state/counters/in-errors", "interface_in_errors", "count"),
+            ("state/counters/out-errors", "interface_out_errors", "count"),
+            (
+                "state/counters/out-discards",
+                "interface_out_discards",
+                "count",
+            ),
+            ("state/counters/in-octets", "interface_in_octets", "bytes"),
+            ("state/counters/out-octets", "interface_out_octets", "bytes"),
+            ("state/counters/in-pkts", "interface_in_packets", "count"),
+            ("state/counters/out-pkts", "interface_out_packets", "count"),
+            (
+                "infiniband/state/counters/port/link-downed",
+                "interface_link_downed",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/link-error-recovery",
+                "interface_link_error_recovery",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/rcv-remote-phy-errors",
+                "interface_rcv_remote_physical_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/rcv-switch-relay-errors",
+                "interface_rcv_switch_relay_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/rcv-constraints-errors",
+                "interface_rcv_constraint_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/local-link-integrity-errors",
+                "interface_local_link_integrity_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/excessive-buffer-overrun",
+                "interface_port_buffer_overrun_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/qp1-dropped",
+                "interface_qp1_dropped",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/vl15-dropped",
+                "interface_vl15_dropped",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/xmit-wait",
+                "interface_port_xmit_wait",
+                "count",
+            ),
+        ];
+
+        check_values(
+            expected.map(|(path, name, unit)| Check {
+                scenario: path,
+                input: path,
+                expect: (
+                    format!("{name}:acp0"),
+                    name.to_string(),
+                    unit.to_string(),
+                    7.0,
+                    path.starts_with("state/counters/").then_some(start),
+                ),
+            }),
+            |path| {
+                let sink = Arc::new(CapturingSink::default());
+                let mut processor = test_processor();
+                processor.data_sink = Some(sink.clone());
+                let tail = path.split('/').collect::<Vec<_>>();
+                processor.process_notification(&proto::Notification {
+                    timestamp: 200,
+                    update: vec![
+                        test_interface_update(
+                            "acp0",
+                            &["state", "counters", "last-clear"],
+                            make_typed_value_uint(100),
+                        ),
+                        test_interface_update("acp0", &tail, make_typed_value_uint(7)),
+                    ],
+                    ..Default::default()
+                });
+                let events = sink.events.lock().expect("events");
+                let [(context, CollectorEvent::Metric(sample))] = events.as_slice() else {
+                    panic!("{path}: expected one counter reading");
+                };
+                assert_eq!(sample.name, NVUE_GNMI_SAMPLE_STREAM_ID);
+                assert_eq!(context.collector_type, NVUE_GNMI_SAMPLE_STREAM_ID);
+                let MetricSemantics::CumulativeCounter {
+                    description,
+                    start_time,
+                } = sample.semantics
+                else {
+                    panic!("{path}: expected cumulative counter semantics");
+                };
+                assert!(
+                    !description.trim().is_empty(),
+                    "{path}: missing description"
+                );
+                assert_eq!(
+                    sample.labels,
+                    [(Cow::Borrowed("interface_name"), "acp0".to_string())],
+                    "{path}: interface labels"
+                );
+                (
+                    sample.key.clone(),
+                    sample.metric_type.clone(),
+                    sample.unit.clone(),
+                    sample.value,
+                    start_time,
+                )
+            },
+        );
+
+        let mut counters = numeric_interface_leaves()
+            .iter()
+            .filter(|mapping| {
+                matches!(mapping.semantics, MetricSemantics::CumulativeCounter { .. })
+            })
+            .map(|mapping| (mapping.tail.join("/"), mapping.name, mapping.unit))
+            .collect::<Vec<_>>();
+        counters.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            counters
+                .iter()
+                .map(|(path, name, unit)| (path.as_str(), *name, *unit))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
     fn test_interface_fec_histogram_bins() {
         for n in 0u8..=15 {
             let leaf = format!("rs-num-corr-err-bin{n}");
@@ -1891,6 +3921,7 @@ mod tests {
             assert_eq!(sample.metric_type, format!("interface_fec_hist_{n}"));
             assert_eq!(sample.unit, "count");
             assert_eq!(sample.value, 11.0);
+            assert_eq!(sample.semantics, MetricSemantics::Gauge);
         }
     }
 
@@ -1904,6 +3935,7 @@ mod tests {
         assert_eq!(sample.metric_type, "interface_raw_ber");
         assert_eq!(sample.unit, "ratio");
         assert!((sample.value - 1e-12).abs() < f64::EPSILON);
+        assert_eq!(sample.semantics, MetricSemantics::Gauge);
     }
 
     #[test]
@@ -2078,6 +4110,7 @@ mod tests {
         assert_eq!(active.metric_type, "interface_link_width_active");
         assert_eq!(active.unit, "lanes");
         assert_eq!(active.value, 2.0);
+        assert_eq!(active.semantics, MetricSemantics::Gauge);
 
         let (supported, _) = run_interface_leaf(
             &["infiniband", "state", "supported-widths"],
@@ -2086,6 +4119,7 @@ mod tests {
         assert_eq!(supported.metric_type, "interface_supported_width");
         assert_eq!(supported.unit, "lanes");
         assert_eq!(supported.value, 4.0);
+        assert_eq!(supported.semantics, MetricSemantics::Gauge);
     }
 
     #[test]
@@ -2103,7 +4137,7 @@ mod tests {
                 component_name: "ASIC1",
                 tail: &["asic", "state", "asic-temp"],
                 raw: 46,
-                metric_type: "component_asic_temperature_celsius",
+                metric_type: "component_asic_temperature",
                 unit: "celsius",
             },
             Case {
@@ -2172,6 +4206,7 @@ mod tests {
             assert_eq!(sample.metric_type, case.metric_type);
             assert_eq!(sample.unit, case.unit);
             assert_eq!(sample.value, case.raw as f64);
+            assert_eq!(sample.semantics, MetricSemantics::Gauge);
         }
     }
 
@@ -2360,6 +4395,7 @@ mod tests {
             assert_eq!(sample.metric_type, "interface_link_speed_active");
             assert_eq!(sample.unit, "gbps", "speed unit must be gbps for {raw}");
             assert_eq!(sample.value, expected, "speed {raw}");
+            assert_eq!(sample.semantics, MetricSemantics::Gauge);
         }
 
         // defensive suffix forms
@@ -2464,6 +4500,10 @@ mod tests {
         assert_eq!(metrics.notifications_received_total.get(), 1.0);
         assert_eq!(metrics.monitored_entities.get(), 1.0);
         assert_eq!(metrics.stream_errors_total.get(), 0.0);
+        assert_eq!(
+            metrics.last_notification_timestamp.get(),
+            metrics.last_notification_timestamp_seconds.get()
+        );
     }
 
     // ---- /platform-general switch-level singleton coverage -----------------

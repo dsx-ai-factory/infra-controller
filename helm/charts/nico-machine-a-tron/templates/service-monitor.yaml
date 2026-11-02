@@ -6,6 +6,7 @@ metadata:
   namespace: {{ include "nico-machine-a-tron.namespace" . }}
   labels:
     {{- include "nico-machine-a-tron.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-machine-a-tron.name" . }}
 spec:
   {{- include "nico-machine-a-tron.serviceMonitorSpec" (dict "name" (include "nico-machine-a-tron.name" .) "monitor" .Values.serviceMonitor "port" "metrics" "namespace" (include "nico-machine-a-tron.namespace" .)) | nindent 2 }}
 {{- end }}
