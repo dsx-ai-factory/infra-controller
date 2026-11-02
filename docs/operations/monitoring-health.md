@@ -182,6 +182,7 @@ Collector defaults from the example config:
 | Entity discovery | `discovery_concurrency` | `1` | Concurrent endpoint identity resolutions. |
 | Entity metrics collector | `fetch_interval` | `"2m"` | Entity metrics polling cadence. |
 | Firmware collector | `firmware_refresh_interval` | `"30m"` | Firmware refresh cadence. |
+| Resource status collector | `poll_interval` | `"30m"` | System, Manager, Chassis, and FirmwareInventory status polling cadence. |
 | Manager collector | `poll_interval` | `"5m"` | Power-shelf manager (PMC) status polling cadence. Power-shelf endpoints only. |
 | Logs collector | `mode` | `"sse"` | Preferred BMC log collection mode. |
 | NMX-C collector | `grpc_port` | `9370` | Switch-host NMX-C gRPC endpoint port. |
@@ -396,6 +397,27 @@ Keep the following in mind when configuring health report records:
 - `health_report.alerts.dropped` appears only when details are enabled *and* the report has more than 64 alerts. It contains the number of omitted alerts beyond those first 64.
 
 - Probe IDs use health API names: for example, OOB GPU inventory alerts appear as `SkuValidation` to deduplicate with the in-band SKU alerts.
+
+### Redfish resource status OTLP log contract
+
+When `[collectors.resource_status]` and `[sinks.otlp]` are enabled, each status poll emits one OTLP log record for every System, Manager, Chassis, and UpdateService/FirmwareInventory resource. Status polling is independent of firmware version inventory, metrics, and event-log collection. A resource is emitted even when its `Status` property is absent so missing status is distinguishable from healthy status.
+
+Resource-status records use `event.type = "redfish.resource_status"` and carry these structured attributes:
+
+| Attribute | OTLP type | Presence | Value |
+|---|---|---|---|
+| `redfish.resource_status.schema_version` | string | Always | `v1` for the contract documented here. |
+| `redfish.resource.type` | string | Always | `system`, `manager`, `chassis`, or `firmware`. |
+| `redfish.resource.id` | string | Always | Redfish resource `Id`. |
+| `redfish.resource.name` | string | Always | Redfish resource `Name`. |
+| `redfish.status.state` | string | Optional | Canonical Redfish `Status.State` value. |
+| `redfish.status.health` | string | Optional | Canonical Redfish `Status.Health` value. |
+| `redfish.status.health_rollup` | string | Optional | Canonical Redfish `Status.HealthRollup` value. |
+| `redfish.status.condition_count` | integer | Conditional | Number of conditions. Present when the BMC supplies `Status.Conditions`, including an empty list. |
+| `redfish.status.conditions` | array of `kvlist` | Conditional | First 64 conditions. Each entry contains `message_id` and the optional `timestamp`, `severity`, and `condition_type`. |
+| `redfish.status.conditions.dropped` | integer | Conditional | Number of conditions omitted after the first 64. |
+
+The OTLP severity is `ERROR` when health, health rollup, or a condition is `Critical`; `WARN` when at least one is `Warning`; and `INFO` otherwise. Missing status remains missing rather than being reported as healthy. At most 64 conditions are included in one record.
 
 ## DPU Health Checks
 

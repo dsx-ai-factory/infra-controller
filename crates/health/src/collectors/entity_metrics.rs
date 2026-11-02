@@ -2260,6 +2260,7 @@ mod tests {
         CollectorRemoved,
         Log,
         Firmware,
+        ResourceStatus,
         HealthReport,
     }
 
@@ -2298,6 +2299,7 @@ mod tests {
                 CollectorEvent::CollectorRemoved => ObservedEvent::CollectorRemoved,
                 CollectorEvent::Log(_) => ObservedEvent::Log,
                 CollectorEvent::Firmware(_) => ObservedEvent::Firmware,
+                CollectorEvent::ResourceStatus(_) => ObservedEvent::ResourceStatus,
                 CollectorEvent::HealthReport(_) => ObservedEvent::HealthReport,
             };
             self.events.lock().unwrap().push(observed);

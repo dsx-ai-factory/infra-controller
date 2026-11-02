@@ -37,8 +37,23 @@ use super::resource::Resource;
 use crate::endpoint::SwitchEndpointRole;
 use crate::sink::{
     CollectorEvent, EventContext, HealthReport, HealthReportAlert, HealthReportSuccess,
-    LogSeverity, MetricSample, MetricSemantics, PrometheusSink,
+    LogSeverity, MetricSample, MetricSemantics, PrometheusSink, RedfishCondition,
+    ResourceStatusInfo,
 };
+
+/// Maximum active conditions serialized into one resource-status OTLP record.
+const MAX_SERIALIZED_RESOURCE_CONDITIONS: usize = 64;
+const RESOURCE_STATUS_SCHEMA_VERSION: &str = "v1";
+const RESOURCE_STATUS_SCHEMA_VERSION_KEY: &str = "redfish.resource_status.schema_version";
+const RESOURCE_TYPE_KEY: &str = "redfish.resource.type";
+const RESOURCE_ID_KEY: &str = "redfish.resource.id";
+const RESOURCE_NAME_KEY: &str = "redfish.resource.name";
+const STATUS_STATE_KEY: &str = "redfish.status.state";
+const STATUS_HEALTH_KEY: &str = "redfish.status.health";
+const STATUS_HEALTH_ROLLUP_KEY: &str = "redfish.status.health_rollup";
+const STATUS_CONDITION_COUNT_KEY: &str = "redfish.status.condition_count";
+const STATUS_CONDITIONS_KEY: &str = "redfish.status.conditions";
+const STATUS_CONDITIONS_DROPPED_KEY: &str = "redfish.status.conditions.dropped";
 
 /// Maximum alerts serialized into the `health_report.alerts` attribute.
 ///
@@ -352,6 +367,107 @@ fn alert_detail_attributes(alerts: &[HealthReportAlert]) -> Vec<(&'static str, A
     attributes
 }
 
+fn resource_condition_value(condition: &RedfishCondition) -> AnyValue {
+    let mut entries = HashMap::from([(
+        Key::from_static_str("message_id"),
+        AnyValue::from(condition.message_id.clone()),
+    )]);
+    for (key, value) in [
+        ("timestamp", &condition.timestamp),
+        ("severity", &condition.severity),
+        ("condition_type", &condition.condition_type),
+    ] {
+        if let Some(value) = value {
+            entries.insert(Key::from_static_str(key), AnyValue::from(value.clone()));
+        }
+    }
+
+    AnyValue::Map(Box::new(entries))
+}
+
+fn resource_status_attributes(info: &ResourceStatusInfo) -> Vec<(&'static str, AnyValue)> {
+    let mut attributes = vec![
+        ("event.type", AnyValue::from("redfish.resource_status")),
+        (
+            RESOURCE_STATUS_SCHEMA_VERSION_KEY,
+            AnyValue::from(RESOURCE_STATUS_SCHEMA_VERSION),
+        ),
+        (
+            RESOURCE_TYPE_KEY,
+            AnyValue::from(info.resource_type.as_str()),
+        ),
+        (RESOURCE_ID_KEY, AnyValue::from(info.id.clone())),
+        (RESOURCE_NAME_KEY, AnyValue::from(info.name.clone())),
+    ];
+    if let Some(status) = &info.status {
+        for (key, value) in [
+            (STATUS_STATE_KEY, &status.state),
+            (STATUS_HEALTH_KEY, &status.health),
+            (STATUS_HEALTH_ROLLUP_KEY, &status.health_rollup),
+        ] {
+            if let Some(value) = value {
+                attributes.push((key, AnyValue::from(value.clone())));
+            }
+        }
+        if let Some(conditions) = &status.conditions {
+            attributes.push((
+                STATUS_CONDITION_COUNT_KEY,
+                AnyValue::from(i64::try_from(conditions.len()).unwrap_or(i64::MAX)),
+            ));
+            attributes.push((
+                STATUS_CONDITIONS_KEY,
+                AnyValue::ListAny(Box::new(
+                    conditions
+                        .iter()
+                        .take(MAX_SERIALIZED_RESOURCE_CONDITIONS)
+                        .map(resource_condition_value)
+                        .collect(),
+                )),
+            ));
+            let dropped = conditions
+                .len()
+                .saturating_sub(MAX_SERIALIZED_RESOURCE_CONDITIONS);
+            if dropped > 0 {
+                attributes.push((
+                    STATUS_CONDITIONS_DROPPED_KEY,
+                    AnyValue::from(i64::try_from(dropped).unwrap_or(i64::MAX)),
+                ));
+            }
+        }
+    }
+
+    attributes
+}
+
+fn resource_status_severity(info: &ResourceStatusInfo) -> LogSeverity {
+    let Some(status) = &info.status else {
+        return LogSeverity::Info;
+    };
+    let values = status
+        .health_rollup
+        .iter()
+        .chain(status.health.iter())
+        .chain(
+            status
+                .conditions
+                .iter()
+                .flatten()
+                .filter_map(|condition| condition.severity.as_ref()),
+        );
+    let mut warning = false;
+    for value in values {
+        if value == "Critical" {
+            return LogSeverity::Error;
+        }
+        warning |= value == "Warning";
+    }
+    if warning {
+        LogSeverity::Warn
+    } else {
+        LogSeverity::Info
+    }
+}
+
 fn convert_event(
     event: &CollectorEvent,
     observed_nanos: u64,
@@ -397,6 +513,22 @@ fn convert_event(
                 severity_text: LogSeverity::Info.as_str().to_string(),
                 body: Some(AnyValue::from(body).into()),
                 attributes: otlp_attributes([KeyValue::new("event.type", "firmware")]),
+                ..Default::default()
+            })
+        }
+        CollectorEvent::ResourceStatus(info) => {
+            let body = format!("{} {} status", info.resource_type.as_str(), info.id);
+            let severity = resource_status_severity(info);
+            Some(OtlpLogRecord {
+                time_unix_nano: observed_nanos,
+                observed_time_unix_nano: observed_nanos,
+                severity_number: severity_number(severity),
+                severity_text: severity.as_str().to_string(),
+                body: Some(AnyValue::from(body).into()),
+                attributes: resource_status_attributes(info)
+                    .into_iter()
+                    .collect::<Attributes>()
+                    .0,
                 ..Default::default()
             })
         }
@@ -694,7 +826,8 @@ mod tests {
     use crate::otlp::common::{AnyValue as OtlpAnyValue, any_value};
     use crate::sink::{
         Classification, HealthReport, HealthReportAlert, HealthReportSuccess, HealthReportTarget,
-        LogRecord, Probe, ReportSource, SensorAttribution,
+        LogRecord, Probe, RedfishCondition, RedfishResourceType, RedfishStatus, ReportSource,
+        ResourceStatusInfo, SensorAttribution,
     };
 
     fn test_context() -> EventContext {
@@ -1189,6 +1322,115 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].severity_text, "WARN");
         assert_eq!(records[0].severity_number, SeverityNumber::Warn as i32);
+    }
+
+    #[test]
+    fn resource_status_event_exports_structured_otlp_for_every_resource_type() {
+        let conditions = (0..=MAX_SERIALIZED_RESOURCE_CONDITIONS)
+            .map(|index| RedfishCondition {
+                timestamp: Some("2026-10-30T10:00:00Z".to_string()),
+                message_id: format!("ResourceEvent.1.0.Condition{index}"),
+                severity: (index == 0).then(|| "Critical".to_string()),
+                condition_type: Some("Alert".to_string()),
+            })
+            .collect::<Vec<_>>();
+        let status = RedfishStatus {
+            state: Some("Enabled".to_string()),
+            health: Some("Warning".to_string()),
+            health_rollup: None,
+            conditions: Some(conditions),
+        };
+
+        for resource_type in [
+            RedfishResourceType::System,
+            RedfishResourceType::Manager,
+            RedfishResourceType::Chassis,
+            RedfishResourceType::Firmware,
+        ] {
+            let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusInfo {
+                resource_type,
+                id: "resource-1".to_string(),
+                name: "Resource One".to_string(),
+                status: Some(status.clone()),
+            }));
+
+            let request = build_export_request(&[(test_context(), event)], EXPORT_NANOS, false);
+            let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+
+            assert_eq!(record.severity_text, "ERROR");
+            assert_eq!(record.severity_number, SeverityNumber::Error as i32);
+            assert_eq!(
+                body_value(record),
+                Some(format!("{} resource-1 status", resource_type.as_str()).as_str())
+            );
+            assert_eq!(
+                attr_value(&record.attributes, "event.type"),
+                Some("redfish.resource_status")
+            );
+            assert_eq!(
+                attr_value(&record.attributes, RESOURCE_STATUS_SCHEMA_VERSION_KEY),
+                Some("v1")
+            );
+            assert_eq!(
+                attr_value(&record.attributes, RESOURCE_TYPE_KEY),
+                Some(resource_type.as_str())
+            );
+            assert_eq!(
+                attr_value(&record.attributes, RESOURCE_ID_KEY),
+                Some("resource-1")
+            );
+            assert_eq!(
+                attr_value(&record.attributes, RESOURCE_NAME_KEY),
+                Some("Resource One")
+            );
+            assert_eq!(
+                attr_value(&record.attributes, STATUS_STATE_KEY),
+                Some("Enabled")
+            );
+            assert_eq!(
+                attr_value(&record.attributes, STATUS_HEALTH_KEY),
+                Some("Warning")
+            );
+            assert_eq!(
+                attr_int_value(&record.attributes, STATUS_CONDITION_COUNT_KEY),
+                Some(65)
+            );
+            assert_eq!(
+                attr_int_value(&record.attributes, STATUS_CONDITIONS_DROPPED_KEY),
+                Some(1)
+            );
+            let conditions = attr_array_value(&record.attributes, STATUS_CONDITIONS_KEY)
+                .expect("condition array");
+            assert_eq!(conditions.len(), MAX_SERIALIZED_RESOURCE_CONDITIONS);
+            let first = any_kvlist_value(&conditions[0]).expect("condition fields");
+            assert_eq!(
+                attr_value(first, "message_id"),
+                Some("ResourceEvent.1.0.Condition0")
+            );
+            assert_eq!(attr_value(first, "severity"), Some("Critical"));
+        }
+    }
+
+    #[test]
+    fn resource_status_event_preserves_missing_status_as_unknown() {
+        let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusInfo {
+            resource_type: RedfishResourceType::Firmware,
+            id: "BMC".to_string(),
+            name: "Baseboard Management Controller".to_string(),
+            status: None,
+        }));
+
+        let request = build_export_request(&[(test_context(), event)], EXPORT_NANOS, false);
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+
+        assert_eq!(record.severity_text, "INFO");
+        assert_eq!(body_value(record), Some("firmware BMC status"));
+        assert_eq!(attr_value(&record.attributes, STATUS_STATE_KEY), None);
+        assert_eq!(attr_value(&record.attributes, STATUS_HEALTH_KEY), None);
+        assert_eq!(
+            attr_array_value(&record.attributes, STATUS_CONDITIONS_KEY),
+            None
+        );
     }
 
     #[test]

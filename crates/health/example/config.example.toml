@@ -291,6 +291,11 @@ fetch_interval = "2m"
 [collectors.firmware]
 firmware_refresh_interval = "30m"
 
+# Periodic Status observations for Systems, Managers, Chassis, and
+# UpdateService/FirmwareInventory resources. Disabled by default.
+[collectors.resource_status]
+poll_interval = "30m"
+
 # Power shelf manager (PMC) status: `manager_status` and `manager_last_reset`.
 # Runs for power shelf endpoints only and is enabled by default with a 5m poll.
 [collectors.manager]
