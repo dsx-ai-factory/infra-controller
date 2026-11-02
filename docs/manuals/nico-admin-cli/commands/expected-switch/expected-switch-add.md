@@ -44,8 +44,8 @@ Chassis serial number of the expected switch
 `--nvos-interface <MAC[,primary]>`
 
 An NVOS ethernet port of the expected switch. Repeat for each port.
-Append ,primary to mark the primary port (eth0); when none is marked the
-first is primary and a single port is always primary
+Append ',primary' to mark the primary port (eth0); when none is marked
+the first is primary and a single port is always primary
 
 `--nvos-username <NVOS_USERNAME>`
 
@@ -115,7 +115,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

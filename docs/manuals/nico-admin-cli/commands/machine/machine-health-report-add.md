@@ -85,7 +85,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<MACHINE_ID>`
 

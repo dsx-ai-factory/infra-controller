@@ -28,8 +28,8 @@ whatever is stored now
 
 `--force`
 
-Required to remove the any fallback, which leaves every class without a
-profile of its own attesting nothing
+Required to remove the 'any' fallback, which leaves every class without
+a profile of its own attesting nothing
 
 `--extended`
 
@@ -51,7 +51,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<HARDWARE_CLASS>`
 
