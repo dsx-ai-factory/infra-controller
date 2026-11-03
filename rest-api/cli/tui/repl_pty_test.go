@@ -847,7 +847,9 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 			case "GET /v2/org/acme/nico/tenant/account":
 				_, _ = io.WriteString(w, `[]`)
 			case "GET /v2/org/acme/nico/ipblock":
-				_, _ = io.WriteString(w, `[{"id":"ipv6-block","name":"provider-ipv6","siteId":"site-1","infrastructureProviderId":"provider-1","tenantId":null,"status":"Ready","prefix":"2001:db8::","prefixLength":48,"protocolVersion":"IPv6"}]`)
+				_, _ = io.WriteString(w, `[{"id":"private-root","name":"private-root","siteId":"site-1","tenantId":"tenant-1","managed":false,"status":"Ready","protocolVersion":"IPv4"},{"id":"ipv6-block","name":"provider-ipv6","siteId":"site-1","infrastructureProviderId":"provider-1","tenantId":null,"status":"Ready","prefix":"2001:db8::","prefixLength":48,"protocolVersion":"IPv6"}]`)
+			case "GET /v2/org/acme/nico/ipblock/private-root":
+				_, _ = io.WriteString(w, `{"id":"private-root","name":"private-root","prefix":"10.21.0.0","managed":false}`)
 			case "POST /v2/org/acme/nico/allocation":
 				w.WriteHeader(http.StatusCreated)
 				_, _ = io.WriteString(w, `{"id":"allocation-1","name":"ipv6-allocation"}`)
@@ -878,6 +880,8 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "Constraint value (prefix length, e.g. 56)")
 		terminal.send(t, "64\r")
 		terminal.waitFor(t, "Allocation created: ipv6-allocation")
+		terminal.send(t, "ip-block get private-root\r")
+		terminal.waitFor(t, "10.21.0.0")
 		terminal.send(t, "exit\r")
 		terminal.waitForExit(t)
 
@@ -885,11 +889,13 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		require.Len(t, requests, 1)
 		assert.JSONEq(t, `{"name":"ipv6-allocation","siteId":"site-1","tenantId":"tenant-1","allocationConstraints":[{"resourceType":"IPBlock","resourceTypeId":"ipv6-block","constraintType":"Reserved","constraintValue":64}]}`, requests[0].Body)
 		ipBlockRequests := recorder.matching(http.MethodGet, "/v2/org/acme/nico/ipblock")
-		require.Len(t, ipBlockRequests, 1)
+		require.Len(t, ipBlockRequests, 2)
 		assert.Contains(t, ipBlockRequests[0].Query, "siteId=site-1")
 		assert.Contains(t, ipBlockRequests[0].Query, "infrastructureProviderId=provider-1")
+		assert.NotContains(t, ipBlockRequests[1].Query, "siteId=", "management lookup restores the original scope")
+		require.Len(t, recorder.matching(http.MethodGet, "/v2/org/acme/nico/ipblock/private-root"), 1, "private roots remain selectable for management")
 		for _, request := range recorder.snapshot() {
-			assert.False(t, strings.HasPrefix(request.Path, "/v2/org/acme/nico/ipblock/"), "the picker already provides the protocol version")
+			assert.NotEqual(t, "/v2/org/acme/nico/ipblock/ipv6-block", request.Path, "the picker already provides the protocol version")
 		}
 	})
 
