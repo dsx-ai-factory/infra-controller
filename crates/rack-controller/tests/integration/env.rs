@@ -334,7 +334,17 @@ impl TestEnv {
     }
 }
 
-pub(super) async fn new_host(
+pub(super) fn new_host(
+    env: &TestEnv,
+    config: ManagedHostConfig,
+) -> impl std::future::Future<Output = eyre::Result<model::machine::ManagedHostStateSnapshot>> + '_
+{
+    // Keep host ingestion's large future out of the enclosing rack test future
+    // so multi-device fixtures fit the default test thread stack.
+    Box::pin(new_host_inner(env, config))
+}
+
+async fn new_host_inner(
     env: &TestEnv,
     mut config: ManagedHostConfig,
 ) -> eyre::Result<model::machine::ManagedHostStateSnapshot> {
