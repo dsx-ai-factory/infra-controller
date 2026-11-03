@@ -273,6 +273,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_health_redfish_sse_subscription_close_total</td><td>counter</td><td>Number of Redfish SSE streams closed, by what happened to the EventDestination each opened.</td></tr>
 <tr><td>carbide_health_redfish_sse_subscriptions_reaped_total</td><td>counter</td><td>Number of SSE EventDestinations the reap_on_cap sweep tried to delete on BMCs at their SSE subscription cap, by outcome.</td></tr>
 <tr><td>carbide_health_report_submissions_total</td><td>counter</td><td>Number of health report submissions to the NICo API, by report target and outcome.</td></tr>
+<tr><td>carbide_host_reconciler_phase_duration_milliseconds</td><td>histogram</td><td>Time one host reconciler phase took, including unsuccessful passes, by phase.</td></tr>
+<tr><td>carbide_host_reconciliation_failures_total</td><td>counter</td><td>Number of failed per-host reconciliation attempts, by phase.</td></tr>
 <tr><td>carbide_host_reprovision_retries_total</td><td>counter</td><td>Number of times a failed host firmware upgrade was retried during host reprovisioning</td></tr>
 <tr><td>carbide_hosts_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_hosts_by_sku_count</td><td>gauge</td><td>Number of hosts by SKU and device type (&#39;unknown&#39; for hosts without SKU)</td></tr>

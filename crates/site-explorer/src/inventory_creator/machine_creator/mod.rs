@@ -22,17 +22,14 @@ use std::time::{Duration, Instant};
 
 use carbide_instrument::emit;
 use carbide_resource_pool::ResourcePoolRegistry;
-use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::{
-    HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId, StableHostMachineId,
-};
+use carbide_uuid::machine::{HostMachineId, MachineId, PredictedHostMachineId};
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
 use db::Transaction;
+use db::machine_interface::MachineInterfaces;
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 use futures_util::stream::FuturesUnordered;
-use itertools::Itertools;
 use mac_address::MacAddress;
 use model::bmc_info::BmcInfo;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
@@ -56,14 +53,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::Config;
 use crate::IdentifiedManagedHost;
-use crate::boot_interfaces::reconcile_desired_boot_interface;
+use crate::boot_interfaces::{initial_selection_source, zero_dpu_primary_mac};
 use crate::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
+use crate::endpoint_exploration_report_ext::EndpointExplorationReportExt;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
-use crate::managed_host::ManagedHost;
+use crate::machine_interfaces::MachineInterfacesExt;
+use crate::managed_host::{ManagedHost, ZeroDpuHostLookup, find_zero_dpu_host};
 use crate::metrics::{
     ManagedHostCreationFinished, ManagedHostCreationStage, ManagedHostCreationStageFinished,
-    SiteExplorationMetrics,
+    SiteExplorationMetrics, SiteExplorerHostAdminAddressReconcileFailed,
 };
 
 mod host_identification;
@@ -119,36 +118,21 @@ impl MachineCreator {
     /// pair) for each ManagedHost that was identified and that doesn't have a
     /// corresponding `Machine` yet. `CreationRun::create_hosts` drives it.
     ///
-    /// A host whose BMC and DPU BMCs are all in `ingested_bmc_ips` only enters the
-    /// per-host transaction when one of its endpoints is in `explored_this_run`, so
-    /// the steady-state repair in `create_managed_host` follows the exploration
-    /// rotation. Such a repair takes a concurrency slot and no slot of
-    /// `machines_created_per_run`. A host with any BMC still missing a machine
-    /// always enters the transaction and counts toward the cap.
+    /// Hosts whose BMCs are all ingested are left to the independent host reconciler.
     pub(super) fn creation_run<'a>(
         &'a self,
         explored_managed_hosts: &'a mut [IdentifiedManagedHost],
         expected_explored_endpoint_index: &'a ExploredEndpointIndex,
         ingested_bmc_ips: &HashSet<IpAddr>,
-        explored_this_run: &HashSet<IpAddr>,
     ) -> CreationRun<'a> {
         let mut skipped_existing_hosts = 0usize;
         let mut pending = Vec::new();
-        let mut repairs = Vec::new();
         let mut racks_to_ensure = BTreeSet::new();
         for identified in explored_managed_hosts.iter_mut() {
-            if !needs_managed_host_transaction(
-                &identified.explored_host,
-                ingested_bmc_ips,
-                explored_this_run,
-            ) {
-                skipped_existing_hosts += 1;
-                continue;
-            }
             if host_bmc_ips(&identified.explored_host)
                 .all(|bmc_ip| ingested_bmc_ips.contains(bmc_ip))
             {
-                repairs.push(identified);
+                skipped_existing_hosts += 1;
                 continue;
             }
             let host_bmc_ip = &identified.explored_host.host_bmc_ip;
@@ -164,7 +148,7 @@ impl MachineCreator {
         if skipped_existing_hosts > 0 {
             tracing::info!(
                 skipped_existing_hosts,
-                "Skipped hosts that already have a machine and were not explored in this run"
+                "Skipped existing hosts during machine creation"
             );
         }
 
@@ -172,7 +156,6 @@ impl MachineCreator {
             creator: self,
             expected_explored_endpoint_index,
             pending: pending.into_iter().peekable(),
-            repairs: repairs.into_iter().peekable(),
             budget: CreationBudget::new(
                 self.config.machines_created_per_run,
                 self.creation_concurrency,
@@ -235,78 +218,16 @@ impl MachineCreator {
         }
     }
 
-    /// Reconciles the admin addresses of the ingested hosts explored in this
-    /// run, for the mode in which `create_machines` is off and its
-    /// steady-state path does not revisit them.
+    /// Creates machines for an identified managed host.
     ///
-    /// A host is revisited when its BMC and every DPU BMC belong to a machine
-    /// and one of them was explored in this run: the hosts `create_machines`
-    /// repairs when it is on. Each reconcile holds the admin-lock admission
-    /// permit, like `create_machines` does. A failed transient reconcile
-    /// flags the host's BMC endpoint for exploration, so the next run
-    /// revisits the host here.
-    pub(crate) async fn reconcile_explored_host_admin_addresses(
-        &self,
-        explored_managed_hosts: &[IdentifiedManagedHost],
-        ingested_bmc_ips: &HashSet<IpAddr>,
-        explored_this_run: &HashSet<IpAddr>,
-    ) {
-        for identified in explored_managed_hosts {
-            let host = &identified.explored_host;
-            if !ingested_host_explored_this_run(host, ingested_bmc_ips, explored_this_run) {
-                continue;
-            }
-            match self.existing_host_machine_id(host).await {
-                Ok(Some(host_machine_id)) => {
-                    // Admission permit BEFORE the reconcile transaction, which
-                    // may wait on the admin-segment advisory locks: excess
-                    // waiters queue in memory, not on open pool connections.
-                    let _admin_admission = db::machine_interface::admin_lock_admission().await;
-                    reconcile_host_admin_addresses_after_commit(
-                        &self.database_connection,
-                        &host_machine_id,
-                    )
-                    .await;
-                }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    %error,
-                    host_bmc_ip_address = %host.host_bmc_ip,
-                    "Skipped the admin address reconcile of an explored host"
-                ),
-            }
-        }
-    }
-
-    /// The host machine the DPUs of `host` are attached to, or `None` while
-    /// they have no machines. A host without DPUs has no DPU-backed admin
-    /// link, so there is nothing to reconcile.
-    async fn existing_host_machine_id(
-        &self,
-        host: &ExploredManagedHost,
-    ) -> SiteExplorerResult<Option<HostMachineId>> {
-        let dpu_ids = host
-            .dpus
-            .iter()
-            .map(|dpu_report| dpu_report.machine_id_if_valid_report())
-            .collect::<Result<Vec<_>, _>>()?;
-        if dpu_ids.is_empty() {
-            return Ok(None);
-        }
-        let host_associations =
-            db::machine::DpuHostAssociations::load(&self.database_connection, &dpu_ids).await?;
-        Ok(host_associations.common_host_machine_id()?)
-    }
-
-    /// Creates machines for an identified managed host or reconciles an existing host.
+    /// Existing hosts are left unchanged.
     ///
     /// Returns `true` only when new machines have been created.
     ///
     /// Prepares missing DPU IPv4 loopbacks through the configured backend before
     /// the machine transaction, then attaches them with the network config.
-    /// Existing loopback ownership is reused during repair.
     ///
-    /// Both creation and reconciliation require a matching `expected_machine` entry.
+    /// Requires a matching `expected_machine` entry.
     pub async fn create_managed_host(
         &self,
         explored_host: &ExploredManagedHost,
@@ -416,7 +337,7 @@ impl MachineCreator {
         }
         let (creation, _admin_admission) = creation?;
 
-        if let Some(host_machine_id) = creation.committed_host_machine_id() {
+        if let ManagedHostCreation::Created { host_machine_id } = creation {
             // Normalize host admin address ownership now that every DPU-backed
             // host interface is attached and the primary flags are committed.
             let repair_start = Instant::now();
@@ -430,10 +351,38 @@ impl MachineCreator {
         Ok(creation)
     }
 
-    /// The creation transaction: one transaction from begin to commit, with
-    /// the DPU-backed branch holding the admin segment locks in allocation
-    /// mode. Returns after the commit; the caller runs the admin address
-    /// repair.
+    /// Initializes a new host's desired target in its inventory transaction.
+    async fn initialize_desired_boot_interface(
+        txn: &mut PgConnection,
+        machine_id: &HostMachineId,
+        primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
+        declared_primary: Option<MacAddress>,
+    ) -> SiteExplorerResult<()> {
+        let interfaces = MachineInterfaces::load(txn, machine_id).await?;
+        if let Some(target) = interfaces.proposed_boot_interface_target(None) {
+            if !db::machine::try_lock_group_for_update(txn, machine_id.as_machine_id()).await? {
+                return Err(db::DatabaseError::FailedPrecondition(format!(
+                    "machine group for {machine_id} changed or is busy; retry",
+                ))
+                .into());
+            }
+            let selection_source =
+                initial_selection_source(&target, primary_interface_selection, declared_primary);
+            db::machine_desired_boot_interface::initialize_if_unset(
+                txn,
+                machine_id,
+                &target,
+                selection_source,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Creates inventory in one transaction, holding admin segment locks in
+    /// allocation mode for new DPU-backed hosts. Existing hosts
+    /// cause a read-only rollback. After a new host commits, the caller
+    /// normalizes its admin addresses.
     async fn create_managed_host_in_transaction(
         &self,
         pool: &PgPool,
@@ -453,7 +402,7 @@ impl MachineCreator {
         // Zero-dpu case: If the explored host had no DPUs, we can create the machine now
         if managed_host.explored_host.dpus.is_empty() {
             if let Some(machine_id) = self
-                .create_or_reconcile_zero_dpu_host(
+                .create_zero_dpu_host(
                     &mut txn,
                     &managed_host,
                     report,
@@ -464,13 +413,8 @@ impl MachineCreator {
             {
                 managed_host.machine_id = Some(machine_id);
             } else {
-                // An existing predicted host may have gained interfaces and a
-                // desired boot target. Keep those restart-safe writes even
-                // though there is no new machine to count this iteration.
-                txn.commit().await?;
-                return Ok(ManagedHostCreation::Repaired {
-                    host_machine_id: None,
-                });
+                txn.rollback().await?;
+                return Ok(ManagedHostCreation::SkippedExisting);
             }
             tracing::info!("Created managed_host with zero DPUs");
         }
@@ -486,31 +430,12 @@ impl MachineCreator {
 
         let host_associations = db::machine::DpuHostAssociations::load(&mut txn, &dpu_ids).await?;
 
-        if let Some(host_machine_id) = host_associations.common_host_machine_id()? {
-            // Steady state case: DPU's already exist, so site explorer must have already created
-            // this managed host (since only site explorer would have created them.) Ensure they're
-            // associated with this machine, then return early. `create_machines` gates this
-            // path with `needs_managed_host_transaction` so an ingested fleet does not re-run
-            // it for every host on every iteration.
-
-            for prepared in loopbacks {
-                prepared.check_identity(&mut txn).await?;
-            }
-
-            Self::reconcile_existing_dpu_host(
-                &mut txn,
-                &host_machine_id,
-                &managed_host.explored_host.dpus,
-            )
-            .await?;
-
-            for prepared in loopbacks {
-                prepared.attach(&mut txn, false).await?;
-            }
-            txn.commit().await?;
-            return Ok(ManagedHostCreation::Repaired {
-                host_machine_id: Some(host_machine_id),
-            });
+        if host_associations.common_host_machine_id()?.is_some() {
+            // A stale creation candidate can already have an attached host.
+            // Validate the complete DPU set to avoid silently accepting partial
+            // or conflicting inventory, then leave existing state unchanged.
+            txn.rollback().await?;
+            return Ok(ManagedHostCreation::SkippedExisting);
         }
 
         // Advisory-lock the admin segments, in the allocators' mode, before the
@@ -594,16 +519,14 @@ impl MachineCreator {
         // while its DPUs stay managed: the NIC becomes the host's HostInband
         // primary and the DPU admin links go dormant in the reconcile below.
         // Only for hosts with explored DPUs -- a zero-DPU host's NICs (including
-        // a declared primary) are already owned by `create_or_reconcile_zero_dpu_host`.
+        // a declared primary) are already owned by `create_zero_dpu_host`.
         if !managed_host.explored_host.dpus.is_empty() {
             self.own_declared_host_boot_nic(&mut txn, &host_machine_id, report, machine_data)
                 .await?;
         }
 
-        reconcile_desired_boot_interface(
+        Self::initialize_desired_boot_interface(
             &mut txn,
-            // TODO: ManagedHost will eventually have a HostMachineId as its machine_id and
-            // conversion will become unnecessary.
             &host_machine_id,
             primary_interface_selection,
             machine_data.and_then(ExpectedMachineData::declared_primary_mac),
@@ -635,25 +558,6 @@ impl MachineCreator {
         Ok(ManagedHostCreation::Created { host_machine_id })
     }
 
-    /// Reconciles DPU OOB ownership and the existing host's desired boot target.
-    /// The caller validates DPU attachment and owns the transaction.
-    async fn reconcile_existing_dpu_host(
-        txn: &mut PgConnection,
-        host_machine_id: &HostMachineId,
-        dpus: &[ExploredDpu],
-    ) -> SiteExplorerResult<()> {
-        for dpu in dpus {
-            Self::ensure_dpu_oob_interface_ownership(txn, dpu).await?;
-        }
-
-        // The primary on an existing host may predate source
-        // tracking. Do not infer its historical selector from today's
-        // exploration or ExpectedMachine data.
-        reconcile_desired_boot_interface(txn, host_machine_id, None, None).await?;
-
-        Ok(())
-    }
-
     async fn dpf_based_dpu_provisioning_possible(
         &self,
         txn: &mut PgConnection,
@@ -675,9 +579,9 @@ impl MachineCreator {
         ))
     }
 
-    /// Creates a zero-DPU host or reconciles one found through its interfaces.
+    /// Creates a zero-DPU host when its interface inventory is still unowned.
     /// Returns a machine ID only when a new host has been created.
-    async fn create_or_reconcile_zero_dpu_host(
+    async fn create_zero_dpu_host(
         &self,
         txn: &mut PgConnection,
         managed_host: &ManagedHost<'_>,
@@ -685,87 +589,35 @@ impl MachineCreator {
         bmc_mac_address: MacAddress,
         machine_data: Option<&ExpectedMachineData>,
     ) -> SiteExplorerResult<Option<HostMachineId>> {
-        let mac_addresses = host_mac_addresses_for_predicted_machine(report, machine_data);
+        let mac_addresses = report.host_mac_addresses_for_predicted_machine(machine_data);
 
-        let existing_predicted_host_machine_id =
-            match Self::find_zero_dpu_host(txn, bmc_mac_address, &mac_addresses).await? {
-                ZeroDpuHostLookup::NotFound => None,
-                ZeroDpuHostLookup::Predicted(machine_id) => Some(machine_id),
-                ZeroDpuHostLookup::Stable(machine_id) => {
-                    // ExpectedMachine is ingestion policy, not a way to
-                    // rewrite interfaces on an already managed host.
-                    reconcile_desired_boot_interface(txn, &machine_id, None, None).await?;
-                    return Ok(None);
-                }
-                ZeroDpuHostLookup::Conflict => return Ok(None),
-            };
+        if !matches!(
+            find_zero_dpu_host(txn, bmc_mac_address, &mac_addresses).await?,
+            ZeroDpuHostLookup::NotFound
+        ) {
+            return Ok(None);
+        }
 
-        // A declared primary remains authoritative while the host is awaiting
-        // its first lease. Without one, retained boot metadata is only a
-        // fallback when the predicted host has no primary row or prediction;
-        // an unrelated retained interface must not replace a settled primary
-        // during an ordinary refresh.
         let declared_primary = machine_data.and_then(|data| data.declared_primary_mac());
-        let has_existing_primary = if declared_primary.is_none()
-            && let Some(machine_id) = existing_predicted_host_machine_id
-        {
-            db::machine_interface::machine_has_primary_interface(&machine_id, &mut *txn).await?
-                || db::predicted_machine_interface::find_by_machine_id(&mut *txn, &machine_id)
-                    .await?
-                    .iter()
-                    .any(|prediction| prediction.primary_interface)
-        } else {
-            false
-        };
-        let primary_mac = match declared_primary {
-            Some(declared) => Some(declared),
-            None if !has_existing_primary => {
-                let mut recovered = None;
-                for mac_address in &mac_addresses {
-                    if db::retained_boot_interface::find_by_mac(
-                        &mut *txn,
-                        *mac_address,
-                        self.config.retained_boot_interface_window,
-                    )
-                    .await?
-                    .is_some()
-                    {
-                        recovered = Some(*mac_address);
-                        break;
-                    }
-                }
-                recovered
-            }
-            None => None,
-        };
+        let primary_mac = zero_dpu_primary_mac(
+            txn,
+            None,
+            &mac_addresses,
+            declared_primary,
+            self.config.retained_boot_interface_window,
+        )
+        .await?;
 
         // Resolve the machine ID before borrowing interface IDs from the report.
-        let machine_id = match (existing_predicted_host_machine_id, managed_host.machine_id) {
-            (Some(machine_id), _) => machine_id.into(),
-            (None, Some(machine_id)) => machine_id,
-            (None, None) => {
-                // Mint a predicted-host machine_id from the exploration report.
-                PredictedHostMachineId::try_from(*report.generate_machine_id(true)?.unwrap())?
-                    .into()
-            }
+        let machine_id = match managed_host.machine_id {
+            Some(machine_id) => machine_id,
+            None => PredictedHostMachineId::try_from(*report.generate_machine_id(true)?.unwrap())?
+                .into(),
         };
         let report_boot_interface_ids: Vec<(MacAddress, &str)> = mac_addresses
             .iter()
             .filter_map(|mac| report.find_interface_id_for_mac(*mac).map(|id| (*mac, id)))
             .collect();
-
-        if let Some(machine_id) = existing_predicted_host_machine_id {
-            Self::reconcile_existing_zero_dpu_host(
-                txn,
-                &machine_id,
-                &mac_addresses,
-                &report_boot_interface_ids,
-                primary_mac,
-                declared_primary,
-            )
-            .await?;
-            return Ok(None);
-        }
 
         tracing::info!(%machine_id, "Minted predicted host ID for zero-DPU machine");
 
@@ -795,7 +647,6 @@ impl MachineCreator {
                 predicted_host_mac_addresses = ?mac_addresses,
                 "Predicted host already exists, with different mac addresses from this one. Potentially multiple machines with same serial number?"
             );
-            reconcile_desired_boot_interface(txn, &existing_machine.id, None, None).await?;
             return Ok(None);
         }
 
@@ -819,96 +670,6 @@ impl MachineCreator {
         Ok(Some(machine_id))
     }
 
-    /// Resolves host identity from owned interfaces or pending predictions.
-    /// Predicted interfaces must belong to the explored BMC before they can be refreshed.
-    async fn find_zero_dpu_host(
-        txn: &mut PgConnection,
-        bmc_mac_address: MacAddress,
-        mac_addresses: &[MacAddress],
-    ) -> SiteExplorerResult<ZeroDpuHostLookup> {
-        // Interface ownership survives migration from a predicted to a stable ID.
-        let endpoint_machine_id =
-            db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
-                &mut *txn,
-                bmc_mac_address,
-            )
-            .await?;
-
-        let machine_ids_by_mac =
-            db::machine::find_machine_ids_by_mac_addresses(&mut *txn, mac_addresses).await?;
-        let predicted_machine_ids_by_mac =
-            db::predicted_machine_interface::find_machine_ids_by_mac_addresses(
-                &mut *txn,
-                mac_addresses,
-            )
-            .await?;
-        let mut existing_predicted_host_machine_id = None;
-        for mac_address in mac_addresses {
-            let Some(machine_id) = machine_ids_by_mac
-                .get(mac_address)
-                .or_else(|| predicted_machine_ids_by_mac.get(mac_address))
-                .copied()
-            else {
-                continue;
-            };
-
-            match machine_id.machine_id_subtype() {
-                MachineIdSubtype::StableHost(machine_id) => {
-                    return Ok(ZeroDpuHostLookup::Stable(machine_id));
-                }
-                MachineIdSubtype::PredictedHost(predicted_machine_id) => {
-                    if endpoint_machine_id.as_ref()
-                        != Some(predicted_machine_id.as_host_machine_id())
-                    {
-                        tracing::warn!(
-                            %mac_address,
-                            predicted_machine_id = %machine_id,
-                            ?endpoint_machine_id,
-                            %bmc_mac_address,
-                            "Could not confirm that the predicted interface belongs to the explored BMC; skipping refresh",
-                        );
-                        return Ok(ZeroDpuHostLookup::Conflict);
-                    }
-                    existing_predicted_host_machine_id = Some(predicted_machine_id);
-                }
-                MachineIdSubtype::Dpu(_) => {
-                    return Ok(ZeroDpuHostLookup::Conflict);
-                }
-            }
-        }
-
-        Ok(existing_predicted_host_machine_id
-            .map_or(ZeroDpuHostLookup::NotFound, ZeroDpuHostLookup::Predicted))
-    }
-
-    /// Refreshes interfaces and the boot target of an existing predicted zero-DPU host.
-    /// The caller verifies BMC ownership and owns the transaction.
-    async fn reconcile_existing_zero_dpu_host(
-        txn: &mut PgConnection,
-        machine_id: &PredictedHostMachineId,
-        mac_addresses: &[MacAddress],
-        report_boot_interface_ids: &[(MacAddress, &str)],
-        primary_mac: Option<MacAddress>,
-        declared_primary: Option<MacAddress>,
-    ) -> SiteExplorerResult<()> {
-        // The refresh writes this host's NIC rows and locks its machine
-        // row; the exclusive segment locks keep it ordered against the
-        // DHCP and admin repair flows that lock those rows under the
-        // segment locks.
-        db::machine_interface::lock_all_admin_segments(&mut *txn).await?;
-        crate::host_interfaces::reconcile(
-            txn,
-            machine_id,
-            mac_addresses,
-            report_boot_interface_ids,
-            primary_mac,
-        )
-        .await?;
-        reconcile_desired_boot_interface(txn, machine_id, None, declared_primary).await?;
-
-        Ok(())
-    }
-
     /// Owns a declared integrated (non-DPU) host NIC as a managed-DPU host's
     /// HostInband boot interface, so a host with managed DPUs can still boot from
     /// an integrated NIC. The NIC carries `primary` into `machine_interfaces` on
@@ -916,7 +677,7 @@ impl MachineCreator {
     /// go dormant in `reconcile_admin_addresses_for_host` once this NIC is the
     /// primary.
     ///
-    /// Mirrors the host-NIC ownership in `create_or_reconcile_zero_dpu_host`, but for the
+    /// Mirrors the host-NIC ownership in `create_zero_dpu_host`, but for the
     /// one declared NIC reached from the managed-DPU path. No-op when nothing is
     /// declared, or when the declared NIC is already owned (e.g. a declared DPU
     /// host-PF, which `attach_dpu_to_host` already owns).
@@ -941,7 +702,7 @@ impl MachineCreator {
                 // primary flag is settled by the DPU attach / promotion paths.
                 // Owned by a DIFFERENT machine: the declaration names a MAC that
                 // already belongs elsewhere -- surface it rather than silently
-                // dropping the declared boot NIC (mirrors create_or_reconcile_zero_dpu_host).
+                // dropping the declared boot NIC (mirrors create_zero_dpu_host).
                 if existing_machine_id != host_machine_id.into() {
                     return Err(SiteExplorerError::AlreadyFoundError {
                         kind: "MachineInterface",
@@ -1073,18 +834,7 @@ impl MachineCreator {
         explored_dpu: &ExploredDpu,
     ) -> SiteExplorerResult<bool> {
         let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
-        let oob_net0_mac = explored_dpu.report.systems.iter().find_map(|x| {
-            x.ethernet_interfaces.iter().find_map(|x| {
-                if x.id
-                    .as_ref()
-                    .is_some_and(|id| id.to_lowercase().contains("oob"))
-                {
-                    x.mac_address
-                } else {
-                    None
-                }
-            })
-        });
+        let oob_net0_mac = explored_dpu.report.dpu_oob_mac_address();
 
         if let Some(oob_net0_mac) = oob_net0_mac {
             return db::machine_interface::ensure_dpu_oob_interface_ownership(
@@ -1335,10 +1085,6 @@ pub(super) struct CreationRun<'a> {
     /// Hosts with a BMC still without a machine, in creation order. Each
     /// attempt counts toward the cap.
     pending: Peekable<std::vec::IntoIter<&'a mut IdentifiedManagedHost>>,
-    /// Ingested hosts explored this run, revisited for the steady-state
-    /// repair after the pending hosts. An attempt takes a concurrency slot
-    /// and no cap slot.
-    repairs: Peekable<std::vec::IntoIter<&'a mut IdentifiedManagedHost>>,
     budget: CreationBudget,
     /// Distinct racks of the pending hosts still without a machine, in id
     /// order. The first `create_hosts` call takes and creates them.
@@ -1350,10 +1096,10 @@ pub(super) struct CreationRun<'a> {
 /// Why `CreationRun::create_hosts` returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CreationProgress {
-    /// Every pending host within the cap and every repair has had its attempt.
+    /// Every pending host within the cap has had its attempt.
     Done,
     /// `switch_and_power_shelf_pass_interval` has elapsed and hosts remain to
-    /// dispatch: pending hosts within the cap, or repairs. Nothing is in
+    /// dispatch: pending hosts within the cap. Nothing is in
     /// flight, so the caller can run the switch and power shelf pass and call
     /// `create_hosts` again.
     PassDue,
@@ -1364,9 +1110,8 @@ impl<'a> CreationRun<'a> {
     /// at once, each in its own transaction under its own admission permit,
     /// and awaits every in-flight creation before returning.
     /// `machines_created_per_run` is applied at dispatch and counts in-flight
-    /// creations. The repairs follow the pending hosts and take a concurrency
-    /// slot only, so an exhausted cap does not defer them. The first call
-    /// creates the racks the pending hosts need before it dispatches anything,
+    /// creations. The first call creates the racks the pending hosts need
+    /// before it dispatches anything,
     /// unless the cap lets it dispatch no pending host. Once
     /// `switch_and_power_shelf_pass_interval` has elapsed since the run
     /// started or since the last pass, dispatching stops, the in-flight
@@ -1397,13 +1142,6 @@ impl<'a> CreationRun<'a> {
                 self.budget.dispatched();
                 in_flight.push(creation_attempt(identified));
             }
-            while !pass_due && self.budget.can_dispatch_repair() {
-                let Some(identified) = self.repairs.next() else {
-                    break;
-                };
-                self.budget.dispatched();
-                in_flight.push(creation_attempt(identified));
-            }
             let Some(attempt) = in_flight.next().await else {
                 break;
             };
@@ -1417,8 +1155,7 @@ impl<'a> CreationRun<'a> {
             }
         }
 
-        let hosts_remain = (self.pending.peek().is_some() && !self.budget.exhausted())
-            || self.repairs.peek().is_some();
+        let hosts_remain = self.pending.peek().is_some() && !self.budget.exhausted();
         if pass_due && hosts_remain {
             self.last_pass = Instant::now();
             CreationProgress::PassDue
@@ -1430,8 +1167,7 @@ impl<'a> CreationRun<'a> {
 
 /// The per-run creation cap applied at dispatch. In-flight creations count
 /// against the cap, so `created` never exceeds it, and a finished attempt
-/// that created nothing frees its slot and keeps the cap. A repair takes a
-/// concurrency slot and no cap slot.
+/// that created nothing frees its slot and keeps the cap.
 #[derive(Debug)]
 struct CreationBudget {
     cap: u64,
@@ -1452,12 +1188,7 @@ impl CreationBudget {
 
     /// Whether another creation may start now.
     fn can_dispatch(&self) -> bool {
-        self.can_dispatch_repair() && !self.exhausted()
-    }
-
-    /// Whether another repair may start now. It needs a concurrency slot only.
-    fn can_dispatch_repair(&self) -> bool {
-        self.in_flight < self.concurrency
+        self.in_flight < self.concurrency && !self.exhausted()
     }
 
     /// Whether the cap leaves nothing more to dispatch, counting in-flight
@@ -1496,39 +1227,15 @@ fn creation_concurrency(configured: u64, admission_permits: usize) -> usize {
     configured.min(ceiling)
 }
 
-/// Host identity found through the zero-DPU host's interface inventory.
-enum ZeroDpuHostLookup {
-    NotFound,
-    Predicted(PredictedHostMachineId),
-    Stable(StableHostMachineId),
-    Conflict,
-}
-
 /// What one `create_managed_host_with_selection` call did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedHostCreation {
     /// A host machine and its DPU machines were created.
     Created { host_machine_id: HostMachineId },
-    /// Every DPU already had a machine, or a predicted zero-DPU host gained no
-    /// machine: the host's rows were refreshed in place. The admin address
-    /// repair after the commit runs when the host machine is known.
-    Repaired {
-        host_machine_id: Option<HostMachineId>,
-    },
+    /// The host already exists or its interfaces are owned; no state was changed.
+    SkippedExisting,
     /// No `expected_machines` record matched the host.
     SkippedUnexpected,
-}
-
-impl ManagedHostCreation {
-    /// The host machine whose admin addresses the after-commit repair
-    /// reconciles, if the transaction committed one.
-    fn committed_host_machine_id(&self) -> Option<HostMachineId> {
-        match self {
-            Self::Created { host_machine_id } => Some(*host_machine_id),
-            Self::Repaired { host_machine_id } => *host_machine_id,
-            Self::SkippedUnexpected => None,
-        }
-    }
 }
 
 /// The Event for one finished creation attempt on `host`.
@@ -1546,8 +1253,8 @@ fn creation_finished_event(
                 dpu_count: host.dpus.len(),
             }
         }
-        Ok(ManagedHostCreation::Repaired { .. }) => {
-            ManagedHostCreationFinished::Repaired { latency }
+        Ok(ManagedHostCreation::SkippedExisting) => {
+            ManagedHostCreationFinished::SkippedExisting { latency }
         }
         Ok(ManagedHostCreation::SkippedUnexpected) => {
             ManagedHostCreationFinished::SkippedUnexpected { latency }
@@ -1564,9 +1271,8 @@ fn record_creation_stage(stage: ManagedHostCreationStage, latency: Duration) {
     emit(ManagedHostCreationStageFinished { stage, latency });
 }
 
-/// Reconciles host admin addresses in a transaction of its own, after the
-/// managed-host transaction has committed or when an exploration revisits an
-/// ingested host.
+/// Initializes host admin address ownership in its own transaction after
+/// managed-host creation commits.
 ///
 /// `reconcile_admin_addresses_for_host` takes the admin segment advisory
 /// locks before any row lock when it has a repair to make, so it cannot run
@@ -1586,147 +1292,14 @@ async fn reconcile_host_admin_addresses_after_commit(
     }
 }
 
-/// A managed host committed, or an exploration revisited it, but its admin
-/// addresses could not be reconciled. After a transient failure the host's
-/// BMC endpoint is flagged for exploration, so the next Site Explorer
-/// iteration revisits the host and retries the repair. Until then a dormant
-/// link may keep a DHCP address and the host's network config version is
-/// not bumped.
-#[derive(carbide_instrument::Event)]
-#[event(
-    event_name = "site_explorer_host_admin_address_reconcile_failed",
-    metric_name = "carbide_site_explorer_host_admin_address_reconcile_failures_total",
-    component = "site-explorer",
-    log = warn,
-    metric = counter,
-    message = "Host admin address reconciliation failed for a managed host",
-    describe = "Number of host admin address reconciliations that failed after Site Explorer committed or revisited a managed host"
-)]
-struct SiteExplorerHostAdminAddressReconcileFailed {
-    #[context]
-    host_machine_id: HostMachineId,
-    #[context]
-    error: String,
-}
-
-/// `host_mac_addresses_for_predicted_machine` finds the Host interfaces used to
-/// mint `predicted_machine_interface` rows for a zero-DPU host.
-///
-/// System EthernetInterfaces remain Host candidates. Adapter Ports are broader
-/// chassis inventory, so when at least one usable System interface exists we
-/// include only discovered Port MACs that ExpectedMachine also declares as
-/// Host interfaces. When no usable System MAC exists, discovered Ports preserve
-/// the existing hardware fallback alongside any System MACs. ExpectedMachine
-/// supplies MACs by itself only when Redfish reports neither collection.
-fn host_mac_addresses_for_predicted_machine(
-    report: &EndpointExplorationReport,
-    machine_data: Option<&ExpectedMachineData>,
-) -> Vec<MacAddress> {
-    let system_mac_addresses = report
-        .systems
-        .iter()
-        .flat_map(|system| &system.ethernet_interfaces)
-        .filter_map(|interface| interface.mac_address)
-        .unique()
-        .collect::<Vec<_>>();
-    let has_usable_system_mac_address = report
-        .systems
-        .iter()
-        .flat_map(|system| &system.ethernet_interfaces)
-        .any(|interface| {
-            interface.interface_enabled != Some(false) && interface.mac_address.is_some()
-        });
-    let port_mac_addresses = report
-        .chassis
-        .iter()
-        .flat_map(|chassis| &chassis.network_adapters)
-        .flat_map(|adapter| adapter.port_mac_addresses.iter().copied())
-        .unique()
-        .collect::<Vec<_>>();
-    let is_host_report = !(report.is_dpu() || report.is_switch() || report.is_power_shelf());
-
-    if has_usable_system_mac_address {
-        let declared_host_mac_addresses = machine_data
-            .into_iter()
-            .flat_map(|data| &data.interfaces)
-            .filter(|interface| interface.role.is_host())
-            .filter_map(|interface| interface.mac_address)
-            .collect::<Vec<_>>();
-
-        return system_mac_addresses
-            .into_iter()
-            .chain(port_mac_addresses.into_iter().filter(|mac_address| {
-                is_host_report && declared_host_mac_addresses.contains(mac_address)
-            }))
-            .unique()
-            .collect();
-    }
-
-    if !port_mac_addresses.is_empty() && is_host_report {
-        return system_mac_addresses
-            .into_iter()
-            .chain(port_mac_addresses)
-            .unique()
-            .collect();
-    }
-    if !system_mac_addresses.is_empty() {
-        return system_mac_addresses;
-    }
-
-    machine_data
-        .filter(|_| is_host_report)
-        .map(|data| {
-            data.interfaces
-                .iter()
-                .filter(|interface| interface.role.is_host())
-                .filter_map(|interface| interface.mac_address)
-                .unique()
-                .collect::<Vec<_>>()
-        })
-        .none_if_empty()
-        .inspect(|host_mac_addresses| {
-            tracing::info!(
-                host_nic_count = host_mac_addresses.len(),
-                "Redfish host MAC inventory missing; using ExpectedMachine.interfaces for predicted machine interfaces"
-            );
-        })
-        .unwrap_or_default()
-}
-
 /// The BMC IPs of `host`: its own BMC, then each DPU BMC.
 fn host_bmc_ips(host: &ExploredManagedHost) -> impl Iterator<Item = &IpAddr> {
     std::iter::once(&host.host_bmc_ip).chain(host.dpus.iter().map(|dpu| &dpu.bmc_ip))
 }
 
-/// Whether `create_machines` must open the per-host transaction: always while
-/// the host BMC or any of its DPU BMCs has no machine yet, otherwise only when
-/// the host or one of its DPUs was explored in this run.
-fn needs_managed_host_transaction(
-    host: &ExploredManagedHost,
-    ingested_bmc_ips: &HashSet<IpAddr>,
-    explored_this_run: &HashSet<IpAddr>,
-) -> bool {
-    host_bmc_ips(host)
-        .any(|bmc_ip| !ingested_bmc_ips.contains(bmc_ip) || explored_this_run.contains(bmc_ip))
-}
-
-/// Whether the admin address pass revisits `host` while `create_machines` is
-/// off: the host BMC and every DPU BMC have a machine, and the host or one of
-/// its DPUs was explored in this run.
-fn ingested_host_explored_this_run(
-    host: &ExploredManagedHost,
-    ingested_bmc_ips: &HashSet<IpAddr>,
-    explored_this_run: &HashSet<IpAddr>,
-) -> bool {
-    host_bmc_ips(host).all(|bmc_ip| ingested_bmc_ips.contains(bmc_ip))
-        && host_bmc_ips(host).any(|bmc_ip| explored_this_run.contains(bmc_ip))
-}
-
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
-    use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
-    use model::site_explorer::{Chassis, ComputerSystem, EthernetInterface, NetworkAdapter};
 
     use super::*;
 
@@ -1742,7 +1315,6 @@ mod tests {
         dispatched: usize,
         created: u64,
         can_dispatch: bool,
-        can_dispatch_repair: bool,
         exhausted: bool,
     }
 
@@ -1761,7 +1333,6 @@ mod tests {
                         dispatched: 2,
                         created: 0,
                         can_dispatch: false,
-                        can_dispatch_repair: true,
                         exhausted: true,
                     },
                 },
@@ -1776,7 +1347,6 @@ mod tests {
                         dispatched: 2,
                         created: 0,
                         can_dispatch: true,
-                        can_dispatch_repair: true,
                         exhausted: false,
                     },
                 },
@@ -1791,7 +1361,6 @@ mod tests {
                         dispatched: 2,
                         created: 2,
                         can_dispatch: false,
-                        can_dispatch_repair: true,
                         exhausted: true,
                     },
                 },
@@ -1806,12 +1375,11 @@ mod tests {
                         dispatched: 1,
                         created: 1,
                         can_dispatch: true,
-                        can_dispatch_repair: true,
                         exhausted: false,
                     },
                 },
                 Check {
-                    scenario: "a repair takes a concurrency slot",
+                    scenario: "a full concurrency limit prevents another creation",
                     input: BudgetCase {
                         cap: 4,
                         concurrency: 1,
@@ -1821,12 +1389,11 @@ mod tests {
                         dispatched: 1,
                         created: 0,
                         can_dispatch: false,
-                        can_dispatch_repair: false,
                         exhausted: false,
                     },
                 },
                 Check {
-                    scenario: "a zero cap dispatches no creation and still admits a repair",
+                    scenario: "a zero cap dispatches no creation",
                     input: BudgetCase {
                         cap: 0,
                         concurrency: 3,
@@ -1836,7 +1403,6 @@ mod tests {
                         dispatched: 0,
                         created: 0,
                         can_dispatch: false,
-                        can_dispatch_repair: true,
                         exhausted: true,
                     },
                 },
@@ -1859,7 +1425,6 @@ mod tests {
                     dispatched,
                     created: budget.created,
                     can_dispatch: budget.can_dispatch(),
-                    can_dispatch_repair: budget.can_dispatch_repair(),
                     exhausted: budget.exhausted(),
                 }
             },
@@ -1892,341 +1457,6 @@ mod tests {
                 },
             ],
             |(configured, admission_permits)| creation_concurrency(configured, admission_permits),
-        );
-    }
-
-    /// A host with one DPU, keyed on BMC IPs only.
-    fn one_dpu_host(host_bmc_ip: IpAddr, dpu_bmc_ip: IpAddr) -> ExploredManagedHost {
-        ExploredManagedHost {
-            host_bmc_ip,
-            dpus: vec![ExploredDpu {
-                bmc_ip: dpu_bmc_ip,
-                host_pf_mac_address: None,
-                host_chassis_id: None,
-                report: Arc::new(EndpointExplorationReport::default()),
-            }],
-        }
-    }
-
-    #[test]
-    fn needs_managed_host_transaction_cases() {
-        let host_bmc_ip: IpAddr = "10.0.0.1".parse().unwrap();
-        let dpu_bmc_ip: IpAddr = "10.0.0.2".parse().unwrap();
-        let other_ip: IpAddr = "10.0.0.3".parse().unwrap();
-        let host = one_dpu_host(host_bmc_ip, dpu_bmc_ip);
-
-        check_values(
-            [
-                Check {
-                    scenario: "no machine yet: always runs",
-                    input: (vec![], vec![]),
-                    expect: true,
-                },
-                Check {
-                    scenario: "no machine yet, unrelated endpoint explored: runs",
-                    input: (vec![other_ip], vec![other_ip]),
-                    expect: true,
-                },
-                Check {
-                    scenario: "host machine exists, DPU has no machine yet: runs",
-                    input: (vec![host_bmc_ip], vec![]),
-                    expect: true,
-                },
-                Check {
-                    scenario: "host and DPU machines exist, nothing explored: skipped",
-                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![]),
-                    expect: false,
-                },
-                Check {
-                    scenario: "host and DPU machines exist, unrelated endpoint explored: skipped",
-                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![other_ip]),
-                    expect: false,
-                },
-                Check {
-                    scenario: "host and DPU machines exist, host BMC explored: runs",
-                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![host_bmc_ip]),
-                    expect: true,
-                },
-                Check {
-                    scenario: "host and DPU machines exist, DPU BMC explored: runs",
-                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![dpu_bmc_ip]),
-                    expect: true,
-                },
-            ],
-            |(ingested_bmc_ips, explored_this_run): (Vec<IpAddr>, Vec<IpAddr>)| {
-                needs_managed_host_transaction(
-                    &host,
-                    &ingested_bmc_ips.into_iter().collect(),
-                    &explored_this_run.into_iter().collect(),
-                )
-            },
-        );
-    }
-
-    /// Unlike `needs_managed_host_transaction`, a host with a BMC that has no
-    /// machine yet is left to creation, and a DPU BMC exploration admits the
-    /// host like its own.
-    #[test]
-    fn ingested_host_explored_this_run_cases() {
-        let host_bmc_ip: IpAddr = "10.0.0.1".parse().unwrap();
-        let dpu_bmc_ip: IpAddr = "10.0.0.2".parse().unwrap();
-        let other_ip: IpAddr = "10.0.0.3".parse().unwrap();
-        let host = one_dpu_host(host_bmc_ip, dpu_bmc_ip);
-
-        check_values(
-            [
-                Check {
-                    scenario: "DPU has no machine yet, host BMC explored: skipped",
-                    input: (vec![host_bmc_ip], vec![host_bmc_ip]),
-                    expect: false,
-                },
-                Check {
-                    scenario: "host and DPU machines exist, unrelated endpoint explored: skipped",
-                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![other_ip]),
-                    expect: false,
-                },
-                Check {
-                    scenario: "host and DPU machines exist, DPU BMC explored: revisited",
-                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![dpu_bmc_ip]),
-                    expect: true,
-                },
-            ],
-            |(ingested_bmc_ips, explored_this_run): (Vec<IpAddr>, Vec<IpAddr>)| {
-                ingested_host_explored_this_run(
-                    &host,
-                    &ingested_bmc_ips.into_iter().collect(),
-                    &explored_this_run.into_iter().collect(),
-                )
-            },
-        );
-    }
-
-    /// Redfish inventory stays authoritative, ExpectedMachine narrows
-    /// supplemental Ports, and the zero-DPU fallback uses only Host
-    /// declarations from a host ExpectedMachine.
-    #[test]
-    fn host_mac_addresses_for_predicted_machine_cases() {
-        let host_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-        let dpu_os_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
-        let dpu_bmc_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x03]);
-        let host_bmc_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x04]);
-        let redfish_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x05]);
-        let declared_port_mac = MacAddress::new([0x94, 0x6d, 0xae, 0x53, 0xcb, 0x9b]);
-        let unrelated_port_mac = MacAddress::new([0x94, 0x6d, 0xae, 0x53, 0xcb, 0x9a]);
-        let system_macs = [
-            MacAddress::new([0x0a, 0x8f, 0xc3, 0xa5, 0x8a, 0x41]),
-            MacAddress::new([0x00, 0x62, 0x0b, 0x4c, 0x28, 0xa8]),
-            MacAddress::new([0x00, 0x62, 0x0b, 0x4c, 0x28, 0xa9]),
-            MacAddress::new([0x00, 0x62, 0x0b, 0x4c, 0x28, 0xaa]),
-            MacAddress::new([0x00, 0x62, 0x0b, 0x4c, 0x28, 0xab]),
-        ];
-        let interface = |mac_address, role| ExpectedInterface {
-            mac_address: Some(mac_address),
-            role,
-            ..Default::default()
-        };
-        let machine_data = |interfaces| ExpectedMachineData {
-            interfaces,
-            ..Default::default()
-        };
-        let all_roles = || {
-            machine_data(vec![
-                interface(host_mac, ExpectedInterfaceRole::Host),
-                interface(dpu_os_mac, ExpectedInterfaceRole::DpuOs),
-                interface(dpu_bmc_mac, ExpectedInterfaceRole::DpuBmc),
-                interface(host_bmc_mac, ExpectedInterfaceRole::HostBmc),
-            ])
-        };
-        let report_with_ports = |port_mac_addresses| EndpointExplorationReport {
-            chassis: vec![Chassis {
-                network_adapters: vec![NetworkAdapter {
-                    id: "slot-15".to_string(),
-                    port_mac_addresses,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let excluded_report = |chassis_id: &str| EndpointExplorationReport {
-            chassis: vec![Chassis {
-                id: chassis_id.to_string(),
-                network_adapters: vec![NetworkAdapter {
-                    id: "slot-15".to_string(),
-                    port_mac_addresses: vec![declared_port_mac],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        check_values(
-            [
-                Check {
-                    scenario: "Redfish EthernetInterfaces are authoritative",
-                    input: (
-                        EndpointExplorationReport {
-                            systems: vec![ComputerSystem {
-                                ethernet_interfaces: vec![EthernetInterface {
-                                    mac_address: Some(redfish_mac),
-                                    ..Default::default()
-                                }],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                        Some(all_roles()),
-                    ),
-                    expect: vec![redfish_mac],
-                },
-                Check {
-                    scenario: "declared discovered Port supplements partial System inventory",
-                    input: (
-                        EndpointExplorationReport {
-                            systems: vec![ComputerSystem {
-                                ethernet_interfaces: system_macs
-                                    .into_iter()
-                                    .map(|mac_address| EthernetInterface {
-                                        mac_address: Some(mac_address),
-                                        ..Default::default()
-                                    })
-                                    .collect(),
-                                ..Default::default()
-                            }],
-                            chassis: report_with_ports(vec![
-                                declared_port_mac,
-                                unrelated_port_mac,
-                                dpu_os_mac,
-                                system_macs[0],
-                            ])
-                            .chassis,
-                            ..Default::default()
-                        },
-                        Some(machine_data(vec![
-                            ExpectedInterface {
-                                primary: Some(true),
-                                ..interface(declared_port_mac, ExpectedInterfaceRole::Host)
-                            },
-                            interface(system_macs[0], ExpectedInterfaceRole::Host),
-                            interface(dpu_os_mac, ExpectedInterfaceRole::DpuOs),
-                        ])),
-                    ),
-                    expect: system_macs.into_iter().chain([declared_port_mac]).collect(),
-                },
-                Check {
-                    scenario: "undeclared Ports do not supplement usable System inventory",
-                    input: (
-                        EndpointExplorationReport {
-                            systems: vec![ComputerSystem {
-                                ethernet_interfaces: vec![EthernetInterface {
-                                    mac_address: Some(redfish_mac),
-                                    ..Default::default()
-                                }],
-                                ..Default::default()
-                            }],
-                            chassis: report_with_ports(vec![declared_port_mac]).chassis,
-                            ..Default::default()
-                        },
-                        None,
-                    ),
-                    expect: vec![redfish_mac],
-                },
-                Check {
-                    scenario: "disabled System interfaces do not suppress the adapter-Port fallback",
-                    input: (
-                        EndpointExplorationReport {
-                            systems: vec![ComputerSystem {
-                                ethernet_interfaces: vec![EthernetInterface {
-                                    mac_address: Some(redfish_mac),
-                                    interface_enabled: Some(false),
-                                    ..Default::default()
-                                }],
-                                ..Default::default()
-                            }],
-                            chassis: report_with_ports(vec![declared_port_mac, unrelated_port_mac])
-                                .chassis,
-                            ..Default::default()
-                        },
-                        None,
-                    ),
-                    expect: vec![redfish_mac, declared_port_mac, unrelated_port_mac],
-                },
-                Check {
-                    scenario: "adapter Ports remain the hardware fallback without System inventory",
-                    input: (
-                        report_with_ports(vec![declared_port_mac, unrelated_port_mac]),
-                        None,
-                    ),
-                    expect: vec![declared_port_mac, unrelated_port_mac],
-                },
-                Check {
-                    scenario: "Host declarations provide the zero-DPU fallback",
-                    input: (EndpointExplorationReport::default(), Some(all_roles())),
-                    expect: vec![host_mac],
-                },
-                Check {
-                    scenario: "DPU-only declarations do not become Host predictions",
-                    input: (
-                        EndpointExplorationReport::default(),
-                        Some(machine_data(vec![
-                            interface(dpu_os_mac, ExpectedInterfaceRole::DpuOs),
-                            interface(dpu_bmc_mac, ExpectedInterfaceRole::DpuBmc),
-                            interface(host_bmc_mac, ExpectedInterfaceRole::HostBmc),
-                        ])),
-                    ),
-                    expect: vec![],
-                },
-                Check {
-                    scenario: "missing ExpectedMachine data has no fallback",
-                    input: (EndpointExplorationReport::default(), None),
-                    expect: vec![],
-                },
-                Check {
-                    scenario: "DPU reports do not use Host declarations",
-                    input: (
-                        EndpointExplorationReport {
-                            systems: vec![ComputerSystem {
-                                id: "Bluefield".to_string(),
-                                ethernet_interfaces: vec![EthernetInterface {
-                                    mac_address: Some(redfish_mac),
-                                    ..Default::default()
-                                }],
-                                ..Default::default()
-                            }],
-                            chassis: vec![Chassis {
-                                id: "Card1".to_string(),
-                                model: Some("BlueField 3 DPU".to_string()),
-                                network_adapters: vec![NetworkAdapter {
-                                    id: "slot-15".to_string(),
-                                    port_mac_addresses: vec![declared_port_mac],
-                                    ..Default::default()
-                                }],
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        },
-                        Some(machine_data(vec![interface(
-                            declared_port_mac,
-                            ExpectedInterfaceRole::Host,
-                        )])),
-                    ),
-                    expect: vec![redfish_mac],
-                },
-                Check {
-                    scenario: "switch reports do not use Host declarations",
-                    input: (excluded_report("MGX_NVSwitch_0"), Some(all_roles())),
-                    expect: vec![],
-                },
-                Check {
-                    scenario: "power-shelf reports do not use Host declarations",
-                    input: (excluded_report("PowerShelf"), Some(all_roles())),
-                    expect: vec![],
-                },
-            ],
-            |(report, machine_data)| {
-                host_mac_addresses_for_predicted_machine(&report, machine_data.as_ref())
-            },
         );
     }
 }
