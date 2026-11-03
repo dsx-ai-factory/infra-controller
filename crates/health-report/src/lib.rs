@@ -660,6 +660,18 @@ impl HealthProbeId {
     pub fn nvlink_unhealthy() -> Self {
         HealthProbeId("NvlinkUnhealthy".to_string())
     }
+
+    /// The ID used while a host marked for NVLink isolation still has GPUs in an NVLink
+    /// partition, or the NVLink partition monitor cannot confirm that it has none.
+    pub fn nvlink_isolation_pending() -> Self {
+        HealthProbeId("NvlinkIsolationPending".to_string())
+    }
+
+    /// The ID the NVLink partition monitor reports as a success once NMX-C lists none of a
+    /// marked host's GPUs in any NVLink partition.
+    pub fn nvlink_isolated() -> Self {
+        HealthProbeId("NvlinkIsolated".to_string())
+    }
 }
 
 impl std::fmt::Debug for HealthProbeId {

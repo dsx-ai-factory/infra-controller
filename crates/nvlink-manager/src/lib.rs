@@ -1216,8 +1216,9 @@ struct CheckPartitionsInput<'a> {
 struct PartitionCheckOutcome {
     /// NMX-C operations that completed.
     completed_operations: usize,
-    /// Whether GPU health was fetched from NMX-C and every host alert write it
-    /// required succeeded. Partition reconciliation does not depend on it.
+    /// Whether GPU health was fetched from NMX-C and every host alert and
+    /// isolation status write required succeeded. Partition reconciliation
+    /// does not depend on it.
     health_recorded: bool,
 }
 
@@ -2254,6 +2255,13 @@ impl NvlPartitionMonitor {
             machine_nvlink_info,
         );
 
+        // Report isolation progress for marked hosts from this pass's partition membership. Like
+        // the GPU health alerts, a failed write never blocks reconciliation.
+        let isolation_recorded = self
+            .record_nvlink_isolation_status(&partition_processing_context, &managed_host_snapshots)
+            .await;
+        let health_recorded = health_recorded && isolation_recorded;
+
         // Check if any partitions need to be created, updated, or deleted.
         let observations = self.check_nv_link_partitions(
             &mut partition_processing_context,
@@ -2389,7 +2397,7 @@ impl NvlPartitionMonitor {
                 .map_or(&[], |info| info.gpus.as_slice());
 
             // This monitor owns exactly one thing: the Merge entry under its own source. Read
-            // that entry directly, in the same mode `set_`/`clear_nvlink_unhealthy_alert`
+            // that entry directly, in the same mode `set_`/`clear_monitor_health_report`
             // mutate, rather than `by_source` (which prefers a Replace report) or derived
             // aggregate health (which a Replace override hides). A Replace report an operator
             // placed under this source name is a deliberate host-level override: it is neither
@@ -2427,7 +2435,7 @@ impl NvlPartitionMonitor {
                 );
                 (
                     NvlinkUnhealthyAlertWrite::Set,
-                    set_nvlink_unhealthy_alert(&self.db_pool, machine_id, &report).await,
+                    set_monitor_health_report(&self.db_pool, machine_id, &report).await,
                 )
             } else if existing.is_some() {
                 tracing::info!(
@@ -2437,7 +2445,12 @@ impl NvlPartitionMonitor {
                 );
                 (
                     NvlinkUnhealthyAlertWrite::Clear,
-                    clear_nvlink_unhealthy_alert(&self.db_pool, machine_id).await,
+                    clear_monitor_health_report(
+                        &self.db_pool,
+                        machine_id,
+                        NVLINK_UNHEALTHY_OVERRIDE_SOURCE,
+                    )
+                    .await,
                 )
             } else {
                 continue;
@@ -2453,6 +2466,74 @@ impl NvlPartitionMonitor {
                     domain_uuid: domain_uuid.to_string(),
                     error: error.to_string(),
                 });
+            }
+        }
+        every_write_succeeded
+    }
+
+    /// Keeps the isolation status report on each host in the group current: hosts marked for
+    /// NVLink isolation get the status from this pass's NMX-C partition membership (see
+    /// [`nvlink_isolation_status_report`]), and the report is removed from hosts that are no
+    /// longer marked. The status reflects membership before this pass's removals, so a host
+    /// reads as isolated on the pass after its removals complete.
+    ///
+    /// Returns whether every write it attempted succeeded, so the caller keeps the group out
+    /// of the skip cache until the writes are retried.
+    async fn record_nvlink_isolation_status(
+        &self,
+        partition_ctx: &PartitionProcessingContext,
+        mh_snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
+    ) -> bool {
+        let mut every_write_succeeded = true;
+        for (machine_id, mh) in mh_snapshots {
+            let existing = mh
+                .host_snapshot
+                .health_reports
+                .merges
+                .get(NVLINK_ISOLATION_REPORT_SOURCE);
+
+            let result = if is_marked_for_nvlink_isolation(mh) {
+                let gpus = mh
+                    .host_snapshot
+                    .status
+                    .nvlink_info
+                    .as_ref()
+                    .map_or(&[][..], |info| info.gpus.as_slice());
+                let mut report =
+                    nvlink_isolation_status_report(gpus, &partition_ctx.gpu_to_partition_map);
+                if existing.is_some_and(|previous| same_nvlink_isolation_status(previous, &report))
+                {
+                    continue;
+                }
+                report.update_in_alert_since(existing);
+                tracing::info!(
+                    %machine_id,
+                    isolated = report.alerts.is_empty(),
+                    "Recording NVLink isolation status"
+                );
+                set_monitor_health_report(&self.db_pool, machine_id, &report).await
+            } else if existing.is_some() {
+                tracing::info!(
+                    %machine_id,
+                    "Host is no longer marked for NVLink isolation - clearing isolation status"
+                );
+                clear_monitor_health_report(
+                    &self.db_pool,
+                    machine_id,
+                    NVLINK_ISOLATION_REPORT_SOURCE,
+                )
+                .await
+            } else {
+                continue;
+            };
+
+            if let Err(error) = result {
+                every_write_succeeded = false;
+                tracing::warn!(
+                    %machine_id,
+                    %error,
+                    "Failed to record NVLink isolation status; retrying next pass"
+                );
             }
         }
         every_write_succeeded
@@ -3839,9 +3920,107 @@ fn nvlink_unhealthy_report(
     }
 }
 
-/// Writes a `NvlinkUnhealthy` merge report for the machine, replacing this monitor's previous
-/// entry and leaving reports from other sources untouched.
-async fn set_nvlink_unhealthy_alert(
+/// Source of the isolation status report this monitor keeps on hosts marked for NVLink
+/// isolation.
+const NVLINK_ISOLATION_REPORT_SOURCE: &str = "nvlink-isolation";
+
+/// Builds the isolation status report for a host marked for NVLink isolation, from the NMX-C
+/// partition membership seen this pass. It reports `NvlinkIsolated` as a success only when the
+/// host's GPU inventory is known and NMX-C lists none of those GPUs in a partition. Otherwise
+/// it carries an `NvlinkIsolationPending` alert naming the GPUs still partitioned, so an
+/// operator never has to read the absence of an alert as confirmation.
+fn nvlink_isolation_status_report(
+    gpus: &[NvLinkGpu],
+    gpu_to_partition_map: &HashMap<u64, PartitionInfo>,
+) -> health_report::HealthReport {
+    // A GUID of 0 is the parse-failure placeholder from `parse_nvlink_gpu_fabric_guid`, so
+    // a GPU carrying it cannot be checked against NMX-C.
+    let pending_message = if gpus.is_empty() || gpus.iter().any(|gpu| gpu.guid == 0) {
+        Some(
+            "Cannot confirm NVLink isolation: the host's NVLink GPU inventory is incomplete"
+                .to_string(),
+        )
+    } else {
+        let partitioned: Vec<String> = gpus
+            .iter()
+            .filter(|gpu| gpu_to_partition_map.contains_key(&gpu.guid))
+            .map(|gpu| gpu.guid.to_string())
+            .collect();
+        (!partitioned.is_empty()).then(|| {
+            format!(
+                "{} of {} NVLink GPUs are still in a partition: {}",
+                partitioned.len(),
+                gpus.len(),
+                partitioned.join(", ")
+            )
+        })
+    };
+
+    let (successes, alerts) = match pending_message {
+        Some(message) => (
+            vec![],
+            vec![health_report::HealthProbeAlert {
+                id: health_report::HealthProbeId::nvlink_isolation_pending(),
+                target: None,
+                in_alert_since: Some(Utc::now()),
+                message,
+                tenant_message: None,
+                classifications: vec![
+                    health_report::HealthAlertClassification::prevent_allocations(),
+                    health_report::HealthAlertClassification::suppress_external_alerting(),
+                ],
+            }],
+        ),
+        None => (
+            vec![health_report::HealthProbeSuccess {
+                id: health_report::HealthProbeId::nvlink_isolated(),
+                target: None,
+            }],
+            vec![],
+        ),
+    };
+
+    health_report::HealthReport {
+        source: NVLINK_ISOLATION_REPORT_SOURCE.to_string(),
+        triggered_by: None,
+        observed_at: Some(Utc::now()),
+        successes,
+        alerts,
+    }
+}
+
+/// Whether two isolation status reports state the same status, ignoring timestamps, so an
+/// unchanged status is not rewritten every pass.
+fn same_nvlink_isolation_status(
+    a: &health_report::HealthReport,
+    b: &health_report::HealthReport,
+) -> bool {
+    let status = |report: &health_report::HealthReport| {
+        (
+            report
+                .successes
+                .iter()
+                .map(|success| success.id.clone())
+                .collect::<Vec<_>>(),
+            report
+                .alerts
+                .iter()
+                .map(|alert| {
+                    (
+                        alert.id.clone(),
+                        alert.message.clone(),
+                        alert.classifications.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    status(a) == status(b)
+}
+
+/// Writes one of this monitor's merge reports for the machine, replacing the previous entry
+/// under the report's source and leaving reports from other sources untouched.
+async fn set_monitor_health_report(
     db_pool: &PgPool,
     machine_id: &MachineId,
     report: &health_report::HealthReport,
@@ -3860,32 +4039,31 @@ async fn set_nvlink_unhealthy_alert(
     )
     .await
     .map_err(|e| {
-        NvLinkManagerError::internal(format!("Failed to set NVLink unhealthy alert: {e}"))
+        NvLinkManagerError::internal(format!(
+            "Failed to set {} health report: {e}",
+            report.source
+        ))
     })?;
 
     Ok(())
 }
 
-/// Clears a previously set `NvlinkUnhealthy` health alert on the machine.
-async fn clear_nvlink_unhealthy_alert(
+/// Removes this monitor's merge report under `source` from the machine.
+async fn clear_monitor_health_report(
     db_pool: &PgPool,
     machine_id: &MachineId,
+    source: &str,
 ) -> NvLinkManagerResult<()> {
     let mut conn = db_pool
         .acquire()
         .await
         .map_err(|e| NvLinkManagerError::internal(format!("Failed to acquire connection: {e}")))?;
 
-    db::machine::remove_health_report(
-        &mut conn,
-        machine_id,
-        HealthReportApplyMode::Merge,
-        NVLINK_UNHEALTHY_OVERRIDE_SOURCE,
-    )
-    .await
-    .map_err(|e| {
-        NvLinkManagerError::internal(format!("Failed to clear NVLink unhealthy alert: {e}"))
-    })?;
+    db::machine::remove_health_report(&mut conn, machine_id, HealthReportApplyMode::Merge, source)
+        .await
+        .map_err(|e| {
+            NvLinkManagerError::internal(format!("Failed to clear {source} health report: {e}"))
+        })?;
 
     Ok(())
 }
@@ -4115,6 +4293,54 @@ mod partition_classification_tests {
                 "partition name {name:?}, slot {slot_id}",
             );
         }
+    }
+
+    /// The isolation status is pending, never isolated, whenever the host's GPUs cannot all be
+    /// checked, and it names only the GPUs NMX-C still lists in a partition.
+    #[test]
+    fn isolation_status_is_pending_until_every_known_gpu_is_unpartitioned() {
+        use std::collections::HashMap;
+
+        use carbide_test_support::{Check, check_values};
+        use model::hardware_info::NvLinkGpu;
+
+        use super::nvlink_isolation_status_report;
+
+        let gpu = |guid: u64| NvLinkGpu {
+            tray_index: 1,
+            slot_id: 1,
+            device_id: 1,
+            guid,
+        };
+        let partitioned = HashMap::from([(0x10, PartitionInfo::default())]);
+
+        check_values(
+            [
+                Check {
+                    scenario: "no GPU inventory",
+                    input: vec![],
+                    expect: "Cannot confirm NVLink isolation: the host's NVLink GPU inventory is incomplete".to_string(),
+                },
+                Check {
+                    scenario: "placeholder GUID",
+                    input: vec![gpu(0x11), gpu(0)],
+                    expect: "Cannot confirm NVLink isolation: the host's NVLink GPU inventory is incomplete".to_string(),
+                },
+                Check {
+                    scenario: "one of two GPUs partitioned",
+                    input: vec![gpu(0x10), gpu(0x11)],
+                    expect: "1 of 2 NVLink GPUs are still in a partition: 16".to_string(),
+                },
+            ],
+            |gpus: Vec<NvLinkGpu>| {
+                let report = nvlink_isolation_status_report(&gpus, &partitioned);
+                assert!(report.successes.is_empty(), "pending is never reported as isolated");
+                assert!(report.alerts[0].classifications.contains(
+                    &health_report::HealthAlertClassification::prevent_allocations()
+                ));
+                report.alerts[0].message.clone()
+            },
+        );
     }
 }
 
@@ -4381,9 +4607,9 @@ mod machine_group_tests {
 
     use super::{
         ChassisNmxCUnreachableReason, GroupResult, LoadSnapshotOptions,
-        NVLINK_UNHEALTHY_OVERRIDE_SOURCE, NvLinkConfig, NvlPartitionMonitor,
-        NvlPartitionMonitorMetrics, ProcessMachineGroupInput, group_managed_hosts_by_group_type,
-        load_by_machine_ids, nmx_c_endpoint,
+        NVLINK_ISOLATION_REPORT_SOURCE, NVLINK_UNHEALTHY_OVERRIDE_SOURCE, NvLinkConfig,
+        NvlPartitionMonitor, NvlPartitionMonitorMetrics, ProcessMachineGroupInput,
+        group_managed_hosts_by_group_type, load_by_machine_ids, nmx_c_endpoint,
     };
     use crate::group_state::group_fingerprint;
     use crate::nvlink::test_support::NmxcSimClient;
@@ -5622,6 +5848,156 @@ mod machine_group_tests {
                 .collect();
             assert_eq!(nmxc.partitions(), expected_partitions, "{scenario}");
         }
+
+        join_set.shutdown().await;
+        Ok(())
+    }
+
+    /// A marked host's isolation status is persisted from each pass's NMX-C membership: pending
+    /// while its GPUs are partitioned, isolated on the pass after the removals complete, and
+    /// removed once the host is no longer marked, which also returns its GPUs to their tray
+    /// partition.
+    #[sqlx_test]
+    async fn monitor_pass_reports_nvlink_isolation_progress(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::ManagedHostState;
+
+        const GPU_A: u64 = 0x1000;
+        const GPU_B: u64 = 0x1001;
+        const MARK_SOURCE: &str = "compute-tray-due-for-swap";
+        let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
+        let id = machine_id(42);
+
+        let mut txn = pool.begin().await?;
+        db::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
+        db::machine::update_nvlink_info(
+            txn.as_mut(),
+            &id,
+            MachineNvLinkInfo {
+                domain_uuid,
+                chassis_serial: "CHASSIS-A".to_string(),
+                gpus: [GPU_A, GPU_B]
+                    .into_iter()
+                    .zip(1..)
+                    .map(|(guid, device_id)| NvLinkGpu {
+                        tray_index: 1,
+                        slot_id: 1,
+                        device_id,
+                        guid,
+                    })
+                    .collect(),
+            },
+        )
+        .await?;
+        let mut mark = health_report::HealthReport::empty(MARK_SOURCE.to_string());
+        mark.alerts.push(nvlink_isolation_alert());
+        db::machine::insert_health_report(
+            txn.as_mut(),
+            &id,
+            health_report::HealthReportApplyMode::Merge,
+            &mark,
+            false,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let mut join_set = JoinSet::new();
+        let work_lock_manager =
+            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let nmxc = Arc::new(NmxcSimClient::with_partition(
+            9,
+            "tray_partition_1",
+            vec![GPU_A, GPU_B],
+        ));
+        let monitor = NvlPartitionMonitor::new(
+            pool.clone(),
+            nmxc.clone(),
+            TestMeter::default().meter(),
+            NvLinkConfig::default(),
+            HostHealthConfig::default(),
+            work_lock_manager,
+        );
+
+        // Runs one group pass over the stored machine and returns its reloaded snapshot.
+        let pass = || async {
+            let snapshot = load_snapshot(&pool, &id).await?;
+            let nvlink_info = snapshot.host_snapshot.status.nvlink_info.clone();
+            let all_snapshots = HashMap::from([(id, snapshot)]);
+            let chassis_snapshots = vec![&all_snapshots[&id]];
+            monitor
+                .process_nmx_c_partition_monitor_group(ProcessMachineGroupInput {
+                    group_id: "CHASSIS-A".to_string(),
+                    group_type: nmx_c_endpoint::ManagedHostGroupType::Chassis,
+                    snapshots: &chassis_snapshots,
+                    endpoint_url: Some("http://nmxc.example:9370"),
+                    rack_id: None,
+                    all_managed_host_snapshots: &all_snapshots,
+                    machine_nvlink_info: HashMap::from([(id, nvlink_info)]),
+                    db_nvl_partitions: &[],
+                    db_nvl_logical_partitions: &[],
+                })
+                .await;
+            load_snapshot(&pool, &id).await
+        };
+        let status = |snapshot: &ManagedHostStateSnapshot| {
+            snapshot
+                .host_snapshot
+                .health_reports
+                .merges
+                .get(NVLINK_ISOLATION_REPORT_SOURCE)
+                .map(|report| {
+                    (
+                        report
+                            .successes
+                            .iter()
+                            .map(|success| success.id.to_string())
+                            .collect::<Vec<_>>(),
+                        report
+                            .alerts
+                            .iter()
+                            .map(|alert| format!("{}: {}", alert.id, alert.message))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+        };
+
+        // Pass 1: both GPUs are still partitioned when the pass starts; it removes them.
+        let after_removal = pass().await?;
+        assert_eq!(
+            status(&after_removal),
+            Some((
+                vec![],
+                vec![format!(
+                    "NvlinkIsolationPending: 2 of 2 NVLink GPUs are still in a partition: {GPU_A}, {GPU_B}"
+                )],
+            )),
+        );
+        assert_eq!(nmxc.partitions(), vec![], "the pass removed the GPUs");
+
+        // Pass 2: NMX-C lists neither GPU in a partition.
+        let isolated = pass().await?;
+        assert_eq!(
+            status(&isolated),
+            Some((vec!["NvlinkIsolated".to_string()], vec![])),
+        );
+
+        // Pass 3: once the mark is removed, the status is cleared and the GPUs return.
+        let mut txn = pool.begin().await?;
+        db::machine::remove_health_report(
+            txn.as_mut(),
+            &id,
+            health_report::HealthReportApplyMode::Merge,
+            MARK_SOURCE,
+        )
+        .await?;
+        txn.commit().await?;
+        let unmarked = pass().await?;
+        assert_eq!(status(&unmarked), None);
+        assert_eq!(
+            nmxc.partitions(),
+            vec![("tray_partition_1".to_string(), vec![GPU_A, GPU_B])],
+        );
 
         join_set.shutdown().await;
         Ok(())

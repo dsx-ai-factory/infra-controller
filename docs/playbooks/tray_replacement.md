@@ -82,29 +82,47 @@ fi
 
 ## 3. Record current partition membership
 
-Define a check that queries NMX-C and reports, for each GPU UID from step 1,
-whether any partition still contains it. The check fails instead of reporting
-success when the query fails or returns an unexpected response, and it matches
-whole numbers only:
+Define helpers that query NMX-C and report partition membership. They read
+only the `gpu_uid_list` entries of each partition, and keep each UID as text so
+that large values keep full precision. A failed query or an unexpected response
+is reported as `QUERY FAILED`, never as success:
 
 ```bash
-check_gpus_partitioned() {
-  local file=$1 found=0 uid
+# Prints "<partition name><TAB><GPU UID>" for each gpu_uid_list entry in a
+# saved partition-info-list response.
+partition_members() {
+  awk '
+    /^ *"name": "/ { name = $0; sub(/^ *"name": "/, "", name); sub(/",?$/, "", name) }
+    /"gpu_uid_list": \[$/ { in_list = 1; next }
+    in_list && /^ *\]/ { in_list = 0; next }
+    in_list { uid = $0; gsub(/[ ,]/, "", uid); print name "\t" uid }
+  ' "$1"
+}
+
+# Saves a partition-info-list response to the given file.
+query_partitions() {
   nico-admin-cli -a "$API" browse nmxc "${NMXC_SELECTOR[@]}" \
-    --operation partition-info-list > "$file" || { echo "QUERY FAILED"; return 2; }
+    --operation partition-info-list > "$1" || { echo "QUERY FAILED"; return 2; }
   jq -e '.code == 200 and (.body.partition_info_list | type == "array")' \
-    "$file" > /dev/null || { echo "QUERY FAILED: unexpected response in $file"; return 2; }
-  for uid in $GPU_UIDS; do
-    if grep -qE "(^|[^0-9])${uid}([^0-9]|$)" "$file"; then
+    "$1" > /dev/null || { echo "QUERY FAILED: unexpected response in $1"; return 2; }
+}
+
+# Reports whether any partition still holds one of the given GPU UIDs.
+check_gpus_partitioned() {
+  local file=$1 uids=$2 found=0 uid
+  [ -n "$uids" ] || { echo "NO GPU UIDS TO CHECK"; return 2; }
+  query_partitions "$file" || return 2
+  for uid in $uids; do
+    if partition_members "$file" | cut -f2 | grep -qx "$uid"; then
       echo "PARTITIONED: $uid"
       found=1
     fi
   done
-  [ "$found" -eq 0 ] && echo "NOT PARTITIONED: all $(echo $GPU_UIDS | wc -w | tr -d " ") GPU UIDs"
+  [ "$found" -eq 0 ] && echo "NOT PARTITIONED: all $(echo $uids | wc -w | tr -d " ") GPU UIDs"
   return "$found"
 }
 
-check_gpus_partitioned partitions-before.json
+check_gpus_partitioned partitions-before.json "$GPU_UIDS"
 ```
 
 Keep `partitions-before.json` with the ticket.
@@ -143,16 +161,40 @@ It does not replace other holds on the host, such as `out-for-repair`.
 
 ## 6. Confirm removal
 
-Wait for the next partition monitor pass (`monitor_run_interval`, one minute by
-default), then run the check again:
+While the host is marked, the partition monitor reports its progress on every
+pass as a health report with source `nvlink-isolation`:
+
+- an `NvlinkIsolationPending` alert names the GPUs that NMX-C still lists in a
+  partition, or says that isolation cannot be confirmed because the host's
+  NVLink GPU inventory is incomplete;
+- an `NvlinkIsolated` success means that NMX-C lists none of the host's GPUs in
+  any partition.
+
+The monitor reports `NvlinkIsolated` on the pass after its removals complete
+(`monitor_run_interval`, one minute by default). Define a helper that prints the
+status and succeeds only when the host is isolated:
 
 ```bash
-check_gpus_partitioned partitions-after.json
+isolation_status() {
+  local out
+  out="$(nico-admin-cli -a "$API" -f json machine health-report show "$1")" \
+    || { echo "QUERY FAILED"; return 2; }
+  printf '%s\n' "$out" | jq -r '
+    [.[].report | select(.source == "nvlink-isolation")] as $r
+    | if ($r | length) == 0 then "NO STATUS"
+      elif (($r[0].successes // []) | map(.id) | index("NvlinkIsolated")) != null then "ISOLATED"
+      else "PENDING: " + (($r[0].alerts // []) | map(.message) | join("; "))
+      end' | tee /dev/stderr | grep -qx ISOLATED
+}
+
+isolation_status "$MACHINE_ID"
 ```
 
-**Continue only when this prints `NOT PARTITIONED` with the GPU count from
-step 1.** If it prints `QUERY FAILED`, fix the query and run it again. If any
-UID is still partitioned after several passes:
+**Continue only when this prints `ISOLATED`.** `NO STATUS` means the monitor has
+not checked the host since it was marked; wait for the next pass. If it prints
+`QUERY FAILED`, fix the query and run it again. To cross-check against NMX-C
+directly, run `check_gpus_partitioned partitions-after.json "$GPU_UIDS"`. If the
+status stays `PENDING` after several passes:
 
 1. Check the nvlink-manager logs for the machine ID and for NMX-C return codes.
 2. Escalate to the NVLink/NMX-C owners. If removal fails now, moving the tray
@@ -167,46 +209,93 @@ installed, Site Explorer can rediscover it as a new, unmarked machine. The
 partition monitor would then return its GPUs to `tray_partition_<slot>` and undo
 step 6.
 
-1. Run `check_gpus_partitioned partitions-handover.json` immediately before
-   handing over the tray. Hand it over only if the check passes.
+1. Run `isolation_status "$MACHINE_ID"` immediately before handing over the
+   tray. Hand it over only if it prints `ISOLATED`.
 2. Have the data center team remove the tray from its slot.
 3. If the tray is being replaced, force-delete the old machine as described in
    [Force Deleting and Rebuilding NICo Hosts](force_delete.md), and then have
    the replacement tray installed.
 
 If the same tray is repaired or moved and reinstalled, keep the mark on until it
-is back, skip the force-delete, and go to step 9.
+is back and skip the force-delete.
 
-## 8. Verify the replacement tray
+## 8. Hold the returning host out of allocation
 
-After the new tray ingests:
+The host that comes back must not receive tenant work until step 9 passes.
+Machine validation is optional per site, so a replacement host can reach
+`Ready` without it. Removing the mark from a reinstalled tray also removes the
+mark's allocation block.
+
+Set `HOST_ID` to the replacement's machine ID as soon as it appears in NICo, or
+to `MACHINE_ID` for a reinstalled tray, and check its existing health reports:
 
 ```bash
-export NEW_MACHINE_ID="<new-host-machine-id>"
-nico-admin-cli -a "$API" machine nvlink-info show "$NEW_MACHINE_ID" > nvlink-info-new.json
-nico-admin-cli -a "$API" browse nmxc "${NMXC_SELECTOR[@]}" \
-  --operation partition-info-list > partitions-new.json
+export HOST_ID="<replacement-host-machine-id, or $MACHINE_ID for the same tray>"
+nico-admin-cli -a "$API" machine show "$HOST_ID"
+nico-admin-cli -a "$API" machine health-report show "$HOST_ID"
 ```
 
-Confirm that:
+If the host has no `manual-maintenance` report, add an `out-for-repair` hold.
+If it already has one, keep that report instead: it already blocks allocations,
+and adding `out-for-repair` would replace it.
 
-- each new GPU UID appears in `partitions-new.json` under `tray_partition_<slot>`;
-- `check_gpus_partitioned partitions-old-uids.json` prints `NOT PARTITIONED` for
-  the old tray's UIDs from step 1;
-- `nv show sdn partition <id>` on the leader NVSwitch shows no `0.0.0.0`
-  locations in any partition;
-- in scout, `nvidia-smi -q | grep -A3 Fabric` shows `State: Completed`,
-  `Status: Success`, and a non-zero `CliqueId` on every GPU;
-- machine validation passes.
+```bash
+nico-admin-cli -a "$API" machine health-report add "$HOST_ID" \
+  --template out-for-repair --message "$TICKET: verifying tray"
+```
 
-## 9. Same-tray repair or move: remove the mark
+If a replacement host already has an instance, involve the tenant before you
+continue.
 
-Only for a tray that was repaired or moved and reinstalled with the same machine
-ID:
+For a reinstalled tray only, remove the mark once the hold is in place. The
+partition monitor then returns its GPUs to `tray_partition_<slot>`, or to the
+tenant's partition if an instance requests it:
 
 ```bash
 nico-admin-cli -a "$API" machine health-report remove "$MACHINE_ID" compute-tray-due-for-swap
 ```
 
-The partition monitor then returns the GPUs to `tray_partition_<slot>`, or to
-the tenant's partition if an instance requests it.
+## 9. Verify the host
+
+The partition monitor places the host's GPUs only after discovery populates its
+NVLink information. Wait until `machine nvlink-info show` lists the host's GPUs,
+then wait for the next monitor pass before you check membership:
+
+```bash
+nico-admin-cli -a "$API" machine nvlink-info show "$HOST_ID" > nvlink-info-host.json
+export HOST_UIDS="$(grep -oE '"guid": *[0-9]+' nvlink-info-host.json | grep -oE '[0-9]+$')"
+export SLOT="$(grep -oE '"slot_id": *[0-9]+' nvlink-info-host.json | head -1 | grep -oE '[0-9]+$')"
+
+query_partitions partitions-verify.json
+for uid in $HOST_UIDS; do
+  if partition_members partitions-verify.json | grep -qxF "$(printf 'tray_partition_%s\t%s' "$SLOT" "$uid")"; then
+    echo "IN TRAY PARTITION: $uid"
+  else
+    echo "NOT IN TRAY PARTITION: $uid"
+  fi
+done
+```
+
+Confirm that:
+
+- every host GPU UID prints `IN TRAY PARTITION`. For a reinstalled tray whose
+  instance requests a tenant partition, confirm that the UIDs are in the
+  tenant's partition instead;
+- for a replacement, `check_gpus_partitioned partitions-old.json "$GPU_UIDS"`
+  prints `NOT PARTITIONED` for the old tray's UIDs from step 1;
+- `nv show sdn partition <id>` on the leader NVSwitch shows no `0.0.0.0`
+  locations in any partition;
+- on the host, `nvidia-smi -q | grep -A3 Fabric` shows `State: Completed`,
+  `Status: Success`, and a non-zero `CliqueId` on every GPU;
+- machine validation passes, if the site runs it.
+
+## 10. Release the host
+
+Only after every step 9 check passes, remove the hold you added in step 8:
+
+```bash
+nico-admin-cli -a "$API" machine health-report remove "$HOST_ID" manual-maintenance
+```
+
+If the host already had a `manual-maintenance` report in step 8, leave it for
+its owner to remove.
