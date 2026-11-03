@@ -332,6 +332,19 @@ pub async fn change_routing_profile(
     }
 }
 
+/// Serializes configured VPC insertion for one name across startup instances.
+/// Recheck the name after taking this transaction-scoped lock. API-created
+/// VPCs can still share names and do not participate in this startup-only lock.
+pub async fn lock_initial_name(txn: &mut PgTransaction<'_>, name: &str) -> DatabaseResult<()> {
+    let query = "SELECT pg_advisory_xact_lock(hashtextextended('initial-vpc:' || $1, 0))";
+    sqlx::query(query)
+        .bind(name)
+        .execute(&mut **txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
 pub async fn find_by_name(txn: impl DbReader<'_>, name: &str) -> Result<Vec<Vpc>, DatabaseError> {
     find_by(txn, ObjectColumnFilter::One(NameColumn, &name)).await
 }
