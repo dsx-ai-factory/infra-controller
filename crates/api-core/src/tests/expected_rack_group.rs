@@ -19,7 +19,11 @@ async fn get_all_expected_rack_groups(pool: sqlx::PgPool) {
             let group = ExpectedRackGroup {
                 rack_group_id: Some(RackGroupId::new(id)),
                 topology: "gb200_nvl72r1_c2g4".into(),
-                protocol: "NVLINK_V5".into(),
+                protocol: if id == "group-a" {
+                    String::new()
+                } else {
+                    "NVLINK_V5".into()
+                },
                 racks: vec![rpc::forge::ExpectedRackGroupRack {
                     rack_id: Some("rack-01".parse().unwrap()),
                     members: vec![rpc::forge::ExpectedRackGroupMember {

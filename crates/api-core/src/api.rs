@@ -270,6 +270,20 @@ impl Forge for Api {
         crate::handlers::vpc::find_by_ids(self, request).await
     }
 
+    async fn find_routing_profile_names(
+        &self,
+        request: Request<rpc::RoutingProfileSearchFilter>,
+    ) -> Result<Response<rpc::RoutingProfileNameList>, Status> {
+        crate::handlers::routing_profile::find_names(self, request)
+    }
+
+    async fn find_routing_profiles_by_names(
+        &self,
+        request: Request<rpc::RoutingProfilesByNamesRequest>,
+    ) -> Result<Response<rpc::NamedRoutingProfileList>, Status> {
+        crate::handlers::routing_profile::find_by_names(self, request)
+    }
+
     async fn get_vpc_routing_state(
         &self,
         request: Request<rpc::VpcRoutingStateRequest>,

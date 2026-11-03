@@ -415,7 +415,7 @@ async fn compact_read_matches_full_read_and_explored_report(pool: sqlx::PgPool) 
         let id = Some(*host_id.as_machine_id());
         let (state, machine) = (compact.remove(&id).unwrap(), full.remove(&id).unwrap());
         let (status, config) = (machine.status.unwrap(), machine.config.unwrap());
-        let bmc = machine.bmc_info.unwrap_or_default();
+        let bmc = machine.bmc.unwrap_or_default();
         // Allocation, update and the explored report exist only in the compact read.
         let expected = rpc::forge::HostState {
             id: machine.id,
@@ -697,7 +697,14 @@ async fn explored_report_freshness(pool: sqlx::PgPool) {
         .find_machines_by_ids(Request::new(request))
         .await
         .unwrap();
-    let full_bmc = machine.into_inner().machines.remove(0).bmc_info.unwrap();
+    let full_bmc = machine
+        .into_inner()
+        .machines
+        .remove(0)
+        .status
+        .unwrap()
+        .bmc_status
+        .unwrap();
     assert_ne!(full_bmc.firmware_version.as_deref(), Some("9.9.9"));
 
     // A failed exploration keeps the old versions and waits for a refresh.

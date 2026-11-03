@@ -874,7 +874,14 @@ async fn core_identity(
             .product_serial;
         eyre::ensure!(!serial.is_empty(), "core DMI serial is empty for {id}");
         serials.insert(id.clone(), serial.clone());
-        bmcs.insert(id, core_bmc_mac(machine.bmc_info.as_ref())?);
+        let bmc_mac = machine
+            .bmc
+            .as_ref()
+            .and_then(|bmc| bmc.mac.as_deref())
+            .context("core BMC MAC missing")?
+            .parse::<MacAddress>()?
+            .to_string();
+        bmcs.insert(id, bmc_mac);
     }
     bmcs.insert(
         view.switch

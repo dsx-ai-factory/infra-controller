@@ -204,17 +204,19 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           TAG_LATEST: ${{ inputs.tag_latest }}
           ADDITIONAL_TAGS: ${{ inputs.additional_tags }}
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           PRIMARY="${IMAGE_NAME}:${IMAGE_TAG}"
           echo "primary=${PRIMARY}" >> "$GITHUB_OUTPUT"
 
           TAGS="${PRIMARY}"
-          if [[ "${TAG_LATEST}" == "true" ]]; then
+          # Suppress shared tags only for the PR publishing command.
+          if [[ "${TAG_LATEST}" == "true" && "${PR_PUBLISH}" != "true" ]]; then
             TAGS="${TAGS}"$'\n'"${IMAGE_NAME}:latest"
           fi
 
-          if [[ -n "${ADDITIONAL_TAGS// }" ]]; then
+          if [[ -n "${ADDITIONAL_TAGS// }" && "${PR_PUBLISH}" != "true" ]]; then
             TAGS="${TAGS}"$'\n'"${ADDITIONAL_TAGS}"
           fi
 
@@ -492,3 +494,13 @@ jobs:
           echo "  Platforms: ${PLATFORMS}"
           echo "  Pushed: ${{ inputs.push }}"
           echo "  Loaded locally: ${{ steps.loadgate.outputs.load }}"
+
+      - name: Record published PR image
+        if: ${{ inputs.push && github.event_name == 'workflow_dispatch' }}
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          TAGS: ${{ steps.tag_list.outputs.tags }}
+          DIGEST: ${{ steps.push.outputs.digest || steps.build.outputs.digest }}
+        run: |
+          printf '### Published image\n\n`%s@%s`\n\n```text\n%s\n```\n\n' \
+            "${IMAGE_NAME}" "${DIGEST}" "${TAGS}" >> "$GITHUB_STEP_SUMMARY"

@@ -33,7 +33,7 @@ type ExpectedRackGroup struct {
 	Site NullableSite `json:"site,omitempty"`
 	// External group-level NVLink topology identifier.
 	Topology *string `json:"topology,omitempty"`
-	// Rack fabric protocol. Null only for declarations created before protocol became required.
+	// Rack fabric protocol, or null when unspecified.
 	Protocol NullableString `json:"protocol,omitempty"`
 	// Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
 	Racks []ExpectedRackGroupRack `json:"racks,omitempty"`

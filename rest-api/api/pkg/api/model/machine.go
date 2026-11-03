@@ -428,15 +428,40 @@ type APIBMCInfo struct {
 	FirmwareRevision *string `json:"firmwareRevision"`
 }
 
-// FromProto populates an APIBMCInfo from its protobuf form.
-func (abmc *APIBMCInfo) FromProto(protoBmcInfo *corev1.BmcInfo) {
-	if protoBmcInfo == nil {
-		return
+// FromProto replaces BMC information across Core versions, clearing fields whose
+// messages are absent. Nil input clears all fields.
+func (abmc *APIBMCInfo) FromProto(protoMachine *corev1.Machine) {
+	*abmc = APIBMCInfo{}
+	bmc := protoMachine.GetBmc()
+	bmcStatus := protoMachine.GetStatus().GetBmcStatus()
+	legacyBmc := protoMachine.GetBmcInfo() //nolint:staticcheck // Support Core versions before the BMC split.
+
+	// A present split message is authoritative, even when its fields are unknown.
+	if bmc != nil {
+		abmc.IP = bmc.Ip
+		abmc.Mac = bmc.Mac
+	} else if legacyBmc != nil {
+		abmc.IP = legacyBmc.Ip
+		abmc.Mac = legacyBmc.Mac
 	}
-	abmc.IP = protoBmcInfo.Ip
-	abmc.Mac = protoBmcInfo.Mac
-	abmc.Version = protoBmcInfo.Version
-	abmc.FirmwareRevision = protoBmcInfo.FirmwareVersion
+	if bmcStatus != nil {
+		abmc.Version = bmcStatus.Version
+		abmc.FirmwareRevision = bmcStatus.FirmwareVersion
+	} else if legacyBmc != nil {
+		abmc.Version = legacyBmc.Version
+		abmc.FirmwareRevision = legacyBmc.FirmwareVersion
+	}
+}
+
+// newAPIBMCInfoFromMachine returns nil when Core omits all BMC messages.
+func newAPIBMCInfoFromMachine(protoMachine *corev1.Machine) *APIBMCInfo {
+	legacyBmc := protoMachine.GetBmcInfo() //nolint:staticcheck // Support Core versions before the BMC split.
+	if protoMachine.GetBmc() == nil && protoMachine.GetStatus().GetBmcStatus() == nil && legacyBmc == nil {
+		return nil
+	}
+	info := &APIBMCInfo{}
+	info.FromProto(protoMachine)
+	return info
 }
 
 // APIMachineGPUInfo is the data structure to capture API representation of a Machine's GPU Info
@@ -660,10 +685,7 @@ func (m *APIMachineMetadata) FromProto(machine *corev1.Machine) {
 		return
 	}
 
-	if machine.BmcInfo != nil {
-		m.BMCInfo = &APIBMCInfo{}
-		m.BMCInfo.FromProto(machine.BmcInfo)
-	}
+	m.BMCInfo = newAPIBMCInfoFromMachine(machine)
 
 	discoveryInfo := machine.GetStatus().GetDiscoveryInfo()
 	if discoveryInfo != nil {

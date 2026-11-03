@@ -320,6 +320,11 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
             "merge-manifests-machine-validation",
             "merge-manifests-machine-validation-basic-plugin",
             "merge-manifests-machine-lifecycle-test",
+        }
+    ),
+    # PR manifests publish independently of Helm uploads and production promotion.
+    "publish_release": frozenset(
+        {
             "build-push-helm-chart",
             "build-push-helm-prereqs-chart",
             "build-push-bluefield-helm-charts",
