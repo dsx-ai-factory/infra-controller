@@ -1097,14 +1097,24 @@ async fn test_zero_dpu_network_update_releases_vpc_bound_host_interface(
 
     // Bind the selected HostInband segment after allocation so cleanup resolves
     // VPC ownership without requiring a primary DPU.
+    let mut attach_request = tonic::Request::new(forge::AttachNetworkSegmentToVpcRequest {
+        network_segment_id: Some(host_inband_segment.id),
+        vpc_id: Some(flat_vpc_id),
+        allow_replace: false,
+        expected_source_vpc_id: None,
+        expected_segment_version: None,
+    });
+    // Direct fixture calls bypass the RPC authentication middleware.
+    attach_request.extensions_mut().insert(AuthContext {
+        principals: vec![Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-admin-cli".into(),
+            None,
+        ))],
+        authorization: None,
+    });
     env.api
-        .attach_network_segment_to_vpc(tonic::Request::new(
-            forge::AttachNetworkSegmentToVpcRequest {
-                network_segment_id: Some(host_inband_segment.id),
-                vpc_id: Some(flat_vpc_id),
-                allow_replace: false,
-            },
-        ))
+        .attach_network_segment_to_vpc(attach_request)
         .await?;
 
     // Finish initial assignment before staging the update so the test exercises
