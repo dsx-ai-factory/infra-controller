@@ -9,7 +9,7 @@ set:
     repository: registry.example/scale-test-acceptance
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 tests:
-  - it: renders only the enabled cluster suite as a hardened helm test Job
+  - it: renders only the cluster suite that is enabled by default
     asserts:
       - hasDocuments:
           count: 1
@@ -142,16 +142,42 @@ tests:
     set:
       suites.cluster.enabled: false
       suites.probe.enabled: false
+      suites.lock.enabled: false
     asserts:
       - failedTemplate:
           errorMessage: at least one suite must be enabled under suites.<name>.enabled
+
+  - it: renders the lock suite with its own binary, anchored tests and namespace
+    set:
+      suites.cluster.enabled: false
+      suites.lock.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: run-scale-test-lock
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/lock.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^(TestEnvLock|TestEnvCleanupIsBounded)$"
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: metadata.namespace
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+          any: true
 
   - it: fails when an unknown suite is enabled
     set:
       suites.bogus.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, store and store-transition
+          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, lock, store and store-transition
 
   - it: renders the history suite with a ConfigMap capture mount and provenance
     set:

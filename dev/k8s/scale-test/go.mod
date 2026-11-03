@@ -7,6 +7,7 @@ go 1.27.3
 
 require (
 	github.com/NVIDIA/infra-controller/rest-api v0.0.0-00010101000000-000000000000
+	github.com/google/uuid v1.6.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/net v0.60.0
 	google.golang.org/grpc v1.83.2
@@ -46,6 +47,6 @@ require (
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
-	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
+	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )

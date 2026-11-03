@@ -18,10 +18,12 @@ helm test run --namespace <ns> --timeout 15m
 deadline (for example `--timeout 15m`) to let each suite reach its own bound.
 
 The `cluster` suite proves the Lease adapter against the real API server using
-the pod ServiceAccount; it needs only the chart's Role. The `probe` suite is
-off by default and needs `probeUrl`. The `inventory` suite is off by default;
-when enabled it reads MAT Pods and Services in `inventory.namespace`, mounts the
-referenced `inventory.clientSecret`, and compares the served cohort to
+the pod ServiceAccount and needs only the chart's Role. The `lock` suite proves
+the Lease site lock the same way and is off by default. The `probe` suite is off
+by default too and needs `probeUrl` set to a reachable probe Service. The
+`inventory` suite is off by default; when enabled it reads MAT Pods and
+Services in `inventory.namespace`, mounts the referenced
+`inventory.clientSecret`, and compares the served cohort to
 `inventory.expected`.
 
 The acceptance image is amd64-only, so the Jobs pin to amd64 nodes via

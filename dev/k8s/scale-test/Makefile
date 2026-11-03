@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-.PHONY: build test vet lint fmt-check devsite-test devcluster-test history-acceptance
+.PHONY: build test vet lint fmt-check devsite-test devcluster-test envtest-test history-acceptance
 
 build:
 	go build -o bin/scale-test ./cmd/scale-test
@@ -39,3 +39,8 @@ fmt-check:
 # elsewhere. Run it with helm test from helm/scale-test (see its README).
 devcluster-test:
 	go test -tags devcluster -count=1 -run TestAgainstARealCluster ./internal/cluster/
+
+# Runs the site lock against the pod's in-cluster API server in
+# SCALE_TEST_NAMESPACE. Meant to run from the runner Job (helm test).
+envtest-test:
+	go test -tags envtest -count=1 ./internal/lock/

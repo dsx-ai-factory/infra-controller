@@ -22,6 +22,7 @@ var acceptanceFixtures = []string{
 	"../cluster/devcluster_test.go",
 	"../../harness/acceptance_test.go",
 	"../history/acceptance_test.go",
+	"../lock/env_test.go",
 	"../store/devsite_test.go",
 }
 

@@ -21,8 +21,9 @@ fullnameOverride: ""
 
 # Suites. Each enabled entry renders one `helm test` Job that runs a fixed
 # binary and anchored test; only the suites the chart knows (cluster, probe,
-# inventory, history, store, store-transition) may be enabled, and at least one
-# must be. Lower weight runs first.
+# inventory, history, lock, store, store-transition) may be enabled, and at least
+# one must be. Lower weight runs first. The lock suite proves the Lease site lock
+# against the API.
 suites:
   cluster:
     enabled: true
@@ -42,6 +43,9 @@ suites:
   store-transition:
     enabled: false
     weight: 6
+  lock:
+    enabled: false
+    weight: 7
 
 # Base URL of the probe Service (SCALE_TEST_PROBE_URL) for the probe suite. When
 # unset, the enabled probe fixture fails rather than skipping.
