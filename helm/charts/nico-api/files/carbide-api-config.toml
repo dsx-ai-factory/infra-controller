@@ -216,14 +216,14 @@ rack_capabilities.power_shelf = { vendor = "LiteOn", count = 6 }
 [rack_profiles.VR_NVL72R1_C2G4_NVIDIA]
 product_family = "vrnvl72"
 rack_hardware_topology = "vr_nvl72r1_c2g4_topology"
-rack_capabilities.compute = { vendor = "NVIDIA", count = 18 }
+rack_capabilities.compute = { vendor = "NVIDIA", count = 0 }
 rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
-rack_capabilities.power_shelf = { vendor = "LiteOn", count = 4 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
 
 [rack_profiles.VR_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF]
 product_family = "vrnvl72"
 rack_hardware_topology = "vr_nvl72r1_c2g4_topology"
-rack_capabilities.compute = { vendor = "NVIDIA", count = 18 }
+rack_capabilities.compute = { vendor = "NVIDIA", count = 0 }
 rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
 rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
 

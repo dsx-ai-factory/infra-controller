@@ -7341,7 +7341,7 @@ path = "credentials.yaml"
                 None,
                 "NVIDIA",
                 "LiteOn",
-                4,
+                0,
             ),
             (
                 "GB300_NVL72R1_C2G4_NVIDIA",
@@ -7411,7 +7411,12 @@ path = "credentials.yaml"
                     Some(compute_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.compute.count, 18, "{key}");
+                let compute_count = if id == "VR_NVL72R1_C2G4_NVIDIA" {
+                    0
+                } else {
+                    18
+                };
+                assert_eq!(caps.compute.count, compute_count, "{key}");
                 assert_eq!(caps.switch.vendor.as_deref(), Some("NVIDIA"), "{key}");
                 assert_eq!(caps.switch.count, 9, "{key}");
                 assert_eq!(
