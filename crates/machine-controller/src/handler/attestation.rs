@@ -502,7 +502,28 @@ pub(crate) async fn handle_spdm_poll_state(
     next_skip_state: ManagedHostState,
     restart_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    // Check current membership even while the job is collecting, without holding a transaction over Redfish.
+    // Active jobs only need a status read. Release the connection before terminal jobs contact Redfish.
+    let job_status = {
+        let mut conn = services.db_pool.acquire().await?;
+        db::attestation::spdm::get_attestation_job_status(&mut conn, job_id).await
+    };
+    let job_status = match job_status {
+        Ok(status) => status,
+        Err(db::DatabaseError::NotFoundError { .. }) => {
+            tracing::info!(
+                machine_id = %host_machine_id,
+                %job_id,
+                "SPDM attestation job not found; restarting attestation"
+            );
+            return Ok(StateHandlerOutcome::transition(restart_state));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if job_status == SpdmAttestationStatus::InProgress {
+        return Ok(StateHandlerOutcome::do_nothing());
+    }
+
+    // Recheck current membership before accepting a terminal job's results.
     let selection = select_machine_attesters(
         &services.db_pool,
         async || {
@@ -517,7 +538,7 @@ pub(crate) async fn handle_spdm_poll_state(
     .await?;
     let mut txn = services.db_pool.begin().await?;
 
-    // Retention can remove a job before either read; restart in the caller's lifecycle stage.
+    // Retention can remove a job during Redfish discovery; restart in the caller's lifecycle stage.
     let job_attestations =
         match db::attestation::spdm::get_attestations_for_job_id(&mut txn, job_id).await {
             Ok(attestations) => attestations,
@@ -553,23 +574,6 @@ pub(crate) async fn handle_spdm_poll_state(
         );
         return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
     }
-    let job_status = match db::attestation::spdm::get_attestation_job_status(&mut txn, job_id).await
-    {
-        Ok(status) => status,
-        Err(db::DatabaseError::NotFoundError { .. }) => {
-            tracing::info!(
-                machine_id = %host_machine_id,
-                %job_id,
-                "SPDM attestation job not found; restarting attestation"
-            );
-            return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if job_status == SpdmAttestationStatus::InProgress {
-        return Ok(StateHandlerOutcome::do_nothing());
-    }
-
     // A finished job alone does not settle newer attestations for its devices.
     let attestation_status = db::attestation::spdm::list_single_machine_attestation_status(
         &mut txn,

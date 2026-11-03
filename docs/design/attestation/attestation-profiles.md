@@ -774,11 +774,21 @@ is present. `--format` is a root-level flag and must precede the command path:
 A job keeps the devices selected when it was created. Editing or deleting a
 profile does not rewrite that job's device records or results.
 
-The managed-host controller rechecks the selected device IDs while polling its
-job. If that set changes, including becoming empty, it requests cancellation
-and returns to scheduling. An empty selection then follows the skip path.
-If the selected IDs stay the same, the job continues. Jobs started directly
-through the trigger API are not automatically cancelled by profile edits.
+The managed-host controller polls its job's database status without contacting
+the BMC while the job is in progress. Once the job has passed, failed, or been
+cancelled, it rechecks the selected device IDs before accepting the results.
+If that set changes, including becoming empty, it requests cancellation and
+returns to scheduling. An empty selection then follows the skip path. If the
+selected IDs stay the same, it evaluates their latest results.
+
+Device removals and profile edits therefore do not restart an in-progress job.
+If a removed device leaves the job stuck, request cancellation of that job so
+the controller can recheck the selection after cancellation completes. A new
+manual trigger creates a separate job and does not replace the job the
+managed-host controller is waiting for. The final selection check requires
+the BMC to respond when the resolved profile needs inventory; BMC errors leave
+the machine polling for a later retry. Jobs started directly through the
+trigger API are not automatically cancelled by profile edits.
 
 ## 7 Storage
 

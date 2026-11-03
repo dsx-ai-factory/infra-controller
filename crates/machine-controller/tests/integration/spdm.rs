@@ -397,7 +397,7 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
     Ok(())
 }
 
-/// Membership changes cancel the old job before returning to the trigger state.
+/// Membership changes restart terminal jobs, while active jobs keep polling without Redfish.
 #[sqlx_test]
 async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::Result<()> {
     struct Case {
@@ -407,7 +407,7 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
     }
     let cases = [
         Case {
-            scenario: "an added attester restarts an active job even with results in another job",
+            scenario: "an added attester waits for completion before restarting, even with results in another job",
             job_devices: vec![("HGX_IRoT_GPU_0", SpdmAttestationState::FetchMetadata)],
             selected_devices: &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1"],
         },
@@ -428,7 +428,7 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
             selected_devices: &["HGX_IRoT_GPU_1"],
         },
         Case {
-            scenario: "an empty selection cancels an active job and then skips without contacting the BMC",
+            scenario: "an empty selection waits for completion, then cancels and skips without contacting the BMC",
             job_devices: vec![("HGX_IRoT_GPU_0", SpdmAttestationState::FetchMetadata)],
             selected_devices: &[],
         },
@@ -445,6 +445,11 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
         env.redfish_sim.clear_create_client_error();
         let job_id = uuid::Uuid::new_v4();
         let other_job_id = uuid::Uuid::new_v4();
+        let poll_state = ManagedHostState::HostInit {
+            machine_state: MachineState::SpdmMeasuring {
+                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
+            },
+        };
         let mut txn = env.test_harness.db_txn().await;
         // Isolate each selection change from jobs and policies left by earlier cases.
         sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
@@ -498,17 +503,64 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
         .bind(other_job_id)
         .execute(&mut *txn)
         .await?;
-        db::machine::update_state(
+        db::machine::update_state(&mut txn, &mh.host.id, &poll_state).await?;
+        db::machine::update_controller_state_outcome(
             &mut txn,
-            &mh.host.id,
-            &ManagedHostState::HostInit {
-                machine_state: MachineState::SpdmMeasuring {
-                    spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
-                },
-            },
+            &machine_id,
+            PersistentStateHandlerOutcome::Transition { source_ref: None },
         )
         .await?;
         txn.commit().await?;
+
+        if case
+            .job_devices
+            .iter()
+            .any(|(_, state)| matches!(state, SpdmAttestationState::FetchMetadata))
+        {
+            // Even changed membership must wait for the tracked job without depending on the BMC.
+            env.redfish_sim
+                .set_create_client_error("the BMC cannot be reached");
+            let client_calls = env.redfish_sim.create_client_calls().len();
+            env.run_single_iteration().await;
+            assert_eq!(
+                env.redfish_sim.create_client_calls().len(),
+                client_calls,
+                "{}: active polling must not create a Redfish client",
+                case.scenario
+            );
+
+            // A persisted DoNothing proves the wait branch ran rather than a BMC error.
+            let mut txn = env.test_harness.db_txn().await;
+            let machine = mh.host.db_machine(&mut txn).await;
+            assert_eq!(machine.current_state(), &poll_state, "{}", case.scenario);
+            assert!(
+                matches!(
+                    machine.controller_state_outcome,
+                    Some(PersistentStateHandlerOutcome::DoNothing { .. })
+                ),
+                "{}: {:?}",
+                case.scenario,
+                machine.controller_state_outcome
+            );
+            let attestations =
+                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+            assert!(
+                attestations
+                    .iter()
+                    .all(|attester| attester.cancelled_at.is_none()),
+                "{}: active polling must not request cancellation",
+                case.scenario
+            );
+
+            // Finish the simulated job so the next poll can compare its membership.
+            sqlx::query("UPDATE spdm_machine_devices_attestation SET state = $2 WHERE job_id = $1")
+                .bind(job_id)
+                .bind(sqlx::types::Json(SpdmAttestationState::Passed))
+                .execute(&mut *txn)
+                .await?;
+            txn.commit().await?;
+            env.redfish_sim.clear_create_client_error();
+        }
         if case.selected_devices.is_empty() {
             env.redfish_sim
                 .set_create_client_error("the BMC cannot be reached");
@@ -610,6 +662,45 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
             );
         }
     }
+    Ok(())
+}
+
+/// A retained polling state can outlive its job and must restart without BMC discovery.
+#[sqlx_test]
+async fn missing_spdm_job_restarts_without_redfish(pool: PgPool) -> eyre::Result<()> {
+    let (mut env, mh) = setup_spdm_host(pool, true).await;
+    let job_id = uuid::Uuid::new_v4();
+    let mut txn = env.test_harness.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        &mh.host.id,
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::SpdmMeasuring {
+                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Missing work can be rescheduled even when the BMC is unavailable.
+    env.redfish_sim
+        .set_create_client_error("the BMC cannot be reached");
+    let client_calls = env.redfish_sim.create_client_calls().len();
+    env.run_single_iteration().await;
+    assert_eq!(env.redfish_sim.create_client_calls().len(), client_calls);
+
+    let mut txn = env.test_harness.db_txn().await;
+    let machine = mh.host.db_machine(&mut txn).await;
+    assert_eq!(
+        machine.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::SpdmMeasuring {
+                spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
+            },
+        }
+    );
+    txn.commit().await?;
     Ok(())
 }
 
