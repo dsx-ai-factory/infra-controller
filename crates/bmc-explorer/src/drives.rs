@@ -23,11 +23,15 @@
 //! entry carries the drive's model as data, which is what host firmware
 //! configuration selects a drive model by; the ID is only for people.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use model::site_explorer::{DriveIdentity, Inventory as ModelInventory};
 use nv_redfish::Bmc;
 use nv_redfish::computer_system::{ComputerSystem, Drive};
 use nv_redfish::schema::drive::{Drive as DriveSchema, MediaType};
 use nv_redfish::schema::resource::State;
+use nv_redfish::schema::storage::StorageController as StorageControllerSchema;
 
 /// Longest reported value accepted as a drive firmware version. Drive firmware
 /// revisions are at most 8 characters, the width of the ATA and NVMe firmware
@@ -36,7 +40,9 @@ use nv_redfish::schema::resource::State;
 const MAX_VERSION_LEN: usize = 8;
 
 pub(crate) struct ExploredDrives<B: Bmc> {
-    drives: Vec<Drive<B>>,
+    /// Each drive, once, with the controllers embedded in every Storage that
+    /// links it.
+    drives: Vec<(Drive<B>, Vec<Arc<StorageControllerSchema>>)>,
 }
 
 impl<B: Bmc> ExploredDrives<B> {
@@ -44,7 +50,9 @@ impl<B: Bmc> ExploredDrives<B> {
     ///
     /// Drive inventory is best effort: a Storage subsystem whose collection or
     /// drives cannot be fetched is logged and left out, and never fails the
-    /// exploration. A drive linked from two Storage subsystems is kept once.
+    /// exploration. A drive linked from two Storage subsystems is kept once,
+    /// with the controllers of both, so the result does not depend on the
+    /// order the BMC lists them in.
     pub(crate) async fn explore(system: &ComputerSystem<B>) -> Self {
         let storages = match system.storage_controllers().await {
             Ok(Some(storages)) => storages,
@@ -54,25 +62,42 @@ impl<B: Bmc> ExploredDrives<B> {
                 Vec::new()
             }
         };
-        let mut drives = Vec::new();
+        let mut drives = BTreeMap::new();
         for storage in storages {
-            match storage.drives().await {
-                Ok(storage_drives) => drives.extend(storage_drives.unwrap_or_default()),
+            let storage_drives = match storage.drives().await {
+                Ok(storage_drives) => storage_drives.unwrap_or_default(),
                 Err(error) => {
                     tracing::warn!(%error, storage_id = %storage.raw().id, "Failed to fetch storage drives");
+                    continue;
                 }
+            };
+            // Embedded controllers come with the Storage resource, so reading
+            // them costs no request. They only supply a fallback version.
+            let controllers = match storage.storage_controllers().await {
+                Ok(controllers) => controllers.unwrap_or_default(),
+                Err(error) => {
+                    tracing::debug!(%error, storage_id = %storage.raw().id, "Storage controllers not usable");
+                    Vec::new()
+                }
+            };
+            for drive in storage_drives {
+                drives
+                    .entry(drive.raw().odata_id.clone())
+                    .or_insert_with(|| (drive, Vec::new()))
+                    .1
+                    .extend(controllers.iter().cloned());
             }
         }
-        drives.sort_by(|left, right| left.raw().odata_id.cmp(&right.raw().odata_id));
-        drives.dedup_by(|left, right| left.raw().odata_id == right.raw().odata_id);
-        Self { drives }
+        Self {
+            drives: drives.into_values().collect(),
+        }
     }
 
     /// Converts collected drives to firmware inventory entries without BMC requests.
     pub(crate) fn to_model(&self) -> Vec<ModelInventory> {
         self.drives
             .iter()
-            .filter_map(|drive| drive.raw().to_firmware_inventory())
+            .filter_map(|(drive, controllers)| drive.raw().to_firmware_inventory(controllers))
             .collect()
     }
 }
@@ -83,11 +108,20 @@ trait DriveExt {
     /// that is not enabled or has no model or usable firmware version.
     /// `FailurePredicted` is not a filter: it is a prediction, not a failure,
     /// so a flagged drive is still reported.
-    fn to_firmware_inventory(&self) -> Option<ModelInventory>;
+    ///
+    /// `controllers` are the controllers embedded in the drive's Storage. They
+    /// supply the version only when the drive itself reports none.
+    fn to_firmware_inventory(
+        &self,
+        controllers: &[Arc<StorageControllerSchema>],
+    ) -> Option<ModelInventory>;
 }
 
 impl DriveExt for DriveSchema {
-    fn to_firmware_inventory(&self) -> Option<ModelInventory> {
+    fn to_firmware_inventory(
+        &self,
+        controllers: &[Arc<StorageControllerSchema>],
+    ) -> Option<ModelInventory> {
         let state = self
             .status
             .as_ref()
@@ -104,9 +138,8 @@ impl DriveExt for DriveSchema {
         let Some(version) = [firmware_version, revision]
             .into_iter()
             .flatten()
-            .find(|version| {
-                version.len() <= MAX_VERSION_LEN && !version.contains(char::is_whitespace)
-            })
+            .find(|version| is_drive_version(version))
+            .or_else(|| controller_version(controllers, model))
         else {
             // Recurs on every exploration; hosts whose configured drive
             // component matches no entry are surfaced separately.
@@ -138,6 +171,29 @@ impl DriveExt for DriveSchema {
     }
 }
 
+/// Whether `version` can be a drive firmware revision.
+fn is_drive_version(version: &str) -> bool {
+    version.len() <= MAX_VERSION_LEN && !version.contains(char::is_whitespace)
+}
+
+/// The version of the Storage controllers whose model equals the drive's.
+///
+/// Some AMI BMCs, such as the Lenovo HS350X V3's, report an NVMe drive's
+/// firmware only on its controller in the embedded `StorageControllers` array.
+/// Two drives of one model in a Storage are indistinguishable there, so
+/// matching controllers that disagree give no version.
+fn controller_version<'a>(
+    controllers: &'a [Arc<StorageControllerSchema>],
+    model: &str,
+) -> Option<&'a str> {
+    let mut versions = controllers
+        .iter()
+        .filter(|controller| trimmed(&controller.model) == Some(model))
+        .map(|controller| trimmed(&controller.firmware_version));
+    let version = versions.next()??;
+    (is_drive_version(version) && versions.all(|other| other == Some(version))).then_some(version)
+}
+
 /// The trimmed value of an optional string property, or `None` when it is
 /// absent, null or blank.
 fn trimmed(value: &Option<Option<String>>) -> Option<&str> {
@@ -150,10 +206,12 @@ fn trimmed(value: &Option<Option<String>>) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use carbide_test_support::value_scenarios;
     use serde_json::{Value, json};
 
-    use super::{DriveExt, DriveIdentity, DriveSchema, ModelInventory};
+    use super::{DriveExt, DriveIdentity, DriveSchema, ModelInventory, StorageControllerSchema};
 
     /// A Dell iDRAC SATA HDD as captured from an R760xd2, reduced to the
     /// properties the conversion reads.
@@ -179,7 +237,7 @@ mod tests {
             drive[key] = value.clone();
         }
         let drive: DriveSchema = serde_json::from_value(drive).unwrap();
-        drive.to_firmware_inventory()
+        drive.to_firmware_inventory(&[])
     }
 
     /// The entry expected for the Dell HDD with `version` and `media_type`.
@@ -231,6 +289,75 @@ mod tests {
                 json!({ "Status": { "State": "Absent" } }) => None,
                 json!({ "Status": null }) => None,
                 json!({ "FailurePredicted": true }) => hdd("GR02"),
+            }
+        );
+    }
+
+    /// An NVMe drive as a Lenovo HS350X V3 reports it: `Revision` holds the
+    /// NVMe specification version, and the firmware version is only on the
+    /// matching controller of its Storage.
+    fn ami_nvme_drive() -> Value {
+        json!({
+            "@odata.id": "/redfish/v1/Systems/Self/Storage/1/Drives/0",
+            "Id": "0",
+            "Name": "Drive 0",
+            "MediaType": "SSD",
+            "Model": "Micron_7450_MTFDKBG960TFR",
+            "Revision": "NVMe Spec v1.4",
+            "Status": { "State": "Enabled" }
+        })
+    }
+
+    /// Converts the AMI NVMe drive with `changes` applied, against embedded
+    /// controllers given as `(model, firmware version)`.
+    fn convert_with_controllers(
+        (changes, controllers): (Value, &[(&str, &str)]),
+    ) -> Option<String> {
+        let mut drive = ami_nvme_drive();
+        for (key, value) in changes.as_object().unwrap() {
+            drive[key] = value.clone();
+        }
+        let drive: DriveSchema = serde_json::from_value(drive).unwrap();
+        let controllers = controllers
+            .iter()
+            .enumerate()
+            .map(|(index, (model, version))| {
+                let controller: StorageControllerSchema = serde_json::from_value(json!({
+                    "@odata.id": format!("/redfish/v1/Systems/Self/Storage/1#/StorageControllers/{index}"),
+                    "MemberId": format!("StorageUnit_{index}"),
+                    "Model": model,
+                    "FirmwareVersion": version,
+                }))
+                .unwrap();
+                Arc::new(controller)
+            })
+            .collect::<Vec<_>>();
+        drive
+            .to_firmware_inventory(&controllers)
+            .and_then(|entry| entry.version)
+    }
+
+    #[test]
+    fn drive_version_from_storage_controller() {
+        const MICRON: &str = "Micron_7450_MTFDKBG960TFR";
+        const INTEL: &str = "INTEL SSDPF2KE016T1O";
+        let version = |version: &str| Some(version.to_string());
+        value_scenarios!(run = convert_with_controllers;
+            "matching controller" {
+                (json!({}), &[(INTEL, "9CV10420"), (MICRON, "E2MU116")][..]) => version("E2MU116"),
+                (json!({}), &[(" Micron_7450_MTFDKBG960TFR ", " E2MU116 ")][..]) => version("E2MU116"),
+                (json!({}), &[(MICRON, "E2MU116"), (MICRON, "E2MU116")][..]) => version("E2MU116"),
+            }
+
+            "no usable controller version" {
+                (json!({}), &[][..]) => None,
+                (json!({}), &[(INTEL, "9CV10420")][..]) => None,
+                (json!({}), &[(MICRON, "NVMe Spec v1.4")][..]) => None,
+                (json!({}), &[(MICRON, "E2MU116"), (MICRON, "E2MU300")][..]) => None,
+            }
+
+            "drive's own version wins" {
+                (json!({ "FirmwareVersion": "E2MU300" }), &[(MICRON, "E2MU116")][..]) => version("E2MU300"),
             }
         );
     }

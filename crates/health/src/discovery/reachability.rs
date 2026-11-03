@@ -19,8 +19,6 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use futures::future::join_all;
-
 use super::context::{CollectorKind, DiscoveryLoopContext};
 use super::spawn::collector_eligibility;
 use crate::HealthError;
@@ -123,7 +121,7 @@ pub(super) async fn reconcile_reachability_collectors(
         ctx.collectors.reachability_specs.remove(key);
     }
 
-    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(stale_collectors).await;
 
     let (Some(config), Some(sink)) = (config, sink) else {
         return Ok(());
