@@ -239,10 +239,10 @@ deployer should hear about at install time.
 {{- if .enabled -}}
 {{- $_ := required "state.siteId is required when state is enabled" .siteId -}}
 {{- if and (include "nico-site-health-probe.nicoReaders" $) (not $.Values.nicoApiClientCert.existingSecret) -}}
-{{- fail "nicoApiClientCert.existingSecret is required while a nico-api state reader is on: the probe's SPIFFE identity may call only FindMachineIds and FindMachinesByIds" -}}
+{{- fail "nicoApiClientCert.existingSecret is required while a nico-api state reader is on: the probe's SPIFFE identity may call only FindMachineIds, FindMachinesByIds and FindHostStatesByIds" -}}
 {{- end -}}
-{{- if and (include "nico-site-health-probe.nicoReaders" $) (ne (toString .nicoApi.hostRead) "full") -}}
-{{- fail "state.nicoApi.hostRead must be full: nico-api has no compact host read yet" -}}
+{{- if not (has (toString .nicoApi.hostRead) (list "auto" "full" "compact")) -}}
+{{- fail (printf "state.nicoApi.hostRead must be auto, full or compact, not %q" (toString .nicoApi.hostRead)) -}}
 {{- end -}}
 {{- if include "nico-site-health-probe.restReaders" $ -}}
 {{- if not (hasPrefix "https://" (toString .rest.target)) -}}
