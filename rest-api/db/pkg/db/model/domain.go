@@ -251,9 +251,9 @@ func (dsd DomainSQLDAO) ReserveOwned(ctx context.Context, tx *db.Tx, input Domai
 // TransitionOwned performs a compare-and-swap on a previously committed
 // immutable reservation. A stale worker cannot mark an unrelated state Ready.
 func (dsd DomainSQLDAO) TransitionOwned(ctx context.Context, tx *db.Tx, id, coreID uuid.UUID, from, to string) (bool, error) {
-	if id == uuid.Nil || coreID == uuid.Nil ||
-		!((from == DomainStatusPending && to == DomainStatusReady) ||
-			(from == DomainStatusRejecting && to == DomainStatusError)) {
+	validTransition := (from == DomainStatusPending && to == DomainStatusReady) ||
+		(from == DomainStatusRejecting && to == DomainStatusError)
+	if id == uuid.Nil || coreID == uuid.Nil || !validTransition {
 		return false, fmt.Errorf("invalid owned Domain transition")
 	}
 	result, err := db.GetIDB(tx, dsd.dbSession).NewUpdate().Model(&Domain{}).
@@ -372,11 +372,13 @@ func (dsd DomainSQLDAO) ClaimRecovery(ctx context.Context, maxRows int, lease ti
 // CompleteRecovery accepts only the worker that still holds an unexpired
 // lease and only the immutable reserved Core identity from the claim.
 func (dsd DomainSQLDAO) CompleteRecovery(ctx context.Context, id, coreID, token uuid.UUID, from, to string, softDelete bool) (bool, error) {
-	if token == uuid.Nil || coreID == uuid.Nil || (from != DomainStatusPending && from != DomainStatusRejecting && from != DomainStatusDeleting) ||
-		(!softDelete && !((from == DomainStatusPending && to == DomainStatusReady) ||
-			(from == DomainStatusRejecting && to == DomainStatusError) ||
-			(from == DomainStatusDeleting && to == DomainStatusReady))) ||
-		(softDelete && (from != DomainStatusDeleting || to != DomainStatusDeleting)) {
+	validTransition := (from == DomainStatusPending && to == DomainStatusReady) ||
+		(from == DomainStatusRejecting && to == DomainStatusError) ||
+		(from == DomainStatusDeleting && to == DomainStatusReady)
+	if softDelete {
+		validTransition = from == DomainStatusDeleting && to == DomainStatusDeleting
+	}
+	if token == uuid.Nil || coreID == uuid.Nil || !validTransition {
 		return false, fmt.Errorf("invalid Domain recovery completion")
 	}
 	q := dsd.dbSession.DB.NewUpdate().Model(&Domain{}).
