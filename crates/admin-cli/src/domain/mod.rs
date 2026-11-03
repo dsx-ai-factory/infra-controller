@@ -30,19 +30,7 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "Display Domain information")]
     Show(show::Args),
-    #[clap(
-        about = "Create a Domain, optionally owned by a VPC",
-        long_about = "Create a Domain, optionally owned by a VPC.\n\n\
-            On success, JSON mode prints the created domain as pretty JSON. Other output modes \
-            print these fields for the created domain: ID, NAME, DEFAULT TTL, VPC, CREATED, \
-            UPDATED, and DELETED.",
-        defer = |command| {
-            // Wait for global options to be inherited before hiding the ones create ignores.
-            command
-                .mut_arg("extended", |arg| arg.hide(true))
-                .mut_arg("sort_by", |arg| arg.hide(true))
-        }
-    )]
+    #[clap(about = "Create a Domain, optionally owned by a VPC")]
     Create(create::Args),
     #[clap(about = "Update domain default TTL")]
     Update(update::Args),
