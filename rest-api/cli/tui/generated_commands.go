@@ -394,7 +394,8 @@ func persistGeneratedSiteScopeFromArgs(
 		var body struct {
 			SiteID string `json:"siteId"`
 		}
-		if err := json.Unmarshal([]byte(data), &body); err != nil {
+		err = json.Unmarshal([]byte(data), &body)
+		if err != nil {
 			return nil, fmt.Errorf("reading request site: %w", err)
 		}
 		setGeneratedSiteScopeFromID(s, body.SiteID)
