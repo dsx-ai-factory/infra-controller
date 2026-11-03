@@ -15,4 +15,8 @@
  * limitations under the License.
  */
 
-pub(in crate::tests) mod rack;
+// Keep SQLx migrations in one integration executable.
+mod controller;
+mod env;
+mod fixtures;
+mod handler;

@@ -1306,6 +1306,7 @@ dependencies = [
  "carbide-health-report",
  "carbide-ib-fabric",
  "carbide-instrument",
+ "carbide-rack",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-site-explorer",
@@ -3121,7 +3122,10 @@ dependencies = [
  "carbide-health-report",
  "carbide-instrument",
  "carbide-rack",
+ "carbide-rpc",
  "carbide-secrets",
+ "carbide-site-explorer",
+ "carbide-test-harness",
  "carbide-test-support",
  "carbide-utils",
  "carbide-uuid",
@@ -3130,6 +3134,7 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
+ "librms",
  "mac_address",
  "opentelemetry",
  "reqwest 0.13.4",
@@ -3138,7 +3143,11 @@ dependencies = [
  "sqlx",
  "state-controller",
  "tokio",
+ "tokio-util",
+ "tonic",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]

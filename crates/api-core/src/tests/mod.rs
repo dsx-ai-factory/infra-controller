@@ -84,7 +84,6 @@ mod nvl_logical_partition;
 mod preingestion_dpu_nic_mode;
 mod primary_interface;
 mod rack_health;
-mod rack_state_controller;
 mod redfish_actions;
 mod resource_pool;
 mod resource_pool_inspection;
