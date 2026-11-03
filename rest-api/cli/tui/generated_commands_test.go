@@ -972,8 +972,6 @@ func TestResolveGeneratedResource_RejectsAmbiguousNames(t *testing.T) {
 		return []NamedItem{
 			{Name: "duplicate", ID: "machine-1"},
 			{Name: "duplicate", ID: "machine-2"},
-			{Name: "case-a", ID: "machine-a"},
-			{Name: "case-b", ID: "Machine-A"},
 		}, nil
 	})
 	session := &Session{Resolver: resolver}
@@ -1000,28 +998,6 @@ func TestResolveGeneratedResource_RejectsAmbiguousNames(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, supported)
 	assert.Equal(t, "machine-2", item.ID)
-
-	item, supported, err = session.ResolveGeneratedResource(
-		context.Background(),
-		descriptor,
-		nil,
-		"Machine",
-		"Machine-A",
-	)
-	require.NoError(t, err, "IDs that differ only in case must not be ambiguous")
-	assert.True(t, supported)
-	assert.Equal(t, "Machine-A", item.ID)
-
-	_, supported, err = session.ResolveGeneratedResource(
-		context.Background(),
-		descriptor,
-		nil,
-		"Machine",
-		"MACHINE-A",
-	)
-	assert.True(t, supported)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no machine matching")
 }
 
 func TestFetchAllocationConstraints_UsesIDWhenDisplayPartsAreEmpty(t *testing.T) {
@@ -1416,5 +1392,74 @@ func TestResolveGeneratedPathParameters(t *testing.T) {
 		{name: "explicit discovery values", run: testResolveGeneratedPathParameters_ExplicitDiscoveryValues},
 	} {
 		t.Run(test.name, test.run)
+	}
+}
+
+func TestResolveGeneratedResource_MatchesCaseByResourceType(t *testing.T) {
+	const domains = `[{"id":"domain-a"},{"id":"Domain-A"}]`
+	tests := []struct {
+		name         string
+		command      string
+		listResponse string
+		value        string
+		wantID       string
+		wantErr      string
+	}{
+		{
+			name: "NVLink domain lowercase ID", command: "domain get",
+			listResponse: domains, value: "domain-a", wantID: "domain-a",
+		},
+		{
+			name: "NVLink domain mixed-case ID", command: "domain get",
+			listResponse: domains, value: "Domain-A", wantID: "Domain-A",
+		},
+		{
+			name: "NVLink domain ID in another case", command: "domain get",
+			listResponse: domains, value: "DOMAIN-A", wantErr: `no domain matching "DOMAIN-A"`,
+		},
+		{
+			name: "expected rack group name in another case", command: "expected-rack-group get",
+			listResponse: `[{"id":"group-1","name":"Group One","siteId":"site-1"}]`,
+			value:        "group one", wantID: "group-1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, test.listResponse)
+			}))
+			defer server.Close()
+
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope.SiteID = "site-1"
+			info := requireGeneratedInfo(t, test.command)
+			descriptor := GeneratedPathResourceDescriptor(
+				info.Name,
+				info.PathParameters[len(info.PathParameters)-1],
+			)
+
+			var (
+				item *NamedItem
+				err  error
+			)
+			_ = captureStdout(func() {
+				item, _, err = session.ResolveGeneratedResource(
+					context.Background(),
+					descriptor,
+					map[string]string{"siteId": "site-1"},
+					"Resource",
+					test.value,
+				)
+			})
+			if test.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantID, item.ID)
+		})
 	}
 }

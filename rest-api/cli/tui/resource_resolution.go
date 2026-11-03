@@ -146,7 +146,7 @@ func (s *Session) ResolveGeneratedResource(
 		item, err = s.Resolver.SelectFromItems(label, items)
 		return item, true, err
 	}
-	matches := matchingGeneratedResourceItems(items, value)
+	matches := matchingGeneratedResourceItems(descriptor, items, value)
 	if len(matches) > 1 {
 		return nil, true, fmt.Errorf(
 			"ambiguous %s %q matches %d resources; use an exact ID",
@@ -162,13 +162,24 @@ func (s *Session) ResolveGeneratedResource(
 	return nil, true, fmt.Errorf("no %s matching %q found", descriptor.ResourceType, value)
 }
 
-func matchingGeneratedResourceItems(items []NamedItem, value string) []NamedItem {
+// matchingGeneratedResourceItems matches value against item IDs, then names.
+// NVLink domain IDs can differ only in case, so domains match exactly; other
+// resources match case-insensitively.
+func matchingGeneratedResourceItems(
+	descriptor GeneratedResourceDescriptor,
+	items []NamedItem,
+	value string,
+) []NamedItem {
+	equal := strings.EqualFold
+	if descriptor.ResourceType == "domain" {
+		equal = func(a, b string) bool { return a == b }
+	}
 	var idMatches []NamedItem
 	var nameMatches []NamedItem
 	for i := range items {
-		if items[i].ID == value {
+		if equal(items[i].ID, value) {
 			idMatches = append(idMatches, items[i])
-		} else if items[i].Name == value {
+		} else if equal(items[i].Name, value) {
 			nameMatches = append(nameMatches, items[i])
 		}
 	}
