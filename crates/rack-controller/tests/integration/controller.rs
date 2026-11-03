@@ -23,6 +23,7 @@ use std::time::Duration;
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
+use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use db::db_read::DbReader;
 use db::{self, ObjectColumnFilter, machine as db_machine, rack as db_rack};
@@ -42,22 +43,17 @@ use state_controller::state_handler::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
-use crate::tests::common::api_fixtures::{
-    TestEnvOverrides, create_test_env, create_test_env_with_overrides,
+use crate::env::{
+    TestEnvOverrides, TestRackDbBuilder, create_test_env, create_test_env_with_overrides,
 };
-
-mod fixtures;
-mod handler;
-
-use fixtures::rack::set_rack_controller_state;
+use crate::fixtures::rack::set_rack_controller_state;
 
 #[derive(Debug, Default, Clone)]
-pub(in crate::tests) struct TestRackStateHandler {
+struct TestRackStateHandler {
     /// The total count for the handler
-    pub(in crate::tests) count: Arc<AtomicUsize>,
+    count: Arc<AtomicUsize>,
     /// We count for every rack ID how often the handler was called
-    pub(in crate::tests) counts_per_id: Arc<Mutex<HashMap<String, usize>>>,
+    counts_per_id: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[async_trait::async_trait]
@@ -190,14 +186,14 @@ fn validate_state_change_history_requires_distinct_ordered_records() {
     ));
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_can_retrieve_rack_state_history_with_real_handler(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(handler::config_with_rack_profiles()),
+            config: Some(crate::handler::config_with_rack_profiles()),
             ..Default::default()
         },
     )
@@ -207,8 +203,8 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     // Using "Simple" capabilities (compute=2, switch=0, power_shelf=0) so
     // Created -> Discovering fires once both machines are linked, without
     // requiring switches or power shelves.
-    let machine_id_1 = handler::new_machine_id(1);
-    let machine_id_2 = handler::new_machine_id(2);
+    let machine_id_1 = crate::handler::new_machine_id(1);
+    let machine_id_2 = crate::handler::new_machine_id(2);
     let mut txn = pool.acquire().await?;
     let rack_id = TestRackDbBuilder::new()
         .with_rack_profile_id("Simple")
@@ -250,7 +246,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle.clone())
+        .database(pool.clone(), env.api.work_lock_manager_handle())
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services)
         .state_handler(rack_handler)
@@ -447,10 +443,10 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 /// Verifies (via the full controller) that a rack in Error state stays in
 /// Error state.
 ///
-/// Compare with `handler::test_error_state_does_nothing`, which tests the
+/// Compare with `crate::handler::test_error_state_does_nothing`, which tests the
 /// same behaviour by calling the handler directly — without the controller
 /// ceremony.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_error_state_does_nothing_with_controller(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -483,7 +479,7 @@ async fn test_error_state_does_nothing_with_controller(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle.clone())
+        .database(pool.clone(), env.api.work_lock_manager_handle())
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services)
         .state_handler(rack_handler)
@@ -501,7 +497,7 @@ async fn test_error_state_does_nothing_with_controller(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_rack_deletion_with_state_controller(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -528,7 +524,7 @@ async fn test_rack_deletion_with_state_controller(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle.clone())
+        .database(pool.clone(), env.api.work_lock_manager_handle())
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services.clone())
         .state_handler(rack_handler.clone())
@@ -569,7 +565,7 @@ async fn test_rack_deletion_with_state_controller(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_rack_controller_state_version_increment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -650,7 +646,7 @@ async fn test_rack_controller_state_version_increment(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_and_stale_config_write(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -732,7 +728,7 @@ async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_a
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_stale_rack_maintenance_termination_latch_does_not_block_non_maintenance_transition(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
