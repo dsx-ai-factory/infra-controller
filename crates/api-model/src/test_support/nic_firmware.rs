@@ -61,6 +61,7 @@ pub fn target() -> NicFirmwareTarget {
         supervisor_instance_id: None,
         receipt: None,
         diagnostic: None,
+        delivery_error_code: None,
     }
 }
 

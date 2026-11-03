@@ -17,6 +17,7 @@
 
 use model::instance::status::SyncState;
 use model::instance::status::tenant::{InstanceTenantStatus, TenantState};
+use model::machine::nic_firmware::{NicFirmwarePhase, NicFirmwarePurpose};
 use model::machine::{InstanceState, ManagedHostState};
 
 use crate as rpc;
@@ -128,6 +129,22 @@ pub fn instance_status_tenant_state(
             InstanceState::WaitingForDpaToBeReady => TenantState::Updating,
             InstanceState::Failed { .. } => TenantState::Failed,
         },
+        ManagedHostState::NicFirmwareUpdating { operation }
+            if matches!(operation.purpose, NicFirmwarePurpose::Allocation { .. }) =>
+        {
+            match operation.phase {
+                NicFirmwarePhase::Failed { .. } => TenantState::Failed,
+                _ => TenantState::Updating,
+            }
+        }
+        ManagedHostState::NicFirmwareUpdating { operation }
+            if matches!(
+                operation.purpose,
+                NicFirmwarePurpose::RestoreBaseline { .. }
+            ) =>
+        {
+            TenantState::Terminating
+        }
         ManagedHostState::ForceDeletion | ManagedHostState::Reset { .. } => {
             TenantState::Terminating
         }
@@ -189,6 +206,36 @@ mod tests {
     };
 
     use super::*;
+
+    /// Firmware work cannot expose an allocation as ready, and restoration
+    /// remains part of releasing its previous tenant.
+    #[test]
+    fn nic_firmware_tenant_state() {
+        let owner = uuid::Uuid::nil().into();
+        scenarios!(
+            run = |(purpose, phase)| {
+                let mut operation = model::test_support::nic_firmware::operation();
+                operation.purpose = purpose;
+                operation.phase = phase;
+                instance_status_tenant_state(
+                    ManagedHostState::NicFirmwareUpdating { operation },
+                    SyncState::Synced, false, None, true, true, true,
+                ).map_err(drop)
+            };
+            "active work cannot become tenant ready" {
+                (NicFirmwarePurpose::Allocation { instance_id: owner }, NicFirmwarePhase::ObservingSupervisor { target_index: 0 })
+                    => Yields(TenantState::Updating),
+            }
+            "terminal allocation failure remains visible" {
+                (NicFirmwarePurpose::Allocation { instance_id: owner }, NicFirmwarePhase::Failed { reason: "required verification failed".into() })
+                    => Yields(TenantState::Failed),
+            }
+            "baseline restoration keeps the old tenant terminating" {
+                (NicFirmwarePurpose::RestoreBaseline { instance_id: owner, cleanup_context: model::machine::CleanupContext::Deprovision }, NicFirmwarePhase::ObservingSupervisor { target_index: 0 })
+                    => Yields(TenantState::Terminating),
+            }
+        );
+    }
 
     #[test]
     fn repair_merge_active_detects_merge_sources() {

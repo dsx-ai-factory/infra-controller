@@ -45,6 +45,7 @@ const (
 	controllerMachineStatePrefixDecommissioning       = "Decommissioning"
 	controllerMachineStatePrefixBomValidating         = "BomValidating"
 	controllerMachineStatePrefixMachineValidation     = "MachineValidation"
+	controllerMachineStatePrefixNicFirmwareUpdating   = "NicFirmwareUpdating"
 
 	// Decommissioning terminal substate (Core ManagedHostState::Decommissioning/Decommissioned)
 	controllerMachineDecommissioningSubstateDecommissioned = "Decommissioned"
@@ -1184,6 +1185,14 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 		case controllerMachineStatePrefixMachineValidation:
 			machineStatus = cdbm.MachineStatusInitializing
 			statusMessage = "Machine is undergoing machine validation"
+		case controllerMachineStatePrefixNicFirmwareUpdating:
+			if controllerMachineSubstate == "Failed" {
+				machineStatus = cdbm.MachineStatusError
+				statusMessage = "Machine NIC firmware update failed"
+			} else {
+				machineStatus = cdbm.MachineStatusInitializing
+				statusMessage = "Machine NIC firmware is being updated"
+			}
 		case controllerMachineStatePrefixAssigned:
 			machineStatus = cdbm.MachineStatusInUse
 			statusMessage = cdbm.MachineStatusInUseMessage

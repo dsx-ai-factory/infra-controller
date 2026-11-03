@@ -23,7 +23,9 @@ use carbide_secrets::credentials::{
     NicLockdownIkm,
 };
 use carbide_uuid::dpa_interface::DpaInterfaceId;
+use carbide_uuid::machine::HostMachineId;
 use hkdf::Hkdf;
+use mac_address::MacAddress;
 use sha2::Sha256;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -301,6 +303,22 @@ pub(crate) async fn build_supernic_lockdown_key(
     ikm_version: u32,
 ) -> Result<String, eyre::Report> {
     let ctx = build_kdf_context(db_reader, dpa_interface_id).await?;
+    let secret = fetch_kdf_secret(credential_reader, ikm_version).await?;
+    build_lockdown_key(secret.as_bytes(), &ctx, KdfContextVersion::V1)
+}
+
+/// Derive the existing lockdown key from a frozen host/card identity, without
+/// requiring that a generic card has a DPA inventory row.
+pub(crate) async fn build_resolved_lockdown_key(
+    host: HostMachineId,
+    mac_address: MacAddress,
+    credential_reader: &dyn CredentialReader,
+    ikm_version: u32,
+) -> Result<String, eyre::Report> {
+    let ctx = KdfContext {
+        mac_address: mac_address.to_string(),
+        machine_id: host.to_string(),
+    };
     let secret = fetch_kdf_secret(credential_reader, ikm_version).await?;
     build_lockdown_key(secret.as_bytes(), &ctx, KdfContextVersion::V1)
 }
@@ -732,5 +750,43 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    // The generic-card adapter must retain the same V1 context as the existing
+    // DPA path; comparing two calls through the adapter would miss a new prefix
+    // or a swapped host/MAC input.
+    #[tokio::test]
+    async fn resolved_card_key_keeps_the_existing_host_mac_context() {
+        let store = MemoryCredentialStore::default();
+        store
+            .set_credentials(
+                &lockdown_ikm_key(7),
+                &Credentials::UsernamePassword {
+                    username: String::new(),
+                    password: "test-site-wide-root-secret".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let expected = build_lockdown_key(
+            b"test-site-wide-root-secret",
+            &KdfContext {
+                machine_id: "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".into(),
+                mac_address: "00:11:22:33:44:55".into(),
+            },
+            KdfContextVersion::V1,
+        )
+        .unwrap();
+        let actual = build_resolved_lockdown_key(
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+                .parse()
+                .unwrap(),
+            "00:11:22:33:44:55".parse().unwrap(),
+            &store,
+            7,
+        )
+        .await
+        .unwrap();
+        assert_eq!(actual, expected);
     }
 }

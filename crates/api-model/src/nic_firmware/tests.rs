@@ -30,6 +30,7 @@ fn device(base_mac: Option<MacAddress>, base_guid: Option<&str>) -> MlxDeviceInf
         psid: None,
         device_description: None,
         part_number: None,
+        fw_version_running: None,
         fw_version_current: None,
         pxe_version_current: None,
         uefi_version_current: None,

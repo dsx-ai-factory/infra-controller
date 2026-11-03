@@ -79,6 +79,7 @@ mod network_segment;
 mod network_segment_find;
 mod network_segment_lifecycle;
 mod nic_firmware;
+mod nic_firmware_operation;
 mod nvl_instance;
 mod nvl_logical_partition;
 mod preingestion_dpu_nic_mode;

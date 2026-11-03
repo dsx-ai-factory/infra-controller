@@ -1077,6 +1077,15 @@ pub(crate) async fn invoke_power(
     let instance_id = request
         .instance_id
         .ok_or(CarbideError::MissingArgument("instance_id"))?;
+    // Power changes write the Instance before the Machine. Read again after
+    // both locks so an earlier snapshot cannot bypass admitted firmware work.
+    let locked_instance = db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
+        .await?
+        .ok_or(CarbideError::NotFoundError {
+            kind: "instance",
+            id: instance_id.to_string(),
+        })?;
+    db::machine::lock_by_id_for_update(txn.as_mut(), &locked_instance.machine_id.into()).await?;
     let snapshot = db::managed_host::load_by_instance_ids(
         &mut txn,
         &[instance_id],
@@ -1090,6 +1099,16 @@ pub(crate) async fn invoke_power(
     })?;
     let machine_id = snapshot.host_snapshot.id;
     log_machine_id(&machine_id);
+
+    if matches!(
+        snapshot.managed_state,
+        ManagedHostState::NicFirmwareUpdating { .. }
+    ) {
+        return Err(CarbideError::FailedPrecondition(
+            "instance power control is blocked by its NIC firmware operation".into(),
+        )
+        .into());
+    }
 
     // Log tenant organization ID
     if let Some(ref instance) = snapshot.instance {

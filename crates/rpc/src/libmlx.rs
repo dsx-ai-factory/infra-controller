@@ -82,6 +82,7 @@ impl From<MlxDeviceInfo> for MlxDeviceInfoPb {
             device_description: info.device_description.unwrap_or_default(),
             part_number: info.part_number.unwrap_or_default(),
             fw_version_current: info.fw_version_current.unwrap_or_default(),
+            fw_version_running: info.fw_version_running,
             pxe_version_current: info.pxe_version_current.unwrap_or_default(),
             uefi_version_current: info.uefi_version_current.unwrap_or_default(),
             uefi_version_virtio_blk_current: info
@@ -118,6 +119,7 @@ impl TryFrom<MlxDeviceInfoPb> for MlxDeviceInfo {
             device_description: proto.device_description.none_if_empty(),
             part_number: proto.part_number.none_if_empty(),
             fw_version_current: proto.fw_version_current.none_if_empty(),
+            fw_version_running: proto.fw_version_running.none_if_empty(),
             pxe_version_current: proto.pxe_version_current.none_if_empty(),
             uefi_version_current: proto.uefi_version_current.none_if_empty(),
             uefi_version_virtio_blk_current: proto.uefi_version_virtio_blk_current.none_if_empty(),
@@ -368,6 +370,7 @@ mod test {
                     psid: "".to_string(), // Empty string should become None
                     device_description: "".to_string(),
                     part_number: "".to_string(),
+                    fw_version_running: Some(String::new()),
                     fw_version_current: "".to_string(),
                     pxe_version_current: "".to_string(),
                     uefi_version_current: "".to_string(),
@@ -382,6 +385,7 @@ mod test {
                     psid: None,
                     device_description: None,
                     part_number: None,
+                    fw_version_running: None,
                     fw_version_current: None,
                     pxe_version_current: None,
                     uefi_version_current: None,

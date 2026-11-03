@@ -2114,6 +2114,28 @@ func TestGetNICoMachineStatus(t *testing.T) {
 			wantMachineAllocatable: true,
 		},
 		{
+			name: "test NIC firmware update in progress",
+			args: args{
+				controllerMachine: &corev1.Machine{
+					State: "NicFirmwareUpdating/UpdatingFirmware",
+				},
+			},
+			wantStatus:             cdbm.MachineStatusInitializing,
+			wantMessage:            "Machine NIC firmware is being updated",
+			wantMachineAllocatable: true, // Initializing is a usability hint; allocation still requires Ready.
+		},
+		{
+			name: "test NIC firmware update failed",
+			args: args{
+				controllerMachine: &corev1.Machine{
+					State: "NicFirmwareUpdating/Failed",
+				},
+			},
+			wantStatus:             cdbm.MachineStatusError,
+			wantMessage:            "Machine NIC firmware update failed",
+			wantMachineAllocatable: false,
+		},
+		{
 			name: "test tenant not usable - Ready with Prevent alerts",
 			args: args{
 				controllerMachine: &corev1.Machine{

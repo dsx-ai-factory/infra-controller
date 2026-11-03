@@ -1828,9 +1828,13 @@ type MlxDeviceInfo struct {
 	// status is the status string returned by mlxfwmanager.
 	Status string `protobuf:"bytes,12,opt,name=status,proto3" json:"status,omitempty"`
 	// base_guid is the base GUID reported by MFT, if available.
-	BaseGuid      *string `protobuf:"bytes,13,opt,name=base_guid,json=baseGuid,proto3,oneof" json:"base_guid,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	BaseGuid *string `protobuf:"bytes,13,opt,name=base_guid,json=baseGuid,proto3,oneof" json:"base_guid,omitempty"`
+	// Firmware version reported by the Linux RDMA driver for this PCI device.
+	// Absent when the driver fact is unavailable or ambiguous. An installed
+	// version alone does not substitute for this post-activation observation.
+	FwVersionRunning *string `protobuf:"bytes,14,opt,name=fw_version_running,json=fwVersionRunning,proto3,oneof" json:"fw_version_running,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *MlxDeviceInfo) Reset() {
@@ -1950,6 +1954,13 @@ func (x *MlxDeviceInfo) GetStatus() string {
 func (x *MlxDeviceInfo) GetBaseGuid() string {
 	if x != nil && x.BaseGuid != nil {
 		return *x.BaseGuid
+	}
+	return ""
+}
+
+func (x *MlxDeviceInfo) GetFwVersionRunning() string {
+	if x != nil && x.FwVersionRunning != nil {
+		return *x.FwVersionRunning
 	}
 	return ""
 }
@@ -8712,7 +8723,7 @@ const file_mlx_device_nico_proto_rawDesc = "" +
 	"\bbase_mac\x18\x01 \x01(\tH\x00R\abaseMac\x12\x1d\n" +
 	"\tbase_guid\x18\x02 \x01(\tH\x00R\bbaseGuidB\n" +
 	"\n" +
-	"\bidentity\"\xae\x04\n" +
+	"\bidentity\"\xf8\x04\n" +
 	"\rMlxDeviceInfo\x12\x19\n" +
 	"\bpci_name\x18\x01 \x01(\tR\apciName\x12\x1f\n" +
 	"\vdevice_type\x18\x02 \x01(\tR\n" +
@@ -8729,9 +8740,11 @@ const file_mlx_device_nico_proto_rawDesc = "" +
 	" \x01(\tR\x1buefiVersionVirtioNetCurrent\x12\x19\n" +
 	"\bbase_mac\x18\v \x01(\tR\abaseMac\x12\x16\n" +
 	"\x06status\x18\f \x01(\tR\x06status\x12 \n" +
-	"\tbase_guid\x18\r \x01(\tH\x00R\bbaseGuid\x88\x01\x01B\f\n" +
+	"\tbase_guid\x18\r \x01(\tH\x00R\bbaseGuid\x88\x01\x01\x121\n" +
+	"\x12fw_version_running\x18\x0e \x01(\tH\x01R\x10fwVersionRunning\x88\x01\x01B\f\n" +
 	"\n" +
-	"_base_guid\"E\n" +
+	"_base_guidB\x15\n" +
+	"\x13_fw_version_running\"E\n" +
 	"\x0fDeviceFilterSet\x122\n" +
 	"\afilters\x18\x01 \x03(\v2\x18.mlx_device.DeviceFilterR\afilters\"\x8b\x01\n" +
 	"\fDeviceFilter\x12-\n" +
