@@ -22,6 +22,7 @@ mod group_state;
 mod metrics;
 pub mod nmx_c_endpoint;
 pub mod nvlink;
+mod rack_alert;
 mod switch_cert_monitor;
 
 use std::io;
@@ -67,6 +68,7 @@ use model::machine::nvlink::{MachineNvLinkGpuStatusObservation, MachineNvLinkSta
 use model::machine::{HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot};
 use model::nvl_logical_partition::LogicalPartition;
 use model::nvl_partition::{NvlPartition, NvlPartitionName};
+use rack_alert::{RackAlertAction, RackUnreachableTracker, nmxc_unreachable_report};
 use sqlx::PgPool;
 #[cfg(feature = "test-support")]
 pub use switch_cert_monitor::{SwitchCertificateMonitor, SwitchCertificateMonitorIterationResult};
@@ -1074,6 +1076,9 @@ pub struct NvlPartitionMonitor {
     work_lock_manager_handle: WorkLockManagerHandle,
     /// Change-detection state per group id, held only between iterations.
     group_states: Mutex<HashMap<String, GroupReconcileState>>,
+    /// Consecutive passes each rack's NMX-C was unusable, for the rack's
+    /// debounced `NmxcUnreachable` alert.
+    rack_unreachable: Mutex<RackUnreachableTracker>,
 }
 
 pub struct NvLinkManager {
@@ -1198,6 +1203,9 @@ struct GroupResult {
     /// Domain UUID observed by this pass's Hello for a rack group. `None` for
     /// chassis groups and when Hello did not yield a usable UUID.
     rack_domain_uuid: Option<NvLinkDomainId>,
+    /// Why NMX-C could not be used for the group this pass, when the pass
+    /// stopped before reconciling. Feeds the rack's `NmxcUnreachable` alert.
+    unreachable_reason: Option<ChassisNmxCUnreachableReason>,
 }
 
 impl GroupResult {
@@ -1214,6 +1222,7 @@ impl GroupResult {
             partial_metrics,
             check_ok: true,
             rack_domain_uuid: None,
+            unreachable_reason: None,
         }
     }
 }
@@ -1254,6 +1263,7 @@ impl NvlPartitionMonitor {
             metric_holder,
             work_lock_manager_handle,
             group_states: Mutex::new(HashMap::new()),
+            rack_unreachable: Mutex::new(RackUnreachableTracker::default()),
         }
     }
 
@@ -1498,6 +1508,8 @@ impl NvlPartitionMonitor {
         let mut checked_group_inputs = Vec::new();
         let mut all_group_results = Vec::new();
         let mut skipped_rack_domains: Vec<(RackId, NvLinkDomainId)> = Vec::new();
+        // This pass's NMX-C outcome per rack group, for the rack's `NmxcUnreachable` alert.
+        let mut rack_outcomes: Vec<(RackId, Option<ChassisNmxCUnreachableReason>)> = Vec::new();
         {
             let group_states = self
                 .group_states
@@ -1524,6 +1536,9 @@ impl NvlPartitionMonitor {
                     {
                         skipped_rack_domains.push(skipped_rack);
                     }
+                    // A skipped rack is not contacted, so it yields no outcome
+                    // for its `NmxcUnreachable` alert. Preserve any stored alert:
+                    // another API replica may have observed a more recent outage.
                 } else {
                     checked_group_inputs.push((input, fingerprint));
                 }
@@ -1563,8 +1578,9 @@ impl NvlPartitionMonitor {
                         .await
                         .expect("NMX-C group concurrency semaphore is never closed");
                     let group_id = input.group_id.clone();
+                    let rack_id = input.rack_id.cloned();
                     let result = self.process_nmx_c_partition_monitor_group(input).await;
-                    (group_id, fingerprint, result)
+                    (group_id, fingerprint, rack_id, result)
                 }
             },
         ));
@@ -1576,7 +1592,7 @@ impl NvlPartitionMonitor {
                 .group_states
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            for (group_id, fingerprint, result) in &checked_group_results {
+            for (group_id, fingerprint, _, result) in &checked_group_results {
                 let state = GroupReconcileState::after_full_check(
                     group_states.get(group_id),
                     group_id,
@@ -1594,10 +1610,15 @@ impl NvlPartitionMonitor {
             }
             group_states.retain(|group_id, _| seen_group_ids.contains(group_id));
         }
+        for (_, _, rack_id, result) in &checked_group_results {
+            if let Some(rack_id) = rack_id {
+                rack_outcomes.push((rack_id.clone(), result.unreachable_reason));
+            }
+        }
         all_group_results.extend(
             checked_group_results
                 .into_iter()
-                .map(|(_, _, result)| result),
+                .map(|(_, _, _, result)| result),
         );
 
         let mut total_completed_operations = 0;
@@ -1618,6 +1639,16 @@ impl NvlPartitionMonitor {
             }
         }
 
+        // Before the fallible observation write: a failure there must not
+        // lose this pass's rack outcomes or leave a recovered rack alerted.
+        let managed_rack_ids = managed_host_snapshots_by_rack_id.keys().cloned().collect();
+        self.reconcile_rack_unreachable_alerts(
+            &rack_outcomes,
+            &rack_id_to_resolved_endpoint,
+            &managed_rack_ids,
+        )
+        .await;
+
         self.record_null_nvlink_status_observations(&pending_null_nvlink_observations, metrics)
             .await?;
 
@@ -1632,6 +1663,141 @@ impl NvlPartitionMonitor {
         metrics.num_completed_operations = total_completed_operations;
 
         Ok(total_completed_operations)
+    }
+
+    /// Raises or clears each rack's `NmxcUnreachable` merge report from this pass's outcomes.
+    ///
+    /// The alert is debounced by `partition_monitor_unreachable_alert_after`
+    /// consecutive unusable passes and cleared on the first pass that reaches
+    /// NMX-C. Which racks currently carry the report is read from the database
+    /// so a restart or an operator removal cannot desynchronise the two.
+    /// Skipped racks keep their stored reports because another API replica
+    /// may have observed an outage since this replica's last check. Racks
+    /// with no managed hosts left have their reports cleared. Failures are
+    /// logged and never block partition reconciliation.
+    async fn reconcile_rack_unreachable_alerts(
+        &self,
+        outcomes: &[(RackId, Option<ChassisNmxCUnreachableReason>)],
+        endpoints: &HashMap<RackId, String>,
+        managed_rack_ids: &HashSet<RackId>,
+    ) {
+        let stored = match db::rack::find_ids_with_health_report_merge_source(
+            &self.db_pool,
+            NVLINK_UNHEALTHY_OVERRIDE_SOURCE,
+        )
+        .await
+        {
+            Ok(rack_ids) => rack_ids.into_iter().collect::<HashSet<RackId>>(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Failed to load racks with NmxcUnreachable alerts; rack alerts not updated this pass"
+                );
+                return;
+            }
+        };
+        if outcomes.is_empty() && stored.is_empty() {
+            return;
+        }
+
+        let threshold = self.config.partition_monitor_unreachable_alert_after.get();
+        let mut actions: Vec<(RackId, RackAlertAction)> = {
+            let mut tracker = self
+                .rack_unreachable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tracker.retain(|rack_id| managed_rack_ids.contains(rack_id));
+            let mut actions = outcomes
+                .iter()
+                .map(|(rack_id, reason)| {
+                    let action =
+                        tracker.observe(rack_id, *reason, threshold, stored.contains(rack_id));
+                    (rack_id.clone(), action)
+                })
+                .collect::<Vec<_>>();
+            // A rack skipped this pass yields no outcome, so a clear that
+            // failed on an earlier pass is retried here.
+            let checked: HashSet<&RackId> = outcomes.iter().map(|(rack_id, _)| rack_id).collect();
+            actions.extend(
+                tracker
+                    .pending_clears(&stored)
+                    .filter(|rack_id| !checked.contains(rack_id))
+                    .map(|rack_id| (rack_id, RackAlertAction::Clear)),
+            );
+            actions
+        };
+        actions.extend(
+            stored
+                .iter()
+                .filter(|rack_id| !managed_rack_ids.contains(rack_id))
+                .map(|rack_id| (rack_id.clone(), RackAlertAction::Clear)),
+        );
+
+        for (rack_id, action) in actions {
+            if action == RackAlertAction::Keep {
+                continue;
+            }
+            let write = async {
+                let mut conn = self.db_pool.acquire().await.map_err(|e| {
+                    NvLinkManagerError::internal(format!("Failed to acquire connection: {e}"))
+                })?;
+                match action {
+                    RackAlertAction::Keep => Ok(()),
+                    RackAlertAction::Set { reason, since } => {
+                        let endpoint = endpoints.get(&rack_id).map(String::as_str);
+                        tracing::warn!(
+                            %rack_id,
+                            endpoint = endpoint.unwrap_or("<none>"),
+                            ?reason,
+                            consecutive_passes = threshold,
+                            unreachable_since = %since,
+                            "NMX-C unusable for consecutive passes - setting NmxcUnreachable alert on rack"
+                        );
+                        let report = nmxc_unreachable_report(
+                            NVLINK_UNHEALTHY_OVERRIDE_SOURCE,
+                            endpoint,
+                            reason,
+                            since,
+                        );
+                        db::rack::insert_health_report(
+                            &mut conn,
+                            &rack_id,
+                            HealthReportApplyMode::Merge,
+                            &report,
+                        )
+                        .await
+                        .map_err(NvLinkManagerError::from)
+                    }
+                    RackAlertAction::Clear => {
+                        tracing::info!(%rack_id, "NMX-C reachable again - clearing NmxcUnreachable alert on rack");
+                        db::rack::remove_health_report(
+                            &mut conn,
+                            &rack_id,
+                            HealthReportApplyMode::Merge,
+                            NVLINK_UNHEALTHY_OVERRIDE_SOURCE,
+                        )
+                        .await
+                        .map_err(NvLinkManagerError::from)
+                    }
+                }
+            };
+            let written = match write.await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        %rack_id,
+                        ?action,
+                        %error,
+                        "Failed to update the rack's NmxcUnreachable alert; retried next pass"
+                    );
+                    false
+                }
+            };
+            self.rack_unreachable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .confirm(&rack_id, action, written);
+        }
     }
 
     /// Connects to NMX-C for one chassis- or rack-scoped host group and reconciles partitions.
@@ -1676,6 +1842,7 @@ impl NvlPartitionMonitor {
                     partial_metrics: group_metrics,
                     check_ok: false,
                     rack_domain_uuid: None,
+                    unreachable_reason: Some($reason),
                 };
             }};
         }
@@ -1893,6 +2060,7 @@ impl NvlPartitionMonitor {
             partial_metrics: group_metrics,
             check_ok,
             rack_domain_uuid: rack_id.map(|_| domain_uuid),
+            unreachable_reason: None,
         }
     }
 
@@ -4260,7 +4428,7 @@ mod health_aggregation_tests {
 
 #[cfg(test)]
 mod machine_group_tests {
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -4792,6 +4960,82 @@ mod machine_group_tests {
         Ok(())
     }
 
+    /// A skipped rack can carry an outage report written by another API replica.
+    /// Only a reachable check or removal from managed inventory clears it.
+    #[sqlx_test]
+    async fn rack_unreachable_alert_cleanup_preserves_skipped_racks(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let skipped_rack = RackId::new("skipped-rack");
+        let reachable_rack = RackId::new("reachable-rack");
+        let unmanaged_rack = RackId::new("unmanaged-rack");
+        let cases = [
+            (&skipped_rack, true),
+            (&reachable_rack, false),
+            (&unmanaged_rack, false),
+        ];
+        let report = crate::rack_alert::nmxc_unreachable_report(
+            NVLINK_UNHEALTHY_OVERRIDE_SOURCE,
+            Some("https://10.0.0.5:9370"),
+            ChassisNmxCUnreachableReason::HelloFailed,
+            chrono::Utc::now(),
+        );
+        let mut txn = pool.begin().await?;
+        for (rack_id, _) in cases {
+            db::rack::create(
+                txn.as_mut(),
+                rack_id,
+                Some(&RackProfileId::new("NVL72")),
+                &RackConfig::default(),
+                None,
+            )
+            .await?;
+            db::rack::insert_health_report(
+                txn.as_mut(),
+                rack_id,
+                health_report::HealthReportApplyMode::Merge,
+                &report,
+            )
+            .await?;
+        }
+        txn.commit().await?;
+
+        let mut join_set = JoinSet::new();
+        let work_lock_manager =
+            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let test_meter = TestMeter::default();
+        let monitor = NvlPartitionMonitor::new(
+            pool.clone(),
+            Arc::new(NmxcSimClient::default()),
+            test_meter.meter(),
+            NvLinkConfig::default(),
+            HostHealthConfig::default(),
+            work_lock_manager,
+        );
+        let managed_rack_ids = HashSet::from([skipped_rack.clone(), reachable_rack.clone()]);
+        let outcomes = [(reachable_rack.clone(), None)];
+        monitor
+            .reconcile_rack_unreachable_alerts(&outcomes, &HashMap::new(), &managed_rack_ids)
+            .await;
+
+        for (rack_id, retained) in cases {
+            let reports: Option<sqlx::types::Json<model::health::HealthReportSources>> =
+                sqlx::query_scalar("SELECT health_reports FROM racks WHERE id = $1")
+                    .bind(rack_id)
+                    .fetch_one(&pool)
+                    .await?;
+            assert_eq!(
+                reports
+                    .as_ref()
+                    .and_then(|reports| { reports.0.merges.get(NVLINK_UNHEALTHY_OVERRIDE_SOURCE) }),
+                retained.then_some(&report),
+                "stored report for {rack_id}"
+            );
+        }
+        join_set.shutdown().await;
+        Ok(())
+    }
+
     #[sqlx_test]
     async fn rack_group_publishes_domain_and_queues_endpoint_failures(
         pool: sqlx::PgPool,
@@ -4902,6 +5146,7 @@ mod machine_group_tests {
                 partial_metrics: metrics,
                 check_ok: _,
                 rack_domain_uuid,
+                unreachable_reason: _,
             } = monitor
                 .process_nmx_c_partition_monitor_group(ProcessMachineGroupInput {
                     group_id: "rack-1".to_string(),
@@ -5464,6 +5709,7 @@ mod machine_group_tests {
                 partial_metrics: metrics_a,
                 check_ok: true,
                 rack_domain_uuid: None,
+                unreachable_reason: None,
             },
             GroupResult {
                 completed_operations: 1,
@@ -5471,6 +5717,7 @@ mod machine_group_tests {
                 partial_metrics: metrics_b,
                 check_ok: true,
                 rack_domain_uuid: None,
+                unreachable_reason: None,
             },
             GroupResult {
                 completed_operations: 0,
@@ -5483,6 +5730,7 @@ mod machine_group_tests {
                 partial_metrics: NvlPartitionMonitorMetrics::new(),
                 check_ok: false,
                 rack_domain_uuid: None,
+                unreachable_reason: Some(ChassisNmxCUnreachableReason::NoEndpoint),
             },
             // A group skipped by change detection carries its last health forward.
             GroupResult::skipped(skipped_health),

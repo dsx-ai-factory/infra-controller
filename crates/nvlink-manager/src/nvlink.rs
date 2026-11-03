@@ -19,7 +19,7 @@
 pub mod test_support {
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use libnmxc::nmxc_model::{
@@ -64,6 +64,9 @@ pub mod test_support {
         _partition_info_list_calls: Arc<AtomicUsize>,
         /// GPUs served by `get_gpu_info_list`.
         _gpu_info_list: Arc<Vec<nmxc_model::GpuInfo>>,
+        /// While set, `hello` fails on this client and the clients it created, simulating an
+        /// NMX-C that cannot be reached.
+        _hello_fails: Arc<AtomicBool>,
     }
 
     impl Default for NmxcSimClient {
@@ -76,6 +79,7 @@ pub mod test_support {
                 _simulator_endpoint: None,
                 _partition_info_list_calls: Arc::new(AtomicUsize::new(0)),
                 _gpu_info_list: Arc::new(Vec::new()),
+                _hello_fails: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -184,6 +188,12 @@ pub mod test_support {
             client
         }
 
+        /// Makes `hello` fail (`true`) or succeed (`false`) for this client and every client
+        /// it has created or will create, so a test can take NMX-C down and bring it back.
+        pub fn set_hello_fails(&self, fails: bool) {
+            self._hello_fails.store(fails, Ordering::SeqCst);
+        }
+
         /// Number of `get_partition_info_list` calls served in memory so far.
         pub fn partition_info_list_calls(&self) -> usize {
             self._partition_info_list_calls.load(Ordering::SeqCst)
@@ -255,6 +265,9 @@ pub mod test_support {
     #[::async_trait::async_trait]
     impl Nmxc for NmxcSimClient {
         async fn hello(&mut self, _gateway_id: &str) -> Result<nmxc_model::ServerHello, NmxcError> {
+            if self._hello_fails.load(Ordering::SeqCst) {
+                return Err(NmxcError::invalid_response("simulated NMX-C outage"));
+            }
             Ok(nmxc_model::ServerHello {
                 server_header: Some({
                     let mut header = Self::success_server_header();
@@ -558,6 +571,7 @@ pub mod test_support {
                 _simulator_endpoint: self._simulator_endpoint.clone(),
                 _partition_info_list_calls: self._partition_info_list_calls.clone(),
                 _gpu_info_list: self._gpu_info_list.clone(),
+                _hello_fails: self._hello_fails.clone(),
             }))
         }
     }

@@ -133,6 +133,13 @@ Each reconciliation pass does the following:
    alerts block normal allocation while they remain in aggregate host health.
    See the linked probe contract for recovery, hardware replacement, manual
    removal, and allocation exceptions.
+1. Raises or clears the per-rack
+   [`NmxcUnreachable`](../architecture/health/health_probe_ids.md#nmxcunreachable)
+   health report. A rack whose NMX-C could not be used for
+   `nvlink_config.partition_monitor_unreachable_alert_after` consecutive passes
+   (default `3`) gets a `Hardware` alert naming the endpoint and the failing
+   step; the first pass that reaches NMX-C again clears it. The alert does not
+   block allocations.
 1. Compares observed state against desired state.
 1. Issues create / update / remove operations to the fabric-management
    service to converge it onto desired state.
@@ -247,6 +254,9 @@ described below do not fit the site, under `[nvlink_config]`:
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+# Consecutive passes a rack's NMX-C must be unusable before its
+# NmxcUnreachable alert is raised; the first reachable pass clears it.
+partition_monitor_unreachable_alert_after = 3
 
 # TLS material for NMX-C. The CA path defaults when nico-api finds a
 # ca.crt (see below); otherwise set it, because the certificate monitor
