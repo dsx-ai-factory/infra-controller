@@ -76,6 +76,9 @@ type ExpectedMachine struct {
 	TrayIdx                  *int32                     `bun:"tray_idx"`
 	HostID                   *int32                     `bun:"host_id"`
 	IsDpfEnabled             *bool                      `bun:"is_dpf_enabled"`
+	DpuPolicy                *string                    `bun:"dpu_policy"`
+	BmcRetainCredentials     *bool                      `bun:"bmc_retain_credentials"`
+	HostNics                 ExpectedHostNics           `bun:"host_nics,type:jsonb,notnull,default:'[]'::jsonb"`
 	Labels                   Labels                     `bun:"labels,type:jsonb"`
 	HostLifecycleProfile     HostLifecycleProfile       `bun:"host_lifecycle_profile,type:jsonb,notnull"`
 	Created                  time.Time                  `bun:"created,nullzero,notnull,default:current_timestamp"`
@@ -247,6 +250,17 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	if em.IsDpfEnabled != nil {
 		proto.IsDpfEnabled = em.IsDpfEnabled
 	}
+	if em.DpuPolicy != nil && *em.DpuPolicy != "" {
+		if mode, ok := dpuPolicyToProto(*em.DpuPolicy); ok {
+			proto.DpuMode = &mode
+		}
+	}
+	if hostNics := em.HostNics.ToProto(); len(hostNics) > 0 {
+		proto.HostNics = hostNics
+	}
+	if em.BmcRetainCredentials != nil {
+		proto.BmcRetainCredentials = em.BmcRetainCredentials
+	}
 	proto.HostLifecycleProfile = em.HostLifecycleProfile.ToProto()
 
 	if creds.Username != nil {
@@ -321,6 +335,11 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	em.HostID = proto.HostId
 	em.Labels.FromProto(proto.Metadata.GetLabels())
 	em.IsDpfEnabled = proto.IsDpfEnabled
+	if proto.DpuMode != nil {
+		em.DpuPolicy = dpuModeFromProto(*proto.DpuMode)
+	}
+	em.HostNics.FromProto(proto.GetHostNics())
+	em.BmcRetainCredentials = proto.BmcRetainCredentials
 	em.HostLifecycleProfile.FromProto(proto.GetHostLifecycleProfile())
 }
 
@@ -346,6 +365,9 @@ type ExpectedMachineCreateInput struct {
 	HostID                   *int32
 	Labels                   map[string]string
 	IsDpfEnabled             *bool
+	DpuPolicy                *string
+	BmcRetainCredentials     *bool
+	HostNics                 ExpectedHostNics
 	HostLifecycleProfile     HostLifecycleProfile
 	CreatedBy                uuid.UUID
 }
@@ -371,6 +393,9 @@ type ExpectedMachineUpdateInput struct {
 	HostID                   *int32
 	Labels                   map[string]string
 	IsDpfEnabled             *bool
+	DpuPolicy                *string
+	BmcRetainCredentials     *bool
+	HostNics                 *ExpectedHostNics
 	HostLifecycleProfile     *HostLifecycleProfile
 }
 
@@ -524,6 +549,9 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 			HostID:                   input.HostID,
 			Labels:                   input.Labels,
 			IsDpfEnabled:             input.IsDpfEnabled,
+			DpuPolicy:                input.DpuPolicy,
+			BmcRetainCredentials:     input.BmcRetainCredentials,
+			HostNics:                 input.HostNics,
 			HostLifecycleProfile:     input.HostLifecycleProfile,
 			CreatedBy:                input.CreatedBy,
 		}
@@ -950,6 +978,18 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		if input.IsDpfEnabled != nil {
 			em.IsDpfEnabled = input.IsDpfEnabled
 			columnsSet["is_dpf_enabled"] = true
+		}
+		if input.DpuPolicy != nil {
+			em.DpuPolicy = input.DpuPolicy
+			columnsSet["dpu_policy"] = true
+		}
+		if input.BmcRetainCredentials != nil {
+			em.BmcRetainCredentials = input.BmcRetainCredentials
+			columnsSet["bmc_retain_credentials"] = true
+		}
+		if input.HostNics != nil {
+			em.HostNics = *input.HostNics
+			columnsSet["host_nics"] = true
 		}
 
 		expectedMachines = append(expectedMachines, em)
