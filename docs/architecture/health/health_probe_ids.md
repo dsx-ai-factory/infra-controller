@@ -219,8 +219,8 @@ leaves the stored report unchanged, is logged with the machine ID, and keeps
 the machine group from being skipped until the next pass retries it. When the
 host is no longer marked, the monitor removes the report.
 
-See [Replace a Compute Tray in an NVLink Rack](../../playbooks/tray_replacement.md)
-for the operator procedure.
+See [Moving or Replacing a Compute Tray](../../manuals/nvlink_partitioning.md#moving-or-replacing-a-compute-tray)
+for the operator steps.
 
 ### `NvlinkIsolationPending`
 
