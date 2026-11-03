@@ -1462,9 +1462,18 @@ jobs:
           username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
           token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
 
+      - name: Restore development DHCP compiler cache
+        id: sccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/sccache-dev-dhcp
+          key: sccache-dev-dhcp-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: sccache-dev-dhcp-${{ matrix.arch }}-
+
       # Reuse the prepared compiler, but build the actual development recipes
       # so runtime dependencies and COPY paths are checked on both architectures.
       - name: Build and smoke-test native development DHCP image
+        id: dev-build
         env:
           ARCH: ${{ matrix.arch }}
           BUILD_CONTAINER: ${{ matrix.build_container }}
@@ -1472,6 +1481,7 @@ jobs:
           PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
           KEA_VERSION: ${{ needs.prepare.outputs.kea_version }}
           DOCKER_BUILDKIT: '1'
+          SCCACHE_SEED_DIR: ${{ runner.temp }}/sccache-dev-dhcp
         run: |
           set -euo pipefail
           docker_context="$(docker context show)"
@@ -1486,26 +1496,89 @@ jobs:
             echo "Docker daemon platform $daemon_platform does not match requested linux/$ARCH" >&2
             exit 1
           fi
+          tag="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          runtime_image="nico-dev-runtime:$tag"
+          service_image="nico-dev-dhcp:$tag"
+          compiler_image="$BUILD_CONTAINER"
           if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
             # Mirror PRs build the compiler without publishing it to another job.
+            compiler_image="nico-dev-build:$tag"
+          fi
+          echo "compiler_image=$compiler_image" >> "$GITHUB_OUTPUT"
+          echo "docker_context=$docker_context" >> "$GITHUB_OUTPUT"
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
             docker build --platform "linux/$ARCH" \
               --file "dev/docker/Dockerfile.build-container-$compiler" \
-              --build-arg KEA_VERSION="$KEA_VERSION" --tag "$BUILD_CONTAINER" .
+              --build-arg KEA_VERSION="$KEA_VERSION" --tag "$compiler_image" .
           else
             docker pull --platform "linux/$ARCH" "$BUILD_CONTAINER"
           fi
-          test "$(docker image inspect --format '{{.Architecture}}' "$BUILD_CONTAINER")" = "$ARCH"
+          test "$(docker image inspect --format '{{.Architecture}}' "$compiler_image")" = "$ARCH"
           docker build --platform "linux/$ARCH" \
             --file dev/docker/Dockerfile.dev-runtime \
-            --tag nico-dev-runtime:ci .
+            --tag "$runtime_image" .
+          mkdir -p "$SCCACHE_SEED_DIR"
           docker build --platform "linux/$ARCH" \
+            --build-context "sccache-seed=$SCCACHE_SEED_DIR" \
+            --build-arg CI_SCCACHE=true \
             --file dev/docker/Dockerfile.dev-services --target dhcp \
-            --build-arg CONTAINER_BUILD="$BUILD_CONTAINER" \
-            --build-arg CONTAINER_RUNTIME=nico-dev-runtime:ci \
+            --build-arg CONTAINER_BUILD="$compiler_image" \
+            --build-arg CONTAINER_RUNTIME="$runtime_image" \
             --build-arg KEA_VERSION="$KEA_VERSION" \
-            --tag nico-dev-dhcp:ci .
-          test "$(docker image inspect --format '{{.Architecture}}' nico-dev-dhcp:ci)" = "$ARCH"
-          bash dev/docker/tests/smoke_dhcp_image.sh nico-dev-dhcp:ci
+            --tag "$service_image" .
+          test "$(docker image inspect --format '{{.Architecture}}' "$service_image")" = "$ARCH"
+          bash dev/docker/tests/smoke_dhcp_image.sh "$service_image"
+
+      - name: Check whether another run saved development DHCP cache
+        id: sccache-saved
+        if: github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/sccache-dev-dhcp
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
+          lookup-only: true
+
+      - name: Export development DHCP compiler cache
+        id: sccache-export
+        if: steps.sccache-saved.outcome == 'success' && steps.sccache-saved.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_CONTAINER: ${{ steps.dev-build.outputs.compiler_image }}
+          DOCKER_CONTEXT: ${{ steps.dev-build.outputs.docker_context }}
+          BUILDX_BUILDER: ${{ steps.dev-build.outputs.docker_context }}
+          CACHE_EXPORT_DIR: ${{ runner.temp }}/sccache-dev-dhcp-export
+        run: |
+          docker build --platform "linux/$ARCH" \
+            --file dev/docker/Dockerfile.dev-services --target sccache-export \
+            --build-arg CONTAINER_BUILD="$BUILD_CONTAINER" \
+            --build-arg SCCACHE_EXPORT_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --output "type=local,dest=$CACHE_EXPORT_DIR" .
+
+      - name: Save development DHCP compiler cache
+        if: steps.sccache-export.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/sccache-dev-dhcp-export
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
+
+      - name: Remove development DHCP job images
+        if: always() && steps.dev-build.outputs.compiler_image != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_CONTAINER_REBUILT: ${{ matrix.build_container_rebuilt }}
+          PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+          DOCKER_CONTEXT: ${{ steps.dev-build.outputs.docker_context }}
+          BUILDX_BUILDER: ${{ steps.dev-build.outputs.docker_context }}
+        run: |
+          tag="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          owned_images=("nico-dev-dhcp:$tag" "nico-dev-runtime:$tag")
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
+            owned_images+=("nico-dev-build:$tag")
+          fi
+          docker image rm "${owned_images[@]}" >/dev/null 2>&1 || true
 
   # ============================================================================
   # BUILD STAGE - Forge CLI (Multi-arch)
@@ -3166,6 +3239,7 @@ jobs:
   prune-sccache:
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     needs:
+      - test-dev-dhcp-image
       - test-release-container-services
       - build-release-container-x86_64
       - build-release-container-aarch64

@@ -6,6 +6,8 @@
 ARG CONTAINER_BUILD=nico-dev-build
 ARG CONTAINER_RUNTIME=nico-dev-runtime
 
+FROM scratch AS sccache-seed
+
 FROM ${CONTAINER_BUILD} AS source
 
 ARG TARGETARCH
@@ -85,9 +87,20 @@ RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,s
 # libdhcp.so builder
 FROM source AS dhcp-builder
 
+# CI restores a compiler cache; local Make/Tilt builds retain Cargo incremental builds.
+ARG CI_SCCACHE=false
+
 RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
     --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
-    cargo build --locked -p carbide-dhcp --lib \
+    --mount=type=cache,id=nico-dev-dhcp-sccache-${TARGETARCH},target=/sccache,sharing=locked \
+    --mount=type=bind,from=sccache-seed,target=/sccache-seed,ro \
+    if [ "$CI_SCCACHE" = true ]; then \
+      export RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 SCCACHE_DIR=/sccache SCCACHE_SEED_DIR=/sccache-seed; \
+      . /workspace/dev/docker/sccache-cache.sh; \
+      sccache_setup; \
+    fi \
+    && cargo build --locked -p carbide-dhcp --lib \
+    && if [ "$CI_SCCACHE" = true ]; then sccache_report; fi \
     && mkdir -p /out \
     && sha256sum </cargo-target/debug/libdhcp.so >/out/libdhcp.so.sha256sum
 
@@ -126,6 +139,18 @@ RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,s
     cargo build --locked -p nico-postgres-exporter --bin nico-postgres-exporter \
     && mkdir -p /out \
     && sha256sum </cargo-target/debug/nico-postgres-exporter >/out/nico-postgres-exporter.sha256sum
+
+# Export only compiler-cache entries, without rerunning Cargo or copying its target directory.
+FROM ${CONTAINER_BUILD} AS sccache-collect
+ARG TARGETARCH
+# Invalidate the snapshot per CI run without resetting the compiler cache mount.
+ARG SCCACHE_EXPORT_ID
+RUN --mount=type=cache,id=nico-dev-dhcp-sccache-${TARGETARCH},target=/sccache,sharing=locked \
+    test -n "$(ls -A /sccache)" \
+    && mkdir -p /sccache-out && cp -a /sccache/. /sccache-out/
+
+FROM scratch AS sccache-export
+COPY --from=sccache-collect /sccache-out/ /
 
 ### Runtime layers
 
