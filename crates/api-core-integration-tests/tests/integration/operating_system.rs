@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::time::Duration;
+
 use carbide_test_harness::prelude::{PgPool, TestHarness, sqlx_test};
 use carbide_uuid::operating_system::OperatingSystemId;
 use rpc::forge::forge_server::Forge;
@@ -557,6 +559,179 @@ async fn create_os_with_artifacts(env: &TestHarness) -> OperatingSystemId {
         .unwrap()
         .into_inner();
     resp.id.unwrap()
+}
+
+#[sqlx_test]
+async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool: PgPool) {
+    enum PendingUpdate {
+        Metadata,
+        CachedArtifact,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct PersistedState {
+        scenario: &'static str,
+        name: String,
+        is_active: bool,
+        kernel_cached_url: Option<String>,
+        initrd_cached_url: Option<String>,
+        status: TenantState,
+    }
+
+    let cases = [
+        (
+            PendingUpdate::Metadata,
+            PersistedState {
+                scenario: "ordinary update",
+                name: "renamed-os".to_string(),
+                is_active: false,
+                kernel_cached_url: Some("http://cache.local/kernel".to_string()),
+                initrd_cached_url: None,
+                status: TenantState::Provisioning,
+            },
+        ),
+        (
+            PendingUpdate::CachedArtifact,
+            PersistedState {
+                scenario: "cached artifact update",
+                name: "artifact-test-os".to_string(),
+                is_active: false,
+                kernel_cached_url: Some("http://cache.local/kernel".to_string()),
+                initrd_cached_url: Some("http://cache.local/initrd".to_string()),
+                status: TenantState::Ready,
+            },
+        ),
+    ];
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let mut actual = Vec::new();
+    let mut expected = Vec::new();
+
+    for (pending_update, expected_state) in cases {
+        let os_id = create_os_with_artifacts(&env).await;
+        let mut holder = pool.begin().await.expect("holder transaction should start");
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .expect("holder backend PID should be available");
+        let existing = db::operating_system::get_for_update(&mut holder, os_id.into())
+            .await
+            .expect("OS fixture should exist");
+        let mut artifacts = existing
+            .ipxe_artifacts
+            .as_ref()
+            .expect("OS fixture should have artifacts")
+            .0
+            .clone();
+        artifacts[0]["cached_url"] = serde_json::json!("http://cache.local/kernel");
+
+        // Keep this write uncommitted while the RPC starts. Fields the RPC
+        // omits must come from this row once the holder commits.
+        db::operating_system::update(
+            &mut holder,
+            &existing,
+            &db::operating_system::UpdateOperatingSystem {
+                id: os_id.into(),
+                name: None,
+                description: None,
+                is_active: Some(false),
+                allow_override: None,
+                phone_home_enabled: None,
+                user_data: None,
+                ipxe_script: None,
+                ipxe_template_id: None,
+                ipxe_parameters: None,
+                ipxe_artifacts: Some(artifacts),
+                ipxe_definition_hash: None,
+                status: None,
+            },
+        )
+        .await
+        .expect("competing OS write should succeed");
+
+        let update = async {
+            match pending_update {
+                PendingUpdate::Metadata => env
+                    .api()
+                    .update_operating_system(tonic::Request::new(
+                        rpc::forge::UpdateOperatingSystemRequest {
+                            id: Some(os_id),
+                            name: Some("renamed-os".to_string()),
+                            ..Default::default()
+                        },
+                    ))
+                    .await
+                    .map(|_| ()),
+                PendingUpdate::CachedArtifact => env
+                    .api()
+                    .update_operating_system_cachable_ipxe_template_artifacts(tonic::Request::new(
+                        rpc::forge::UpdateOperatingSystemIpxeTemplateArtifactRequest {
+                            id: Some(os_id),
+                            updates: vec![rpc::forge::IpxeTemplateArtifactUpdateRequest {
+                                name: "initrd".to_string(),
+                                cached_url: Some("http://cache.local/initrd".to_string()),
+                            }],
+                        },
+                    ))
+                    .await
+                    .map(|_| ()),
+            }
+        };
+        tokio::pin!(update);
+        tokio::select! {
+            result = &mut update => panic!(
+                "{}: OS update completed before waiting for the competing write: {result:?}",
+                expected_state.scenario
+            ),
+            blocked = tokio::time::timeout(
+                Duration::from_secs(10),
+                db::test_support::postgres::wait_for_blocked_query(
+                    &pool, holder_pid, "operating_systems"
+                ),
+            ) => {
+                blocked.unwrap_or_else(|error| panic!(
+                    "{}: OS handler should wait for the competing write: {error}",
+                    expected_state.scenario
+                ));
+            }
+        }
+        holder
+            .commit()
+            .await
+            .expect("competing write should commit");
+
+        tokio::time::timeout(Duration::from_secs(30), update)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: OS update should complete after the competing write commits: {error}",
+                    expected_state.scenario
+                )
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: waiting OS update should succeed: {error}",
+                    expected_state.scenario
+                )
+            });
+
+        let fetched = env
+            .api()
+            .get_operating_system(tonic::Request::new(os_id))
+            .await
+            .expect("updated OS should be readable")
+            .into_inner();
+        actual.push(PersistedState {
+            scenario: expected_state.scenario,
+            name: fetched.name,
+            is_active: fetched.is_active,
+            kernel_cached_url: fetched.ipxe_template_artifacts[0].cached_url.clone(),
+            initrd_cached_url: fetched.ipxe_template_artifacts[1].cached_url.clone(),
+            status: TenantState::try_from(fetched.status).expect("OS status should be recognized"),
+        });
+        expected.push(expected_state);
+    }
+
+    assert_eq!(actual, expected);
 }
 
 // ---------------------------------------------------------------------------
