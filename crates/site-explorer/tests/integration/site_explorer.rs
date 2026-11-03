@@ -48,8 +48,8 @@ use model::metadata::Metadata;
 use model::site_explorer::{
     BlueFieldOperatingMode, Chassis, ComponentIntegrityEntry, ComputerSystem,
     EndpointExplorationError, EndpointExplorationReport, EndpointType, ExploredDpu,
-    ExploredManagedHost, InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState,
-    Service, UefiDevicePath,
+    ExploredManagedHost, InitialBmcResetPhase, Inventory, NetworkAdapter, PowerState,
+    PreingestionState, Service, UefiDevicePath,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::GetSiteExplorationRequest;
@@ -579,6 +579,157 @@ async fn test_suppressed_unexplored_endpoint_does_not_consume_budget_and_resumes
     Ok(())
 }
 
+/// An expected BMC whose first probe fails must be retried before older routine
+/// reports. Recovery must release that capacity so routine refresh can resume.
+#[sqlx_test]
+async fn test_failed_first_probe_is_retried_before_routine_refresh(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Use synthetic BMC identities and an older identified endpoint to expose the backlog.
+    let env = Env::new(pool).await;
+    let mut machines = vec![
+        env.new_machine("02:00:00:00:13:01", "Vendor1"),
+        env.new_machine("02:00:00:00:13:02", "Vendor2"),
+    ];
+    machines.discover_dhcp(env.api()).await?;
+    let routine_ip: IpAddr = machines[0].ip.parse()?;
+    let retry_ip: IpAddr = machines[1].ip.parse()?;
+    let mut txn = env.pool.begin().await?;
+    // Declare the BMC so failed probes qualify for refresh-wait retries.
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: machines[1].mac,
+            data: ExpectedMachineData {
+                serial_number: "synthetic-first-probe-retry".to_string(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    db::explored_endpoints::insert(
+        routine_ip,
+        &cached_suppression_report("synthetic later probe failure"),
+        false,
+        txn.as_mut(),
+    )
+    .await?;
+    db::explored_endpoints::set_preingestion_complete(routine_ip, txn.as_mut()).await?;
+    db::explored_endpoints::set_waiting_for_explorer_refresh(routine_ip, txn.as_mut()).await?;
+    let routine_before = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+
+    // Keep automatic ingestion enabled so the failure retains the production Initial state.
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        create_machines: Arc::new(true.into()),
+        ..suppression_test_config(1)
+    });
+    let error = EndpointExplorationError::ConnectionRefused {
+        details: "synthetic first probe failure".to_string(),
+    };
+    explorer.insert_endpoint_result(retry_ip, Err(error.clone()));
+    explorer.insert_endpoints(vec![(
+        routine_ip,
+        EndpointExplorationReport {
+            endpoint_type: EndpointType::Bmc,
+            ..Default::default()
+        },
+    )]);
+
+    // The unseen interface gets its first attempt; reload the actual persisted failure row.
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let first_failure = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(first_failure.len(), 1);
+    assert_eq!(first_failure[0].report_version.version_nr(), 1);
+    assert_eq!(first_failure[0].report.endpoint_type, EndpointType::Unknown);
+    assert_eq!(
+        first_failure[0].preingestion_state,
+        PreingestionState::Initial
+    );
+    assert!(!first_failure[0].waiting_for_explorer_refresh);
+    assert!(!first_failure[0].exploration_requested);
+    assert_eq!(
+        first_failure[0].report.last_exploration_error,
+        Some(error.clone())
+    );
+    assert!(
+        routine_before[0].report_version.timestamp() < first_failure[0].report_version.timestamp()
+    );
+
+    // A repeated failure must still be attempted before the older identified report.
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let repeated_failure = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
+    let routine_after = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(
+        repeated_failure[0].report.endpoint_type,
+        EndpointType::Unknown
+    );
+    assert_eq!(
+        repeated_failure[0].report.last_exploration_error,
+        Some(error)
+    );
+    assert!(repeated_failure[0].waiting_for_explorer_refresh);
+    assert_eq!(
+        repeated_failure[0].report_version.version_nr(),
+        first_failure[0].report_version.version_nr() + 1
+    );
+    assert_eq!(
+        routine_after[0].report_version,
+        routine_before[0].report_version
+    );
+
+    // Restore reachability and verify that the saved report clears the failure and wait.
+    explorer.insert_endpoints(vec![(
+        retry_ip,
+        EndpointExplorationReport {
+            endpoint_type: EndpointType::Bmc,
+            ..Default::default()
+        },
+    )]);
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let recovered = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(recovered[0].report.endpoint_type, EndpointType::Bmc);
+    assert!(recovered[0].report.last_exploration_error.is_none());
+    assert!(!recovered[0].waiting_for_explorer_refresh);
+    assert_eq!(
+        recovered[0].report_version.version_nr(),
+        repeated_failure[0].report_version.version_nr() + 1
+    );
+
+    // After identification, the older routine report must regain the single available slot.
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let retry_after = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
+    let routine_after = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(retry_after[0].report_version, recovered[0].report_version);
+    assert_eq!(
+        routine_after[0].report_version.version_nr(),
+        routine_before[0].report_version.version_nr() + 1
+    );
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.ip_address)
+            .collect::<Vec<_>>(),
+        vec![retry_ip, retry_ip, retry_ip, routine_ip],
+        "first failure, failed retry, recovery, then routine refresh must each use one probe"
+    );
+
+    Ok(())
+}
+
 /// A BMC preingestion parked with `waiting_for_explorer_refresh` is probed
 /// ahead of an older routine report inside the `explorations_per_run` budget,
 /// while a parked endpoint that preingestion has completed is not.
@@ -1103,6 +1254,135 @@ async fn test_rejected_exploration_error_skips_only_its_remediation(
         .collect();
     assert_eq!(counts["{kind=\"endpoint_error_update_attempts\"}"], "2");
     assert_eq!(counts["{kind=\"redfish_remediation_candidates\"}"], "1");
+    Ok(())
+}
+
+/// A probe report the database rejected as stale does not count as refreshed:
+/// the identify phase reads the host's power state live instead of trusting
+/// the stored report, which another writer replaced during the probe.
+#[sqlx_test]
+async fn test_rejected_report_is_not_treated_as_refreshed_for_ingestion(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machines = vec![env.new_machine("02:00:00:00:15:01", "Vendor1")];
+    machines.discover_dhcp(env.api()).await?;
+    let machine = &machines[0];
+    let address: IpAddr = machine.ip.parse()?;
+    let serial = format!("host-{}", machine.mac);
+    let mut txn = env.pool.begin().await?;
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: machine.mac,
+            data: ExpectedMachineData {
+                serial_number: serial.clone(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    // The stored report says the host is on, and the live host is off.
+    let report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        last_exploration_error: Some(EndpointExplorationError::AvoidLockout),
+        systems: vec![ComputerSystem {
+            id: "System_0".to_string(),
+            serial_number: Some(serial),
+            power_state: PowerState::On,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    db::explored_endpoints::insert(address, &report, false, &mut txn).await?;
+    db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?;
+    db::explored_endpoints::request_exploration_for_addresses(&[address], txn.as_mut()).await?;
+    txn.commit().await?;
+    let seeded = db::explored_endpoints::find_by_ips(&env.pool, vec![address])
+        .await?
+        .pop()
+        .expect("the endpoint is registered");
+
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 1,
+        concurrent_explorations: 1,
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    let mut probe_report = report.clone();
+    probe_report.last_exploration_error = None;
+    probe_report.systems[0].power_state = PowerState::Off;
+    explorer.insert_endpoint_result(address, Ok(probe_report));
+    explorer
+        .endpoint_explorer()
+        .power_states
+        .lock()
+        .unwrap()
+        .insert(address, libredfish::PowerState::Off);
+
+    // The operator's clear commits while the probe is in flight, so the
+    // probe's report is rejected as stale.
+    let blocker = explorer.endpoint_explorer().block_next_exploration();
+    let clear_during_probe = async {
+        blocker.wait_until_started().await;
+        env.api()
+            .clear_site_exploration_error(Request::new(
+                rpc::forge::ClearSiteExplorationErrorRequest {
+                    ip_address: address.to_string(),
+                },
+            ))
+            .await?;
+        blocker.release();
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let iteration = async {
+        explorer.run_single_iteration().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    tokio::try_join!(iteration, clear_during_probe)?;
+
+    let persisted = db::explored_endpoints::find_by_ips(&env.pool, vec![address])
+        .await?
+        .pop()
+        .expect("the endpoint is still registered");
+    assert_eq!(
+        persisted.report_version.version_nr(),
+        seeded.report_version.version_nr() + 1,
+        "only the clear's write was accepted"
+    );
+    assert!(persisted.waiting_for_explorer_refresh);
+    assert_eq!(persisted.report.last_exploration_error, None);
+    assert_eq!(
+        persisted.report.systems[0].power_state,
+        PowerState::On,
+        "the stored power state is the stale cached one"
+    );
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .redfish_get_power_state_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &[std::net::SocketAddr::new(address, 443)],
+        "the host's power state is read live"
+    );
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .redfish_power_control_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &[(
+            std::net::SocketAddr::new(address, 443),
+            libredfish::SystemPowerControl::On,
+        )],
+        "the live reading drives a power-on, not an ingestion"
+    );
     Ok(())
 }
 
@@ -2546,17 +2826,23 @@ async fn test_site_explorer_audit_exploration_results(
 
     // Make a mock host for machines[4] to generate the report
     // This serial is from the create_expected_machine.sql seed.
-    let machine_4_host = ManagedHostConfig::default().with_serial("VVG121GJ".to_string());
+    let machine_4_host = ManagedHostConfig::default()
+        .with_serial("VVG121GJ".to_string())
+        .with_dpus(vec![DpuConfig::with_serial("dpu_serial1".to_string())]);
 
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
         admin_fnn_enabled: false,
         explorations_per_run: 7,
+        exploration_timeouts_before_prevent_allocations: 1,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),
         create_machines: Arc::new(true.into()),
         machines_created_per_run: 1,
+        machine_creation_concurrency: SiteExplorerConfig::default_machine_creation_concurrency(),
+        switch_and_power_shelf_pass_interval:
+            SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
         override_target_ip: None,
         override_target_port: None,
         allow_changing_bmc_proxy: None,
@@ -2572,6 +2858,7 @@ async fn test_site_explorer_audit_exploration_results(
         deprecated_force_dpu_nic_mode: None,
         // Tests use MockEndpointExplorer. So this doesn't affect anything.
         explore_mode: SiteExplorerExploreMode::NvRedfish,
+        explore_drive_firmware: false,
     };
     let explorer = env.test_site_explorer(explorer_config);
     explorer.insert_endpoints(vec![
@@ -3205,16 +3492,18 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
     for machine in [&mut host1_dpu_bmc, &mut host1_bmc] {
         machine.discover_dhcp(api).await?;
     }
-    // Create a host and dpu reports && host has no dpu_serial
+    // The host reports a serial that differs from its DPU BMC's serial.
+    // The configured fallback must allow ingestion without changing inventory.
     let host1_dpu_report = DpuConfig {
         serial: HOST1_DPU_SERIAL_NUMBER.to_string(),
         bmc_mac_address: HOST1_DPU_BMC_MAC.parse()?,
         ..DpuConfig::default()
     };
-    let host1_report = ManagedHostConfig {
+    let host1_report: EndpointExplorationReport = ManagedHostConfig {
         bmc_mac_address: HOST1_BMC_MAC.parse()?,
         ..ManagedHostConfig::default()
-    };
+    }
+    .into();
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
@@ -3234,7 +3523,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
             host1_dpu_bmc.ip.parse().unwrap(),
             Ok(host1_dpu_report.into()),
         ),
-        (host1_bmc.ip.parse().unwrap(), Ok(host1_report.into())),
+        (host1_bmc.ip.parse().unwrap(), Ok(host1_report)),
     ]);
 
     // Create expected_machine entry for host1 w.o fallback_dpu_serial_number
@@ -3703,6 +3992,7 @@ async fn test_site_explorer_retries_matched_dpu_mode_on_next_iteration(
     explorer.endpoint_explorer().fail_next_set_nic_mode(
         EndpointExplorationError::ConnectionTimeout {
             details: "injected transient mode-setting failure".to_string(),
+            consecutive_count: 1,
         },
     );
     // The expected-serial fallback must not retry the failed PCIe match.
@@ -3991,6 +4281,259 @@ async fn test_site_explorer_falls_back_to_ac_powercycle_when_powercycle_refused(
     Ok(())
 }
 
+/// A ready expected DPU must not bypass a reported DPU mode change.
+#[sqlx_test]
+async fn test_site_explorer_resets_inventory_dpu_with_ready_fallback(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::HostDpuPolicy;
+
+    let env = Env::new(pool).await;
+    let inventory_dpu = DpuConfig {
+        nic_mode: Some(BlueFieldOperatingMode::Nic),
+        ..DpuConfig::default()
+    };
+    let fallback_dpu = DpuConfig::default();
+    let host = ManagedHostConfig::default().with_dpus(vec![inventory_dpu.clone()]);
+    let mut txn = env.pool.begin().await?;
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: host.bmc_mac_address,
+            data: ExpectedMachineData {
+                serial_number: host.serial.clone(),
+                dpu_policy: HostDpuPolicy::Manage,
+                fallback_dpu_serial_numbers: vec![fallback_dpu.serial.clone()],
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    let mut host_bmc = env.new_machine(&host.bmc_mac_address.to_string(), "SomeVendor");
+    let mut inventory_bmc =
+        env.new_machine(&inventory_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
+    let mut fallback_bmc =
+        env.new_machine(&fallback_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
+    host_bmc.discover_dhcp(env.api()).await?;
+    inventory_bmc.discover_dhcp(env.api()).await?;
+    fallback_bmc.discover_dhcp(env.api()).await?;
+    let host_ip: IpAddr = host_bmc.ip.parse()?;
+    let inventory_ip: IpAddr = inventory_bmc.ip.parse()?;
+    let fallback_ip: IpAddr = fallback_bmc.ip.parse()?;
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 10,
+        concurrent_explorations: 1,
+        run_interval: Duration::from_secs(1),
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    explorer.insert_endpoints(vec![
+        (host_ip, host.into()),
+        (inventory_ip, inventory_dpu.into()),
+        (fallback_ip, fallback_dpu.into()),
+    ]);
+    explorer.run_single_iteration().await?;
+
+    assert!(
+        db::explored_managed_host::find_all(&env.pool)
+            .await?
+            .is_empty(),
+        "a ready fallback must not bypass a pending inventory mode change",
+    );
+    let endpoint_explorer = explorer.endpoint_explorer();
+    assert_eq!(
+        *endpoint_explorer.set_nic_mode_calls.lock().unwrap(),
+        vec![(
+            std::net::SocketAddr::new(inventory_ip, 443),
+            BlueFieldOperatingMode::Dpu,
+        )],
+    );
+    assert_eq!(
+        *endpoint_explorer
+            .redfish_power_control_calls
+            .lock()
+            .unwrap(),
+        vec![(
+            std::net::SocketAddr::new(host_ip, 443),
+            libredfish::SystemPowerControl::PowerCycle,
+        )],
+    );
+    let host_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![host_ip])
+        .await?
+        .pop()
+        .unwrap();
+    assert!(host_endpoint.last_redfish_powercycle.is_some());
+
+    Ok(())
+}
+
+/// Every expected serial must be ready even when host inventory is fully matched.
+#[sqlx_test]
+async fn test_site_explorer_waits_for_all_fallback_dpus(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::HostDpuPolicy;
+
+    let env = Env::new(pool).await;
+    let ready_dpu = DpuConfig::default();
+    let pending_dpu = DpuConfig {
+        nic_mode: Some(BlueFieldOperatingMode::Nic),
+        ..DpuConfig::default()
+    };
+    let host = ManagedHostConfig::default().with_dpus(vec![ready_dpu.clone()]);
+    let mut txn = env.pool.begin().await?;
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: host.bmc_mac_address,
+            data: ExpectedMachineData {
+                serial_number: host.serial.clone(),
+                dpu_policy: HostDpuPolicy::Manage,
+                fallback_dpu_serial_numbers: vec![
+                    ready_dpu.serial.clone(),
+                    pending_dpu.serial.clone(),
+                ],
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    let mut host_bmc = env.new_machine(&host.bmc_mac_address.to_string(), "SomeVendor");
+    let mut ready_bmc = env.new_machine(&ready_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
+    host_bmc.discover_dhcp(env.api()).await?;
+    ready_bmc.discover_dhcp(env.api()).await?;
+    let host_ip: IpAddr = host_bmc.ip.parse()?;
+    let ready_ip: IpAddr = ready_bmc.ip.parse()?;
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 10,
+        concurrent_explorations: 1,
+        run_interval: Duration::from_secs(1),
+        create_machines: Arc::new(false.into()),
+        reset_rate_limit: chrono::Duration::hours(1),
+        ..Default::default()
+    });
+    explorer.insert_endpoints(vec![(host_ip, host.into()), (ready_ip, ready_dpu.into())]);
+    let endpoint_explorer = explorer.endpoint_explorer();
+
+    // A fully matched PCIe/chassis inventory must still wait for another DPU
+    // listed only in expected serials. The reported DPU is also in that list.
+    explorer.run_single_iteration().await?;
+    assert!(
+        db::explored_managed_host::find_all(&env.pool)
+            .await?
+            .is_empty(),
+        "host must wait for the second fallback DPU to be discovered",
+    );
+    assert!(
+        endpoint_explorer
+            .set_nic_mode_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        endpoint_explorer
+            .redfish_power_control_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut pending_bmc =
+        env.new_machine(&pending_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
+    pending_bmc.discover_dhcp(env.api()).await?;
+    let pending_ip: IpAddr = pending_bmc.ip.parse()?;
+    let pending_address = std::net::SocketAddr::new(pending_ip, 443);
+    let host_address = std::net::SocketAddr::new(host_ip, 443);
+    explorer.insert_endpoints(vec![(pending_ip, pending_dpu.clone().into())]);
+    endpoint_explorer.fail_next_set_nic_mode(EndpointExplorationError::ConnectionTimeout {
+        details: "injected transient fallback mode-setting failure".to_string(),
+        consecutive_count: 1,
+    });
+
+    let mut reset_at = None;
+    for (scenario, attempts, resets) in [
+        ("failed mode request", 1, 0),
+        ("queued mode change", 2, 1),
+        ("waiting within the reset rate limit", 3, 1),
+    ] {
+        explorer.run_single_iteration().await?;
+        assert!(
+            db::explored_managed_host::find_all(&env.pool)
+                .await?
+                .is_empty(),
+            "{scenario}: one ready DPU must not allow ingestion",
+        );
+        assert_eq!(
+            *endpoint_explorer.set_nic_mode_calls.lock().unwrap(),
+            vec![(pending_address, BlueFieldOperatingMode::Dpu); attempts],
+            "{scenario}",
+        );
+        let host_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![host_ip])
+            .await?
+            .pop()
+            .unwrap();
+        assert_eq!(
+            host_endpoint.last_redfish_powercycle.is_some(),
+            resets > 0,
+            "{scenario}"
+        );
+        if reset_at.is_some() {
+            assert_eq!(
+                host_endpoint.last_redfish_powercycle, reset_at,
+                "{scenario}"
+            );
+        }
+        reset_at = host_endpoint.last_redfish_powercycle;
+        assert_eq!(
+            *endpoint_explorer
+                .redfish_power_control_calls
+                .lock()
+                .unwrap(),
+            vec![(host_address, libredfish::SystemPowerControl::PowerCycle); resets],
+            "{scenario}",
+        );
+    }
+
+    explorer.insert_endpoints(vec![(
+        pending_ip,
+        DpuConfig {
+            nic_mode: Some(BlueFieldOperatingMode::Dpu),
+            ..pending_dpu
+        }
+        .into(),
+    )]);
+    explorer.run_single_iteration().await?;
+    let managed_hosts = db::explored_managed_host::find_all(&env.pool).await?;
+    assert_eq!(managed_hosts.len(), 1);
+    assert_eq!(managed_hosts[0].host_bmc_ip, host_ip);
+    let mut actual_dpu_ips = managed_hosts[0]
+        .dpus
+        .iter()
+        .map(|dpu| dpu.bmc_ip)
+        .collect::<Vec<_>>();
+    actual_dpu_ips.sort();
+    let mut expected_dpu_ips = vec![ready_ip, pending_ip];
+    expected_dpu_ips.sort();
+    assert_eq!(actual_dpu_ips, expected_dpu_ips);
+    assert_eq!(
+        endpoint_explorer.set_nic_mode_calls.lock().unwrap().len(),
+        3
+    );
+
+    Ok(())
+}
+
 /// Regression guard for the fallback-serial path (#2631): a DPU paired only
 /// through `fallback_dpu_serial_numbers` must get the same NIC-mode enforcement
 /// as a host-reported one. The host BMC here enumerates no DPU over PCIe -- the
@@ -4119,25 +4662,32 @@ async fn test_site_explorer_enforces_nic_mode_on_fallback_serial_match(
     Ok(())
 }
 
-/// Chassis fallback depends on PCIe serial matching, even when the PCIe DPU
-/// count and operating modes would suggest a different fallback decision.
+/// Chassis and expected-only DPUs participate in matching and configuration
+/// alongside PCIe matches, including a settled SuperNIC and a managed DPU.
 #[sqlx_test]
-async fn test_site_explorer_chassis_fallback_depends_on_pcie_matching(
+async fn test_site_explorer_combines_dpu_matching_sources(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use model::expected_machine::HostDpuPolicy;
 
+    enum AdditionalDpuSource {
+        Chassis,
+        ExpectedSerial,
+    }
+
     struct Case {
         name: &'static str,
+        source: AdditionalDpuSource,
         pcie_serial_matches: bool,
-        configure_chassis_dpu: bool,
+        host_dpu_policy: HostDpuPolicy,
+        configure_additional_dpu: bool,
     }
 
     let env = Env::new(pool).await;
     let explorer = env.test_site_explorer(SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
-        explorations_per_run: 10,
+        explorations_per_run: 20,
         concurrent_explorations: 1,
         run_interval: Duration::from_secs(1),
         create_machines: Arc::new(false.into()),
@@ -4146,21 +4696,46 @@ async fn test_site_explorer_chassis_fallback_depends_on_pcie_matching(
     let mut hosts = Vec::new();
     for case in [
         Case {
-            name: "unmatched PCIe serial allows chassis fallback",
+            name: "unmatched PCIe serial does not prevent chassis configuration",
+            source: AdditionalDpuSource::Chassis,
             pcie_serial_matches: false,
-            configure_chassis_dpu: true,
+            host_dpu_policy: HostDpuPolicy::Nic,
+            configure_additional_dpu: true,
         },
         Case {
-            name: "PCIe match in NIC mode suppresses chassis fallback",
+            name: "a settled PCIe SuperNIC does not hide a ready chassis DPU",
+            source: AdditionalDpuSource::Chassis,
             pcie_serial_matches: true,
-            configure_chassis_dpu: false,
+            host_dpu_policy: HostDpuPolicy::Manage,
+            configure_additional_dpu: false,
+        },
+        Case {
+            name: "a PCIe match does not prevent chassis configuration",
+            source: AdditionalDpuSource::Chassis,
+            pcie_serial_matches: true,
+            host_dpu_policy: HostDpuPolicy::Nic,
+            configure_additional_dpu: true,
+        },
+        Case {
+            name: "a settled PCIe SuperNIC does not hide a ready expected-only DPU",
+            source: AdditionalDpuSource::ExpectedSerial,
+            pcie_serial_matches: true,
+            host_dpu_policy: HostDpuPolicy::Manage,
+            configure_additional_dpu: false,
+        },
+        Case {
+            name: "a PCIe match does not prevent expected-only DPU configuration",
+            source: AdditionalDpuSource::ExpectedSerial,
+            pcie_serial_matches: true,
+            host_dpu_policy: HostDpuPolicy::Nic,
+            configure_additional_dpu: true,
         },
     ] {
         let pcie_dpu = DpuConfig {
             nic_mode: Some(BlueFieldOperatingMode::Nic),
             ..DpuConfig::default()
         };
-        let chassis_dpu = DpuConfig::default();
+        let additional_dpu = DpuConfig::default();
         let host = ManagedHostConfig::default().with_dpus(vec![pcie_dpu.clone()]);
         let mut txn = env.pool.begin().await?;
         db::expected_machine::create(
@@ -4173,7 +4748,11 @@ async fn test_site_explorer_chassis_fallback_depends_on_pcie_matching(
                     bmc_password: "PASS".to_string(),
                     serial_number: host.serial.clone(),
                     metadata: Metadata::new_with_default_name(),
-                    dpu_policy: HostDpuPolicy::Nic,
+                    dpu_policy: case.host_dpu_policy,
+                    fallback_dpu_serial_numbers: match case.source {
+                        AdditionalDpuSource::ExpectedSerial => vec![additional_dpu.serial.clone()],
+                        AdditionalDpuSource::Chassis => Vec::new(),
+                    },
                     ..Default::default()
                 },
             },
@@ -4183,38 +4762,42 @@ async fn test_site_explorer_chassis_fallback_depends_on_pcie_matching(
 
         let mut host_bmc = env.new_machine(&host.bmc_mac_address.to_string(), "SomeVendor");
         let mut pcie_bmc = env.new_machine(&pcie_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
-        let mut chassis_bmc =
-            env.new_machine(&chassis_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
+        let mut additional_bmc =
+            env.new_machine(&additional_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
         host_bmc.discover_dhcp(env.api()).await?;
         pcie_bmc.discover_dhcp(env.api()).await?;
-        chassis_bmc.discover_dhcp(env.api()).await?;
+        additional_bmc.discover_dhcp(env.api()).await?;
         let host_ip: IpAddr = host_bmc.ip.parse()?;
         let pcie_ip: IpAddr = pcie_bmc.ip.parse()?;
-        let chassis_ip: IpAddr = chassis_bmc.ip.parse()?;
+        let additional_ip: IpAddr = additional_bmc.ip.parse()?;
 
         let mut host_report: EndpointExplorationReport = host.into();
+        host_report.systems[0].pcie_devices[0].part_number = Some("900-9D3B4-00EN-EA0".to_string());
         if !case.pcie_serial_matches {
             host_report.systems[0].pcie_devices[0].serial_number =
                 Some(format!("undiscovered-{}", pcie_dpu.serial));
         }
-        // The chassis reports a different DPU, so PCIe deduplication cannot
-        // hide an incorrectly enabled chassis fallback.
-        host_report.chassis = vec![Chassis {
-            id: "1".to_string(),
-            network_adapters: vec![NetworkAdapter {
-                id: "BlueField".to_string(),
-                part_number: Some("900-9D3B6-00CV-A".to_string()),
-                serial_number: Some(chassis_dpu.serial.clone()),
+        // Chassis or expected serials supply a different DPU that must be
+        // considered even when PCIe matched a discovered SuperNIC.
+        host_report.chassis = match case.source {
+            AdditionalDpuSource::ExpectedSerial => Vec::new(),
+            AdditionalDpuSource::Chassis => vec![Chassis {
+                id: "1".to_string(),
+                network_adapters: vec![NetworkAdapter {
+                    id: "BlueField".to_string(),
+                    part_number: Some("900-9D3B6-00CV-A".to_string()),
+                    serial_number: Some(additional_dpu.serial.clone()),
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
-            ..Default::default()
-        }];
+        };
         explorer.insert_endpoint_results(vec![
             (host_ip, Ok(host_report)),
             (pcie_ip, Ok(pcie_dpu.into())),
-            (chassis_ip, Ok(chassis_dpu.into())),
+            (additional_ip, Ok(additional_dpu.into())),
         ]);
-        hosts.push((case, host_ip, chassis_ip));
+        hosts.push((case, host_ip, additional_ip));
     }
 
     // Manual ingestion completes preingestion during exploration, so the same
@@ -4223,7 +4806,7 @@ async fn test_site_explorer_chassis_fallback_depends_on_pcie_matching(
 
     let expected_mode_calls = hosts
         .iter()
-        .filter(|(case, _, _)| case.configure_chassis_dpu)
+        .filter(|(case, _, _)| case.configure_additional_dpu)
         .map(|(_, _, ip)| {
             (
                 std::net::SocketAddr::new(*ip, 443),
@@ -4231,23 +4814,29 @@ async fn test_site_explorer_chassis_fallback_depends_on_pcie_matching(
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        *explorer
+    {
+        let mode_calls = explorer
             .endpoint_explorer()
             .set_nic_mode_calls
             .lock()
-            .unwrap(),
-        expected_mode_calls,
-    );
+            .unwrap();
+        assert_eq!(mode_calls.len(), expected_mode_calls.len());
+        for call in expected_mode_calls {
+            assert!(
+                mode_calls.contains(&call),
+                "missing additional DPU configuration: {call:?}"
+            );
+        }
+    }
     let managed_hosts = db::explored_managed_host::find_all(&env.pool).await?;
-    for (case, host_ip, _) in hosts {
+    for (case, host_ip, additional_ip) in hosts {
         let host_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![host_ip])
             .await?
             .pop()
             .unwrap();
         assert_eq!(
             host_endpoint.last_redfish_powercycle.is_some(),
-            case.configure_chassis_dpu,
+            case.configure_additional_dpu,
             "{}: only a queued mode change should reset the host",
             case.name,
         );
@@ -4256,12 +4845,17 @@ async fn test_site_explorer_chassis_fallback_depends_on_pcie_matching(
             .find(|host| host.host_bmc_ip == host_ip);
         assert_eq!(
             managed_host.is_some(),
-            !case.configure_chassis_dpu,
+            !case.configure_additional_dpu,
             "{}: a queued mode change should keep the host waiting",
             case.name,
         );
         if let Some(managed_host) = managed_host {
-            assert!(managed_host.dpus.is_empty(), "{}", case.name);
+            assert_eq!(
+                managed_host.dpus.iter().map(|dpu| dpu.bmc_ip).collect_vec(),
+                vec![additional_ip],
+                "{}: attach the additional DPU and exclude the PCIe SuperNIC",
+                case.name,
+            );
         }
     }
 
@@ -4378,11 +4972,11 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
     Ok(())
 }
 
-/// A host can report one BlueField as both a network adapter and a separate
-/// chassis. Refresh must replace a persisted duplicate list and ingest each
-/// distinct DPU once.
+/// A host can report one BlueField in PCIe, a network adapter, and a separate
+/// chassis, including copies without part numbers. Refresh must replace a
+/// persisted duplicate list and ingest each distinct DPU once.
 #[sqlx_test]
-async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_host(
+async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted_host(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::new(pool).await;
@@ -4404,9 +4998,9 @@ async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_h
             ..DpuConfig::default()
         },
     ];
-    // No PCIe DPUs: chassis discovery must supply the pairing without an
-    // expected-machine fallback.
-    let mock_host = ManagedHostConfig::zero_dpu();
+    // PCIe reports only one DPU. Chassis must supply the other DPU while
+    // copies of the PCIe DPU are deduplicated across both sources.
+    let mock_host = ManagedHostConfig::default().with_dpus(vec![dpus[0].clone()]);
     let host_bmc_mac = mock_host.bmc_mac_address;
     let mut host_report: EndpointExplorationReport = mock_host.clone().into();
     host_report.chassis = vec![
@@ -4417,7 +5011,7 @@ async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_h
                 .enumerate()
                 .map(|(index, dpu)| NetworkAdapter {
                     id: (index + 1).to_string(),
-                    part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                    part_number: (index != 0).then(|| "900-9D3B6-00CV-AA0".to_string()),
                     serial_number: Some(dpu.serial.clone()),
                     ..Default::default()
                 })
@@ -4428,6 +5022,15 @@ async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_h
             id: "SmartNIC_1".to_string(),
             part_number: Some("900-9D3B6-00CV-AA0".to_string()),
             serial_number: Some(dpus[0].serial.clone()),
+            ..Default::default()
+        },
+        Chassis {
+            id: "2".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "1".to_string(),
+                serial_number: Some(dpus[1].serial.clone()),
+                ..Default::default()
+            }],
             ..Default::default()
         },
     ];
@@ -4451,6 +5054,7 @@ async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_h
                 bmc_username: "ADMIN".to_string(),
                 bmc_password: "PASS".to_string(),
                 serial_number: mock_host.serial,
+                fallback_dpu_serial_numbers: dpus.iter().map(|dpu| dpu.serial.clone()).collect(),
                 metadata: Metadata::new_with_default_name(),
                 ..Default::default()
             },

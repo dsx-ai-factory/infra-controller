@@ -174,6 +174,7 @@ async fn astra_failure_reports_without_blocking_network_configuration_and_recove
         loopback_ip_override: Some("2001:db8::1"),
         astra_config: Some(rpc::forge::AstraConfig {
             astra_attachments: vec![expected_attachment.clone()],
+            ..Default::default()
         }),
         ..Default::default()
     }));
@@ -237,7 +238,11 @@ async fn astra_failure_reports_without_blocking_network_configuration_and_recove
             })
             .await?;
             eyre::ensure!(
-                failed.astra_config_status == Some(rpc::forge::AstraConfigStatus::default()),
+                failed.astra_config_status == Some(rpc::forge::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
                 "failed astra attempt omitted its explicit unsuccessful report: {failed:?}"
             );
             eyre::ensure!(
@@ -1626,11 +1631,13 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         datacenter_asn: 11414,
         common_internal_route_target: Some(rpc_common::RouteTarget {
             asn: 11415,
-            vni: 200,
+            vni: Some(200),
+            vni_self: false,
         }),
         additional_route_target_imports: vec![rpc_common::RouteTarget {
             asn: 11111,
-            vni: 22222,
+            vni: Some(22222),
+            vni_self: false,
         }],
         routing_profile: Some(rpc::forge::RoutingProfile {
             tenant_leak_communities_accepted: false,
@@ -1640,11 +1647,13 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             allowed_anycast_prefixes: vec![],
             route_target_imports: vec![rpc_common::RouteTarget {
                 asn: 44444,
-                vni: 55555,
+                vni: Some(55555),
+                vni_self: false,
             }],
             route_targets_on_exports: vec![rpc_common::RouteTarget {
                 asn: 77415,
-                vni: 800,
+                vni: Some(800),
+                vni_self: false,
             }],
         }),
 

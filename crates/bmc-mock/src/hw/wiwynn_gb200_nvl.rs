@@ -204,6 +204,7 @@ impl WiwynnGB200Nvl<'_> {
                 part_number: Some("B81.11810.0005".into()),
                 model: Some("GB200 NVL".into()),
                 pcie_devices: Some(vec![]),
+                aux_power_reset: true,
                 ..redfish::chassis::SingleChassisConfig::defaults()
             })
             .chain(std::iter::once(redfish::chassis::SingleChassisConfig {

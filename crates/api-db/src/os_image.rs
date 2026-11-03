@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_uuid::DbTable;
 use chrono::{DateTime, Utc};
 use model::storage::{OsImage, OsImageAttributes, OsImageStatus};
 use model::tenant::TenantOrganizationId;
@@ -27,23 +28,23 @@ pub async fn list(
     tenant_organization_id: Option<TenantOrganizationId>,
 ) -> Result<Vec<OsImage>, DatabaseError> {
     if let Some(tenant_organization_id) = tenant_organization_id {
-        let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
-                l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
-                l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
-                l.created_at, l.modified_at
-            from os_images l WHERE l.organization_id=$1";
-        sqlx::query_as(query)
+        let query = format!(
+            "SELECT {} FROM {} WHERE l.organization_id=$1",
+            OsImage::db_aliased_columns(),
+            OsImage::db_aliased_table(),
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(query))
             .bind(tenant_organization_id.to_string())
             .fetch_all(txn)
             .await
             .map_err(|e| DatabaseError::new("os_images All", e))
     } else {
-        let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
-                l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
-                l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
-                l.created_at, l.modified_at
-            from os_images l";
-        sqlx::query_as(query)
+        let query = format!(
+            "SELECT {} FROM {}",
+            OsImage::db_aliased_columns(),
+            OsImage::db_aliased_table(),
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(query))
             .fetch_all(txn)
             .await
             .map_err(|e| DatabaseError::new("os_images All", e))
@@ -51,12 +52,12 @@ pub async fn list(
 }
 
 pub async fn get(txn: &mut PgConnection, os_image_id: Uuid) -> Result<OsImage, DatabaseError> {
-    let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
-            l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
-            l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
-            l.created_at, l.modified_at
-        from os_images l WHERE l.id = $1";
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM {} WHERE l.id = $1",
+        OsImage::db_aliased_columns(),
+        OsImage::db_aliased_table(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(os_image_id)
         .fetch_one(txn)
         .await

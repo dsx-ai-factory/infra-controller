@@ -62,6 +62,9 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
         .with_view(carbide_site_explorer::site_explorer_latency_histogram_view(
             "carbide_endpoint_exploration_duration",
         )?)
+        .with_view(carbide_site_explorer::site_explorer_latency_histogram_view(
+            "carbide_endpoint_exploration_step_latency",
+        )?)
         .build();
     // After this call `global::meter()` will be available
     opentelemetry::global::set_meter_provider(meter_provider.clone());
@@ -232,6 +235,12 @@ mod tests {
                 )
                 .unwrap(),
             )
+            .with_view(
+                carbide_site_explorer::site_explorer_latency_histogram_view(
+                    "carbide_endpoint_exploration_step_latency",
+                )
+                .unwrap(),
+            )
             .build();
 
         let state = KeyValue::new("state", "mystate");
@@ -275,6 +284,44 @@ mod tests {
                 assert!(!encoded.contains(r#"mygauge{error="ErrC",state="mystate"} 1"#));
             }
         }
+    }
+
+    /// Exercise production view registration and Prometheus export for slow steps.
+    #[tokio::test]
+    async fn endpoint_exploration_step_latency_uses_extended_buckets() {
+        let metrics = setup_metrics(None).unwrap();
+        metrics
+            .meter
+            .f64_histogram("carbide_endpoint_exploration_step_latency")
+            .with_unit("ms")
+            .build()
+            .record(30_000.0, &[KeyValue::new("step", "redfish_explore")]);
+
+        let mut buffer = vec![];
+        TextEncoder::new()
+            .encode(&metrics.registry.gather(), &mut buffer)
+            .unwrap();
+        let encoded = String::from_utf8(buffer).unwrap();
+        check_values(
+            [
+                r#"bucket{step="redfish_explore",le="10000"} 0"#,
+                r#"bucket{step="redfish_explore",le="30000"} 1"#,
+                r#"bucket{step="redfish_explore",le="3600000"} 1"#,
+                r#"bucket{step="redfish_explore",le="+Inf"} 1"#,
+                r#"count{step="redfish_explore"} 1"#,
+                r#"sum{step="redfish_explore"} 30000"#,
+            ]
+            .map(|sample| Check {
+                scenario: sample,
+                input: sample,
+                expect: true,
+            }),
+            |sample| {
+                let expected =
+                    format!("carbide_endpoint_exploration_step_latency_milliseconds_{sample}");
+                encoded.lines().any(|line| line == expected)
+            },
+        );
     }
 
     #[test]
@@ -374,6 +421,76 @@ mod tests {
                     .chain([(f64::INFINITY, infinity_counts[0])])
                     .collect::<Vec<_>>()
             },
+        );
+    }
+
+    #[test]
+    fn machine_reboot_duration_histogram_resolves_long_reboots() {
+        let registry = prometheus::Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .without_scope_info()
+            .without_target_info()
+            .build()
+            .unwrap();
+        let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
+            .with_reader(exporter)
+            .with_view(ApiMetricsEmitter::machine_reboot_duration_view().unwrap())
+            .build();
+        let emitter = ApiMetricsEmitter::new(&provider.meter("test"));
+        for duration in [180, 7200, 172800] {
+            emitter.record_machine_reboot_duration(
+                duration,
+                "test-product".to_string(),
+                "test-vendor".to_string(),
+                "Reboot".to_string(),
+            );
+        }
+
+        let families = registry.gather();
+        let family = families
+            .iter()
+            .find(|family| family.name() == "carbide_machine_reboot_duration_seconds")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 1);
+        let metric = &family.get_metric()[0];
+        let labels: Vec<_> = metric
+            .get_label()
+            .iter()
+            .map(|label| (label.name(), label.value()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("product_name", "test-product"),
+                ("reboot_mode", "Reboot"),
+                ("vendor", "test-vendor"),
+            ]
+        );
+        let histogram = metric.get_histogram();
+        assert_eq!(histogram.get_sample_count(), 3);
+        assert_eq!(histogram.get_sample_sum(), 180180.0);
+        let buckets: Vec<_> = histogram
+            .get_bucket()
+            .iter()
+            .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
+            .collect();
+        assert_eq!(
+            buckets,
+            [
+                (180.0, 1),
+                (300.0, 1),
+                (600.0, 1),
+                (900.0, 1),
+                (1800.0, 1),
+                (3600.0, 1),
+                (7200.0, 2),
+                (14400.0, 2),
+                (28800.0, 2),
+                (43200.0, 2),
+                (86400.0, 2),
+                (172800.0, 3),
+            ]
         );
     }
 

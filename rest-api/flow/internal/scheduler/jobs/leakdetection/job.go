@@ -35,6 +35,10 @@ type reconcilingReader struct {
 	reconcile reconcileFunc
 }
 
+func (r reconcilingReader) GetLeakingRackIds(ctx context.Context) ([]string, error) {
+	return r.reader.GetLeakingRackIds(ctx)
+}
+
 func (r reconcilingReader) GetLeakingMachineIds(ctx context.Context) ([]string, error) {
 	ids, err := r.reader.GetLeakingMachineIds(ctx)
 	if err != nil {

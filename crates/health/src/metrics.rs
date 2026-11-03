@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use http::Response;
-use http::header::CONTENT_TYPE;
+use http::header::{ALLOW, CONTENT_TYPE};
+use http::{Method, Response};
 use hyper::Request;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -500,6 +500,8 @@ pub struct GaugeMetrics {
 impl GaugeMetrics {
     /// Registers gauge readings with an ID unique to the registry. The registration
     /// identity does not add labels or change the names returned by `collect()`.
+    /// `metric_help` supplies gauge `HELP`; counter aliases use the description
+    /// in their sample's `MetricSemantics::CumulativeCounter`.
     pub fn new(
         id: String,
         registry: &Registry,
@@ -628,12 +630,17 @@ impl Collector for GaugeMetrics {
 
             // Both series share one retained reading, so pruning removes both.
             // Replacement uses the latest value; invalid totals omit only the alias.
-            let counter_labels = data
-                .semantics
-                .exports_counter(data.value)
-                .then(|| labels.clone());
-            for (kind, labels) in std::iter::once((proto::MetricType::GAUGE, labels))
-                .chain(counter_labels.map(|labels| (proto::MetricType::COUNTER, labels)))
+            let counter = match data.semantics {
+                MetricSemantics::CumulativeCounter { description, .. }
+                    if data.semantics.exports_counter(data.value) =>
+                {
+                    Some((proto::MetricType::COUNTER, labels.clone(), description))
+                }
+                _ => None,
+            };
+            for (kind, labels, help) in
+                std::iter::once((proto::MetricType::GAUGE, labels, self.metric_help.as_str()))
+                    .chain(counter)
             {
                 let family_key = (
                     data.name.clone(),
@@ -651,7 +658,7 @@ impl Collector for GaugeMetrics {
                     }
                     let mut family = proto::MetricFamily::default();
                     family.set_name(name);
-                    family.set_help(self.metric_help.clone());
+                    family.set_help(help.to_string());
                     family.set_field_type(kind);
                     family
                 });
@@ -714,14 +721,24 @@ fn serve_request<B>(
     req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
-    match req.uri().path() {
-        "/livez" => Ok(Response::builder()
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/livez") => Ok(Response::builder()
             .status(http::StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("ok".to_string())
             .expect("BUG: Response::builder error")),
-        "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
-        "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
+        (&Method::GET, "/metrics") => {
+            serve_prometheus(metrics_manager.export_metrics(), "service metrics")
+        }
+        (&Method::GET, "/telemetry") => {
+            serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics")
+        }
+        (_, "/livez" | "/metrics" | "/telemetry") => Ok(Response::builder()
+            .status(http::StatusCode::METHOD_NOT_ALLOWED)
+            .header(ALLOW, "GET")
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body("method not allowed; use GET".to_string())
+            .expect("BUG: Response::builder error")),
         _ => Ok(Response::builder()
             .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -778,6 +795,7 @@ pub fn sanitize_unit(unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use http::HeaderValue;
 
     use super::*;
 
@@ -805,6 +823,73 @@ mod tests {
         assert_eq!(
             response.body(),
             "not found; use /metrics, /telemetry, or /livez",
+        );
+    }
+
+    #[test]
+    fn metrics_routes_serve_only_get() {
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
+
+        check_values(
+            [
+                Check {
+                    scenario: "liveness probe serves GET",
+                    input: (Method::GET, "/livez"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "service metrics serve GET",
+                    input: (Method::GET, "/metrics"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "telemetry metrics serve GET",
+                    input: (Method::GET, "/telemetry"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "liveness probe rejects POST",
+                    input: (Method::POST, "/livez"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "service metrics reject POST",
+                    input: (Method::POST, "/metrics"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "telemetry metrics reject POST",
+                    input: (Method::POST, "/telemetry"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "unknown route stays not found for POST",
+                    input: (Method::POST, "/definitely-not-a-route"),
+                    expect: (http::StatusCode::NOT_FOUND, None),
+                },
+            ],
+            |(method, path)| {
+                let request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(())
+                    .expect("test request should be valid");
+
+                let response = serve_request(request, metrics_manager.clone())
+                    .expect("request should produce a response");
+                (response.status(), response.headers().get(ALLOW).cloned())
+            },
         );
     }
 
@@ -931,9 +1016,18 @@ mod tests {
                 GaugeReading::new("device", "hardware", "errors", "count", value)
                     .with_labels(vec![("component".into(), "pcie".to_string())])
                     .with_semantics(MetricSemantics::CumulativeCounter {
+                        description: "Number of PCIe errors reported by the device",
                         start_time: Some(std::time::UNIX_EPOCH),
                     })
             };
+            readings.record(
+                GaugeReading::new("replays", "hardware", "replays", "count", 20.0)
+                    .with_labels(vec![("component".into(), "pcie".to_string())])
+                    .with_semantics(MetricSemantics::CumulativeCounter {
+                        description: "Number of PCIe replays reported by the device",
+                        start_time: None,
+                    }),
+            );
             [10.0, replacement].map(|value| {
                 readings.record(reading(value));
                 registry
@@ -984,19 +1078,40 @@ mod tests {
                 input: value,
                 expect: [(10.0, 2), (value, family_count)].map(|(value, family_count)| {
                     [
-                        ("custom_hardware_errors_count", proto::MetricType::GAUGE),
+                        (
+                            "custom_hardware_errors_count",
+                            proto::MetricType::GAUGE,
+                            "Device readings",
+                            value,
+                        ),
                         (
                             "custom_hardware_errors_count_total",
                             proto::MetricType::COUNTER,
+                            "Number of PCIe errors reported by the device",
+                            value,
                         ),
                     ]
                     .into_iter()
                     .take(family_count)
-                    .map(|(name, kind)| {
+                    .chain([
+                        (
+                            "custom_hardware_replays_count",
+                            proto::MetricType::GAUGE,
+                            "Device readings",
+                            20.0,
+                        ),
+                        (
+                            "custom_hardware_replays_count_total",
+                            proto::MetricType::COUNTER,
+                            "Number of PCIe replays reported by the device",
+                            20.0,
+                        ),
+                    ])
+                    .map(|(name, kind, help, value)| {
                         (
                             name.to_string(),
                             kind,
-                            "Device readings".to_string(),
+                            help.to_string(),
                             vec![(
                                 value.to_bits(),
                                 vec![

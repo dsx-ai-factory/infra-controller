@@ -270,10 +270,10 @@ pub(crate) struct MultipartFirmwareUploadUnsupported {
 }
 
 /// `FirmwareComponentType` as a bounded metric label. The manual impl is the
-/// framework's reviewed escape hatch: the type is a fieldless enum in
-/// `model::firmware` (bounded by construction), and the orphan rule keeps the
-/// derive out of reach from here. The rendering mirrors what
-/// `#[derive(LabelValue)]` would produce.
+/// framework's reviewed escape hatch: the orphan rule keeps the derive out of
+/// reach from here. The label stays bounded because every drive model shares
+/// the `drive` label; the model belongs in log context. Other components render
+/// as `#[derive(LabelValue)]` would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FirmwareComponentLabel(pub(crate) FirmwareComponentType);
 
@@ -290,6 +290,7 @@ impl LabelValue for FirmwareComponentLabel {
             FirmwareComponentType::CombinedBmcUefi => "combined_bmc_uefi",
             FirmwareComponentType::Gpu => "gpu",
             FirmwareComponentType::Cx7 => "cx7",
+            FirmwareComponentType::Drive { .. } => "drive",
             FirmwareComponentType::Unknown => "unknown",
         })
     }
@@ -753,6 +754,7 @@ mod tests {
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
     use carbide_utils::test_support::test_meter::TestMeter;
+    use model::firmware::DriveModel;
     use prometheus_text_parser::ParsedPrometheusMetrics;
 
     use super::*;
@@ -844,6 +846,12 @@ mod tests {
                 FirmwareComponentType::Gpu => "gpu".to_string(),
                 FirmwareComponentType::Cx7 => "cx7".to_string(),
                 FirmwareComponentType::Unknown => "unknown".to_string(),
+            }
+
+            "drives are labelled without their model" {
+                FirmwareComponentType::Drive {
+                    model: DriveModel::new("Dell Ent NVMe CM6 RI 1.92TB").unwrap(),
+                } => "drive".to_string(),
             }
         );
     }

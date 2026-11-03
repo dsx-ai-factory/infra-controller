@@ -104,9 +104,12 @@ means something is blocking normal lifecycle progression and warrants investigat
 Common causes include BMC connectivity issues, PXE boot failures or external service
 timeouts.
 
-Related metrics include `carbide_<object>_per_state` (current count per state),
-`carbide_<object>_state_time_in_state_seconds` (histogram of time spent) and
-`carbide_<object>_state_handler_errors_total` (processing failures).
+Related metrics include:
+
+- `carbide_<object>_per_state` - current count per state
+- `carbide_<object>_time_in_state_seconds` - histogram of elapsed seconds in state
+- `carbide_<object>_with_state_handling_errors_per_state` - gauge of objects with error,
+grouped by state, substate and error name
 
 ### Capacity: "How much headroom do we have?"
 
@@ -262,8 +265,16 @@ request handling. nico-dns exposes query rates and resolution latency.
 
 ### Console services
 
-nico-ssh-console-rs exposes `carbide_ssh_console_*` metrics for BMC connection counts,
-session durations and error rates. This is useful for debugging console access issues.
+nico-ssh-console-rs exposes legacy `ssh_console_*` metrics for console sessions,
+BMC connections, and errors, plus `carbide_ssh_console_*` counters.
+`carbide_ssh_console_bmc_recovery_attempts_total` counts iterations of the BMC
+connection recovery loop, excluding each client's initial iteration. This
+service-wide counter has no labels, survives BMC client recreation, and resets
+when the service restarts. The legacy `ssh_console_bmc_recovery_attempts` gauge
+provides per-machine values through its `machine_id` label and resets when that
+client is recreated. `carbide_ssh_console_stream_lines_dropped_total` counts lines
+omitted from individual console-log gRPC streams. Its `reason` label is
+`client_queue_full` or `completed_line_broadcast_lag`.
 
 ## 3. Collection architecture
 
@@ -308,9 +319,16 @@ telemetryServiceMonitor:
 ### OTel Collector configuration
 
 Configure the prometheus receiver for Kubernetes service discovery. This example scrapes
-only the `/metrics` endpoint. For nico-hardware-health `/telemetry` (high-cardinality
-sensor data), add a separate scrape job targeting the `metrics` port name with its
-metrics path set to `/telemetry`.
+the primary `/metrics` endpoints for nico-api, nico-dhcp, nico-pxe and
+nico-hardware-health. It selects the chart-defined `app.kubernetes.io/metrics` Service
+label and the corresponding endpoint port name (`http` or `metrics`); no
+`prometheus.io/scrape` annotation is required. Set `names` to the installation namespace
+and adjust the label values in `regex` if using chart `nameOverride` values.
+
+The selection excludes the optional nico-api per-object metrics Service. For
+nico-hardware-health `/telemetry` (high-cardinality sensor data), add a separate scrape
+job selecting the nico-hardware-health metrics label and the `metrics` port name, with
+its metrics path set to `/telemetry`.
 
 <Note>
 If running as a DaemonSet, each replica will independently discover and scrape
@@ -329,12 +347,11 @@ receivers:
               namespaces:
                 names: [nico-system]
           relabel_configs:
-            - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            - source_labels:
+                - __meta_kubernetes_service_label_app_kubernetes_io_metrics
+                - __meta_kubernetes_endpoint_port_name
               action: keep
-              regex: true
-            - source_labels: [__meta_kubernetes_endpoint_port_name]
-              action: keep
-              regex: metrics
+              regex: '(nico-api|nico-dhcp|nico-pxe);http|nico-hardware-health;metrics'
 
 processors:
   batch: {}
@@ -655,8 +672,12 @@ control plane health and performance metrics:
 **Request summary** - API status, request rate, p95 latency, gRPC error rate. Top-level
 indicators for SLO monitoring.
 
-**Requests by method and status** - Heatmap of request latency by gRPC method. Identifies
-which endpoints are slow or failing.
+**Requests by method and status** - Stacked time series of requests per second, grouped
+by gRPC method and status code. Shows traffic volume and error responses by method.
+
+**Request latency** - The summary p95 and the p50/p95/p99 latency time series aggregate
+requests across all methods matching the selected job filter; they do not show
+per-method latency.
 
 **Database** - Queries per second, time per request, connection pool utilization. Database
 contention is a common cause of API slowdowns.

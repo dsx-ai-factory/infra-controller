@@ -140,6 +140,7 @@ fn build_exploration_report(
                 description: None,
                 version: Some(bmc_version.to_string()),
                 release_date: None,
+                drive: None,
             }],
         }],
         machine_id,

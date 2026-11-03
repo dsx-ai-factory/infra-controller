@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_test_support::{Check, check_values};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::network::NetworkSegmentId;
 use model::allocation_type::AllocationType;
@@ -29,6 +30,46 @@ use model::network_segment::{
 
 use super::*;
 use crate as db;
+use crate::test_support::postgres::wait_for_blocked_query;
+
+#[test]
+fn admin_lock_admission_permit_count_prefers_the_configuration() {
+    check_values(
+        [
+            Check {
+                scenario: "the configured value wins over the environment",
+                input: (Some(32), Some("8")),
+                expect: 32,
+            },
+            Check {
+                scenario: "the environment applies when nothing is configured",
+                input: (None, Some("8")),
+                expect: 8,
+            },
+            Check {
+                scenario: "an unparsable environment value falls back to the default",
+                input: (None, Some("many")),
+                expect: 16,
+            },
+            Check {
+                scenario: "nothing set gives the default",
+                input: (None, None),
+                expect: 16,
+            },
+            Check {
+                scenario: "zero from the environment would deadlock every gated flow and becomes one",
+                input: (None, Some("0")),
+                expect: 1,
+            },
+            Check {
+                scenario: "a value above the ceiling from the environment is clamped",
+                input: (None, Some("1000")),
+                expect: 256,
+            },
+        ],
+        |(configured, environment)| admin_lock_admission_permit_count(configured, environment),
+    );
+}
 
 async fn create_static_assignments_segment(
     pool: &sqlx::PgPool,
@@ -659,6 +700,37 @@ async fn reconcile_interface_segment_preserves_static_assignment_lookup_failure(
         assert_eq!(interface.hostname, original.hostname, "{source}");
         assert_eq!(interface.addresses, original.addresses, "{source}");
     }
+    Ok(())
+}
+
+// The DHCP handler normally rejects an unknown DHCPv6 relay before this
+// helper runs, so exercise the helper's own guard directly.
+#[crate::sqlx_test]
+async fn observed_dhcp_unknown_relay_is_failed_precondition(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = db::Transaction::begin(&pool).await?;
+    let error = find_or_create_observed_machine_interface(
+        txn.as_pgconn(),
+        None,
+        "02:00:00:00:71:04".parse()?,
+        &["2001:db8:dead::1".parse()?],
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("an unknown relay should not create an observed interface");
+
+    assert!(
+        matches!(
+            &error,
+            DatabaseError::FailedPrecondition(message)
+                if message.starts_with("No network segment defined for relay addresses")
+        ),
+        "{error:?}"
+    );
+
     Ok(())
 }
 
@@ -2138,5 +2210,272 @@ async fn test_expected_interface_role_controls_observed_interface_creation(
         assert!(interface.addresses.is_empty(), "case: {name}");
     }
 
+    Ok(())
+}
+
+#[test]
+fn segment_lock_mode_cases() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        [
+            Check {
+                scenario: "no prefixes",
+                input: vec![],
+                expect: SegmentLockMode::Shared,
+            },
+            Check {
+                scenario: "IPv4 prefixes only",
+                input: vec!["192.0.2.0/24", "198.51.100.0/24"],
+                expect: SegmentLockMode::Shared,
+            },
+            Check {
+                scenario: "one IPv6 prefix among IPv4 prefixes",
+                input: vec!["192.0.2.0/24", "2001:db8::/64", "198.51.100.0/24"],
+                expect: SegmentLockMode::Exclusive,
+            },
+        ],
+        |prefixes: Vec<&str>| {
+            let prefixes = prefixes
+                .into_iter()
+                .map(|prefix| prefix.parse::<IpNetwork>().unwrap())
+                .collect::<Vec<_>>();
+            segment_lock_mode(&prefixes)
+        },
+    );
+}
+
+/// A Postgres error carrying only a SQLSTATE, as sqlx reports one, so the
+/// classifier can be exercised without a database.
+#[derive(Debug)]
+struct SqlState(&'static str);
+
+impl std::fmt::Display for SqlState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SQLSTATE {}", self.0)
+    }
+}
+
+impl std::error::Error for SqlState {}
+
+impl sqlx::error::DatabaseError for SqlState {
+    fn message(&self) -> &str {
+        "test error"
+    }
+
+    fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(std::borrow::Cow::Borrowed(self.0))
+    }
+
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+        self
+    }
+
+    fn kind(&self) -> sqlx::error::ErrorKind {
+        sqlx::error::ErrorKind::Other
+    }
+}
+
+fn sql_state_error(code: &'static str) -> DatabaseError {
+    DatabaseError::query(
+        "test query",
+        sqlx::Error::Database(Box::new(SqlState(code))),
+    )
+}
+
+#[test]
+fn transient_reconcile_failure_cases() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        [
+            Check {
+                scenario: "allocation lost a lock race",
+                input: DatabaseError::TryAgain,
+                expect: true,
+            },
+            Check {
+                scenario: "network config bump lost every swap",
+                input: DatabaseError::NetworkConfigVersionChanged {
+                    machine_id: MachineId::new(
+                        MachineIdSource::ProductBoardChassisSerial,
+                        [0x7b; 32],
+                        MachineType::Host,
+                    ),
+                    attempts: NETWORK_CONFIG_BUMP_ATTEMPTS,
+                },
+                expect: true,
+            },
+            Check {
+                scenario: "transaction aborted for a deadlock",
+                input: sql_state_error("40P01"),
+                expect: true,
+            },
+            Check {
+                scenario: "Postgres error that is not a lock conflict",
+                input: sql_state_error("23505"),
+                expect: false,
+            },
+            Check {
+                scenario: "pool connection timed out",
+                input: DatabaseError::query("test query", sqlx::Error::PoolTimedOut),
+                expect: false,
+            },
+            Check {
+                scenario: "host without a primary admin interface",
+                input: DatabaseError::internal("no primary admin interface".to_string()),
+                expect: false,
+            },
+        ],
+        |error| is_transient_reconcile_failure(&error),
+    );
+}
+
+/// Creates a ready Admin segment with `prefixes` and returns its id.
+async fn create_admin_segment(
+    pool: &sqlx::PgPool,
+    name: &str,
+    prefixes: &[&str],
+) -> Result<NetworkSegmentId, Box<dyn std::error::Error>> {
+    let segment_id = NetworkSegmentId::new();
+    let prefixes = prefixes
+        .iter()
+        .map(|prefix| {
+            Ok(NewNetworkPrefix {
+                prefix: prefix.parse()?,
+                gateway: None,
+                dhcpv6_link_address: None,
+                num_reserved: 0,
+            })
+        })
+        .collect::<Result<Vec<_>, ipnetwork::IpNetworkError>>()?;
+    let mut txn = db::Transaction::begin(pool).await?;
+    db::network_segment::persist(
+        NewNetworkSegment {
+            id: segment_id,
+            name: name.to_string(),
+            subdomain_id: None,
+            vpc_id: None,
+            mtu: 1500,
+            prefixes,
+            vlan_id: None,
+            vni: None,
+            segment_type: NetworkSegmentType::Admin,
+            can_stretch: Some(false),
+            allocation_strategy: AllocationStrategy::Dynamic,
+            infer_slaac_eui64_addresses: false,
+        },
+        txn.as_pgconn(),
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(segment_id)
+}
+
+/// Advisory lock modes the current session holds, sorted by mode.
+async fn held_advisory_lock_modes(conn: &mut PgConnection) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT mode FROM pg_locks \
+         WHERE pid = pg_backend_pid() AND locktype = 'advisory' AND granted \
+         ORDER BY mode",
+    )
+    .fetch_all(conn)
+    .await
+}
+
+/// At an IPv4-only site the allocation mode holds every admin segment shared:
+/// a second allocating transaction is admitted alongside the first, the
+/// reconcile's own pass re-acquires the keys without upgrading them, and an
+/// exclusive request waits for every holder.
+#[crate::sqlx_test]
+async fn allocation_mode_locks_ipv4_only_admin_segments_shared(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_admin_segment(&pool, "admin-v4-a", &["192.0.2.0/24"]).await?;
+    create_admin_segment(&pool, "admin-v4-b", &["198.51.100.0/24"]).await?;
+
+    let mut holder = pool.begin().await?;
+    let admin_segment_count =
+        db::network_segment::list_segment_ids(&mut holder, Some(NetworkSegmentType::Admin))
+            .await?
+            .len();
+    lock_all_admin_segments_for_allocation(&mut holder).await?;
+    let shared_modes = vec!["ShareLock".to_string(); admin_segment_count];
+    assert_eq!(held_advisory_lock_modes(&mut holder).await?, shared_modes);
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
+
+    let mut peer = pool.begin().await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        lock_all_admin_segments_for_allocation(&mut peer),
+    )
+    .await??;
+    let peer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *peer)
+        .await?;
+
+    // The locked reconcile pass takes the same set in the same mode: no wait
+    // behind the peer, and no exclusive lock appears.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        load_and_lock_all_admin_segments(&mut holder),
+    )
+    .await??;
+    assert_eq!(held_advisory_lock_modes(&mut holder).await?, shared_modes);
+
+    // The exclusive request waits for each holder in turn: still blocked by
+    // the peer once the holder is gone, admitted once the peer is gone too.
+    let mut teardown = pool.begin().await?;
+    let teardown_lock = async {
+        lock_all_admin_segments(&mut teardown).await?;
+        teardown.rollback().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let release = async {
+        wait_for_blocked_query(&pool, holder_pid, "pg_advisory_xact_lock(").await;
+        holder.rollback().await?;
+        wait_for_blocked_query(&pool, peer_pid, "pg_advisory_xact_lock(").await;
+        peer.rollback().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::try_join!(teardown_lock, release)
+    })
+    .await??;
+    Ok(())
+}
+
+/// One IPv6 admin prefix makes the allocation mode exclusive on every admin
+/// segment, the IPv4-only ones included, so no later IPv6 allocation upgrades
+/// a lock.
+#[crate::sqlx_test]
+async fn ipv6_admin_prefix_locks_every_admin_segment_exclusively(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_admin_segment(&pool, "admin-v4", &["192.0.2.0/24"]).await?;
+    create_admin_segment(&pool, "admin-dual", &["198.51.100.0/24", "2001:db8::/64"]).await?;
+
+    let mut holder = pool.begin().await?;
+    let admin_segment_count =
+        db::network_segment::list_segment_ids(&mut holder, Some(NetworkSegmentType::Admin))
+            .await?
+            .len();
+    lock_all_admin_segments_for_allocation(&mut holder).await?;
+    assert_eq!(
+        held_advisory_lock_modes(&mut holder).await?,
+        vec!["ExclusiveLock".to_string(); admin_segment_count]
+    );
+    holder.rollback().await?;
     Ok(())
 }

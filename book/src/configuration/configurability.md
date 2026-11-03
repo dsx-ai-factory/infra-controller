@@ -835,8 +835,8 @@ advertised. Both are documented field-by-field in
 
 `[ib_config]` toggles InfiniBand support fleet-wide; `[ib_fabrics.<name>]`
 defines a specific UFM-managed fabric. Currently exactly one fabric is
-supported. Required fields: UFM endpoint, credentials (username + password,
-or token), MGMT IB subnet, GUID prefix. See
+supported. Required fields: UFM endpoint, credentials (a token or a client
+certificate), MGMT IB subnet, GUID prefix. See
 [`crates/api-core/src/cfg/README.md` → NicoConfig](../../../crates/api-core/src/cfg/README.md#nicoconfig-top-level).
 
 ### Operator dev / debug knobs
@@ -882,7 +882,7 @@ through Kubernetes Secrets and ConfigMaps wired by `helm-prereqs`:
 | `vault-cluster-keys` / `vaultunsealkeys` / `vaultroottoken` | Secret | Vault init job | Vault auto-unseal on pod restart |
 | `nico-roots` | Secret | ESO-synced from Vault PKI | Every workload that needs the SPIFFE root |
 | `imagepullsecret` / `nvcr-nico-dev` | dockerconfigjson | `setup.sh` (from `REGISTRY_PULL_SECRET`) | Every pod that pulls from authenticated registries |
-| `ssh-host-key` | Secret | `helm-prereqs` pre-install Job | `nico-ssh-console-rs` (mounted as `ssh_host_ed25519_key`) |
+| `ssh-host-key` | Secret | `bootstrap_ssh_host_key.sh` during `setup.sh` prerequisite setup | `nico-ssh-console-rs` (mounted as `ssh_host_ed25519_key`) |
 | `azure-sso-nico-web-client-secret` | Secret | **operator-supplied** (manual, optional) | `nico-api` when `[auth.web].auth_type = "oauth2"` (`CARBIDE_WEB_OAUTH2_CLIENT_SECRET` env) |
 | `site-root` | cert-manager Certificate | `helm-prereqs` (self-signed bootstrap) | Vault PKI bootstrap chain |
 
@@ -1139,6 +1139,8 @@ NvLink partitioning via NMX-C is gated on `[nvlink_config]`:
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+partition_monitor_max_concurrent_groups = 16 # racks or chassis reconciled in parallel per pass, documented range 1 to 256, larger values are accepted with a startup warning
+partition_monitor_full_check_interval = "10m" # racks and chassis whose inputs are unchanged and whose instances are synced are skipped between full checks, GPU health on them refreshes at this interval, "0s" checks every pass
 nmxc_endpoint = "https://nmxc.example.com"
 # Plus auth + retry settings — see the canonical reference.
 ```
@@ -1374,7 +1376,7 @@ helm template nico ./helm -f helm-prereqs/values/nico-core.yaml --set global.ima
 - **NICo Core log level**: set `RUST_LOG` via `nico-api.extraEnv` (`info`, `debug`, `trace`; default `info`). Same pattern for every Rust workload.
 - **Structured logging**: `nico-api` emits JSON to stdout — collect with any cluster logging stack.
 - **Prometheus metrics**: every chart exposes `/metrics`; ServiceMonitor CRDs are off by default and gated behind `<chart>.serviceMonitor.enabled`.
-- **Metric prefix migration**: existing dashboards reference `carbide_*`. Set `alt_metric_prefix = "nico"` in siteConfig to emit `nico_*` aliases alongside without breaking the legacy names.
+- **Metric prefix migration**: existing dashboards reference `carbide_*`. Set `alt_metric_prefix = "nico_"` in siteConfig to emit `nico_*` aliases alongside without breaking the legacy names.
 - **SSH session logs**: opt-in via `nico-ssh-console-rs.lokiLogCollector.enabled` — see *Layer 4* above.
 
 ### Backup and restore
@@ -1516,7 +1518,7 @@ on or off.
 | ServiceMonitor (per chart) | Helm | `<chart>.serviceMonitor.enabled` | off | Enable when the Prometheus Operator is installed. |
 | Hardware-health telemetry | Helm | `nico-hardware-health.telemetryServiceMonitor.enabled` | off | Enable for per-machine sensor metrics (temperature, power, fans). |
 | IB Fabric Monitor | siteConfig | `[ib_config].enabled` | off | Sites running InfiniBand fabrics managed by UFM. |
-| NvLink Monitor | siteConfig | `[nvlink_config].enabled` | off | GB200/GB300 sites using NMX-C for NvLink partitioning. |
+| NvLink Monitor | siteConfig | `[nvlink_config].enabled` | off | GB200/GB300/VR sites using NMX-C for NvLink partitioning. |
 | DSX Exchange Event Bus | siteConfig | `[dsx_exchange_event_bus]` present | off | Pairs with the `nico-dsx-exchange-consumer` chart. Requires MQTT broker. |
 | DPA (Cluster Interconnect) | siteConfig | `[dpa_config].enabled` | off | East-west Ethernet cluster networking; requires MQTT broker. |
 | FNN (L3 VPC overlay) | siteConfig | `[fnn]` present | off | Tenant VPC networking via VXLAN; needs `routing_profiles` and route targets. |

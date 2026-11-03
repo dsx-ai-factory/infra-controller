@@ -24,6 +24,7 @@ import (
 // Re-export for convenience
 type ComponentDrift = inventorystore.ComponentDrift
 type FieldDiff = inventorystore.FieldDiff
+type ComponentPatch = inventorystore.ComponentPatch
 
 // Manager defines the interface for inventory management business logic.
 // It wraps InventoryStore and provides a consistent API for the service layer.
@@ -50,9 +51,12 @@ type Manager interface {
 	GetComponentBySerial(ctx context.Context, manufacturer string, serial string, withRack bool) (*component.Component, error)
 	GetComponentByBMCMAC(ctx context.Context, macAddress string) (*component.Component, error)
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*component.Component, error)
+	// GetComponentIdentitiesByIDsIncludingDeleted resolves saved task selections;
+	// missing UUIDs are omitted, and an empty request performs no query.
+	GetComponentIdentitiesByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID) ([]component.Identity, error)
 	GetListOfComponents(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, componentTypes []devicetypes.ComponentType, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy) ([]*component.Component, int32, error)
 	AddComponent(ctx context.Context, comp *component.Component) (uuid.UUID, error)
-	PatchComponent(ctx context.Context, comp *component.Component) error
+	PatchComponent(ctx context.Context, patch ComponentPatch) error
 	DeleteComponent(ctx context.Context, id uuid.UUID) error
 	PurgeComponent(ctx context.Context, id uuid.UUID) error
 
@@ -176,6 +180,12 @@ func (m *ManagerImpl) GetComponentsByExternalIDs(ctx context.Context, externalID
 	return m.store.GetComponentsByExternalIDs(ctx, externalIDs)
 }
 
+// GetComponentIdentitiesByIDsIncludingDeleted retains identities after soft
+// deletion so task details can still name their recorded inventory targets.
+func (m *ManagerImpl) GetComponentIdentitiesByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID) ([]component.Identity, error) {
+	return m.store.GetComponentIdentitiesByIDsIncludingDeleted(ctx, ids)
+}
+
 // CreateNVLDomain creates a new NVL domain.
 func (m *ManagerImpl) CreateNVLDomain(ctx context.Context, nvlDomain *nvldomain.NVLDomain) (uuid.UUID, error) {
 	return m.store.CreateNVLDomain(ctx, nvlDomain)
@@ -217,8 +227,8 @@ func (m *ManagerImpl) AddComponent(ctx context.Context, comp *component.Componen
 }
 
 // PatchComponent updates a single component's fields in the database.
-func (m *ManagerImpl) PatchComponent(ctx context.Context, comp *component.Component) error {
-	return m.store.PatchComponent(ctx, comp)
+func (m *ManagerImpl) PatchComponent(ctx context.Context, patch ComponentPatch) error {
+	return m.store.PatchComponent(ctx, patch)
 }
 
 // DeleteRack soft-deletes a rack and all its components.

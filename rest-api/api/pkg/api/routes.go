@@ -417,9 +417,14 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		},
 		// Interface endpoints
 		{
+			Path:    apiPathPrefix + "/interface",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllInterfaceHandler(dbSession, tc, cfg, nil),
+		},
+		{
 			Path:    apiPathPrefix + "/instance/:instanceId/interface",
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetAllInterfaceHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewGetAllInstanceInterfaceHandler(dbSession, tc, cfg),
 		},
 		// Instance InfiniBandInterface endpoints
 		{
@@ -797,6 +802,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/machine/:id/chassis/:chassisId/reset",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewResetMachineChassisHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/spectrumx-multiplane",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetMachineSpectrumXMultiplaneHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/spectrumx-multiplane",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateMachineSpectrumXMultiplaneHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/machine/:id/health-report",
@@ -1424,6 +1439,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/tray/:id/health-report/:source",
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteTrayHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/power",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetTrayPowerStateHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/tray/:id/power",

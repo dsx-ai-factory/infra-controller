@@ -111,12 +111,11 @@ func (rs *FlowServerImpl) GetTrayPowerDetails(
 	}
 
 	details := &pb.TrayPowerDetails{
-		FlowComponentId: protobuf.UUIDTo(tray.Info.ID),
-		ComponentType:   protobuf.ComponentTypeTo(tray.Type),
-		Operations:      &pb.PowerOperations{},
+		ComponentType: protobuf.ComponentTypeTo(tray.Type),
+		Operations:    &pb.PowerOperations{},
 	}
 	if tray.ComponentID != "" {
-		details.CoreComponentId = &tray.ComponentID
+		details.ComponentId = &tray.ComponentID
 	}
 	if tray.RackID != uuid.Nil {
 		details.RackId = protobuf.UUIDTo(tray.RackID)
@@ -133,6 +132,17 @@ func (rs *FlowServerImpl) GetTrayPowerDetails(
 	go func() {
 		defer reads.Done()
 		details.Operations.Tasks = rs.readFlowPowerTasks(readCtx, tray)
+		externalRackID, rackError := rs.readPowerDetailsRackID(readCtx, tray)
+		if externalRackID != "" {
+			details.RackExternalId = &externalRackID
+		}
+		if rackError != nil {
+			for _, entry := range details.Operations.Tasks.Entries {
+				entry.ExternalTargets = &pb.PowerTaskExternalTargets{Error: rackError}
+			}
+			return
+		}
+		rs.addPowerTaskExternalTargets(readCtx, externalRackID, details.Operations.Tasks.Entries)
 	}()
 	reads.Wait()
 
@@ -238,6 +248,8 @@ func unavailableCorePowerDetails(code pb.PowerDetailsReadError) (*pb.PowerActual
 
 // readFlowPowerTasks filters the bounded rack read by recorded target membership.
 // A shelf selection also affects other trays on that rack without selecting them.
+// Inventory ID enrichment follows this read so a failed identity lookup cannot
+// hide the original tasks or query targets that were filtered out here.
 func (rs *FlowServerImpl) readFlowPowerTasks(ctx context.Context, tray *component.Component) *pb.PowerTaskDetailsList {
 	tasks, result := rs.readRackPowerTasks(ctx, tray.RackID)
 	if result.Error != nil {
@@ -329,12 +341,13 @@ func powerDetailsReadError(err error) pb.PowerDetailsReadError {
 	return pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_READ_FAILED
 }
 
-// boundPowerDetailsResponse drops waiting-context references before making the
-// task list unavailable, so optional context does not hide primary power tasks.
+// boundPowerDetailsResponse drops waiting-context references, then external
+// identities, before making the task list unavailable. Optional information
+// must not hide the original power-task records.
 // Selected targets are never truncated. JSON wrapper encoding matters because
 // its HTML escaping can expand strings beyond protojson's size.
 func boundPowerDetailsResponse(response *pb.GetTrayPowerDetailsResponse) error {
-	for attempt := range 3 {
+	for attempt := range 4 {
 		message, err := protojson.Marshal(response)
 		if err != nil {
 			return status.Error(codes.Internal, "power details could not be encoded")
@@ -360,6 +373,14 @@ func boundPowerDetailsResponse(response *pb.GetTrayPowerDetailsResponse) error {
 				task.WaitingContext = &pb.PowerTaskWaitingContext{Error: &code}
 			}
 		case 1:
+			// Retain original task records before giving up on the whole section.
+			// Preserve absent support and existing identity lookup failures.
+			for _, task := range response.GetDetails().GetOperations().GetTasks().GetEntries() {
+				if task.ExternalTargets != nil && task.ExternalTargets.Error == nil {
+					task.ExternalTargets = &pb.PowerTaskExternalTargets{Error: &code}
+				}
+			}
+		case 2:
 			// If primary tasks still do not fit, retain Core facts and report
 			// the task section as unavailable rather than dropping any targets.
 			response.Details.Operations.Tasks = &pb.PowerTaskDetailsList{Error: &code}

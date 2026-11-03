@@ -560,7 +560,10 @@ mod tests {
 
         let metric_event = CollectorEvent::Metric(
             MetricSample {
-                semantics: MetricSemantics::CumulativeCounter { start_time: None },
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable PCIe errors reported by the device",
+                    start_time: None,
+                },
                 key: "metric_key".to_string(),
                 name: "hw_metric".to_string(),
                 metric_type: "pcie_correctable_errors".to_string(),
@@ -631,7 +634,10 @@ mod tests {
         sink.handle_event(&context, &start_event);
         let s1_event = CollectorEvent::Metric(
             MetricSample {
-                semantics: MetricSemantics::CumulativeCounter { start_time: None },
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable PCIe errors reported by the device",
+                    start_time: None,
+                },
                 key: "s1".to_string(),
                 name: "hw_metric".to_string(),
                 metric_type: "pcie_correctable_errors".to_string(),
@@ -668,7 +674,10 @@ mod tests {
         sink.handle_event(&context, &start_event);
         let s2_event = CollectorEvent::Metric(
             MetricSample {
-                semantics: MetricSemantics::CumulativeCounter { start_time: None },
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable PCIe errors reported by the device",
+                    start_time: None,
+                },
                 key: "s2".to_string(),
                 name: "hw_metric".to_string(),
                 metric_type: "pcie_correctable_errors".to_string(),

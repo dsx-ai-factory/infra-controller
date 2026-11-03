@@ -47,7 +47,7 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(ms.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")

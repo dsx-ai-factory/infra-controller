@@ -302,6 +302,13 @@ pub enum MetricSemantics {
     /// values retain only the legacy gauge. Callers must keep the alias name
     /// distinct from other metric names in both Prometheus and OTLP exports.
     CumulativeCounter {
+        /// Prometheus `HELP` and OTLP description for the counter alias.
+        /// Callers must supply nonempty text and use the same text for every
+        /// observation with the same exported name, including across endpoints.
+        /// Each export uses the first description encountered for a family.
+        /// The gauge uses the collector's Prometheus `HELP` and an empty OTLP
+        /// description.
+        description: &'static str,
         /// When the device began accumulating this value, if the source reports it.
         /// After a reset, report the new accumulation start, or `None` if unknown.
         /// A connection or exporter start time does not establish this epoch.

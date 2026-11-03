@@ -17,10 +17,12 @@ import (
 )
 
 func TestDetector_Collect(t *testing.T) {
-	t.Run("ingests one event per leaking component", func(t *testing.T) {
-		computeObservedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	t.Run("ingests one event per leaking resource", func(t *testing.T) {
+		rackObservedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+		computeObservedAt := rackObservedAt.Add(time.Second)
 		switchObservedAt := computeObservedAt.Add(time.Second)
 		reader := &leakReader{
+			racks: []string{"rack-1"},
 			machines: []string{
 				"",
 				"machine-2",
@@ -31,9 +33,9 @@ func TestDetector_Collect(t *testing.T) {
 			},
 			switches: []string{"switch-1"},
 		}
-		detector := newTestDetector(t, reader, computeObservedAt)
+		detector := newTestDetector(t, reader, rackObservedAt)
 
-		observedAts := []time.Time{computeObservedAt, switchObservedAt}
+		observedAts := []time.Time{rackObservedAt, computeObservedAt, switchObservedAt}
 		nextObservedAt := 0
 		detector.now = func() time.Time {
 			observedAt := observedAts[nextObservedAt]
@@ -45,13 +47,15 @@ func TestDetector_Collect(t *testing.T) {
 		envelopes, err := collectEnvelopes(context.Background(), detector)
 
 		require.NoError(t, err)
-		require.Len(t, envelopes, 3)
-		require.Equal(t, []string{"machine-1", "machine-2", "switch-1"}, []string{
+		require.Len(t, envelopes, 4)
+		require.Equal(t, []string{"rack-1", "machine-1", "machine-2", "switch-1"}, []string{
 			envelopes[0].Resource.ExternalID,
 			envelopes[1].Resource.ExternalID,
 			envelopes[2].Resource.ExternalID,
+			envelopes[3].Resource.ExternalID,
 		})
 		require.Equal(t, []flowtypes.ComponentType{
+			"",
 			flowtypes.ComponentTypeCompute,
 			flowtypes.ComponentTypeCompute,
 			flowtypes.ComponentTypeNVSwitch,
@@ -59,8 +63,10 @@ func TestDetector_Collect(t *testing.T) {
 			envelopes[0].Resource.ComponentTypeHint,
 			envelopes[1].Resource.ComponentTypeHint,
 			envelopes[2].Resource.ComponentTypeHint,
+			envelopes[3].Resource.ComponentTypeHint,
 		})
-		for _, envelope := range envelopes {
+		require.Equal(t, eventrule.ResourceKindRack, envelopes[0].Resource.Kind)
+		for _, envelope := range envelopes[1:] {
 			require.Empty(t, envelope.Key.SourceName)
 			require.NotEmpty(t, envelope.Key.SourceKey)
 			require.Equal(t, leakage.TypeHardwareLeakDetected, envelope.Type)
@@ -68,6 +74,7 @@ func TestDetector_Collect(t *testing.T) {
 			require.Equal(t, eventrule.ResourceKindComponent, envelope.Resource.Kind)
 		}
 		require.Equal(t, []time.Time{
+			rackObservedAt,
 			computeObservedAt,
 			computeObservedAt,
 			switchObservedAt,
@@ -75,6 +82,7 @@ func TestDetector_Collect(t *testing.T) {
 			envelopes[0].ObservedAt,
 			envelopes[1].ObservedAt,
 			envelopes[2].ObservedAt,
+			envelopes[3].ObservedAt,
 		})
 	})
 
@@ -104,16 +112,16 @@ func TestDetector_Collect(t *testing.T) {
 
 	t.Run("ingests successful source after another source fails", func(t *testing.T) {
 		reader := &leakReader{
-			machineErr: errors.New("machine query unavailable"),
-			switches:   []string{"switch-1"},
+			rackErr:  errors.New("rack query unavailable"),
+			machines: []string{"machine-1"},
 		}
 		detector := newTestDetector(t, reader, time.Now())
 
 		envelopes, err := collectEnvelopes(context.Background(), detector)
 
-		require.ErrorContains(t, err, "machine query unavailable")
+		require.ErrorContains(t, err, "rack query unavailable")
 		require.Len(t, envelopes, 1)
-		require.Equal(t, "switch-1", envelopes[0].Resource.ExternalID)
+		require.Equal(t, "machine-1", envelopes[0].Resource.ExternalID)
 	})
 
 	t.Run("continues after terminal per-event failures", func(t *testing.T) {
@@ -141,8 +149,8 @@ func TestDetector_Collect(t *testing.T) {
 		)
 
 		require.ErrorIs(t, err, eventrule.ErrTerminalProcessing)
-		require.ErrorContains(t, err, `component "machine-1"`)
-		require.ErrorContains(t, err, `component "switch-1"`)
+		require.ErrorContains(t, err, `resource "machine-1"`)
+		require.ErrorContains(t, err, `resource "switch-1"`)
 		require.Equal(t, []string{"machine-1", "machine-2", "switch-1"}, ingested)
 	})
 
@@ -241,10 +249,16 @@ func newTestDetector(t *testing.T, reader Reader, now time.Time) *Detector {
 }
 
 type leakReader struct {
+	racks      []string
 	machines   []string
 	switches   []string
+	rackErr    error
 	machineErr error
 	switchErr  error
+}
+
+func (r *leakReader) GetLeakingRackIds(context.Context) ([]string, error) {
+	return r.racks, r.rackErr
 }
 
 func (r *leakReader) GetLeakingMachineIds(context.Context) ([]string, error) {

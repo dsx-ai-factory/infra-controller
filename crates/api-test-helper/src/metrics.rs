@@ -50,41 +50,52 @@ pub struct MetricInfo {
 
 /// Collect metric type information exposed by prometheus endpoints
 pub fn collect_metric_infos(metrics_endpoints: &[SocketAddr]) -> eyre::Result<Vec<MetricInfo>> {
+    let responses = metrics_endpoints
+        .iter()
+        .map(metrics)
+        .collect::<eyre::Result<Vec<_>>>()?;
+    Ok(parse_metric_infos(&responses.join("\n")))
+}
+
+/// `parse_metric_infos` reads HELP and TYPE metadata from Prometheus text.
+/// Each directive must be complete: `# HELP <name> <help>` or
+/// `# TYPE <name> <type>`. An absent companion directive leaves its field
+/// empty. Repeated names keep the last value for each field.
+///
+/// # Panics
+///
+/// Panics when a line beginning with `# HELP` or `# TYPE` has fewer than four
+/// space-separated fields or its directive is not exactly `HELP` or `TYPE`.
+pub fn parse_metric_infos(metrics: &str) -> Vec<MetricInfo> {
     let mut metric_infos: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    let lines: Vec<&str> = metrics
+        .lines()
+        .filter(|line| line.starts_with("# HELP") || line.starts_with("# TYPE"))
+        .collect();
 
-    for ep in metrics_endpoints.iter() {
-        let metrics = metrics(ep)?;
-        let lines: Vec<&str> = metrics
-            .lines()
-            .filter(|line| line.starts_with("# HELP") || line.starts_with("# TYPE"))
-            .collect();
-
-        for line in lines {
-            let mut parts = line.splitn(4, " ");
-            let _pound = parts.next().unwrap();
-            let line_type = parts.next().unwrap();
-            let name = parts.next().unwrap().to_string();
-            let value = parts.next().unwrap().to_string();
-            if line_type == "TYPE" {
-                metric_infos.entry(name).or_default().0 = Some(value);
-            } else if line_type == "HELP" {
-                metric_infos.entry(name).or_default().1 = Some(value);
-            } else {
-                panic!("Unhandled line type {line_type}");
-            }
+    for line in lines {
+        let mut parts = line.splitn(4, " ");
+        let _pound = parts.next().unwrap();
+        let line_type = parts.next().unwrap();
+        let name = parts.next().unwrap().to_string();
+        let value = parts.next().unwrap().to_string();
+        if line_type == "TYPE" {
+            metric_infos.entry(name).or_default().0 = Some(value);
+        } else if line_type == "HELP" {
+            metric_infos.entry(name).or_default().1 = Some(value);
+        } else {
+            panic!("Unhandled line type {line_type}");
         }
     }
 
-    let infos: Vec<MetricInfo> = metric_infos
+    metric_infos
         .into_iter()
         .map(|(name, (ty, help))| MetricInfo {
             name,
             help: help.unwrap_or_default(),
             ty: ty.unwrap_or_default(),
         })
-        .collect();
-
-    Ok(infos)
+        .collect()
 }
 
 /// Waits for a specific metric line to show up. Returns the metrics.
@@ -129,4 +140,33 @@ pub fn assert_not_metric_line(metrics: &str, expected: &str) {
         !metrics.contains(expected),
         "Expected missing \"{expected}\" in Metrics/nActual metrics are:\n{metrics}"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::parse_metric_infos;
+
+    #[test]
+    fn metric_metadata_merges_directives_per_name() {
+        let exposition = [
+            "# HELP a original help\n# TYPE a counter\n# TYPE b counter",
+            "# HELP a latest help\n# TYPE a gauge\n# HELP c help only",
+        ]
+        .join("\n");
+        let infos = parse_metric_infos(&exposition);
+        let metadata = infos
+            .iter()
+            .map(|info| (info.name.as_str(), (info.ty.as_str(), info.help.as_str())))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            metadata,
+            BTreeMap::from([
+                ("a", ("gauge", "latest help")),
+                ("b", ("counter", "")),
+                ("c", ("", "help only")),
+            ]),
+        );
+    }
 }

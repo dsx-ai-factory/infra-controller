@@ -29,7 +29,7 @@ use carbide_dpf::types::{
 };
 use carbide_dpf::{
     AstraRoutePrefixes, BmcPasswordProvider, DPU_ENABLED_NODE_LABEL, DpfError, DpfSdk,
-    DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo, DpuPhase, DpuWatcher, KubeRepository,
+    DpuDeploymentType, DpuDeviceInfo, DpuNodeInfo, DpuPhaseObservation, DpuWatcher, KubeRepository,
     ResourceLabeler, node_id_from_dpu_node_cr_name,
 };
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
@@ -40,6 +40,9 @@ use model::machine_pending_action::{MachinePendingAction, MachinePendingActionKi
 use sqlx::PgPool;
 use state_controller::controller::Enqueuer;
 use tokio::task::JoinSet;
+
+pub(crate) mod deployment;
+pub use deployment::validate_reprovision_compatibility;
 
 use crate::handler::is_bf4_dmi_product;
 use crate::io::MachineStateControllerIO;
@@ -91,21 +94,34 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         dpu_device_names: &[String],
     ) -> Result<(), DpfError>;
 
-    /// Get the current phase of a DPU (for status reporting).
-    async fn get_dpu_phase(
+    /// Read a DPU phase and terminal failure details from the same CR observation.
+    ///
+    /// `device_id` excludes the `device-` prefix. `node_name` accepts a node ID
+    /// or DPUNode CR name; one leading `node-` prefix is stripped. Deletion
+    /// returns `Deleting` without failure details, even with stale status.
+    /// See [`DpfSdk::get_dpu_phase_observation`] for errors when the CR or
+    /// status is missing.
+    async fn get_dpu_phase_observation(
         &self,
-        dpu_device_name: &str,
+        device_id: &str,
         node_name: &str,
-    ) -> Result<DpuPhase, DpfError>;
+    ) -> Result<DpuPhaseObservation, DpfError>;
 
-    /// Read every requested DPU phase only when one deployment owns the full
-    /// set and each Ready DPU matches its flavor and provisioning source.
-    async fn get_dpu_phases_for_deployment_type(
+    /// Read every requested DPU phase and failure details only when one deployment owns the full
+    /// set and each `Ready` DPU matches its flavor and provisioning source.
+    ///
+    /// `device_ids` contains distinct IDs without the `device-` prefix; these
+    /// IDs are also the returned map keys, ordered lexicographically.
+    /// `node_name` accepts a node ID or DPUNode CR name; one leading `node-`
+    /// prefix is stripped. No partial map is returned. See
+    /// [`DpfSdk::get_dpu_phase_observations_for_deployment_type`] for `None`,
+    /// empty input, and error behavior.
+    async fn get_dpu_phase_observations_for_deployment_type(
         &self,
-        dpu_device_names: &[String],
+        device_ids: &[String],
         node_name: &str,
         deployment_type: DpuDeploymentType,
-    ) -> Result<Option<BTreeMap<String, DpuPhase>>, DpfError>;
+    ) -> Result<Option<BTreeMap<String, DpuPhaseObservation>>, DpfError>;
 
     /// Delete source deployment DPU CRs while preserving target replacements.
     async fn delete_source_dpus_for_deployment_migration(
@@ -124,7 +140,7 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
 
     /// Resolve a DPU's base hardware deployment class (BF3 or BF4).
     ///
-    /// The state handler separately refines BF3 from the host rack and DPU
+    /// `deployment_types_for_host` refines BF3 from the host rack and DPU
     /// profile. This returns `Err` when the DMI product name is absent.
     fn deployment_type_for_dpu(
         &self,
@@ -134,6 +150,7 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
 
     /// Check that a DPUNode's labels match the current expected labels.
     /// Returns `false` when the node exists but has stale labels.
+    /// A missing DPUNode returns `true`; this does not establish resource readiness.
     async fn verify_node_labels(
         &self,
         node_name: &str,
@@ -187,26 +204,26 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
     /// DPU is already up to date" fail closed.
     async fn is_dpu_outdated(&self, dpu_name: &str) -> Result<bool, DpfError>;
 
-    /// Create a direct, detached DPUService for an extension service.
+    /// Create a direct, detached DPUService managed independently of a DPUDeployment.
     async fn create_dpu_service(
         &self,
         service: &DetachedDpuServiceDefinition,
     ) -> Result<DpuServiceObservation, DpfError>;
 
-    /// Get any observed DPUService by name for an extension service.
+    /// Get any observed DPUService by name for ownership and convergence checks.
     async fn get_dpu_service(
         &self,
         service_name: &str,
     ) -> Result<Option<DpuServiceObservation>, DpfError>;
 
-    /// Apply an RFC 6902 JSON Patch to a detached DPUService for an extension service.
+    /// Apply an RFC 6902 JSON Patch to a detached DPUService.
     async fn patch_dpu_service(
         &self,
         service_name: &str,
         patch: serde_json::Value,
     ) -> Result<DpuServiceObservation, DpfError>;
 
-    /// Delete the exact detached DPUService observed for an extension service.
+    /// Delete the exact detached DPUService identified by Kubernetes preconditions.
     async fn delete_dpu_service(
         &self,
         service_name: &str,
@@ -838,22 +855,24 @@ impl DpfOperations for DpfSdkOps {
         self.sdk.reprovision_dpu(dpu_device_name, node_name).await
     }
 
-    async fn get_dpu_phase(
+    async fn get_dpu_phase_observation(
         &self,
-        dpu_device_name: &str,
+        device_id: &str,
         node_name: &str,
-    ) -> Result<DpuPhase, DpfError> {
-        self.sdk.get_dpu_phase(dpu_device_name, node_name).await
+    ) -> Result<DpuPhaseObservation, DpfError> {
+        self.sdk
+            .get_dpu_phase_observation(device_id, node_name)
+            .await
     }
 
-    async fn get_dpu_phases_for_deployment_type(
+    async fn get_dpu_phase_observations_for_deployment_type(
         &self,
-        dpu_device_names: &[String],
+        device_ids: &[String],
         node_name: &str,
         deployment_type: DpuDeploymentType,
-    ) -> Result<Option<BTreeMap<String, DpuPhase>>, DpfError> {
+    ) -> Result<Option<BTreeMap<String, DpuPhaseObservation>>, DpfError> {
         self.sdk
-            .get_dpu_phases_for_deployment_type(dpu_device_names, node_name, deployment_type)
+            .get_dpu_phase_observations_for_deployment_type(device_ids, node_name, deployment_type)
             .await
     }
 

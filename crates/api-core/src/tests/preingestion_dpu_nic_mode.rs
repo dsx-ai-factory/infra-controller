@@ -98,6 +98,7 @@ fn host_bmc_report() -> EndpointExplorationReport {
                 description: None,
                 version: Some("6.10.00.00".to_string()),
                 release_date: None,
+                drive: None,
             }],
         }],
         machine_id: None,

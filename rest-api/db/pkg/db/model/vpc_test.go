@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -41,6 +42,97 @@ func testVpcSetupSchema(t *testing.T, dbSession *db.Session) {
 
 	err = dbSession.DB.ResetModel(context.Background(), (*Vpc)(nil))
 	require.NoError(t, err)
+}
+
+// TestVpcRouteTarget_ToProto verifies literal and symbolic VNI sources retain
+// distinct wire presence because omitted and zero VNIs have different meanings.
+func TestVpcRouteTarget_ToProto(t *testing.T) {
+	tests := []struct {
+		name   string
+		target VpcRouteTarget
+		want   *corev1.RouteTarget
+	}{
+		// Literal zero must remain explicitly present for predecessor-compatible routing.
+		{
+			name:   "encodes literal zero",
+			target: VpcRouteTarget{ASN: 64_512},
+			want:   &corev1.RouteTarget{Asn: 64_512, Vni: cutil.GetPtr(uint32(0))},
+		},
+		// Symbolic resolution must omit the competing literal source.
+		{
+			name:   "encodes symbolic VNI",
+			target: VpcRouteTarget{ASN: 64_513, VniSelf: true},
+			want:   &corev1.RouteTarget{Asn: 64_513, VniSelf: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Convert through the mapper used by routing-profile overrides.
+			got := tt.target.ToProto()
+
+			// Preserve the selected source and its presence on the Core wire.
+			assert.True(t, proto.Equal(tt.want, got))
+		})
+	}
+
+	t.Run("preserves literal zero from legacy JSON", func(t *testing.T) {
+		// Decode the exact route-target object stored by predecessor REST binaries.
+		target := VpcRouteTarget{}
+		require.NoError(t, json.Unmarshal([]byte(`{"asn":64512,"vni":0}`), &target))
+
+		// Missing vniSelf must still emit an explicitly present literal zero.
+		got := target.ToProto()
+		assert.True(t, proto.Equal(
+			&corev1.RouteTarget{Asn: 64_512, Vni: cutil.GetPtr(uint32(0))},
+			got,
+		))
+	})
+}
+
+// TestVpcRouteTarget_FromProto verifies compatible literal encodings and
+// symbolic targets replace stale receiver state because their meanings differ.
+func TestVpcRouteTarget_FromProto(t *testing.T) {
+	tests := []struct {
+		name        string
+		protoTarget *corev1.RouteTarget
+		want        VpcRouteTarget
+	}{
+		// Predecessor scalar zero arrives without presence and must retain literal-zero meaning.
+		{
+			name:        "decodes omitted predecessor zero",
+			protoTarget: &corev1.RouteTarget{Asn: 64_512},
+			want:        VpcRouteTarget{ASN: 64_512, VNI: 0},
+		},
+		// A present zero follows the new literal encoding while producing the same REST value.
+		{
+			name: "decodes explicit zero",
+			protoTarget: &corev1.RouteTarget{
+				Asn: 64_513,
+				Vni: cutil.GetPtr(uint32(0)),
+			},
+			want: VpcRouteTarget{ASN: 64_513, VNI: 0},
+		},
+		// Symbolic resolution must clear a stale literal value.
+		{
+			name:        "decodes symbolic VNI",
+			protoTarget: &corev1.RouteTarget{Asn: 64_514, VniSelf: true},
+			want:        VpcRouteTarget{ASN: 64_514, VniSelf: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Seed both fields so the conversion must replace the complete value.
+			target := VpcRouteTarget{ASN: 1, VNI: 1, VniSelf: true}
+
+			// Decode through the mapper used by configured routing profiles.
+			target.FromProto(tt.protoTarget)
+
+			// Each encoding must replace the receiver with its selected VNI source.
+			assert.Equal(t, tt.want, target)
+		})
+	}
 }
 
 func TestVpcSQLDAO_GetByID(t *testing.T) {
@@ -993,8 +1085,9 @@ func TestVpcSQLDAO_CreateFromParams(t *testing.T) {
 	st := testBuildSite(t, dbSession, nil, ip.ID, "test-site", "Test Site", ip.Org, ipu.ID)
 
 	networkSecurityGroup := testInstanceBuildNetworkSecurityGroup(t, dbSession, tn, st, "testNetworkSecurityGroup")
+	// Persist a symbolic import because JSONB must retain the caller's VNI source.
 	routingProfileOverrides := &VpcRoutingProfileOverrides{
-		RouteTargetImports:           &[]VpcRouteTarget{{ASN: 64512, VNI: 101}},
+		RouteTargetImports:           &[]VpcRouteTarget{{ASN: 64512, VniSelf: true}},
 		LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
 		AllowedAnycastPrefixes:       &[]string{},
 	}
@@ -1161,8 +1254,9 @@ func TestVpcSQLDAO_Update(t *testing.T) {
 	networkSecurityGroup2 := testInstanceBuildNetworkSecurityGroup(t, dbSession, tn, st, "testNetworkSecurityGroup2")
 
 	vpc := testBuildVpc(t, dbSession, nil, "test-vpc", nil, tn.Org, ip.ID, tn.ID, st.ID, nil, cutil.GetPtr(VpcEthernetVirtualizer), nil, nil, nil, tnu.ID, &networkSecurityGroup.ID)
+	// Update symbolic desired state beside concrete effective state to keep both JSONB contracts distinct.
 	routingProfileOverrides := &VpcRoutingProfileOverrides{
-		RouteTargetsOnExports:         &[]VpcRouteTarget{{ASN: 64513, VNI: 202}},
+		RouteTargetsOnExports:         &[]VpcRouteTarget{{ASN: 64513, VniSelf: true}},
 		TenantLeakCommunitiesAccepted: cutil.GetPtr(true),
 	}
 	effectiveRoutingProfile := &VpcEffectiveRoutingProfile{
@@ -2008,7 +2102,7 @@ func TestVpc_ToProtoFromProto_RoundTrip(t *testing.T) {
 		ActiveVni:                 &active,
 		NVLinkLogicalPartitionID:  &nvllpID,
 		RoutingProfileOverrides: &VpcRoutingProfileOverrides{
-			RouteTargetImports:           &[]VpcRouteTarget{{ASN: 64512, VNI: 23}},
+			RouteTargetImports:           &[]VpcRouteTarget{{ASN: 64512, VniSelf: true}},
 			RouteTargetsOnExports:        &[]VpcRouteTarget{},
 			LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
 			AcceptedLeaksFromUnderlay:    &[]string{"10.0.0.1/24"},

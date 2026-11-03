@@ -5,7 +5,6 @@ package infinibandpartition
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -39,7 +38,7 @@ func (mibp ManageInfiniBandPartition) UpdateInfiniBandPartitionsInDB(ctx context
 
 	stDAO := cdbm.NewSiteDAO(mibp.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received InfiniBand Partition inventory for unknown or deleted Site")
@@ -385,17 +384,6 @@ func (mibp ManageInfiniBandPartition) createOrUpdateInfiniBandPartitionFromSite(
 		}
 
 		tenant := &tenants[0]
-
-		_, tenantSiteErr := cdbm.NewTenantSiteDAO(mibp.dbSession).GetByTenantIDAndSiteID(ctx, tx, tenant.ID, site.ID, nil)
-		if tenantSiteErr != nil {
-			if errors.Is(tenantSiteErr, cdb.ErrDoesNotExist) {
-				logger.Warn().Msgf("unable to create InfiniBand Partition found on Site: Tenant for org %s does not have access to Site", reportedIbp.Org)
-
-				return nil, nil
-			}
-
-			return nil, fmt.Errorf("unable to create InfiniBand Partition found on Site: failed to validate Tenant access to Site, DB error: %w", tenantSiteErr)
-		}
 
 		lockErr := tx.TryAcquireAdvisoryLock(
 			ctx,

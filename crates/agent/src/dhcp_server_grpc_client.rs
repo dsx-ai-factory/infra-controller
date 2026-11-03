@@ -187,8 +187,8 @@ pub(super) async fn stop_server(grpc_addr: &str) -> eyre::Result<()> {
 ///
 /// Matching configuration and interfaces do not restart a running server, so
 /// this function is safe to call on every agent tick. Success acknowledges
-/// application, not listener readiness; an empty interface list only stages
-/// configuration for a later request that includes interfaces.
+/// application, not listener readiness. An empty interface list stages file-only
+/// changes, but a changed service replacement applies on remembered listeners.
 pub(super) async fn update_and_reload(
     grpc_addr: &str,
     dhcp_config: ModelDhcpConfig,
@@ -207,6 +207,8 @@ pub(super) async fn update_and_reload(
             dhcp_config: Some(dhcp_config.into()),
             host_config: host_config.map(Into::into),
             interfaces,
+            // This writer owns host settings only, so its full replacement explicitly clears service reservations.
+            service_config: None,
         })
         .await
         .map_err(|s| eyre::eyre!("UpdateAndReloadConfig gRPC failed: {s}"))?;

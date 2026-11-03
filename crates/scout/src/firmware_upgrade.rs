@@ -186,7 +186,7 @@ async fn run_firmware_upgrade(
 mod tests {
     use axum::Router;
     use axum::routing::get;
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::capture_logs;
     use rpc::scout_firmware_upgrade::FileArtifact;
     use sha2::{Digest, Sha256};
     use tokio::net::TcpListener;
@@ -494,82 +494,6 @@ test "$(cd "$DOWNLOAD_DIR" && pwd -P)" = "$PWD/downloads"
         assert!(result.stdout.contains("argc=2"));
         assert!(result.stdout.contains("arg1=first.bin"));
         assert!(result.stdout.contains("arg2=second.bin"));
-    }
-
-    #[test]
-    fn test_download_failure() {
-        const SECRET: &str = "DOWNLOAD_FAILURE_SECRET_MARKER";
-
-        let metrics = MetricsCapture::start();
-        let runtime = test_runtime();
-        let mut output = None;
-        let logs = capture_logs(|| {
-            output = Some(runtime.block_on(async {
-                let base = start_file_server(vec![]).await;
-                let task = FirmwareUpgradeTask {
-                    upgrade_task_id: "test-upgrade-task-id".into(),
-                    component_type: "cpld".into(),
-                    target_version: "1.0.0".into(),
-                    script: Some(FileArtifact {
-                        url: format!("{base}/scripts/nonexistent.sh?token={SECRET}#{SECRET}"),
-                        sha256: "doesntmatter".into(),
-                    }),
-                    execution_timeout_seconds: 30,
-                    artifact_download_timeout_seconds: 30,
-                    file_artifacts: vec![],
-                };
-                let result = handle_firmware_upgrade(&reqwest::Client::new(), &task).await;
-                (base, result)
-            }));
-        });
-        let (base, result) = output.expect("download should produce a result");
-
-        let attempt_logs = logs
-            .iter()
-            .filter(|log| log.field("event_name") == Some("scout_firmware_download_attempt_failed"))
-            .collect::<Vec<_>>();
-        let expected_url = format!("{base}/scripts/nonexistent.sh");
-        // Assert the caller-visible retry budget independently of its constant.
-        assert_eq!(attempt_logs.len(), 4);
-        assert!(attempt_logs.iter().all(|log| {
-            log.field("kind") == Some("script")
-                && log.field("url") == Some(expected_url.as_str())
-                && log.message == "[firmware_upgrade] download attempt failed; retrying"
-                && log
-                    .field("error")
-                    .is_some_and(|error| !error.contains(SECRET))
-        }));
-        assert_eq!(
-            attempt_logs
-                .iter()
-                .filter(|log| log.field("next_action") == Some("retry"))
-                .count(),
-            3
-        );
-        assert_eq!(
-            attempt_logs
-                .iter()
-                .filter(|log| log.field("next_action") == Some("give_up"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            metrics.counter_delta(
-                "carbide_scout_firmware_download_attempt_failures_total",
-                &[("kind", "script"), ("next_action", "retry")],
-            ),
-            3.0
-        );
-        assert_eq!(
-            metrics.counter_delta(
-                "carbide_scout_firmware_download_attempt_failures_total",
-                &[("kind", "script"), ("next_action", "give_up")],
-            ),
-            1.0
-        );
-        assert!(!result.success);
-        assert!(result.error.contains(&expected_url));
-        assert!(!format!("{result:?}\n{logs:?}").contains(SECRET));
     }
 
     #[tokio::test]

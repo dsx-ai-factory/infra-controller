@@ -137,6 +137,39 @@ func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: true,
 		},
+		{
+			desc: "ok when BMC password is 128 multibyte characters",
+			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: validSwitchSerial,
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 128)),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "ok when BMC password is 255 multibyte characters",
+			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: validSwitchSerial,
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 255)),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when BMC password is 256 multibyte characters",
+			obj: APIExpectedSwitchCreateRequest{
+				NvosInterfaces:     APINvosInterfaces{{MacAddress: "02:00:00:00:10:01"}},
+				SiteID:             "550e8400-e29b-41d4-a716-446655440000",
+				BmcMacAddress:      "00:11:22:33:44:55",
+				SwitchSerialNumber: validSwitchSerial,
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 256)),
+			},
+			expectErr: true,
+		},
 		// Boundary tests for switch serial number (max 32 characters)
 		{
 			desc: "ok when switch serial number is exactly 32 characters",
@@ -632,6 +665,27 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 				DefaultBmcUsername: &validUsername,
 				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("a", 256)),
 				Labels:             map[string]string{"env": "test"},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "ok when BMC password is 128 multibyte characters",
+			obj: APIExpectedSwitchUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 128)),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "ok when BMC password is 255 multibyte characters",
+			obj: APIExpectedSwitchUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 255)),
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when BMC password is 256 multibyte characters",
+			obj: APIExpectedSwitchUpdateRequest{
+				DefaultBmcPassword: cutil.GetPtr(strings.Repeat("é", 256)),
 			},
 			expectErr: true,
 		},

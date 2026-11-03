@@ -1161,13 +1161,13 @@ async fn gnmi_sample_task(
 }
 
 /// Adapts the SAMPLE processor to the same runtime used by additional streams.
-/// The injectable opener also preserves the existing timeout/retry unit boundary.
+/// Clears retained counter metadata before each attempt, including retries.
 async fn run_gnmi_sample_task<S, F, Fut>(
     cancel_token: &CancellationToken,
     config: &GnmiStreamConfig,
     stream_metrics: &GnmiStreamMetrics,
     sample_processor: &GnmiSampleProcessor,
-    subscribe: F,
+    mut subscribe: F,
 ) where
     S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send + Unpin,
     F: FnMut() -> Fut + Send,
@@ -1190,8 +1190,8 @@ async fn run_gnmi_sample_task<S, F, Fut>(
         sample_processor
             .reconciliation
             .as_deref()
-            .map(|reconciliation| Reconciliation {
-                processor: ReconciliationProcessor::Metrics(reconciliation),
+            .map(|_| Reconciliation {
+                processor: ReconciliationProcessor::Samples(sample_processor),
                 interval: config.reconcile_interval,
                 request: build_snapshot_request(build_sample_subscribe_request(
                     &config.paths,
@@ -1201,7 +1201,12 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                     .diagnostic_stream
                     .unwrap_or(NVUE_GNMI_SAMPLE_STREAM_ID),
             }),
-        subscribe,
+        || {
+            // Earlier epochs and delete history may no longer describe the source.
+            // Learn them from the new stream, including updates before `SyncResponse`.
+            sample_processor.clear_counter_epochs();
+            subscribe()
+        },
         |response| {
             sample_processor.process_subscribe_response(response, stream_metrics);
             Ok(false)
@@ -1247,7 +1252,7 @@ async fn gnmi_on_change_task(
 
 /// Runs opening, initial synchronization, telemetry delivery and reconnects.
 ///
-/// Processors keep their metric and delete semantics across reconnects.
+/// The opener applies each processor's per-attempt reset before telemetry resumes.
 /// Synchronized streams release the RPC and readiness guards before credential refresh.
 /// Credential refresh observes cancellation so shutdown does not wait for its timeout.
 async fn run_subscription<S, F, Fut, P>(
@@ -1462,17 +1467,20 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
 
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async};
     use carbide_uuid::rack::RackId;
     use mac_address::MacAddress;
 
+    use super::super::sample_processor::test_interface_update;
     use super::*;
     use crate::bmc::{BoxFuture, CredentialProvider};
     use crate::endpoint::test_support::test_endpoint as test_bmc_endpoint;
     use crate::endpoint::{BmcAddr, BmcCredentials};
     use crate::metrics::MetricsManager;
+    use crate::sink::{MetricSample, MetricSemantics};
 
     type TestStream =
         Pin<Box<dyn Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send>>;
@@ -2026,7 +2034,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn sample_task_retries_when_initial_stream_does_not_synchronize() {
+    async fn sample_task_relearns_epochs_after_sync_timeout_and_live_stream_failure() {
+        #[derive(Default)]
+        struct RecordingSink(StdMutex<Vec<MetricSample>>);
+
+        impl DataSink for RecordingSink {
+            fn sink_type(&self) -> &'static str {
+                "recording-metric"
+            }
+
+            fn try_handle_event(
+                &self,
+                _context: &EventContext,
+                event: &CollectorEvent,
+            ) -> Result<(), HealthError> {
+                if let CollectorEvent::Metric(sample) = event {
+                    self.0
+                        .lock()
+                        .expect("recorded metrics")
+                        .push((**sample).clone());
+                }
+
+                Ok(())
+            }
+        }
+
         let cancel_token = CancellationToken::new();
 
         let client_provider = test_client_provider(RecordingProvider::responding_with(
@@ -2041,23 +2073,90 @@ mod tests {
         };
 
         let metrics = test_gnmi_stream_metrics();
+        let sink = Arc::new(RecordingSink::default());
+        let mut processor = test_sample_processor(None);
+        processor.data_sink = Some(sink.clone());
 
-        let processor = test_sample_processor(None);
+        let counter_update =
+            |value: u64, last_clear: Option<u64>, observed_at: i64| proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(
+                    proto::Notification {
+                        timestamp: observed_at,
+                        update: last_clear
+                            .map(|epoch| ("last-clear", epoch))
+                            .into_iter()
+                            .chain([("in-errors", value)])
+                            .map(|(leaf, value)| {
+                                test_interface_update(
+                                    "counter-port",
+                                    &["state", "counters", leaf],
+                                    proto::TypedValue {
+                                        value: Some(proto::typed_value::Value::UintVal(value)),
+                                    },
+                                )
+                            })
+                            .collect(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            };
 
         let synchronized = proto::SubscribeResponse {
             response: Some(proto::subscribe_response::Response::SyncResponse(true)),
             ..Default::default()
         };
 
-        let stalled: TestStream = Box::pin(tokio_stream::pending());
+        // The first stream supplies a deletion boundary and a later epoch but
+        // never finishes its initial sync.
+        let stalled: TestStream = Box::pin(
+            tokio_stream::iter([
+                Ok(proto::SubscribeResponse {
+                    response: Some(proto::subscribe_response::Response::Update(
+                        proto::Notification {
+                            timestamp: 3_000,
+                            delete: vec![proto::Path::default()],
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                }),
+                Ok(counter_update(10, Some(100), 4_000)),
+            ])
+            .chain(tokio_stream::pending()),
+        );
 
-        let synchronized: TestStream =
-            Box::pin(tokio_stream::once(Ok(synchronized)).chain(tokio_stream::pending()));
+        // The retry must discard the old epoch and deletion boundary, allowing
+        // earlier metadata to establish an epoch that survives synchronization.
+        let (failure_tx, failure_rx) = tokio::sync::mpsc::channel(1);
+        let recovered: TestStream = Box::pin(
+            tokio_stream::iter([
+                Ok(counter_update(13, None, 5_000)),
+                Ok(counter_update(14, Some(200), 2_001)),
+                Ok(synchronized.clone()),
+                Ok(counter_update(15, None, 2_002)),
+            ])
+            .chain(tokio_stream::wrappers::ReceiverStream::new(failure_rx)),
+        );
 
-        let mut streams = VecDeque::from([stalled, synchronized]);
+        // A retry after synchronization must also start with an unknown epoch.
+        let reconnected: TestStream = Box::pin(
+            tokio_stream::iter([
+                Ok(counter_update(16, None, 6_000)),
+                Ok(counter_update(17, Some(300), 6_001)),
+                Ok(synchronized),
+            ])
+            .chain(tokio_stream::pending()),
+        );
+
+        let mut streams = VecDeque::from([stalled, recovered, reconnected]);
         let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let run = run_gnmi_sample_task(&cancel_token, &config, &metrics, &processor, || {
+            assert_eq!(
+                processor.counter_epoch_start("counter-port", i64::MAX),
+                None
+            );
             attempt_tx.send(()).expect("attempt receiver remains open");
             std::future::ready(Ok((
                 streams.pop_front().expect("test stream is available"),
@@ -2068,27 +2167,86 @@ mod tests {
         let observe = async {
             attempt_rx.recv().await.expect("first subscription attempt");
 
-            tokio::task::yield_now().await;
+            wait_for_stream_condition(|| sink.0.lock().expect("recorded metrics").len() == 1).await;
             assert_eq!(metrics.connection_state.get(), READY);
             assert_eq!(metrics.connected.get(), 1);
             assert_eq!(metrics.synchronized.get(), 0);
 
             attempt_rx.recv().await.expect("retry subscription attempt");
 
-            tokio::task::yield_now().await;
+            wait_for_stream_condition(|| sink.0.lock().expect("recorded metrics").len() == 4).await;
             assert_eq!(metrics.connection_state.get(), READY);
             assert_eq!(metrics.connected.get(), 1);
             assert_eq!(metrics.synchronized.get(), 1);
             assert_eq!(metrics.reconnections_total.get(), 1.0);
 
+            // Inject the second failure only after the live stream is synchronized.
+            failure_tx
+                .send(Err(tonic::Status::unavailable("stream interrupted")))
+                .await
+                .expect("live stream receives the failure");
+
+            attempt_rx.recv().await.expect("live stream retry attempt");
+
+            wait_for_stream_condition(|| {
+                sink.0.lock().expect("recorded metrics").len() == 6
+                    && metrics.synchronized.get() == 1
+            })
+            .await;
+            assert_eq!(metrics.connection_state.get(), READY);
+            assert_eq!(metrics.connected.get(), 1);
+            assert_eq!(metrics.reconnections_total.get(), 2.0);
+
             cancel_token.cancel();
         };
 
-        tokio::join!(run, observe);
+        // Allow the sync deadline, two backoffs under 4s each with jitter,
+        // three 1s observation waits, and 1s for cancellation.
+        tokio::time::timeout(
+            config.client_provider.request_timeout + Duration::from_secs(12),
+            async {
+                tokio::join!(run, observe);
+            },
+        )
+        .await
+        .expect("sample task should retry twice and shut down");
 
         assert_eq!(metrics.connection_state.get(), SHUTDOWN);
         assert_eq!(metrics.connected.get(), 0);
         assert_eq!(metrics.synchronized.get(), 0);
+
+        let samples = sink.0.lock().expect("recorded metrics");
+        assert_eq!(samples.len(), 6);
+
+        for (sample, (value, epoch)) in samples.iter().zip([
+            (10.0, Some(100)),
+            (13.0, None),
+            (14.0, Some(200)),
+            (15.0, Some(200)),
+            (16.0, None),
+            (17.0, Some(300)),
+        ]) {
+            assert_eq!(sample.value, value);
+            assert_eq!(sample.key, "interface_in_errors:counter-port");
+            assert_eq!(sample.name, "nvue_gnmi");
+            assert_eq!(sample.metric_type, "interface_in_errors");
+            assert_eq!(sample.unit, "count");
+            assert_eq!(
+                sample.labels,
+                vec![(
+                    std::borrow::Cow::Borrowed("interface_name"),
+                    "counter-port".to_string(),
+                )]
+            );
+            let MetricSemantics::CumulativeCounter { start_time, .. } = sample.semantics else {
+                panic!("expected cumulative counter semantics");
+            };
+            assert_eq!(
+                start_time,
+                epoch.map(|nanos| SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)),
+                "counter value {value}"
+            );
+        }
     }
 
     async fn wait_for_stream_condition(condition: impl Fn() -> bool) {

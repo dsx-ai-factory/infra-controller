@@ -19,6 +19,8 @@ pub mod convert;
 pub mod drain;
 pub mod metrics_drain;
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::ops::Range;
 use std::sync::Arc;
@@ -443,6 +445,9 @@ pub(crate) async fn export_items<E: OtlpExport>(
 /// fewer than `max_concurrent_exports` are in flight. Each export runs as its
 /// own task, so building and encoding requests uses several worker threads. A
 /// partial batch is sent when `flush_interval` elapses without a full one.
+/// Metric keys keep their latest complete observation until that batch is sent;
+/// logs retain every staged event. Each queue pass consumes at most `batch_size`
+/// entries so repeated replacements cannot prevent a return to the select loop.
 /// Exports share one connection, which is replaced when the target's TLS
 /// material is reloaded. Queue storage is converted to export items after
 /// removal, so compact metric entries do not change batching or retries.
@@ -460,6 +465,7 @@ async fn run_drain<K, Q, E>(
     let target = Arc::new(target);
     let mut export = make_export(connect(&target, signal).await);
     let mut batch = Vec::with_capacity(target.batch_size);
+    let mut metric_indices = HashMap::new();
     let mut interval = tokio::time::interval(target.flush_interval);
 
     // Non-TLS targets use the default only to construct a dormant interval;
@@ -512,13 +518,19 @@ async fn run_drain<K, Q, E>(
         }
 
         while in_flight.len() < target.max_concurrent_exports {
-            drain_batch(&queue, &mut batch, target.batch_size);
+            drain_batch(
+                std::iter::from_fn(|| queue.pop()),
+                &mut batch,
+                (signal == OtlpSignal::Metrics).then_some(&mut metric_indices),
+                target.batch_size,
+            );
             let full = batch.len() >= target.batch_size;
             let send_partial = flush_partial && !batch.is_empty();
             if !full && !send_partial {
                 break;
             }
             let ready = std::mem::replace(&mut batch, Vec::with_capacity(target.batch_size));
+            metric_indices.clear();
             in_flight.spawn(export_batch(export.clone(), ready, target.clone(), signal));
             if !full {
                 break;
@@ -537,15 +549,37 @@ async fn export_batch<E: OtlpExport>(
     export_items(&mut export, &batch, &target, signal).await;
 }
 
-/// Tops `batch` up to `batch_size` from the queue.
-fn drain_batch<K: Eq + Hash + Clone, Q: IntoExportItem<V>, V>(
-    queue: &DedupQueue<K, Q>,
+/// Tops `batch` up to `batch_size`, consuming at most that many queue entries.
+///
+/// With `metric_indices`, an existing key replaces its complete observation;
+/// `None` preserves the order and multiplicity of staged logs. The caller keeps
+/// the index across partial drains and clears it when taking the batch to export.
+fn drain_batch<K: Eq + Hash, Q: IntoExportItem<V>, V>(
+    entries: impl Iterator<Item = (K, Q)>,
     batch: &mut Vec<V>,
+    mut metric_indices: Option<&mut HashMap<K, usize>>,
     batch_size: usize,
 ) {
+    let mut entries = entries.take(batch_size);
     while batch.len() < batch_size {
-        match queue.pop() {
-            Some((_key, value)) => batch.push(value.into_export_item()),
+        match entries.next() {
+            Some((key, value)) => {
+                let value = value.into_export_item();
+                // Two staged readings for one metric would become two points
+                // with the same export timestamp.
+                if let Some(indices) = metric_indices.as_deref_mut() {
+                    match indices.entry(key) {
+                        Entry::Occupied(index) => {
+                            batch[*index.get()] = value;
+                            continue;
+                        }
+                        Entry::Vacant(index) => {
+                            index.insert(batch.len());
+                        }
+                    }
+                }
+                batch.push(value);
+            }
             None => break,
         }
     }
@@ -639,12 +673,13 @@ pub use opentelemetry_proto::tonic::resource::v1 as resource;
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::collections::HashMap;
+    use std::time::{Duration, SystemTime};
 
     use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
+    use carbide_test_support::{Case, check_cases_async, value_scenarios};
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
@@ -652,10 +687,144 @@ mod tests {
 
     use super::{
         OtlpExport, OtlpExportFailed, OtlpSignal, connect_replacement_target_with_timeout,
-        export_items, target_endpoint,
+        drain_batch, export_items, target_endpoint,
     };
     use crate::HealthError;
     use crate::config::OtlpTargetConfig;
+    use crate::endpoint::BmcAddr;
+    use crate::otlp::common::any_value;
+    use crate::otlp::convert::build_queued_metrics_export_request;
+    use crate::otlp::metrics::{metric, number_data_point};
+    use crate::sink::otlp::QueuedMetric;
+    use crate::sink::{EventContext, MetricSample, MetricSemantics};
+
+    #[test]
+    fn partial_metric_batch_request_keeps_latest_complete_observation() {
+        let context = EventContext {
+            endpoint_key: "switch".to_string(),
+            addr: BmcAddr {
+                ip: "192.0.2.1".parse().unwrap(),
+                port: None,
+                mac: None,
+            },
+            collector_type: "nvue_gnmi",
+            metadata: None,
+            rack_id: None,
+            labels: Default::default(),
+        };
+        let sample = |key: &str, value, semantics| {
+            (
+                key.to_string(),
+                QueuedMetric::Owned(Box::new((
+                    context.clone(),
+                    MetricSample {
+                        key: key.to_string(),
+                        name: "nvue_gnmi".to_string(),
+                        metric_type: "packets".to_string(),
+                        unit: "count".to_string(),
+                        value,
+                        semantics,
+                        labels: vec![("interface_name".into(), key.to_string())],
+                        context: None,
+                    },
+                ))),
+            )
+        };
+        let counter = |start| MetricSemantics::CumulativeCounter {
+            description: "Number of packets reported by the interface",
+            start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(start)),
+        };
+        let mut batch = Vec::new();
+        let mut metric_indices = HashMap::new();
+
+        drain_batch(
+            [
+                sample("swp1", 100.0, counter(100)),
+                sample("swp2", 20.0, MetricSemantics::Gauge),
+            ]
+            .into_iter(),
+            &mut batch,
+            Some(&mut metric_indices),
+            3,
+        );
+        assert_eq!(batch.len(), 2);
+
+        // The first reading has left the queue, but its batch has not flushed.
+        // A device reset supplies a lower value and a newer accumulation start.
+        let mut replacements = [
+            sample("swp1", 3.0, counter(200)),
+            sample("swp3", 30.0, MetricSemantics::Gauge),
+            sample("swp4", 40.0, MetricSemantics::Gauge),
+        ]
+        .into_iter();
+        drain_batch(
+            replacements.by_ref(),
+            &mut batch,
+            Some(&mut metric_indices),
+            3,
+        );
+        assert_eq!(replacements.next().unwrap().0, "swp4");
+
+        let request = build_queued_metrics_export_request(&batch, 300, "health");
+        assert_eq!(request.resource_metrics.len(), 1);
+        let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(metrics.len(), 2);
+
+        let exported_points = |(name, expected_counter): (&str, bool)| {
+            let metric = metrics.iter().find(|metric| metric.name == name).unwrap();
+            let points = match (expected_counter, metric.data.as_ref()) {
+                (false, Some(metric::Data::Gauge(gauge))) => &gauge.data_points,
+                (true, Some(metric::Data::Sum(sum))) => &sum.data_points,
+                _ => panic!("unexpected metric type for {name}"),
+            };
+            points
+                .iter()
+                .map(|point| {
+                    let interface = point
+                        .attributes
+                        .iter()
+                        .find(|attribute| attribute.key == "interface_name")
+                        .unwrap();
+                    let Some(any_value::Value::StringValue(key)) =
+                        &interface.value.as_ref().unwrap().value
+                    else {
+                        panic!("interface label must be a string");
+                    };
+                    let Some(number_data_point::Value::AsDouble(value)) = point.value else {
+                        panic!("metric point must contain a double");
+                    };
+                    (
+                        key.as_str(),
+                        value,
+                        point.start_time_unix_nano,
+                        point.time_unix_nano,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        value_scenarios!(run = exported_points;
+            "legacy gauge keeps latest reading and unrelated series" {
+                ("health_nvue_gnmi_packets_count", false) =>
+                    vec![("swp1", 3.0, 0, 300), ("swp2", 20.0, 0, 300), ("swp3", 30.0, 0, 300)]
+            }
+            "counter alias keeps the replacement accumulation start" {
+                ("health_nvue_gnmi_packets_count_total", true) =>
+                    vec![("swp1", 3.0, 200, 300)]
+            }
+        );
+    }
+
+    #[test]
+    fn metric_batch_limits_replacement_work_per_drain() {
+        let mut queue = (1..=5).map(|value| ("metric", value));
+        let mut batch = Vec::new();
+        let mut metric_indices = HashMap::new();
+
+        drain_batch(queue.by_ref(), &mut batch, Some(&mut metric_indices), 3);
+
+        assert_eq!(batch, [3]);
+        assert_eq!(queue.next(), Some(("metric", 4)));
+    }
 
     #[tokio::test]
     async fn https_target_without_tls_profile_starts_tls_handshake()

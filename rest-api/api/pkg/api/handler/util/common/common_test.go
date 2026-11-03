@@ -675,64 +675,134 @@ func TestAuthorizeProviderSiteForCore(t *testing.T) {
 	tenantOrg := "tenant-org"
 	tenantUser := TestBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{authz.TenantAdminRole})
 	assert.NotNil(t, tenantUser)
-	tenant := TestBuildTenant(t, dbSession, tenantOrg, "Tenant", tenantUser)
-	assert.NotNil(t, tenant)
-	tenantSite := TestBuildTenantSite(t, dbSession, tenant, site, user)
-	assert.NotNil(t, tenantSite)
+	pendingSite := TestBuildSite(t, dbSession, ip, "Pending Site", user)
+	uninitializedOrg := "uninitialized-provider-org"
+	uninitializedUser := TestBuildUser(t, dbSession, uuid.NewString(), uninitializedOrg, []string{authz.ProviderAdminRole})
+	missingSiteID := uuid.NewString()
 
-	scp := &stubSiteTemporalClientPool{client: &tmocks.Client{}}
-	authInput := func(org string, user *cdbm.User, siteID string) AuthorizeProviderSiteForCoreInput {
-		return AuthorizeProviderSiteForCoreInput{
-			Ctx:       ctx,
-			Logger:    logger,
-			DBSession: dbSession,
-			SCP:       scp,
-			Org:       org,
-			User:      user,
-			SiteID:    siteID,
-		}
+	cases := []struct {
+		name        string
+		org         string
+		user        *cdbm.User
+		siteID      string
+		clientError error
+		wantCode    int
+		wantMessage string
+		wantLookups []uuid.UUID
+	}{
+		{
+			name:        "success",
+			org:         org,
+			user:        user,
+			siteID:      site.ID.String(),
+			wantLookups: []uuid.UUID{site.ID},
+		},
+		{
+			name:        "nil user",
+			org:         org,
+			siteID:      site.ID.String(),
+			wantCode:    http.StatusInternalServerError,
+			wantMessage: "Failed to retrieve current user",
+		},
+		{
+			name:        "user is not a provider admin",
+			org:         tenantOrg,
+			user:        tenantUser,
+			siteID:      site.ID.String(),
+			wantCode:    http.StatusForbidden,
+			wantMessage: "User does not have Provider Admin role with org",
+		},
+		{
+			name:        "user is not an org member",
+			org:         "unrelated-org",
+			user:        user,
+			siteID:      site.ID.String(),
+			wantCode:    http.StatusForbidden,
+			wantMessage: "Failed to validate membership for org: unrelated-org",
+		},
+		{
+			name:        "org has no provider",
+			org:         uninitializedOrg,
+			user:        uninitializedUser,
+			siteID:      site.ID.String(),
+			wantCode:    http.StatusNotFound,
+			wantMessage: "Org 'uninitialized-provider-org' does not have an Infrastructure Provider",
+		},
+		{
+			name:        "site not found",
+			org:         org,
+			user:        user,
+			siteID:      missingSiteID,
+			wantCode:    http.StatusBadRequest,
+			wantMessage: "Could not find Site with ID specified in request data: " + missingSiteID,
+		},
+		{
+			name:        "site belongs to another provider",
+			org:         org,
+			user:        user,
+			siteID:      otherSite.ID.String(),
+			wantCode:    http.StatusForbidden,
+			wantMessage: "Site specified in request doesn't belong to current org's Provider",
+		},
+		{
+			name:        "owned Site is not Registered",
+			org:         org,
+			user:        user,
+			siteID:      pendingSite.ID.String(),
+			wantCode:    http.StatusBadRequest,
+			wantMessage: "Site is not in Registered state, unable to execute operation on Site",
+		},
+		{
+			name:        "client lookup fails",
+			org:         org,
+			user:        user,
+			siteID:      site.ID.String(),
+			clientError: errors.New("client unavailable"),
+			wantCode:    http.StatusInternalServerError,
+			wantMessage: "Failed to retrieve client for Site",
+			wantLookups: []uuid.UUID{site.ID},
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scp := &stubSiteTemporalClientPool{client: &tmocks.Client{}, err: tc.clientError}
 
-	t.Run("success", func(t *testing.T) {
-		client, siteID, apiErr := AuthorizeProviderSiteForCore(authInput(org, user, site.ID.String()))
-		require.Nil(t, apiErr)
-		require.NotNil(t, client)
-		assert.Equal(t, site.ID.String(), siteID)
-	})
+			client, siteID, apiErr := AuthorizeProviderSiteForCore(AuthorizeProviderSiteForCoreInput{
+				Ctx:       ctx,
+				Logger:    logger,
+				DBSession: dbSession,
+				SCP:       scp,
+				Org:       tc.org,
+				User:      tc.user,
+				SiteID:    tc.siteID,
+			})
 
-	t.Run("nil user", func(t *testing.T) {
-		_, _, apiErr := AuthorizeProviderSiteForCore(authInput(org, nil, site.ID.String()))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
-	})
-
-	t.Run("user is not a provider admin", func(t *testing.T) {
-		_, _, apiErr := AuthorizeProviderSiteForCore(authInput(tenantOrg, tenantUser, site.ID.String()))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusForbidden, apiErr.Code)
-	})
-
-	t.Run("site not found", func(t *testing.T) {
-		missingSiteID := uuid.NewString()
-		_, _, apiErr := AuthorizeProviderSiteForCore(authInput(org, user, missingSiteID))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-		assert.Contains(t, apiErr.Message, missingSiteID)
-	})
-
-	t.Run("site belongs to another provider", func(t *testing.T) {
-		_, _, apiErr := AuthorizeProviderSiteForCore(authInput(org, user, otherSite.ID.String()))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusForbidden, apiErr.Code)
-	})
+			assert.Equal(t, tc.wantLookups, scp.lookups)
+			if tc.wantCode == 0 {
+				require.Nil(t, apiErr)
+				assert.Same(t, scp.client, client)
+				assert.Equal(t, tc.siteID, siteID)
+				return
+			}
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.wantCode, apiErr.Code)
+			assert.Equal(t, tc.wantMessage, apiErr.Message)
+			assert.Nil(t, client)
+			assert.Empty(t, siteID)
+		})
+	}
 }
 
+// stubSiteTemporalClientPool records resolution attempts and can return a client error.
 type stubSiteTemporalClientPool struct {
-	client tclient.Client
+	client  tclient.Client
+	err     error
+	lookups []uuid.UUID
 }
 
 func (s *stubSiteTemporalClientPool) GetClientByID(siteID uuid.UUID) (tclient.Client, error) {
-	return s.client, nil
+	s.lookups = append(s.lookups, siteID)
+	return s.client, s.err
 }
 
 func TestGetIPBlockFromIDString(t *testing.T) {
@@ -3616,6 +3686,81 @@ func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := TenantHasLegacyTargetedInstanceCreation(ctx, nil, dbSession, tc.tenant)
 			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestTenantHasCrossTenantInterfaceCreation(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testCommonInitDB(t)
+	defer dbSession.Close()
+	testCommonSetupSchema(t, dbSession)
+
+	user := testCommonBuildUser(t, dbSession, uuid.NewString(), []string{"cross-interface-provider"}, []string{authz.ProviderAdminRole})
+	provider := testCommonBuildInfrastructureProvider(t, dbSession, "Cross Interface Provider", "cross-interface-provider", user)
+	otherProvider := testCommonBuildInfrastructureProvider(t, dbSession, "Other Provider", "cross-interface-other-provider", user)
+	defaultSite := testCommonBuildSite(t, dbSession, provider, "Default Site", user)
+	overrideSite := testCommonBuildSite(t, dbSession, provider, "Override Site", user)
+	otherProviderSite := testCommonBuildSite(t, dbSession, otherProvider, "Other Provider Site", user)
+
+	buildTenant := func(name, status string, accountDefault bool) *cdbm.Tenant {
+		tenant := cdbm.TestBuildTenant(t, dbSession, name, name+"-org", user)
+		_, err := cdbm.NewTenantAccountDAO(dbSession).Create(ctx, nil, cdbm.TenantAccountCreateInput{
+			AccountNumber:             uuid.NewString(),
+			TenantID:                  &tenant.ID,
+			TenantOrg:                 tenant.Org,
+			InfrastructureProviderID:  provider.ID,
+			InfrastructureProviderOrg: provider.Org,
+			Status:                    status,
+			Config: &cdbm.TenantAccountConfig{
+				CrossTenantInterfaceCreation: accountDefault,
+			},
+			CreatedBy: user.ID,
+		})
+		require.NoError(t, err)
+		return tenant
+	}
+
+	enabledTenant := buildTenant("cross-interface-enabled", cdbm.TenantAccountStatusReady, true)
+	disabledTenant := buildTenant("cross-interface-disabled", cdbm.TenantAccountStatusReady, false)
+	pendingTenant := buildTenant("cross-interface-pending", cdbm.TenantAccountStatusPending, true)
+
+	cdbm.TestBuildTenantSite(t, dbSession, enabledTenant, overrideSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(false),
+	}, user)
+	cdbm.TestBuildTenantSite(t, dbSession, disabledTenant, overrideSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(true),
+	}, user)
+	cdbm.TestBuildTenantSite(t, dbSession, enabledTenant, otherProviderSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(true),
+	}, user)
+
+	tests := []struct {
+		name     string
+		tenant   *cdbm.Tenant
+		siteID   uuid.UUID
+		expected bool
+		wantErr  bool
+	}{
+		{name: "nil Tenant is disabled", siteID: defaultSite.ID},
+		{name: "enabled account default", tenant: enabledTenant, siteID: defaultSite.ID, expected: true},
+		{name: "disabled account default", tenant: disabledTenant, siteID: defaultSite.ID},
+		{name: "false Site override disables true default", tenant: enabledTenant, siteID: overrideSite.ID},
+		{name: "true Site override enables false default", tenant: disabledTenant, siteID: overrideSite.ID, expected: true},
+		{name: "non-Ready account does not authorize", tenant: pendingTenant, siteID: defaultSite.ID},
+		{name: "override without Ready account at Site Provider fails closed", tenant: enabledTenant, siteID: otherProviderSite.ID},
+		{name: "missing Site returns an error", tenant: enabledTenant, siteID: uuid.New(), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tc.tenant, tc.siteID)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 			assert.Equal(t, tc.expected, got)
 		})
 	}

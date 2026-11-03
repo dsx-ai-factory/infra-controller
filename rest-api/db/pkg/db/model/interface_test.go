@@ -847,6 +847,140 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 
 	}
 
+	t.Run("VpcID filter includes direct and explicit-prefix attachments", func(t *testing.T) {
+		directInterface, err := ifcd.Create(ctx, nil, InterfaceCreateInput{
+			InstanceID: instances[0].ID,
+			VpcID:      &vpc.ID,
+			Status:     InterfaceStatusPending,
+			CreatedBy:  user.ID,
+		})
+		require.NoError(t, err)
+
+		got, total, err := ifcd.GetAll(ctx, nil, InterfaceFilterInput{VpcID: &vpc.ID}, paginator.PageInput{
+			Limit: cutil.GetPtr(paginator.TotalLimit),
+		}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, totalCount+1, total)
+		assert.Len(t, got, totalCount+1)
+		ids := make(map[uuid.UUID]struct{}, len(got))
+		includesSecondPrefix := false
+		for _, ifc := range got {
+			ids[ifc.ID] = struct{}{}
+			if ifc.VpcPrefixID != nil && *ifc.VpcPrefixID == vpcPrefix1.ID {
+				includesSecondPrefix = true
+			}
+		}
+		assert.Contains(t, ids, directInterface.ID)
+		assert.Contains(t, ids, instance1VpcPrefixes[0].ID)
+		assert.True(t, includesSecondPrefix)
+
+		require.NoError(t, ifcd.Delete(ctx, nil, directInterface.ID))
+	})
+
+	t.Run("pagination uses Interface ID as a stable tie breaker", func(t *testing.T) {
+		otherVpc := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "stablePaginationVpc")
+		first, err := ifcd.Create(ctx, nil, InterfaceCreateInput{
+			InstanceID: instances[0].ID,
+			VpcID:      &otherVpc.ID,
+			Status:     InterfaceStatusPending,
+			CreatedBy:  user.ID,
+		})
+		require.NoError(t, err)
+		second, err := ifcd.Create(ctx, nil, InterfaceCreateInput{
+			InstanceID: instances[1].ID,
+			VpcID:      &otherVpc.ID,
+			Status:     InterfaceStatusPending,
+			CreatedBy:  user.ID,
+		})
+		require.NoError(t, err)
+
+		orderByStatus := &paginator.OrderBy{Field: InterfaceOrderByStatus, Order: paginator.OrderAscending}
+		pageOne, total, err := ifcd.GetAll(ctx, nil, InterfaceFilterInput{VpcID: &otherVpc.ID}, paginator.PageInput{
+			Limit:   cutil.GetPtr(1),
+			Offset:  cutil.GetPtr(0),
+			OrderBy: orderByStatus,
+		}, nil)
+		require.NoError(t, err)
+		require.Len(t, pageOne, 1)
+		assert.Equal(t, 2, total)
+		pageTwo, total, err := ifcd.GetAll(ctx, nil, InterfaceFilterInput{VpcID: &otherVpc.ID}, paginator.PageInput{
+			Limit:   cutil.GetPtr(1),
+			Offset:  cutil.GetPtr(1),
+			OrderBy: orderByStatus,
+		}, nil)
+		require.NoError(t, err)
+		require.Len(t, pageTwo, 1)
+		assert.Equal(t, 2, total)
+
+		expectedFirstID := first.ID
+		expectedSecondID := second.ID
+		if expectedFirstID.String() > expectedSecondID.String() {
+			expectedFirstID, expectedSecondID = expectedSecondID, expectedFirstID
+		}
+		assert.Equal(t, expectedFirstID, pageOne[0].ID)
+		assert.Equal(t, expectedSecondID, pageTwo[0].ID)
+
+		require.NoError(t, ifcd.Delete(ctx, nil, first.ID))
+		require.NoError(t, ifcd.Delete(ctx, nil, second.ID))
+	})
+
+	t.Run("VpcID filter excludes Interfaces of soft-deleted Instances", func(t *testing.T) {
+		attachmentVpc := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "softDeletedInstanceVpc")
+		attachmentVpcPrefix, err := vpsd.Create(ctx, nil, VpcPrefixCreateInput{
+			Name:         "softDeletedInstanceVpcPrefix",
+			TenantOrg:    "test",
+			SiteID:       site.ID,
+			VpcID:        attachmentVpc.ID,
+			TenantID:     tenant.ID,
+			IpBlockID:    &ipv4Block.ID,
+			Prefix:       ipv4Prefix,
+			PrefixLength: 24,
+			Status:       VpcPrefixStatusReady,
+			CreatedBy:    user.ID,
+		})
+		require.NoError(t, err)
+
+		buildInstance := func(name string) *Instance {
+			instance, cerr := isd.Create(ctx, nil, InstanceCreateInput{
+				Name:                     name,
+				TenantID:                 tenant.ID,
+				InfrastructureProviderID: ip.ID,
+				SiteID:                   site.ID,
+				InstanceTypeID:           &instanceType.ID,
+				VpcID:                    vpc.ID,
+				MachineID:                &machine.ID,
+				OperatingSystemID:        cutil.GetPtr(operatingSystem.ID),
+				Status:                   InstanceStatusReady,
+				CreatedBy:                user.ID,
+			})
+			require.NoError(t, cerr)
+			return instance
+		}
+		activeInstance := buildInstance("activeAttachmentInstance")
+		deletedInstance := buildInstance("softDeletedAttachmentInstance")
+
+		activeInterface, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: activeInstance.ID, VpcID: &attachmentVpc.ID, Status: InterfaceStatusReady, CreatedBy: user.ID})
+		require.NoError(t, err)
+		deletedVpcInterface, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: deletedInstance.ID, VpcID: &attachmentVpc.ID, Status: InterfaceStatusReady, CreatedBy: user.ID})
+		require.NoError(t, err)
+		deletedPrefixInterface, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: deletedInstance.ID, VpcPrefixID: &attachmentVpcPrefix.ID, Status: InterfaceStatusReady, CreatedBy: user.ID})
+		require.NoError(t, err)
+		require.NoError(t, isd.Delete(ctx, nil, deletedInstance.ID))
+
+		got, total, err := ifcd.GetAll(ctx, nil, InterfaceFilterInput{VpcID: &attachmentVpc.ID}, paginator.PageInput{
+			Limit: cutil.GetPtr(paginator.TotalLimit),
+		}, []string{InstanceRelationName})
+		require.NoError(t, err)
+		assert.Equal(t, 1, total)
+		require.Len(t, got, 1)
+		assert.Equal(t, activeInterface.ID, got[0].ID)
+		assert.NotNil(t, got[0].Instance)
+
+		require.NoError(t, ifcd.Delete(ctx, nil, activeInterface.ID))
+		require.NoError(t, ifcd.Delete(ctx, nil, deletedVpcInterface.ID))
+		require.NoError(t, ifcd.Delete(ctx, nil, deletedPrefixInterface.ID))
+	})
+
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 	_, err = ifcd.Update(ctx, nil, InterfaceUpdateInput{
@@ -1072,6 +1206,183 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("tenant visibility filters Interfaces before pagination", func(t *testing.T) {
+		callerTenant := testInstanceBuildTenant(t, dbSession, "interfaceVisibilityCaller")
+		otherTenant := testInstanceBuildTenant(t, dbSession, "interfaceVisibilityOther")
+		callerVpc := testInstanceBuildVpc(t, dbSession, ip, site, callerTenant, "interfaceVisibilityCallerVpc")
+		otherVpc := testInstanceBuildVpc(t, dbSession, ip, site, otherTenant, "interfaceVisibilityOtherVpc")
+		callerPrefix, err := vpsd.Create(ctx, nil, VpcPrefixCreateInput{
+			Name:         "interface-visibility-prefix",
+			TenantOrg:    callerTenant.Org,
+			SiteID:       site.ID,
+			VpcID:        callerVpc.ID,
+			TenantID:     callerTenant.ID,
+			IpBlockID:    &ipv4Block.ID,
+			Prefix:       ipv4Prefix,
+			PrefixLength: 24,
+			Status:       VpcPrefixStatusReady,
+			CreatedBy:    user.ID,
+		})
+		require.NoError(t, err)
+
+		buildInstance := func(name string, owner *Tenant, primaryVpcID uuid.UUID) *Instance {
+			instance, createErr := isd.Create(ctx, nil, InstanceCreateInput{
+				Name:                     name,
+				TenantID:                 owner.ID,
+				InfrastructureProviderID: ip.ID,
+				SiteID:                   site.ID,
+				InstanceTypeID:           &instanceType.ID,
+				VpcID:                    primaryVpcID,
+				MachineID:                &machine.ID,
+				OperatingSystemID:        &operatingSystem.ID,
+				Status:                   InstanceStatusReady,
+				CreatedBy:                user.ID,
+			})
+			require.NoError(t, createErr)
+			return instance
+		}
+		callerInstance := buildInstance("interfaceVisibilityCallerInstance", callerTenant, callerVpc.ID)
+		otherInstance := buildInstance("interfaceVisibilityOtherInstance", otherTenant, otherVpc.ID)
+
+		createInterface := func(input InterfaceCreateInput) Interface {
+			ifc, createErr := ifcd.Create(ctx, nil, input)
+			require.NoError(t, createErr)
+			return *ifc
+		}
+		callerOnCallerVpc := createInterface(InterfaceCreateInput{
+			InstanceID: callerInstance.ID,
+			VpcID:      &callerVpc.ID,
+			Status:     InterfaceStatusReady,
+			CreatedBy:  user.ID,
+		})
+		callerOnOtherVpc := createInterface(InterfaceCreateInput{
+			InstanceID: callerInstance.ID,
+			VpcID:      &otherVpc.ID,
+			Status:     InterfaceStatusReady,
+			CreatedBy:  user.ID,
+		})
+		otherOnCallerVpc := createInterface(InterfaceCreateInput{
+			InstanceID:  otherInstance.ID,
+			VpcPrefixID: &callerPrefix.ID,
+			Status:      InterfaceStatusReady,
+			CreatedBy:   user.ID,
+		})
+		otherOnOtherVpc := createInterface(InterfaceCreateInput{
+			InstanceID: otherInstance.ID,
+			VpcID:      &otherVpc.ID,
+			Status:     InterfaceStatusReady,
+			CreatedBy:  user.ID,
+		})
+		callerSubnetOnly := createInterface(InterfaceCreateInput{
+			InstanceID: callerInstance.ID,
+			SubnetID:   &subnet1.ID,
+			Status:     InterfaceStatusReady,
+			CreatedBy:  user.ID,
+		})
+
+		crossTenant := true
+		sameTenant := false
+		cases := []struct {
+			name      string
+			filter    InterfaceFilterInput
+			wantIDs   []uuid.UUID
+			wantError bool
+		}{
+			{
+				name: "default visibility includes own Interfaces and cross-Tenant Interfaces on owned VPCs",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+				},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, callerOnOtherVpc.ID, callerSubnetOnly.ID, otherOnCallerVpc.ID},
+			},
+			{
+				name: "cross-Tenant true includes Interfaces whose Instance and VPC owners differ",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					CrossTenant:       &crossTenant,
+				},
+				wantIDs: []uuid.UUID{callerOnOtherVpc.ID, otherOnCallerVpc.ID},
+			},
+			{
+				name: "cross-Tenant false includes only caller-owned Instances",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					CrossTenant:       &sameTenant,
+				},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, callerSubnetOnly.ID},
+			},
+			{
+				name: "foreign Tenant filters within the visibility boundary",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					InstanceTenantID:  &otherTenant.ID,
+				},
+				wantIDs: []uuid.UUID{otherOnCallerVpc.ID},
+			},
+			{
+				name: "VPC Tenant filters direct and explicit-prefix Interfaces",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					VpcTenantID:       &callerTenant.ID,
+				},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, otherOnCallerVpc.ID},
+			},
+			{
+				name: "caller-owned VPC includes own and cross-Tenant Interfaces",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					VpcID:             &callerVpc.ID,
+				},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, otherOnCallerVpc.ID},
+			},
+			{
+				name: "other Tenant VPC includes only caller-owned Instance Interfaces",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					VpcID:             &otherVpc.ID,
+				},
+				wantIDs: []uuid.UUID{callerOnOtherVpc.ID},
+			},
+			{
+				name: "cross-Tenant and Instance Tenant filters compose",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					InstanceTenantID:  &callerTenant.ID,
+					CrossTenant:       &crossTenant,
+				},
+				wantIDs: []uuid.UUID{callerOnOtherVpc.ID},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got, _, getErr := ifcd.GetAll(ctx, nil, tc.filter, paginator.PageInput{
+					Limit: cutil.GetPtr(paginator.TotalLimit),
+				}, nil)
+				if tc.wantError {
+					require.Error(t, getErr)
+					return
+				}
+				require.NoError(t, getErr)
+				gotIDs := make([]uuid.UUID, 0, len(got))
+				for _, ifc := range got {
+					gotIDs = append(gotIDs, ifc.ID)
+				}
+				assert.ElementsMatch(t, tc.wantIDs, gotIDs)
+			})
+		}
+
+		for _, ifc := range []Interface{
+			callerOnCallerVpc,
+			callerOnOtherVpc,
+			otherOnCallerVpc,
+			otherOnOtherVpc,
+			callerSubnetOnly,
+		} {
+			require.NoError(t, ifcd.Delete(ctx, nil, ifc.ID))
+		}
+	})
 }
 
 func TestInterfaceSQLDAO_Clear(t *testing.T) {

@@ -26,11 +26,15 @@ repository.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
+trace-propagation = { path = "../trace-propagation" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { features = [
   "env-filter",
   "local-time",

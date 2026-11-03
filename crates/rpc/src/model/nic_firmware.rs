@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_libmlx_model::device::identity::MlxDeviceSelectorError;
 use model::ConfigValidationError;
 use model::nic_firmware::{
     NicFirmwareApproach, NicFirmwareArtifact, NicFirmwareCardSelection, NicFirmwareCardSelector,
@@ -30,44 +31,12 @@ impl TryFrom<rpc::NicFirmwareCardSelector> for NicFirmwareCardSelector {
     fn try_from(selector: rpc::NicFirmwareCardSelector) -> Result<Self, Self::Error> {
         use rpc::nic_firmware_card_selector::Identity;
 
-        let selector = match selector.identity {
-            Some(Identity::BaseMac(mac_address)) => {
-                // `MacAddress` accepts signed octets and ignores extra split fields.
-                // Reject those inputs before they become a typed selector.
-                let bytes = mac_address.as_bytes();
-                let valid_format = match bytes.len() {
-                    12 => bytes.iter().all(u8::is_ascii_hexdigit),
-                    17 => {
-                        matches!(bytes[2], b':' | b'-')
-                            && bytes.iter().enumerate().all(|(index, byte)| {
-                                if index % 3 == 2 {
-                                    *byte == bytes[2]
-                                } else {
-                                    byte.is_ascii_hexdigit()
-                                }
-                            })
-                    }
-                    _ => false,
-                };
-                if !valid_format {
-                    return Err(ConfigValidationError::InvalidValue(
-                        "card selector base MAC is malformed".into(),
-                    ));
-                }
-                Self::Mac(mac_address.parse().map_err(|_| {
-                    ConfigValidationError::InvalidValue(
-                        "card selector base MAC is malformed".into(),
-                    )
-                })?)
-            }
-            Some(Identity::BaseGuid(guid)) => Self::Guid(guid),
-            None => {
-                return Err(ConfigValidationError::InvalidValue(
-                    "card selector identity is required".into(),
-                ));
-            }
-        };
-        selector.validate()
+        match selector.identity {
+            Some(Identity::BaseMac(mac_address)) => Self::from_mac_str(&mac_address),
+            Some(Identity::BaseGuid(guid)) => Self::Guid(guid).validate(),
+            None => Err(MlxDeviceSelectorError::MissingIdentity),
+        }
+        .map_err(Into::into)
     }
 }
 

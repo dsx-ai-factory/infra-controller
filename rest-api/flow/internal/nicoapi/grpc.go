@@ -53,6 +53,7 @@ const (
 	// HealthAlertClassification::prevent_allocations() in
 	// crates/health-report/src/lib.rs.
 	classificationPreventAllocations = "PreventAllocations"
+	classificationRackLeak           = "RackLeak"
 
 	// flowFindByIDsBatchSize bounds the number of full protobuf resources Flow
 	// retains in one detail-lookup batch. Core's max_find_by_ids remains the
@@ -409,6 +410,46 @@ func (c *grpcClient) GetPowerShelves(ctx context.Context) ([]ObservedControllerD
 		return nil, fmt.Errorf("FindPowerShelvesByIds for actual inventory: %w", err)
 	}
 	return result, nil
+}
+
+// GetLeakingRackIds retrieves IDs of racks whose aggregate health contains an
+// active RackLeak classification. The ID and detail RPCs receive independent
+// timeout budgets so a slow ID lookup cannot starve the batched health lookup.
+func (c *grpcClient) GetLeakingRackIds(ctx context.Context) ([]string, error) {
+	idsCtx, idsCancel := context.WithTimeout(ctx, c.grpcTimeout)
+	idsResponse, err := c.gclient.FindRackIds(idsCtx, &corev1.RackSearchFilter{})
+	idsCancel()
+	if err != nil {
+		return nil, fmt.Errorf("FindRackIds for leak detection: %w", err)
+	}
+
+	rackIDs := idsResponse.GetRackIds()
+	if len(rackIDs) == 0 {
+		return []string{}, nil
+	}
+
+	detailsCtx, detailsCancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer detailsCancel()
+	request := &corev1.RacksByIdsRequest{RackIds: rackIDs}
+	leakingRackIDs := make([]string, 0, len(rackIDs))
+	err = c.gclient.visitRackBatchesAllowPartial(detailsCtx, request, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			health := rack.GetStatus().GetHealth()
+			for _, alert := range health.GetAlerts() {
+				if slices.Contains(alert.GetClassifications(), classificationRackLeak) {
+					leakingRackIDs = append(leakingRackIDs, rack.GetId().GetId())
+					break
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("FindRacksByIds for leak detection: %w", err)
+	}
+
+	slices.Sort(leakingRackIDs)
+	return leakingRackIDs, nil
 }
 
 // GetLeakingMachineIds retrieves IDs of all machines which are leaking and are powered on.
@@ -1997,6 +2038,10 @@ func (c *grpcClient) AddExpectedSwitchInfo(info ExpectedSwitchInfo) {
 }
 
 func (c *grpcClient) SetLeakingMachineIds(ids []string) {
+	panic("Not a unit test")
+}
+
+func (c *grpcClient) SetLeakingRackIds(ids []string) {
 	panic("Not a unit test")
 }
 

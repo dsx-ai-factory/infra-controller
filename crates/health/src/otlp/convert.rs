@@ -572,27 +572,32 @@ fn build_metrics_export_request_from_pairs<'a>(
         };
 
         let counter_point = match sample.semantics {
-            MetricSemantics::CumulativeCounter { start_time }
-                if sample.semantics.exports_counter(sample.value) =>
-            {
-                Some(NumberDataPoint {
-                    // The device's accumulation can predate this process and survive
-                    // a reconnect. Only a source timestamp establishes its start.
-                    // A source start after our export clock would invert the interval,
-                    // so leave it unset.
-                    start_time_unix_nano: start_time
-                        .and_then(|start| start.duration_since(SystemTime::UNIX_EPOCH).ok())
-                        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
-                        .filter(|start| *start <= observed_nanos)
-                        .unwrap_or_default(),
-                    ..data_point.clone()
-                })
+            MetricSemantics::CumulativeCounter {
+                description,
+                start_time,
+            } if sample.semantics.exports_counter(sample.value) => {
+                Some((
+                    MetricOutput::CumulativeCounter,
+                    NumberDataPoint {
+                        // The device's accumulation can predate this process and survive
+                        // a reconnect. Only a source timestamp establishes its start.
+                        // A source start after our export clock would invert the interval,
+                        // so leave it unset.
+                        start_time_unix_nano: start_time
+                            .and_then(|start| start.duration_since(SystemTime::UNIX_EPOCH).ok())
+                            .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+                            .filter(|start| *start <= observed_nanos)
+                            .unwrap_or_default(),
+                        ..data_point.clone()
+                    },
+                    description,
+                ))
             }
             _ => None,
         };
 
-        for (output, point) in std::iter::once((MetricOutput::Gauge, data_point))
-            .chain(counter_point.map(|point| (MetricOutput::CumulativeCounter, point)))
+        for (output, point, description) in
+            std::iter::once((MetricOutput::Gauge, data_point, "")).chain(counter_point)
         {
             let metric_index = match descriptor_indices.entry((
                 &sample.name,
@@ -625,7 +630,7 @@ fn build_metrics_export_request_from_pairs<'a>(
 
                     metrics.push(OtlpMetric {
                         name,
-                        description: String::new(),
+                        description: description.to_string(),
                         unit: sample.unit.clone(),
                         data: Some(data),
                         ..Default::default()
@@ -1820,13 +1825,24 @@ mod tests {
             context: None,
         };
         let counter = |interface, value, start_time| MetricSample {
-            semantics: MetricSemantics::CumulativeCounter { start_time },
+            semantics: MetricSemantics::CumulativeCounter {
+                description: "Number of packets reported by the interface",
+                start_time,
+            },
             ..sample("packets", "count", interface, value)
         };
 
         let batch = [
             (first.clone(), sample("status", "state", "swp1", 1.0)),
             (first.clone(), sample("power", "watts", "swp1", 10.0)),
+            (
+                first.clone(),
+                MetricSample {
+                    name: "other_source".to_string(),
+                    ..sample("power", "watts", "swp1", 20.0)
+                },
+            ),
+            (first.clone(), sample("power", "kilowatts", "swp1", 0.01)),
             (first.clone(), sample("status", "state", "swp2", 0.0)),
             (second, sample("status", "state", "swp3", 3.0)),
             (
@@ -1839,6 +1855,16 @@ mod tests {
             ),
             (first.clone(), counter("swp3", -1.0, None)),
             (first.clone(), counter("swp2", 0.0, None)),
+            (
+                first.clone(),
+                MetricSample {
+                    semantics: MetricSemantics::CumulativeCounter {
+                        description: "Number of errors reported by the interface",
+                        start_time: None,
+                    },
+                    ..sample("errors", "count", "swp1", 2.0)
+                },
+            ),
             (first, sample("status", "state", "swp4", -0.0)),
         ];
 
@@ -1858,7 +1884,52 @@ mod tests {
 
         let metrics = &first_resource.scope_metrics[0].metrics;
 
-        assert_eq!(metrics.len(), 4);
+        assert_eq!(metrics.len(), 8);
+
+        let power_descriptor = |name: &str| {
+            let metric = metrics
+                .iter()
+                .find(|metric| metric.name == name)
+                .unwrap_or_else(|| panic!("missing power descriptor {name}"));
+            let Some(metric::Data::Gauge(gauge)) = &metric.data else {
+                panic!("power metric must be a gauge");
+            };
+            let values: Vec<_> = gauge.data_points.iter().map(|point| point.value).collect();
+
+            (metric.unit.as_str(), metric.description.as_str(), values)
+        };
+
+        value_scenarios!(run = power_descriptor;
+            "original descriptor" {
+                "health_nvue_gnmi_power_watts" => (
+                    "watts", "", vec![Some(number_data_point::Value::AsDouble(10.0))]
+                )
+            }
+            "only the descriptor name differs" {
+                "health_other_source_power_watts" => (
+                    "watts", "", vec![Some(number_data_point::Value::AsDouble(20.0))]
+                )
+            }
+            "only the descriptor unit differs" {
+                "health_nvue_gnmi_power_kilowatts" => (
+                    "kilowatts", "", vec![Some(number_data_point::Value::AsDouble(0.01))]
+                )
+            }
+        );
+
+        for (name, description) in [
+            ("health_nvue_gnmi_errors_count", ""),
+            (
+                "health_nvue_gnmi_errors_count_total",
+                "Number of errors reported by the interface",
+            ),
+        ] {
+            let metric = metrics
+                .iter()
+                .find(|metric| metric.name == name)
+                .expect("errors metric");
+            assert_eq!(metric.description, description);
+        }
 
         let status = metrics
             .iter()
@@ -1905,6 +1976,10 @@ mod tests {
 
         assert_eq!(counter.unit, "count");
         assert_eq!(
+            counter.description,
+            "Number of packets reported by the interface"
+        );
+        assert_eq!(
             sum.aggregation_temporality,
             AggregationTemporality::Cumulative as i32
         );
@@ -1949,6 +2024,7 @@ mod tests {
             panic!("legacy metric must remain a Gauge");
         };
 
+        assert_eq!(legacy.description, "");
         assert_eq!(gauge.data_points.len(), 3);
         for (point, (interface, value)) in
             gauge
@@ -2028,7 +2104,10 @@ mod tests {
     fn invalid_counter_values_keep_only_the_legacy_gauge() {
         let exported_value = |value| {
             let sample = MetricSample {
-                semantics: MetricSemantics::CumulativeCounter { start_time: None },
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of packets reported by the interface",
+                    start_time: None,
+                },
                 key: "swp1/packets".to_string(),
                 name: "nvue_gnmi".to_string(),
                 metric_type: "packets".to_string(),
@@ -2066,6 +2145,7 @@ mod tests {
         let exported_start = |start_time| {
             let sample = MetricSample {
                 semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable ECC errors over the memory lifetime",
                     start_time: Some(start_time),
                 },
                 key: "memory1/errors".to_string(),

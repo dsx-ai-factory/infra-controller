@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 /// Older Scout senders may report success without a new burn when no profile
 /// was supplied. Correlated operations instead report `flashed=false` for
 /// that completed request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirmwareFlashReport {
     /// Whether the burn completed. Older Scout senders also set this when no profile
     /// was supplied; it is not proof of a new flash attempt.
@@ -39,8 +39,9 @@ pub struct FirmwareFlashReport {
     /// Whether the observed version matches the exact target; absent when
     /// unrequested. This does not establish which firmware is running after reset.
     pub verified_version: Option<bool>,
-    /// The version reported by `mlxfwmanager`, including a mismatched version.
-    /// Absent for dry-run, a failed or unrequested query, or unavailable facts.
+    /// The last usable version reported by `mlxfwmanager` during this operation,
+    /// including a mismatched version, retained across subsequent failed queries.
+    /// Absent when no usable version was observed, including dry-run or no query.
     pub observed_version: Option<String>,
     /// The literal target version from the configuration, when supplied.
     pub expected_version: Option<String>,

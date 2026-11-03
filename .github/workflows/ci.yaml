@@ -17,6 +17,16 @@
 name: NICo Core CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Exact PR head SHA authorized for image publishing'
+        required: true
+        type: string
+      comment_id:
+        description: 'PR comment containing the privileged publishing request'
+        required: true
+        type: string
   push:
     branches:
       - main
@@ -52,6 +62,9 @@ jobs:
   changes:
     name: Detect Core CI Gate
     runs-on: linux-amd64-cpu4
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       run_core_ci: ${{ steps.gate.outputs.run_core_ci }}
       non_rest_changed: ${{ steps.non-rest-changes.outputs.non_rest }}
@@ -62,11 +75,50 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # Keep publishing checks in changes because skipped prerequisites can suppress ordinary builds.
+      # https://github.com/actions/runner/issues/2205
+      # A dispatch follows a mutable branch, so check its captured SHA before PR code.
+      - name: Validate PR publishing request
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 5
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          COMMENT_ID: ${{ inputs.comment_id }}
+        with:
+          script: |
+            const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
+            if (context.repo.owner + '/' + context.repo.repo !== 'dsx-ai-factory/infra-controller'
+                || !match || !/^[0-9a-f]{40}$/.test(process.env.EXPECTED_SHA)
+                || context.sha !== process.env.EXPECTED_SHA) {
+              throw new Error('Dispatch must target the exact authorized PR mirror commit');
+            }
+            const { authorizePush } = require('./.github/ci/pr_push.cjs');
+            await authorizePush({
+              github, ...context.repo, prNumber: Number(match[1]),
+              commentId: Number(process.env.COMMENT_ID), expectedSha: context.sha,
+            });
+
+      - name: Set up Node for PR publishing tests
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 5
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test PR publishing authorization
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 5
+        run: node --test .github/ci/test_pr_push.cjs
+
       - name: Check Core CI concurrency policy
         run: bash scripts/check-ci-concurrency.sh core
 
       - name: Test CI final-gate checker
         run: python3 -B .github/ci/test_check_ci_gate.py
+
+      - name: Test Fern preview generation
+        run: python3 -B .github/ci/test_fern_docs_preview.py
 
       - name: Test secret-scan range resolver
         run: bash .github/ci/test-resolve-secret-scan-range.sh
@@ -111,6 +163,7 @@ jobs:
           REF: ${{ github.ref }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
           NON_REST_CHANGED: ${{ steps.non-rest-changes.outputs.non_rest }}
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           run_core_ci=true
 
@@ -118,7 +171,8 @@ jobs:
             run_core_ci="${NON_REST_CHANGED}"
           fi
 
-          if [[ "${COMMIT_MESSAGE}" =~ ci-run-complete-pipeline ]]; then
+          # A publishing request needs the build jobs even when path filters skip normal PR CI.
+          if [[ "${PR_PUBLISH}" == "true" || "${COMMIT_MESSAGE}" =~ ci-run-complete-pipeline ]]; then
             run_core_ci=true
           fi
 
@@ -140,6 +194,7 @@ jobs:
       source_registry_host: ${{ steps.registry.outputs.source_registry_host }}
       bases_rebuilt: ${{ steps.base-container-gate.outputs.build_container_x86_64_run == 'true' || steps.base-container-gate.outputs.runtime_container_x86_64_run == 'true' || steps.base-container-gate.outputs.build_container_aarch64_run == 'true' || steps.base-container-gate.outputs.runtime_container_aarch64_run == 'true' || steps.base-container-gate.outputs.build_artifacts_container_x86_64_run == 'true' || steps.base-container-gate.outputs.build_artifacts_container_aarch64_run == 'true' }}
       publish_images: ${{ steps.release-gate.outputs.publish_built_container }}
+      publish_release: ${{ steps.release-gate.outputs.publish_release }}
       lint_container_ref: ${{ steps.release-gate.outputs.lint_container_ref }}
       target_ngc_path: ${{ steps.registry.outputs.target_ngc_path }}
       registry_host: ${{ steps.registry.outputs.registry_host }}
@@ -247,6 +302,8 @@ jobs:
               - '.github/ci/test_check_ci_gate.py'
       - name: Calculate version
         id: version
+        env:
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
 
           set -euo pipefail
@@ -276,6 +333,13 @@ jobs:
           HELM_VERSION="${VERSION#v}"
           if [[ "$IS_LONG_TAG" == "true" ]]; then
             HELM_VERSION=$(echo "$HELM_VERSION" | sed 's/\(.*\)-/\1./')
+          fi
+
+          # Separate PR packages and images from the versions published by main.
+          if [[ "${PR_PUBLISH}" == "true" ]]; then
+            PR_NUMBER="${GITHUB_REF_NAME#pull-request/}"
+            VERSION="${VERSION}-pr.${PR_NUMBER}.g${SHORT_SHA}"
+            HELM_VERSION="${HELM_VERSION}-pr.${PR_NUMBER}.g${SHORT_SHA}"
           fi
 
           # Strict SemVer validation. Regex adapted to POSIX ERE (non-capturing
@@ -439,6 +503,11 @@ jobs:
           MACHINE_LIFECYCLE_CHANGED: ${{ steps.build-container-changes.outputs.machine_lifecycle }}
           CONTROL_PLANE_DPU_CHANGED: ${{ steps.build-container-changes.outputs.control_plane_dpu }}
         run: |
+          # Read the authorized commit message because dispatch events have no head_commit.
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            COMMIT_MESSAGE=$(git log -1 --format=%B "${GITHUB_SHA}") || exit 1
+          fi
+
           build_container_x86_64_run=false
           runtime_container_x86_64_run=false
           build_container_aarch64_run=false
@@ -590,12 +659,16 @@ jobs:
           SOURCE_REGISTRY: ${{ steps.registry.outputs.source_registry }}
           HAS_TARGET_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME != '' }}
           EVENT_NAME: ${{ github.event_name }}
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
           REF: ${{ github.ref }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
         run: |
           PUBLISH=false
 
-          if [[ "${EVENT_NAME}" == "pull_request" ]] || [[ "${REF}" =~ pull-request/[0-9]+ ]] ; then
+          # Only an authenticated dispatch may publish deployable images from a PR.
+          if [[ "${PR_PUBLISH}" == "true" ]]; then
+            PUBLISH=true
+          elif [[ "${EVENT_NAME}" == "pull_request" ]] || [[ "${REF}" =~ pull-request/[0-9]+ ]] ; then
             PUBLISH=false
           elif [[ "${REF}" == "refs/heads/main" ]] || [[ "${REF}" =~ ^refs/heads/release/ ]] || [[ "${REF}" =~ ^refs/tags/ ]] || [[ "${COMMIT_MESSAGE}" =~ ci-run-complete-pipeline ]]; then
             PUBLISH=true
@@ -607,6 +680,12 @@ jobs:
             exit 1
           fi
           echo "publish_built_container=${PUBLISH}" >> "$GITHUB_OUTPUT"
+          # Helm uploads and production promotion remain reserved for release refs.
+          PUBLISH_RELEASE=false
+          if [[ "${PUBLISH}" == "true" && "${PR_PUBLISH}" != "true" ]]; then
+            PUBLISH_RELEASE=true
+          fi
+          echo "publish_release=${PUBLISH_RELEASE}" >> "$GITHUB_OUTPUT"
           # job containers log in before any step runs, so the lint job must
           # never point at a target ref that was not published (mirror PRs)
           if [[ "${BUILD_X86_RUN}" == "true" && "${GITHUB_REPOSITORY}" != "dsx-ai-factory/infra-controller" && "${PUBLISH}" != "true" ]]; then
@@ -865,6 +944,7 @@ jobs:
       # of what filled up the Actions quota and evicted the sccache
       # entries.
       cache: false
+      sccache_scope: release-container-x86_64
       build_args: ${{ needs.prepare.outputs.release_build_args }}
       image_name: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       image_tag: ${{ needs.prepare.outputs.version }}
@@ -901,6 +981,7 @@ jobs:
       # is the worst of the four: 8m21s of cache export on a main run for two
       # cached layers.
       cache: false
+      sccache_scope: release-container-aarch64
       build_args: ${{ needs.prepare.outputs.release_build_args_aarch64 }}
       image_name: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide-aarch64
       image_tag: ${{ needs.prepare.outputs.version }}
@@ -942,20 +1023,34 @@ jobs:
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
+          X86_DIGEST: ${{ needs.build-release-container-x86_64.outputs.image_digest }}
+          ARM_DIGEST: ${{ needs.build-release-container-aarch64.outputs.image_digest }}
         with:
           max_attempts: 3
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
+            # Require strict PR publishing failures while preserving main/tag shell behavior.
+            if [[ "${PUBLISH_RELEASE}" != "true" ]]; then
+              set -euo pipefail
+            fi
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide@${{ needs.build-release-container-x86_64.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide-aarch64@${{ needs.build-release-container-aarch64.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/nvmetal-carbide:${VERSION}" \
+              "${IMAGE_REGISTRY}/nvmetal-carbide@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/nvmetal-carbide-aarch64@${ARM_DIGEST}"
 
-            docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide@${{ needs.build-release-container-x86_64.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide-aarch64@${{ needs.build-release-container-aarch64.outputs.image_digest }}
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/nvmetal-carbide:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/nvmetal-carbide@${X86_DIGEST}" \
+                "${IMAGE_REGISTRY}/nvmetal-carbide-aarch64@${ARM_DIGEST}"
+            fi
 
   build-machine-a-tron:
     if: >-
@@ -1077,7 +1172,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: dev/k8s/machine-a-tron-controller/go.mod
           cache: true
@@ -1146,6 +1241,7 @@ jobs:
           mkdir -p "${{ github.workspace }}/.sccache"
           docker pull "${BUILD_CONTAINER}"
           docker run --rm \
+            --ulimit nofile=65536:65536 \
             -v "${{ github.workspace }}:/carbide" \
             -v "${{ github.workspace }}/.sccache:/sccache" \
             -w /carbide \
@@ -1153,6 +1249,7 @@ jobs:
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_MAKE_SKIP_CODECOV=true \
             -e DATABASE_URL='postgresql://root@%2Fvar%2Frun%2Fpostgresql/root' \
+            -e NICO_TEST_MAX_PG_CONNECTIONS=900 \
             -e SCCACHE_DIR=/sccache \
             -e SCCACHE_CACHE_SIZE=5G \
             -e RUSTC_WRAPPER=sccache \
@@ -1163,15 +1260,16 @@ jobs:
             "${BUILD_CONTAINER}" \
             bash -c '
               set -euo pipefail
+              echo "Open file descriptor limits: soft=$(ulimit -Sn), hard=$(ulimit -Hn)"
               # Everything in here runs as root, so sccache leaves /sccache
               # owned by root and the post-job archive step cannot read it back.
               # Hand the directory to the runner user on the way out, including
               # when the tests fail.
               trap "chown -R ${HOST_OWNER} /sccache 2>/dev/null || true" EXIT
               git config --global --add safe.directory /carbide
-              # max_connections is startup-only; the default of 100 is too low
-              # when Cargo runs several SQLx-backed test binaries concurrently.
-              printf "max_connections = 1000\n" | tee -a /etc/postgresql/*/main/postgresql.conf
+              # Apply durability, WAL and connection settings for this disposable
+              # CI cluster before PostgreSQL starts.
+              tee -a /etc/postgresql/*/main/postgresql.conf < .github/ci/postgresql.conf
               /etc/init.d/postgresql start
               sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
               createdb root
@@ -1220,6 +1318,7 @@ jobs:
       # Off for the same reason as the release containers above: 2m00s of cache
       # export on a main run for a single cached layer.
       cache: false
+      sccache_scope: forge-cli-x86_64
       image_name: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -1244,6 +1343,7 @@ jobs:
       # Off for the same reason as the release containers above: 3m27s of cache
       # export on a main run for two cached layers.
       cache: false
+      sccache_scope: forge-cli-aarch64
       image_name: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -1279,25 +1379,37 @@ jobs:
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
         with:
           max_attempts: 3
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
+            # Require strict PR publishing failures while preserving main/tag shell behavior.
+            if [[ "${PUBLISH_RELEASE}" != "true" ]]; then
+              set -euo pipefail
+            fi
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.version }}
+              "${IMAGE_REGISTRY}/forge-admin-cli:${VERSION}" \
+              "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
+              "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
 
-            docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli:latest \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.version }}
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/forge-admin-cli:latest" \
+                "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
+                "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
 
-            docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.version }}
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/forge-admin-cli:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
+                "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
+            fi
 
   # ============================================================================
   # BUILD STAGE - Boot Artifacts
@@ -1685,6 +1797,13 @@ jobs:
           token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
+          X86_DIGEST: ${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }}
+          ARM_DIGEST: ${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
         with:
           max_attempts: 3
           timeout_minutes: 10
@@ -1693,14 +1812,17 @@ jobs:
             set -euo pipefail
 
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin-aarch64@${ARM_DIGEST}"
 
-            docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/machine-validation-basic-plugin:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/machine-validation-basic-plugin@${X86_DIGEST}" \
+                "${IMAGE_REGISTRY}/machine-validation-basic-plugin-aarch64@${ARM_DIGEST}"
+            fi
 
   build-release-machine-validation-artifacts-x86-host:
     needs:
@@ -1731,7 +1853,7 @@ jobs:
   # machine_validation tag below. It bundles the same amd64 runner archive as the
   # amd64 carrier, so the served payload does not depend on the control-plane
   # node's architecture. (The bundled validation runner payload staying
-  # arm64-capable is tracked separately — this only makes the carrier runnable on
+  # arm64-capable is tracked separately. This only makes the carrier runnable on
   # arm64 nodes.)
   build-release-machine-validation-artifacts-arm-host:
     needs:
@@ -1785,20 +1907,34 @@ jobs:
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
+          X86_DIGEST: ${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_digest }}
+          ARM_DIGEST: ${{ needs.build-release-machine-validation-artifacts-arm-host.outputs.image_digest }}
         with:
           max_attempts: 3
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
+            # Require strict PR publishing failures while preserving main/tag shell behavior.
+            if [[ "${PUBLISH_RELEASE}" != "true" ]]; then
+              set -euo pipefail
+            fi
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation@${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation-aarch64@${{ needs.build-release-machine-validation-artifacts-arm-host.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/machine_validation:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine_validation@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/machine_validation-aarch64@${ARM_DIGEST}"
 
-            docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation@${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation-aarch64@${{ needs.build-release-machine-validation-artifacts-arm-host.outputs.image_digest }}
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/machine_validation:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/machine_validation@${X86_DIGEST}" \
+                "${IMAGE_REGISTRY}/machine_validation-aarch64@${ARM_DIGEST}"
+            fi
 
   proto-police:
     needs:
@@ -1881,11 +2017,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: "1.26.4"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: rest-api/go.sum
+
+      - name: Download REST dependencies
+        uses: ./.github/actions/go-mod-download
 
       - name: Regenerate REST protos from Core protos
         run: make -C rest-api core-proto
@@ -2089,6 +2228,11 @@ jobs:
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
         with:
           max_attempts: 3
           timeout_minutes: 10
@@ -2096,14 +2240,17 @@ jobs:
           command: |
             set -euo pipefail
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64:${{ needs.prepare.outputs.version }}
+              "${IMAGE_REGISTRY}/machine-lifecycle-test:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine-lifecycle-test-x86_64:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine-lifecycle-test-aarch64:${VERSION}"
 
-            docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64:${{ needs.prepare.outputs.version }}
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/machine-lifecycle-test:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/machine-lifecycle-test-x86_64:${VERSION}" \
+                "${IMAGE_REGISTRY}/machine-lifecycle-test-aarch64:${VERSION}"
+            fi
 
   # ============================================================================
   # BUILD STAGE - Helm Chart
@@ -2153,6 +2300,9 @@ jobs:
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
+      - name: Check KMIP provider preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_kmip_provider.py'
+
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
@@ -2165,6 +2315,7 @@ jobs:
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
             bluefield/charts/nico-dpu-agent
+            bluefield/charts/nico-dhcp-server
             bluefield/charts/nico-fmds
             bluefield/charts/nico-otelcol
             helm
@@ -2196,7 +2347,7 @@ jobs:
     needs:
       - prepare
       - build-validate-helm-chart
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-chart.result == 'success' && needs.prepare.outputs.publish_images == 'true' }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-chart.result == 'success' && needs.prepare.outputs.publish_release == 'true' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2206,7 +2357,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2214,7 +2365,8 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
   build-validate-helm-prereqs-chart:
     needs:
@@ -2295,11 +2447,19 @@ jobs:
       - name: Test doca-platform pin
         run: bash helm-prereqs/tests/doca-platform-pin_test.sh
 
+      - name: Test KMIP client Secret
+        run: bash helm-prereqs/tests/setup-kmip-client-secret_test.sh
+
+  # Waits for the nico chart push. NGC answers an upload with HTTP 409 while
+  # another upload to the same namespace is updating its chart index, and the
+  # CLI reports that as "already exists". `!cancelled()` still runs this job
+  # when the nico chart push fails.
   build-push-helm-prereqs-chart:
     needs:
       - prepare
       - build-validate-helm-prereqs-chart
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-prereqs-chart.result == 'success' && needs.prepare.outputs.publish_images == 'true' }}
+      - build-push-helm-chart
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-prereqs-chart.result == 'success' && needs.prepare.outputs.publish_release == 'true' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2309,7 +2469,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2317,7 +2477,8 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
   # ============================================================================
   # BUILD STAGE - Bluefield Images
@@ -2353,9 +2514,13 @@ jobs:
           token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
 
       - name: Pull build container
-        run: docker pull ${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }}
+        env:
+          BUILD_CONTAINER_REF: ${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }}
+        run: docker pull "${BUILD_CONTAINER_REF}"
 
       - name: Compile bluefield Rust binaries
+        env:
+          BUILD_CONTAINER_REF: ${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }}
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
@@ -2363,7 +2528,7 @@ jobs:
             -e CARGO_HOME=/workspace/cargo \
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu \
-            ${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }} \
+            "${BUILD_CONTAINER_REF}" \
             bash -c "git config --global --add safe.directory /workspace && \
               cargo make --cwd bluefield build-dpu-agent-and-dhcp-server-ci && \
               cargo make --cwd bluefield build-fmds-ci && \
@@ -2564,11 +2729,14 @@ jobs:
           /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_map_endpoints.py
           /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_otel_post_install.py
 
+  # Waits for the prereqs chart push, for the same reason as
+  # `build-push-helm-prereqs-chart`.
   build-push-bluefield-helm-charts:
     needs:
       - prepare
       - build-validate-bluefield-helm-charts
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-bluefield-helm-charts.result == 'success' && needs.prepare.outputs.publish_images == 'true' }}
+      - build-push-helm-prereqs-chart
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-bluefield-helm-charts.result == 'success' && needs.prepare.outputs.publish_release == 'true' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2578,7 +2746,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2586,11 +2754,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2598,11 +2767,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2610,11 +2780,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: bluefield/charts/nico-fmds
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2622,7 +2793,8 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
   build-summary:
     runs-on: linux-amd64-cpu4
@@ -2672,13 +2844,32 @@ jobs:
       - lint-police
     steps:
       - name: Generate summary
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+          BUILD_CONTAINER_X86_64_IMAGE_REF: ${{ needs.build-container-x86_64.outputs.image_ref }}
+          BUILD_CONTAINER_AARCH64_IMAGE_REF: ${{ needs.build-container-aarch64.outputs.image_ref }}
+          BUILD_RUNTIME_CONTAINER_X86_64_IMAGE_REF: ${{ needs.build-runtime-container-x86_64.outputs.image_ref }}
+          BUILD_RUNTIME_CONTAINER_AARCH64_IMAGE_REF: ${{ needs.build-runtime-container-aarch64.outputs.image_ref }}
+          BUILD_ARTIFACTS_CONTAINER_X86_64_IMAGE_REF: ${{ needs.build-artifacts-container-x86_64.outputs.image_ref }}
+          BUILD_ARTIFACTS_CONTAINER_AARCH64_IMAGE_REF: ${{ needs.build-artifacts-container-aarch64.outputs.image_ref }}
+          BUILD_RELEASE_CONTAINER_X86_64_IMAGE_REF: ${{ needs.build-release-container-x86_64.outputs.image_ref }}
+          BUILD_RELEASE_CONTAINER_AARCH64_IMAGE_REF: ${{ needs.build-release-container-aarch64.outputs.image_ref }}
+          BUILD_FORGE_CLI_X86_64_IMAGE_REF: ${{ needs.build-forge-cli-x86_64.outputs.image_ref }}
+          BUILD_FORGE_CLI_AARCH64_IMAGE_REF: ${{ needs.build-forge-cli-aarch64.outputs.image_ref }}
+          BUILD_RELEASE_MACHINE_VALIDATION_RUNNER_IMAGE_REF: ${{ needs.build-release-machine-validation-runner.outputs.image_ref }}
+          BUILD_RELEASE_MACHINE_VALIDATION_BASIC_PLUGIN_X86_IMAGE_REF: ${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_ref }}
+          BUILD_RELEASE_MACHINE_VALIDATION_BASIC_PLUGIN_ARM_IMAGE_REF: ${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_ref }}
+          BUILD_RELEASE_MACHINE_VALIDATION_ARTIFACTS_X86_HOST_IMAGE_REF: ${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_ref }}
+          BUILD_RELEASE_ARTIFACTS_X86_HOST_IMAGE_REF: ${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}
+          BUILD_RELEASE_ARTIFACTS_ARM_HOST_IMAGE_REF: ${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}
+          BUILD_MAT_K8S_CONTROLLER_IMAGE_REF: ${{ needs.build-mat-k8s-controller.outputs.image_ref }}
+          BUILD_SITE_HEALTH_PROBE_IMAGE_REF: ${{ needs.build-site-health-probe.outputs.image_ref }}
         run: |
-          NEEDS='${{ toJson(needs) }}'
           echo "## Build Jobs Summary" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "$NEEDS" | jq -r '
+          echo "$NEEDS_JSON" | jq -r '
             to_entries[]
             | select((.key | startswith("build-")) or (.key | startswith("test-")) or (.key | startswith("merge-manifests-")))
             | "| \(.key) | \(if .value.result == "failure" then "**\(.value.result)**" else .value.result end) |"
@@ -2692,24 +2883,24 @@ jobs:
 
           # Collect image_ref from docker-build jobs
           declare -A IMAGES
-          IMAGES["build-container-x86_64"]="${{ needs.build-container-x86_64.outputs.image_ref }}"
-          IMAGES["build-container-aarch64"]="${{ needs.build-container-aarch64.outputs.image_ref }}"
-          IMAGES["build-runtime-container-x86_64"]="${{ needs.build-runtime-container-x86_64.outputs.image_ref }}"
-          IMAGES["build-runtime-container-aarch64"]="${{ needs.build-runtime-container-aarch64.outputs.image_ref }}"
-          IMAGES["build-artifacts-container-x86_64"]="${{ needs.build-artifacts-container-x86_64.outputs.image_ref }}"
-          IMAGES["build-artifacts-container-aarch64"]="${{ needs.build-artifacts-container-aarch64.outputs.image_ref }}"
-          IMAGES["build-release-container-x86_64"]="${{ needs.build-release-container-x86_64.outputs.image_ref }}"
-          IMAGES["build-release-container-aarch64"]="${{ needs.build-release-container-aarch64.outputs.image_ref }}"
-          IMAGES["build-forge-cli-x86_64"]="${{ needs.build-forge-cli-x86_64.outputs.image_ref }}"
-          IMAGES["build-forge-cli-aarch64"]="${{ needs.build-forge-cli-aarch64.outputs.image_ref }}"
-          IMAGES["build-release-machine-validation-runner"]="${{ needs.build-release-machine-validation-runner.outputs.image_ref }}"
-          IMAGES["build-release-machine-validation-basic-plugin-x86"]="${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_ref }}"
-          IMAGES["build-release-machine-validation-basic-plugin-arm"]="${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_ref }}"
-          IMAGES["build-release-machine-validation-artifacts-x86-host"]="${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_ref }}"
-          IMAGES["build-release-artifacts-x86-host"]="${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}"
-          IMAGES["build-release-artifacts-arm-host"]="${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}"
-          IMAGES["build-mat-k8s-controller"]="${{ needs.build-mat-k8s-controller.outputs.image_ref }}"
-          IMAGES["build-site-health-probe"]="${{ needs.build-site-health-probe.outputs.image_ref }}"
+          IMAGES["build-container-x86_64"]="${BUILD_CONTAINER_X86_64_IMAGE_REF}"
+          IMAGES["build-container-aarch64"]="${BUILD_CONTAINER_AARCH64_IMAGE_REF}"
+          IMAGES["build-runtime-container-x86_64"]="${BUILD_RUNTIME_CONTAINER_X86_64_IMAGE_REF}"
+          IMAGES["build-runtime-container-aarch64"]="${BUILD_RUNTIME_CONTAINER_AARCH64_IMAGE_REF}"
+          IMAGES["build-artifacts-container-x86_64"]="${BUILD_ARTIFACTS_CONTAINER_X86_64_IMAGE_REF}"
+          IMAGES["build-artifacts-container-aarch64"]="${BUILD_ARTIFACTS_CONTAINER_AARCH64_IMAGE_REF}"
+          IMAGES["build-release-container-x86_64"]="${BUILD_RELEASE_CONTAINER_X86_64_IMAGE_REF}"
+          IMAGES["build-release-container-aarch64"]="${BUILD_RELEASE_CONTAINER_AARCH64_IMAGE_REF}"
+          IMAGES["build-forge-cli-x86_64"]="${BUILD_FORGE_CLI_X86_64_IMAGE_REF}"
+          IMAGES["build-forge-cli-aarch64"]="${BUILD_FORGE_CLI_AARCH64_IMAGE_REF}"
+          IMAGES["build-release-machine-validation-runner"]="${BUILD_RELEASE_MACHINE_VALIDATION_RUNNER_IMAGE_REF}"
+          IMAGES["build-release-machine-validation-basic-plugin-x86"]="${BUILD_RELEASE_MACHINE_VALIDATION_BASIC_PLUGIN_X86_IMAGE_REF}"
+          IMAGES["build-release-machine-validation-basic-plugin-arm"]="${BUILD_RELEASE_MACHINE_VALIDATION_BASIC_PLUGIN_ARM_IMAGE_REF}"
+          IMAGES["build-release-machine-validation-artifacts-x86-host"]="${BUILD_RELEASE_MACHINE_VALIDATION_ARTIFACTS_X86_HOST_IMAGE_REF}"
+          IMAGES["build-release-artifacts-x86-host"]="${BUILD_RELEASE_ARTIFACTS_X86_HOST_IMAGE_REF}"
+          IMAGES["build-release-artifacts-arm-host"]="${BUILD_RELEASE_ARTIFACTS_ARM_HOST_IMAGE_REF}"
+          IMAGES["build-mat-k8s-controller"]="${BUILD_MAT_K8S_CONTROLLER_IMAGE_REF}"
+          IMAGES["build-site-health-probe"]="${BUILD_SITE_HEALTH_PROBE_IMAGE_REF}"
 
           for job in "${!IMAGES[@]}"; do
             image="${IMAGES[$job]}"
@@ -2718,13 +2909,64 @@ jobs:
             fi
           done
 
+  # Every Cargo.lock change on main saves a new sccache archive per scope, and
+  # restore-keys only falls back to the newest one. The older archives would
+  # otherwise hold their space until they go 7 days unread, so this keeps the
+  # newest per scope and deletes the rest.
+  prune-sccache:
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    needs:
+      - test-release-container-services
+      - build-release-container-x86_64
+      - build-release-container-aarch64
+      - build-forge-cli-x86_64
+      - build-forge-cli-aarch64
+      - build-boot-artifacts-x86
+      - build-boot-artifacts-bfb
+      - build-package-scout-aarch64
+    runs-on: linux-amd64-cpu4
+    permissions:
+      actions: write
+    steps:
+      - name: Delete superseded sccache archives
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const entries = await github.paginate(github.rest.actions.getActionsCacheList, {
+              owner,
+              repo,
+              key: 'sccache-',
+              ref: 'refs/heads/main',
+              per_page: 100,
+            });
+            const scopeOf = (key) => key.replace(/-[0-9a-f]{64}$/, '');
+            const newest = new Map();
+            for (const entry of entries) {
+              const kept = newest.get(scopeOf(entry.key));
+              if (!kept || Date.parse(entry.created_at) > Date.parse(kept.created_at)) {
+                newest.set(scopeOf(entry.key), entry);
+              }
+            }
+            for (const entry of entries) {
+              const kept = newest.get(scopeOf(entry.key));
+              if (kept.id === entry.id) continue;
+              core.info(`Deleting ${entry.key} (${entry.size_in_bytes} bytes), superseded by ${kept.key}`);
+              try {
+                await github.rest.actions.deleteActionsCacheById({ owner, repo, cache_id: entry.id });
+              } catch (error) {
+                // An overlapping main run may have deleted it already.
+                if (error.status !== 404) throw error;
+              }
+            }
+
   promote-to-be-scanned-image:
     # Skip for pull-request/* branches (main, release/*, and tags are allowed by workflow trigger)
-    if: ${{ !cancelled() && github.repository == 'dsx-ai-factory/infra-controller' && needs.build-release-container-x86_64.result == 'success' && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' }}
+    if: ${{ !cancelled() && github.repository == 'dsx-ai-factory/infra-controller' && needs.build-release-container-x86_64.result == 'success' && github.event_name != 'schedule' && needs.prepare.outputs.publish_release == 'true' }}
     needs:
       - prepare
       - build-release-container-x86_64
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@760d2d7964b479fde431cd3e0b980bc6b6a26ccd
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}

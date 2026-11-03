@@ -1483,6 +1483,30 @@ After changing the DPF status for a host in this way, you should trigger a repro
 
 ---
 
+### Site-wide partial-multiplane maintenance
+
+In `carbide.toml`, `partial-multiplane` controls whether Astra provisioning
+initializes all planes in maintenance mode. It defaults to `enabled`. To skip
+initialization of planes in maintenance mode during provisioning, set:
+
+```toml
+[ewethers_config]
+partial-multiplane = "disabled"
+```
+
+Core reads this setting at startup. Setting `enabled`
+initializes all planes in maintenance mode once per provisioning. `disabled` skips
+that step, leaving newly provisioned planes in their default enabled state.
+Legacy MAC/IP inventory skips maintenance initialization for either value.
+
+This setting does not restrict CLI or REST maintenance requests, configuration
+delivery, or DPU observations. Operators can request maintenance changes after
+provisioning with either value. Saved requests remain in effect.
+
+Changing the setting does not change existing plane states. It affects the
+initialization script in newly provisioned Astra flavors, including after
+reingestion or reprovisioning.
+
 ## 4. Start carbide-api to create the DPF initialization objects
 
 Once everything in sections 1–3 is in place, deploy Core with

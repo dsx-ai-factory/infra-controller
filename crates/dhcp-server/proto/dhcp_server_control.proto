@@ -21,11 +21,16 @@ package dhcp_server_control;
 service DhcpServerControl {
     // Update the DHCP config and immediately reload/restart the DHCP server.
     // A running server skips the restart if both config and interfaces are
-    // unchanged. An empty interface list stages the config for a
-    // later update and leaves any running listeners unchanged. Otherwise,
+    // unchanged. An empty interface list stages host and DHCP settings for a
+    // later update. A changed service replacement restarts the running generation
+    // on its last applied interfaces; otherwise, running listeners are unchanged.
+    // With no running generation, listeners remain stopped. Otherwise,
     // success acknowledges application, not readiness of every listener socket.
     // DHCP settings replace the previous settings. Supplied host settings also
     // replace the previous settings; omission retains the live host file.
+    // Service settings always replace the active reservation set, and omission
+    // or an empty message clears every service reservation. This clear also
+    // applies when an empty listener inventory leaves host and DHCP files staged.
     // Invalid caller configuration returns
     // INVALID_ARGUMENT; storage or application failures return INTERNAL. A full
     // update queue returns RESOURCE_EXHAUSTED; an unavailable control loop returns
@@ -105,14 +110,66 @@ message HostConfig {
     map<string, InterfaceInfo> host_ip_addresses = 2;
 }
 
+// Replaces all service reservations on every update. Omission and an empty
+// message both clear active reservations, including while host and DHCP files
+// remain staged for a later nonempty listener inventory.
+// Only DPU mode serves these reservations. Controller mode accepts the
+// replacement but does not use it for packet selection.
+message ServiceConfig {
+    repeated ServiceInterfaceReservations interfaces = 1;
+}
+
+// Binds reservations to the exact nonempty interface on which DHCP receives a
+// request. The interface must also appear in UpdateAndReloadConfig.interfaces;
+// an empty reservations list explicitly prevents host fallback on that slot.
+message ServiceInterfaceReservations {
+    string receiving_interface = 1;
+    repeated ServiceReservation reservations = 2;
+}
+
+// Carries stable service identity and one required point-to-point address
+// family. An unset link rejects the complete update with INVALID_ARGUMENT.
+// Identity fields are non-nil UUID strings. mac_address is a nonzero unicast
+// MAC string and combines with receiving_interface to form the lookup key.
+// internal_uuid and each (attachment_id, interface_ordinal) pair are unique
+// across the complete ServiceConfig replacement.
+message ServiceReservation {
+    string attachment_id = 1;
+    uint32 interface_ordinal = 2;
+    string internal_uuid = 3;
+    string mac_address = 4;
+    oneof link {
+        ServiceLinkV4 ipv4 = 5;
+        ServiceLinkV6 ipv6 = 6;
+    }
+}
+
+// Uses dotted-decimal addresses and a canonical CIDR /31 whose base address is
+// the HBN gateway and whose second address is assigned to the service. HBN's
+// VRF owns overlay routes learned through route-target imports.
+message ServiceLinkV4 {
+    string address = 1;
+    string prefix = 2;
+    string gateway = 3;
+}
+
+// Uses IPv6 address strings and a canonical CIDR /127 whose base address is
+// the HBN peer and whose second address is assigned to the service.
+message ServiceLinkV6 {
+    string address = 1;
+    string prefix = 2;
+    string hbn_peer = 3;
+}
+
 message UpdateAndReloadConfigRequest {
     DhcpConfig dhcp_config = 1;
     // In DPU mode, omission retains the live host file and discards any staged
-    // replacement. That file must exist when applying the configuration; an
-    // unreadable retained file is a storage failure (INTERNAL). Controller mode
-    // does not use host settings.
+    // replacement. A missing retained file is accepted so service-only operation
+    // does not require host state; other read or validation failures return
+    // INTERNAL. Controller mode does not use host settings.
     HostConfig host_config = 2;
     repeated string interfaces = 3;  // network interfaces for the DHCP server to listen on
+    ServiceConfig service_config = 4;
 }
 
 message UpdateAndReloadConfigResponse {}

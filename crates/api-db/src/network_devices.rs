@@ -65,10 +65,11 @@ pub async fn find<DB>(
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let mut query = sqlx::QueryBuilder::new(
-        "SELECT l.id, l.name, l.description, l.ip_addresses, l.device_type, l.discovered_via
-         FROM network_devices l",
-    );
+    let mut query = sqlx::QueryBuilder::new(format!(
+        "SELECT {} FROM {}",
+        NetworkDevice::db_aliased_columns(),
+        NetworkDevice::db_aliased_table(),
+    ));
 
     let mut devices: Vec<NetworkDevice> = match filter {
         ObjectFilter::All => query

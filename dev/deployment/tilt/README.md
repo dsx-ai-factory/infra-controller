@@ -128,6 +128,23 @@ Narrow the results with the `namespace`, `workload`, `pod`, `container`, or
 Loki stores logs on a 2 GiB persistent volume and retains them for 24 hours.
 The volume survives pod restarts but is removed with the local Kind cluster.
 
+## API traces
+
+With `--observability=true`, Tilt installs Tempo and enables `nico-api` trace
+sampling with the chart's `tracing.enabled` value. The API exports OTLP/gRPC
+traces to `http://tempo.observability.svc.cluster.local:4317` by default.
+Set `nico-api.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in
+[`values.yaml`](values.yaml) to use a different OTLP/gRPC URL. An empty or
+omitted endpoint selects the local Tempo service when the profile is enabled.
+The environment variable overrides `[tracing].otlp_endpoint` in the API's TOML
+configuration; site TOML overrides the chart's generated `[tracing].enabled`.
+
+Open **Explore** in Grafana, select **Tempo**, and search for service name
+`carbide-api`. Tempo retains traces for 24 hours on a 2 GiB persistent volume.
+The volume survives pod restarts and is removed with the local Kind cluster.
+When enabling observability in an existing session, trigger the manual
+`nico-api` resource in Tilt to apply its tracing configuration.
+
 ## Pod metrics
 
 Prometheus discovers ServiceMonitor and PodMonitor resources across the local
@@ -248,7 +265,7 @@ retention policies.
 The `tilt.profiles` switches in [`values.yaml`](values.yaml) control REST, MCP,
 DSX Exchange, and observability. REST brings Temporal and Keycloak, MCP
 automatically brings REST, and DSX Exchange brings NATS. Observability manages
-Loki, Alloy, Prometheus, Grafana, and the NICo metrics monitors as one unit. All
+Loki, Tempo, Alloy, Prometheus, Grafana, and the NICo metrics monitors as one unit. All
 optional profiles are disabled by default.
 
 Changes to `values.yaml` reload the running Tilt session. For temporary

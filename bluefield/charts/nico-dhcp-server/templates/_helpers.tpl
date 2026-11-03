@@ -52,3 +52,14 @@ Server Port
 {{- define "nico-dhcp-server.serverPort" -}}
 {{- default 10079 .Values.serverPort -}}
 {{- end -}}
+
+{{/*
+Keep workload rendering enabled for values retained from chart versions without the switch.
+*/}}
+{{- define "nico-dhcp-server.serviceDaemonSetEnabled" -}}
+{{- if hasKey .Values.serviceDaemonSet "enabled" -}}
+{{- .Values.serviceDaemonSet.enabled -}}
+{{- else -}}
+true
+{{- end -}}
+{{- end -}}

@@ -420,7 +420,15 @@ impl ExploredEndpoint {
     /// declared hardware that is not powered on yet does not hold refresh-wait
     /// slots. An undeclared one is routine from the start: an underlay address
     /// that never answers Redfish would otherwise hold a slot for good.
-    pub fn exploration_tier(&self, expected: bool) -> ExplorationTier {
+    /// A BMC whose explorations timed out fewer than
+    /// `timeouts_before_prevent_allocations` times in a row is a refresh wait,
+    /// so it is re-explored ahead of the routine refresh to confirm or clear
+    /// the timeout; once its timeouts prevent allocations it is routine again.
+    pub fn exploration_tier(
+        &self,
+        expected: bool,
+        timeouts_before_prevent_allocations: u32,
+    ) -> ExplorationTier {
         if self.exploration_requested {
             ExplorationTier::Priority
         } else if (expected
@@ -428,6 +436,12 @@ impl ExploredEndpoint {
             && self.report_version.version_nr() <= NEVER_EXPLORED_QUICK_RETRIES)
             || (self.waiting_for_explorer_refresh
                 && self.preingestion_state.parks_for_explorer_refresh())
+            || (self.report.endpoint_type == EndpointType::Bmc
+                && matches!(
+                    self.report.last_exploration_error,
+                    Some(EndpointExplorationError::ConnectionTimeout { consecutive_count, .. })
+                        if consecutive_count < timeouts_before_prevent_allocations
+                ))
         {
             ExplorationTier::RefreshWait
         } else {
@@ -1538,7 +1552,12 @@ pub enum EndpointExplorationError {
     /// reachable, but the  port is not listening, see ConnectionRefused.
     #[error("site-explorer timed out communicating with the endpoint: {details:?}")]
     #[serde(rename_all = "PascalCase")]
-    ConnectionTimeout { details: String },
+    ConnectionTimeout {
+        details: String,
+        /// Explorations in a row that timed out, including this one.
+        #[serde(default)]
+        consecutive_count: u32,
+    },
     /// The connection to the configured endpoint was refused. This indicates
     /// that site-explorer probably has connectivity to the target IP (unless
     /// a network device in the path is sending an RST), and is able to positively
@@ -2038,6 +2057,25 @@ pub struct Inventory {
     pub description: Option<String>,
     pub version: Option<String>,
     pub release_date: Option<String>,
+    /// The drive this entry reports, set only on entries that exploration
+    /// created from a Redfish Storage drive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<DriveIdentity>,
+}
+
+/// The drive behind a firmware inventory entry created from Redfish Storage.
+/// Host firmware configuration selects drive components by `model`.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct DriveIdentity {
+    /// The drive's Redfish `Model`, trimmed. Its form depends on the BMC: some
+    /// report the part number alone (`KCD8DPUG15T3` on Lenovo XCC), some add
+    /// the vendor (`SAMSUNG MZTL63T8HFLT-00AW7` on GB200), and Dell reports
+    /// its own name (`Dell Ent NVMe CM6 RI 1.92TB`).
+    pub model: String,
+    /// The drive's Redfish `MediaType` (`SSD`, `HDD` or `SMR`), for reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
 }
 
 /// The result of one Redfish machine-setup check.
@@ -2915,6 +2953,28 @@ mod tests {
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
 
+    /// Stored reports written before inventory entries carried drive data
+    /// still load, and the drive data round-trips.
+    #[test]
+    fn inventory_drive_identity_is_optional_in_stored_reports() {
+        let legacy: Inventory =
+            serde_json::from_str(r#"{"Id": "BMC-Primary", "Version": "1.0"}"#).unwrap();
+        assert_eq!(legacy.drive, None);
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("Drive"));
+
+        let drive = Inventory {
+            id: "Drive_KCD8DPUG15T3_drive_bay_0".into(),
+            version: Some("1XET7106".into()),
+            drive: Some(DriveIdentity {
+                model: "KCD8DPUG15T3".into(),
+                media_type: Some("SSD".into()),
+            }),
+            ..Default::default()
+        };
+        let stored = serde_json::to_string(&drive).unwrap();
+        assert_eq!(serde_json::from_str::<Inventory>(&stored).unwrap(), drive);
+    }
+
     fn processor_position_report() -> EndpointExplorationReport {
         EndpointExplorationReport {
             systems: vec![ComputerSystem {
@@ -3359,6 +3419,7 @@ mod tests {
                 description: None,
                 version: version.map(|v| v.to_string()),
                 release_date: None,
+                drive: None,
             })
             .collect();
 
@@ -3524,7 +3585,53 @@ mod tests {
                 endpoint.waiting_for_explorer_refresh = waiting;
                 endpoint.exploration_requested = requested;
                 endpoint.report_version = ConfigVersion::new(version);
-                endpoint.exploration_tier(expected)
+                endpoint.exploration_tier(expected, 1)
+            },
+        );
+    }
+
+    /// A BMC that timed out is a refresh wait until its timeouts reach the
+    /// threshold that prevents allocations.
+    #[test]
+    fn exploration_tier_timeout_cases() {
+        // input: (endpoint type, consecutive timeouts, threshold)
+        check_values(
+            [
+                Check {
+                    scenario: "a first timeout is retried on the next run",
+                    input: (EndpointType::Bmc, 1, 3),
+                    expect: ExplorationTier::RefreshWait,
+                },
+                Check {
+                    scenario: "a timeout one short of the threshold",
+                    input: (EndpointType::Bmc, 2, 3),
+                    expect: ExplorationTier::RefreshWait,
+                },
+                Check {
+                    scenario: "timeouts that prevent allocations go back to routine",
+                    input: (EndpointType::Bmc, 3, 3),
+                    expect: ExplorationTier::Routine,
+                },
+                Check {
+                    scenario: "a threshold of one keeps timeouts routine",
+                    input: (EndpointType::Bmc, 1, 1),
+                    expect: ExplorationTier::Routine,
+                },
+                Check {
+                    scenario: "an endpoint never explored as a BMC stays routine",
+                    input: (EndpointType::Unknown, 1, 3),
+                    expect: ExplorationTier::Routine,
+                },
+            ],
+            |(endpoint_type, consecutive_count, threshold)| {
+                let mut endpoint = create_test_endpoint(Vec::new());
+                endpoint.report.endpoint_type = endpoint_type;
+                endpoint.report.last_exploration_error =
+                    Some(EndpointExplorationError::ConnectionTimeout {
+                        details: "timeout".to_string(),
+                        consecutive_count,
+                    });
+                endpoint.exploration_tier(false, threshold)
             },
         );
     }
@@ -3864,6 +3971,7 @@ mod tests {
                     scenario: "connection timeout",
                     input: EndpointExplorationError::ConnectionTimeout {
                         details: "timeout".to_string(),
+                        consecutive_count: 1,
                     },
                     expect: expected_error_behavior(
                         ErrorCode::nico(SiteExplorer, 100),
@@ -4440,6 +4548,7 @@ mod tests {
             description: Some("Host image".to_string()),
             version: uefi_version.clone(),
             release_date: None,
+            drive: None,
         };
         let report = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,

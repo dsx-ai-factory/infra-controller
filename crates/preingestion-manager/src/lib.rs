@@ -55,6 +55,7 @@ use futures_util::FutureExt;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
+use model::DpuModel;
 use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
 use model::rack_type::RackProfileConfig;
 use model::site_explorer::{
@@ -100,6 +101,9 @@ const INITIAL_BMC_RESET_MAX_ATTEMPTS: u32 = 3;
 const SET_NTP_SERVERS_MAX_ATTEMPTS: u32 = 3;
 /// How long to wait for NTP servers to converge before checking time sync.
 const SET_NTP_SERVERS_CONVERGENCE_WAIT: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
+/// How long after a BMC reset the host may fail to power on before the reset
+/// cycle is treated as failed. The clock starts when the BMC reset is recorded.
+const BMC_RESET_POWER_ON_TIMEOUT: chrono::TimeDelta = chrono::TimeDelta::minutes(30);
 
 pub struct PreingestionManager {
     static_info: Arc<PreingestionManagerStatic>,
@@ -1388,22 +1392,9 @@ impl PreingestionManagerStatic {
             || *upgrade_type == FirmwareComponentType::Gpu
         {
             // Needs a host power reset
-            // DGX models only had an "off", GB200 (and presumably later ones) has an actual AC powercycle.
-            let poweroff_style = if redfish_client.ac_powercycle_supported_by_power() {
-                SystemPowerControl::ACPowercycle
-            } else {
-                SystemPowerControl::ForceOff
-            };
-            if instrument_power_op(
-                poweroff_style.into(),
-                redfish_client.power(poweroff_style),
-                PowerControlLog::Step {
-                    bmc_ip_address: endpoint.address,
-                    step: PowerControlStep::PowerOff,
-                },
-            )
-            .await
-            .is_err()
+            if power_off_for_hgx_reset(redfish_client.as_ref(), endpoint.address)
+                .await
+                .is_err()
             {
                 return Ok(());
             }
@@ -1958,7 +1949,10 @@ impl PreingestionManagerStatic {
                 return false;
             }
         };
-        if status != PowerState::Off {
+        // BlueField-3 may report Paused after ForceOff; the resume helper handles it.
+        let is_bluefield3 = endpoint.report.identify_dpu() == Some(DpuModel::BlueField3);
+        let is_off = status == PowerState::Off || (status == PowerState::Paused && is_bluefield3);
+        if !is_off {
             tracing::warn!(
                 bmc_ip_address = %endpoint.address,
                 power_state = %status,
@@ -1995,6 +1989,38 @@ impl PreingestionManagerStatic {
                 "Waiting for BMC reset to complete"
             );
             return false;
+        }
+
+        // A BlueField-3 left Paused by the earlier ForceOff ignores On, so restart it
+        // directly, as the machine controller does.
+        if endpoint.report.identify_dpu() == Some(DpuModel::BlueField3) {
+            match redfish_client.get_power_state().await {
+                Ok(PowerState::Paused) => {
+                    tracing::warn!(
+                        bmc_ip_address = %endpoint.address,
+                        "BlueField-3 is Paused after BMC reset; force-restarting it"
+                    );
+                    // Returning true advances to the boot wait, which decides whether the restart worked.
+                    return instrument_power_op(
+                        PowerOperation::ForceRestart,
+                        redfish_client.power(SystemPowerControl::ForceRestart),
+                        PowerControlLog::RecoverySequence {
+                            bmc_ip_address: endpoint.address,
+                        },
+                    )
+                    .await
+                    .is_ok();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        bmc_ip_address = %endpoint.address,
+                        error = %e,
+                        "Could not get power state"
+                    );
+                    return false;
+                }
+            }
         }
 
         match instrument_power_op(
@@ -2103,6 +2129,24 @@ impl PreingestionManagerStatic {
                     .execute_wait_bmc_and_power_on(redfish_client.as_ref(), endpoint)
                     .await
                 {
+                    if Utc::now().signed_duration_since(last_time.unwrap_or(&Utc::now()))
+                        > BMC_RESET_POWER_ON_TIMEOUT
+                    {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            "Host did not power on within the BMC reset timeout; failing preingestion"
+                        );
+                        db.with_txn(|txn| {
+                            db::explored_endpoints::set_preingestion_failed(
+                                endpoint.address,
+                                "Host did not power on within 30 minutes of the BMC reset"
+                                    .to_string(),
+                                txn,
+                            )
+                            .boxed()
+                        })
+                        .await??;
+                    }
                     return Ok(());
                 }
                 tracing::info!(
@@ -2122,6 +2166,45 @@ impl PreingestionManagerStatic {
             }
             InitialResetPhase::WaitHostBoot => {
                 if !self.should_proceed_after_boot_wait(last_time, endpoint) {
+                    return Ok(());
+                }
+                let power_state = match redfish_client.get_power_state().await {
+                    Ok(power_state) => power_state,
+                    Err(error) => {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            error = %error,
+                            "Could not verify host power state after restart"
+                        );
+                        return Ok(());
+                    }
+                };
+                if matches!(power_state, PowerState::PoweringOn | PowerState::Reset) {
+                    tracing::trace!(
+                        bmc_ip_address = %endpoint.address,
+                        power_state = %power_state,
+                        "Host still powering on after restart; rechecking next iteration"
+                    );
+                    return Ok(());
+                }
+                if power_state != PowerState::On {
+                    let reason =
+                        "Host never reached On after restart during firmware pre-update reset";
+                    tracing::error!(
+                        bmc_ip_address = %endpoint.address,
+                        power_state = %power_state,
+                        reason,
+                        "Host did not reach On after restart during pre-update reset"
+                    );
+                    db.with_txn(|txn| {
+                        db::explored_endpoints::set_preingestion_failed(
+                            endpoint.address,
+                            reason.to_string(),
+                            txn,
+                        )
+                        .boxed()
+                    })
+                    .await??;
                     return Ok(());
                 }
                 // Now we can actually proceed with the upgrade.  Go back to checking firmware so we don't have to store all of that info.
@@ -2205,6 +2288,40 @@ impl PreingestionManagerStatic {
                     .execute_wait_bmc_and_power_on(redfish_client.as_ref(), endpoint)
                     .await
                 {
+                    // Count a host that never turns on as a failed cycle so the attempt budget applies.
+                    if Utc::now().signed_duration_since(last_time.unwrap_or(&Utc::now()))
+                        > BMC_RESET_POWER_ON_TIMEOUT
+                    {
+                        let attempts_done = attempt + 1;
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            attempt = attempts_done,
+                            max_attempts = MAX_TIME_SYNC_RESET_ATTEMPTS,
+                            "Host did not power on within the BMC reset timeout"
+                        );
+                        if attempts_done < MAX_TIME_SYNC_RESET_ATTEMPTS {
+                            db.with_txn(|txn| {
+                                db::explored_endpoints::set_preingestion_time_sync_reset(
+                                    endpoint.address,
+                                    TimeSyncResetPhase::Start,
+                                    attempts_done,
+                                    txn,
+                                )
+                                .boxed()
+                            })
+                            .await??;
+                        } else {
+                            db.with_txn(|txn| {
+                                db::explored_endpoints::set_preingestion_failed(
+                                    endpoint.address,
+                                    format!("Host did not power on after BMC reset in {attempts_done} attempts"),
+                                    txn,
+                                )
+                                .boxed()
+                            })
+                            .await??;
+                        }
+                    }
                     return Ok(false);
                 }
                 tracing::info!(
@@ -2225,6 +2342,61 @@ impl PreingestionManagerStatic {
             }
             TimeSyncResetPhase::WaitHostBoot => {
                 if !self.should_proceed_after_boot_wait(last_time, endpoint) {
+                    return Ok(false);
+                }
+
+                let power_state = match redfish_client.get_power_state().await {
+                    Ok(power_state) => power_state,
+                    Err(error) => {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            error = %error,
+                            "Could not verify host power state after restart"
+                        );
+                        return Ok(false);
+                    }
+                };
+                if power_state != PowerState::On {
+                    let attempts_done = attempt + 1;
+                    if attempts_done < MAX_TIME_SYNC_RESET_ATTEMPTS {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            power_state = %power_state,
+                            attempt = attempts_done,
+                            max_attempts = MAX_TIME_SYNC_RESET_ATTEMPTS,
+                            "Host did not reach On after restart; retrying time-sync reset"
+                        );
+                        db.with_txn(|txn| {
+                            db::explored_endpoints::set_preingestion_time_sync_reset(
+                                endpoint.address,
+                                TimeSyncResetPhase::Start,
+                                attempts_done,
+                                txn,
+                            )
+                            .boxed()
+                        })
+                        .await??;
+                    } else {
+                        let reason = format!(
+                            "Host never reached On after restart in {attempts_done} time-sync reset attempts"
+                        );
+                        tracing::error!(
+                            bmc_ip_address = %endpoint.address,
+                            power_state = %power_state,
+                            attempt = attempts_done,
+                            max_attempts = MAX_TIME_SYNC_RESET_ATTEMPTS,
+                            "Host did not reach On after restart; failing preingestion"
+                        );
+                        db.with_txn(|txn| {
+                            db::explored_endpoints::set_preingestion_failed(
+                                endpoint.address,
+                                reason,
+                                txn,
+                            )
+                            .boxed()
+                        })
+                        .await??;
+                    }
                     return Ok(false);
                 }
 
@@ -3388,6 +3560,21 @@ impl PreingestionManagerStatic {
             }
         };
 
+        // Re-ingested XCC hosts may retain firmware lockdown from their
+        // previous lifecycle. HostInit restores policy after pre-ingestion.
+        if endpoint_clone.report.vendor == Some(bmc_vendor::BMCVendor::Lenovo)
+            && let Err(error) = redfish_client
+                .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
+                .await
+        {
+            tracing::warn!(
+                bmc_ip_address = %endpoint_clone.address,
+                %error,
+                "Failed to unlock Lenovo firmware updates; upload deferred"
+            );
+            return Ok(false);
+        }
+
         tracing::debug!(
             bmc_ip_address = %endpoint_clone.address,
             "Started firmware upload"
@@ -3616,11 +3803,117 @@ impl CreateClientForIngestedHost for Arc<dyn RedfishClientPool> {
     }
 }
 
+/// Powers the host off for an HGX BMC or GPU firmware reset. DGX models only
+/// have an "off"; GB200 and later have an AC power cycle. Falls back to
+/// `ForceOff` when the BMC does not support AC power cycle.
+async fn power_off_for_hgx_reset(
+    redfish_client: &dyn Redfish,
+    bmc_ip_address: IpAddr,
+) -> Result<(), RedfishError> {
+    let log = PowerControlLog::Step {
+        bmc_ip_address,
+        step: PowerControlStep::PowerOff,
+    };
+    if redfish_client.ac_powercycle_supported_by_power() {
+        match instrument_power_op(
+            PowerOperation::AcPowercycle,
+            redfish_client.power(SystemPowerControl::ACPowercycle),
+            log,
+        )
+        .await
+        {
+            Err(RedfishError::NotSupported(_)) => {}
+            result => return result,
+        }
+    }
+    instrument_power_op(
+        PowerOperation::ForceOff,
+        redfish_client.power(SystemPowerControl::ForceOff),
+        log,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    /// The HGX BMC and GPU reset falls back to `ForceOff` only when AC power
+    /// cycle is not supported; other errors still stop the reset.
+    #[tokio::test]
+    async fn power_off_for_hgx_reset_falls_back_to_force_off() {
+        use carbide_instrument::testing::MetricsCapture;
+        use carbide_redfish::libredfish::RedfishAuth;
+        use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
+
+        // `power_off_for_hgx_reset` records `carbide_preingestion_power_control_total`,
+        // which a `metrics` test measures as a delta. Hold the shared `MetricsCapture`
+        // lock so these calls can't land inside that measurement.
+        let _metrics = MetricsCapture::start();
+
+        let not_supported = || RedfishError::NotSupported("ACCycle".to_string());
+        let generic = || RedfishError::GenericError {
+            error: "sim: BMC busy".to_string(),
+        };
+        for (case, ac_supported, ac_error, expected_ok, expected) in [
+            (
+                "AC power cycle supported",
+                true,
+                None,
+                true,
+                vec![RedfishSimAction::Power(SystemPowerControl::ACPowercycle)],
+            ),
+            (
+                "AC power cycle not supported by the BMC",
+                true,
+                Some(not_supported()),
+                true,
+                vec![
+                    RedfishSimAction::PowerFailed(SystemPowerControl::ACPowercycle),
+                    RedfishSimAction::Power(SystemPowerControl::ForceOff),
+                ],
+            ),
+            (
+                "other AC power cycle error",
+                true,
+                Some(generic()),
+                false,
+                vec![RedfishSimAction::PowerFailed(
+                    SystemPowerControl::ACPowercycle,
+                )],
+            ),
+            (
+                "client reports no AC power cycle",
+                false,
+                None,
+                true,
+                vec![RedfishSimAction::Power(SystemPowerControl::ForceOff)],
+            ),
+        ] {
+            let sim = RedfishSim::default();
+            sim.set_ac_powercycle_supported(ac_supported);
+            if let Some(error) = ac_error {
+                sim.fail_next_power_action_with(SystemPowerControl::ACPowercycle, error);
+            }
+            let client = sim
+                .create_client("192.0.2.10", None, RedfishAuth::Anonymous, None)
+                .await
+                .unwrap();
+            let timepoint = sim.timepoint();
+
+            let result =
+                power_off_for_hgx_reset(client.as_ref(), "192.0.2.10".parse().unwrap()).await;
+
+            assert_eq!(result.is_ok(), expected_ok, "{case}: {result:?}");
+            assert_eq!(
+                sim.actions_since(&timepoint).for_host("192.0.2.10"),
+                expected,
+                "{case}"
+            );
+        }
+    }
 
     #[test]
     fn resolve_preingestion_firmware_artifact_preserves_legacy_local_entries() {

@@ -22,7 +22,8 @@ use std::sync::atomic::Ordering;
 use ::rpc::forge as rpc;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
-    HostMachineId, MachineId, MachineIdSource, MachineIdSubtype, StableHostMachineId,
+    HostMachineId, MachineId, MachineIdSource, MachineIdSubtype, PredictedHostMachineId,
+    StableHostMachineId,
 };
 use carbide_uuid::nvlink::NvLinkDomainId;
 use db::machine::MachineNetworkConfigNotCurrent;
@@ -124,26 +125,24 @@ pub(crate) async fn discover_machine(
 
     // Keep readers that are waiting behind instance allocation out of open
     // database transactions. Hold the same permit through the main discovery
-    // transaction so the admin-lock queue remains bounded too.
+    // transaction and the admin address reconcile that follows it, so the
+    // admin-lock queue remains bounded too.
     let admin_admission = db::machine_interface::admin_lock_admission().await;
 
     // Resolve direct underlay ownership before taking the long-lived machine
-    // and admin locks below. This authenticates the already-arrived request
+    // and interface row locks below. This authenticates the already-arrived request
     // against one ownership snapshot, then releases the address-table read
     // lock. The main transaction locks and verifies only the same interface;
     // it does not re-evaluate overlay ownership after authentication.
-    let direct_interface_id = if let Some(remote_ip) = secure_remote_ip {
+    let direct_interface = if let Some(remote_ip) = secure_remote_ip {
         let mut source_txn = api.txn_begin().await?;
         let direct_interface =
             db::machine_interface::find_by_ip(source_txn.as_pgconn(), remote_ip).await?;
-        let direct_interface_id = if let Some(interface) = direct_interface {
+        if let Some(interface) = &direct_interface {
             match find_overlay_address_owner(source_txn.as_pgconn(), remote_ip).await? {
-                OverlayAddressOwnerLookup::NotFound => Some(interface.id),
+                OverlayAddressOwnerLookup::NotFound => {}
                 OverlayAddressOwnerLookup::One(owner)
-                    if is_same_host_inband_interface(&interface, &owner) =>
-                {
-                    Some(interface.id)
-                }
+                    if is_same_host_inband_interface(interface, &owner) => {}
                 OverlayAddressOwnerLookup::One(_) | OverlayAddressOwnerLookup::Ambiguous => {
                     tracing::warn!(
                         machine_interface_id = %interface.id,
@@ -153,24 +152,72 @@ pub(crate) async fn discover_machine(
                     return Err(discovery_source_owner_error().into());
                 }
             }
-        } else {
-            None
-        };
+        }
         source_txn.commit().await?;
-        direct_interface_id
+        direct_interface
     } else {
         None
+    };
+    let direct_interface_id = direct_interface.as_ref().map(|interface| interface.id);
+
+    let site_explorer_creates_machines = api
+        .runtime_config
+        .site_explorer
+        .create_machines
+        .load(Ordering::Relaxed);
+
+    // Decide from unlocked reads which locks the transaction takes first. The
+    // caller interface's current machine id tells a host's first discovery (a
+    // rename) from a repeat one; a DPU's host link row tells an allocation
+    // from a reattach.
+    let caller_machine_id = match &direct_interface {
+        Some(interface) => interface.machine_id,
+        None => match machine_discovery_info.machine_interface_id {
+            Some(interface_id) => {
+                match db::machine_interface::find_one(api.pg_pool(), interface_id).await {
+                    Ok(interface) => interface.machine_id,
+                    // The transaction below loads this interface again and
+                    // reports a missing one itself.
+                    Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => None,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => None,
+        },
+    };
+    let admin_segment_locks = admin_segment_locks_for_discovery(
+        api,
+        &hardware_info,
+        caller_machine_id,
+        site_explorer_creates_machines,
+    )
+    .await?;
+    // A host's first discovery renames the caller interface's predicted
+    // machine id, and the rename cascades into every interface row of the
+    // host. The transaction locks those rows and the machines row before any
+    // other row lock, under the segment locks taken below.
+    let predicted_host_id = if hardware_info.is_dpu() {
+        None
+    } else {
+        caller_machine_id.and_then(|id| PredictedHostMachineId::try_from(id).ok())
     };
 
     let mut txn = api.txn_begin().await?;
 
-    // Advisory-lock the admin segments before any machine-interface row
-    // writes in this transaction (`associate_interface_with_dpu_machine`,
-    // the proactive host-interface create, `set_primary_interface`), so the
-    // whole transaction holds locks in the allocator order (segment advisory
-    // lock first, then interface rows) all the way to the reconcile pass --
-    // which re-acquires the same locks as a no-op.
-    db::machine_interface::lock_all_admin_segments(&mut txn).await?;
+    // Segment advisory locks come before any interface row lock, so the ones
+    // this transaction needs are taken before the caller interface is locked.
+    match admin_segment_locks {
+        AdminSegmentLocks::None => {}
+        AdminSegmentLocks::Allocation => {
+            db::machine_interface::lock_all_admin_segments_for_allocation(&mut txn).await?;
+        }
+        AdminSegmentLocks::Exclusive => {
+            db::machine_interface::lock_all_admin_segments(&mut txn).await?;
+        }
+    }
+    if let Some(predicted_host_id) = &predicted_host_id {
+        db::machine::lock_rows_for_stable_id_sync(&mut txn, predicted_host_id).await?;
+    }
 
     tracing::debug!(
         remote_ip_address = ?remote_ip,
@@ -234,11 +281,21 @@ pub(crate) async fn discover_machine(
         interface
     };
 
-    let site_explorer_creates_machines = api
-        .runtime_config
-        .site_explorer
-        .create_machines
-        .load(Ordering::Relaxed);
+    // The rows locked above belong to the predicted id read before the
+    // transaction opened. A caller interface that carries another predicted
+    // id now would rename rows this transaction does not hold.
+    if !hardware_info.is_dpu()
+        && let Some(MachineIdSubtype::PredictedHost(current_predicted_id)) = caller_interface
+            .machine_id
+            .map(|id| id.machine_id_subtype())
+        && predicted_host_id != Some(current_predicted_id)
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "machine id of InterfaceId {:?} changed during discovery; retry",
+            caller_interface.id,
+        ))
+        .into());
+    }
 
     // Now that we know who's submitting this DiscoveryInfo, make sure they're not submitting info
     // for another host in an attempt to get their machine certificate.
@@ -313,7 +370,7 @@ pub(crate) async fn discover_machine(
         .into());
     }
 
-    let machine_id = if hardware_info.is_dpu() {
+    let (machine_id, dpu_network_config) = if hardware_info.is_dpu() {
         // if site explorer is creating machine records and there isn't one for this machine return an error
         if site_explorer_creates_machines {
             db::machine::find_one(
@@ -365,48 +422,7 @@ pub(crate) async fn discover_machine(
             })?
         };
 
-        // Collect every missing address into one `network_config` write. Each
-        // write bumps the whole machine group, so writing one field at a time
-        // leaves the later call with a stale `network_config_version`.
-        let (mut network_config, network_config_version) = db_machine.network_config.clone().take();
-        let owner_id = stable_machine_id.to_string();
-        let mut network_config_changed = false;
-
-        if network_config.loopback_ip.is_none() {
-            let loopback_ip =
-                db::machine::allocate_loopback_ip(&api.common_pools, &mut txn, &owner_id).await?;
-            network_config.loopback_ip = Some(loopback_ip);
-            network_config_changed = true;
-        }
-
-        if network_config.loopback_ip_v6.is_none()
-            && let Some(loopback_ip_v6) =
-                db::machine::allocate_loopback_ip_v6(&api.common_pools, &mut txn, &owner_id).await?
-        {
-            network_config.loopback_ip_v6 = Some(loopback_ip_v6);
-            network_config_changed = true;
-        }
-
-        if network_config_changed
-            && let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
-                db::machine::try_update_network_config(
-                    &mut txn,
-                    &stable_machine_id,
-                    network_config_version,
-                    &network_config,
-                )
-                .await?
-        {
-            // Discovery uses the same rejection for missing and changed targets.
-            // Both cases abort discovery and roll back the allocations above.
-            return Err(CarbideError::ConcurrentModificationError(
-                "machine",
-                network_config_version.to_string(),
-            )
-            .into());
-        }
-
-        db_machine.id
+        (db_machine.id, Some(db_machine.network_config))
     } else {
         // Now we know stable machine id for host. Let's update it in db.
         let stable_host_machine_id = StableHostMachineId::try_from(stable_machine_id)
@@ -416,13 +432,14 @@ pub(crate) async fn discover_machine(
             .map(HostMachineId::try_from)
             .transpose()
             .map_err(|error| CarbideError::internal(error.to_string()))?;
-        db::machine::try_sync_stable_id_with_current_machine_id_for_host(
-            &mut txn,
-            current_host_machine_id,
-            &stable_host_machine_id,
-        )
-        .await?
-        .into()
+        let synced_host_machine_id =
+            db::machine::try_sync_stable_id_with_current_machine_id_for_host(
+                &mut txn,
+                current_host_machine_id,
+                &stable_host_machine_id,
+            )
+            .await?;
+        (MachineId::from(synced_host_machine_id), None)
     };
 
     db::machine_topology::create_or_update_with_bom_validation(
@@ -433,7 +450,11 @@ pub(crate) async fn discover_machine(
     )
     .await?;
 
-    if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
+    // The host whose admin addresses get normalized after this transaction
+    // commits, whenever DPU discovery creates or reattaches a DPU-backed host
+    // interface.
+    let machine_id_subtype = machine_id.machine_id_subtype();
+    let dpu_host_machine_id = if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id_subtype {
         // Create Host proactively.
         // In case host interface is created, this method will return existing one, instead
         // creating new everytime.
@@ -450,6 +471,55 @@ pub(crate) async fn discover_machine(
                 api.runtime_config.retained_boot_interface_window,
             )
             .await?;
+
+        // The loopback fill writes machines rows, so it follows the host link
+        // row update above: interface rows before machines rows, the order the
+        // host rename and the admin address repair lock in.
+        if let Some(dpu_network_config) = dpu_network_config {
+            // Collect every missing address into one `network_config` write.
+            // Each write bumps the whole machine group, so writing one field
+            // at a time leaves the later call with a stale
+            // `network_config_version`.
+            let (mut network_config, network_config_version) = dpu_network_config.take();
+            let owner_id = stable_machine_id.to_string();
+            let mut network_config_changed = false;
+
+            if network_config.loopback_ip.is_none() {
+                let loopback_ip =
+                    db::machine::allocate_loopback_ip(&api.common_pools, &mut txn, &owner_id)
+                        .await?;
+                network_config.loopback_ip = Some(loopback_ip);
+                network_config_changed = true;
+            }
+
+            if network_config.loopback_ip_v6.is_none()
+                && let Some(loopback_ip_v6) =
+                    db::machine::allocate_loopback_ip_v6(&api.common_pools, &mut txn, &owner_id)
+                        .await?
+            {
+                network_config.loopback_ip_v6 = Some(loopback_ip_v6);
+                network_config_changed = true;
+            }
+
+            if network_config_changed
+                && let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+                    db::machine::try_update_network_config(
+                        &mut txn,
+                        &stable_machine_id,
+                        network_config_version,
+                        &network_config,
+                    )
+                    .await?
+            {
+                // Discovery uses the same rejection for missing and changed targets.
+                // Both cases abort discovery and roll back the allocations above.
+                return Err(CarbideError::ConcurrentModificationError(
+                    "machine",
+                    network_config_version.to_string(),
+                )
+                .into());
+            }
+        }
 
         let host_machine_id = if let Some(host_machine_id) = machine_interface.machine_id {
             host_machine_id
@@ -513,32 +583,10 @@ pub(crate) async fn discover_machine(
             proactive_machine.id
         };
 
-        // Normalize admin address ownership any time DPU discovery creates
-        // or reattaches a DPU-backed host interface.
-        let active_config_changed =
-            db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &host_machine_id)
-                .await?;
-        if active_config_changed {
-            let (network_config, network_config_version) =
-                db::machine::get_network_config(&mut txn, &host_machine_id)
-                    .await?
-                    .take();
-            if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
-                db::machine::try_update_network_config(
-                    &mut txn,
-                    &host_machine_id,
-                    network_config_version,
-                    &network_config,
-                )
-                .await?
-            {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "network configuration for machine {host_machine_id} changed or is no longer available"
-                ))
-                .into());
-            }
-        }
-    }
+        Some(host_machine_id)
+    } else {
+        None
+    };
 
     // if attestation is enabled and it is not a DPU, then we create a random nonce (auth token)
     // and create a decrypting challenge (make credential) out of it.
@@ -595,6 +643,31 @@ pub(crate) async fn discover_machine(
     }
 
     txn.commit().await?;
+
+    // The reconcile runs in a transaction of its own after this one has
+    // committed, so its segment locks never follow a row lock held here. A
+    // host's first discovery runs it under the stable id, which a DPU
+    // discovery overlapping the rename could not see. Failures are counted and
+    // never reject the committed discovery; a transient one flags the host's
+    // BMC endpoint so the next Site Explorer iteration retries.
+    let reconciled_host_machine_id = match (dpu_host_machine_id, &predicted_host_id) {
+        (Some(host_machine_id), _) => Some(host_machine_id),
+        (None, Some(_)) => Some(machine_id),
+        (None, None) => None,
+    };
+    if let Some(host_machine_id) = reconciled_host_machine_id
+        && let Err(error) = db::machine_interface::reconcile_admin_addresses_after_commit(
+            api.pg_pool(),
+            &host_machine_id,
+        )
+        .await
+    {
+        carbide_instrument::emit(HostAdminAddressReconcileFailed {
+            dpu_machine_id: dpu_host_machine_id.map(|_| stable_machine_id),
+            host_machine_id,
+            error: error.to_string(),
+        });
+    }
     drop(admin_admission);
 
     // Authentication, stable ID resolution, and discovery writes are complete. A scout update
@@ -684,6 +757,88 @@ fn discovery_source_owner_error() -> CarbideError {
     CarbideError::PermissionDeniedError(
         "discovery source IP and selected interface do not identify one host".to_string(),
     )
+}
+
+/// The admin segment advisory locks a discovery transaction takes before its
+/// first row lock, decided from unlocked reads before it opens. Its row locks
+/// then follow the order the host rename and the admin address repair use,
+/// interface rows before machines rows. A stale decision can only make the
+/// transaction request a segment lock after a row lock, which Postgres
+/// reports as a deadlock the caller retries.
+enum AdminSegmentLocks {
+    /// No interface row this transaction writes needs a segment lock: a repeat
+    /// host discovery, or a DPU whose host link is attached to a machine.
+    None,
+    /// The allocators' mode: a host's first discovery, or a DPU whose host
+    /// link is missing or unattached where Site Explorer creates machines.
+    Allocation,
+    /// A DPU whose host link is missing or unattached where Site Explorer does
+    /// not create machines, or a host caller interface whose machine id fails
+    /// authorization inside the transaction.
+    Exclusive,
+}
+
+/// Picks the locks for a discovery of `hardware_info` from the caller
+/// interface's current machine id and, for a DPU, its host link row.
+async fn admin_segment_locks_for_discovery(
+    api: &Api,
+    hardware_info: &HardwareInfo,
+    caller_machine_id: Option<MachineId>,
+    site_explorer_creates_machines: bool,
+) -> Result<AdminSegmentLocks, CarbideError> {
+    if hardware_info.is_dpu() {
+        // The transaction reports a missing factory MAC itself.
+        let Ok(host_mac) = hardware_info.factory_mac_address() else {
+            return Ok(AdminSegmentLocks::None);
+        };
+        // A link row with no machine (a host NIC that leased before its DPU
+        // registered) still needs the host machine created or attached.
+        let host_link_attached =
+            db::machine_interface::mac_address_has_machine(api.pg_pool(), host_mac).await?;
+        return Ok(if host_link_attached {
+            AdminSegmentLocks::None
+        } else if site_explorer_creates_machines {
+            AdminSegmentLocks::Allocation
+        } else {
+            // Sibling DPUs' first discoveries look up the host machine row
+            // this one may create; they serialize here instead of colliding
+            // on that insert.
+            AdminSegmentLocks::Exclusive
+        });
+    }
+    Ok(match caller_machine_id.map(|id| id.machine_id_subtype()) {
+        Some(MachineIdSubtype::StableHost(_)) => AdminSegmentLocks::None,
+        Some(MachineIdSubtype::PredictedHost(_)) => AdminSegmentLocks::Allocation,
+        // A missing or DPU id on a host's caller interface fails authorization
+        // inside the transaction; the exclusive lock keeps the order until it
+        // does.
+        None | Some(MachineIdSubtype::Dpu(_)) => AdminSegmentLocks::Exclusive,
+    })
+}
+
+/// A discovery committed but the host's admin addresses could not be
+/// reconciled afterwards. The host's BMC endpoint is flagged for exploration,
+/// so the next Site Explorer iteration revisits the host and retries the
+/// repair, whether or not it creates machines. Until then a dormant link may
+/// keep a DHCP address and the host's network config version is not bumped.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "host_admin_address_reconcile_failed",
+    metric_name = "carbide_api_host_admin_address_reconcile_failures_total",
+    component = "nico-api",
+    log = warn,
+    metric = counter,
+    message = "Could not reconcile host admin addresses after discovery",
+    describe = "Number of host admin address reconciliations that failed after a discovery committed"
+)]
+struct HostAdminAddressReconcileFailed {
+    /// The DPU whose discovery committed; `None` after a host's first discovery.
+    #[context]
+    dpu_machine_id: Option<MachineId>,
+    #[context]
+    host_machine_id: MachineId,
+    #[context]
+    error: String,
 }
 
 // Host has completed discovery

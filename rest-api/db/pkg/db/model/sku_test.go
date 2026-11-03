@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -321,6 +322,196 @@ func TestSkuSQLDAO_Get(t *testing.T) {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
 			}
+		})
+	}
+}
+
+func TestSkuSQLDAO_GetForAttachment(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSKUInitDB(t)
+	defer dbSession.Close()
+	testSKUSetupSchema(t, dbSession)
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	otherSite := TestBuildSite(t, dbSession, ip, "other-site", user)
+	dao := NewSkuDAO(dbSession)
+	for _, input := range []SkuCreateInput{
+		{SkuID: "last", SiteID: site.ID},
+		{SkuID: "first", SiteID: site.ID},
+		{SkuID: "foreign", SiteID: otherSite.ID},
+	} {
+		_, err := dao.Create(ctx, nil, input)
+		require.NoError(t, err)
+	}
+
+	t.Run("requires a transaction", func(t *testing.T) {
+		_, err := dao.GetForAttachment(ctx, nil, site.ID, []string{"first"})
+		require.EqualError(t, err, "transaction is required to lock SKU attachments")
+	})
+
+	for _, tc := range []struct {
+		name string
+		ids  []string
+		want []string
+	}{
+		{name: "no requested IDs selects nothing", want: []string{}},
+		{
+			name: "returns only requested Site SKUs in ID order",
+			ids:  []string{"last", "foreign", "missing", "first", "last"},
+			want: []string{"first", "last"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+				skus, err := dao.GetForAttachment(ctx, tx, site.ID, tc.ids)
+				if err != nil {
+					return err
+				}
+				ids := make([]string, 0, len(skus))
+				for _, sku := range skus {
+					ids = append(ids, sku.ID)
+				}
+				assert.Equal(t, tc.want, ids)
+				return nil
+			})
+			require.NoError(t, err)
+		})
+	}
+
+	t.Run("locks the smallest ID before later rows", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		gate, err := db.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		var workers sync.WaitGroup
+		defer func() {
+			_ = gate.Rollback()
+			cancel()
+			workers.Wait()
+		}()
+		var firstID string
+		err = gate.GetBunTx().NewSelect().Model((*SKU)(nil)).Column("id").
+			Where("sk.id = ?", "first").For("UPDATE").Scan(ctx, &firstID)
+		require.NoError(t, err)
+
+		readerReady := make(chan int, 1)
+		readerDone := make(chan error, 1)
+		workers.Go(func() {
+			readerDone <- db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+				// The fixture was inserted in reverse ID order. Force a table
+				// scan so an incidental index order cannot hide a missing ORDER BY.
+				_, err := tx.GetBunTx().ExecContext(ctx, "SET LOCAL enable_indexscan = off")
+				if err != nil {
+					return err
+				}
+				_, err = tx.GetBunTx().ExecContext(ctx, "SET LOCAL enable_bitmapscan = off")
+				if err != nil {
+					return err
+				}
+				var pid int
+				err = tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid)
+				if err != nil {
+					return err
+				}
+				readerReady <- pid
+				_, err = dao.GetForAttachment(ctx, tx, site.ID, []string{"last", "first"})
+				return err
+			})
+		})
+		var readerPID int
+		select {
+		case readerPID = <-readerReady:
+		case <-ctx.Done():
+			t.Fatal("SKU attachment lookup did not start: ", ctx.Err())
+		}
+		require.Eventually(t, func() bool {
+			var blockers int
+			err := dbSession.DB.NewSelect().ColumnExpr("cardinality(pg_blocking_pids(?))", readerPID).Scan(ctx, &blockers)
+			return err == nil && blockers > 0
+		}, 5*time.Second, 10*time.Millisecond, "lookup must wait at the smallest SKU ID")
+
+		// The reader is waiting on first, so it must not already hold last.
+		var lastID string
+		err = dbSession.DB.NewSelect().Model((*SKU)(nil)).Column("id").
+			Where("sk.id = ?", "last").For("UPDATE NOWAIT").Scan(ctx, &lastID)
+		require.NoError(t, err, "later SKU must remain unlocked while the first ID is blocked")
+		require.Equal(t, "last", lastID)
+		require.NoError(t, gate.Commit())
+		select {
+		case err = <-readerDone:
+			require.NoError(t, err)
+		case <-ctx.Done():
+			t.Fatal("SKU attachment lookup did not finish after release: ", ctx.Err())
+		}
+	})
+
+	for _, commit := range []bool{true, false} {
+		name := "rollback"
+		if commit {
+			name = "commit"
+		}
+		t.Run("protects deletion until "+name+" while allowing metadata updates", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			sku, err := dao.Create(ctx, nil, SkuCreateInput{SkuID: name, SiteID: site.ID})
+			require.NoError(t, err)
+			tx, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			var workers sync.WaitGroup
+			defer func() {
+				_ = tx.Rollback()
+				cancel()
+				workers.Wait()
+			}()
+			skus, err := dao.GetForAttachment(ctx, tx, site.ID, []string{sku.ID})
+			require.NoError(t, err)
+			require.Len(t, skus, 1)
+
+			// KEY SHARE protects the attachment without blocking inventory's
+			// ordinary SKU metadata updates.
+			updated, err := dao.Update(ctx, nil, SkuUpdateInput{SkuID: sku.ID, Description: cutil.GetPtr("new description")})
+			require.NoError(t, err)
+			assert.Equal(t, "new description", updated.Description)
+
+			writerReady := make(chan int, 1)
+			writerDone := make(chan error, 1)
+			workers.Go(func() {
+				writerDone <- db.WithTx(ctx, dbSession, func(writer *db.Tx) error {
+					var pid int
+					err := writer.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid)
+					if err != nil {
+						return err
+					}
+					writerReady <- pid
+					return dao.Delete(ctx, writer, sku.ID)
+				})
+			})
+			var writerPID int
+			select {
+			case writerPID = <-writerReady:
+			case <-ctx.Done():
+				t.Fatal("SKU deletion did not start: ", ctx.Err())
+			}
+			require.Eventually(t, func() bool {
+				var blockers int
+				err := dbSession.DB.NewSelect().ColumnExpr("cardinality(pg_blocking_pids(?))", writerPID).Scan(ctx, &blockers)
+				return err == nil && blockers > 0
+			}, 5*time.Second, 10*time.Millisecond, "SKU deletion must wait for the attachment transaction")
+
+			if commit {
+				require.NoError(t, tx.Commit())
+			} else {
+				require.NoError(t, tx.Rollback())
+			}
+			select {
+			case err = <-writerDone:
+				require.NoError(t, err)
+			case <-ctx.Done():
+				t.Fatal("SKU deletion did not finish after transaction release: ", ctx.Err())
+			}
+			_, err = dao.Get(ctx, nil, sku.ID)
+			require.ErrorIs(t, err, db.ErrDoesNotExist)
 		})
 	}
 }

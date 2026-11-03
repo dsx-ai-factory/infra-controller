@@ -16,6 +16,7 @@
  */
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use mac_address::MacAddress;
 
@@ -87,7 +88,12 @@ impl NvidiaSwitchNd5200Ld<'_> {
         }
     }
 
-    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
+    /// The tray's ComputerSystem. Its power callbacks let a BMC backend
+    /// power-cycle the switch, as a tray BMC can.
+    pub(crate) fn system_config<C: Callbacks>(
+        &self,
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
 
         redfish::computer_system::Config {
@@ -99,7 +105,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
                 eth_interfaces: None,
                 serial_number: None,
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,
-                callbacks: None,
+                callbacks: Some(callbacks),
                 chassis: vec!["BMC_eeprom".into()],
                 boot_options: None,
                 bios_mode: redfish::computer_system::BiosMode::Generic,

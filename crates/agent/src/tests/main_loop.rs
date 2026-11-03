@@ -45,6 +45,7 @@ fn astra_status_reporting_maps_results_and_preserves_network_errors() {
             }),
             ..Default::default()
         }],
+        ..Default::default()
     };
 
     value_scenarios!(run = |row: Row| {
@@ -90,7 +91,11 @@ fn astra_status_reporting_maps_results_and_preserves_network_errors() {
                 result: Err(eyre::eyre!("astra list failed")),
                 previous_error: None,
             } => (
-                Some(rpc::AstraConfigStatus::default()),
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
                 Some("astra list failed".to_string()),
             ),
         }
@@ -100,7 +105,11 @@ fn astra_status_reporting_maps_results_and_preserves_network_errors() {
                 result: Err(eyre::eyre!("astra list failed")),
                 previous_error: Some("HBN update failed"),
             } => (
-                Some(rpc::AstraConfigStatus::default()),
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
                 Some("HBN update failed".to_string()),
             ),
         }
@@ -278,21 +287,25 @@ fn comparison_routing_profile() -> rpc::RoutingProfile {
         route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_001,
-                vni: 101,
+                vni: Some(101),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_002,
-                vni: 102,
+                vni: Some(102),
+                vni_self: false,
             },
         ],
         route_targets_on_exports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_003,
-                vni: 103,
+                vni: Some(103),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_004,
-                vni: 104,
+                vni: Some(104),
+                vni_self: false,
             },
         ],
         leak_default_route_from_underlay: false,
@@ -465,16 +478,19 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         datacenter_asn: 65_100,
         common_internal_route_target: Some(::rpc::common::RouteTarget {
             asn: 65_200,
-            vni: 5_000,
+            vni: Some(5_000),
+            vni_self: false,
         }),
         additional_route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_201,
-                vni: 5_001,
+                vni: Some(5_001),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_202,
-                vni: 5_002,
+                vni: Some(5_002),
+                vni_self: false,
             },
         ],
         network_security_policy_overrides: vec![
@@ -1006,7 +1022,17 @@ impl NonHbnInputChange {
                         ..Default::default()
                     });
             }
-            Self::AstraConfig => config.astra_config = Some(rpc::AstraConfig::default()),
+            Self::AstraConfig => {
+                config.astra_config = Some(rpc::AstraConfig {
+                    multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                        logical_ifname: "eth_r2_p6".to_string(),
+                        cfg_maintenance_mode: Some(false),
+                        revision: "V2-T1791792000000000".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+            }
             Self::AdminNetworkTransition => config.use_admin_network_changed = Some(true),
         }
     }
@@ -1126,4 +1152,47 @@ async fn test_get_fabric_interfaces_data() {
     // should pass on any Linux host with real hardware or a virtualized PCI
     // network interface.
     // assert!(fabric_interfaces_data.len() > 0);
+}
+
+#[test]
+fn multiplane_delivery_preserves_optional_mode_without_attachments() {
+    use prost::Message;
+    for mode in [None, Some(true), Some(false)] {
+        let response = ManagedHostNetworkConfigResponse {
+            astra_config: Some(rpc::AstraConfig {
+                astra_attachments: Vec::new(),
+                is_attachment_config_present: Some(false),
+                is_maintenance_config_present: Some(true),
+                multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                    logical_ifname: "eth_r2_p6".to_string(),
+                    cfg_maintenance_mode: mode,
+                    reference: Some("https://tickets.example.com/SPX-42".to_string()),
+                    revision: "V2-T1791792000000000".to_string(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let received =
+            ManagedHostNetworkConfigResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+        let configuration = received.astra_config.unwrap();
+        assert!(configuration.astra_attachments.is_empty());
+        assert_eq!(configuration.is_attachment_config_present, Some(false));
+        assert_eq!(configuration.is_maintenance_config_present, Some(true));
+        assert_eq!(
+            configuration.multiplane_interfaces[0].cfg_maintenance_mode,
+            mode
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].logical_ifname,
+            "eth_r2_p6"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].revision,
+            "V2-T1791792000000000"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].reference.as_deref(),
+            Some("https://tickets.example.com/SPX-42")
+        );
+    }
 }

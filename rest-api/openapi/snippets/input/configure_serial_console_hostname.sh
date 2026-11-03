@@ -5,8 +5,5 @@ curl -X PATCH "https://api.example.com/v2/org/{provider-org-name}/nico/site/2ae2
   -H "Content-Type: application/json" -H "Accept: application/json" \
   -H "Authorization: Bearer ${TOKEN}" \
   -d '{
-        "isSerialConsoleEnabled": true,
-        "serialConsoleHostname": "10.217.126.53",
-        "serialConsoleIdleTimeout": 7200,
-        "serialConsoleMaxSessionLength": 86400
+        "serialConsoleHostname": "console.example.com"
       }'

@@ -303,7 +303,8 @@ impl JobPhase {
     }
 
     /// The `JobExecutionState` value; `Unknown` is the proto3 default.
-    pub(crate) fn execution_state(self) -> i32 {
+    #[cfg(test)]
+    fn execution_state(self) -> i32 {
         match self {
             Self::Queued => 1,
             Self::Running => 2,
@@ -314,7 +315,8 @@ impl JobPhase {
     }
 
     /// The spelling of the string-typed job status RPC; `Unknown` is empty.
-    pub(crate) fn wire_str(self) -> &'static str {
+    #[cfg(test)]
+    fn wire_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",

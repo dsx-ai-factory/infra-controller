@@ -429,7 +429,7 @@ async fn delete_stale_weave_ew_vpc_virtual_networks(
         else {
             tracing::error!(
                 ?virtual_network,
-                "Cannot delete virtual network from DOCA Weave server because metadata id is missing or empty"
+                "ERROR: Cannot delete virtual network from DOCA Weave server because metadata id is missing or empty"
             );
             continue;
         };
@@ -823,7 +823,7 @@ async fn delete_stale_weave_ew_vpc_astra_attachments(
         else {
             tracing::error!(
                 ?virtual_network_attachment,
-                "Cannot delete virtual network attachment from DOCA Weave server because metadata id is missing or empty"
+                "ERROR: Cannot delete virtual network attachment from DOCA Weave server because metadata id is missing or empty"
             );
             continue;
         };
@@ -921,7 +921,7 @@ async fn delete_match_attachment_with_vni_changed(
     else {
         tracing::error!(
             ?match_attachment,
-            "Cannot delete mismatched virtual network attachment from DOCA Weave server as metadata id missing or empty"
+            "ERROR: Cannot delete mismatched virtual network attachment from DOCA Weave server as metadata id missing or empty"
         );
         set_astra_attachment_status_with_weave_ew_vpc_status(
             &mut *astra_attachment_status,
@@ -955,7 +955,7 @@ async fn delete_match_attachment_with_vni_changed(
             tracing::error!(
                 error = format!("{err:#}"),
                 ?match_attachment,
-                "Failed to delete mismatched virtual network attachment from DOCA Weave server"
+                "ERROR: Failed to delete mismatched virtual network attachment from DOCA Weave server"
             );
             set_astra_attachment_status_with_weave_ew_vpc_status(
                 &mut *astra_attachment_status,
@@ -1003,7 +1003,12 @@ async fn build_notify_weave_ew_vpc_astra_config_uds(
     astra_config: Option<&AstraConfig>,
 ) -> eyre::Result<AstraConfigStatus> {
     let Some(astra_config) = astra_config else {
-        return Ok(AstraConfigStatus::default());
+        return Ok(AstraConfigStatus {
+            astra_attachments_status: Vec::new(),
+            is_attachment_status_present: Some(false),
+            is_maintenance_status_present: Some(false),
+            ..Default::default()
+        });
     };
     debug_check_astra_config_attachment_revisions(astra_config);
     let desired = build_astra_config_status(astra_config)?;
@@ -1117,6 +1122,9 @@ fn log_virtual_network_attachments(virtual_network_attachments: &[VirtualNetwork
 fn build_astra_config_status(astra_config: &AstraConfig) -> eyre::Result<AstraConfigStatus> {
     let mut astra_config_status = AstraConfigStatus {
         astra_attachments_status: Vec::new(),
+        is_attachment_status_present: Some(true),
+        is_maintenance_status_present: Some(false),
+        ..Default::default()
     };
 
     for astra_attachment in &astra_config.astra_attachments {
@@ -1192,7 +1200,7 @@ fn debug_check_astra_config_attachment_revisions(astra_config: &AstraConfig) {
     if first_attachment.revision.is_empty() {
         tracing::error!(
             mac_address = %first_attachment.mac_address,
-            "AstraConfig attachment has missing revision"
+            "ERROR: AstraConfig attachment has missing revision"
         );
     }
 
@@ -1201,7 +1209,7 @@ fn debug_check_astra_config_attachment_revisions(astra_config: &AstraConfig) {
         if attachment.revision.is_empty() {
             tracing::error!(
                 mac_address = %attachment.mac_address,
-                "AstraConfig attachment has missing revision"
+                "ERROR: AstraConfig attachment has missing revision"
             );
             continue;
         }
@@ -1212,7 +1220,7 @@ fn debug_check_astra_config_attachment_revisions(astra_config: &AstraConfig) {
                 first_revision,
                 mac_address = %attachment.mac_address,
                 revision = %attachment.revision,
-                "AstraConfig attachment revisions are inconsistent"
+                "ERROR: AstraConfig attachment revisions are inconsistent"
             );
         }
     }
@@ -1237,7 +1245,7 @@ fn debug_check_weave_ew_vpc_attachment_revisions(
                 first_revision = first_revision.unwrap_or("none"),
                 attachment_id = weave_ew_vpc_attachment_id(attachment),
                 revision = revision.unwrap_or("none"),
-                "DOCA Weave virtual network attachment revisions are inconsistent"
+                "ERROR: DOCA Weave virtual network attachment revisions are inconsistent"
             );
         }
     }
@@ -1261,6 +1269,17 @@ fn set_astra_attachment_status_with_weave_ew_vpc_status(
         reason: weave_ew_vpc_state.reason,
         message: weave_ew_vpc_state.message,
     });
+    if astra_status_phase == AstraPhase::PhaseError {
+        tracing::info!(
+            ?astra_attachment_status,
+            "ERROR: Updated Astra attachment status from Weave with an error"
+        );
+    } else {
+        tracing::info!(
+            ?astra_attachment_status,
+            "Updated Astra attachment status from Weave"
+        );
+    }
 }
 
 fn verify_weave_ew_vpc_resources_match(
@@ -2154,6 +2173,8 @@ pub(crate) mod tests {
             .await?;
 
         assert!(status.astra_attachments_status.is_empty());
+        assert_eq!(status.is_attachment_status_present, Some(false));
+        assert_eq!(status.is_maintenance_status_present, Some(false));
         {
             let calls = calls.lock().await;
             assert_eq!(calls.list_virtual_networks, 0);
@@ -2179,6 +2200,9 @@ pub(crate) mod tests {
             start_recording_weave_ew_vpc_mock_server(Vec::new(), Vec::new());
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
         };
 
@@ -2249,6 +2273,9 @@ pub(crate) mod tests {
         );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
         };
 
@@ -2289,6 +2316,9 @@ pub(crate) mod tests {
         );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![
                 astra_attachment("02:aa:bb:cc:dd:ee", 100),
                 astra_attachment_detached("02:aa:bb:cc:dd:ff", "test-revision"),
@@ -2349,6 +2379,9 @@ pub(crate) mod tests {
         );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
         };
 
@@ -2411,6 +2444,9 @@ pub(crate) mod tests {
         );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
         };
 
@@ -2446,6 +2482,9 @@ pub(crate) mod tests {
             start_recording_weave_ew_vpc_mock_server(Vec::new(), Vec::new());
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![
                 astra_attachment("02:aa:bb:cc:dd:ee", 100),
                 astra_attachment("02:aa:bb:cc:dd:ff", 100),
@@ -2485,6 +2524,9 @@ pub(crate) mod tests {
             );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![
                 astra_attachment("02:aa:bb:cc:dd:ee", 100),
                 astra_attachment("02:aa:bb:cc:dd:ff", 100),
@@ -2528,6 +2570,9 @@ pub(crate) mod tests {
         );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![
                 astra_attachment("02:aa:bb:cc:dd:ee", 100),
                 astra_attachment("02:aa:bb:cc:dd:ff", 100),
@@ -2565,6 +2610,9 @@ pub(crate) mod tests {
         );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: Vec::new(),
         };
 
@@ -2605,6 +2653,9 @@ pub(crate) mod tests {
         );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 200)],
         };
 
@@ -2658,6 +2709,9 @@ pub(crate) mod tests {
         let socket_path = socket_path.to_str().unwrap();
         // Same NIC and VNI, new revision, only the OVS bridge changes.
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment_ovs(
                 "02:aa:bb:cc:dd:ee",
                 100,
@@ -2742,6 +2796,9 @@ pub(crate) mod tests {
         let socket_path = socket_path.to_str().unwrap();
         // Same NIC and VNI, new revision, attachment type changes OVS -> Physical.
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment_with_revision(
                 "02:aa:bb:cc:dd:ee",
                 100,
@@ -2803,6 +2860,9 @@ pub(crate) mod tests {
         );
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
         };
 
@@ -2833,6 +2893,9 @@ pub(crate) mod tests {
             start_recording_weave_ew_vpc_mock_server(Vec::new(), Vec::new());
         let socket_path = socket_path.to_str().unwrap();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment_detached("02:aa:bb:cc:dd:ee", "revision-1")],
         };
 
@@ -2882,6 +2945,9 @@ pub(crate) mod tests {
         // The NIC previously attached to VNI 100 is now detached (VNI 0).
         // Its remaining service resources require cleanup before Ready.
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment_detached("02:aa:bb:cc:dd:ee", "revision-2")],
         };
 
@@ -2927,6 +2993,9 @@ pub(crate) mod tests {
         let socket_path = socket_path.to_str().unwrap();
 
         let config = |attachments: Vec<(&str, u32)>, revision: &str| rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: attachments
                 .into_iter()
                 .map(|(mac_address, vni)| {
@@ -3167,6 +3236,7 @@ pub(crate) mod tests {
                     astra_attachment("02:aa:bb:cc:dd:ee", 100),
                     astra_attachment_detached("02:aa:bb:cc:dd:ff", "test-revision"),
                 ],
+                ..Default::default()
             };
 
             // Delete succeeds before either kind of resource disappears.
@@ -3343,6 +3413,7 @@ pub(crate) mod tests {
                 astra_attachment("02:aa:bb:cc:dd:ff", 100),
                 astra_attachment("02:aa:bb:cc:dd:00", 100),
             ],
+            ..Default::default()
         };
         let status =
             build_notify_weave_ew_vpc_astra_config_uds(socket.to_str().unwrap(), Some(&config))
@@ -3667,6 +3738,7 @@ pub(crate) mod tests {
                         astra_attachment("02:aa:bb:cc:dd:ee", 100),
                         astra_attachment("02:aa:bb:cc:dd:ff", 100),
                     ],
+                    ..Default::default()
                 },
                 networks: vec![weave_ew_vpc_virtual_network("astra-weave-vni-100", 100)],
                 attachments: vec![
@@ -3729,6 +3801,7 @@ pub(crate) mod tests {
         );
         let config = rpc::AstraConfig {
             astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
+            ..Default::default()
         };
 
         // A malformed ID cannot be deleted, but it must not stop cleanup of
@@ -3813,6 +3886,7 @@ pub(crate) mod tests {
             }
             let config = rpc::AstraConfig {
                 astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
+                ..Default::default()
             };
             let error =
                 build_notify_weave_ew_vpc_astra_config_uds(socket.to_str().unwrap(), Some(&config))
@@ -3923,6 +3997,7 @@ pub(crate) mod tests {
             let reconcile = tokio::spawn(async move {
                 let config = rpc::AstraConfig {
                     astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
+                    ..Default::default()
                 };
                 build_notify_weave_ew_vpc_astra_config_uds(socket.to_str().unwrap(), Some(&config))
                     .await
@@ -4013,6 +4088,7 @@ pub(crate) mod tests {
                     desired_bridge,
                     "test-revision",
                 )],
+                ..Default::default()
             };
             let result = reconcile_with_injected_rpc_failure(&socket, &config, &failure).await;
             let expected_delete_attempts = match mismatch {
@@ -4151,6 +4227,7 @@ pub(crate) mod tests {
             state.lock().await.attachment_create_response_failure = Some(failure.clone());
             let config = rpc::AstraConfig {
                 astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
+                ..Default::default()
             };
             let status = reconcile_with_injected_rpc_failure(&socket, &config, &failure).await?;
             assert_eq!(status.astra_attachments_status.len(), 1, "{failure:?}");
@@ -4237,6 +4314,7 @@ pub(crate) mod tests {
         desired.attachment_type = Some(rpc::SpxAttachmentType::Virtual as i32);
         let config = rpc::AstraConfig {
             astra_attachments: vec![desired],
+            ..Default::default()
         };
         let status =
             build_notify_weave_ew_vpc_astra_config_uds(socket.to_str().unwrap(), Some(&config))
@@ -4317,6 +4395,7 @@ pub(crate) mod tests {
         );
         let config = rpc::AstraConfig {
             astra_attachments: vec![astra_attachment("02:aa:bb:cc:dd:ee", 100)],
+            ..Default::default()
         };
         for iteration in 0..2 {
             let status =
@@ -4343,6 +4422,9 @@ pub(crate) mod tests {
     #[test]
     fn test_build_astra_config_status_copies_attachments_and_sets_ready() -> eyre::Result<()> {
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![
                 astra_attachment("00:11:22:33:44:55", 100),
                 astra_attachment("00:11:22:33:44:66", 200),
@@ -4352,6 +4434,8 @@ pub(crate) mod tests {
         let status = build_astra_config_status(&astra_config)?;
 
         assert_eq!(status.astra_attachments_status.len(), 2);
+        assert_eq!(status.is_attachment_status_present, Some(true));
+        assert_eq!(status.is_maintenance_status_present, Some(false));
 
         let first_status = &status.astra_attachments_status[0];
         assert_eq!(first_status.mac_address, "00:11:22:33:44:55");
@@ -4375,6 +4459,9 @@ pub(crate) mod tests {
     #[test]
     fn test_build_astra_config_status_rejects_vni_that_does_not_fit_i32() {
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![astra_attachment("00:11:22:33:44:55", i32::MAX as u32 + 1)],
         };
 
@@ -4391,6 +4478,9 @@ pub(crate) mod tests {
         let mut attachment = astra_attachment("00:11:22:33:44:55", 100);
         attachment.revision.clear();
         let astra_config = rpc::AstraConfig {
+            multiplane_interfaces: Vec::new(),
+            is_attachment_config_present: None,
+            is_maintenance_config_present: None,
             astra_attachments: vec![attachment],
         };
 
@@ -4417,6 +4507,9 @@ pub(crate) mod tests {
 
         for (vpc_phase, expected_astra_phase) in cases {
             let mut attachment_status = build_astra_config_status(&rpc::AstraConfig {
+                multiplane_interfaces: Vec::new(),
+                is_attachment_config_present: None,
+                is_maintenance_config_present: None,
                 astra_attachments: vec![astra_attachment("00:11:22:33:44:55", 100)],
             })
             .unwrap()

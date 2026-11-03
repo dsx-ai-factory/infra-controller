@@ -1036,7 +1036,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 
 			// Check if the Site status has been updated
 			stDAO := cdbm.NewSiteDAO(mm.dbSession)
-			updatedSite, err := stDAO.GetByID(tt.args.ctx, nil, tt.args.siteID, nil, false)
+			updatedSite, err := stDAO.GetByID(tt.args.ctx, nil, tt.args.siteID, nil, false, false)
 			assert.Nil(t, err)
 			assert.Equal(t, cdbm.SiteStatusRegistered, updatedSite.Status)
 
@@ -1393,7 +1393,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 			}
 
 			// Check Site status and inventory update time
-			updatedSite, err = stDAO.GetByID(tt.args.ctx, nil, tt.args.siteID, nil, false)
+			updatedSite, err = stDAO.GetByID(tt.args.ctx, nil, tt.args.siteID, nil, false, false)
 			assert.Nil(t, err)
 			assert.Equal(t, cdbm.SiteStatusRegistered, updatedSite.Status)
 			assert.NotNil(t, updatedSite.InventoryReceived)

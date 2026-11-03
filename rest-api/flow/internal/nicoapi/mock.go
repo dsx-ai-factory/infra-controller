@@ -21,6 +21,7 @@ type mockClient struct {
 	powerStates                   map[string]PowerState
 	machineInterfaces             map[string]MachineInterface
 	expectedSwitches              map[string]ExpectedSwitchInfo // keyed by BMC MAC
+	leakingRackIds                []string
 	leakingMachineIds             []string
 	leakingSwitchIds              []string
 	firmwareUpdateTimeWindowErr   error // If set, SetFirmwareUpdateTimeWindow will return this error
@@ -141,12 +142,20 @@ func (c *mockClient) GetMachines(ctx context.Context) ([]MachineDetail, error) {
 	return result, nil
 }
 
+func (c *mockClient) GetLeakingRackIds(ctx context.Context) ([]string, error) {
+	return c.leakingRackIds, nil
+}
+
 func (c *mockClient) GetLeakingMachineIds(ctx context.Context) ([]string, error) {
 	return c.leakingMachineIds, nil
 }
 
 func (c *mockClient) GetLeakingSwitchIds(ctx context.Context) ([]string, error) {
 	return c.leakingSwitchIds, nil
+}
+
+func (c *mockClient) SetLeakingRackIds(ids []string) {
+	c.leakingRackIds = ids
 }
 
 func (c *mockClient) SetLeakingMachineIds(ids []string) {

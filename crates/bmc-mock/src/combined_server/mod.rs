@@ -78,7 +78,7 @@ impl Drop for CombinedServer {
 impl CombinedServer {
     pub fn run(
         name: &str,
-        routers_by_ip_address: Arc<RwLock<HashMap<String, Router>>>,
+        routers_by_ip_address: impl Into<Arc<RwLock<HashMap<String, Router>>>>,
         listener_or_address: Option<ListenerOrAddress>,
         server_config: rustls::ServerConfig,
     ) -> Self {

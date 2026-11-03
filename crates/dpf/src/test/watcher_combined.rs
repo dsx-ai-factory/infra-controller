@@ -109,6 +109,9 @@ async fn test_dpu_no_status_ignored() {
     let mut dpu_no_status = make_dpu(TEST_NS, "d1", "dev", "n1", DpuStatusPhase::Ready);
     dpu_no_status.status = None;
     m.emit_dpu(dpu_no_status);
+    let mut dpu_no_phase = make_dpu(TEST_NS, "d2", "dev", "n1", DpuStatusPhase::Ready);
+    dpu_no_phase.status.as_mut().unwrap().phase = None;
+    m.emit_dpu(dpu_no_phase);
     m.emit_dpu(make_dpu(
         TEST_NS,
         "sentinel",

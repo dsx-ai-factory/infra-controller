@@ -33,7 +33,7 @@ use hyper_util::rt::TokioExecutor;
 use rustls::{ClientConfig, ConfigBuilder, RootCertStore, WantsVerifier};
 use thiserror::Error;
 
-use crate::ib::ufmclient::UFMCert;
+use crate::ib::ufmclient::AuthMethod;
 
 #[derive(Error, Debug)]
 pub(super) enum RestError {
@@ -103,7 +103,7 @@ pub(super) struct RestClientConfig {
     pub(super) address: String,
     pub(super) port: Option<u16>,
     pub(super) scheme: RestScheme,
-    pub(super) auth_info: String,
+    pub(super) auth: AuthMethod,
     pub(super) base_path: String,
 }
 
@@ -117,20 +117,12 @@ pub(super) struct RestClient {
 
 impl RestClient {
     pub(super) fn new(conf: &RestClientConfig) -> Result<RestClient, RestError> {
-        let mut auth_info = conf.auth_info.clone().trim().to_string();
-        let mut auto_cert: Option<UFMCert> = None;
-
-        if auth_info.chars().filter(|c| *c == '\n').count() == 2 {
-            let mut v = auth_info.split('\n');
-            auto_cert = Some(UFMCert {
-                ca_crt: v.next().unwrap_or("").to_string(),
-                tls_key: v.next().unwrap_or("").to_string(),
-                tls_crt: v.next().unwrap_or("").to_string(),
-            });
-            auth_info = "".to_string();
-        } else {
-            auth_info = format!("Basic {}", conf.auth_info.clone().trim());
-        }
+        // A certificate authenticates during the TLS handshake, so its
+        // requests send an empty Authorization header.
+        let (auth_info, auto_cert) = match &conf.auth {
+            AuthMethod::Token(token) => (format!("Basic {}", token.trim()), None),
+            AuthMethod::Cert(cert) => (String::new(), Some(cert)),
+        };
 
         let base_url = match &conf.port {
             None => format!(
@@ -157,7 +149,7 @@ impl RestClient {
         http_connector.set_read_timeout(Some(REST_TIME_OUT));
         http_connector.set_write_timeout(Some(REST_TIME_OUT));
 
-        let config = if let Some(auto_cert) = &auto_cert {
+        let config = if let Some(auto_cert) = auto_cert {
             // Get CA root
             let mut roots = RootCertStore::empty();
             let fd = match std::fs::File::open(auto_cert.ca_crt.clone()) {

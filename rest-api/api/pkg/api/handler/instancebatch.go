@@ -443,7 +443,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	siteDAO := cdbm.NewSiteDAO(bcih.dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, vpc.SiteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, vpc.SiteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where Instances are being created could not be found", nil)
@@ -539,10 +539,29 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Load VPCs only for interfaces using Core-managed prefix selection.
-	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, bcih.dbSession, apiRequest.Interfaces, tenant.ID, site.ID)
+	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, bcih.dbSession, apiRequest.Interfaces)
 	if interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by batch Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
+	}
+
+	// Attaching an Interface to another Tenant's VPC or VPC Prefix needs
+	// crossTenantInterfaceCreation
+	// at the Site. Check it before validating the selectors, so the errors can't reveal another
+	// Tenant's VPC state.
+	if model.HasCrossTenantInterface(apiRequest.Interfaces, tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
+		hasCrossTenantInterfaceCreation, capErr := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, bcih.dbSession, tenant, site.ID)
+		if capErr != nil {
+			logger.Error().Err(capErr).Msg("failed to resolve crossTenantInterfaceCreation capability")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantInterfaceCreation capability, DB error", nil)
+		}
+		if !hasCrossTenantInterfaceCreation {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have crossTenantInterfaceCreation capability enabled", nil)
+		}
+	}
+	if apiErr := model.ValidateInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); apiErr != nil {
+		logger.Warn().Err(apiErr).Msg("failed to validate VPCs specified by batch Instance interfaces")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
 	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
@@ -662,11 +681,6 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			vpcPrefix, ok := vpcPrefixIDMap[vpcPrefixUUID]
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find VPC Prefix with ID specified in request data", nil)
-			}
-
-			if vpcPrefix.TenantID != tenant.ID {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixUUID))
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixUUID), nil)
 			}
 
 			if vpcPrefix.Status != cdbm.VpcPrefixStatusReady {
@@ -1340,7 +1354,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
 			}
 			vpc = lockedVPC
-			lockedSite, lockErr := siteDAO.GetByID(ctx, tx, vpc.SiteID, nil, false)
+			lockedSite, lockErr := siteDAO.GetByID(ctx, tx, vpc.SiteID, nil, false, false)
 			if lockErr != nil {
 				logger.Error().Err(lockErr).Str("siteID", vpc.SiteID.String()).Msg("failed to reload Site after acquiring the VPC power lock")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload Site power configuration", nil)

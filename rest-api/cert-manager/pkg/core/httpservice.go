@@ -234,12 +234,16 @@ func HTTPAddVersionRoute(ctx context.Context, r *mux.Router) {
 	r.Path("/version").Handler(HTTPVersionHandler(ctx)).Methods("GET")
 }
 
+// Version is the service release version, set by the build system. Builds without
+// version metadata report dev.
+var Version = "dev"
+
 // HTTPVersionHandler handles the version ep
 func HTTPVersionHandler(_ context.Context) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log := GetLogger(r.Context())
 		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte("0.1.0" + "\n"))
+		_, err := w.Write([]byte(Version + "\n"))
 		if err != nil {
 			log.Error(err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)

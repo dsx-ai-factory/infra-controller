@@ -1,5 +1,6 @@
 ### DPF contract ###
 serviceDaemonSet:
+  enabled: true
   nodeSelector:
   labels: {}
   annotations: {}
@@ -8,6 +9,13 @@ serviceDaemonSet:
 exposedPorts:
   labels: {}
   ports: {}
+
+## The shared raw NAD and its node-local DHCP CNI daemon are opt-in.
+serviceVpcNetworks:
+  ipv4:
+    enabled: false
+    name: nico-service-vpc-ipv4
+    mtu: 9000
 
 ### Service specific values ###
 ## OTLP/gRPC collector endpoint. Empty leaves span export off.

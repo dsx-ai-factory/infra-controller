@@ -26,7 +26,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use serde::{Deserialize, Serialize};
 
 use crate::crds::dpus_generated::{
-    DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
+    DpuStatus, DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
 };
 
 /// IPv4 route prefix lengths used to build Astra DPUDevice underlay values.
@@ -186,6 +186,8 @@ pub struct InitDpfResourcesConfig {
     pub(crate) extra_bfcfg_parameters: Vec<String>,
     /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
     pub(crate) enable_delay_host_init: bool,
+    /// Omit partial-multiplane maintenance initialization from Astra provisioning when true.
+    pub(crate) partial_multiplane_disabled: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
     pub(crate) deployment_type: DpuDeploymentType,
 }
@@ -229,6 +231,7 @@ impl Default for InitDpfResourcesConfig {
             proxy: None,
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
+            partial_multiplane_disabled: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
     }
@@ -665,6 +668,8 @@ pub struct DpuServiceInterfacePatch {
     pub(crate) peer_bridge: String,
     pub(crate) peer_patch_name: String,
     pub(crate) peer_external_ids: Option<BTreeMap<String, String>>,
+    /// Optional MTU for the DPUDeployment service-chain switch terminating this patch.
+    pub(crate) service_mtu: Option<i64>,
 }
 
 /// Network interface for a DPU service.
@@ -1026,6 +1031,46 @@ pub struct DpuNodeInfo {
     pub deployment_type: DpuDeploymentType,
 }
 
+/// A lifecycle phase and any terminal failure details from the same DPU CR observation.
+#[derive(Debug, Clone)]
+pub struct DpuPhaseObservation {
+    /// Actionable lifecycle phase; a deletion timestamp overrides the reported status.
+    pub phase: DpuPhase,
+    /// Diagnostic context present only for a non-terminating DPU in the `Error` phase.
+    pub failure: Option<DpuFailureObservation>,
+}
+
+/// Diagnostic context retained when a DPU enters its terminal `Error` phase.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DpuFailureObservation {
+    /// DPU custom resource name.
+    pub name: Option<String>,
+    /// Namespace containing the DPU custom resource.
+    pub namespace: Option<String>,
+    /// Kubernetes identity distinguishing this DPU from replacements with the same name.
+    pub uid: Option<String>,
+    /// Kubernetes resource revision that supplied both the phase and diagnostics.
+    pub resource_version: Option<String>,
+    /// Desired configuration generation of the observed DPU.
+    pub generation: Option<i64>,
+    /// Raw `svc.dpu.nvidia.com/owned-by-dpudeployment` label value, when present.
+    /// DPF encodes the owner as `<namespace>_<name>`; this is not a bare deployment name.
+    pub deployment: Option<String>,
+    /// Host DPUNode referenced by the DPU specification.
+    pub dpu_node_name: String,
+    /// DPUDevice referenced by the DPU specification.
+    pub dpu_device_name: String,
+    /// Desired DPUFlavor name.
+    pub dpu_flavor: String,
+    /// Desired BFB provisioning source, when configured.
+    pub bfb: Option<String>,
+    /// Desired BlueFieldSoftware provisioning source, when configured.
+    pub blue_field_software: Option<String>,
+    /// Complete operator status, including all condition collections and firmware task context.
+    pub status: DpuStatus,
+}
+
 /// Phase of DPU lifecycle.
 ///
 /// This is a simplified view - the DPF operator has many more internal phases,
@@ -1097,11 +1142,12 @@ impl From<DpuStatusPhase> for DpuPhase {
     }
 }
 
-/// Event emitted on any DPU resource change.
+/// Event emitted on named DPU resource changes with status and phase present.
 ///
-/// This event fires for every observed update to a DPU, not only when the
-/// phase transitions. Handlers must be idempotent and tolerate receiving
-/// the same phase multiple times.
+/// This event fires for every observed DPU update with `metadata.name`, `status`,
+/// and `status.phase` present, not only when the phase transitions. Updates
+/// missing any of these are skipped. Handlers must be idempotent and tolerate
+/// receiving the same phase multiple times.
 #[derive(Debug, Clone)]
 pub struct DpuEvent {
     /// Name of the DPU resource.

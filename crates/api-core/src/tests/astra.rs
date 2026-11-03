@@ -125,6 +125,7 @@ fn astra_status(astra: &DpaInterface, phase: AstraPhase) -> AstraConfigStatus {
             }),
             ..Default::default()
         }],
+        ..Default::default()
     }
 }
 
