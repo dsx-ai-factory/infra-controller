@@ -972,7 +972,7 @@ nicocli instance delete <instance-id>
 
 In TUI mode, `instance delete` prompts for confirmation before proceeding. Deletion triggers the full sanitization workflow: secure erase of NVMe storage, GPU and system memory wipe, TPM reset, re-attestation, and network isolation teardown. The machine returns to the available pool once sanitization completes.
 
-### Machine-Level Emergency Operations (gRPC Only)
+### Machine-Level Emergency Operations
 
 If a machine is stuck or unresponsive, operators can use `nico-admin-cli` for
 recovery. Choose the operation that matches the problem:

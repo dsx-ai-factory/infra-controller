@@ -1632,6 +1632,35 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
+			name:   "targeted creation rejects an unresolved deletion despite a cleared marker and unhealthy override",
+			fields: fields{dbSession: dbSession, tc: tc, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name: "retained-force-deletion", TenantID: tn1.ID.String(), VpcID: vpc1.ID.String(),
+					IpxeScript:            cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces:            []model.APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(subnet1.ID.String())}},
+					AllowUnhealthyMachine: cutil.GetPtr(true), PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
+					machine := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(false), nil)
+					testInstanceBuildMachineInstanceType(t, dbSession, machine, ist1)
+					_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+						MachineID: machine.ID, IsForceDeletionRequested: cutil.GetPtr(false), IsForceDeletionComplete: cutil.GetPtr(true), ForceDeletionWorkflowID: cutil.GetPtr("unresolved-attempt"), IsUsableByTenant: cutil.GetPtr(false),
+					})
+					require.NoError(t, err)
+					req.MachineID = cutil.GetPtr(machine.ID)
+					t.Cleanup(func() {
+						retained, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machine.ID, nil, false)
+						require.NoError(t, getErr)
+						assert.False(t, retained.IsAssigned)
+						assert.Equal(t, cutil.GetPtr("unresolved-attempt"), retained.ForceDeletionWorkflowID)
+					})
+				},
+				reqOrg: tnOrg, reqUser: tnu1, respCode: http.StatusBadRequest,
+				respMessage: "has a force-deletion request and cannot be used for a new Instance",
+			},
+		},
+		{
 			name: "test Instance create API endpoint failure, machine DB status not Ready but controller Ready without allowUnhealthyMachine",
 			fields: fields{
 				dbSession: dbSession,

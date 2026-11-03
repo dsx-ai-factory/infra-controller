@@ -5,6 +5,7 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
@@ -53,6 +55,39 @@ func ExecuteCoreGRPC(
 ) *cutil.APIError {
 	workflowID := fmt.Sprintf("core-grpc-%s-%s", path.Base(fullMethod), uuid.NewString())
 	return executeGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, secretKey, secretFields...)
+}
+
+// ExecuteCoreGRPCWithWorkflowID starts or recovers one durably recorded Core
+// attempt. Only the caller that reserved a new attempt may set startNewAttempt.
+// Recovery retrieves the existing result without starting a workflow, including
+// when its history is missing or expired. A duplicate start joins the recorded
+// execution instead of repeating the Core call.
+//
+// The second result, coreResultObserved, is true for a decoded response or a
+// definitive typed Core reply. It does not mean the requested operation succeeded:
+// callers must still inspect the API error and response. Missing history, malformed
+// results, timeouts, and transport-ambiguous errors leave it false. Never infer
+// completion from an HTTP status alone or terminate the recorded execution.
+func ExecuteCoreGRPCWithWorkflowID(
+	ctx context.Context,
+	stc tclient.Client,
+	fullMethod string,
+	req proto.Message,
+	resp proto.Message,
+	workflowID string,
+	startNewAttempt bool,
+	secretKey string,
+	secretFields ...string,
+) (*cutil.APIError, bool) {
+	if strings.TrimSpace(workflowID) == "" {
+		return cutil.NewAPIError(http.StatusInternalServerError, "Core proxy attempt requires a workflow ID", nil), false
+	}
+	mode := proxyResumeAttempt
+	if startNewAttempt {
+		mode = proxyStartAttempt
+	}
+	return runGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID,
+		temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL, mode, secretKey, secretFields...)
 }
 
 // ExecuteFlowGRPC proxies one already-validated Flow (v1.Flow) gRPC request via
@@ -189,17 +224,43 @@ func executeGRPCProxy(
 	secretKey string,
 	secretFields ...string,
 ) *cutil.APIError {
+	apiErr, _ := runGRPCProxy(ctx, stc, backend, fullMethod, req, resp, workflowID,
+		conflictPolicy, proxyDefaultWorkflow, secretKey, secretFields...)
+	return apiErr
+}
+
+type proxyWorkflowMode uint8
+
+const (
+	proxyDefaultWorkflow proxyWorkflowMode = iota
+	proxyStartAttempt
+	proxyResumeAttempt
+)
+
+func runGRPCProxy(
+	ctx context.Context,
+	stc tclient.Client,
+	backend grpcproxy.Backend,
+	fullMethod string,
+	req proto.Message,
+	resp proto.Message,
+	workflowID string,
+	conflictPolicy temporalEnums.WorkflowIdConflictPolicy,
+	mode proxyWorkflowMode,
+	secretKey string,
+	secretFields ...string,
+) (*cutil.APIError, bool) {
 	// Refuse the combination rather than fall through to sending the request
 	// unredacted: without a key the secrets cannot travel encrypted, and the
 	// caller named them precisely because they must not reach Temporal history
 	// in cleartext.
 	if len(secretFields) > 0 && secretKey == "" {
-		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to encode %s proxy request", backend.Label), fmt.Errorf("secret fields named for %s without a secret key", fullMethod))
+		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to encode %s proxy request", backend.Label), fmt.Errorf("secret fields named for %s without a secret key", fullMethod)), false
 	}
 
 	reqJSON, err := protojson.Marshal(req)
 	if err != nil {
-		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to encode %s proxy request", backend.Label), fmt.Errorf("encode request for %s: %w", fullMethod, err))
+		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to encode %s proxy request", backend.Label), fmt.Errorf("encode request for %s: %w", fullMethod, err)), false
 	}
 
 	// Redact any secret fields from the Temporal-visible request and carry them
@@ -209,7 +270,7 @@ func executeGRPCProxy(
 	if len(secretFields) > 0 {
 		redacted, secretsJSON, rerr := grpcproxy.RedactSecrets(reqJSON, secretFields)
 		if rerr != nil {
-			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to redact %s proxy request", backend.Label), rerr)
+			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to redact %s proxy request", backend.Label), rerr), false
 		}
 		reqJSON = redacted
 		if len(secretsJSON) > 0 {
@@ -224,15 +285,29 @@ func executeGRPCProxy(
 		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 		WorkflowIDConflictPolicy: conflictPolicy,
 	}
+	if mode == proxyStartAttempt {
+		workflowOptions.WorkflowIDReusePolicy = temporalEnums.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE
+		workflowOptions.WorkflowExecutionErrorWhenAlreadyStarted = true
+	}
 
 	wfCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
 	defer cancel()
 
-	we, err := stc.ExecuteWorkflow(wfCtx, workflowOptions, backend.WorkflowName, grpcproxy.Request{
-		FullMethod:       fullMethod,
-		RequestJSON:      reqJSON,
-		EncryptedSecrets: encryptedSecrets,
-	})
+	var we tclient.WorkflowRun
+	if mode == proxyResumeAttempt {
+		we = stc.GetWorkflow(wfCtx, workflowID, "")
+	} else {
+		we, err = stc.ExecuteWorkflow(wfCtx, workflowOptions, backend.WorkflowName, grpcproxy.Request{
+			FullMethod:       fullMethod,
+			RequestJSON:      reqJSON,
+			EncryptedSecrets: encryptedSecrets,
+		})
+		var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
+		if mode == proxyStartAttempt && errors.As(err, &alreadyStarted) {
+			we = stc.GetWorkflow(wfCtx, workflowID, alreadyStarted.RunId)
+			err = nil
+		}
+	}
 	if err != nil {
 		// Either way the start may have reached the server before the wait
 		// ended, so these are timeouts rather than failures to dispatch. The
@@ -241,13 +316,13 @@ func executeGRPCProxy(
 		// never retries that deadline, so a slow frontend surfaces here with
 		// the caller still waiting.
 		if wfCtx.Err() != nil {
-			return proxyTimedOutError(backend, fullMethod, "caller stopped waiting", wfCtx.Err())
+			return proxyTimedOutError(backend, fullMethod, "caller stopped waiting", wfCtx.Err()), false
 		}
 		var startDeadlineErr *serviceerror.DeadlineExceeded
 		if errors.As(err, &startDeadlineErr) {
-			return proxyTimedOutError(backend, fullMethod, "start deadline exceeded", err)
+			return proxyTimedOutError(backend, fullMethod, "start deadline exceeded", err), false
 		}
-		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute %s proxy workflow", backend.Label), fmt.Errorf("execute %s workflow: %w", backend.WorkflowName, err))
+		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute %s proxy workflow", backend.Label), fmt.Errorf("execute %s workflow: %w", backend.WorkflowName, err)), false
 	}
 
 	var out grpcproxy.Response
@@ -258,7 +333,7 @@ func executeGRPCProxy(
 		// the more useful fact of the two.
 		var timeoutErr *tp.TimeoutError
 		if errors.As(resultErr, &timeoutErr) {
-			return proxyTimedOutError(backend, fullMethod, "execution timed out", resultErr)
+			return proxyTimedOutError(backend, fullMethod, "execution timed out", resultErr), false
 		}
 
 		// Only wfCtx proves the caller stopped waiting. A DeadlineExceeded in
@@ -267,18 +342,43 @@ func executeGRPCProxy(
 		// start, the wait for a result runs to wfCtx's deadline, so there is no
 		// shorter SDK deadline to distinguish from it here.
 		if wfCtx.Err() != nil {
-			return proxyTimedOutError(backend, fullMethod, "caller stopped waiting", wfCtx.Err())
+			return proxyTimedOutError(backend, fullMethod, "caller stopped waiting", wfCtx.Err()), false
 		}
 
 		code, werr := UnwrapWorkflowError(resultErr)
-		return cutil.NewAPIError(code, werr.Error(), nil).WithCause(resultErr)
+		coreResultObserved := false
+		if mode != proxyDefaultWorkflow {
+			var activityErr *tp.ActivityError
+			var applicationErr *tp.ApplicationError
+			if errors.As(resultErr, &activityErr) && activityErr.ActivityType().GetName() == "InvokeCoreGRPCOnSite" && errors.As(resultErr, &applicationErr) {
+				switch applicationErr.Type() {
+				case swe.ErrTypeNICoObjectNotFound, swe.ErrTypeCarbideObjectNotFound,
+					swe.ErrTypeNICoUnimplemented, swe.ErrTypeCarbideUnimplemented,
+					swe.ErrTypeNICoDenied, swe.ErrTypeCarbideDenied,
+					swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists,
+					swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition,
+					swe.ErrTypeNICoInvalidArgument, swe.ErrTypeCarbideInvalidArgument:
+					coreResultObserved = true
+				}
+			}
+			var missingWorkflow *serviceerror.NotFound
+			var missingNamespace *serviceerror.NamespaceNotFound
+			if !coreResultObserved && (code == http.StatusNotFound || errors.As(resultErr, &missingWorkflow) || errors.As(resultErr, &missingNamespace)) {
+				// A missing workflow or namespace is not a missing Core resource.
+				code = http.StatusServiceUnavailable
+			}
+		}
+		return cutil.NewAPIError(code, werr.Error(), nil).WithCause(resultErr), coreResultObserved
 	}
 
+	if mode != proxyDefaultWorkflow && !json.Valid(out.ResponseJSON) {
+		return cutil.NewAPIError(http.StatusInternalServerError, "Core proxy result is missing or malformed", nil), false
+	}
 	if resp != nil && len(out.ResponseJSON) > 0 {
 		decodeErr := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(out.ResponseJSON, resp)
 		if decodeErr != nil {
-			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to decode %s proxy response", backend.Label), fmt.Errorf("decode response for %s: %w", fullMethod, decodeErr))
+			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to decode %s proxy response", backend.Label), fmt.Errorf("decode response for %s: %w", fullMethod, decodeErr)), false
 		}
 	}
-	return nil
+	return nil, true
 }
