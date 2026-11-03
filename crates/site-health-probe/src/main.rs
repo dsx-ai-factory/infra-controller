@@ -35,6 +35,8 @@ mod probes;
 mod readers;
 mod rest;
 mod snapshot;
+#[cfg(test)]
+mod soak_tests;
 mod state;
 mod state_metrics;
 
