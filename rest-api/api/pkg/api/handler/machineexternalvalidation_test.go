@@ -152,9 +152,15 @@ func TestGetAllMachineExternalValidationHoldHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
+			name:           "status filter reaches Core",
+			caller:         fixture.provider,
+			target:         siteQuery + "&status=Satisfied",
+			expectedStatus: http.StatusNotImplemented,
+		},
+		{
 			name:           "unknown query parameter is rejected",
 			caller:         fixture.provider,
-			target:         siteQuery + "&status=Pending",
+			target:         siteQuery + "&state=Pending",
 			expectedStatus: http.StatusBadRequest,
 		},
 		{

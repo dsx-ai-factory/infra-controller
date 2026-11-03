@@ -271,7 +271,7 @@ func (r ApiCompleteMachineExternalValidationAttemptRequest) Execute() (*MachineE
 /*
 CompleteMachineExternalValidationAttempt Complete a Machine external validation attempt
 
-Record the result of an external validation attempt after its validation Instance was created. After recording any result, delete the validation Instance with [Delete an Instance](#tag/Instance/operation/delete-instance). NICo removes the hold only after a `Passed` result, Instance deletion and local Machine validation all succeed.
+Record the result of an external validation attempt after its validation Instance was created. After recording any result, delete the validation Instance with [Delete an Instance](#tag/Instance/operation/delete-instance). The hold becomes `Satisfied` only after a `Passed` result, Instance deletion and local Machine validation all succeed.
 
 To abandon an attempt after its validation Instance was created, complete it with `outcome` `Cancelled`. Repeating an identical request returns the recorded attempt.
 
@@ -1899,6 +1899,7 @@ type ApiGetAllMachineExternalValidationHoldRequest struct {
 	siteId     *string
 	org        string
 	machineId  *string
+	status     *string
 	pageNumber *int32
 	pageSize   *int32
 	orderBy    *string
@@ -1910,9 +1911,15 @@ func (r ApiGetAllMachineExternalValidationHoldRequest) SiteId(siteId string) Api
 	return r
 }
 
-// ID of a Machine, to retrieve only the hold on that Machine
+// ID of a Machine, to retrieve only the holds on that Machine
 func (r ApiGetAllMachineExternalValidationHoldRequest) MachineId(machineId string) ApiGetAllMachineExternalValidationHoldRequest {
 	r.machineId = &machineId
+	return r
+}
+
+// Status of the holds to retrieve. When omitted, holds with any status except Satisfied are retrieved.
+func (r ApiGetAllMachineExternalValidationHoldRequest) Status(status string) ApiGetAllMachineExternalValidationHoldRequest {
+	r.status = &status
 	return r
 }
 
@@ -1941,15 +1948,17 @@ func (r ApiGetAllMachineExternalValidationHoldRequest) Execute() ([]MachineExter
 /*
 GetAllMachineExternalValidationHold Retrieve all Machine external validation holds
 
-Retrieve the active external validation holds at a Site. NICo places a hold on a Machine when the Site requires external validation for it. While the hold is active, the Machine can only be allocated through an external validation attempt by the Site's validation Tenant, which is set in the Site configuration. A hold leaves this list once its validation passes, the validation Instance is deleted, and local Machine validation succeeds.
+Retrieve the external validation holds at a Site. NICo places a hold on a Machine when the Site requires external validation for it. While the hold is active, the Machine can only be allocated through an external validation attempt by the Site's validation Tenant, which is set in the Site configuration. A hold becomes `Satisfied` once its validation passes, the validation Instance is deleted and local Machine validation succeeds.
 
-Use this list to find Machines waiting for external validation, and to read `allocationStatus` of an attempt after a restart or a failed request. A held Machine reports `status` `Error` in Machine responses, so use this list rather than Machine status to find held Machines.
+Only active holds are returned unless `status` is specified. Set `status` to `Satisfied` to retrieve satisfied holds, for example to confirm that a Machine passed external validation.
+
+Use this list to find Machines waiting for external validation and to read `allocationStatus` of an attempt after a restart or a failed request. A held Machine reports `status` `Error` in Machine responses, so use this list rather than Machine status to find held Machines.
 
 A Site without external validation returns `501`.
 
 For Infrastructure Providers: Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Site, and the Tenant must be the Site's validation Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Site. User must have authorization role with `TENANT_ADMIN` suffix. Only holds for the Tenant's org are returned, so a Tenant other than the Site's validation Tenant receives an empty list.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -1992,6 +2001,9 @@ func (a *MachineAPIService) GetAllMachineExternalValidationHoldExecute(r ApiGetA
 	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	if r.machineId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "machineId", r.machineId, "form", "")
+	}
+	if r.status != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")

@@ -11422,15 +11422,17 @@ paths:
         - machine
         - externalValidation
       description: |-
-        Retrieve the active external validation holds at a Site. NICo places a hold on a Machine when the Site requires external validation for it. While the hold is active, the Machine can only be allocated through an external validation attempt by the Site's validation Tenant, which is set in the Site configuration. A hold leaves this list once its validation passes, the validation Instance is deleted, and local Machine validation succeeds.
+        Retrieve the external validation holds at a Site. NICo places a hold on a Machine when the Site requires external validation for it. While the hold is active, the Machine can only be allocated through an external validation attempt by the Site's validation Tenant, which is set in the Site configuration. A hold becomes `Satisfied` once its validation passes, the validation Instance is deleted and local Machine validation succeeds.
 
-        Use this list to find Machines waiting for external validation, and to read `allocationStatus` of an attempt after a restart or a failed request. A held Machine reports `status` `Error` in Machine responses, so use this list rather than Machine status to find held Machines.
+        Only active holds are returned unless `status` is specified. Set `status` to `Satisfied` to retrieve satisfied holds, for example to confirm that a Machine passed external validation.
+
+        Use this list to find Machines waiting for external validation and to read `allocationStatus` of an attempt after a restart or a failed request. A held Machine reports `status` `Error` in Machine responses, so use this list rather than Machine status to find held Machines.
 
         A Site without external validation returns `501`.
 
         For Infrastructure Providers: Org must have an Infrastructure Provider entity that owns the Site. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-        For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Site, and the Tenant must be the Site's validation Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+        For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled at the Site. User must have authorization role with `TENANT_ADMIN` suffix. Only holds for the Tenant's org are returned, so a Tenant other than the Site's validation Tenant receives an empty list.
       parameters:
         - schema:
             type: string
@@ -11443,7 +11445,18 @@ paths:
             type: string
           in: query
           name: machineId
-          description: ID of a Machine, to retrieve only the hold on that Machine
+          description: ID of a Machine, to retrieve only the holds on that Machine
+        - schema:
+            type: string
+            enum:
+              - Pending
+              - AttemptOpen
+              - AwaitingCleanup
+              - Recovery
+              - Satisfied
+          in: query
+          name: status
+          description: Status of the holds to retrieve. When omitted, holds with any status except Satisfied are retrieved.
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -12811,7 +12824,7 @@ paths:
         - machine
         - externalValidation
       description: |-
-        Record the result of an external validation attempt after its validation Instance was created. After recording any result, delete the validation Instance with [Delete an Instance](#tag/Instance/operation/delete-instance). NICo removes the hold only after a `Passed` result, Instance deletion and local Machine validation all succeed.
+        Record the result of an external validation attempt after its validation Instance was created. After recording any result, delete the validation Instance with [Delete an Instance](#tag/Instance/operation/delete-instance). The hold becomes `Satisfied` only after a `Passed` result, Instance deletion and local Machine validation all succeed.
 
         To abandon an attempt after its validation Instance was created, complete it with `outcome` `Cancelled`. Repeating an identical request returns the recorded attempt.
 
@@ -20942,7 +20955,9 @@ components:
             instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
             details: null
             created: '2026-10-20T18:05:00Z'
+            closed: null
           created: '2026-10-20T18:00:00Z'
+          statusChanged: '2026-10-20T18:05:00Z'
       required:
         - id
         - machineId
@@ -20952,6 +20967,7 @@ components:
         - recoveryReason
         - attempt
         - created
+        - statusChanged
       properties:
         id:
           type: string
@@ -20977,8 +20993,9 @@ components:
             - AttemptOpen
             - AwaitingCleanup
             - Recovery
+            - Satisfied
           description: |-
-            Status of the hold. `Pending` means the hold has no attempt. `AttemptOpen` means an attempt can allocate the validation Instance. `AwaitingCleanup` means a result was recorded, and the validation Instance deletion or local Machine validation has not finished. `Recovery` means the hold needs operator attention, as described in `recoveryReason`.
+            Status of the hold. `Pending` means the hold has no attempt. `AttemptOpen` means an attempt can allocate the validation Instance. `AwaitingCleanup` means a result was recorded, and the validation Instance deletion or local Machine validation has not finished. `Recovery` means the hold needs operator attention, as described in `recoveryReason`. `Satisfied` means the validation passed, the validation Instance was deleted and local Machine validation succeeded. A satisfied hold no longer affects allocation.
         recoveryReason:
           type:
             - string
@@ -20993,6 +21010,10 @@ components:
           type: string
           format: date-time
           description: Time the hold was created.
+        statusChanged:
+          type: string
+          format: date-time
+          description: Time `status` last changed, equal to `created` until it first changes. Changes to the attempt or its allocation that leave `status` the same don't update it, so use it to measure how long a hold has been in its current status.
     MachineExternalValidationAttempt:
       type: object
       title: MachineExternalValidationAttempt
@@ -21006,6 +21027,7 @@ components:
           instanceId: null
           details: null
           created: '2026-10-20T18:05:00Z'
+          closed: null
       required:
         - id
         - holdId
@@ -21015,6 +21037,7 @@ components:
         - instanceId
         - details
         - created
+        - closed
       properties:
         id:
           type: string
@@ -21043,7 +21066,7 @@ components:
             - Creating
             - Created
           description: |-
-            Progress of the validation Instance allocation. `NotStarted` means no allocation was accepted, so the attempt can be cancelled or the Instance create corrected. `Creating` means an allocation was accepted but its outcome is not known, so send the identical Instance create again. `Created` means the validation Instance exists.
+            Progress of the validation Instance allocation. `NotStarted` means no validation Instance was allocated, so the attempt can be cancelled or the Instance create corrected. A corrected Instance create returns `409` if NICo already accepted the original one. In that case, cancel the attempt and start a new one. `Creating` means an allocation was accepted but its outcome is not known, so send the identical Instance create again. `Created` means the validation Instance exists.
         instanceId:
           type:
             - string
@@ -21059,6 +21082,12 @@ components:
           type: string
           format: date-time
           description: Time the attempt was started.
+        closed:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Time a result was recorded for the attempt. Null while `status` is `Open`.
     MachineExternalValidationAttemptCreateRequest:
       type: object
       title: MachineExternalValidationAttemptCreateRequest

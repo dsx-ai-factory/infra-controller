@@ -33,7 +33,7 @@ type MachineExternalValidationHold struct {
 	SiteId string `json:"siteId"`
 	// ID of the Site's validation Tenant. Null when no Tenant exists for the org named in the Site configuration.
 	TenantId NullableString `json:"tenantId"`
-	// Status of the hold. `Pending` means the hold has no attempt. `AttemptOpen` means an attempt can allocate the validation Instance. `AwaitingCleanup` means a result was recorded, and the validation Instance deletion or local Machine validation has not finished. `Recovery` means the hold needs operator attention, as described in `recoveryReason`.
+	// Status of the hold. `Pending` means the hold has no attempt. `AttemptOpen` means an attempt can allocate the validation Instance. `AwaitingCleanup` means a result was recorded, and the validation Instance deletion or local Machine validation has not finished. `Recovery` means the hold needs operator attention, as described in `recoveryReason`. `Satisfied` means the validation passed, the validation Instance was deleted and local Machine validation succeeded. A satisfied hold no longer affects allocation.
 	Status string `json:"status"`
 	// Why the hold needs operator attention. Set only when `status` is `Recovery`.
 	RecoveryReason NullableString `json:"recoveryReason"`
@@ -41,6 +41,8 @@ type MachineExternalValidationHold struct {
 	Attempt NullableMachineExternalValidationAttempt `json:"attempt"`
 	// Time the hold was created.
 	Created time.Time `json:"created"`
+	// Time `status` last changed, equal to `created` until it first changes. Changes to the attempt or its allocation that leave `status` the same don't update it, so use it to measure how long a hold has been in its current status.
+	StatusChanged time.Time `json:"statusChanged"`
 }
 
 type _MachineExternalValidationHold MachineExternalValidationHold
@@ -49,7 +51,7 @@ type _MachineExternalValidationHold MachineExternalValidationHold
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineExternalValidationHold(id string, machineId string, siteId string, tenantId NullableString, status string, recoveryReason NullableString, attempt NullableMachineExternalValidationAttempt, created time.Time) *MachineExternalValidationHold {
+func NewMachineExternalValidationHold(id string, machineId string, siteId string, tenantId NullableString, status string, recoveryReason NullableString, attempt NullableMachineExternalValidationAttempt, created time.Time, statusChanged time.Time) *MachineExternalValidationHold {
 	this := MachineExternalValidationHold{}
 	this.Id = id
 	this.MachineId = machineId
@@ -59,6 +61,7 @@ func NewMachineExternalValidationHold(id string, machineId string, siteId string
 	this.RecoveryReason = recoveryReason
 	this.Attempt = attempt
 	this.Created = created
+	this.StatusChanged = statusChanged
 	return &this
 }
 
@@ -268,6 +271,30 @@ func (o *MachineExternalValidationHold) SetCreated(v time.Time) {
 	o.Created = v
 }
 
+// GetStatusChanged returns the StatusChanged field value
+func (o *MachineExternalValidationHold) GetStatusChanged() time.Time {
+	if o == nil {
+		var ret time.Time
+		return ret
+	}
+
+	return o.StatusChanged
+}
+
+// GetStatusChangedOk returns a tuple with the StatusChanged field value
+// and a boolean to check if the value has been set.
+func (o *MachineExternalValidationHold) GetStatusChangedOk() (*time.Time, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.StatusChanged, true
+}
+
+// SetStatusChanged sets field value
+func (o *MachineExternalValidationHold) SetStatusChanged(v time.Time) {
+	o.StatusChanged = v
+}
+
 func (o MachineExternalValidationHold) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -286,6 +313,7 @@ func (o MachineExternalValidationHold) ToMap() (map[string]interface{}, error) {
 	toSerialize["recoveryReason"] = o.RecoveryReason.Get()
 	toSerialize["attempt"] = o.Attempt.Get()
 	toSerialize["created"] = o.Created
+	toSerialize["statusChanged"] = o.StatusChanged
 	return toSerialize, nil
 }
 
@@ -302,6 +330,7 @@ func (o *MachineExternalValidationHold) UnmarshalJSON(data []byte) (err error) {
 		"recoveryReason",
 		"attempt",
 		"created",
+		"statusChanged",
 	}
 
 	allProperties := make(map[string]interface{})

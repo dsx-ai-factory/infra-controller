@@ -25,7 +25,16 @@ const (
 	MachineExternalValidationHoldStatusAttemptOpen     MachineExternalValidationHoldStatus = "AttemptOpen"
 	MachineExternalValidationHoldStatusAwaitingCleanup MachineExternalValidationHoldStatus = "AwaitingCleanup"
 	MachineExternalValidationHoldStatusRecovery        MachineExternalValidationHoldStatus = "Recovery"
+	MachineExternalValidationHoldStatusSatisfied       MachineExternalValidationHoldStatus = "Satisfied"
 )
+
+var validMachineExternalValidationHoldStatuses = []interface{}{
+	MachineExternalValidationHoldStatusPending,
+	MachineExternalValidationHoldStatusAttemptOpen,
+	MachineExternalValidationHoldStatusAwaitingCleanup,
+	MachineExternalValidationHoldStatusRecovery,
+	MachineExternalValidationHoldStatusSatisfied,
+}
 
 // MachineExternalValidationAttemptStatus is the status of an external validation attempt
 type MachineExternalValidationAttemptStatus string
@@ -80,6 +89,8 @@ type APIMachineExternalValidationHold struct {
 	Attempt *APIMachineExternalValidationAttempt `json:"attempt"`
 	// Created is the time the hold was created
 	Created time.Time `json:"created"`
+	// StatusChanged is the time Status last changed, equal to Created until it first changes
+	StatusChanged time.Time `json:"statusChanged"`
 }
 
 // APIMachineExternalValidationAttempt is the API representation of an external validation attempt
@@ -100,6 +111,8 @@ type APIMachineExternalValidationAttempt struct {
 	Details *string `json:"details"`
 	// Created is the time the attempt was started
 	Created time.Time `json:"created"`
+	// Closed is the time a result was recorded, nil while Status is Open
+	Closed *time.Time `json:"closed"`
 }
 
 // APIGetAllMachineExternalValidationHoldRequest binds query parameters for GET /machine/external-validation/hold
@@ -108,6 +121,8 @@ type APIGetAllMachineExternalValidationHoldRequest struct {
 	SiteID string `query:"siteId"`
 	// MachineID limits the list to the hold of one Machine
 	MachineID string `query:"machineId"`
+	// Status limits the list to holds with this status, every status except Satisfied when empty
+	Status MachineExternalValidationHoldStatus `query:"status"`
 }
 
 // Validate ensures that the values passed in request are acceptable
@@ -116,6 +131,8 @@ func (r *APIGetAllMachineExternalValidationHoldRequest) Validate() error {
 		validation.Field(&r.SiteID,
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&r.Status,
+			validation.In(validMachineExternalValidationHoldStatuses...).Error(fmt.Sprintf("must be one of %v", validMachineExternalValidationHoldStatuses))),
 	)
 }
 

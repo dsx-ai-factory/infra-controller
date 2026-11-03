@@ -783,9 +783,9 @@ func (h CreateMachineValidationRunHandler) Handle(c echo.Context) error {
 	return c.JSON(http.StatusAccepted, model.NewAPIMachineValidationRunFromOnDemandResponse(coreResponse))
 }
 
-// getMachineValidationReadParams returns the Machine ID for reading validation runs or results. The
+// getMachineValidationRetrievalParams returns the Machine ID for retrieving validation runs or results. The
 // legacy /site/:siteID/machine-validation/machine/:machineID routes also return their Site ID.
-func getMachineValidationReadParams(c echo.Context) (string, string) {
+func getMachineValidationRetrievalParams(c echo.Context) (string, string) {
 	legacySiteID := c.Param("siteID")
 	if legacySiteID != "" {
 		return c.Param("machineID"), legacySiteID
@@ -793,11 +793,11 @@ func getMachineValidationReadParams(c echo.Context) (string, string) {
 	return c.Param("id"), ""
 }
 
-// authorizeMachineValidationRead returns the Site to read a Machine's validation runs or results from,
-// and whether the caller reads them as the Machine's Provider. A Tenant with targeted Instance creation
-// at the Machine's Site can read them too. The /site/:siteID/machine-validation routes share these
+// authorizeMachineValidationRetrieval returns the Site to retrieve a Machine's validation runs or results from,
+// and whether the caller retrieves them as the Machine's Provider. A Tenant with targeted Instance creation
+// at the Machine's Site can retrieve them too. The /site/:siteID/machine-validation routes share these
 // handlers and pass legacySiteID, which stays Provider Admin only.
-func authorizeMachineValidationRead(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, org string, dbUser *cdbm.User, machineID string, legacySiteID string) (*cdbm.Site, bool, *cutil.APIError) {
+func authorizeMachineValidationRetrieval(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, org string, dbUser *cdbm.User, machineID string, legacySiteID string) (*cdbm.Site, bool, *cutil.APIError) {
 	if legacySiteID != "" {
 		if !auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole) {
 			logger.Warn().Msg("user does not have Provider Admin role, access denied")
@@ -899,9 +899,9 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	machineID, legacySiteID := getMachineValidationReadParams(c)
+	machineID, legacySiteID := getMachineValidationRetrievalParams(c)
 	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
-	site, isProvider, apiError := authorizeMachineValidationRead(ctx, logger, handler.dbSession, org, dbUser, machineID, legacySiteID)
+	site, isProvider, apiError := authorizeMachineValidationRetrieval(ctx, logger, handler.dbSession, org, dbUser, machineID, legacySiteID)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
@@ -1010,9 +1010,9 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	machineID, legacySiteID := getMachineValidationReadParams(c)
+	machineID, legacySiteID := getMachineValidationRetrievalParams(c)
 	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
-	site, _, apiError := authorizeMachineValidationRead(ctx, logger, handler.dbSession, org, dbUser, machineID, legacySiteID)
+	site, _, apiError := authorizeMachineValidationRetrieval(ctx, logger, handler.dbSession, org, dbUser, machineID, legacySiteID)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}

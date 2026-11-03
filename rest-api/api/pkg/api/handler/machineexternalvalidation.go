@@ -29,7 +29,7 @@ const (
 	machineExternalValidationNotImplementedMessage = "Machine external validation is not yet implemented"
 )
 
-// GetAllMachineExternalValidationHoldHandler lists the active external validation holds at a Site
+// GetAllMachineExternalValidationHoldHandler lists the external validation holds at a Site
 type GetAllMachineExternalValidationHoldHandler struct {
 	dbSession *cdb.Session
 }
@@ -43,7 +43,7 @@ func NewGetAllMachineExternalValidationHoldHandler(dbSession *cdb.Session) GetAl
 
 // Handle godoc
 // @Summary Retrieve all Machine external validation holds
-// @Description Retrieve the active external validation holds at a Site.
+// @Description Retrieve the external validation holds at a Site. Only active holds are returned unless status is specified.
 // @Tags Machine
 // @Accept json
 // @Produce json
@@ -51,6 +51,7 @@ func NewGetAllMachineExternalValidationHoldHandler(dbSession *cdb.Session) GetAl
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string true "ID of Site"
 // @Param machineId query string false "ID of Machine"
+// @Param status query string false "Status of the holds to retrieve" Enums(Pending, AttemptOpen, AwaitingCleanup, Recovery, Satisfied)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Hold creation time ordering" Enums(CREATED_ASC, CREATED_DESC) default(CREATED_ASC)

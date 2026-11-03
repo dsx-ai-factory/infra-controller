@@ -33,7 +33,7 @@ type MachineExternalValidationAttempt struct {
 	IdempotencyKey string `json:"idempotencyKey"`
 	// Status of the attempt. `Open` until a result is recorded, and `Passed`, `Failed` and `Cancelled` are final.
 	Status string `json:"status"`
-	// Progress of the validation Instance allocation. `NotStarted` means no allocation was accepted, so the attempt can be cancelled or the Instance create corrected. `Creating` means an allocation was accepted but its outcome is not known, so send the identical Instance create again. `Created` means the validation Instance exists.
+	// Progress of the validation Instance allocation. `NotStarted` means no validation Instance was allocated, so the attempt can be cancelled or the Instance create corrected. A corrected Instance create returns `409` if NICo already accepted the original one. In that case, cancel the attempt and start a new one. `Creating` means an allocation was accepted but its outcome is not known, so send the identical Instance create again. `Created` means the validation Instance exists.
 	AllocationStatus string `json:"allocationStatus"`
 	// ID of the validation Instance. Null until the Instance is created, and kept after the Instance is deleted.
 	InstanceId NullableString `json:"instanceId"`
@@ -41,6 +41,8 @@ type MachineExternalValidationAttempt struct {
 	Details NullableString `json:"details"`
 	// Time the attempt was started.
 	Created time.Time `json:"created"`
+	// Time a result was recorded for the attempt. Null while `status` is `Open`.
+	Closed NullableTime `json:"closed"`
 }
 
 type _MachineExternalValidationAttempt MachineExternalValidationAttempt
@@ -49,7 +51,7 @@ type _MachineExternalValidationAttempt MachineExternalValidationAttempt
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineExternalValidationAttempt(id string, holdId string, idempotencyKey string, status string, allocationStatus string, instanceId NullableString, details NullableString, created time.Time) *MachineExternalValidationAttempt {
+func NewMachineExternalValidationAttempt(id string, holdId string, idempotencyKey string, status string, allocationStatus string, instanceId NullableString, details NullableString, created time.Time, closed NullableTime) *MachineExternalValidationAttempt {
 	this := MachineExternalValidationAttempt{}
 	this.Id = id
 	this.HoldId = holdId
@@ -59,6 +61,7 @@ func NewMachineExternalValidationAttempt(id string, holdId string, idempotencyKe
 	this.InstanceId = instanceId
 	this.Details = details
 	this.Created = created
+	this.Closed = closed
 	return &this
 }
 
@@ -266,6 +269,32 @@ func (o *MachineExternalValidationAttempt) SetCreated(v time.Time) {
 	o.Created = v
 }
 
+// GetClosed returns the Closed field value
+// If the value is explicit nil, the zero value for time.Time will be returned
+func (o *MachineExternalValidationAttempt) GetClosed() time.Time {
+	if o == nil || o.Closed.Get() == nil {
+		var ret time.Time
+		return ret
+	}
+
+	return *o.Closed.Get()
+}
+
+// GetClosedOk returns a tuple with the Closed field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MachineExternalValidationAttempt) GetClosedOk() (*time.Time, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Closed.Get(), o.Closed.IsSet()
+}
+
+// SetClosed sets field value
+func (o *MachineExternalValidationAttempt) SetClosed(v time.Time) {
+	o.Closed.Set(&v)
+}
+
 func (o MachineExternalValidationAttempt) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -284,6 +313,7 @@ func (o MachineExternalValidationAttempt) ToMap() (map[string]interface{}, error
 	toSerialize["instanceId"] = o.InstanceId.Get()
 	toSerialize["details"] = o.Details.Get()
 	toSerialize["created"] = o.Created
+	toSerialize["closed"] = o.Closed.Get()
 	return toSerialize, nil
 }
 
@@ -300,6 +330,7 @@ func (o *MachineExternalValidationAttempt) UnmarshalJSON(data []byte) (err error
 		"instanceId",
 		"details",
 		"created",
+		"closed",
 	}
 
 	allProperties := make(map[string]interface{})

@@ -22,6 +22,15 @@ func TestAPIGetAllMachineExternalValidationHoldRequest_Validate(t *testing.T) {
 		{name: "Site ID accepted", request: APIGetAllMachineExternalValidationHoldRequest{SiteID: uuid.NewString()}},
 		{name: "missing Site ID rejected", wantErr: true},
 		{name: "malformed Site ID rejected", request: APIGetAllMachineExternalValidationHoldRequest{SiteID: "site-1"}, wantErr: true},
+		{
+			name:    "Satisfied status accepted",
+			request: APIGetAllMachineExternalValidationHoldRequest{SiteID: uuid.NewString(), Status: MachineExternalValidationHoldStatusSatisfied},
+		},
+		{
+			name:    "unknown status rejected",
+			request: APIGetAllMachineExternalValidationHoldRequest{SiteID: uuid.NewString(), Status: "Passed"},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
