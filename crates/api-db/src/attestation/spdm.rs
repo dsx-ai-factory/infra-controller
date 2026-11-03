@@ -639,25 +639,6 @@ fn convert_status_str_to_model_status(
     }
 }
 
-pub async fn get_attestations_for_machine_id(
-    txn: &mut PgConnection,
-    machine_id: &MachineId,
-) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
-    let query = r#"
-        SELECT machine_id, device_id, ca_certificate, state, metadata, evidence, started_at, cancelled_at, completed_at
-        FROM spdm_machine_devices_attestation
-        WHERE machine_id = $1
-    "#;
-
-    let attestation_details: Vec<SpdmDeviceAttestationDetails> = sqlx::query_as(query)
-        .bind(machine_id)
-        .fetch_all(txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
-    Ok(attestation_details)
-}
-
 /// Returns the latest attestation details for each selected device on a machine.
 ///
 /// Uses the same revision ordering as [`list_single_machine_attestation_status`].
