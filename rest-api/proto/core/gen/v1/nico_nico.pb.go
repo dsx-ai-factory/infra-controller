@@ -18300,7 +18300,8 @@ type ExpectedRackGroup struct {
 	// Ordered racks and their devices. Rack IDs and device identities are unique across the group.
 	// May be empty; updates replace the complete list.
 	Racks []*ExpectedRackGroupRack `protobuf:"bytes,6,rep,name=racks,proto3" json:"racks,omitempty"`
-	// Required external rack-management protocol identifier.
+	// Optional external rack-management protocol identifier. Empty means unspecified.
+	// Non-empty declarations must be non-blank and at most 128 characters.
 	Protocol      string `protobuf:"bytes,7,opt,name=protocol,proto3" json:"protocol,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

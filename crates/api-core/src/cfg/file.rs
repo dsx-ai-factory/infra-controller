@@ -7115,7 +7115,7 @@ path = "credentials.yaml"
         .unwrap();
         let profiles = &config.rack_profiles.rack_profiles;
         assert_eq!(profiles.len(), 14);
-        for (id, family, topology, name, compute_vendor, power_vendor, power_count) in [
+        for (id, family, topology, name, compute_vendor, power_vendor) in [
             (
                 "VR_NVL72R1_C2G4_NVIDIA",
                 "vrnvl72",
@@ -7123,7 +7123,6 @@ path = "credentials.yaml"
                 None,
                 "NVIDIA",
                 "LiteOn",
-                4,
             ),
             (
                 "GB300_NVL72R1_C2G4_NVIDIA",
@@ -7132,7 +7131,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "NVIDIA",
                 "LiteOn",
-                6,
             ),
             (
                 "GB300_NVL72R1_C2G4_LENOVO",
@@ -7141,7 +7139,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "Lenovo",
                 "LiteOn",
-                6,
             ),
             (
                 "GB300_NVL72R1_C2G4_SMC",
@@ -7150,7 +7147,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "Supermicro",
                 "Delta",
-                6,
             ),
             (
                 "GB200_NVL72R1_C2G4_NVIDIA",
@@ -7159,7 +7155,6 @@ path = "credentials.yaml"
                 Some("GB200"),
                 "NVIDIA",
                 "LiteOn",
-                8,
             ),
             (
                 "GB200_NVL72R1_C2G4_WIWYNN",
@@ -7168,10 +7163,9 @@ path = "credentials.yaml"
                 Some("GB200"),
                 "WIWYNN",
                 "LiteOn",
-                8,
             ),
         ] {
-            for (suffix, count) in [("", power_count), ("_NO_POWERSHELF", 0)] {
+            for suffix in ["", "_NO_POWERSHELF"] {
                 let key = format!("{id}{suffix}");
                 let profile = profiles
                     .get(&key)
@@ -7193,7 +7187,7 @@ path = "credentials.yaml"
                     Some(compute_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.compute.count, 18, "{key}");
+                assert_eq!(caps.compute.count, 0, "{key}");
                 assert_eq!(caps.switch.vendor.as_deref(), Some("NVIDIA"), "{key}");
                 assert_eq!(caps.switch.count, 9, "{key}");
                 assert_eq!(
@@ -7201,12 +7195,12 @@ path = "credentials.yaml"
                     Some(power_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.power_shelf.count, count, "{key}");
+                assert_eq!(caps.power_shelf.count, 0, "{key}");
             }
         }
-        for (id, family, vendor, power_count) in [
-            ("NVL72", "gb200", "NVIDIA", 8),
-            ("NVL72_GB300", "gb300", "Lenovo", 6),
+        for (id, family, vendor) in [
+            ("NVL72", "gb200", "NVIDIA"),
+            ("NVL72_GB300", "gb300", "Lenovo"),
         ] {
             let profile = &profiles[id];
             assert_eq!(profile.product_family.as_ref().unwrap().as_str(), family);
@@ -7214,14 +7208,14 @@ path = "credentials.yaml"
                 profile.rack_capabilities.compute.vendor.as_deref(),
                 Some(vendor)
             );
-            assert_eq!(profile.rack_capabilities.compute.count, 18);
+            assert_eq!(profile.rack_capabilities.compute.count, 0);
             assert_eq!(profile.rack_capabilities.switch.count, 9);
-            assert_eq!(profile.rack_capabilities.power_shelf.count, power_count);
+            assert_eq!(profile.rack_capabilities.power_shelf.count, 0);
         }
         let overridden: CarbideConfig = Figment::new()
             .merge(Toml::string(&source))
             .merge(Toml::string(
-                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"",
+                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"\ncount = 18\n[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.power_shelf]\ncount = 8",
             ))
             .extract()
             .unwrap();
