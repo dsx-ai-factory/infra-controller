@@ -17,7 +17,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -623,7 +622,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     let nvlink_config = carbide_config.nvlink_config.clone().unwrap_or_default();
 
     let mut nmxc_builder = libnmxc::NmxcClientPool::builder();
-    if let Some(tls) = nmxc_tls_config_from_nvlink(&nvlink_config) {
+    if let Some(tls) = nvlink_config
+        .nmx_c_tls_config()
+        .wrap_err("invalid nvlink_config")?
+    {
         nmxc_builder = nmxc_builder.tls(tls);
     }
     let nmxc_client_pool = nmxc_builder
@@ -2605,27 +2607,6 @@ async fn initialize_and_start_controllers<'a>(
     tracing::info!("initialize_and_start_controllers: all controllers initialized and started");
 
     Ok(())
-}
-
-fn nmxc_tls_config_from_nvlink(
-    cfg: &carbide_nvlink_manager::config::NvLinkConfig,
-) -> Option<libnmxc::NmxcTlsConfig> {
-    let ca = cfg.nmx_c_tls_ca_cert_path.as_ref().map(PathBuf::from);
-    let client_cert = cfg.nmx_c_tls_client_cert_path.as_ref().map(PathBuf::from);
-    let client_key = cfg.nmx_c_tls_client_key_path.as_ref().map(PathBuf::from);
-    if ca.is_none()
-        && client_cert.is_none()
-        && client_key.is_none()
-        && cfg.nmx_c_tls_authority.is_none()
-    {
-        return None;
-    }
-    Some(libnmxc::NmxcTlsConfig {
-        ca_cert_path: ca,
-        client_cert_path: client_cert,
-        client_key_path: client_key,
-        authority: cfg.nmx_c_tls_authority.clone(),
-    })
 }
 
 #[cfg(test)]
