@@ -13,20 +13,27 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/client-go/rest"
+
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/cluster"
 )
 
-// TestAgainstARealCluster exercises the Lease calls against a real API server
-// (in-cluster or the current kubeconfig) in SCALE_TEST_NAMESPACE. It proves the
-// create, read and compare-and-swap semantics the site lock relies on, on a
-// fresh unique Lease each run, and removes only that Lease. The target fails,
-// rather than skips, when the namespace is unset.
+// TestAgainstARealCluster exercises the Lease calls against the real API server
+// using the pod ServiceAccount (in-cluster config) in SCALE_TEST_NAMESPACE. It
+// proves the create, read and compare-and-swap semantics the site lock relies
+// on, on a fresh unique Lease each run, and removes only that Lease. The target
+// fails, rather than skips, when the namespace is unset or no ServiceAccount is
+// mounted. It runs as a helm test Job from the runner chart.
 func TestAgainstARealCluster(t *testing.T) {
 	ns := os.Getenv("SCALE_TEST_NAMESPACE")
 	if ns == "" {
 		t.Fatal("SCALE_TEST_NAMESPACE must be set to run the dev-cluster test")
 	}
-	k, err := cluster.New(ns)
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		t.Fatalf("in-cluster config requires a mounted ServiceAccount: %v", err)
+	}
+	k, err := cluster.NewFor(cfg, ns)
 	if err != nil {
 		t.Fatal(err)
 	}

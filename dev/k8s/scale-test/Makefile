@@ -24,5 +24,7 @@ fmt-check:
 	@test -z "$$(gofmt -l . | tee /dev/stderr)"
 
 # Runs the Kubernetes adapter against a real API server in SCALE_TEST_NAMESPACE.
+# It uses the pod ServiceAccount, so it only works inside a pod and fails
+# elsewhere. Run it with helm test from helm/scale-test (see its README).
 devcluster-test:
 	go test -tags devcluster -count=1 -run TestAgainstARealCluster ./internal/cluster/

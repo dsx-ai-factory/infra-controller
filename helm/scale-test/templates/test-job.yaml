@@ -1,0 +1,98 @@
+{{- $root := . -}}
+{{/* The chart owns the binary and anchored test for each suite: values select
+     only which to run, never an arbitrary executable or pattern. */}}
+{{- $known := dict
+    "cluster" (dict "binary" "/tests/cluster.test" "run" "^TestAgainstARealCluster$")
+    "probe" (dict "binary" "/tests/probe.test" "run" "^TestAgainstARealProbe$") -}}
+{{- $enabled := list -}}
+{{- range $name, $suite := .Values.suites -}}
+{{- if $suite.enabled -}}
+{{- if not (hasKey $known $name) -}}
+{{- fail (printf "unknown suite %q; the known suites are cluster and probe" $name) -}}
+{{- end -}}
+{{- $enabled = append $enabled $name -}}
+{{- end -}}
+{{- end -}}
+{{- if not $enabled -}}
+{{- fail "at least one suite must be enabled under suites.<name>.enabled" -}}
+{{- end -}}
+{{- $image := include "scale-test.image" $root -}}
+{{- $deadline := include "scale-test.jobDeadline" $root -}}
+{{- $timeout := include "scale-test.testTimeout" $root -}}
+{{- range $name := $enabled }}
+{{- $suite := index $root.Values.suites $name }}
+{{- $def := index $known $name }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "scale-test.jobName" (dict "root" $root "suite" $name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: acceptance
+    scale-test.nvidia.com/suite: {{ $name | quote }}
+  annotations:
+    # Weighted test hooks run serially and stop the run on the first failure.
+    helm.sh/hook: test
+    helm.sh/hook-weight: {{ $suite.weight | default 0 | quote }}
+    # Keep the finished Job so its logs stay collectable; the next run replaces it.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ $deadline }}
+  template:
+    metadata:
+      labels:
+        {{- include "scale-test.labels" $root | nindent 8 }}
+        scale-test.nvidia.com/suite: {{ $name | quote }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "scale-test.fullname" $root }}
+      automountServiceAccountToken: true
+      {{- with $root.Values.nodeSelector }}
+      # The acceptance image is amd64-only; pin the Jobs to amd64 nodes.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $name }}
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: [{{ (index $def "binary") | quote }}]
+          args:
+            - "-test.run={{ index $def "run" }}"
+            - "-test.v"
+            - "-test.timeout={{ $timeout }}"
+          env:
+            # The run's own namespace, from the Downward API; a fixture fails if unset.
+            - name: SCALE_TEST_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- if and (eq $name "probe") $root.Values.probeUrl }}
+            - name: SCALE_TEST_PROBE_URL
+              value: {{ $root.Values.probeUrl | quote }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
