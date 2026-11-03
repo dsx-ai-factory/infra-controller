@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -38,6 +39,11 @@ class DevImagesTest(unittest.TestCase):
             )
             docker.chmod(0o755)
             env = dict(os.environ)
+            for variable in (
+                "IMAGE_TAG", "KEA_VERSION", "DEV_TARGET", "DEV_IMAGE",
+                "DEV_BUILD_CONTAINER", "DEV_RUNTIME_CONTAINER",
+            ):
+                env.pop(variable, None)
             env.update(
                 PATH=f"{directory}{os.pathsep}{env['PATH']}",
                 DOCKER_TEST_LOG=str(log),
@@ -54,6 +60,14 @@ class DevImagesTest(unittest.TestCase):
             calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             return result, calls
 
+    @patch.dict(os.environ, {
+        "IMAGE_TAG": "exported-tag",
+        "KEA_VERSION": "exported-version",
+        "DEV_TARGET": "dhcp",
+        "DEV_IMAGE": "exported/service:tag",
+        "DEV_BUILD_CONTAINER": "exported/build:tag",
+        "DEV_RUNTIME_CONTAINER": "exported/runtime:tag",
+    })
     def test_daemon_platform_selects_native_compiler_and_local_service(self):
         for platform, arch, compiler in (
             ("linux/aarch64", "arm64", "aarch64"),
@@ -78,6 +92,8 @@ class DevImagesTest(unittest.TestCase):
                     self.assertEqual(call[call.index("--platform") + 1], f"linux/{arch}")
                     self.assertEqual(call[-1], ".")
                     self.assertNotIn("--push", call)
+                self.assertEqual(builds[0][builds[0].index("--tag") + 1], "nico-dev-build:latest")
+                self.assertEqual(builds[1][builds[1].index("--tag") + 1], "nico-dev-runtime:latest")
                 self.assertEqual(builds[-1][builds[-1].index("--target") + 1], "api")
                 self.assertEqual(builds[-1][builds[-1].index("--tag") + 1], "nico-dev-api:latest")
                 version = (ROOT / "dev/docker/kea.version").read_text().strip()
