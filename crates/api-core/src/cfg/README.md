@@ -741,7 +741,7 @@ TOML section: `[spdm_state_controller]`. Changes require an API restart.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `cancellation_timeout` | `Duration` | `2m` | Optional positive duration up to `5m`, such as `30s` or `5m`. Measured from the persisted start of cancellation cleanup across retries and restarts. Operator stop and cancellation use persisted request timestamps and cannot extend automatic cleanup already in progress. While the evidence collection lock is held, the controller attempts BMC task cancellation and polls for completion; without a task ID it waits for this timeout. BMC confirmation releases the lock early. At or after the timeout, the next controller iteration releases the lock without BMC confirmation and finishes as `Cancelled` for cancellation or `Failed` for operator stop and automatic recovery. This grace period spans iterations and is independent of the per-iteration `max_object_handling_time` budget. Zero, negative, malformed, and greater-than-five-minute values fail configuration loading. Omission uses `2m`, including when the section is absent. |
+| `cancellation_timeout` | `Duration` | `2m` | Optional positive duration up to `5m`, such as `30s` or `5m`. Measured from the persisted start of cancellation cleanup across retries and restarts. Operator failure, waiver, and obsolete-job cancellation requests use persisted request timestamps and cannot extend automatic cleanup already in progress. While the evidence collection lock is held, the controller attempts BMC task cancellation and polls for completion; without a task ID it waits for this timeout. BMC confirmation releases the lock early. At or after the timeout, the next controller iteration releases the lock without BMC confirmation and finishes as `Cancelled` for waivers and obsolete-job cancellation or `Failed` for operator failure and automatic recovery. This grace period spans iterations and is independent of the per-iteration `max_object_handling_time` budget. Zero, negative, malformed, and greater-than-five-minute values fail configuration loading. Omission uses `2m`, including when the section is absent. |
 
 Automatic cleanup requests BMC cancellation when an unexpected nonterminal task
 response arrives after a fixed two-minute grace measured from entry into
@@ -752,7 +752,7 @@ polling grace is separate from `cancellation_timeout` and does not bound `New`,
 `WaitForTaskCancellation`, preserving the task ID, retry count, and evidence
 collection claim. A task that stops before the cleanup deadline
 permits another collection attempt while the existing collection retry budget
-remains. User cancellation takes precedence over retrying or failing, but still
+remains. Operator waiver and failure requests take precedence over automatic retrying or failing, but still
 waits for termination or the cleanup deadline.
 
 ### `SwitchStateControllerConfig`

@@ -122,13 +122,13 @@ pub async fn stop_attestation_job(
         device_id: String,
         state: sqlx::types::Json<SpdmAttestationState>,
         state_version: ConfigVersion,
-        stop_requested_at: Option<chrono::DateTime<chrono::Utc>>,
+        fail_requested_at: Option<chrono::DateTime<chrono::Utc>>,
         completed_at: Option<chrono::DateTime<chrono::Utc>>,
     }
     // Lock the rows before advancing their versions so concurrent worker writes
     // either finish first or roll back against the new version.
     let query =
-        "SELECT machine_id, device_id, state, state_version, stop_requested_at, completed_at
+        "SELECT machine_id, device_id, state, state_version, fail_requested_at, completed_at
         FROM spdm_machine_devices_attestation WHERE job_id = $1
         ORDER BY machine_id, device_id FOR UPDATE";
     let rows = sqlx::query_as::<_, Device>(query)
@@ -145,7 +145,7 @@ pub async fn stop_attestation_job(
 
     let requested_at = chrono::Utc::now();
     for row in rows {
-        if row.stop_requested_at.is_some()
+        if row.fail_requested_at.is_some()
             || row.completed_at.is_some()
             || matches!(
                 row.state.0,
@@ -166,7 +166,7 @@ pub async fn stop_attestation_job(
         )
         .then_some(row.state_version.timestamp());
         let query = "UPDATE spdm_machine_devices_attestation
-            SET stop_requested_at = $1, state_version = $2,
+            SET fail_requested_at = $1, state_version = $2,
                 cancelled_at = LEAST(cancelled_at, $6)
             WHERE machine_id = $3 AND device_id = $4 AND job_id = $5";
         sqlx::query(query)
@@ -199,7 +199,7 @@ pub async fn try_acquire_evidence_collection_lock(
         SET evidence_collection_locked = TRUE
         WHERE machine_id = $1 AND device_id = $2 AND job_id = $3
             AND state_version = $4 AND NOT evidence_collection_locked
-            AND cancelled_at IS NULL AND stop_requested_at IS NULL AND completed_at IS NULL
+            AND cancelled_at IS NULL AND fail_requested_at IS NULL AND completed_at IS NULL
     "#;
     let mut savepoint = crate::Transaction::begin_inner(txn).await?;
     let result = sqlx::query(query)
@@ -786,7 +786,7 @@ pub async fn load_snapshot_for_machine_and_device_id(
             mda.metadata, mda.ca_certificate_link, mda.ca_certificate,
             mda.evidence_target, mda.evidence, mda.state_version,
             mda.state_outcome, mda.completed_at, mda.started_at, mda.cancelled_at,
-            mda.job_id, mda.evidence_collection_locked, mda.stop_requested_at,
+            mda.job_id, mda.evidence_collection_locked, mda.fail_requested_at,
             CASE WHEN mi.id IS NULL THEN
                 COALESCE(mt.topology->'bmc_info', '{}'::jsonb) - 'ip' - 'mac'
             ELSE
@@ -1030,14 +1030,14 @@ mod tests {
         assert!(try_acquire_evidence_collection_lock(&mut txn, &object_id, old_version).await?);
 
         stop_attestation_job(&mut txn, &job_id).await?;
-        let stopped_rows = sqlx::query("SELECT device_id, state, state_version, stop_requested_at, completed_at, evidence_collection_locked
+        let stopped_rows = sqlx::query("SELECT device_id, state, state_version, fail_requested_at, completed_at, evidence_collection_locked
             FROM spdm_machine_devices_attestation WHERE job_id = $1 ORDER BY device_id")
             .bind(job_id).fetch_all(&mut *txn).await?;
         for row in &stopped_rows {
             let device_id: String = row.try_get("device_id")?;
             let state: sqlx::types::Json<SpdmAttestationState> = row.try_get("state")?;
             let requested_at: Option<chrono::DateTime<chrono::Utc>> =
-                row.try_get("stop_requested_at")?;
+                row.try_get("fail_requested_at")?;
             let version: ConfigVersion = row.try_get("state_version")?;
             if matches!(device_id.as_str(), "GPU_0" | "GPU_1") {
                 assert!(requested_at.is_some(), "{device_id}");
@@ -1090,7 +1090,7 @@ mod tests {
         for row in &stopped_rows {
             let device_id: String = row.try_get("device_id")?;
             let actual: (sqlx::types::Json<SpdmAttestationState>, ConfigVersion, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
-                "SELECT state, state_version, stop_requested_at FROM spdm_machine_devices_attestation
+                "SELECT state, state_version, fail_requested_at FROM spdm_machine_devices_attestation
                  WHERE job_id = $1 AND device_id = $2")
                 .bind(job_id).bind(device_id).fetch_one(&mut *txn).await?;
             assert_eq!(
@@ -1098,12 +1098,12 @@ mod tests {
                 (
                     row.try_get("state")?,
                     row.try_get("state_version")?,
-                    row.try_get("stop_requested_at")?
+                    row.try_get("fail_requested_at")?
                 )
             );
         }
         let other_stop: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT stop_requested_at FROM spdm_machine_devices_attestation WHERE job_id = $1",
+            "SELECT fail_requested_at FROM spdm_machine_devices_attestation WHERE job_id = $1",
         )
         .bind(other_job)
         .fetch_one(&mut *txn)

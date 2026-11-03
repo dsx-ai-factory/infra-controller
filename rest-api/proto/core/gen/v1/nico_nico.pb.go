@@ -83837,7 +83837,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"&RESOURCE_POOL_STATS_STATUS_UNSPECIFIED\x10\x00\x12$\n" +
 	" RESOURCE_POOL_STATS_STATUS_KNOWN\x10\x01\x12&\n" +
 	"\"RESOURCE_POOL_STATS_STATUS_UNKNOWN\x10\x02\x12*\n" +
-	"&RESOURCE_POOL_STATS_STATUS_UNAVAILABLE\x10\x032֓\x03\n" +
+	"&RESOURCE_POOL_STATS_STATUS_UNAVAILABLE\x10\x032Փ\x03\n" +
 	"\x05Forge\x122\n" +
 	"\aVersion\x12\x15.forge.VersionRequest\x1a\x10.forge.BuildInfo\x12J\n" +
 	"\rGetRmsVersion\x12\x1b.forge.GetRmsVersionRequest\x1a\x1c.forge.GetRmsVersionResponse\x12Y\n" +
@@ -84323,9 +84323,9 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1dFindDpuExtensionServicesByIds\x12'.forge.DpuExtensionServicesByIdsRequest\x1a\x1e.forge.DpuExtensionServiceList\x12\x81\x01\n" +
 	"\"GetDpuExtensionServiceVersionsInfo\x120.forge.GetDpuExtensionServiceVersionsInfoRequest\x1a).forge.DpuExtensionServiceVersionInfoList\x12\x89\x01\n" +
 	"\"FindInstancesByDpuExtensionService\x120.forge.FindInstancesByDpuExtensionServiceRequest\x1a1.forge.FindInstancesByDpuExtensionServiceResponse\x12v\n" +
-	"\x19TriggerMachineAttestation\x12+.forge.SpdmMachineAttestationTriggerRequest\x1a,.forge.SpdmMachineAttestationTriggerResponse\x129\n" +
-	"\x11CancelAttestation\x12\f.common.UUID\x1a\x16.google.protobuf.Empty\x127\n" +
-	"\x0fStopAttestation\x12\f.common.UUID\x1a\x16.google.protobuf.Empty\x12X\n" +
+	"\x19TriggerMachineAttestation\x12+.forge.SpdmMachineAttestationTriggerRequest\x1a,.forge.SpdmMachineAttestationTriggerResponse\x128\n" +
+	"\x10WaiveAttestation\x12\f.common.UUID\x1a\x16.google.protobuf.Empty\x127\n" +
+	"\x0fFailAttestation\x12\f.common.UUID\x1a\x16.google.protobuf.Empty\x12X\n" +
 	"\x0fListAttestation\x12!.forge.SpdmListAttestationRequest\x1a\".forge.SpdmListAttestationResponse\x12A\n" +
 	"\x0eGetAttestation\x12\f.common.UUID\x1a!.forge.SpdmGetAttestationResponse\x12}\n" +
 	"\x1eListMachineAttestationStatuses\x12,.forge.ListMachineAttestationStatusesRequest\x1a-.forge.ListMachineAttestationStatusesResponse\x12]\n" +
@@ -87841,8 +87841,8 @@ var file_nico_nico_proto_depIdxs = []int32{
 	961,  // 1964: forge.Forge.GetDpuExtensionServiceVersionsInfo:input_type -> forge.GetDpuExtensionServiceVersionsInfoRequest
 	963,  // 1965: forge.Forge.FindInstancesByDpuExtensionService:input_type -> forge.FindInstancesByDpuExtensionServiceRequest
 	135,  // 1966: forge.Forge.TriggerMachineAttestation:input_type -> forge.SpdmMachineAttestationTriggerRequest
-	1227, // 1967: forge.Forge.CancelAttestation:input_type -> common.UUID
-	1227, // 1968: forge.Forge.StopAttestation:input_type -> common.UUID
+	1227, // 1967: forge.Forge.WaiveAttestation:input_type -> common.UUID
+	1227, // 1968: forge.Forge.FailAttestation:input_type -> common.UUID
 	136,  // 1969: forge.Forge.ListAttestation:input_type -> forge.SpdmListAttestationRequest
 	1227, // 1970: forge.Forge.GetAttestation:input_type -> common.UUID
 	1148, // 1971: forge.Forge.ListMachineAttestationStatuses:input_type -> forge.ListMachineAttestationStatusesRequest
@@ -88390,8 +88390,8 @@ var file_nico_nico_proto_depIdxs = []int32{
 	962,  // 2513: forge.Forge.GetDpuExtensionServiceVersionsInfo:output_type -> forge.DpuExtensionServiceVersionInfoList
 	964,  // 2514: forge.Forge.FindInstancesByDpuExtensionService:output_type -> forge.FindInstancesByDpuExtensionServiceResponse
 	132,  // 2515: forge.Forge.TriggerMachineAttestation:output_type -> forge.SpdmMachineAttestationTriggerResponse
-	1296, // 2516: forge.Forge.CancelAttestation:output_type -> google.protobuf.Empty
-	1296, // 2517: forge.Forge.StopAttestation:output_type -> google.protobuf.Empty
+	1296, // 2516: forge.Forge.WaiveAttestation:output_type -> google.protobuf.Empty
+	1296, // 2517: forge.Forge.FailAttestation:output_type -> google.protobuf.Empty
 	137,  // 2518: forge.Forge.ListAttestation:output_type -> forge.SpdmListAttestationResponse
 	134,  // 2519: forge.Forge.GetAttestation:output_type -> forge.SpdmGetAttestationResponse
 	1152, // 2520: forge.Forge.ListMachineAttestationStatuses:output_type -> forge.ListMachineAttestationStatusesResponse

@@ -3650,18 +3650,18 @@ impl Forge for Api {
         crate::handlers::attestation::trigger_machine_attestation(self, request).await
     }
 
-    async fn cancel_attestation(
+    async fn waive_attestation(
         &self,
         request: tonic::Request<::rpc::Uuid>,
     ) -> Result<tonic::Response<()>, Status> {
-        crate::handlers::attestation::cancel_attestation(self, request).await
+        crate::handlers::attestation::waive_attestation(self, request).await
     }
 
-    async fn stop_attestation(
+    async fn fail_attestation(
         &self,
         request: tonic::Request<::rpc::Uuid>,
     ) -> Result<tonic::Response<()>, Status> {
-        crate::handlers::attestation::stop_attestation(self, request).await
+        crate::handlers::attestation::fail_attestation(self, request).await
     }
 
     async fn list_attestation(

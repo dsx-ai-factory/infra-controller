@@ -60,7 +60,7 @@ impl SpdmAttestationStateHandler {
         }
     }
 
-    async fn handle_stop_cancel(
+    async fn handle_fail_waive(
         &self,
         object_id: &SpdmObjectId,
         snapshot: &SpdmDeviceAttestation,
@@ -71,7 +71,7 @@ impl SpdmAttestationStateHandler {
             && let Some(requested_at) = snapshot
                 .cancelled_at
                 .into_iter()
-                .chain(snapshot.stop_requested_at)
+                .chain(snapshot.fail_requested_at)
                 .min()
         {
             // Keep the original deadline across retries and controller restarts.
@@ -95,11 +95,11 @@ impl SpdmAttestationStateHandler {
                     .await
                     .map_err(|error| redfish_error("get_task_state", error))?;
                 if evidence_collection_task_stopped(task.task_state.as_ref()) {
-                    return self.complete_stop_cancel(object_id, snapshot, ctx).await;
+                    return self.complete_fail_waive(object_id, snapshot, ctx).await;
                 }
                 // Finish immediately when the BMC confirms cancellation; otherwise poll.
                 match client.cancel_task(task_id).await {
-                    Ok(true) => return self.complete_stop_cancel(object_id, snapshot, ctx).await,
+                    Ok(true) => return self.complete_fail_waive(object_id, snapshot, ctx).await,
                     Ok(false) => {}
                     Err(libredfish::RedfishError::NotSupported(_)) => {
                         tracing::warn!(%object_id, %task_id, "BMC task cancellation is unsupported; waiting for collection to stop");
@@ -118,10 +118,10 @@ impl SpdmAttestationStateHandler {
             }
         }
 
-        self.complete_stop_cancel(object_id, snapshot, ctx).await
+        self.complete_fail_waive(object_id, snapshot, ctx).await
     }
 
-    async fn complete_stop_cancel(
+    async fn complete_fail_waive(
         &self,
         object_id: &SpdmObjectId,
         snapshot: &SpdmDeviceAttestation,
@@ -132,9 +132,9 @@ impl SpdmAttestationStateHandler {
         db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id).await?;
         db::attestation::spdm::set_completed_at(&mut txn, &object_id.0, &object_id.1, &object_id.2)
             .await?;
-        // Stop is a failure, while cancellation retains its existing waiver semantics.
-        let next_state = if snapshot.stop_requested_at.is_some() {
-            SpdmAttestationState::Failed("Stopped by operator".to_string())
+        // Operator failure requests take precedence over waivers and obsolete-job cancellation.
+        let next_state = if snapshot.fail_requested_at.is_some() {
+            SpdmAttestationState::Failed("Failed by operator".to_string())
         } else {
             SpdmAttestationState::Cancelled
         };
@@ -192,14 +192,14 @@ impl StateHandler for SpdmAttestationStateHandler {
         // record metrics irrespective of the state of the machine
         self.record_metrics(snapshot, ctx);
 
-        if (snapshot.cancelled_at.is_some() || snapshot.stop_requested_at.is_some())
+        if (snapshot.cancelled_at.is_some() || snapshot.fail_requested_at.is_some())
             && !matches!(
                 original_controller_state,
                 SpdmAttestationState::WaitForTaskCancellation { .. }
             )
         {
             return self
-                .handle_stop_cancel(object_id, snapshot, original_controller_state, ctx)
+                .handle_fail_waive(object_id, snapshot, original_controller_state, ctx)
                 .await;
         }
 
@@ -553,7 +553,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                 let started_at = snapshot
                     .cancelled_at
                     .into_iter()
-                    .chain(snapshot.stop_requested_at)
+                    .chain(snapshot.fail_requested_at)
                     .fold(cancellation_started_at, |earliest, time| earliest.min(time));
                 let timed_out = chrono::Utc::now() - started_at >= self.cancellation_timeout;
                 // Check the deadline before Redfish so transport failures cannot keep
@@ -579,9 +579,9 @@ impl StateHandler for SpdmAttestationStateHandler {
                     }
                 }
 
-                // Operator requests finish with their requested failure or cancellation.
-                if snapshot.cancelled_at.is_some() || snapshot.stop_requested_at.is_some() {
-                    return self.complete_stop_cancel(object_id, snapshot, ctx).await;
+                // Operator requests finish with their requested failure or waiver.
+                if snapshot.cancelled_at.is_some() || snapshot.fail_requested_at.is_some() {
+                    return self.complete_fail_waive(object_id, snapshot, ctx).await;
                 }
                 // Automatic recovery must fail rather than waive attestation if cleanup
                 // expires. Only a confirmed stop and remaining retries permit a new task.
@@ -647,7 +647,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                 Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
             }
             SpdmAttestationState::Cancelled => {
-                self.complete_stop_cancel(object_id, snapshot, ctx).await
+                self.complete_fail_waive(object_id, snapshot, ctx).await
             }
         }
     }

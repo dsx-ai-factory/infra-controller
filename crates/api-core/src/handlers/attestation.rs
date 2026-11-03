@@ -160,7 +160,7 @@ fn reported_outcome(outcome: SchedulingOutcome) -> rpc::SpdmSchedulingOutcome {
     }
 }
 
-pub(crate) async fn cancel_attestation(
+pub(crate) async fn waive_attestation(
     api: &Api,
     request: Request<::rpc::Uuid>,
 ) -> Result<Response<()>, Status> {
@@ -170,13 +170,14 @@ pub(crate) async fn cancel_attestation(
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
 
     let mut txn = api.txn_begin().await?;
+    // Waivers share the cancellation marker used to retire obsolete controller jobs.
     db::attestation::spdm::cancel_attestation_job(&mut txn, &job_id).await?;
     txn.commit().await?;
 
     Ok(Response::new(()))
 }
 
-pub(crate) async fn stop_attestation(
+pub(crate) async fn fail_attestation(
     api: &Api,
     request: Request<::rpc::Uuid>,
 ) -> Result<Response<()>, Status> {

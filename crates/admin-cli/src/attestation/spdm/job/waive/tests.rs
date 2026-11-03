@@ -27,7 +27,7 @@ use crate::attestation::spdm::job::Cmd as JobCmd;
 use crate::cfg::cli_options::{CliCommand, CliOptions};
 
 #[test]
-fn job_cancel_and_stop_command_paths() {
+fn job_waive_and_fail_command_paths() {
     let job_id = "12345678-1234-5678-90ab-cdef01234567";
     let expected = Uuid::parse_str(job_id).unwrap();
 
@@ -42,31 +42,35 @@ fn job_cancel_and_stop_command_paths() {
                     panic!("expected the public SPDM job command path");
                 };
                 match command {
-                    JobCmd::Cancel(args) => ("cancel", args.job_id),
-                    JobCmd::Stop(args) => ("stop", args.job_id),
-                    _ => panic!("expected cancel or stop"),
+                    JobCmd::Waive(args) => ("waive", args.job_id),
+                    JobCmd::Fail(args) => ("fail", args.job_id),
+                    _ => panic!("expected waive or fail"),
                 }
             })
             .map_err(|error| error.kind())
         };
         "canonical path" {
-            &["attestation", "spdm", "job", "cancel", job_id][..] => Yields(("cancel", expected)),
-            &["attestation", "spdm", "job", "stop", job_id][..] => Yields(("stop", expected)),
+            &["attestation", "spdm", "job", "waive", job_id][..] => Yields(("waive", expected)),
+            &["attestation", "spdm", "job", "fail", job_id][..] => Yields(("fail", expected)),
         }
         "jobs alias" {
-            &["attestation", "spdm", "jobs", "cancel", job_id][..] => Yields(("cancel", expected)),
-            &["attestation", "spdm", "jobs", "stop", job_id][..] => Yields(("stop", expected)),
+            &["attestation", "spdm", "jobs", "waive", job_id][..] => Yields(("waive", expected)),
+            &["attestation", "spdm", "jobs", "fail", job_id][..] => Yields(("fail", expected)),
         }
         "job ID is required" {
-            &["attestation", "spdm", "job", "cancel"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
-            &["attestation", "spdm", "job", "stop"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+            &["attestation", "spdm", "job", "waive"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+            &["attestation", "spdm", "job", "fail"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
         }
         "job ID must be a UUID" {
-            &["attestation", "spdm", "job", "cancel", "invalid"][..] => FailsWith(ErrorKind::ValueValidation),
-            &["attestation", "spdm", "job", "stop", "invalid"][..] => FailsWith(ErrorKind::ValueValidation),
+            &["attestation", "spdm", "job", "waive", "invalid"][..] => FailsWith(ErrorKind::ValueValidation),
+            &["attestation", "spdm", "job", "fail", "invalid"][..] => FailsWith(ErrorKind::ValueValidation),
         }
-        "ungrouped cancel is removed" {
-            &["attestation", "spdm", "cancel", job_id][..] => FailsWith(ErrorKind::InvalidSubcommand),
+        "renamed commands are removed" {
+            &["attestation", "spdm", "job", "cancel", job_id][..] => FailsWith(ErrorKind::InvalidSubcommand),
+            &["attestation", "spdm", "job", "stop", job_id][..] => FailsWith(ErrorKind::InvalidSubcommand),
+        }
+        "ungrouped waive is rejected" {
+            &["attestation", "spdm", "waive", job_id][..] => FailsWith(ErrorKind::InvalidSubcommand),
         }
     );
 }

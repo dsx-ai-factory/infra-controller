@@ -1086,17 +1086,17 @@ pub(in crate::tests) mod tests {
                 }),
             },
             Case {
-                scenario: "user cancellation wins without extending cleanup",
+                scenario: "operator waiver wins without extending cleanup",
                 initially_cancelling: true,
                 finish_collection: false,
                 operator_outcome: Some(SpdmAttestationState::Cancelled),
                 cancel_error: None,
             },
             Case {
-                scenario: "operator stop fails without extending automatic cleanup",
+                scenario: "operator failure wins without extending automatic cleanup",
                 initially_cancelling: true,
                 finish_collection: false,
-                operator_outcome: Some(SpdmAttestationState::Failed("Stopped by operator".into())),
+                operator_outcome: Some(SpdmAttestationState::Failed("Failed by operator".into())),
                 cancel_error: None,
             },
         ] {
@@ -1266,11 +1266,11 @@ pub(in crate::tests) mod tests {
             if let Some(outcome) = &operator_outcome {
                 if *outcome == SpdmAttestationState::Cancelled {
                     env.api
-                        .cancel_attestation(Request::new(job_id.into()))
+                        .waive_attestation(Request::new(job_id.into()))
                         .await?;
                 } else {
                     env.api
-                        .stop_attestation(Request::new(job_id.into()))
+                        .fail_attestation(Request::new(job_id.into()))
                         .await?;
                 }
             }
@@ -1332,7 +1332,7 @@ pub(in crate::tests) mod tests {
     ) -> Result<(), eyre::Error> {
         struct Case {
             scenario: &'static str,
-            stop: bool,
+            fail: bool,
             trigger_iterations: usize,
             cancel_error: Option<libredfish::RedfishError>,
             finish_collection: bool,
@@ -1340,8 +1340,8 @@ pub(in crate::tests) mod tests {
         }
         let cases = [
             Case {
-                scenario: "cancel before collection starts",
-                stop: false,
+                scenario: "waive before collection starts",
+                fail: false,
                 trigger_iterations: 2,
                 cancel_error: None,
                 finish_collection: false,
@@ -1349,7 +1349,7 @@ pub(in crate::tests) mod tests {
             },
             Case {
                 scenario: "retry a transient cancellation failure, then wait for the BMC",
-                stop: false,
+                fail: false,
                 trigger_iterations: 3,
                 cancel_error: Some(libredfish::RedfishError::GenericError {
                     error: "temporary cancellation failure".to_string(),
@@ -1359,7 +1359,7 @@ pub(in crate::tests) mod tests {
             },
             Case {
                 scenario: "unsupported cancellation releases the lock only at the deadline",
-                stop: false,
+                fail: false,
                 trigger_iterations: 3,
                 cancel_error: Some(libredfish::RedfishError::NotSupported(
                     "cancel task".to_string(),
@@ -1369,31 +1369,31 @@ pub(in crate::tests) mod tests {
             },
             Case {
                 scenario: "a collection claim without a task ID uses the deadline",
-                stop: false,
+                fail: false,
                 trigger_iterations: 2,
                 cancel_error: None,
                 finish_collection: false,
                 claim_without_task: true,
             },
             Case {
-                scenario: "stop before collection fails unfinished work",
-                stop: true,
+                scenario: "fail unfinished work before collection starts",
+                fail: true,
                 trigger_iterations: 2,
                 cancel_error: None,
                 finish_collection: false,
                 claim_without_task: false,
             },
             Case {
-                scenario: "stop retains the lock until the BMC confirms cleanup",
-                stop: true,
+                scenario: "fail retains the lock until the BMC confirms cleanup",
+                fail: true,
                 trigger_iterations: 3,
                 cancel_error: None,
                 finish_collection: true,
                 claim_without_task: false,
             },
             Case {
-                scenario: "stop fails at the cleanup deadline when cancellation is unsupported",
-                stop: true,
+                scenario: "fail completes at the cleanup deadline when cancellation is unsupported",
+                fail: true,
                 trigger_iterations: 3,
                 cancel_error: Some(libredfish::RedfishError::NotSupported(
                     "cancel task".to_string(),
@@ -1417,14 +1417,14 @@ pub(in crate::tests) mod tests {
         ] {
             let error = env
                 .api
-                .stop_attestation(Request::new(rpc::Uuid { value }))
+                .fail_attestation(Request::new(rpc::Uuid { value }))
                 .await
                 .unwrap_err();
             assert_eq!(error.code(), code);
         }
         for case in cases {
-            let expected_state = if case.stop {
-                SpdmAttestationState::Failed("Stopped by operator".to_string())
+            let expected_state = if case.fail {
+                SpdmAttestationState::Failed("Failed by operator".to_string())
             } else {
                 SpdmAttestationState::Cancelled
             };
@@ -1461,13 +1461,13 @@ pub(in crate::tests) mod tests {
             if let Some(error) = case.cancel_error {
                 env.redfish_sim.set_next_task_cancel_error(error);
             }
-            if case.stop {
+            if case.fail {
                 env.api
-                    .stop_attestation(Request::new(job_id.into()))
+                    .fail_attestation(Request::new(job_id.into()))
                     .await?;
             } else {
                 env.api
-                    .cancel_attestation(Request::new(job_id.into()))
+                    .waive_attestation(Request::new(job_id.into()))
                     .await?;
             }
             env.run_spdm_controller_iteration_no_requeue().await;
@@ -1573,24 +1573,24 @@ pub(in crate::tests) mod tests {
                 // Advance the persisted deadline without a real two-minute sleep.
                 sqlx::query("UPDATE spdm_machine_devices_attestation
                     SET cancelled_at = CASE WHEN cancelled_at IS NOT NULL THEN NOW() - INTERVAL '2 minutes' END,
-                        stop_requested_at = CASE WHEN stop_requested_at IS NOT NULL THEN NOW() - INTERVAL '2 minutes' END
+                        fail_requested_at = CASE WHEN fail_requested_at IS NOT NULL THEN NOW() - INTERVAL '2 minutes' END
                     WHERE job_id = $1")
                     .bind(job_id).execute(&env.pool).await?;
             }
-            let request_time_query = "SELECT COALESCE(stop_requested_at, cancelled_at)
+            let request_time_query = "SELECT COALESCE(fail_requested_at, cancelled_at)
                 FROM spdm_machine_devices_attestation WHERE job_id = $1 LIMIT 1";
             let requested_at: chrono::DateTime<Utc> = sqlx::query_scalar(request_time_query)
                 .bind(job_id)
                 .fetch_one(&env.pool)
                 .await?;
             // Repeated user requests must not postpone the original deadline.
-            if case.stop {
+            if case.fail {
                 env.api
-                    .stop_attestation(Request::new(job_id.into()))
+                    .fail_attestation(Request::new(job_id.into()))
                     .await?;
             } else {
                 env.api
-                    .cancel_attestation(Request::new(job_id.into()))
+                    .waive_attestation(Request::new(job_id.into()))
                     .await?;
             }
             let repeated_requested_at: chrono::DateTime<Utc> =

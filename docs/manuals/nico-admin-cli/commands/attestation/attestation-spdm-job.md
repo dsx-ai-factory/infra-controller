@@ -37,8 +37,8 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
-| [`cancel`](./attestation-spdm-job-cancel.md) | Cancel an attestation job |
-| [`stop`](./attestation-spdm-job-stop.md) | Stop an attestation job, failing unfinished device attestations after BMC cleanup |
+| [`waive`](./attestation-spdm-job-waive.md) | Waive an attestation job after BMC cleanup (recorded as Cancelled) |
+| [`fail`](./attestation-spdm-job-fail.md) | Fail unfinished device attestations after BMC cleanup |
 | [`get`](./attestation-spdm-job-get.md) | Get SPDM attestation details for a given job id |
 | [`list`](./attestation-spdm-job-list.md) | List SPDM attestation jobs by status |
 

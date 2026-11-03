@@ -23,7 +23,7 @@ earlier job. For example, jobs A and B can both contain results for the same
 device. Finding A's timestamp proves A was recorded; it does not prove A is
 the latest attempt.
 
-## Progress, cancellation, and stop
+## Progress, waivers, and failure
 
 The SPDM controller collects and verifies evidence for each device, saving
 progress so it can resume after a restart. Jobs can overlap, but only one job
@@ -37,25 +37,25 @@ A job's status combines its device states in this order:
 3. **Cancelled** if any device was cancelled.
 4. **Passed** if every device passed.
 
-Cancellation records a request; it is not an immediate confirmation that the
-BMC stopped collecting evidence. The controller tries to stop an active BMC
-task before releasing its claim. A cancellation timeout allows release
-without confirmation that the task stopped. Repeating a cancellation request
-preserves the original deadline. Cancelling an unknown job returns not found.
+`job waive` records a waiver request, which completes as `Cancelled`; it is
+not an immediate confirmation that the BMC stopped collecting evidence. The
+controller tries to stop an active BMC task before releasing its claim. A
+cancellation timeout allows release without confirmation that the task stopped. Repeating a waiver request
+preserves the original deadline. Waiving an unknown job returns not found.
 
-`job stop` uses the same cleanup path, then moves unfinished device attestations
-to `Failed("Stopped by operator")`. Completed results stay unchanged. Repeating
-stop preserves the request and its deadline; stopping a terminal job succeeds
+`job fail` uses the same cleanup path, then moves unfinished device attestations
+to `Failed("Failed by operator")`. Completed results stay unchanged. Repeating
+fail preserves the request and its deadline; failing a terminal job succeeds
 without changing its results. An unknown job returns not found and an invalid
-UUID is rejected. Stop is asynchronous: the job remains in progress until
+UUID is rejected. Fail is asynchronous: the job remains in progress until
 cleanup finishes or its timeout expires. Use this command only after all Core
-replicas have been upgraded to support `StopAttestation`.
+replicas have been upgraded to support `FailAttestation`.
 
-The managed-host controller accepts cancellation as a waiver. Stop records a
+The managed-host controller accepts `Cancelled` results as a waiver. Fail records a
 failure instead. Once its tracked job is terminal, that controller rechecks the
 selected device IDs. A changed selection schedules a replacement automatically;
 otherwise, failed latest results put the machine into its attestation failure
-state. A successful new run can then let the machine recover. Stop does not
+state. A successful new run can then let the machine recover. Fail does not
 directly change the machine's state, and newer acceptable results can already
 satisfy its attestation requirement.
 
@@ -69,9 +69,9 @@ The commands below belong to `nico-admin-cli attestation spdm`. They use the
 `trigger` schedules attestation for one machine through
 `TriggerMachineAttestation`. On success, it prints the job ID when devices
 were scheduled, or `none` when no job was created. Keep that ID to inspect or
-stop or cancel the run.
+fail or waive the run.
 
-### Inspect, stop, or cancel a run: `job`
+### Inspect, fail, or waive a run: `job`
 
 The `job` group operates on individual runs:
 
@@ -79,19 +79,19 @@ The `job` group operates on individual runs:
 | --- | --- | --- |
 | `list` | Find retained jobs by status | `ListAttestation` |
 | `get` | Read one job's device details | `GetAttestation` |
-| `cancel` | Request cancellation of one job | `CancelAttestation` |
-| `stop` | Fail unfinished devices after BMC cleanup | `StopAttestation` |
+| `waive` | Waive one job, recorded as Cancelled after BMC cleanup | `WaiveAttestation` |
+| `fail` | Fail unfinished devices after BMC cleanup | `FailAttestation` |
 
 `list` requires `--selector` with `in-progress`, `failed`, `cancelled`, or
-`passed`. `get`, `cancel`, and `stop` take a job ID. Both `list` and `get` print JSON;
+`passed`. `get`, `waive`, and `fail` take a job ID. Both `list` and `get` print JSON;
 `get` returns the details from `SpdmGetAttestationResponse`. Reading an unknown
-or removed job returns not found. A successful `cancel` acknowledges the
-request; the controller performs the cancellation as described above.
+or removed job returns not found. A successful `waive` or `fail` acknowledges the
+request; the controller performs the BMC cleanup as described above.
 
-For a stuck run, stop its original job and inspect it until cleanup completes:
+For a stuck run, fail its original job and inspect it until cleanup completes:
 
 ```bash
-nico-admin-cli attestation spdm job stop 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli attestation spdm job fail 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli attestation spdm job get 12345678-1234-5678-90ab-cdef01234567
 ```
 

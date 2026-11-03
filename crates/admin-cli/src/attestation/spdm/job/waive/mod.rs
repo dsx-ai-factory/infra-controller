@@ -15,36 +15,19 @@
  * limitations under the License.
  */
 
-use clap::Parser;
-use eyre::WrapErr;
-use uuid::Uuid;
+pub(super) mod args;
+mod cmd;
+#[cfg(test)]
+mod tests;
+
+use args::Args;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
-#[derive(Parser, Debug)]
-#[command(after_long_help = "\
-EXAMPLES:
-
-Stop a stuck SPDM attestation job, failing unfinished devices after BMC cleanup:
-    $ nico-admin-cli attestation spdm job stop 12345678-1234-5678-90ab-cdef01234567
-
-")]
-pub(crate) struct Args {
-    #[clap(help = "Attestation job ID")]
-    pub(super) job_id: Uuid,
-}
-
-impl Run for Args {
+impl Run for args::Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        // Submission is asynchronous; the job reaches Failed once cleanup finishes.
-        ctx.api_client
-            .0
-            .stop_attestation(self.job_id)
-            .await
-            .context("stop the SPDM attestation job")?;
-        println!("Stop requested; unfinished device attestations will fail after BMC cleanup");
-        Ok(())
+        cmd::waive(self, &ctx.api_client).await
     }
 }

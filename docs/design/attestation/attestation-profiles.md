@@ -649,9 +649,9 @@ a derived class always has two `_`-separated fields, and `any` has one.
 
 ### 6.3 The admin CLI
 
-The commands sit under the existing `attestation spdm` group, alongside the
-`trigger`, `get`, `list`, `cancel`, and `stop` commands that act on the machines these
-profiles decide:
+The commands sit under the existing `attestation spdm` group, alongside
+`trigger` and the `job get`, `job list`, `job waive`, and `job fail` commands that
+act on the machines these profiles decide:
 
 ```text
 nico-admin-cli attestation spdm profile list
@@ -782,11 +782,11 @@ returns to scheduling. An empty selection then follows the skip path. If the
 selected IDs stay the same, it evaluates their latest results.
 
 Device removals and profile edits therefore do not restart an in-progress job.
-If a removed device leaves the job stuck, use `attestation spdm job stop` with
+If a removed device leaves the job stuck, use `attestation spdm job fail` with
 that job's ID. Unfinished devices fail after BMC cleanup, allowing the controller
 to recheck the selection. If the selected IDs still match, failed latest results
 put the machine in its attestation failure state; a successful new run can let it
-recover. See [job stop semantics](spdm-jobs.md#progress-cancellation-and-stop).
+recover. See [job fail semantics](spdm-jobs.md#progress-waivers-and-failure).
 A new manual trigger creates a separate job and does not replace the job the
 managed-host controller is waiting for. The final selection check requires
 the BMC to respond when the resolved profile needs inventory; BMC errors leave
@@ -1115,8 +1115,8 @@ is attesting under".
 `job_id` identifies the scheduling attempt. It is present only when devices
 were scheduled, including a `PartiallySatisfied` outcome. Use it with
 `GetAttestation` to read that job's device details in
-`SpdmGetAttestationResponse`, with `CancelAttestation` to request cancellation,
-or with `StopAttestation` to fail unfinished work after BMC cleanup.
+`SpdmGetAttestationResponse`, with `WaiveAttestation` to request a waiver,
+or with `FailAttestation` to fail unfinished work after BMC cleanup.
 
 `started_at` records when the job's device rows were written. Every row in the
 job carries the same value, also returned as `SpdmAttestationDetails.started_at`.

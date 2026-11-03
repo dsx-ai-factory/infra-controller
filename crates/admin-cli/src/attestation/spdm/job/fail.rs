@@ -16,17 +16,35 @@
  */
 
 use clap::Parser;
+use eyre::WrapErr;
 use uuid::Uuid;
+
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
+use crate::errors::CarbideCliResult;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
 EXAMPLES:
 
-Cancel an in-progress SPDM attestation job:
-    $ nico-admin-cli attestation spdm job cancel 12345678-1234-5678-90ab-cdef01234567
+Fail a stuck SPDM attestation job after BMC cleanup:
+    $ nico-admin-cli attestation spdm job fail 12345678-1234-5678-90ab-cdef01234567
 
 ")]
 pub(crate) struct Args {
     #[clap(help = "Attestation job ID")]
     pub(super) job_id: Uuid,
+}
+
+impl Run for Args {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        // Submission is asynchronous; the job reaches Failed once cleanup finishes.
+        ctx.api_client
+            .0
+            .fail_attestation(self.job_id)
+            .await
+            .context("fail the SPDM attestation job")?;
+        println!("Failure requested; unfinished device attestations will fail after BMC cleanup");
+        Ok(())
+    }
 }

@@ -15,19 +15,21 @@
  * limitations under the License.
  */
 
-pub(super) mod args;
-mod cmd;
-#[cfg(test)]
-mod tests;
+use eyre::WrapErr;
 
-use args::Args;
-
-use crate::cfg::run::Run;
-use crate::cfg::runtime::RuntimeContext;
+use crate::attestation::spdm::job::waive::Args;
 use crate::errors::CarbideCliResult;
+use crate::rpc::ApiClient;
 
-impl Run for args::Args {
-    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::cancel(self, &ctx.api_client).await
-    }
+pub(super) async fn waive(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+    // The controller records the waiver after evidence collection cleanup.
+    api_client
+        .0
+        .waive_attestation(::rpc::common::Uuid {
+            value: args.job_id.to_string(),
+        })
+        .await
+        .context("waive the SPDM attestation job")?;
+    println!("Waiver requested; device attestations will become Cancelled after BMC cleanup");
+    Ok(())
 }

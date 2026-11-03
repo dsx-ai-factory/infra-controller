@@ -137,7 +137,7 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
         job_id: uuid::Uuid::new_v4(),
         started_at: Utc::now(),
         cancelled_at: None,
-        stop_requested_at: None,
+        fail_requested_at: None,
         completed_at: None,
     };
     insert_device_attestations(
@@ -327,7 +327,7 @@ async fn exercise_snapshot(
         job_id: uuid::Uuid::new_v4(),
         started_at: "2026-09-01T12:00:00Z".parse()?,
         cancelled_at: Some("2026-09-01T12:01:00Z".parse()?),
-        stop_requested_at: Some("2026-09-01T12:01:30Z".parse()?),
+        fail_requested_at: Some("2026-09-01T12:01:30Z".parse()?),
         completed_at: Some("2026-09-01T12:02:00Z".parse()?),
     };
     assert_eq!(
@@ -344,7 +344,7 @@ async fn exercise_snapshot(
     sqlx::query(
         "UPDATE spdm_machine_devices_attestation
          SET metadata = $1, ca_certificate = $2, evidence = $3,
-             state_outcome = $4, cancelled_at = $5, completed_at = $6, stop_requested_at = $10
+             state_outcome = $4, cancelled_at = $5, completed_at = $6, fail_requested_at = $10
          WHERE machine_id = $7 AND device_id = $8 AND job_id = $9",
     )
     .bind(sqlx::types::Json(&expected.metadata))
@@ -356,7 +356,7 @@ async fn exercise_snapshot(
     .bind(machine_id)
     .bind(&expected.device_id)
     .bind(expected.job_id)
-    .bind(expected.stop_requested_at)
+    .bind(expected.fail_requested_at)
     .execute(txn.as_mut())
     .await?;
 

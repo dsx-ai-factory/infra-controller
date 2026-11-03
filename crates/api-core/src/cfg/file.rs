@@ -4140,8 +4140,8 @@ pub struct SpdmStateControllerConfig {
     /// Maximum wait from the persisted start of cancellation cleanup before releasing an
     /// evidence collection lock without BMC confirmation. Accepts positive
     /// durations up to five minutes (e.g. "30s", "5m"); defaults to "2m".
-    /// Covers operator stop, cancellation, and automatic recovery. Requests use
-    /// persisted timestamps and cannot extend cleanup already in progress.
+    /// Covers operator failure, waivers, obsolete-job cancellation, and automatic recovery.
+    /// Requests use persisted timestamps and cannot extend cleanup already in progress.
     /// Requires an API restart; controller retries do not reset the deadline.
     #[serde(
         deserialize_with = "SpdmStateControllerConfig::deserialize_cancellation_timeout",
