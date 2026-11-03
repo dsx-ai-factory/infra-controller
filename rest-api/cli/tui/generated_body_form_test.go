@@ -343,9 +343,9 @@ func testGeneratedTUICommandGuidedBodyResolvesNamesToIDs(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/vpc":
 			vpcFetches++
 			if vpcFetches == 1 {
-				_, _ = io.WriteString(w, `[{"id":"vpc-1","name":"vpc-one","siteId":"site-1","tenantId":"tenant-1"}]`)
+				_, _ = io.WriteString(w, `[{"id":"vpc-1","name":"vpc-one","siteId":"site-1"}]`)
 			} else {
-				_, _ = io.WriteString(w, `[{"id":"vpc-2","name":"vpc-two","siteId":"site-1","tenantId":"tenant-1"}]`)
+				_, _ = io.WriteString(w, `[{"id":"vpc-2","name":"vpc-two","siteId":"site-1"}]`)
 			}
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/org/acme/nico/vpc-peering":
 			w.WriteHeader(http.StatusCreated)
@@ -361,7 +361,6 @@ func testGeneratedTUICommandGuidedBodyResolvesNamesToIDs(t *testing.T) {
 		"acme",
 		"",
 	)
-	session.Cache.Set("_tenant", []NamedItem{{Name: "acme", ID: "tenant-1"}})
 	_, err := withStdin(t, "\ny\n", func() (string, error) {
 		return "", runGeneratedTUICommand(
 			session,

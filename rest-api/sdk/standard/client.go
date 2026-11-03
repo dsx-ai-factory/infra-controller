@@ -59,8 +59,6 @@ type APIClient struct {
 
 	CredentialRotationAPI *CredentialRotationAPIService
 
-	DNSDomainAPI *DNSDomainAPIService
-
 	DPUExtensionServiceAPI *DPUExtensionServiceAPIService
 
 	DPUMachineAPI *DPUMachineAPIService
@@ -170,7 +168,6 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.AuditAPI = (*AuditAPIService)(&c.common)
 	c.BMCCredentialAPI = (*BMCCredentialAPIService)(&c.common)
 	c.CredentialRotationAPI = (*CredentialRotationAPIService)(&c.common)
-	c.DNSDomainAPI = (*DNSDomainAPIService)(&c.common)
 	c.DPUExtensionServiceAPI = (*DPUExtensionServiceAPIService)(&c.common)
 	c.DPUMachineAPI = (*DPUMachineAPIService)(&c.common)
 	c.DomainAPI = (*DomainAPIService)(&c.common)

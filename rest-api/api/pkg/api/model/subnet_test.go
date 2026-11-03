@@ -4,7 +4,6 @@
 package model
 
 import (
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -52,11 +51,6 @@ func TestAPISubnetCreateRequest_Validate(t *testing.T) {
 		{
 			desc:      "error when IPv4Block is not valid uuid",
 			obj:       APISubnetCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), VpcID: uuid.New().String(), IPv4BlockID: cutil.GetPtr("bad"), PrefixLength: prefix24},
-			expectErr: true,
-		},
-		{
-			desc:      "error when subdomainId is not valid uuid",
-			obj:       APISubnetCreateRequest{Name: "ab", Description: cutil.GetPtr("abc"), VpcID: uuid.New().String(), IPv4BlockID: cutil.GetPtr(uuid.New().String()), SubdomainID: cutil.GetPtr("bad"), PrefixLength: prefix24},
 			expectErr: true,
 		},
 		{
@@ -114,7 +108,6 @@ func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 	subID := uuid.New()
 	vpcID := uuid.New()
 	domainID := uuid.New()
-	controllerDomainID := uuid.New()
 	prefix := "10.0.0.0"
 	gateway := "10.0.0.1"
 	mtu := 9000
@@ -133,12 +126,10 @@ func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 
 	t.Run("sources canonical fields from the entity's ToProto and overlays the reservedIPCount", func(t *testing.T) {
 		scr := APISubnetCreateRequest{
-			Name:               "subnet-a",
-			VpcID:              vpcID.String(),
-			IPv4BlockID:        cutil.GetPtr(uuid.New().String()),
-			SubdomainID:        cutil.GetPtr(domainID.String()),
-			PrefixLength:       16,
-			ControllerDomainID: &controllerDomainID,
+			Name:         "subnet-a",
+			VpcID:        vpcID.String(),
+			IPv4BlockID:  cutil.GetPtr(uuid.New().String()),
+			PrefixLength: 16,
 		}
 		req := scr.ToProto(subnet, vpc, 2)
 		require.NotNil(t, req)
@@ -146,7 +137,7 @@ func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 		assert.Equal(t, subID.String(), req.Id.Value)
 		assert.Equal(t, "subnet-a", req.Name)
 		require.NotNil(t, req.SubdomainId)
-		assert.Equal(t, controllerDomainID.String(), req.SubdomainId.Value)
+		assert.Equal(t, domainID.String(), req.SubdomainId.Value)
 		require.NotNil(t, req.VpcId)
 		assert.Equal(t, vpcID.String(), req.VpcId.Value)
 		require.NotNil(t, req.Mtu)
@@ -158,12 +149,6 @@ func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 		assert.Equal(t, int32(2), req.Prefixes[0].ReserveFirst)
 	})
 
-	t.Run("does not send the local REST Domain ID without a resolved controller ID", func(t *testing.T) {
-		scr := APISubnetCreateRequest{SubdomainID: cutil.GetPtr(domainID.String())}
-		req := scr.ToProto(subnet, vpc, 2)
-		assert.Nil(t, req.SubdomainId)
-	})
-
 	t.Run("uses VPC's Site-facing ID for the parent ID", func(t *testing.T) {
 		ctrlID := uuid.New()
 		vpcWithCtrl := &cdbm.Vpc{ID: vpcID, ControllerVpcID: &ctrlID}
@@ -172,41 +157,6 @@ func TestAPISubnetCreateRequest_ToProto(t *testing.T) {
 		require.NotNil(t, req.VpcId)
 		assert.Equal(t, ctrlID.String(), req.VpcId.Value)
 	})
-}
-
-func TestAPISubnetAttachVpcRequest_Validate(t *testing.T) {
-	tests := []struct {
-		name    string
-		request APISubnetAttachVpcRequest
-		wantErr bool
-	}{
-		{name: "valid target", request: APISubnetAttachVpcRequest{VpcID: uuid.NewString()}},
-		{name: "missing target", request: APISubnetAttachVpcRequest{}, wantErr: true},
-		{name: "invalid target", request: APISubnetAttachVpcRequest{VpcID: "invalid"}, wantErr: true},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			assert.Equal(t, test.wantErr, test.request.Validate() != nil)
-		})
-	}
-}
-
-func TestAPISubnetAttachVpcRequest_ToProto(t *testing.T) {
-	segmentID := uuid.New()
-	vpcID := uuid.New()
-	for _, allowReplace := range []bool{false, true} {
-		request := APISubnetAttachVpcRequest{
-			VpcID:                      uuid.NewString(),
-			AllowReplace:               allowReplace,
-			ControllerNetworkSegmentID: segmentID,
-			ControllerVpcID:            vpcID,
-		}
-		protoRequest := request.ToProto()
-		assert.Equal(t, segmentID.String(), protoRequest.GetNetworkSegmentId().GetValue())
-		assert.Equal(t, vpcID.String(), protoRequest.GetVpcId().GetValue())
-		assert.Equal(t, allowReplace, protoRequest.GetAllowReplace())
-	}
 }
 
 func TestAPISubnetUpdateRequest_Validate(t *testing.T) {
@@ -287,7 +237,6 @@ func TestAPISubnetNew(t *testing.T) {
 		Description:                cutil.GetPtr("test"),
 		SiteID:                     uuid.New(),
 		VpcID:                      uuid.New(),
-		DomainID:                   cutil.GetPtr(uuid.New()),
 		TenantID:                   uuid.New(),
 		ControllerNetworkSegmentID: cutil.GetPtr(uuid.New()),
 		IPv4BlockID:                &ipv4Block.ID,
@@ -362,18 +311,6 @@ func TestAPISubnetNew(t *testing.T) {
 			}
 
 			assert.Equal(t, tc.dbObj.PrefixLength, got.PrefixLength)
-			if tc.dbObj.DomainID != nil {
-				require.NotNil(t, got.SubdomainID)
-				assert.Equal(t, tc.dbObj.DomainID.String(), *got.SubdomainID)
-			} else {
-				assert.Nil(t, got.SubdomainID)
-				encoded, err := json.Marshal(got)
-				require.NoError(t, err)
-				var response map[string]any
-				require.NoError(t, json.Unmarshal(encoded, &response))
-				assert.Contains(t, response, "subdomainId")
-				assert.Nil(t, response["subdomainId"])
-			}
 		})
 	}
 }

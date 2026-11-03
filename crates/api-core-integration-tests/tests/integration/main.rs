@@ -63,5 +63,3 @@ mod switch_find;
 mod switch_health;
 mod tenant_keyset_find;
 mod vpc_find;
-
-mod dns_joined_proxy;

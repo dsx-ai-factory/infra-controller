@@ -99,7 +99,6 @@ impl TestHarness {
                 name: name.clone(),
                 default_ttl: None,
                 vpc_id: None,
-                reserved_id: None,
             }))
             .await
             .unwrap()

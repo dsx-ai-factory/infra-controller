@@ -26,12 +26,6 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::create(
-            self,
-            ctx.config.format,
-            &mut ctx.output_file,
-            &ctx.api_client,
-        )
-        .await
+        cmd::create(self, ctx.config.format, &ctx.api_client).await
     }
 }

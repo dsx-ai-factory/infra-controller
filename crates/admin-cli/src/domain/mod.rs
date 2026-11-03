@@ -16,7 +16,6 @@
  */
 
 mod create;
-mod delete;
 mod show;
 mod update;
 
@@ -29,12 +28,10 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
 pub(crate) enum Cmd {
-    #[clap(about = "Create a Domain, optionally owned by a VPC")]
-    Create(create::Args),
-    #[clap(about = "Delete an unreferenced DNS domain")]
-    Delete(delete::Args),
     #[clap(about = "Display Domain information")]
     Show(show::Args),
+    #[clap(about = "Create a Domain, optionally owned by a VPC")]
+    Create(create::Args),
     #[clap(about = "Update domain default TTL")]
     Update(update::Args),
 }
