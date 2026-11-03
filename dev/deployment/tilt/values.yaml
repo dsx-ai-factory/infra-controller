@@ -320,6 +320,7 @@ tilt:
     mcp: false
     dsxExchange: false
     observability: false
+    dpf: false
 
   certManager:
     crds:
@@ -441,6 +442,24 @@ tilt:
             vault kv put secrets/machines/all_dpus/site_default/uefi-metadata-items/auth - >/dev/null
           printf '%s' '{"UsernamePassword":{"username":"root","password":"vault-password"}}' | \
             vault kv put secrets/machines/all_hosts/site_default/uefi-metadata-items/auth - >/dev/null
+
+  # Appended by the Tiltfile to the dev Vault server's postStart script when
+  # the dpf profile is enabled. nico-api's Vault client switches to Kubernetes
+  # ServiceAccount login whenever a token is mounted
+  # (crates/secrets/src/forge_vault.rs), which the dpf profile does for the
+  # DPF SDK. Bind its ServiceAccount to a policy as permissive as the root
+  # token used otherwise; production grants nico-vault-policy through
+  # helm-prereqs' vault-config-job instead.
+  vaultDpfPostStart: |
+    vault auth list | grep -q '^kubernetes/' || vault auth enable kubernetes
+    vault write auth/kubernetes/config \
+      kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" >/dev/null
+    printf 'path "*" {\n  capabilities = ["create", "read", "update", "patch", "delete", "list", "sudo"]\n}\n' | \
+      vault policy write nico-dev-admin - >/dev/null
+    vault write auth/kubernetes/role/nico-api \
+      bound_service_account_names=nico-api \
+      bound_service_account_namespaces=nico-system \
+      policies=nico-dev-admin ttl=1h >/dev/null
 
   observability:
     # Values passed directly to the nico-postgres-exporter Helm subchart.
@@ -896,6 +915,7 @@ tilt:
     restNamespace: nico-rest
     temporalNamespace: temporal
     observabilityNamespace: observability
+    dpfNamespace: dpf-operator-system
     vault:
       service: http://nico-vault.nico-system.svc.cluster.local:8200
       mount: secrets
