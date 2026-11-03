@@ -192,6 +192,12 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		cur, found := existingByID[emID]
 		if !found {
 			cerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				// Take the Expected Inventory lock before the SKU and insert so
+				// REST batch serial checks cannot miss this inventory write.
+				err := tx.TryAcquireSharedAdvisoryLock(ctx, cdbm.ExpectedInventoryMutationLockID(siteID), nil)
+				if err != nil {
+					return err
+				}
 				if reported.SkuID != nil {
 					skus, err := cdbm.NewSkuDAO(mei.dbSession).GetForAttachment(ctx, tx, siteID, []string{*reported.SkuID})
 					if err != nil {
@@ -201,7 +207,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 						return fmt.Errorf("SKU %q does not exist on Site %s", *reported.SkuID, siteID)
 					}
 				}
-				_, err := emDAO.Create(ctx, tx, cdbm.ExpectedMachineCreateInput{
+				_, err = emDAO.Create(ctx, tx, cdbm.ExpectedMachineCreateInput{
 					ExpectedMachineID:        emID,
 					SiteID:                   siteID,
 					BmcMacAddress:            reported.BmcMacAddress,
@@ -222,6 +228,15 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				return err
 			})
 			if cerr != nil {
+				// Retry errors include earlier failures; classify the last attempt.
+				lastErr := errors.Unwrap(cerr)
+				if lastErr == nil {
+					lastErr = cerr
+				}
+				if errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed) {
+					logger.Warn().Err(cerr).Str("ID", emID.String()).Msg("skipping ExpectedMachine after bounded Expected Inventory lock contention retries")
+					continue
+				}
 				logger.Error().Err(cerr).Str("ID", emID.String()).Msg("failed to create ExpectedMachine in DB")
 			}
 			continue
@@ -266,7 +281,13 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			(reported.HostLifecycleProfile.DisableLockdown != nil && !util.PtrsEqual(cur.HostLifecycleProfile.DisableLockdown, reported.HostLifecycleProfile.DisableLockdown)) ||
 			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
-				// Match the handlers: lock a new SKU before the Expected Machine.
+				// Match the handlers: Expected Inventory lock, then new SKU,
+				// then Expected Machine row. This keeps REST batch serial checks
+				// from missing an inventory write without reversing lock order.
+				err := tx.TryAcquireSharedAdvisoryLock(ctx, cdbm.ExpectedInventoryMutationLockID(siteID), nil)
+				if err != nil {
+					return err
+				}
 				if skuID != nil {
 					skus, err := cdbm.NewSkuDAO(mei.dbSession).GetForAttachment(ctx, tx, siteID, []string{*skuID})
 					if err != nil {
@@ -321,6 +342,15 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 				return uerr
 			})
 			if uerr != nil {
+				// Retry errors include earlier failures; classify the last attempt.
+				lastErr := errors.Unwrap(uerr)
+				if lastErr == nil {
+					lastErr = uerr
+				}
+				if errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed) {
+					logger.Warn().Err(uerr).Str("ExpectedMachineID", cur.ID.String()).Msg("skipping ExpectedMachine after bounded Expected Inventory lock contention retries")
+					continue
+				}
 				logger.Error().Err(uerr).Str("ExpectedMachineID", cur.ID.String()).Msg("failed to reconcile ExpectedMachine in DB")
 				continue
 			}
