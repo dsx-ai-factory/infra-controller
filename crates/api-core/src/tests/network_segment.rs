@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_authn::middleware::{ExternalUserInfo, Principal};
@@ -65,6 +66,7 @@ use tonic::Request;
 use crate::auth::AuthContext;
 use crate::cfg::file::InitialObjectsConfig;
 use crate::db_init;
+use crate::test_support::builder::TestApiBuilder;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::network_segment::FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS;
@@ -741,13 +743,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         },
     )]);
 
-    crate::db_init::create_initial_vpcs(
-        &env.pool,
-        &vpcs,
-        env.common_pools.ethernet.pool_vpc_vni.as_ref(),
-        &env.api.resource_pool_registry,
-    )
-    .await?;
+    crate::db_init::create_initial_vpcs(&env.api, &vpcs).await?;
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
     let mut txn = db_pool.begin().await?;
@@ -771,13 +767,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
     assert_eq!(host_inband.config.vpc_id, Some(seeded_vpc.id));
     txn.commit().await?;
 
-    crate::db_init::create_initial_vpcs(
-        &env.pool,
-        &vpcs,
-        env.common_pools.ethernet.pool_vpc_vni.as_ref(),
-        &env.api.resource_pool_registry,
-    )
-    .await?;
+    crate::db_init::create_initial_vpcs(&env.api, &vpcs).await?;
     let seeded_vpcs = db::vpc::find_by_name(&env.pool, "zero-dpu-vpc").await?;
     assert_eq!(
         seeded_vpcs.len(),
@@ -863,6 +853,10 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
 ) -> Result<(), eyre::Report> {
     const LIFECYCLE_FAILURES_METRIC: &str = "carbide_resource_pool_lifecycle_failures_total";
 
+    let env =
+        create_test_env_with_overrides(db_pool.clone(), TestEnvOverrides::no_network_segments())
+            .await;
+
     check_cases_async(
         [
             Case {
@@ -942,7 +936,8 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
             },
         ],
         |failure| {
-            let db_pool = db_pool.clone();
+            let db_pool = env.pool.clone();
+            let manager = env.api.work_lock_manager_handle.clone();
             async move {
                 let source_pool =
                     ResourcePool::<i32>::new(failure.pool_name().to_string(), ValueType::Integer);
@@ -1003,14 +998,22 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     !matches!(failure, InitialVpcAllocationFailure::MissingPool)
                 );
                 txn.commit().await.expect("commit pool binding");
+                let mut common = db::resource_pool::create_common_pools(
+                    db_pool.clone(),
+                    Default::default(),
+                )
+                .await
+                .expect("create pool handles");
+                Arc::get_mut(&mut common)
+                    .expect("unshared pool handles")
+                    .ethernet
+                    .pool_vpc_vni = Arc::new(source_pool);
+                let api = TestApiBuilder::new(db_pool.clone(), common, manager)
+                    .with_resource_pool_registry(registry)
+                    .build();
                 let metrics = MetricsCapture::start();
-                let (result, logs) = capture_logs_async(crate::db_init::create_initial_vpcs(
-                    &db_pool,
-                    &vpcs,
-                    &source_pool,
-                    &registry,
-                ))
-                .await;
+                let (result, logs) =
+                    capture_logs_async(crate::db_init::create_initial_vpcs(&api, &vpcs)).await;
                 let returned_error = result.expect_err("initial VPC allocation must fail");
                 let error_kind = match &returned_error {
                     crate::CarbideError::ResourcePoolDatabaseError(
@@ -1036,6 +1039,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     observed >= 1.0,
                     "expected at least one {failure:?} allocation failure, observed {observed}"
                 );
+
 
                 Ok::<_, ()>(InitialVpcAllocationFailureRecord {
                     error_kind,

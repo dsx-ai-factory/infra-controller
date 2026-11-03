@@ -1856,13 +1856,7 @@ async fn initialize_and_start_controllers<'a>(
 
     if let Some(seed_data) = seed_data {
         if !seed_data.initial_vpcs.is_empty() {
-            db_init::create_initial_vpcs(
-                db_pool,
-                &seed_data.initial_vpcs,
-                common_pools.ethernet.pool_vpc_vni.as_ref(),
-                &api_service.resource_pool_registry,
-            )
-            .await?;
+            db_init::create_initial_vpcs(&api_service, &seed_data.initial_vpcs).await?;
         }
 
         if !seed_data.initial_networks.is_empty() {

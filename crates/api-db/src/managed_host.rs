@@ -132,10 +132,11 @@ where
     ID: MachineIdSubtypeTrait,
     DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
 {
-    // Partition the ID's by whether or not they're DPU's.
+    // Partition the ID's by whether or not they're DPU's. A repeated ID maps to the same result
+    // entry, so drop repeats here instead of handing a snapshot out to each of them.
     let mut requested_dpu_ids = Vec::new();
     let mut requested_host_ids = Vec::new();
-    for machine_id in requested_machine_ids {
+    for machine_id in requested_machine_ids.iter().unique() {
         match machine_id.host_or_dpu_id() {
             HostOrDpuId::Dpu(dpu_machine_id) => requested_dpu_ids.push(dpu_machine_id),
             HostOrDpuId::Host(host_machine_id) => requested_host_ids.push(host_machine_id),
@@ -204,36 +205,35 @@ where
         .collect();
 
     // Now that we've built the snapshots for all hosts that have been somehow referenced
-    // in the query, go back and fulfill the original request
-    let [dpu_pairs, host_pairs] = [
-        // First loop is for requested DPUs
-        // Since their snapshot might also have been queried for a host in the same query,
-        // we have to clone from snapshots_by_host_id
-        requested_dpu_ids
-            .into_iter()
-            .filter_map(|dpu_id| {
-                host_ids_by_dpu_id.get(&dpu_id).and_then(|host_id| {
-                    snapshots_by_host_id
-                        .get(host_id)
-                        .map(|snapshot| Ok((dpu_id.to_machine_id().try_into()?, snapshot.clone())))
-                })
-            })
-            .collect::<Result<Vec<_>, DatabaseError>>()?,
-        // Then extract the explicitly requested host snapshots. Since we already scanned through
-        // requested DPUs, we can move them out of the map
-        requested_host_ids
-            .into_iter()
-            .filter_map(|host_id| {
-                snapshots_by_host_id
-                    .remove(&host_id)
-                    .map(|snapshot| Ok((host_id.to_machine_id().try_into()?, snapshot)))
-            })
-            .collect::<Result<Vec<_>, DatabaseError>>()?,
-    ];
-    let result = dpu_pairs
+    // in the query, go back and fulfill the original request.
+    //
+    // Each requested ID gets its own snapshot, but a host and its DPUs can be requested in the
+    // same call and share one loaded snapshot. So group the requested IDs by host: every ID but
+    // the last gets a clone, and the last one takes the loaded snapshot itself. That way a single
+    // requested DPU, which is what `GetManagedHostNetworkConfig` loads on every DPU poll, gets its
+    // snapshot without a copy.
+    let requested_ids_by_host_id = requested_dpu_ids
         .into_iter()
-        .chain(host_pairs)
-        .collect::<HashMap<_, _>>();
+        .filter_map(|dpu_id| Some((*host_ids_by_dpu_id.get(&dpu_id)?, dpu_id.to_machine_id())))
+        .chain(
+            requested_host_ids
+                .into_iter()
+                .map(|host_id| (host_id, host_id.to_machine_id())),
+        )
+        .into_group_map();
+
+    let mut result = HashMap::with_capacity(requested_machine_ids.len());
+    for (host_id, mut machine_ids) in requested_ids_by_host_id {
+        let (Some(snapshot), Some(last_machine_id)) =
+            (snapshots_by_host_id.remove(&host_id), machine_ids.pop())
+        else {
+            continue;
+        };
+        for machine_id in machine_ids {
+            result.insert(machine_id.try_into()?, snapshot.clone());
+        }
+        result.insert(last_machine_id.try_into()?, snapshot);
+    }
 
     Ok(result)
 }

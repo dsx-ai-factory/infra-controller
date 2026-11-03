@@ -3540,6 +3540,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bmc-vendor",
  "carbide-rpc",
  "carbide-site-health-probe-api",
  "carbide-test-support",
