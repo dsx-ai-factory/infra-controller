@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use carbide_instrument::emit;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
-    DpuMachineId, HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId,
+    HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId,
     StableHostMachineId,
 };
 use carbide_uuid::rack::RackId;
@@ -284,13 +284,9 @@ impl MachineCreator {
         if dpu_ids.is_empty() {
             return Ok(None);
         }
-        let existing_hosts_by_dpu_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(&self.database_connection, &dpu_ids)
-                .await?;
-        if existing_hosts_by_dpu_id.is_empty() {
-            return Ok(None);
-        }
-        attached_host_machine_id(&existing_hosts_by_dpu_id, &dpu_ids).map(Some)
+        let host_associations =
+            db::machine::DpuHostAssociations::load(&self.database_connection, &dpu_ids).await?;
+        Ok(host_associations.common_host_machine_id()?)
     }
 
     /// Creates machines for an identified managed host or reconciles an existing host.
@@ -427,17 +423,14 @@ impl MachineCreator {
             dpu_ids.push(dpu_machine_id);
         }
 
-        let existing_hosts_by_dpu_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(&mut txn, &dpu_ids).await?;
+        let host_associations = db::machine::DpuHostAssociations::load(&mut txn, &dpu_ids).await?;
 
-        if !existing_hosts_by_dpu_id.is_empty() {
+        if let Some(host_machine_id) = host_associations.common_host_machine_id()? {
             // Steady state case: DPU's already exist, so site explorer must have already created
             // this managed host (since only site explorer would have created them.) Ensure they're
             // associated with this machine, then return early. `create_machines` gates this
             // path with `needs_managed_host_transaction` so an ingested fleet does not re-run
             // it for every host on every iteration.
-
-            let host_machine_id = attached_host_machine_id(&existing_hosts_by_dpu_id, &dpu_ids)?;
 
             Self::reconcile_existing_dpu_host(
                 &mut txn,
@@ -1850,49 +1843,6 @@ fn host_mac_addresses_for_predicted_machine(
             );
         })
         .unwrap_or_default()
-}
-
-/// The host the DPUs of an exploration report are attached to: every DPU of
-/// the report has to be attached, and all of them to the same host.
-fn attached_host_machine_id(
-    existing_hosts_by_dpu_id: &HashMap<DpuMachineId, HostMachineId>,
-    dpu_ids: &[DpuMachineId],
-) -> SiteExplorerResult<HostMachineId> {
-    let existing_dpu_ids = existing_hosts_by_dpu_id
-        .keys()
-        .copied()
-        .sorted()
-        .dedup()
-        .collect::<Vec<_>>();
-    let existing_managed_host_ids = existing_hosts_by_dpu_id
-        .values()
-        .copied()
-        .sorted()
-        .dedup()
-        .collect::<Vec<_>>();
-
-    if existing_dpu_ids != dpu_ids.iter().copied().sorted().dedup().collect::<Vec<_>>() {
-        // This would only happen if somehow a host endpoint gains/loses a DPU from its endpoint report before we
-        // get a chance to create a managed host for it.
-        let msg = "explored endpoint has a partial number of DPU's already created";
-        tracing::error!(
-            dpu_ids = dpu_ids.iter().join(", "),
-            existing_dpu_ids = existing_dpu_ids.iter().join(", "),
-            "{msg}",
-        );
-        return Err(SiteExplorerError::internal(msg.to_string()));
-    }
-
-    match existing_managed_host_ids.as_slice() {
-        [host_machine_id] => Ok(*host_machine_id),
-        host_machine_ids => {
-            let existing_dpu_ids = existing_dpu_ids.iter().join(", ");
-            let existing_host_ids = host_machine_ids.iter().join(", ");
-            let msg = "DPU's from exploration report exist but are members of different managed hosts. exploration results are inconsistent";
-            tracing::error!(%existing_dpu_ids, %existing_host_ids, "BUG: {msg}");
-            Err(SiteExplorerError::internal(msg.to_string()))
-        }
-    }
 }
 
 /// The BMC IPs of `host`: its own BMC, then each DPU BMC.
