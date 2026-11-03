@@ -26,12 +26,17 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data_redacted};
 use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
-    validate_bmc_mac,
+    validate_bmc_mac, validate_single_interface_address,
 };
 use crate::handlers::machine_interface_address::update_preallocated_machine_interface;
 use crate::handlers::static_address_metrics::{
     PreallocationSuccess, StaticAddressPreallocationCompleted,
 };
+
+/// Validate the power shelf fields carried by a write.
+fn validate_expected_power_shelf(power_shelf: &ExpectedPowerShelf) -> Result<(), CarbideError> {
+    validate_single_interface_address("bmc_ip_address", power_shelf.bmc_ip_address)
+}
 
 pub(crate) async fn add_expected_power_shelf(
     api: &Api,
@@ -44,6 +49,7 @@ pub(crate) async fn add_expected_power_shelf(
             .map_err(|e: ::rpc::errors::RpcDataConversionError| {
                 CarbideError::InvalidArgument(e.to_string())
             })?;
+    validate_expected_power_shelf(&power_shelf)?;
 
     let mut txn = api
         .database_connection
@@ -207,6 +213,8 @@ async fn update_power_shelf_in_transaction(
     power_shelf: &ExpectedPowerShelf,
     retained_window: Option<chrono::Duration>,
 ) -> Result<Option<PreallocationSuccess>, CarbideError> {
+    validate_expected_power_shelf(power_shelf)?;
+
     // Lock the inventory before allocating addresses so PATCH and legacy
     // updates cannot wait on each other's locks.
     db_expected_power_shelf::update(txn, power_shelf).await?;
@@ -324,6 +332,7 @@ pub(crate) async fn replace_all_expected_power_shelves(
                 .map_err(|e: ::rpc::errors::RpcDataConversionError| {
                     CarbideError::InvalidArgument(e.to_string())
                 })?;
+        validate_expected_power_shelf(&power_shelf)?;
         db_expected_power_shelf::create(&mut txn, power_shelf)
             .await
             .map_err(|e| CarbideError::Internal {

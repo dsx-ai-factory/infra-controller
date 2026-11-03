@@ -213,7 +213,7 @@ kubectl annotate dpunode node-02-00-00-00-00-01 -n dpf-operator-system \
 > name within milliseconds, so `kubectl delete dpu`, which waits for the name
 > to disappear, hangs indefinitely.
 >
-> **Building on Apple Silicon:** the multi-stage `golang:1.25` build segfaults
+> **Building on Apple Silicon:** the multi-stage `golang:1.27.3` build segfaults
 > under QEMU. `make docker-build` sets `--platform linux/amd64`, which works on
 > native amd64 (CI); on an Apple-Silicon laptop, cross-compile first
 > (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/dpf-sim-controller ./cmd`)
@@ -240,8 +240,23 @@ simulator do what the operator does:
    Location. Poll until `Completed`, then move to Rebooting. The DPU stays in
    OS Installing meanwhile, and `--os-install-dwell` does not apply.
    A monitor-only response is polled with 202 meaning running and 204 meaning
-   completed. A 200 response must contain TaskState. A response without that
-   state is retried until the install timeout.
+   completed. A monitor 200 with a `TaskState` uses that task state,
+   progress and messages, because `Location` can point to a Task resource.
+   An empty or non-string `TaskState` is a polling error that retries until
+   the install timeout. Without `TaskState`, monitor 200 means completed and
+   its action body is ignored.
+   A Task resource's 200 must contain `TaskState`, otherwise
+   polling retries until the install timeout. Resource 202/204 handling stays
+   running/completed, respectively.
+   The `sim.dpu.nvidia.com/bfb-install-task` annotation stores path and kind
+   together, for example `{"path":"/monitor/7","kind":"monitor"}`, so a restart
+   resumes with the same interpretation. After ignoring leading whitespace,
+   values starting with `{` are JSON references and their paths must start
+   with `/`. Other values are legacy bare paths interpreted as resources.
+   Missing kind also means resource. Invalid JSON references fail `TaskLost`
+   without resubmitting. Older controller versions cannot resume the new JSON
+   format, so do not downgrade during an install. An old monitor saved as a
+   bare path remains interpreted as a resource.
 3. A `SimpleUpdate` response other than 202, a task in `Exception`, and
    `--os-install-timeout` (default 45m, the operator's default) move the DPU to
    `Error` with an `OSInstalled=False` condition. A task GET returning 404 with
@@ -254,6 +269,8 @@ simulator do what the operator does:
    without another POST, including after a restart between the marker and POST.
    Plain routing or proxy 404s and unreachable BMCs while polling a known task
    are retried every `--os-install-poll-interval` until `--os-install-timeout`.
+   **Known limit:** a monitor that finishes with another 4xx or 5xx also retries
+   until that timeout. Only the Redfish error 404 above fails immediately.
 4. A DPU created from a `blueFieldSoftware` source has no BFB and is not
    installed.
 

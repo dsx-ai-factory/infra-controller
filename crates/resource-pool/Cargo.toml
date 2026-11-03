@@ -73,6 +73,7 @@ tokio = { workspace = true, features = [
   "net",
   "rt-multi-thread",
   "sync",
+  "test-util",
   "time",
 ] }
 tokio-stream = { workspace = true, features = ["net"] }

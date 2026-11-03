@@ -1447,7 +1447,8 @@ type SiteTemporalClientPool interface {
 	GetClientByID(siteID uuid.UUID) (tclient.Client, error)
 }
 
-// AuthorizeProviderSiteForCoreInput carries the inputs for AuthorizeProviderSiteForCore.
+// AuthorizeProviderSiteForCoreInput supplies both Site authorization helpers.
+// Only AuthorizeProviderSiteForCore uses SCP to resolve a Temporal client.
 type AuthorizeProviderSiteForCoreInput struct {
 	Ctx       context.Context
 	Logger    zerolog.Logger
@@ -1458,15 +1459,13 @@ type AuthorizeProviderSiteForCoreInput struct {
 	SiteID    string
 }
 
-// AuthorizeProviderSiteForCore validates that user is a Provider Admin for org,
-// resolves siteStrID to a Site owned by the org's Infrastructure Provider, and
-// returns the per-site Temporal client plus the site ID string. The site ID is
-// the shared key used to encrypt redacted secret fields for transport to the
-// site agent.
-func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient.Client, string, *cutil.APIError) {
+// AuthorizeProviderSite checks Provider Admin access and returns the owned Site.
+// It skips Site readiness and SCP so callers can reject requests using REST
+// data, such as a SKU's machine associations, without a Temporal client.
+func AuthorizeProviderSite(in AuthorizeProviderSiteForCoreInput) (*cdbm.Site, *cutil.APIError) {
 	if in.User == nil {
 		in.Logger.Error().Msg("invalid User object found in request context")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current user", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
 	ok, err := auth.ValidateOrgMembership(in.User, in.Org)
@@ -1476,37 +1475,50 @@ func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient
 		} else {
 			in.Logger.Warn().Msg("could not validate org membership for user, access denied")
 		}
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", in.Org), nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", in.Org), nil)
 	}
 
-	if ok := auth.ValidateUserRoles(in.User, in.Org, nil, auth.ProviderAdminRole); !ok {
+	ok = auth.ValidateUserRoles(in.User, in.Org, nil, auth.ProviderAdminRole)
+	if !ok {
 		in.Logger.Warn().Msg("user does not have Provider Admin role, access denied")
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, "User does not have Provider Admin role with org", nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
 
 	provider, err := GetInfrastructureProviderForOrg(in.Ctx, nil, in.DBSession, in.Org)
 	if err != nil {
 		if errors.Is(err, ErrOrgInstrastructureProviderNotFound) {
-			return nil, "", cutil.NewAPIError(http.StatusNotFound,
+			return nil, cutil.NewAPIError(http.StatusNotFound,
 				fmt.Sprintf("Org '%v' does not have an Infrastructure Provider", in.Org), nil)
 		}
 		in.Logger.Error().Err(err).Msg("error retrieving Infrastructure Provider for this org")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
 	}
 
 	site, err := GetSiteFromIDString(in.Ctx, nil, in.SiteID, in.DBSession)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) || errors.Is(err, ErrInvalidID) {
 			in.Logger.Warn().Err(err).Str("Site ID", in.SiteID).Msg("site not found in request")
-			return nil, "", cutil.NewAPIError(http.StatusBadRequest,
+			return nil, cutil.NewAPIError(http.StatusBadRequest,
 				fmt.Sprintf("Could not find Site with ID specified in request data: %s", in.SiteID), nil)
 		}
 		in.Logger.Error().Err(err).Str("Site ID", in.SiteID).Msg("error retrieving Site from DB")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site due to DB error", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site due to DB error", nil)
 	}
 
 	if site.InfrastructureProviderID != provider.ID {
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
+	}
+
+	return site, nil
+}
+
+// AuthorizeProviderSiteForCore runs AuthorizeProviderSite, requires a Registered
+// Site, and returns its Temporal client and ID. The Site ID is the key used
+// to encrypt redacted secret fields for transport to the site agent.
+func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient.Client, string, *cutil.APIError) {
+	site, apiErr := AuthorizeProviderSite(in)
+	if apiErr != nil {
+		return nil, "", apiErr
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {

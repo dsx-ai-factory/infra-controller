@@ -59,12 +59,7 @@ const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIALIZATION_WAIT: Duration = Duration::from_secs(40);
 
 /// Delay after each periodic observation; the actor retains at most one polling alarm.
-// Unit tests exercise polling and recovery without waiting for the production cadence.
-const POWER_POLL_INTERVAL: Duration = if cfg!(test) {
-    Duration::from_millis(20)
-} else {
-    Duration::from_secs(5)
-};
+const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -676,5 +671,8 @@ impl Callbacks for LibvirtCallbacks {
     }
 }
 
+// Do not generate executable stub scripts in tests. A parallel test can fork while
+// another thread holds a script open for writing; inherited descriptors can race
+// with exec and cause ETXTBSY (Text file busy) or other unexpected failures.
 #[cfg(test)]
 mod tests;

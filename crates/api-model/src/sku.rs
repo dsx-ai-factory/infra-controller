@@ -400,7 +400,7 @@ pub fn diff_skus(actual_sku: &Sku, expected_sku: &Sku) -> Vec<String> {
 
     if expected_total_memory != actual_total_memory {
         diffs.push(format!(
-            "Actual memory ({expected_total_memory}) differs from expected ({actual_total_memory})"
+            "Actual memory ({actual_total_memory}) differs from expected ({expected_total_memory})"
         ));
     }
 
@@ -746,8 +746,7 @@ mod tests {
         );
 
         // Check the reported totals: wrapping and saturation can change a
-        // value or make different totals compare equal. The memory message
-        // prints expected before actual; preserve its wording here.
+        // value or make different totals compare equal.
         check_values(
             [
                 Check {
@@ -779,7 +778,7 @@ mod tests {
                         component_sku(Vec::new(), vec![memory(u32::MAX, u32::MAX); 3]),
                     ),
                     expect: vec![
-                        "Actual memory (55340232195358851075) differs from expected (36893488130239234050)"
+                        "Actual memory (36893488130239234050) differs from expected (55340232195358851075)"
                             .to_string(),
                     ],
                 },

@@ -12,17 +12,16 @@ import "mlx_device.proto";
 // the executor separately owns the host-wide claim before admitting work.
 // Receipts survive client disconnection. RPC cancellation never cancels a
 // firmware operation, and callers must resolve an uncertain submission by its
-// original operation ID. This service is not part of the Core API.
+// original operation ID and preserve its admission token when used. This service
+// is not part of the Core API.
 // Each daemon admits at most eight journal RPC tasks across all connections;
 // excess requests return RESOURCE_EXHAUSTED without waiting for capacity.
 // Detached tasks retain their quota until journal access finishes. Execution
 // progress and observer cancellation do not consume this quota. Transport limits
 // allow 32 connected sockets and eight active HTTP/2 streams per connection;
 // excess sockets are closed. Requests and responses are limited to 128 KiB.
-// Protocol 3 supports checked submission and bounded post-reset verification
-// retries. Version-3 clients may read and cancel receipts from versions 1 and 2,
-// but every submission requires version 3. Version 1 ignores retry policy,
-// including its omitted defaults; versions 1 and 2 ignore checked update context.
+// The client and supervisor support one matching private API revision. Clients
+// reject a different revision during the status handshake before any operation.
 service FirmwareSupervisor {
   // Record an immutable request, or return its existing receipt. Reusing an ID
   // with different work is rejected, as is new work while a predecessor still
@@ -33,6 +32,10 @@ service FirmwareSupervisor {
   rpc SubmitFirmwareOperation(SubmitFirmwareOperationRequest) returns (SubmitFirmwareOperationResponse);
   // Return a recorded operation; an unknown ID returns NOT_FOUND.
   rpc GetFirmwareOperation(GetFirmwareOperationRequest) returns (GetFirmwareOperationResponse);
+  // Read checked work only when every immutable request field matches. A reused
+  // ID with different work returns ALREADY_EXISTS. Absence never admits work.
+  // Unlike Get, this proves which request the receipt serves.
+  rpc ObserveFirmwareUpdate(ObserveFirmwareUpdateRequest) returns (ObserveFirmwareOperationResponse);
   // Request cancellation at a safe phase boundary. This never kills an active
   // hardware mutation and does not undo effects that have already completed.
   rpc CancelFirmwareOperation(CancelFirmwareOperationRequest) returns (CancelFirmwareOperationResponse);
@@ -67,7 +70,8 @@ message SupervisorIdentity {
 // SubmitFirmwareOperationRequest identifies one immutable operation on this card.
 message SubmitFirmwareOperationRequest {
   // Stable ID containing 1-256 printable nonspace ASCII bytes. Other values
-  // return INVALID_ARGUMENT. Reuse it to resolve a lost response without dispatching again.
+  // return INVALID_ARGUMENT. Reuse it to recover its receipt; guard uncertain
+  // submission retries with expected_supervisor_instance_id.
   string operation_id = 1;
   // Omission requests a durable no-work completion with flashed=false. Admission
   // still rejects unresolved predecessors or an unavailable host mutation claim.
@@ -79,19 +83,45 @@ message SubmitFirmwareOperationRequest {
   // returns FAILED_PRECONDITION before admitting work.
   SupervisorIdentity expected_identity = 4;
   // Presence selects digest-bound UpdateFirmware semantics and requires profile.
-  // Omission preserves the legacy profile/no-work contract. Clients must require
-  // protocol 3 before sending this field; earlier helpers do not enforce it.
+  // Omission preserves the profile/no-work contract.
   FirmwareUpdateContext update_context = 5;
+  // If present, new admission requires this exact opaque token from a prior
+  // observation (1-256 printable nonspace ASCII bytes).
+  // A mismatch (including an empty token) returns FAILED_PRECONDITION before any
+  // claim or receipt is created. A matching existing request returns its receipt
+  // even after instance replacement. Omission preserves unguarded admission.
+  // The guard also applies when update_context or profile is omitted.
+  // Clients must not replace this token during reconnection.
+  optional string expected_supervisor_instance_id = 6;
 }
 
 // FirmwareUpdateContext binds one checked workflow to its dispatch and artifacts.
-// Both fields participate in immutable request identity. Neither changes the
+// All present fields participate in immutable request identity. None changes the
 // supervisor's internal phase ordering or permits resuming an interrupted burn.
 message FirmwareUpdateContext {
   // Immutable caller dispatch token: 1-256 printable nonspace ASCII bytes.
   string phase_id = 1;
   // Required image digest and configuration digest iff the profile has config.
   mlx_device.FirmwareArtifactDigests expected_digests = 2;
+  // Optional frozen base MAC or GUID, checked before mutation. Omission preserves
+  // the stored request fingerprint for work submitted without a stable identity.
+  mlx_device.MlxDeviceSelector expected_device = 3;
+}
+
+// ObserveFirmwareUpdateRequest repeats the immutable checked submission without
+// requesting admission. Profile and context are required and validated exactly
+// as on submission. The serving instance token is returned only for absence.
+message ObserveFirmwareUpdateRequest {
+  // Original operation ID, with the bounds and reserved prefix of checked submit.
+  string operation_id = 1;
+  // Original complete profile, including options, sources and retry policy.
+  mlx_device.FirmwareFlasherProfile profile = 2;
+  // Original policy; omission means Continue and unknown values are rejected.
+  ObserverExitBehavior observer_exit_behavior = 3;
+  // Required handshake identity, including the exact execution PCI BDF.
+  SupervisorIdentity expected_identity = 4;
+  // Original phase, artifact digests and optional stable device identity.
+  FirmwareUpdateContext update_context = 5;
 }
 
 // SubmitFirmwareOperationResponse contains the durably recorded receipt.
@@ -111,6 +141,18 @@ message GetFirmwareOperationRequest {
 message GetFirmwareOperationResponse {
   // Always present on success, including when execution needs manual intervention.
   mlx_device.FirmwareOperation operation = 1;
+}
+
+// ObserveFirmwareOperationResponse distinguishes absent receipts from failed reads.
+message ObserveFirmwareOperationResponse {
+  // Exactly one result is required. An absent result is an invalid response.
+  oneof result {
+    // Recorded execution state, including an interrupted or terminal operation.
+    mlx_device.FirmwareOperation receipt = 1;
+    // No receipt exists in this service's readable journal. A failed or fenced
+    // journal returns an RPC error instead, never permission for new admission.
+    mlx_device.FirmwareOperationMissingReceipt missing_receipt = 2;
+  }
 }
 
 // CancelFirmwareOperationRequest asks an existing operation to stop safely.
@@ -134,7 +176,7 @@ message GetSupervisorStatusRequest {}
 
 // GetSupervisorStatusResponse supplies the identity checked before submission.
 message GetSupervisorStatusResponse {
-  // Private protocol version, exactly 3 for this service implementation.
+  // Private API revision. Clients require an exact match with their own revision.
   uint32 protocol_version = 1;
   // Normalized PCI slot dddd:bb:ss, not a certified physical card or an
   // independently isolated reset domain.

@@ -481,7 +481,13 @@ The daemon persists acceptance before starting work and records intent before ea
 
 An operation ID must contain 1–256 printable, non-space ASCII characters. IDs are scoped to a PCI slot's journal, not the host: another slot can contain independent work with the same ID. Reuse both the original target and ID to resolve a lost response. Retrieving a receipt never restarts work, and resubmitting the identical profile and observer-exit policy to that slot returns the existing receipt. Reusing its ID with different work is rejected. After an uncertain result, do not invent a replacement ID or select another target. Scout's DPA path reads first and submits only after `NotFound`, preserving the accepted request even when Core's live profile changes or disappears. A new legacy request with no profile records a no-work `Complete` receipt with `flashed=false`; it still passes predecessor and host-claim checks.
 
-The checked `submit_update` method requires a profile and `FirmwareUpdateContext`: a phase ID with the same character and length bounds as the operation ID, plus expected image and optional configuration SHA-256 digests. Checked operation IDs cannot start with `dpa-firmware:`, which is reserved for legacy DPA state entries. The configuration digest is required exactly when its source is present. Wire digests use 64 lowercase hexadecimal characters. Sources must use unauthenticated HTTP(S) without user information, queries, fragments, or redirects. The phase ID, digests, exact execution PCI address, profile, and observer policy participate in request identity. Every delivery submits that immutable request, including when observing completed work; it never downloads again merely to return a receipt. The daemon stages its own copies and saves their actual hashes before checking both expected digests and the existing read-only preflight. A mismatch stops before mutation and retains the staged bytes for diagnosis, as does failed checked preflight. Legacy submissions still record actual hashes but do not compare caller-supplied expected digests.
+Library callers can inspect a checked request with `observe_update` without submitting work, downloading artifacts, or querying hardware. It returns either the matching receipt or `MissingReceipt` with the serving process's `supervisor_instance_id`. The token contains 1–256 printable, non-space ASCII characters. Before the first guarded submission, retain that token and pass it unchanged to `submit_update_on_instance`, including after reconnecting. A replacement daemon can return a matching retained receipt, but guarded submission of missing work returns `FAILED_PRECONDITION` when the token differs. A missing receipt after replacement requires reconciliation; it does not authorize obtaining a new token and burning again. A failed or unreadable journal returns an error, not `MissingReceipt`.
+
+The checked `observe_update`, `submit_update`, and `submit_update_on_instance` methods require a profile and `FirmwareUpdateContext`. The context contains a phase ID with the same character and length bounds as the operation ID, expected image and optional configuration SHA-256 digests, and an optional `expected_device` selector. Checked operation IDs cannot start with `dpa-firmware:`, which is reserved for legacy DPA state entries. The configuration digest is required exactly when its source is present. Wire digests use 64 lowercase hexadecimal characters. Sources must use unauthenticated HTTP(S) without user information, queries, fragments, or redirects.
+
+The optional selector uses the shared [`MlxDeviceSelector`](../libmlx-model/src/device/identity.rs) type: a nonzero unicast base MAC or a base GUID. A GUID contains 1–256 UTF-8 bytes without surrounding whitespace or control characters; the absence placeholders `--` and `N/A` are invalid. Matching is exact, including GUID case and formatting. When supplied, the selector must match the live card before mutation. Omitting it preserves the existing preflight checks without adding a physical identity check.
+
+The phase ID, digests, selector, exact execution PCI address, profile, and observer policy participate in request identity. Both checked observation and submission compare that identity before returning an existing receipt; conflicting work returns `ALREADY_EXISTS`. Neither downloads again merely to return a receipt. For new work, the daemon stages its own copies and saves their actual hashes before checking the expected digests and running read-only preflight. A digest or identity mismatch stops before mutation and retains the staged bytes for diagnosis, as does failed checked preflight. Legacy submissions still record actual hashes but do not compare caller-supplied expected digests.
 
 Scout's generic command and its production integration boundary are described in [supervised NIC firmware updates](../scout/README.md#supervised-nic-firmware-updates).
 
@@ -493,11 +499,13 @@ The typed client resolves local image, configuration, and SSH-key paths against 
 
 Connecting and each RPC have a five-second total deadline, including channel readiness. Launch/readiness has a separate ten-second bound. Requests and responses are limited to 128 KiB. These bounds do not limit the firmware operation's lifetime; a timeout, dropped client, or closed socket does not cancel accepted work. The client does not automatically retry RPCs.
 
-Private protocol 3 supports checked submission and post-reset verification retries. The client can read and cancel receipts from protocol-1 and protocol-2 daemons, but every submission requires protocol 3. Protocol 1 ignores retry policy; protocols 1 and 2 ignore checked update context. Refusal includes resubmission through `firmware flash`, `firmware flash-config`, or `submit_update`; use `firmware status` to read an existing receipt. Upgrading the client does not replace a running daemon or replay accepted work. Protocol-1 and protocol-2 clients reject protocol-3 daemons; use matching updated Scout or CLI binaries and helpers. Scouts predating retry support omit the timing fields, so upgrading Core alone does not enable the retry policy.
+The client and supervisor support one matching private API revision. A different revision is rejected during the status handshake, before submitting, reading, observing, or canceling work. Install matching Scout or CLI binaries and helpers. Upgrading a client does not replace a running daemon or replay accepted work.
 
-To replace a protocol-1 or protocol-2 daemon, pause its callers and inspect the existing receipt with the updated client. Let accepted work settle and reconcile any uncertain hardware effects. Identify the daemon serving the exact execution device and state root, send SIGTERM to that daemon only, and wait for it to exit. Preserve its journal, prepared inputs, and host claim; the next connection launches the installed matching helper against that state. Do not stop an active worker's scope or force termination to accelerate replacement. Replacing a daemon does not resolve an uncertain operation: its retained receipt and claim still block new work.
+Unguarded `submit` and `submit_update`, including firmware CLI submissions, do not prevent replay after journal loss.
 
-Older helpers cannot reopen a journal containing checked update context: their strict decoder rejects the added request field. Keep the matching updated helper available to inspect and reconcile that journal. A fresh state root, journal deletion, or downgrade does not reconcile the recorded hardware work.
+Use `firmware status` with a client matching the running daemon to read an existing receipt without submitting work. Before replacing a daemon, pause its callers, let accepted work settle, and reconcile any uncertain hardware effects. Identify the daemon serving the exact execution device and state root, send SIGTERM to that daemon only, and wait for it to exit. Preserve its journal, prepared inputs, and host claim; the next connection launches the installed matching helper against that state. Do not stop an active worker's scope or force termination to accelerate replacement. Replacing a daemon does not resolve an uncertain operation: its retained receipt and claim still block new work.
+
+The journal's stored request fingerprint is separate from the socket API revision. Omitting `expected_device` preserves the fingerprint for work submitted without a card selector. Keep a helper that understands the retained journal available to inspect and reconcile it. A fresh state root, journal deletion, or downgrade does not reconcile the recorded hardware work.
 
 Each daemon permits eight journal RPC tasks across all connections, including tasks whose callers have disconnected. Excess requests return `RESOURCE_EXHAUSTED` without waiting for capacity. Execution progress and observer cancellation do not consume this quota. Transport limits separately allow 32 connected sockets and eight active HTTP/2 streams per connection; excess sockets are closed.
 
@@ -598,7 +606,7 @@ An error distinguishes a proven failure before tool launch from a result that is
 
 Direct CLI dry-run, verification, and reset actions catch SIGINT, SIGTERM, SIGHUP, and SIGQUIT, drop the operation, and close its per-command control channel. The helper requests bounded cleanup independently, including if that direct caller crashes or is killed; cancellation does not wait for confirmed cleanup. Supervised flash commands instead stop observing and leave the accepted operation running under `Continue`. The synchronous `config-reset` command keeps its existing signal behavior. Killing a per-command helper, losing power, or terminating its entire service cgroup can prevent cleanup. No process cleanup proves that work inside the device has stopped. Cancellation uses the required proc entry to locate the helper's adopted children.
 
-These limits apply to `FirmwareFlasher` and `discover_device_bounded`. The existing synchronous `FlintRunner` and `MlxFwResetRunner` methods, and `discover_device`/`discover_devices`, retain blocking execution without these deadlines or helper supervision.
+`FirmwareFlasher` and `discover_device_bounded` use these deadlines and helper limits. The [bounded lockdown methods](#lockdown) use the same helper, output, and cleanup limits, with a caller-supplied command deadline. The existing synchronous `FlintRunner` and `MlxFwResetRunner` methods, and `discover_device`/`discover_devices`, retain blocking execution without these deadlines or helper supervision.
 
 Dry-run still checks identity and prepares inputs, but starts no mutation or verification commands. Its report contains no observed version and does not claim completed phases: `flashed` is `false`, requested optional steps are `Some(false)`, and unrequested optional steps are `None`.
 
@@ -677,6 +685,39 @@ The firmware workflow has the following limitations:
 ## Lockdown
 
 Device lockdown status checking and `flint` command execution for Mellanox NICs.
+
+`LockdownManager::get_status_bounded`, `lock_device_bounded`, and
+`unlock_device_bounded` run one asynchronous attempt through a supplied
+`FirmwareToolExecutor`. You must supply a `Duration`; there is no default timeout
+or automatic retry. The duration covers helper startup, command execution, and
+output collection. Each output stream is capped at 1 MiB. Failure allows up to
+5 seconds for cleanup and 5 more seconds for result delivery. Dropping the future
+requests cleanup without waiting for confirmation. These methods require Linux
+and the [firmware helper prerequisites](#firmwareflasher). Use
+`LockdownManager::with_runner` with `FlintRunner::with_path` to avoid the
+synchronous executable probes in `LockdownManager::new`.
+
+The bounded methods do not acquire host exclusion. Hold the shared host claim
+through the attempt and retain it when process settlement is unknown. A failed
+attempt does not authorize another mutation or retry. Refer to
+[supervised firmware operations](#supervised-firmware-operations) for claim
+ownership and recovery limits.
+
+Device IDs cannot be empty or contain an ASCII space. Lock and unlock keys must
+contain 1–16 bare ASCII hexadecimal digits. Invalid inputs fail before execution;
+dry-run returns `MlxError::DryRun` without starting a command. Successful lock and
+unlock calls return an inferred `LockStatus`, not independent readback.
+Already-disabled and already-enabled responses return `MlxError::AlreadyLocked`
+and `MlxError::AlreadyUnlocked`, respectively. Use `get_status_bounded` for a
+separate status query.
+
+`MlxError::CommandAttempt` redacts command arguments, tool output, and arbitrary
+I/O text while preserving typed process-settlement evidence. Completed lock and
+unlock failures omit tool output; their dry-run diagnostics redact the key.
+Status queries pass no credential argument. An otherwise unclassified nonzero
+status-query exit returns `MlxError::CommandFailed` with bounded stdout and
+stderr. Query supervisor failures still use the redacted
+`MlxError::CommandAttempt`.
 
 ### Key Types
 

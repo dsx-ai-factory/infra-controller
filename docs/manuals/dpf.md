@@ -1485,28 +1485,27 @@ After changing the DPF status for a host in this way, you should trigger a repro
 
 ### Site-wide partial-multiplane maintenance
 
-In `carbide.toml`, partial-multiplane maintenance defaults to `enabled`.
-To disable it, add the following key to the existing East West Ethernet section:
+In `carbide.toml`, `partial-multiplane` controls whether Astra provisioning
+initializes all planes in maintenance mode. It defaults to `enabled`. To skip
+initialization of planes in maintenance mode during provisioning, set:
 
 ```toml
 [ewethers_config]
 partial-multiplane = "disabled"
 ```
 
-Accepted values are `enabled` and `disabled`. Core reads this setting at startup.
-When disabled, Core rejects `spx-maintenance` CLI and REST requests and stops delivering maintenance configuration. Saved configuration
-and per-DPU observations remain in the machine database, but observations become stale while
-reporting is disabled. Re-enabling resumes delivery of saved requests and refreshes observations
-on subsequent reports.
+Core reads this setting at startup. Setting `enabled`
+initializes all planes in maintenance mode once per provisioning. `disabled` skips
+that step, leaving newly provisioned planes in their default enabled state.
+Legacy MAC/IP inventory skips maintenance initialization for either value.
 
-Disabling does not change the existing plane states: planes in maintenance mode remain disabled,
-and enabled planes remain enabled. To enable all planes, turn maintenance off for them before
-disabling the feature.
+This setting does not restrict CLI or REST maintenance requests, configuration
+delivery, or DPU observations. Operators can request maintenance changes after
+provisioning with either value. Saved requests remain in effect.
 
-If the DPU is reingested or reprovisioned with the feature disabled, maintenance initialization
-is skipped and all planes start in their default enabled state.
-
-For deployments that include the `doca_xplane` service, NICO derives the DPU agent Helm value `xplaneMaintenance.enabled` from this setting. The derived value overrides any `xplaneMaintenance` entry in the DPU agent `extra_helm_values`.
+Changing the setting does not change existing plane states. It affects the
+initialization script in newly provisioned Astra flavors, including after
+reingestion or reprovisioning.
 
 ## 4. Start carbide-api to create the DPF initialization objects
 

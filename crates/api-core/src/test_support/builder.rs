@@ -243,9 +243,10 @@ impl TestApiBuilder {
         let runtime_config = self
             .runtime_config
             .unwrap_or_else(|| Arc::new(default_config::get()));
-        let resource_pool_monitor =
+        let mut resource_pool_monitor =
             ResourcePoolMonitor::new(self.db_pool.clone(), &runtime_config.resource_pool_backends)
                 .expect("valid resource pool backend configuration");
+        resource_pool_monitor.use_registry_clients(&self.resource_pool_registry);
 
         let scout_stream_registry = ConnectionRegistry::new();
         let credential_manager = self

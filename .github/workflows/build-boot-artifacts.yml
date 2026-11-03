@@ -382,46 +382,29 @@ jobs:
             exit 1
           fi
 
-      # The build-artifacts containers ship sccache but never point it anywhere,
-      # so the Rust compile inside them started cold on every run -- 3m36s of the
-      # bfb critical path. These are the same credentials the release image
-      # builds hand to BuildKit. The sentinel keeps the value non-empty so the
-      # in-container check can tell "no backend" from "malformed endpoint".
-      - name: Expose Actions cache credentials to the container build
+      # The container's sccache store is cache/sccache in the workspace, so a
+      # cold one recompiles the whole Rust tree on the bfb critical path. One
+      # restore here and one save on main replace a cache request per
+      # compilation, which held the repository at the cache API rate limit.
+      # Cargo.lock keys the entry, and the prefix lets a lockfile bump start
+      # from the previous entry.
+      - name: Restore sccache
+        id: sccache
         if: inputs.use_container == true
-        uses: actions/github-script@v7
+        uses: actions/cache/restore@v4
         with:
-          script: |
-            const token = process.env.ACTIONS_RUNTIME_TOKEN || '';
-            const url = process.env.ACTIONS_RESULTS_URL || '';
-            if (token) core.setSecret(token);
-            core.exportVariable('BUILD_ACTIONS_RUNTIME_TOKEN', token || 'unavailable');
-            core.exportVariable('BUILD_ACTIONS_RESULTS_URL', url || 'unavailable');
-            core.info(`In-container sccache backend: ${token && url ? 'enabled' : 'disabled'}`);
+          path: cache/sccache
+          key: sccache-${{ inputs.cargo_make_task }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: sccache-${{ inputs.cargo_make_task }}-
 
       # Run build in container mode (for boot artifacts)
       - name: Run cargo make task (container mode)
         if: inputs.use_container == true
         env:
-          # Only main publishes; every other ref reads what main left behind.
-          SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
           VERSION: ${{ inputs.version }}
           BUILD_CONTAINER: ${{ inputs.build_container }}
           CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
         run: |
-          # dev/docker/sccache-cache.sh reads its credentials from /run/secrets
-          # because that is where BuildKit puts them. Staging the same three
-          # files here lets the container reuse that script rather than carry a
-          # second copy of the backend-selection logic.
-          SCCACHE_SECRETS="$(mktemp -d)"
-          # These runners are not guaranteed to be ephemeral, so the token must
-          # not outlive the step that needs it.
-          trap 'rm -rf "${SCCACHE_SECRETS}"' EXIT
-          printf '%s' "${BUILD_ACTIONS_RESULTS_URL}" > "${SCCACHE_SECRETS}/actions_results_url"
-          printf '%s' "${BUILD_ACTIONS_RUNTIME_TOKEN}" > "${SCCACHE_SECRETS}/actions_runtime_token"
-          printf '%s' "${SCCACHE_GHA_RW_MODE}" > "${SCCACHE_SECRETS}/sccache_gha_rw_mode"
-          chmod 600 "${SCCACHE_SECRETS}"/*
-
           # Set up environment variables for container (matches GitLab CI global variables)
           ENV_ARGS=(
             -e CARGO_HOME=/workspace/cargo
@@ -437,6 +420,7 @@ jobs:
             -e VERSION
             -e CARGO_MAKE_TASK
             -e FORGE_CA=prod
+            -e HOST_OWNER="$(id -u):$(id -g)"
           )
 
           echo "============================================"
@@ -445,7 +429,7 @@ jobs:
           echo "FORGE_CA=prod"
           echo "============================================"
 
-          EXTRA_DOCKER_ARGS="-v ${SCCACHE_SECRETS}:/run/secrets:ro"
+          EXTRA_DOCKER_ARGS=""
           if [[ "${CARGO_MAKE_TASK}" == "build-boot-artifacts-bfb-ci" ]]; then
             # bfb build runs `docker pull/save` (see pxe/Makefile.toml tasks.bfb-hbn-pull/export).
             # Allow docker CLI inside the build container to talk to the host Docker daemon.
@@ -470,14 +454,27 @@ jobs:
             SA_ENABLEMENT_ARG="--env SA_ENABLEMENT=1"
           fi
 
-          # Run cargo make in container
+          # Run cargo make in container. It runs as root, so sccache leaves its
+          # store owned by root and the save step below could not read it back.
+          # The trap hands it to the runner user on the way out, failed or not.
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
             ${EXTRA_DOCKER_ARGS} \
             -w /workspace \
             "${ENV_ARGS[@]}" \
             "${BUILD_CONTAINER}" \
-            bash -c ". /workspace/dev/docker/sccache-cache.sh && sccache_setup && git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/pxe/ipxe/upstream && echo 'VERSION in container: '\${VERSION} && cargo make --cwd pxe ${SA_ENABLEMENT_ARG} \"\${CARGO_MAKE_TASK}\" && sccache_report"
+            bash -c "trap 'chown -R \${HOST_OWNER} /workspace/cache/sccache 2>/dev/null || true' EXIT; . /workspace/dev/docker/sccache-cache.sh && sccache_setup && git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/pxe/ipxe/upstream && echo 'VERSION in container: '\${VERSION} && cargo make --cwd pxe ${SA_ENABLEMENT_ARG} \"\${CARGO_MAKE_TASK}\" && sccache_report"
+
+      # Only main saves, like the other sccache entries: other refs can read
+      # main's entry but not each other's. A run whose Cargo.lock matches the
+      # restored entry skips the upload. Runs only after a successful build so
+      # an empty or partial directory is never saved under the key.
+      - name: Save sccache
+        if: inputs.use_container == true && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: cache/sccache
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
 
       # Run build directly on runner (for ephemeral images with mkosi)
       - name: Run cargo make task (shell mode)

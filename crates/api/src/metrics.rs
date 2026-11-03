@@ -62,6 +62,9 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
         .with_view(carbide_site_explorer::site_explorer_latency_histogram_view(
             "carbide_endpoint_exploration_duration",
         )?)
+        .with_view(carbide_site_explorer::site_explorer_latency_histogram_view(
+            "carbide_endpoint_exploration_step_latency",
+        )?)
         .build();
     // After this call `global::meter()` will be available
     opentelemetry::global::set_meter_provider(meter_provider.clone());
@@ -232,6 +235,12 @@ mod tests {
                 )
                 .unwrap(),
             )
+            .with_view(
+                carbide_site_explorer::site_explorer_latency_histogram_view(
+                    "carbide_endpoint_exploration_step_latency",
+                )
+                .unwrap(),
+            )
             .build();
 
         let state = KeyValue::new("state", "mystate");
@@ -275,6 +284,44 @@ mod tests {
                 assert!(!encoded.contains(r#"mygauge{error="ErrC",state="mystate"} 1"#));
             }
         }
+    }
+
+    /// Exercise production view registration and Prometheus export for slow steps.
+    #[tokio::test]
+    async fn endpoint_exploration_step_latency_uses_extended_buckets() {
+        let metrics = setup_metrics(None).unwrap();
+        metrics
+            .meter
+            .f64_histogram("carbide_endpoint_exploration_step_latency")
+            .with_unit("ms")
+            .build()
+            .record(30_000.0, &[KeyValue::new("step", "redfish_explore")]);
+
+        let mut buffer = vec![];
+        TextEncoder::new()
+            .encode(&metrics.registry.gather(), &mut buffer)
+            .unwrap();
+        let encoded = String::from_utf8(buffer).unwrap();
+        check_values(
+            [
+                r#"bucket{step="redfish_explore",le="10000"} 0"#,
+                r#"bucket{step="redfish_explore",le="30000"} 1"#,
+                r#"bucket{step="redfish_explore",le="3600000"} 1"#,
+                r#"bucket{step="redfish_explore",le="+Inf"} 1"#,
+                r#"count{step="redfish_explore"} 1"#,
+                r#"sum{step="redfish_explore"} 30000"#,
+            ]
+            .map(|sample| Check {
+                scenario: sample,
+                input: sample,
+                expect: true,
+            }),
+            |sample| {
+                let expected =
+                    format!("carbide_endpoint_exploration_step_latency_milliseconds_{sample}");
+                encoded.lines().any(|line| line == expected)
+            },
+        );
     }
 
     #[test]

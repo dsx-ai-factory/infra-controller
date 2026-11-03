@@ -220,19 +220,17 @@ pub async fn has_instance_references(
 
 /// `SpxPartitionAlreadyDeleted` means the partition already has a deletion timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpxPartitionAlreadyDeleted {
-    /// The partition's VNI, if any, so callers can finish an incomplete release.
-    pub vni: Option<i32>,
-}
+pub struct SpxPartitionAlreadyDeleted;
 
 /// `mark_as_deleted` records the first deletion and returns the updated partition.
 /// Deletion callers must first use `lock_for_delete` and reject any instance
 /// references found by `has_instance_references` in the same transaction.
 /// An existing deleted partition returns `NotApplied` without changing its timestamps.
 /// If neither the update nor the tombstone lookup finds the partition, the error
-/// wraps `sqlx::Error::RowNotFound`. Callers must release any VNI returned by
-/// either result through owner-checked release in the same transaction. A release
-/// error must discard any new deletion so callers can retry both writes together.
+/// wraps `sqlx::Error::RowNotFound`. After either result, callers must release the
+/// VNI the partition still owns, found with `ResourcePoolRegistry::find_owned`, in
+/// the same transaction. A release error must discard any new deletion so callers
+/// can retry both writes together.
 pub async fn mark_as_deleted(
     pid: SpxPartitionId,
     txn: &mut PgConnection,
@@ -253,17 +251,14 @@ pub async fn mark_as_deleted(
 
     // A caller-supplied UUID may be created after the UPDATE. Only a deleted
     // row proves that the deletion was already recorded.
-    let already_deleted_query =
-        "SELECT vni FROM spx_partitions WHERE id=$1 AND deleted IS NOT NULL";
-    let already_deleted: Option<(Option<i32>,)> = sqlx::query_as(already_deleted_query)
+    let already_deleted_query = "SELECT id FROM spx_partitions WHERE id=$1 AND deleted IS NOT NULL";
+    let already_deleted: Option<SpxPartitionId> = sqlx::query_scalar(already_deleted_query)
         .bind(pid)
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new(already_deleted_query, e))?;
-    if let Some((vni,)) = already_deleted {
-        return Ok(ConditionalWrite::NotApplied(SpxPartitionAlreadyDeleted {
-            vni,
-        }));
+    if already_deleted.is_some() {
+        return Ok(ConditionalWrite::NotApplied(SpxPartitionAlreadyDeleted));
     }
 
     Err(DatabaseError::new(query, sqlx::Error::RowNotFound))

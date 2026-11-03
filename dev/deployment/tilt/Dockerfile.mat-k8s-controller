@@ -17,7 +17,7 @@
 
 # mat-k8s-controller image: the Go controller for the controller container. The build context is the repository root.
 
-ARG GO_IMAGE=golang:1.26.4-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b
+ARG GO_IMAGE=golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
 # Go controller build stage
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS controller-builder
 

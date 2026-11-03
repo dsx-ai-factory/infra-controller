@@ -295,6 +295,7 @@ pub fn get() -> CarbideConfig {
             num_of_vfs: crate::cfg::file::DEFAULT_DPU_NUM_OF_VFS,
             service_vpc_slot_count: 0,
             max_active_service_vpc_interfaces_per_dpu: 0,
+            allow_service_vpc_tenant_overlap: false,
             additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         },

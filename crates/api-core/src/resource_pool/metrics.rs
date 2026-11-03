@@ -166,6 +166,17 @@ pub(crate) fn start_pool_stats(
     Ok(stats)
 }
 
+/// `poll_resource_pool_stats` emits poll failure events for catalogue scrapes.
+/// The observations are discarded; running server gauges keep their own samples.
+/// Saved remote bindings without an accepted definition produce an unavailable
+/// observation before any provider lookup. No remote clients are configured.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn poll_resource_pool_stats(database: sqlx::PgPool) -> eyre::Result<()> {
+    let monitor = ResourcePoolMonitor::new(database, &Default::default())?;
+    poll(&monitor, &Default::default(), &[]).await;
+    Ok(())
+}
+
 /// `poll` publishes rows as they complete, retaining successful samples on error.
 async fn poll(monitor: &ResourcePoolMonitor, stats: &PoolStats, common_names: &[String]) {
     let observations = tokio::time::timeout(SNAPSHOT_TIMEOUT, monitor.observe(common_names))

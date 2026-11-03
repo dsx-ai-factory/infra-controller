@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    ActionError, HostFirmwareVersions, HostMachineInfo, MachineInfo, ResourceResetType,
+    ActionError, DeviceEffect, HostFirmwareVersions, HostMachineInfo, MachineInfo,
+    ResourceResetType,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use carbide_uuid::machine::MachineId;
@@ -409,6 +410,24 @@ impl HostMachine {
                             _ = reply.send(response);
                         }
                     }
+                    BmcCommand::DeviceEffect { effect, reply } => {
+                        let effect_debug = format!("{effect:?}");
+                        let result = match effect {
+                            DeviceEffect::ResetBmcToDefaults(update) => {
+                                self.state_machine.reset_bmc(update).await
+                            },
+                            effect => self.apply_device_effect(effect),
+                        };
+                        if let Some(reply) = reply {
+                            _ = reply.send(result);
+                        } else if let Err(error) = result {
+                            tracing::error!(
+                                effect = %effect_debug,
+                                %error,
+                                "Could not apply device effect",
+                            );
+                        }
+                    }
                     BmcCommand::StateRefreshIndication => {
                         self.state_machine.update_live_state();
                     }
@@ -530,6 +549,29 @@ impl HostMachine {
         self.state_machine.set_system_power(request)
     }
 
+    /// Applies a BMC action's effect on the tray, whatever the host's power state is.
+    fn apply_device_effect(&mut self, effect: DeviceEffect) -> Result<(), ActionError> {
+        tracing::debug!(?effect, "Received host device effect");
+        match effect {
+            // The AC cycle drops power to the host and every DPU in the tray and leaves
+            // them off, so this is a forced power-off of all of them. It is applied
+            // directly, so unlike a Redfish `ForceOff` it also succeeds when they are
+            // already off. Powering back on is up to the controller, and a host
+            // power-on reaches the DPUs the same way it does after any other power-off.
+            DeviceEffect::AuxPowerCycle => {
+                for (dpu_index, dpu) in self.dpus.iter().enumerate() {
+                    _ = dpu.aux_power_cycle().inspect_err(|error| {
+                        tracing::error!(%error, dpu_index, "Could not send AC power cycle to DPU");
+                    });
+                }
+                self.state_machine.apply_aux_power_cycle()
+            }
+            DeviceEffect::ResetBmcToDefaults(_) => Err(ActionError::Internal(eyre::eyre!(
+                "BMC reset requires actor dispatch"
+            ))),
+        }
+    }
+
     fn pause(&mut self) {
         let was_paused = self.paused;
         self.paused = true;
@@ -591,6 +633,17 @@ struct HostMachineActor {
 pub(crate) struct MachineHandle(Arc<HostMachineActor>);
 
 impl MachineHandle {
+    /// Observes live BMC effects without contacting its leased address.
+    /// Returns None when the live BMC resource state is unavailable.
+    pub(crate) fn bmc_effect_snapshot(&self) -> Option<bmc_mock::persistence::BmcEffectSnapshot> {
+        self.0
+            .live_state
+            .read()
+            .unwrap()
+            .bmc_persistence
+            .effect_snapshot()
+    }
+
     /// Drive power through the guard the BMC mock uses, so an RMS power
     /// request obeys the same rules as a Redfish one.
     pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
@@ -600,6 +653,10 @@ impl MachineHandle {
 
     pub(crate) fn power_state(&self) -> PowerState {
         self.0.live_state.read().unwrap().power_state
+    }
+
+    pub(super) fn aux_power_cycle_generation(&self) -> u64 {
+        self.0.live_state.read().unwrap().aux_power_cycle_generation
     }
 
     #[cfg(test)]
@@ -980,5 +1037,89 @@ mod firmware_catalog_tests {
                 )
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod device_effect_tests {
+    use bmc_mock::HardwareType;
+
+    use super::*;
+
+    async fn wait_for_dpu_power(dpus: &[DpuMachineHandle], expected: PowerState) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while dpus.iter().any(|dpu| dpu.power_state() != expected) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("DPUs did not reach {expected:?}"));
+    }
+
+    /// The AC cycle takes the host and every DPU off, whatever their state, and does
+    /// not bring them back: the controller powers the host on, which reaches the
+    /// DPUs the same way as after any other power-off.
+    #[tokio::test]
+    async fn aux_power_cycle_takes_host_and_dpus_off_and_leaves_them_off() {
+        let app_context = MachineATronContext::for_test();
+        let mut config = (*app_context.app_config.machines["config"]).clone();
+        config.hw_type = HardwareType::WiwynnGB200Nvl;
+        let mac = mac_address::MacAddress::new([2, 0, 0, 0, 0, 0]);
+        let pool_config = MacAddressPoolConfig::new(mac, 24).unwrap();
+        let mut host = HostMachine::new(
+            app_context,
+            "test".to_string(),
+            Arc::new(config),
+            &mut MacAddressPool::new_pool(pool_config),
+            pool_config,
+        );
+        assert_eq!(host.dpus.len(), 2);
+        let host_power = |host: &HostMachine| host.live_state.read().unwrap().power_state;
+
+        host.set_system_power(ResourceResetType::On).unwrap();
+        wait_for_dpu_power(&host.dpus, PowerState::On).await;
+        assert_ne!(host_power(&host), PowerState::Off);
+
+        // Applied to an on tray, and again to one that is already off, which a
+        // Redfish ForceOff would reject.
+        for generation in 1..=2 {
+            host.apply_device_effect(DeviceEffect::AuxPowerCycle)
+                .unwrap();
+            assert_eq!(host_power(&host), PowerState::Off);
+            wait_for_dpu_power(&host.dpus, PowerState::Off).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while host
+                    .dpus
+                    .iter()
+                    .any(|dpu| dpu.aux_power_cycle_generation() != generation)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("DPU AC power cycle was not applied");
+            assert_eq!(
+                host.live_state.read().unwrap().aux_power_cycle_generation,
+                generation
+            );
+            // An ordinary power-off must not manufacture AC-reset evidence.
+            host.set_system_power(ResourceResetType::On).unwrap();
+            wait_for_dpu_power(&host.dpus, PowerState::On).await;
+            host.set_system_power(ResourceResetType::ForceOff).unwrap();
+            wait_for_dpu_power(&host.dpus, PowerState::Off).await;
+            assert_eq!(
+                host.live_state.read().unwrap().aux_power_cycle_generation,
+                generation
+            );
+            assert!(
+                host.dpus
+                    .iter()
+                    .all(|dpu| dpu.aux_power_cycle_generation() == generation)
+            );
+        }
+
+        host.set_system_power(ResourceResetType::On).unwrap();
+        assert_ne!(host_power(&host), PowerState::Off);
+        wait_for_dpu_power(&host.dpus, PowerState::On).await;
     }
 }

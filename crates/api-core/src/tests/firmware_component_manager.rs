@@ -67,6 +67,7 @@ struct RecordingComputeTrayManager {
     inner: MockComputeTrayManager,
     firmware_update_options: Mutex<Vec<FirmwareUpdateOptions>>,
     target_versions: Mutex<Vec<String>>,
+    submitted_credentials: Mutex<Vec<Credentials>>,
 }
 
 impl RecordingComputeTrayManager {
@@ -108,6 +109,11 @@ impl ComputeTrayManager for RecordingComputeTrayManager {
         components: &[ComputeTrayComponent],
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.bmc_credentials.clone()));
+
         self.firmware_update_options
             .lock()
             .unwrap()
@@ -140,6 +146,7 @@ struct RecordingNvSwitchManager {
     inner: MockNvSwitchManager,
     target_versions: Mutex<Vec<String>>,
     non_rms: Mutex<bool>,
+    submitted_credentials: Mutex<Vec<Credentials>>,
 }
 
 #[async_trait]
@@ -167,6 +174,12 @@ impl NvSwitchManager for RecordingNvSwitchManager {
         components: &[model::component_manager::NvSwitchComponent],
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
+        self.submitted_credentials.lock().unwrap().extend(
+            endpoints
+                .iter()
+                .flat_map(|ep| [ep.bmc_credentials.clone(), ep.nvos_credentials.clone()]),
+        );
+
         self.target_versions
             .lock()
             .unwrap()
@@ -227,6 +240,7 @@ impl NvSwitchManager for RecordingNvSwitchManager {
 struct RecordingPowerShelfManager {
     inner: MockPowerShelfManager,
     target_versions: Mutex<Vec<String>>,
+    submitted_credentials: Mutex<Vec<Credentials>>,
 }
 
 #[async_trait]
@@ -254,6 +268,11 @@ impl PowerShelfManager for RecordingPowerShelfManager {
         components: &[model::component_manager::PowerShelfComponent],
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.pmc_credentials.clone()));
+
         self.target_versions
             .lock()
             .unwrap()
@@ -865,6 +884,8 @@ async fn create_pre_ingestion_firmware_fixture(
             bmc_mac_address: compute_mac,
             data: rpc::ExpectedMachine {
                 chassis_serial_number: "pre-ingestion-compute".to_owned(),
+                bmc_username: "factory-compute".into(),
+                bmc_password: "factory-compute-pw".into(),
                 rack_id: Some(rack_id.clone()),
                 ..Default::default()
             }
@@ -882,6 +903,10 @@ async fn create_pre_ingestion_firmware_fixture(
                 is_primary: true,
             }],
             serial_number: "pre-ingestion-switch".to_owned(),
+            bmc_username: "factory-switch".into(),
+            bmc_password: "factory-switch-pw".into(),
+            nvos_username: Some("factory-nvos".into()),
+            nvos_password: Some("factory-nvos-pw".into()),
             rack_id: Some(rack_id.clone()),
             ..Default::default()
         },
@@ -893,6 +918,8 @@ async fn create_pre_ingestion_firmware_fixture(
         ExpectedPowerShelf {
             bmc_mac_address: shelf_mac,
             serial_number: "pre-ingestion-power-shelf".to_owned(),
+            bmc_username: "factory-shelf".into(),
+            bmc_password: "factory-shelf-pw".into(),
             rack_id: Some(rack_id),
             ..Default::default()
         },
@@ -947,6 +974,24 @@ async fn empty_version_resolves_profile_for_pre_ingestion_macs(
         [compute_mac, switch_mac, shelf_mac],
     ) = create_pre_ingestion_firmware_fixture(pool).await?;
 
+    // Direct dispatch before ingestion must work with only expected inventory
+    // credentials, and must pass those credentials through to each backend.
+    for key in [compute_mac, switch_mac, shelf_mac]
+        .map(|bmc_mac_address| CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+        })
+        .into_iter()
+        .chain([CredentialKey::SwitchNvosAdmin {
+            bmc_mac_address: switch_mac,
+        }])
+    {
+        env.api
+            .credential_manager
+            .delete_credentials(&key)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
     for (mut request, mac) in [
         (compute_request(machine_id, false).into_inner(), compute_mac),
         (switch_request(switch_id, false).into_inner(), switch_mac),
@@ -998,6 +1043,39 @@ async fn empty_version_resolves_profile_for_pre_ingestion_macs(
         power_shelf_manager.target_versions.lock().unwrap().clone(),
     ] {
         assert_eq!(versions, [FIRMWARE_OBJECT]);
+    }
+
+    for (actual, users) in [
+        (
+            compute_tray_manager
+                .submitted_credentials
+                .lock()
+                .unwrap()
+                .clone(),
+            vec!["compute"],
+        ),
+        (
+            nv_switch_manager
+                .submitted_credentials
+                .lock()
+                .unwrap()
+                .clone(),
+            vec!["switch", "nvos"],
+        ),
+        (
+            power_shelf_manager
+                .submitted_credentials
+                .lock()
+                .unwrap()
+                .clone(),
+            vec!["shelf"],
+        ),
+    ] {
+        let expected = users
+            .into_iter()
+            .map(|user| Credentials::new(format!("factory-{user}"), format!("factory-{user}-pw")))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     Ok(())

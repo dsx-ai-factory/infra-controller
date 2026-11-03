@@ -20,6 +20,10 @@ const (
 
 	// APIErrorNotFound indicates that the requested path was not found
 	APIErrorNotFound = "The requested path was not found"
+
+	// MaxRequestBodyBytes is the largest request body the API accepts. The audit
+	// capture uses the same limit so every accepted body is audited in full.
+	MaxRequestBodyBytes = 10_000_000
 )
 
 var (

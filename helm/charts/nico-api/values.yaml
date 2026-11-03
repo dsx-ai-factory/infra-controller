@@ -313,11 +313,21 @@ command: |
       --site-config-path /etc/forge/carbide-api/site/carbide-api-site-config.toml
   fi
 
+## Enable trace sampling at startup. Export also requires an OTLP/gRPC endpoint
+## in env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or [tracing].otlp_endpoint in TOML.
+## A custom configFiles.nicoApiConfig replaces the generated tracing section;
+## siteConfig.nicoApiSiteConfig takes precedence over the generated config.
+tracing:
+  enabled: false
+
 ## Environment variables for nico-api
 env:
   VAULT_PKI_ROLE_NAME: "nico-cluster"
   RUST_BACKTRACE: "full"
   RUST_LIB_BACKTRACE: "0"
+  ## Optional OTLP/gRPC URL (for example, http://tempo.observability:4317).
+  ## Empty omits the variable; the binary falls back to [tracing].otlp_endpoint.
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ""
 
 ## Optional operator-managed static credential file. The chart mounts one key
 ## from an existing Secret and configures nico-api to watch it; no credential

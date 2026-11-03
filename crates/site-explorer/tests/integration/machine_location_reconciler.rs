@@ -243,7 +243,11 @@ async fn test_site_explorer_retries_machine_location_after_request_deadline(
     let env = Env::new(pool).await;
     let provider = Arc::new(TestMachineInfoProvider::default());
 
-    provider.set_delay(Duration::from_secs(60)).await;
+    // The iteration includes database-backed host creation before the 10-second
+    // RMS deadline starts. Allow for that work under CI contention, while keeping
+    // the provider stalled beyond the watchdog so a missing deadline still fails.
+    let iteration_timeout = Duration::from_secs(120);
+    provider.set_delay(iteration_timeout * 2).await;
 
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let managed_host = ManagedHostConfig {
@@ -297,7 +301,7 @@ async fn test_site_explorer_retries_machine_location_after_request_deadline(
     );
     explorer.insert_endpoints(vec![(host_bmc_ip, fixture.host_report)]);
 
-    tokio::time::timeout(Duration::from_secs(30), explorer.run_single_iteration())
+    tokio::time::timeout(iteration_timeout, explorer.run_single_iteration())
         .await
         .expect(
             "a stalled machine-information request must not hold the Site Explorer iteration open",
@@ -324,7 +328,7 @@ async fn test_site_explorer_retries_machine_location_after_request_deadline(
 
     // A subsequent production iteration must reacquire the work lock and retry
     // the existing host, without going through machine creation again.
-    tokio::time::timeout(Duration::from_secs(30), explorer.run_single_iteration())
+    tokio::time::timeout(iteration_timeout, explorer.run_single_iteration())
         .await
         .expect("Site Explorer must resume after a machine-information deadline")?;
 

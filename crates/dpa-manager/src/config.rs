@@ -241,10 +241,10 @@ impl Default for AstraConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PartialMultiplane {
-    /// Enable maintenance initialization, requests, configuration delivery, and status processing.
+    /// Initialize planes in maintenance mode during provisioning.
     #[default]
     Enabled,
-    /// Disable maintenance processing without changing saved requests or current plane states.
+    /// Skip maintenance initialization during provisioning. Runtime maintenance is unaffected.
     Disabled,
 }
 
@@ -268,9 +268,8 @@ pub struct EwEthersConfig {
     #[serde(default)]
     pub astra_enabled: bool,
 
-    /// Site-wide partial-multiplane maintenance control: `enabled` (default) or `disabled`.
-    /// Disabled rejects maintenance requests and stops maintenance delivery/status processing.
-    /// It also omits maintenance initialization from newly provisioned Astra flavors.
+    /// Initialize newly provisioned Astra planes in maintenance mode when `enabled` (default).
+    /// `disabled` skips initialization without restricting runtime requests or observations.
     #[serde(default, rename = "partial-multiplane")]
     pub partial_multiplane: PartialMultiplane,
 

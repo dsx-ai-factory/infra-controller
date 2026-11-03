@@ -35,7 +35,7 @@ use url::Url;
 
 use crate::HealthError;
 use crate::bmc::{
-    BmcClient, BmcLatencyInstrumentation, BoxFuture, CredentialProvider,
+    BmcClient, BmcLatencyEndpointLabels, BmcLatencyInstrumentation, BoxFuture, CredentialProvider,
     bmc_latency_endpoint_labels,
 };
 use crate::endpoint::{
@@ -449,6 +449,9 @@ pub struct ApiEndpointSource {
 #[derive(Clone)]
 struct CachedBmcClient {
     client: Arc<BmcClient>,
+    addr: BmcAddr,
+    /// The machine and rack in the client's latency labels.
+    latency_labels: BmcLatencyEndpointLabels,
     kind: ApiCredentialKind,
     system_uuid: SharedSystemUuid,
 }
@@ -973,15 +976,18 @@ impl ApiEndpointSource {
         let mac = addr.mac.ok_or_else(|| {
             HealthError::GenericError(format!("API endpoint {} has no BMC MAC address", addr.ip))
         })?;
-        let bmc_latency_instrumentation = self.bmc_latency_metrics.clone().map(|metrics| {
-            BmcLatencyInstrumentation::new(
-                metrics,
-                bmc_latency_endpoint_labels(metadata.as_ref(), rack_id.as_ref()),
-            )
-        });
+        let latency_labels = bmc_latency_endpoint_labels(metadata.as_ref(), rack_id.as_ref());
+        let bmc_latency_instrumentation = self
+            .bmc_latency_metrics
+            .clone()
+            .map(|metrics| BmcLatencyInstrumentation::new(metrics, latency_labels.clone()));
         let cached = {
             let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
-            cache_or_create_bmc_client(&mut cache, mac, credential_kind, |kind| {
+            let binding = ClientBinding {
+                addr: &addr,
+                latency_labels: &latency_labels,
+            };
+            cache_or_create_bmc_client(&mut cache, mac, binding, credential_kind, |kind| {
                 let provider: Arc<dyn CredentialProvider> = Arc::new(ApiCredentialProvider {
                     client: self.api.client.clone(),
                     kind,
@@ -1012,12 +1018,27 @@ impl ApiEndpointSource {
     }
 }
 
+/// What a BMC client is built with that it cannot change afterwards.
+#[derive(Clone, Copy)]
+struct ClientBinding<'a> {
+    addr: &'a BmcAddr,
+    latency_labels: &'a BmcLatencyEndpointLabels,
+}
+
+/// Returns the cached client for a BMC MAC, creating one on first use.
+///
+/// A client is bound to the address and latency labels it was built with, so
+/// a new address, port, machine, or rack for the same MAC replaces the client.
+/// The resolved system UUID is carried over because the MAC still identifies
+/// the same hardware.
 fn cache_or_create_bmc_client(
     cache: &mut HashMap<MacAddress, CachedBmcClient>,
     mac: MacAddress,
+    binding: ClientBinding<'_>,
     credential_kind: ApiCredentialKind,
     make_client: impl FnOnce(ApiCredentialKind) -> Result<Arc<BmcClient>, HealthError>,
 ) -> Result<CachedBmcClient, HealthError> {
+    let mut system_uuid = SharedSystemUuid::default();
     if let Some(existing) = cache.get(&mac) {
         if existing.kind != credential_kind {
             return Err(HealthError::GenericError(format!(
@@ -1028,14 +1049,27 @@ fn cache_or_create_bmc_client(
                 credential_kind.tag(),
             )));
         }
-        return Ok(existing.clone());
+        if existing.addr == *binding.addr && existing.latency_labels == *binding.latency_labels {
+            return Ok(existing.clone());
+        }
+        tracing::info!(
+            bmc_mac_address = %mac,
+            old_bmc_address = ?existing.addr,
+            new_bmc_address = ?binding.addr,
+            old_latency_labels = ?existing.latency_labels,
+            new_latency_labels = ?binding.latency_labels,
+            "BMC address or labels changed; replacing cached BMC client"
+        );
+        system_uuid = existing.system_uuid.clone();
     }
 
     let client = make_client(credential_kind.clone())?;
     let cached = CachedBmcClient {
         client,
+        addr: binding.addr.clone(),
+        latency_labels: binding.latency_labels.clone(),
         kind: credential_kind,
-        system_uuid: SharedSystemUuid::default(),
+        system_uuid,
     };
     cache.insert(mac, cached.clone());
     Ok(cached)
@@ -1206,6 +1240,16 @@ mod tests {
             [9u8; 32],
             PowerShelfType::Rack,
         )
+    }
+
+    fn binding<'a>(
+        addr: &'a BmcAddr,
+        latency_labels: &'a BmcLatencyEndpointLabels,
+    ) -> ClientBinding<'a> {
+        ClientBinding {
+            addr,
+            latency_labels,
+        }
     }
 
     fn make_test_client(_kind: ApiCredentialKind) -> Result<Arc<BmcClient>, HealthError> {
@@ -1644,19 +1688,29 @@ mod tests {
         let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
         let factory_calls = AtomicUsize::new(0);
 
-        let first =
-            cache_or_create_bmc_client(&mut cache, test_mac(), ApiCredentialKind::Bmc, |kind| {
+        let first = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
+            ApiCredentialKind::Bmc,
+            |kind| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 make_test_client(kind)
-            })
-            .expect("first insert");
+            },
+        )
+        .expect("first insert");
 
-        let second =
-            cache_or_create_bmc_client(&mut cache, test_mac(), ApiCredentialKind::Bmc, |kind| {
+        let second = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
+            ApiCredentialKind::Bmc,
+            |kind| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 make_test_client(kind)
-            })
-            .expect("cache hit");
+            },
+        )
+        .expect("cache hit");
 
         assert!(
             Arc::ptr_eq(&first.client, &second.client),
@@ -1722,6 +1776,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cache_replaces_client_when_bmc_address_or_labels_change() {
+        let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
+        let labels = |machine_id: Option<&str>, rack_id: &str| {
+            BmcLatencyEndpointLabels::new(machine_id.map(str::to_string), Some(rack_id.to_string()))
+        };
+        let original = (test_addr(), labels(None, "rack-a"));
+        let moved = (
+            BmcAddr {
+                ip: "10.99.0.2".parse().expect("valid test IP"),
+                ..test_addr()
+            },
+            original.1.clone(),
+        );
+        let repointed = (
+            BmcAddr {
+                port: Some(8443),
+                ..moved.0.clone()
+            },
+            original.1.clone(),
+        );
+        // Latency labels are fixed at construction, so a rack or machine
+        // change needs a client that reports the new labels.
+        let reracked = (repointed.0.clone(), labels(None, "rack-b"));
+        let assigned = (repointed.0.clone(), labels(Some("machine-1"), "rack-b"));
+
+        let first = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            binding(&original.0, &original.1),
+            ApiCredentialKind::Bmc,
+            make_test_client,
+        )
+        .expect("first insert");
+        let system_uuid = uuid::uuid!("4c4c4544-0044-4710-8052-cac04f4b4632");
+        first
+            .system_uuid
+            .get_or_try_init(|| async { Ok::<_, std::convert::Infallible>(Some(system_uuid)) })
+            .await
+            .expect("infallible UUID initialization");
+
+        let mut previous = first;
+        for (addr, latency_labels) in [&moved, &repointed, &reracked, &assigned] {
+            let replaced = cache_or_create_bmc_client(
+                &mut cache,
+                test_mac(),
+                binding(addr, latency_labels),
+                ApiCredentialKind::Bmc,
+                make_test_client,
+            )
+            .expect("a changed binding rebuilds the client");
+            assert!(
+                !Arc::ptr_eq(&previous.client, &replaced.client),
+                "a changed binding must not reuse the client bound to {:?} {:?}",
+                previous.addr,
+                previous.latency_labels,
+            );
+            assert_eq!(&replaced.addr, addr);
+            assert_eq!(&replaced.latency_labels, latency_labels);
+            assert_eq!(replaced.system_uuid.get(), Some(system_uuid));
+            previous = replaced;
+        }
+
+        let reused = cache_or_create_bmc_client(
+            &mut cache,
+            test_mac(),
+            binding(&assigned.0, &assigned.1),
+            ApiCredentialKind::Bmc,
+            |_| panic!("an unchanged binding must reuse the cached client"),
+        )
+        .expect("cache hit");
+        assert!(Arc::ptr_eq(&previous.client, &reused.client));
+    }
+
     #[test]
     fn cache_rejects_conflicting_credential_kinds() {
         let mut cache: HashMap<MacAddress, CachedBmcClient> = HashMap::new();
@@ -1729,6 +1857,7 @@ mod tests {
         cache_or_create_bmc_client(
             &mut cache,
             test_mac(),
+            binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
             ApiCredentialKind::Bmc,
             make_test_client,
         )
@@ -1737,6 +1866,7 @@ mod tests {
         let err = cache_or_create_bmc_client(
             &mut cache,
             test_mac(),
+            binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
             ApiCredentialKind::SwitchNvosAdmin {
                 switch_id: test_switch_id(),
             },
@@ -1892,6 +2022,7 @@ mod tests {
             cache_or_create_bmc_client(
                 &mut cache,
                 test_mac(),
+                binding(&test_addr(), &BmcLatencyEndpointLabels::default()),
                 ApiCredentialKind::Bmc,
                 make_test_client,
             )
@@ -2025,5 +2156,198 @@ mod tests {
         }
 
         check_values(checks, |observed| observed);
+    }
+
+    /// The production API source, answering one machine endpoint whose
+    /// machine ID the test changes between discovery passes.
+    struct ChangingMachineSource {
+        api: ApiEndpointSource,
+        machine_id: std::sync::Mutex<MachineId>,
+    }
+
+    impl EndpointSource for ChangingMachineSource {
+        fn fetch_bmc_hosts<'a>(
+            &'a self,
+        ) -> BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
+            let machine_id = *self.machine_id.lock().expect("machine id lock");
+            Box::pin(async move {
+                let metadata = EndpointMetadata::Machine(MachineData {
+                    machine_id: Some(machine_id),
+                    machine_serial: None,
+                    system_uuid: SharedSystemUuid::default(),
+                    slot_number: None,
+                    tray_index: None,
+                    nvlink_domain_uuid: None,
+                    driver_version: None,
+                });
+                let endpoint = self.api.endpoint_for(
+                    test_addr(),
+                    Some(metadata),
+                    Some(RackId::new("rack-a")),
+                    ApiCredentialKind::Bmc,
+                )?;
+                Ok(vec![endpoint])
+            })
+        }
+    }
+
+    /// Answers the client's version handshake and GetBmcCredentials, the only
+    /// RPC the BMC client makes.
+    async fn credentials_response(request: Request<Body>) -> Response<Body> {
+        let method = request.uri().path().rsplit('/').next().expect("RPC path");
+        if method == "Version" {
+            // An empty protobuf message: compression byte and zero length.
+            return Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "0")
+                .body(Body::from(vec![0u8; 5]))
+                .expect("valid gRPC response");
+        }
+        if method != "GetBmcCredentials" {
+            return Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "12")
+                .body(Body::empty())
+                .expect("valid gRPC response");
+        }
+        let bytes = rpc::forge::GetBmcCredentialsResponse {
+            credentials: Some(rpc::forge::BmcCredentials {
+                r#type: Some(rpc::forge::bmc_credentials::Type::UsernamePassword(
+                    rpc::forge::UsernamePassword {
+                        username: "reader".to_string(),
+                        password: "reader-password".to_string(),
+                    },
+                )),
+            }),
+        }
+        .encode_to_vec();
+        let mut frame = vec![0];
+        frame.extend_from_slice(
+            &u32::try_from(bytes.len())
+                .expect("small fixture")
+                .to_be_bytes(),
+        );
+        frame.extend(bytes);
+        Response::builder()
+            .header("content-type", "application/grpc")
+            .header("grpc-status", "0")
+            .body(Body::from(frame))
+            .expect("valid gRPC response")
+    }
+
+    /// BMC requests counted in the latency histogram, by machine_id label.
+    fn latency_requests_by_machine(registry: &prometheus::Registry) -> HashMap<String, u64> {
+        let mut out = HashMap::new();
+        for family in registry.gather() {
+            for metric in family.get_metric() {
+                if let Some(label) = metric.get_label().iter().find(|l| l.name() == "machine_id") {
+                    *out.entry(label.value().to_string()).or_default() +=
+                        metric.get_histogram().get_sample_count();
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn machine_change_moves_running_collectors_to_a_relabeled_client() {
+        use crate::config::{Config, Configurable, SensorCollectorConfig};
+        use crate::discovery::{DiscoveryLoopContext, run_discovery_iteration};
+        use crate::limiter::NoopLimiter;
+        use crate::metrics::MetricsManager;
+        use crate::sharding::ShardManager;
+
+        // NICo answers only the BMC credentials request.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind credentials fixture");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let mut server = JoinSet::new();
+        let app = axum::Router::new().fallback(credentials_response);
+        server.spawn(async move { axum::serve(listener, app).await });
+        let client = ForgeApiClient::new(&ApiConfig::new(&url, &ForgeClientConfig::default()));
+
+        // A recorded Redfish BMC over HTTPS, reached through the proxy setting.
+        let (_bmc, bmc_url) = bmc_mock::test_support::serve_https(
+            "health-machine-change",
+            bmc_mock::test_support::lenovo_thinksystem_sr670_router(),
+        );
+        let latency_registry = prometheus::Registry::new();
+        let latency = Arc::new(
+            BmcLatencyMetrics::new(&latency_registry, "machine_change").expect("latency metrics"),
+        );
+        let changing = Arc::new(ChangingMachineSource {
+            api: ApiEndpointSource::new(
+                Arc::new(ApiClientWrapper { client }),
+                reqwest(),
+                Some(bmc_url),
+                10,
+                Some(latency),
+            ),
+            machine_id: std::sync::Mutex::new(test_machine_id()),
+        });
+        let source: Arc<dyn EndpointSource> = changing.clone();
+        let first = test_machine_id().to_string();
+        let second_id = MachineId::new(MachineIdSource::Tpm, [6u8; 32], MachineType::Host);
+        let second = second_id.to_string();
+
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        config.collectors.discovery.refresh_interval = Duration::from_millis(100);
+        config.collectors.sensors = Configurable::Enabled(SensorCollectorConfig {
+            sensor_fetch_interval: Duration::from_millis(100),
+            ..Default::default()
+        });
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            Arc::new(MetricsManager::new("machine_change_iteration").expect("metrics manager")),
+            Arc::new(config),
+        )
+        .expect("discovery context");
+        let shard_manager = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+        let wait_for = |machine: String| {
+            let registry = latency_registry.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    while latency_requests_by_machine(&registry)
+                        .get(&machine)
+                        .copied()
+                        .unwrap_or(0)
+                        == 0
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("no BMC requests labeled machine_id={machine}"));
+            }
+        };
+
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("first discovery");
+        wait_for(first.clone()).await;
+
+        // The same BMC now belongs to another machine. Collectors restart onto
+        // the rebuilt client, so its requests carry the new machine ID.
+        *changing.machine_id.lock().expect("machine id lock") = second_id;
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("second discovery");
+        let first_after_restart = latency_requests_by_machine(&latency_registry)[&first];
+        wait_for(second.clone()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let counts = latency_requests_by_machine(&latency_registry);
+        assert_eq!(
+            counts[&first], first_after_restart,
+            "requests kept the old machine ID after the restart: {counts:?}"
+        );
+        server.abort_all();
     }
 }

@@ -18,8 +18,9 @@
 //! Wire types for the site health probe `/v1` HTTP API.
 //!
 //! This crate is the one source of the JSON contract between the probe and
-//! its clients. It holds types only. The `schema` feature also derives
-//! `schemars::JsonSchema` on every type.
+//! its clients. The `schema` feature also derives `schemars::JsonSchema` on
+//! every type. [`metrics`] holds the metric contract: the names, labels and
+//! filter rules of the series the probe publishes.
 //!
 //! Conventions:
 //! - Field names and query parameters are camelCase. Enum values are
@@ -30,11 +31,22 @@
 //!   time or flag means unknown, never 0 or false.
 //! - Times are RFC 3339 UTC. `snapshotId` and `cursor` are opaque strings.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod metrics;
+
 /// Quantiles `/v1/summary` reports when the request has no `q`.
 pub const DEFAULT_Q: &str = "0.5,0.9,0.95,0.99,0.995,1";
+
+/// Decimal places a `q` entry may have.
+pub const Q_DECIMALS: usize = 6;
+
+/// The largest count `/v1/summary` handles, 2^53: the largest an f64 holds
+/// exactly. No crossing target may exceed it.
+pub const MAX_COUNT: u64 = 1 << 53;
 
 /// Kind of unit a [`Filter`] selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -71,6 +83,20 @@ pub enum Source {
     NicoApi,
     #[serde(rename = "rest")]
     Rest,
+}
+
+/// Whether the REST site's machines are this NICo site's machines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SiteMatch {
+    /// Every machine on a nonempty page is a machine of this NICo site.
+    Match,
+    /// No machine on the page is.
+    Mismatch,
+    /// An empty page, a mixed page, a machine without a NICo ID, or no
+    /// device sweep yet. Never binds the site.
+    Unknown,
 }
 
 /// Kind of expected record.
@@ -278,7 +304,7 @@ pub struct SweepInfo {
 /// `GET /v1/count` reply.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::CountResponse")]
 pub struct CountResponse {
     pub count: u64,
     #[serde(flatten)]
@@ -308,7 +334,7 @@ pub struct UnitsQuery {
 /// `(source, type, id)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::UnitsResponse")]
 pub struct UnitsResponse {
     #[serde(flatten)]
     pub sweep: SweepInfo,
@@ -415,18 +441,57 @@ pub struct ReadInfo {
     pub last_attempt_error: Option<String>,
 }
 
-/// `GET /v1/config` reply. A source is `null` before its first good read.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `GET /v1/config` reply. A source is `null` before its first good read,
+/// and while its reader is off.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigResponse {
     pub nico_api: Option<ConfigNicoApi>,
     pub rest: Option<ConfigRest>,
+    #[serde(default)]
+    pub rest_site: Option<RestSiteBinding>,
+    /// Where the probe's series are in the metrics store. Absent when the
+    /// deployment declares no store that scrapes the probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<MetricsInfo>,
+}
+
+/// How a client finds this probe's series in the metrics store that scrapes
+/// it. The probe itself never reads the store.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsInfo {
+    /// The [`metrics::CONTRACT_VERSION`] the probe publishes with.
+    pub contract_version: u32,
+    /// Label equality matchers that select this probe's series. Never empty.
+    pub selector: BTreeMap<String, String>,
+    /// How often the store scrapes the probe, as deployed.
+    pub scrape_interval_seconds: f64,
+    /// The reader interval of each family an enabled reader sweeps. A family
+    /// missing here is not read.
+    pub reader_intervals_seconds: BTreeMap<Family, f64>,
+    /// The value of this process's `process_start_timestamp_seconds`, so a
+    /// client can check the selected series come from this process.
+    pub process_start_seconds: f64,
+}
+
+/// The REST site checked against the NICo device census, with the times of
+/// that check. Only `match` from a fresh read with no newer failed attempt
+/// binds the site.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", from = "flat::RestSiteBinding")]
+pub struct RestSiteBinding {
+    #[serde(flatten)]
+    pub read: ReadInfo,
+    pub result: SiteMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::ConfigNicoApi")]
 pub struct ConfigNicoApi {
     #[serde(flatten)]
     pub read: ReadInfo,
@@ -470,7 +535,7 @@ pub struct SiteExplorerRun {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "flat::ConfigRest")]
 pub struct ConfigRest {
     #[serde(flatten)]
     pub read: ReadInfo,
@@ -500,7 +565,11 @@ pub struct SummaryParams {
     pub base: u64,
     pub n: u64,
     pub direction: Direction,
-    /// Comma list of quantiles. [`DEFAULT_Q`] when absent.
+    /// Comma list of quantiles, each a decimal in (0, 1] with at most
+    /// [`Q_DECIMALS`] places. [`DEFAULT_Q`] when absent. The target of `q`
+    /// is `base + ceil(q * n)` going up and `base - ceil(q * n)` going down,
+    /// computed exactly. A `q` outside this form, or a target above
+    /// [`MAX_COUNT`] or below 0, is a 400 `invalid_param`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
     pub add_window_seconds: f64,
@@ -615,13 +684,24 @@ pub struct ErrorDetail {
     pub field: Option<String>,
 }
 
-/// Parses a `q` comma list. Every entry must be in (0, 1]. The result is
-/// sorted and deduplicated.
+/// Parses a `q` comma list. Every entry must be a plain decimal in (0, 1]
+/// with at most [`Q_DECIMALS`] places, checked on the text before it becomes
+/// an f64, which would round extra places away. The result is sorted and
+/// deduplicated.
 pub fn parse_q(raw: &str) -> Result<Vec<f64>, String> {
     let mut qs = Vec::new();
     for entry in raw.split(',').map(str::trim) {
         if entry.is_empty() {
             return Err("q has an empty entry".to_string());
+        }
+        let (whole, places) = entry.split_once('.').unwrap_or((entry, ""));
+        if !(whole.bytes().chain(places.bytes())).all(|b| b.is_ascii_digit()) {
+            return Err(format!("q entry {entry:?} is not a decimal number"));
+        }
+        if places.len() > Q_DECIMALS {
+            return Err(format!(
+                "q entry {entry:?} has more than {Q_DECIMALS} decimal places"
+            ));
         }
         let q: f64 = entry
             .parse()
@@ -634,6 +714,161 @@ pub fn parse_q(raw: &str) -> Result<Vec<f64>, String> {
     qs.sort_by(f64::total_cmp);
     qs.dedup();
     Ok(qs)
+}
+
+/// Flat copies of the replies that flatten [`SweepInfo`] or [`ReadInfo`],
+/// read in their place. Serde reads a flattened struct from buffered values,
+/// and serde_json's `arbitrary_precision`, which a workspace build turns on,
+/// buffers a number as a map that no f64 field accepts.
+mod flat {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct CountResponse {
+        count: u64,
+        snapshot_id: String,
+        family: Family,
+        sweep_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        sweep_age_seconds: f64,
+        sweep_interval_seconds: f64,
+    }
+
+    impl From<CountResponse> for super::CountResponse {
+        fn from(r: CountResponse) -> Self {
+            Self {
+                count: r.count,
+                sweep: SweepInfo {
+                    snapshot_id: r.snapshot_id,
+                    family: r.family,
+                    sweep_start: r.sweep_start,
+                    read_at: r.read_at,
+                    sweep_age_seconds: r.sweep_age_seconds,
+                    sweep_interval_seconds: r.sweep_interval_seconds,
+                },
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct UnitsResponse {
+        snapshot_id: String,
+        family: Family,
+        sweep_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        sweep_age_seconds: f64,
+        sweep_interval_seconds: f64,
+        units: Vec<Unit>,
+        missing_ids: Vec<String>,
+        next_cursor: Option<String>,
+    }
+
+    impl From<UnitsResponse> for super::UnitsResponse {
+        fn from(r: UnitsResponse) -> Self {
+            Self {
+                sweep: SweepInfo {
+                    snapshot_id: r.snapshot_id,
+                    family: r.family,
+                    sweep_start: r.sweep_start,
+                    read_at: r.read_at,
+                    sweep_age_seconds: r.sweep_age_seconds,
+                    sweep_interval_seconds: r.sweep_interval_seconds,
+                },
+                units: r.units,
+                missing_ids: r.missing_ids,
+                next_cursor: r.next_cursor,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct RestSiteBinding {
+        read_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        read_age_seconds: f64,
+        read_interval_seconds: f64,
+        last_attempt_error: Option<String>,
+        result: SiteMatch,
+    }
+
+    impl From<RestSiteBinding> for super::RestSiteBinding {
+        fn from(r: RestSiteBinding) -> Self {
+            Self {
+                read: ReadInfo {
+                    read_start: r.read_start,
+                    read_at: r.read_at,
+                    read_age_seconds: r.read_age_seconds,
+                    read_interval_seconds: r.read_interval_seconds,
+                    last_attempt_error: r.last_attempt_error,
+                },
+                result: r.result,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct ConfigNicoApi {
+        read_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        read_age_seconds: f64,
+        read_interval_seconds: f64,
+        last_attempt_error: Option<String>,
+        firmware_targets: Vec<FirmwareTarget>,
+        runtime: RuntimeSettings,
+        site_explorer: Option<SiteExplorerRun>,
+    }
+
+    impl From<ConfigNicoApi> for super::ConfigNicoApi {
+        fn from(r: ConfigNicoApi) -> Self {
+            Self {
+                read: ReadInfo {
+                    read_start: r.read_start,
+                    read_at: r.read_at,
+                    read_age_seconds: r.read_age_seconds,
+                    read_interval_seconds: r.read_interval_seconds,
+                    last_attempt_error: r.last_attempt_error,
+                },
+                firmware_targets: r.firmware_targets,
+                runtime: r.runtime,
+                site_explorer: r.site_explorer,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct ConfigRest {
+        read_start: DateTime<Utc>,
+        read_at: DateTime<Utc>,
+        read_age_seconds: f64,
+        read_interval_seconds: f64,
+        last_attempt_error: Option<String>,
+        tenant_allocation: Option<TenantAllocation>,
+    }
+
+    impl From<ConfigRest> for super::ConfigRest {
+        fn from(r: ConfigRest) -> Self {
+            Self {
+                read: ReadInfo {
+                    read_start: r.read_start,
+                    read_at: r.read_at,
+                    read_age_seconds: r.read_age_seconds,
+                    read_interval_seconds: r.read_interval_seconds,
+                    last_attempt_error: r.last_attempt_error,
+                },
+                tenant_allocation: r.tenant_allocation,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -668,6 +903,8 @@ mod tests {
         T: Serialize + DeserializeOwned + PartialEq + Debug,
     {
         assert_eq!(serde_json::to_value(value).unwrap(), golden);
+        let back: T = serde_json::from_str(&golden.to_string()).unwrap();
+        assert_eq!(&back, value);
         let back: T = serde_json::from_value(golden).unwrap();
         assert_eq!(&back, value);
     }
@@ -771,6 +1008,11 @@ mod tests {
             (Component::Uefi, "uefi"),
             (Component::BmcUefi, "bmc_uefi"),
             (Component::Other, "other"),
+        ]);
+        assert_wire_names(&[
+            (SiteMatch::Match, "match"),
+            (SiteMatch::Mismatch, "mismatch"),
+            (SiteMatch::Unknown, "unknown"),
         ]);
         assert_wire_names(&[
             (MismatchKind::AmbiguousLink, "ambiguous_link"),
@@ -1138,6 +1380,187 @@ mod tests {
         );
     }
 
+    fn read_info() -> ReadInfo {
+        ReadInfo {
+            read_start: t("2026-10-23T10:00:00Z"),
+            read_at: t("2026-10-23T10:00:02Z"),
+            read_age_seconds: 5.0,
+            read_interval_seconds: 120.0,
+            last_attempt_error: None,
+        }
+    }
+
+    fn read_info_json() -> serde_json::Value {
+        json!({
+            "readStart": "2026-10-23T10:00:00Z",
+            "readAt": "2026-10-23T10:00:02Z",
+            "readAgeSeconds": 5.0,
+            "readIntervalSeconds": 120.0,
+            "lastAttemptError": null,
+        })
+    }
+
+    #[test]
+    fn config_response_json_golden() {
+        let reply = ConfigResponse {
+            nico_api: None,
+            rest: None,
+            rest_site: Some(RestSiteBinding {
+                read: read_info(),
+                result: SiteMatch::Match,
+            }),
+            metrics: None,
+        };
+        let mut rest_site = read_info_json();
+        rest_site["result"] = json!("match");
+        assert_json_golden(
+            &reply,
+            json!({"nicoApi": null, "rest": null, "restSite": rest_site}),
+        );
+
+        // A reply from before restSite reads as no site check.
+        let old: ConfigResponse =
+            serde_json::from_value(json!({"nicoApi": null, "rest": null})).unwrap();
+        assert_eq!(old, ConfigResponse::default());
+
+        // Clients built on the first contract (16bc37890) read the new
+        // reply: restSite is a field they do not know, and they ignore it.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FirstConfigResponse {
+            nico_api: Option<ConfigNicoApi>,
+            rest: Option<ConfigRest>,
+        }
+        let first: FirstConfigResponse =
+            serde_json::from_value(serde_json::to_value(&reply).unwrap()).unwrap();
+        assert_eq!(
+            first,
+            FirstConfigResponse {
+                nico_api: None,
+                rest: None
+            }
+        );
+    }
+
+    fn metrics_info() -> MetricsInfo {
+        MetricsInfo {
+            contract_version: metrics::CONTRACT_VERSION,
+            selector: BTreeMap::from([
+                ("job".to_string(), "probe-metrics".to_string()),
+                ("namespace".to_string(), "nico-system".to_string()),
+            ]),
+            scrape_interval_seconds: 5.0,
+            reader_intervals_seconds: BTreeMap::from([
+                (Family::Host, 120.0),
+                (Family::RestTotals, 60.0),
+            ]),
+            process_start_seconds: 1_761_818_400.25,
+        }
+    }
+
+    #[test]
+    fn config_response_metrics_json_golden() {
+        let reply = ConfigResponse {
+            metrics: Some(metrics_info()),
+            ..ConfigResponse::default()
+        };
+        assert_json_golden(
+            &reply,
+            json!({
+                "nicoApi": null,
+                "rest": null,
+                "restSite": null,
+                "metrics": {
+                    "contractVersion": 1,
+                    "selector": {"job": "probe-metrics", "namespace": "nico-system"},
+                    "scrapeIntervalSeconds": 5.0,
+                    "readerIntervalsSeconds": {"host": 120.0, "rest_totals": 60.0},
+                    "processStartSeconds": 1_761_818_400.25,
+                },
+            }),
+        );
+
+        // Without a declared store the block is left out, so the reply is
+        // the one older probes send.
+        let without = serde_json::to_value(ConfigResponse::default()).unwrap();
+        assert_eq!(
+            without,
+            json!({"nicoApi": null, "rest": null, "restSite": null})
+        );
+
+        // A reply from a probe without the block reads as no metrics.
+        let old: ConfigResponse =
+            serde_json::from_value(json!({"nicoApi": null, "rest": null, "restSite": null}))
+                .unwrap();
+        assert_eq!(old.metrics, None);
+
+        // Clients built before the block ignore it.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldConfigResponse {
+            nico_api: Option<ConfigNicoApi>,
+            rest: Option<ConfigRest>,
+            rest_site: Option<RestSiteBinding>,
+        }
+        let old: OldConfigResponse =
+            serde_json::from_value(serde_json::to_value(&reply).unwrap()).unwrap();
+        assert_eq!(
+            old,
+            OldConfigResponse {
+                nico_api: None,
+                rest: None,
+                rest_site: None
+            }
+        );
+    }
+
+    #[test]
+    fn config_sources_json_golden() {
+        let nico_api = ConfigNicoApi {
+            read: read_info(),
+            firmware_targets: vec![],
+            runtime: RuntimeSettings {
+                max_concurrent_machine_updates_absolute: Some(10),
+                max_concurrent_machine_updates_percent: None,
+                auto_host_firmware_update: Some(true),
+            },
+            site_explorer: None,
+        };
+        let mut golden = read_info_json();
+        golden["firmwareTargets"] = json!([]);
+        golden["runtime"] = json!({
+            "maxConcurrentMachineUpdatesAbsolute": 10,
+            "maxConcurrentMachineUpdatesPercent": null,
+            "autoHostFirmwareUpdate": true,
+        });
+        golden["siteExplorer"] = json!(null);
+        assert_json_golden(&nico_api, golden);
+
+        let rest = ConfigRest {
+            read: read_info(),
+            tenant_allocation: Some(TenantAllocation {
+                tenant: "t1".to_string(),
+                instance_type: "it-1".to_string(),
+                assigned: 4,
+                total: 5,
+                used: 3,
+                unused: 2,
+                unused_usable: 1,
+            }),
+        };
+        let mut golden = read_info_json();
+        golden["tenantAllocation"] = json!({
+            "tenant": "t1",
+            "instanceType": "it-1",
+            "assigned": 4,
+            "total": 5,
+            "used": 3,
+            "unused": 2,
+            "unusedUsable": 1,
+        });
+        assert_json_golden(&rest, golden);
+    }
+
     #[test]
     fn request_none_fields_omitted() {
         let filter = Filter::new(UnitType::Host);
@@ -1231,8 +1654,18 @@ mod tests {
         );
         assert_eq!(parse_q("1").unwrap(), vec![1.0]);
         assert_eq!(parse_q("0.9, 0.5,0.9").unwrap(), vec![0.5, 0.9]);
-        for bad in ["", "0", "-0.5", "1.01", "0.5,", "x", "NaN", "inf"] {
+        assert_eq!(parse_q("0.500001,.25").unwrap(), vec![0.25, 0.500001]);
+        for bad in [
+            "", "0", "-0.5", "1.01", "0.5,", "x", "NaN", "inf", "5e-1", "+0.5", ".",
+        ] {
             assert!(parse_q(bad).is_err(), "{bad:?} should be rejected");
+        }
+        // Places past the sixth are refused before f64 could round them
+        // away: this one parses to exactly 0.5.
+        assert_eq!("0.50000000000000001".parse::<f64>().unwrap(), 0.5);
+        for precise in ["0.50000000000000001", "0.5000001", "1.0000000"] {
+            let err = parse_q(precise).expect_err("too precise");
+            assert!(err.contains("decimal places"), "{precise}: {err}");
         }
     }
 
@@ -1286,6 +1719,24 @@ mod tests {
         let units = property_names(&schema::<UnitsResponse>());
         for name in ["units", "missingIds", "nextCursor", "snapshotId"] {
             assert!(units.contains(name), "UnitsResponse lacks {name}");
+        }
+
+        let config = property_names(&schema::<ConfigResponse>());
+        assert!(config.contains("restSite"), "ConfigResponse lacks restSite");
+        assert!(config.contains("metrics"), "ConfigResponse lacks metrics");
+        let metrics = property_names(&schema::<MetricsInfo>());
+        for name in [
+            "contractVersion",
+            "selector",
+            "scrapeIntervalSeconds",
+            "readerIntervalsSeconds",
+            "processStartSeconds",
+        ] {
+            assert!(metrics.contains(name), "MetricsInfo lacks {name}");
+        }
+        let site = property_names(&schema::<RestSiteBinding>());
+        for name in ["result", "readAt", "lastAttemptError"] {
+            assert!(site.contains(name), "RestSiteBinding lacks {name}");
         }
 
         // Every other top-level request and reply has a schema.

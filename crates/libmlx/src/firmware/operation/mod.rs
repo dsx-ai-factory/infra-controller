@@ -21,7 +21,10 @@ pub use carbide_libmlx_model::firmware::operation::{
     FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState, ObserverExitBehavior,
 };
 pub use claim::DirectMlxClaim;
-pub use client::{FirmwareSupervisorClient, FirmwareSupervisorClientError, SupervisorStatus};
+pub use client::{
+    FirmwareOperationObservation, FirmwareSupervisorClient, FirmwareSupervisorClientError,
+    SupervisorStatus,
+};
 pub use launch::{
     SupervisorConfig, SupervisorLaunchError, SupervisorLaunchMode, connect_or_launch,
     has_unresolved_firmware_claim,

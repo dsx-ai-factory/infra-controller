@@ -10,11 +10,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 
-use libmlx::firmware::config::{FirmwareFlasherProfile, FirmwareSpec, FlashOptions, FlashSpec};
+use carbide_libmlx_model::device::identity::MlxDeviceSelector;
+use libmlx::firmware::config::{
+    FirmwareArtifactDigests, FirmwareFlasherProfile, FirmwareSpec, FirmwareUpdateContext,
+    FlashOptions, FlashSpec,
+};
 use libmlx::firmware::operation::{
-    FirmwareOperationPhase, FirmwareOperationState, FirmwareSupervisorClient,
-    FirmwareSupervisorClientError, ObserverExitBehavior, SupervisorConfig, SupervisorLaunchError,
-    SupervisorLaunchMode, connect_or_launch,
+    FirmwareOperation, FirmwareOperationObservation, FirmwareOperationPhase,
+    FirmwareOperationState, FirmwareSupervisorClient, FirmwareSupervisorClientError,
+    ObserverExitBehavior, SupervisorConfig, SupervisorLaunchError, SupervisorLaunchMode,
+    connect_or_launch,
 };
 use nix::errno::Errno;
 use nix::sys::prctl::set_child_subreaper;
@@ -22,6 +27,7 @@ use nix::sys::signal::{Signal, kill};
 use nix::sys::socket::{getsockopt, sockopt};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::time::{sleep, timeout};
@@ -298,7 +304,9 @@ if [ "${1-}" = --version ]; then
 fi
 case "${0##*/}" in
     mlxfwmanager)
-        printf '<Devices><Device pciName="%s" type="BlueField3" partNumber="test-part" psid="test-psid"><Versions><FW current="1.0"/></Versions></Device></Devices>' "$DEVICE"
+        mac=020000000001
+        if [ -f "$FIXTURE/base-mac" ]; then IFS= read -r mac < "$FIXTURE/base-mac"; fi
+        printf '<Devices><Device pciName="%s" type="BlueField3" partNumber="test-part" psid="test-psid"><Versions><FW current="1.0"/></Versions><MACs Base_Mac="%s"/></Device></Devices>' "$DEVICE" "$mac"
         ;;
     flint)
         if [ "$#" -eq 5 ] && [ "$1" = -d ] && [ "$2" = "$DEVICE" ] &&
@@ -334,6 +342,11 @@ case "${0##*/}" in
         fi
         printf tool-finished
         printf finished > "$FIXTURE/burn-completed"
+        ;;
+    mlxconfig)
+        [ "$#" -eq 5 ] && [ "$1" = -d ] && [ "$2" = "$DEVICE" ] &&
+            [ "$3" = --yes ] && [ "$4" = apply ] || exit 47
+        [ -s "$5" ] || exit 43
         ;;
     mlxfwreset)
         [ "$#" -eq 6 ] && [ "$1" = --device ] && [ "$2" = "$DEVICE" ] &&
@@ -452,6 +465,339 @@ impl Drop for GatedDaemon {
             Ok(Some(_)) => {}
             result => eprintln!("fixture did not finish admitted work during cleanup: {result:?}"),
         }
+    }
+}
+
+/// Guarded admission must preserve the physical selector across staging and
+/// restart. A replacement card cannot inherit work, and a replacement supervisor
+/// can recover a saved receipt without admitting missing work on the old token.
+#[tokio::test]
+async fn guarded_updates_check_card_identity_and_preserve_restart_recovery() {
+    struct Case {
+        reported_mac_after_download: &'static str,
+        expected_state: FirmwareOperationState,
+        check: fn(&FirmwareOperation, &str),
+    }
+
+    for case in [
+        // The matching card must configure, burn, and reset in order, not fail
+        // at another gate before exercising the selector check.
+        Case {
+            reported_mac_after_download: "020000000001",
+            expected_state: FirmwareOperationState::Complete,
+            check: |operation, invocations| {
+                assert!(operation.is_complete());
+                let mutations: Vec<_> = invocations
+                    .lines()
+                    .filter(|line| {
+                        line.contains(" --yes apply ")
+                            || line.ends_with(" burn")
+                            || line.ends_with(" reset -y")
+                    })
+                    .map(|line| line.split_whitespace().next().unwrap())
+                    .collect();
+                assert_eq!(mutations, ["mlxconfig", "flint", "mlxfwreset"]);
+            },
+        },
+        // A replacement during staging still fits the PCI address, part number,
+        // and PSID. Checking only the first discovery would configure and burn
+        // the wrong card.
+        Case {
+            reported_mac_after_download: "020000000002",
+            expected_state: FirmwareOperationState::Failed,
+            check: |operation, invocations| {
+                assert_eq!(operation.phase, Some(FirmwareOperationPhase::Prepare));
+                assert!(
+                    operation
+                        .diagnostic
+                        .as_deref()
+                        .unwrap()
+                        .contains("base MAC")
+                );
+                let query = format!("mlxfwmanager --dev {DEVICE} --query-format xml\n");
+                assert_eq!(invocations, format!("{query}{query}"));
+            },
+        },
+    ] {
+        timeout(TEST_TIMEOUT, async {
+            let directory = private_fixture();
+            let fixture = directory.path();
+            fake_tools(fixture);
+            fs::write(fixture.join("release"), "release").unwrap();
+            fs::write(fixture.join("base-mac"), "020000000001\n").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let image = fs::read(fixture.join("image.bin")).unwrap();
+            let configuration = b"fixture device configuration\n".as_slice();
+            let mut profile = firmware_profile(fixture);
+            profile.flash_spec.firmware_url =
+                format!("http://{}/image.bin", listener.local_addr().unwrap());
+            profile.flash_spec.device_conf_url = Some(format!(
+                "http://{}/configuration.bin",
+                listener.local_addr().unwrap()
+            ));
+            profile.flash_options.reset = true;
+            let context = FirmwareUpdateContext {
+                phase_id: "checked-selector".into(),
+                expected_digests: FirmwareArtifactDigests {
+                    image_sha256: Sha256::digest(&image).into(),
+                    configuration_sha256: Some(Sha256::digest(configuration).into()),
+                },
+                expected_device: Some(MlxDeviceSelector::from_mac_str("020000000001").unwrap()),
+            };
+            let mut supervisor = GatedDaemon {
+                process: daemon(fixture),
+                fixture: fixture.to_path_buf(),
+            };
+            let mut client = connect(&mut supervisor.process, fixture).await;
+            let FirmwareOperationObservation::MissingReceipt {
+                supervisor_instance_id,
+            } = client
+                .observe_update(
+                    "checked-selector",
+                    profile.clone(),
+                    context.clone(),
+                    ObserverExitBehavior::Continue,
+                )
+                .await
+                .expect("observe missing checked work before guarded admission")
+            else {
+                panic!("fresh fixture already has a checked receipt");
+            };
+            if case.expected_state == FirmwareOperationState::Complete {
+                // Keep this second ID absent so restart must distinguish a
+                // retained receipt from permission to admit new work.
+                assert_eq!(
+                    client
+                        .observe_update(
+                            "not-admitted",
+                            profile.clone(),
+                            context.clone(),
+                            ObserverExitBehavior::Continue,
+                        )
+                        .await
+                        .unwrap(),
+                    FirmwareOperationObservation::MissingReceipt {
+                        supervisor_instance_id: supervisor_instance_id.clone(),
+                    }
+                );
+            }
+            client
+                .submit_update_on_instance(
+                    "checked-selector",
+                    profile.clone(),
+                    context.clone(),
+                    ObserverExitBehavior::Continue,
+                    &supervisor_instance_id,
+                )
+                .await
+                .expect("admit checked work on the observed supervisor instance");
+
+            // Admission does not wait for staging. Serve both checked artifacts
+            // here so the fixture needs no background server or shared task.
+            timeout(WATCHDOG, async {
+                for (path, contents) in [
+                    ("image.bin", image.as_slice()),
+                    ("configuration.bin", configuration),
+                ] {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    assert_eq!(line, format!("GET /{path} HTTP/1.1\r\n"));
+                    loop {
+                        line.clear();
+                        assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    if path == "image.bin" {
+                        // The first query already saw the expected card. Change
+                        // only its MAC before staging finishes and the final
+                        // query starts.
+                        assert_eq!(
+                            fs::read_to_string(fixture.join("invocations")).unwrap(),
+                            format!("mlxfwmanager --dev {DEVICE} --query-format xml\n")
+                        );
+                        fs::write(
+                            fixture.join("base-mac"),
+                            format!("{}\n", case.reported_mac_after_download),
+                        )
+                        .unwrap();
+                    }
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        contents.len()
+                    );
+                    stream.get_mut().write_all(header.as_bytes()).await.unwrap();
+                    stream.get_mut().write_all(contents).await.unwrap();
+                    stream.get_mut().shutdown().await.unwrap();
+                }
+            })
+            .await
+            .expect("checked artifact transfers finish within watchdog");
+            drop(listener);
+            let operation = timeout(WATCHDOG, async {
+                loop {
+                    let operation = client.get("checked-selector").await.unwrap();
+                    if !matches!(
+                        operation.state,
+                        FirmwareOperationState::Accepted | FirmwareOperationState::Running
+                    ) {
+                        return operation;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("checked work reaches its terminal receipt within watchdog");
+            assert_eq!(
+                operation.state, case.expected_state,
+                "{}",
+                case.reported_mac_after_download
+            );
+            timeout(WATCHDOG, async {
+                while fixture.join("state/mutation.json").exists() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("settled checked work releases host exclusion");
+
+            // Read the committed record independently of the RPC result. Both
+            // branches must retain the selector and both prepared digests.
+            let card_directory = fixture.join("state").join(SLOT);
+            let ledger_path = card_directory.join("operations.json");
+            let ledger_bytes = fs::read(&ledger_path).unwrap();
+            let ledger: serde_json::Value = serde_json::from_slice(&ledger_bytes).unwrap();
+            let records = ledger["records"].as_array().unwrap();
+            assert_eq!(records.len(), 1);
+            let record = &records[0];
+            assert_eq!(
+                record["operation"],
+                serde_json::to_value(&operation).unwrap()
+            );
+            assert_eq!(
+                record["requested"]["update_context"],
+                serde_json::to_value(&context).unwrap()
+            );
+            assert_eq!(
+                record["prepared_inputs"]["image"]["sha256"],
+                serde_json::to_value(context.expected_digests.image_sha256).unwrap()
+            );
+            assert_eq!(
+                record["prepared_inputs"]["configuration"]["sha256"],
+                serde_json::to_value(context.expected_digests.configuration_sha256.unwrap()).unwrap()
+            );
+            let mutated = case.expected_state == FirmwareOperationState::Complete;
+            assert_eq!(record["mutation_started"], mutated);
+            assert_eq!(operation.report.flashed, mutated);
+            assert_eq!(operation.report.reset, Some(mutated));
+            if !mutated {
+                for (artifact, contents) in [
+                    ("image", image.as_slice()),
+                    ("configuration", configuration),
+                ] {
+                    let retained = record["prepared_inputs"][artifact]["path"].as_str().unwrap();
+                    assert_eq!(fs::read(card_directory.join(retained)).unwrap(), contents);
+                }
+            }
+            let invocations = fs::read_to_string(fixture.join("invocations")).unwrap();
+            (case.check)(&operation, &invocations);
+            drop(client);
+            supervisor.process.stop();
+            if mutated {
+                // Reopen the journal containing the selector in a new process.
+                // The caller keeps its original absence token across reconnection.
+                supervisor = GatedDaemon {
+                    process: daemon(fixture),
+                    fixture: fixture.to_path_buf(),
+                };
+                let mut client = connect(&mut supervisor.process, fixture).await;
+                let FirmwareOperationObservation::MissingReceipt {
+                    supervisor_instance_id: replacement_instance_id,
+                } = client
+                    .observe_update(
+                        "not-admitted",
+                        profile.clone(),
+                        context.clone(),
+                        ObserverExitBehavior::Continue,
+                    )
+                    .await
+                    .expect("replacement supervisor observes the still-absent ID")
+                else {
+                    panic!("observation must not admit the second ID");
+                };
+                assert_ne!(replacement_instance_id, supervisor_instance_id);
+                let rejected = client
+                    .submit_update_on_instance(
+                        "not-admitted",
+                        profile.clone(),
+                        context.clone(),
+                        ObserverExitBehavior::Continue,
+                        &supervisor_instance_id,
+                    )
+                    .await
+                    .expect_err("a replaced supervisor cannot use old absence permission");
+                let FirmwareSupervisorClientError::Rpc(status) = rejected else {
+                    panic!("expected guarded admission rejection: {rejected}");
+                };
+                assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+                assert_eq!(
+                    status.message(),
+                    "firmware supervisor instance changed; missing operation requires reconciliation"
+                );
+                assert_eq!(fs::read(&ledger_path).unwrap(), ledger_bytes);
+                assert!(!fixture.join("state/mutation.json").exists());
+                assert_eq!(
+                    fs::read_to_string(fixture.join("invocations")).unwrap(),
+                    invocations
+                );
+
+                // The same old token must still recover admitted work. Neither
+                // recovery call may fetch from the closed source or mutate.
+                assert_eq!(
+                    client
+                        .submit_update_on_instance(
+                            "checked-selector",
+                            profile.clone(),
+                            context.clone(),
+                            ObserverExitBehavior::Continue,
+                            &supervisor_instance_id,
+                        )
+                        .await
+                        .expect("old admission token recovers the retained receipt"),
+                    operation
+                );
+                assert_eq!(
+                    client
+                        .observe_update(
+                            "checked-selector",
+                            profile,
+                            context,
+                            ObserverExitBehavior::Continue,
+                        )
+                        .await
+                        .expect("checked observation decodes the reopened receipt"),
+                    FirmwareOperationObservation::Receipt(operation)
+                );
+                assert_eq!(fs::read(&ledger_path).unwrap(), ledger_bytes);
+                assert!(!fixture.join("state/mutation.json").exists());
+                assert_eq!(
+                    fs::read_to_string(fixture.join("invocations")).unwrap(),
+                    invocations
+                );
+                drop(client);
+                supervisor.process.stop();
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "checked selector {} exceeded its watchdog",
+                case.reported_mac_after_download
+            )
+        });
     }
 }
 
@@ -971,7 +1317,13 @@ async fn submit_deadline_preserves_admitted_work_over_a_real_socket() {
                 _ = wait_for_file(&burn_path) => {},
                 result = &mut submitting => panic!("submit finished before the admitted burn: {result:?}"),
             }
-            submitting.await
+            // Admission and the burn are established. Paused time advances all
+            // timers on this runtime while the relay withholds the reply; the
+            // external daemon and its burn keep running on real time.
+            tokio::time::pause();
+            let result = submitting.await;
+            tokio::time::resume();
+            result
         };
         assert!(matches!(result, Err(FirmwareSupervisorClientError::Deadline)));
         let accepted = direct.get("lost-reply").await.unwrap();
@@ -995,6 +1347,18 @@ async fn submit_deadline_preserves_admitted_work_over_a_real_socket() {
             }
         }).await.expect("accepted work completes after the reply deadline");
         assert_eq!(fs::read_to_string(fixture.join("burns")).unwrap(), "launch");
+        kill(Pid::from_raw(daemon.process.0.id() as i32), Signal::SIGTERM).unwrap();
+        // Keep the client runtime polling while Tonic drains its connections;
+        // blocking in Drop would prevent that shutdown from completing.
+        let status = timeout(WATCHDOG, async {
+            loop {
+                if let Some(status) = daemon.process.0.try_wait().unwrap() {
+                    break status;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("daemon finishes admitted work and connection shutdown");
+        assert!(status.success());
     }).await.expect("lost submit reply fixture exceeded its watchdog");
 }
 

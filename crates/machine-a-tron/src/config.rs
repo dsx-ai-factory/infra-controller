@@ -513,6 +513,17 @@ pub struct MachineATronConfig {
     #[serde(default)]
     pub dhcp: DhcpType,
 
+    /// Periodic host/DPU BMC lease renewal, default 900 seconds.
+    /// First renewals spread over [0, interval), then each interval has +/-10% jitter.
+    /// Like scout polling, this interval is not scaled by `acceleration_factor`.
+    /// Zero disables periodic renewal. Changes take effect after restarting MAT.
+    #[serde(
+        default = "default_bmc_dhcp_renewal_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub bmc_dhcp_renewal_interval: Duration,
+
     #[serde(default = "default_bmc_mock_port")]
     pub bmc_mock_port: u16,
 
@@ -644,6 +655,15 @@ impl MachineATronConfig {
     /// Checks the invariants serde cannot express, such as the UFM mock settings
     /// and the UDP relay addresses.
     pub fn validate(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            tokio::time::Instant::now()
+                .checked_add(
+                    self.bmc_dhcp_renewal_interval
+                        .saturating_add(self.bmc_dhcp_renewal_interval / 10)
+                )
+                .is_some(),
+            "BMC DHCP renewal interval must fit within the monotonic clock"
+        );
         if let Some(ufm_mock) = self.ufm_mock.as_ref() {
             ufm_mock.validate()?;
         }
@@ -917,7 +937,7 @@ pub struct PersistedDevice {
     /// the versions last observed, not the operator-configured starting point.
     #[serde(default)]
     pub active_host_firmware: Option<HostFirmwareVersions>,
-    /// Portable BMC state. Power shelves do not populate this field.
+    /// Portable BMC state, including accounts and the factory-reset generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bmc_state: Option<bmc_mock::persistence::PersistedBmcState>,
     /// A switch's NVOS administrator as the last completed password rotation
@@ -1029,6 +1049,10 @@ fn default_acceleration_factor() -> f64 {
 
 fn default_scout_run_interval() -> Duration {
     Duration::from_secs(60)
+}
+
+fn default_bmc_dhcp_renewal_interval() -> Duration {
+    Duration::from_secs(900)
 }
 
 fn default_scout_stream_reconnect_interval() -> Duration {
@@ -1204,6 +1228,50 @@ scout_run_interval = "5s"
     "#,
         )
         .expect("Could not parse config")
+    }
+
+    #[test]
+    fn bmc_renewal_interval_defaults_and_overrides() {
+        check_values(
+            [
+                Check {
+                    scenario: "omitted",
+                    input: None,
+                    expect: Duration::from_secs(900),
+                },
+                Check {
+                    scenario: "explicit default",
+                    input: Some("900s"),
+                    expect: Duration::from_secs(900),
+                },
+                Check {
+                    scenario: "test interval",
+                    input: Some("250ms"),
+                    expect: Duration::from_millis(250),
+                },
+                Check {
+                    scenario: "disabled",
+                    input: Some("0s"),
+                    expect: Duration::ZERO,
+                },
+            ],
+            |value| {
+                let mut config = serde_json::to_value(rack_config()).unwrap();
+                config
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("bmc_dhcp_renewal_interval");
+                if let Some(value) = value {
+                    config["bmc_dhcp_renewal_interval"] = value.into();
+                }
+                let config = serde_json::from_value::<MachineATronConfig>(config).unwrap();
+                config.validate().unwrap();
+                config.bmc_dhcp_renewal_interval
+            },
+        );
+        let mut config = rack_config();
+        config.bmc_dhcp_renewal_interval = Duration::MAX;
+        assert!(config.validate().is_err());
     }
 
     #[test]

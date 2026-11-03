@@ -1038,20 +1038,17 @@ async fn test_missing_compute_component_health_tracks_host_inventory(
         )
         .await?
         .expect("host snapshot should exist");
-        assert_eq!(
-            host.aggregate_health.alerts.iter().any(|alert| {
-                alert.id.as_str() == "MissingRackComponent"
-                    && alert.target.as_deref() == Some("compute")
-            }),
-            host_count == 1,
-        );
+        assert!(!host.aggregate_health.alerts.iter().any(|alert| {
+            alert.id.as_str() == "MissingRackComponent"
+                && alert.target.as_deref() == Some("compute")
+        }));
         assert_eq!(host.is_usable_as_instance(false), Ok(()));
     }
     Ok(())
 }
 
 #[crate::sqlx_test]
-async fn test_missing_component_health_is_persisted_and_propagated(
+async fn test_missing_component_health_is_persisted_only_on_rack(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
@@ -1106,10 +1103,52 @@ async fn test_missing_component_health_is_persisted_and_propagated(
     )
     .await?
     .expect("host snapshot should exist");
-    assert!(host.aggregate_health.alerts.iter().any(|alert| {
+    assert!(!host.aggregate_health.alerts.iter().any(|alert| {
         alert.id.as_str() == "MissingRackComponent" && alert.target.as_deref() == Some("switch")
     }));
     assert_eq!(host.is_usable_as_instance(false), Ok(()));
+
+    let racks = env
+        .api
+        .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
+            rack_ids: vec![rack_id.clone()],
+        }))
+        .await?
+        .into_inner();
+    let rack_health = racks.racks[0]
+        .status
+        .as_ref()
+        .unwrap()
+        .health
+        .as_ref()
+        .unwrap();
+    assert!(
+        rack_health
+            .alerts
+            .iter()
+            .any(|alert| alert.id == "MissingRackComponent")
+    );
+    let machines = env
+        .api
+        .find_machines_by_ids(Request::new(rpc::forge::MachinesByIdsRequest {
+            machine_ids: vec![host.host_snapshot.id.into()],
+            include_history: false,
+        }))
+        .await?
+        .into_inner();
+    let host_health = machines.machines[0]
+        .status
+        .as_ref()
+        .unwrap()
+        .health
+        .as_ref()
+        .unwrap();
+    assert!(
+        !host_health
+            .alerts
+            .iter()
+            .any(|alert| alert.id == "MissingRackComponent")
+    );
 
     // Reconcile a persisted report from the allocation-blocking implementation.
     let mut previous_report = report.clone();

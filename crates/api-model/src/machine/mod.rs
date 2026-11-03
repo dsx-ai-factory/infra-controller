@@ -18,6 +18,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::LazyLock;
 
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::machine::{
@@ -62,6 +63,10 @@ use crate::network_segment::NetworkSegmentType;
 use crate::predicted_machine_interface::PredictedMachineInterface;
 use crate::state_history::StateHistoryRecord;
 
+// Rack-scoped probes excluded from host health aggregation.
+static RACK_ONLY_PROBES: LazyLock<[health_report::HealthProbeId; 1]> =
+    LazyLock::new(|| [health_report::HealthProbeId::missing_rack_component()]);
+
 pub mod slas;
 
 pub mod astra;
@@ -73,6 +78,7 @@ pub mod json;
 pub mod machine_id;
 pub mod machine_search_config;
 pub mod network;
+pub mod nic_firmware;
 pub mod nvlink;
 pub mod spx;
 pub mod spx_multiplane;
@@ -594,6 +600,9 @@ impl ManagedHostStateSnapshot {
     /// Derives the aggregate health of the Managed Host based on individual
     /// health reports
     ///
+    /// Rack component inventory shortages remain rack-scoped; other rack alerts
+    /// are included unless a host replacement report takes precedence.
+    ///
     /// Also runs on the compact snapshot, see [`Self::is_usable_as_instance`].
     pub fn derive_aggregate_health(&mut self, host_health_config: HostHealthConfig) {
         let source = "aggregate-host-health".to_string();
@@ -699,11 +708,18 @@ impl ManagedHostStateSnapshot {
         }
 
         if let Some(rack_overrides) = &self.rack_health_overrides {
-            if let Some(rack_replace) = &rack_overrides.replace {
-                output.merge(rack_replace);
-            }
-            for rack_merge in rack_overrides.merges.values() {
-                output.merge(rack_merge);
+            for report in rack_overrides
+                .replace
+                .iter()
+                .chain(rack_overrides.merges.values())
+            {
+                // Inventory shortages are actionable at the rack, not on each host.
+                // Filter before merging so host-owned alerts remain untouched.
+                let mut report = report.clone();
+                report
+                    .alerts
+                    .retain(|alert| !RACK_ONLY_PROBES.contains(&alert.id));
+                output.merge(&report);
             }
         }
 
@@ -1191,11 +1207,13 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
 
     /// Whether this machine's BMC must have its lockdown disabled before its
     /// UEFI (BIOS setup) password can be changed, and re-enabled afterward.
-    /// Only Dell BMCs enforce a lockdown that blocks the BIOS password change;
-    /// other vendors accept it without unlocking. Centralizes the vendor check
-    /// so the UEFI setup and rotation flows don't special-case Dell inline.
+    /// Dell and Lenovo XCC BMCs can lock BIOS settings. On older Lenovo
+    /// firmware, the Redfish client skips the unsupported OEM controls.
     pub fn needs_bmc_unlock_for_uefi_setup(&self) -> bool {
-        self.bmc_vendor().is_dell()
+        matches!(
+            self.bmc_vendor(),
+            bmc_vendor::BMCVendor::Dell | bmc_vendor::BMCVendor::Lenovo
+        )
     }
 
     /// Does the forge-dpu-agent on this DPU need upgrading?
@@ -1334,9 +1352,9 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
     }
 
     pub fn to_capabilities(&self) -> Option<MachineCapabilitiesSet> {
-        self.status.hardware_info.clone().map(|info| {
+        self.status.hardware_info.as_ref().map(|info| {
             MachineCapabilitiesSet::from_hardware_info(
-                &info,
+                info,
                 self.status.infiniband_status_observation.as_ref(),
                 self.associated_dpu_machine_ids(),
                 &self.status.interfaces,
@@ -2470,6 +2488,12 @@ pub enum PerformPowerOperation {
 pub enum MachineState {
     Init,
     EnableIpmiOverLan,
+    /// Toggle onboard NICs off during initialization of Vera Rubin hosts with managed DPUs.
+    /// Other SKUs do not support disabling onboard NICs through the BMC and skip this state.
+    DisableOnboardNics {
+        /// Persist the write or application wait across controller iterations.
+        disable_onboard_nics_state: DisableOnboardNicsState,
+    },
     WaitingForPlatformConfiguration {
         /// Retries after BIOS job failure remediation; re-run machine_setup from this state.
         #[serde(default)]
@@ -2507,6 +2531,24 @@ pub enum MachineState {
     // MachineValidating has been moved to ValidationState
 }
 
+/// Vera Rubin-only sequence that enables, then disables onboard NICs, with a
+/// ten-second application wait after each successful write. Other SKUs do not
+/// support this BMC operation; hosts without managed DPUs also skip the sequence.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum DisableOnboardNicsState {
+    /// Write the requested onboard NIC setting; failures retry this substate.
+    ConfigureOnboardNics {
+        /// Enable first (`true`), then disable (`false`).
+        enable: bool,
+    },
+    /// Wait at least ten seconds from entry before continuing the sequence.
+    WaitForConfigToBeApplied {
+        /// Whether the preceding write disabled the NICs, completing the sequence.
+        onboard_nics_disabled: bool,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub struct LockdownInfo {
@@ -2536,8 +2578,8 @@ pub enum UefiSetupState {
     WaitForPasswordJobScheduled,
     PowercycleHost,
     WaitForPasswordJobCompletion,
-    // Deprecated: no-op state, transitions directly to WaitingForLockdown::SetLockdown
-    // Kept for backwards compatibility with hosts that may be in this state
+    /// Legacy ingestion no-op; transitions to WaitingForLockdown::SetLockdown.
+    /// Lenovo rotation retries BMC re-locking here after a failed password change.
     LockdownHost,
 }
 
@@ -4685,6 +4727,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn uefi_password_changes_unlock_dell_and_lenovo_xcc() {
+        check_values(
+            [
+                Check {
+                    scenario: "Dell",
+                    input: "Dell Inc.",
+                    expect: true,
+                },
+                Check {
+                    scenario: "Lenovo XCC",
+                    input: "Lenovo",
+                    expect: true,
+                },
+                Check {
+                    scenario: "Supermicro unchanged",
+                    input: "Supermicro",
+                    expect: false,
+                },
+                Check {
+                    scenario: "HPE unchanged",
+                    input: "HPE",
+                    expect: false,
+                },
+                Check {
+                    scenario: "unknown unchanged",
+                    input: "unknown",
+                    expect: false,
+                },
+            ],
+            |vendor| {
+                let mut machine = host_machine();
+                machine
+                    .status
+                    .hardware_info
+                    .as_mut()
+                    .and_then(|hardware| hardware.dmi_data.as_mut())
+                    .expect("fixture host has DMI data")
+                    .sys_vendor = vendor.to_string();
+                machine.needs_bmc_unlock_for_uefi_setup()
+            },
+        );
+    }
+
     #[derive(Clone, Copy)]
     struct DpfProvisioningInput {
         dpf_enabled_at_site: bool,
@@ -5331,6 +5417,60 @@ mod tests {
                 )),
             }
         );
+    }
+
+    #[test]
+    fn rack_component_shortages_are_not_host_health() {
+        use health_report::{
+            HealthAlertClassification, HealthProbeId, HealthProbeSuccess, HealthReportApplyMode,
+        };
+
+        for mode in [HealthReportApplyMode::Merge, HealthReportApplyMode::Replace] {
+            let mut host = managed_host_state_snapshot();
+            host.host_snapshot.health_reports = HealthReportSources::default();
+            let missing = health_report::HealthProbeAlert {
+                id: HealthProbeId::missing_rack_component(),
+                target: Some("switch".to_string()),
+                ..alert_with_classifications(vec![HealthAlertClassification::hardware()])
+            };
+            let other = health_report::HealthProbeAlert {
+                id: "RackLeak".parse().unwrap(),
+                ..alert_with_classifications(vec![HealthAlertClassification::prevent_allocations()])
+            };
+            let mut report = health_report_with_alerts(vec![missing.clone(), other.clone()]);
+            report.successes.push(HealthProbeSuccess {
+                id: "RackProbe".parse().unwrap(),
+                target: None,
+            });
+            let mut sources = HealthReportSources::default();
+            match mode {
+                HealthReportApplyMode::Merge => {
+                    sources.merges.insert(report.source.clone(), report.clone());
+                }
+                HealthReportApplyMode::Replace => sources.replace = Some(report.clone()),
+            }
+            host.rack_health_overrides = Some(sources.clone());
+            // A snapshot produced by the previous implementation already has this alert.
+            host.aggregate_health = report.clone();
+            host.derive_aggregate_health(HostHealthConfig::default());
+            assert!(!host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+            assert!(host.aggregate_health.alerts.contains(&other), "{mode:?}");
+            assert!(
+                host.aggregate_health
+                    .successes
+                    .contains(&report.successes[0])
+            );
+            assert_eq!(host.rack_health_overrides, Some(sources));
+
+            // Filtering rack data must not remove an identically named host-owned alert.
+            let host_report = health_report_with_alerts(vec![missing.clone()]);
+            host.host_snapshot
+                .health_reports
+                .merges
+                .insert(host_report.source.clone(), host_report);
+            host.derive_aggregate_health(HostHealthConfig::default());
+            assert!(host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+        }
     }
 
     fn alert_with_classifications(

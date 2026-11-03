@@ -52,8 +52,8 @@ pub(in crate::tests) mod tests {
     //   B = auto_generate_missing_sku (F=manual, T=auto-generate)
     //
     // When allow_allocation_on_validation_failure=true, machines with assigned
-    // SKUs in failed states (SkuVerificationFailed or SkuMissing) can transition
-    // back to Ready/MachineValidation instead of staying blocked.
+    // SKUs can proceed to Ready/MachineValidation despite SKU mismatches or
+    // missing SKU records.
     //
     // ================================================================================
     //
@@ -92,7 +92,7 @@ pub(in crate::tests) mod tests {
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
     // │5.1 │ F │ * │ Re-verify mismatched SKU    │ → VerificationFailed       │ test_stays_in_failed_when_verification_fails             │
     // │5.2 │ F │ * │ Replace SKU, no re-verify   │ Stays Ready (no validation)│ test_continues_to_ready_when_verification_fails          │
-    // │5.3 │ T │ * │ SkuVerificationFailed state │ Escapes → Ready            │ test_allow_allocation_escapes_from_sku_failed            │
+    // │5.3 │ T │ * │ Assigned SKU mismatches     │ → MachineValidation        │ test_allow_allocation_proceeds_despite_sku_mismatch      │
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
     // │ 6. SKU Auto-Matching Scenarios                                                                                                   │
     // ├────┼───┼───┼─────────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────┤
@@ -1673,28 +1673,33 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
-    /// Test 5.3: SkuVerificationFailed → Escapes to MachineValidation with allow_allocation_on_validation_failure=true
+    /// Test 5.3: A host with mismatched SKU hardware proceeds to machine validation.
     /// Conditions:
-    /// - allow_allocation_on_validation_failure = true (allow machines to escape from failed states)
-    /// - auto_generate_missing_sku = false
-    /// - machine has assigned SKU but verification would fail (hardware mismatch)
-    /// Expected: Machine escapes any potential SkuVerificationFailed state and proceeds directly to Ready
-    /// Note: With allow_allocation_on_validation_failure=true, the machine never actually stays in
-    /// SkuVerificationFailed state—it escapes immediately, so we just verify it reaches Ready.
+    /// - `allow_allocation_on_validation_failure = true`
+    /// - `auto_generate_missing_sku = false`
+    /// - the assigned SKU's CPU count does not match the host
+    /// Expected: one `VerifyingSku` iteration persists `RebootHost` with the
+    /// discovery validation ID and a validation run with `Discovery` context.
     #[crate::sqlx_test]
-    async fn test_allow_allocation_escapes_from_sku_failed(
+    async fn test_allow_allocation_proceeds_despite_sku_mismatch(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(pool.clone(), true, None, false).await;
 
-        // Create a SKU that will mismatch with the actual hardware
         let mut txn = pool.begin().await?;
-        let mismatched_sku: Sku = serde_json::from_str(SKU_DATA)?;
+        let mut mismatched_sku: Sku = serde_json::from_str(SKU_DATA)?;
+        mismatched_sku.components.cpus[0].count += 1;
         db::sku::create(&mut txn, &mismatched_sku).await?;
         txn.commit().await?;
 
-        // Create machine with the mismatched SKU
-        let managed_host_config = ManagedHostConfig::default();
+        let verifying_sku = ManagedHostState::BomValidating {
+            bom_validating_state: BomValidating::VerifyingSku(BomValidatingContext {
+                machine_validation_context: Some(MachineValidationContext::Discovery),
+                ..BomValidatingContext::default()
+            }),
+        };
+        let managed_host_config =
+            ManagedHostConfig::default().with_expected_state(verifying_sku.clone());
         let mut txn = pool.begin().await?;
         db::expected_machine::create(
             &mut txn,
@@ -1727,12 +1732,48 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host_with_config(&env, managed_host_config).await;
         let machine_id = mh.host().id;
 
-        // With allow_allocation_on_validation_failure=true, the machine should reach Ready state
-        // even though the SKU doesn't match the hardware (it would have failed verification
-        // if allow_allocation_on_validation_failure was false)
         let mut txn = pool.begin().await?;
         let machine = get_machine_by_id(&mut txn, &machine_id).await?;
-        assert_eq!(machine.current_state(), &ManagedHostState::Ready);
+        assert_eq!(machine.current_state(), &verifying_sku);
+        assert_eq!(machine.config.hw_sku.as_ref(), Some(&mismatched_sku.id));
+        assert!(machine.discovery_machine_validation_id.is_none());
+
+        let assigned_sku = db::sku::find(&mut txn, std::slice::from_ref(&mismatched_sku.id))
+            .await?
+            .pop()
+            .expect("assigned SKU should exist");
+        let actual_sku = db::sku::generate_sku_from_machine_at_version(
+            txn.as_mut(),
+            &machine_id,
+            assigned_sku.schema_version,
+        )
+        .await?;
+        // Both matching SKUs and allowed mismatches reach `RebootHost`;
+        // prove the mismatch first.
+        assert_eq!(
+            model::sku::diff_skus(&actual_sku, &assigned_sku),
+            ["Number of CPUs (1) does not match expected (2)"]
+        );
+        txn.commit().await?;
+
+        env.run_machine_state_controller_iteration().await;
+
+        let mut txn = pool.begin().await?;
+        let machine = get_machine_by_id(&mut txn, &machine_id).await?;
+        let validation_id = machine
+            .discovery_machine_validation_id
+            .expect("discovery validation ID should be persisted");
+        assert_eq!(
+            machine.current_state(),
+            &ManagedHostState::Validation {
+                validation_state: ValidationState::MachineValidation {
+                    machine_validation: MachineValidatingState::RebootHost { validation_id },
+                },
+            }
+        );
+        let validation = db::machine_validation::find_by_id(txn.as_mut(), &validation_id).await?;
+        assert_eq!(validation.machine_id, machine.id);
+        assert_eq!(validation.context.as_deref(), Some("Discovery"));
         txn.commit().await?;
 
         Ok(())
@@ -2222,6 +2263,29 @@ pub(in crate::tests) mod tests {
         assert_eq!(actual_sku_json, returned_sku_json);
         assert_eq!(actual_sku_json, expected_sku_json);
 
+        let mut invalid_sku = expected_sku.clone();
+        invalid_sku.device_type = Some("x".repeat(257));
+        let error = db::sku::replace(&mut txn, &invalid_sku)
+            .await
+            .expect_err("overlong device type must fail the SKU update");
+        let DatabaseError::Sqlx(annotated) = &error else {
+            panic!("expected SQLx update error, got {error:?}");
+        };
+        let source = annotated
+            .source
+            .as_database_error()
+            .expect("SKU update should retain the PostgreSQL error");
+        assert_eq!(source.code().as_deref(), Some("22001"));
+        assert!(annotated.to_string().contains("replace sku: update"));
+
+        let saved_sku = db::sku::find(&mut txn, std::slice::from_ref(&expected_sku.id))
+            .await?
+            .remove(0);
+        assert_eq!(
+            serde_json::ser::to_string_pretty(&saved_sku)?,
+            returned_sku_json
+        );
+
         Ok(())
     }
 
@@ -2475,6 +2539,37 @@ pub(in crate::tests) mod tests {
                 case.scenario
             );
         }
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_replace_sku_rejects_missing_target(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        let env = create_test_env(pool.clone()).await;
+        let sku_id = "missing-sku";
+        let sku: rpc::forge::Sku = serde_json::from_str(FULL_SKU_DATA)?;
+        let error = env
+            .api
+            .replace_sku(tonic::Request::new(rpc::forge::Sku {
+                id: sku_id.to_string(),
+                schema_version: CURRENT_SKU_VERSION,
+                ..sku
+            }))
+            .await
+            .expect_err("missing replacement target should be rejected");
+
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.message(), format!("SKU not found: {sku_id}"));
+        assert!(
+            db::sku::find(pool.acquire().await?.as_mut(), &[sku_id])
+                .await?
+                .is_empty(),
+            "replacement must not create the missing SKU"
+        );
 
         Ok(())
     }

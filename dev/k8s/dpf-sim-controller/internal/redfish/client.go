@@ -56,6 +56,24 @@ var ErrTaskNotFound = errors.New("redfish task not found")
 // other than 202 Accepted. The real operator moves the DPU to Error on this.
 var ErrUpdateRejected = errors.New("redfish SimpleUpdate rejected")
 
+// TaskKind distinguishes a Task resource from a task monitor's action response.
+type TaskKind string
+
+const (
+	// TaskResource requires TaskState in an HTTP 200 response.
+	TaskResource TaskKind = "resource"
+	// TaskMonitor accepts an action response or an explicit TaskState on HTTP 200.
+	TaskMonitor TaskKind = "monitor"
+)
+
+// TaskReference keeps the URI and its response semantics together across polls.
+type TaskReference struct {
+	// Path includes the escaped path and query on the configured BMC origin.
+	Path string `json:"path"`
+	// Kind records whether Path came from the Task body or Location header.
+	Kind TaskKind `json:"kind"`
+}
+
 // Task is the part of a Redfish Task resource the simulator reads.
 type Task struct {
 	State           string
@@ -97,31 +115,34 @@ func New(baseURL, user, password string, timeout time.Duration) *Client {
 }
 
 // SimpleUpdate asks the BMC to install imageURI to the DPU OS and returns the
-// path of its Task resource, or its task monitor when the body names no
+// reference to its Task resource, or its task monitor when the body names no
 // resource. A 202 response is required.
-func (c *Client) SimpleUpdate(ctx context.Context, imageURI string) (string, error) {
+func (c *Client) SimpleUpdate(ctx context.Context, imageURI string) (TaskReference, error) {
 	body, err := json.Marshal(map[string]any{
 		"TransferProtocol": "HTTP",
 		"ImageURI":         imageURI,
 		"Targets":          []string{dpuOSTarget},
 	})
 	if err != nil {
-		return "", err
+		return TaskReference{}, err
 	}
 	resp, data, err := c.do(ctx, http.MethodPost, simpleUpdatePath, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return TaskReference{}, err
 	}
 	if resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("%w: %s: %s", ErrUpdateRejected, resp.Status, snippet(data))
+		return TaskReference{}, fmt.Errorf("%w: %s: %s", ErrUpdateRejected, resp.Status, snippet(data))
 	}
 	return taskPath(resp, data)
 }
 
-// GetTask reads the task resource or monitor at path, as returned by SimpleUpdate.
-// Monitor 202 means running and 204 means completed. A 200 response must
-// contain TaskState, so a malformed resource cannot be mistaken for success.
-func (c *Client) GetTask(ctx context.Context, path string) (Task, error) {
+// GetTask polls a reference returned by SimpleUpdate. HTTP 202 means running
+// and 204 means completed. Monitor 200 honours an explicit TaskState and
+// rejects an empty or non-string one. Without TaskState it completes without
+// interpreting the action body. Resource 200 requires TaskState. Redfish
+// error 404s are TaskNotFound.
+func (c *Client) GetTask(ctx context.Context, reference TaskReference) (Task, error) {
+	path := reference.Path
 	resp, data, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return Task{}, err
@@ -132,6 +153,17 @@ func (c *Client) GetTask(ctx context.Context, path string) (Task, error) {
 	case http.StatusNoContent:
 		return Task{State: TaskStateCompleted, PercentComplete: 100}, nil
 	case http.StatusOK:
+		if reference.Kind == TaskMonitor {
+			// An action response without TaskState completes. A present but
+			// empty or non-string TaskState is decoded below and rejected.
+			var fields map[string]json.RawMessage
+			if json.Unmarshal(data, &fields) != nil {
+				return Task{State: TaskStateCompleted, PercentComplete: 100}, nil
+			}
+			if _, ok := fields["TaskState"]; !ok {
+				return Task{State: TaskStateCompleted, PercentComplete: 100}, nil
+			}
+		}
 		// A task resource supplies its explicit lifecycle state below.
 	default:
 		if resp.StatusCode == http.StatusNotFound {
@@ -187,25 +219,31 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 }
 
 // taskPath prefers the durable Task resource in the response body. Location
-// is a task monitor, whose 202/204 responses are handled by GetTask when the
-// body supplies neither @odata.id nor Id.
-func taskPath(resp *http.Response, data []byte) (string, error) {
+// is a task monitor when the body supplies neither @odata.id nor Id.
+func taskPath(resp *http.Response, data []byte) (TaskReference, error) {
 	var body struct {
 		ODataID string `json:"@odata.id"`
 		ID      string `json:"Id"`
 	}
+	reference := ""
+	kind := TaskResource
 	if err := json.Unmarshal(data, &body); err == nil {
-		if body.ODataID != "" {
-			return taskURI(body.ODataID)
-		}
-		if body.ID != "" {
-			return tasksPath + "/" + url.PathEscape(body.ID), nil
+		reference = body.ODataID
+		if reference == "" && body.ID != "" {
+			reference = tasksPath + "/" + url.PathEscape(body.ID)
 		}
 	}
-	if loc := resp.Header.Get("Location"); loc != "" {
-		return taskURI(loc)
+	if reference == "" {
+		reference, kind = resp.Header.Get("Location"), TaskMonitor
 	}
-	return "", fmt.Errorf("SimpleUpdate accepted but response names no task: %s", snippet(data))
+	if reference == "" {
+		return TaskReference{}, fmt.Errorf("SimpleUpdate accepted but response names no task: %s", snippet(data))
+	}
+	path, err := taskURI(reference)
+	if err != nil {
+		return TaskReference{}, err
+	}
+	return TaskReference{Path: path, Kind: kind}, nil
 }
 
 // taskURI retains escaped path and query components but always uses the

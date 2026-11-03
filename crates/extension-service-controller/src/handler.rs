@@ -64,6 +64,7 @@ struct DesiredRegistration {
     family: Option<ServiceVpcAddressFamily>,
     had_interface_mac: bool,
     has_references: bool,
+    capacity_draining: bool,
 }
 
 /// State handler for DPF Helm chart extension services.
@@ -173,6 +174,7 @@ async fn reconcile_registration(
             service_id,
             &desired.resources.service,
             dpf_sdk.as_ref(),
+            true,
         )
         .await);
     }
@@ -774,6 +776,7 @@ async fn reconcile_registration(
             service_id,
             &desired.resources.service,
             dpf_sdk.as_ref(),
+            !desired.capacity_draining,
         )
         .await
         .requeue_if_waiting(parent_created));
@@ -785,6 +788,7 @@ async fn reconcile_registration(
         &desired.resources.service,
         existing,
         dpf_sdk.as_ref(),
+        !desired.capacity_draining,
     )
     .await)
 }
@@ -797,11 +801,20 @@ async fn create_or_verify_dpu_service(
     service_id: ExtensionServiceId,
     desired: &DetachedDpuServiceDefinition,
     dpf_sdk: &dyn DpfOperations,
+    ready_allowed: bool,
 ) -> StateHandlerOutcome<ExtensionServiceLifecycleState> {
     match dpf_sdk.create_dpu_service(desired).await {
         Ok(created) => match verify_dpu_service_ownership(&created, service_id, desired) {
             Ok(()) => {
-                reconcile_observed_dpu_service(mode, service_id, desired, &created, dpf_sdk).await
+                reconcile_observed_dpu_service(
+                    mode,
+                    service_id,
+                    desired,
+                    &created,
+                    dpf_sdk,
+                    ready_allowed,
+                )
+                .await
             }
             Err(error) => permanent_failure(
                 service_id,
@@ -821,7 +834,12 @@ async fn create_or_verify_dpu_service(
                     ),
                     Ok(()) => {
                         reconcile_observed_dpu_service(
-                            mode, service_id, desired, &existing, dpf_sdk,
+                            mode,
+                            service_id,
+                            desired,
+                            &existing,
+                            dpf_sdk,
+                            ready_allowed,
                         )
                         .await
                     }
@@ -858,15 +876,10 @@ async fn reconcile_observed_dpu_service(
     desired: &DetachedDpuServiceDefinition,
     existing: &DpuServiceObservation,
     dpf_sdk: &dyn DpfOperations,
+    ready_allowed: bool,
 ) -> StateHandlerOutcome<ExtensionServiceLifecycleState> {
     if dpu_service_mutable_fields_match(desired, existing) {
-        // Creating and Updating complete only after every owned field converges.
-        return match mode {
-            RegistrationReconcileMode::Creating | RegistrationReconcileMode::Updating => {
-                StateHandlerOutcome::transition(ExtensionServiceLifecycleState::Ready)
-            }
-            RegistrationReconcileMode::Ready => StateHandlerOutcome::do_nothing(),
-        };
+        return converged_dpu_service_outcome(mode, ready_allowed);
     }
 
     // A durable Updating barrier makes mutable repair visible before its side effect.
@@ -890,7 +903,7 @@ async fn reconcile_observed_dpu_service(
                 "DPF DPUService finalization began during update; retrying".to_string(),
             ),
             Ok(()) if dpu_service_mutable_fields_match(desired, &patched) => {
-                StateHandlerOutcome::transition(ExtensionServiceLifecycleState::Ready)
+                converged_dpu_service_outcome(mode, ready_allowed)
             }
             Ok(()) => StateHandlerOutcome::wait(
                 "DPUService update response has not converged; retrying".to_string(),
@@ -902,6 +915,40 @@ async fn reconcile_observed_dpu_service(
             ),
         },
         Err(error) => dpf_failure_outcome(service_id, "DPUService update failed; retrying", error),
+    }
+}
+
+/// Returns the lifecycle outcome for a converged DPUService while retaining higher-slot
+/// DPUServiceInterface and DPUServiceChain resources during a capacity drain.
+fn converged_dpu_service_outcome(
+    mode: RegistrationReconcileMode,
+    ready_allowed: bool,
+) -> StateHandlerOutcome<ExtensionServiceLifecycleState> {
+    // A reduced slot count cannot become Ready while persisted service interfaces still require
+    // higher-slot DPUServiceInterface and DPUServiceChain resources.
+    if !ready_allowed {
+        return match mode {
+            // Leave Ready so later reconciliation cannot delete higher-slot
+            // DPUServiceInterface and DPUServiceChain resources.
+            RegistrationReconcileMode::Ready => {
+                StateHandlerOutcome::transition(ExtensionServiceLifecycleState::Updating)
+            }
+            // Creating and Updating already block deletion, so wait for service-interface reclamation.
+            RegistrationReconcileMode::Creating | RegistrationReconcileMode::Updating => {
+                StateHandlerOutcome::wait(
+                    "service-VPC slot capacity is draining retained endpoints; retrying"
+                        .to_string(),
+                )
+            }
+        };
+    }
+
+    // Creating and Updating complete only after every owned field converges.
+    match mode {
+        RegistrationReconcileMode::Creating | RegistrationReconcileMode::Updating => {
+            StateHandlerOutcome::transition(ExtensionServiceLifecycleState::Ready)
+        }
+        RegistrationReconcileMode::Ready => StateHandlerOutcome::do_nothing(),
     }
 }
 
@@ -919,6 +966,28 @@ impl From<DatabaseError> for LoadDesiredRegistrationError {
     fn from(error: DatabaseError) -> Self {
         Self::Database(error)
     }
+}
+
+/// Extends configured slot inventory through the highest persisted service-interface `slot_index`
+/// and reports whether the registration must remain non-Ready until reclamation.
+fn effective_service_vpc_slots(
+    configured: carbide_dpf::ServiceVpcSlots,
+    highest_retained_slot: Option<u32>,
+) -> Result<(carbide_dpf::ServiceVpcSlots, bool), DpfError> {
+    let retained_count = highest_retained_slot
+        .map(|slot| {
+            slot.checked_add(1).ok_or_else(|| {
+                DpfError::ConfigError(format!(
+                    "retained service-VPC slot {slot} cannot be represented as a slot count"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok((
+        carbide_dpf::ServiceVpcSlots::new(configured.len().max(retained_count))?,
+        retained_count > configured.len(),
+    ))
 }
 
 /// Loads the stable V1 definition, attachment state, and MAC identity under the service row lock.
@@ -958,6 +1027,23 @@ async fn load_desired_registration(
         db::extension_service::find_interface_macs(txn.as_mut(), service_id).await?;
     let had_interface_mac = !existing_macs.is_empty();
 
+    // Retain slot-specific DPUServiceInterface and DPUServiceChain resources above a reduced
+    // configured count until every endpoint using them is gone. This lookup intentionally runs
+    // during Ready reconciliation because persisted endpoints may be the only evidence that a
+    // higher-slot resource must be repaired rather than deleted. Simply ignoring higher observed
+    // resources would leave them outside normal desired reconciliation (operationally orphaned
+    // until owner-labelled service deletion discovers them) and could leave them pointing at fixed
+    // slot resources removed during DPU reprovisioning. Retaining every higher-slot resource
+    // indefinitely would avoid the database scan but prevent convergence to a reduced inventory.
+    // A later count increase safely recreates released resources from their deterministic names.
+    // Replace this scan only with durable retained-slot indexing or an explicit configuration
+    // contract that rejects slot-count reductions.
+    let highest_retained_slot =
+        db::instance::highest_retained_service_vpc_slot(&mut txn, service_id).await?;
+    let (effective_service_vpc_slots, capacity_draining) =
+        effective_service_vpc_slots(service_vpc_slots, highest_retained_slot)
+            .map_err(|error| LoadDesiredRegistrationError::InvalidData(error.to_string()))?;
+
     // The MVP admits one ordinal; persistence and allocation still retain the ordinal explicitly.
     if service.service_vpc_interfaces.len() > 1 {
         return Err(LoadDesiredRegistrationError::InvalidData(
@@ -985,7 +1071,7 @@ async fn load_desired_registration(
             &data,
             family,
             mac,
-            service_vpc_slots,
+            effective_service_vpc_slots,
         )
         .map_err(|error| LoadDesiredRegistrationError::InvalidData(error.to_string()))?,
         None => ServiceVpcRegistrationResources {
@@ -1028,7 +1114,7 @@ async fn load_desired_registration(
                 &data,
                 alternate_family,
                 mac,
-                service_vpc_slots,
+                effective_service_vpc_slots,
             )
             .map_err(|error| LoadDesiredRegistrationError::InvalidData(error.to_string()))?;
             replacement_service_interfaces.extend(projection.interfaces.into_iter().take(1));
@@ -1043,6 +1129,7 @@ async fn load_desired_registration(
         family,
         had_interface_mac: had_interface_mac || network_identity.is_some(),
         has_references,
+        capacity_draining,
     })
 }
 
@@ -1650,6 +1737,38 @@ fn is_permanent_dpf_error(error: &DpfError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies a reduced configured count retains every slot through the highest persisted
+    /// `slot_index` because Ready would otherwise authorize deleting its DPUServiceChain.
+    #[test]
+    fn effective_slots_preserve_retained_parent_during_capacity_drain() {
+        // Model one configured slot and a highest persisted service-interface `slot_index` of three.
+        let configured = carbide_dpf::ServiceVpcSlots::new(1).expect("valid configured slots");
+
+        // Derive the `ServiceVpcSlots` used by registration reconciliation.
+        let (effective, draining) =
+            effective_service_vpc_slots(configured, Some(3)).expect("retained slot is supported");
+
+        // The effective inventory contains slots zero through three and reports that Ready remains blocked.
+        assert_eq!(effective.len(), 4);
+        assert!(draining);
+    }
+
+    /// Verifies a converged Updating registration stays non-Ready while persisted service interfaces
+    /// require slots above configured capacity, preventing deletion of their DPUServiceInterface and
+    /// DPUServiceChain resources.
+    #[test]
+    fn converged_updating_registration_waits_during_capacity_drain() {
+        // Pass `Updating` with `ready_allowed` false after DPUService fields have converged.
+        let outcome = converged_dpu_service_outcome(RegistrationReconcileMode::Updating, false);
+
+        // Reconciliation remains waiting until service-interface reclamation permits the slot shrink.
+        assert!(matches!(
+            outcome,
+            StateHandlerOutcome::Wait { reason, .. }
+                if reason == "service-VPC slot capacity is draining retained endpoints; retrying"
+        ));
+    }
 
     /// Verifies Kubernetes 409 responses remain retryable because a refreshed observation can
     /// make the same operation safe.

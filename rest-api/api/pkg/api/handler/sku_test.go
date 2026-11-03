@@ -1864,6 +1864,27 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 			},
 		},
 		{
+			name: "rejects tenant admin before Core dispatch",
+			run: func(t *testing.T) {
+				fixture := newSkuManagementFixture(t, []string{authz.TenantAdminRole})
+				skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
+				before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				description := "updated description"
+
+				rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
+					Description: &description,
+				}, fixture.updateHandler.Handle)
+
+				require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+				assert.JSONEq(t, `{"source":"","message":"User does not have Provider Admin role with org","data":null}`, rec.Body.String())
+				assert.Empty(t, fixture.requests)
+				after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, before, after, "denied PATCH must preserve the row and Updated")
+			},
+		},
+		{
 			name: "rejects inverted storage size range",
 			run: func(t *testing.T) {
 				fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
@@ -1941,86 +1962,194 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 	}
 }
 
-func TestDeleteSkuHandler(t *testing.T) {
-	t.Run("proxies delete", func(t *testing.T) {
-		fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+func TestDeleteSkuHandler_Handle(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "proxies delete",
+			run: func(t *testing.T) {
+				fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
 
-		rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
-		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-		require.Len(t, fixture.requests, 1)
-		assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
+				rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
+				require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+				require.Len(t, fixture.requests, 1)
+				assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
 
-		var coreReq corev1.SkuIdList
-		require.NoError(t, protojson.Unmarshal(fixture.requests[0].RequestJSON, &coreReq))
-		assert.Equal(t, []string{"sku-1"}, coreReq.Ids)
-		_, err := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession).Get(context.Background(), nil, "sku-1")
-		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
-	})
+				var coreReq corev1.SkuIdList
+				require.NoError(t, protojson.Unmarshal(fixture.requests[0].RequestJSON, &coreReq))
+				assert.Equal(t, []string{"sku-1"}, coreReq.Ids)
+				_, err := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession).Get(context.Background(), nil, "sku-1")
+				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			},
+		},
+		{
+			name: "rejects SKU with associated machines",
+			run: func(t *testing.T) {
+				// Association rejection must not depend on Site readiness or client lookup.
+				for _, tc := range []struct {
+					name    string
+					prepare func(*testing.T, *skuManagementFixture)
+				}{
+					{name: "Registered Site"},
+					{name: "unregistered Site", prepare: func(t *testing.T, fixture *skuManagementFixture) {
+						_, err := cdbm.NewSiteDAO(fixture.deleteHandler.dbSession).Update(context.Background(), nil, cdbm.SiteUpdateInput{
+							SiteID: uuid.MustParse(fixture.siteID),
+							Status: cutil.GetPtr(cdbm.SiteStatusPending),
+						})
+						require.NoError(t, err)
+					}},
+					{name: "nil client pool", prepare: func(t *testing.T, fixture *skuManagementFixture) {
+						fixture.deleteHandler.scp = nil
+					}},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+						if tc.prepare != nil {
+							tc.prepare(t, fixture)
+						}
+						skuDAO := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession)
+						before, err := skuDAO.Update(context.Background(), nil, cdbm.SkuUpdateInput{
+							SkuID:                "sku-1",
+							AssociatedMachineIds: []string{"machine-1"},
+						})
+						require.NoError(t, err)
 
-	t.Run("rejects SKU with associated machines", func(t *testing.T) {
-		fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
-		skuDAO := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession)
-		_, err := skuDAO.Update(context.Background(), nil, cdbm.SkuUpdateInput{
-			SkuID:                "sku-1",
-			AssociatedMachineIds: []string{"machine-1"},
-		})
-		require.NoError(t, err)
+						rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
 
-		rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		assert.JSONEq(t, `{"source":"","message":"SKU is associated with machines and cannot be deleted","data":null}`, rec.Body.String())
-		assert.Empty(t, fixture.requests)
+						require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+						assert.JSONEq(t, `{"source":"","message":"SKU is associated with machines and cannot be deleted","data":null}`, rec.Body.String())
+						assert.Empty(t, fixture.requests)
+						after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						assert.Equal(t, before, after)
+					})
+				}
+			},
+		},
+		{
+			name: "rejects another provider's SKU without revealing associations",
+			run: func(t *testing.T) {
+				// The caller belongs to the route org, but the SKU belongs to another provider.
+				for _, tc := range []struct {
+					name         string
+					associations []string
+				}{
+					{name: "without associations"},
+					{name: "with associations", associations: []string{"machine-1"}},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+						dbSession := fixture.deleteHandler.dbSession
+						skuDAO := cdbm.NewSkuDAO(dbSession)
+						if tc.associations != nil {
+							_, err := skuDAO.Update(context.Background(), nil, cdbm.SkuUpdateInput{
+								SkuID:                "sku-1",
+								AssociatedMachineIds: tc.associations,
+							})
+							require.NoError(t, err)
+						}
+						before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						fixture.org = "other-org"
+						fixture.user = common.TestBuildUser(t, dbSession, uuid.NewString(), fixture.org, []string{authz.ProviderAdminRole})
+						common.TestBuildInfrastructureProvider(t, dbSession, "Other Provider", fixture.org, fixture.user)
 
-		saved, err := skuDAO.Get(context.Background(), nil, "sku-1")
-		require.NoError(t, err)
-		assert.Equal(t, []string{"machine-1"}, saved.AssociatedMachineIds)
-	})
+						rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
 
-	t.Run("removes stale record when Core returns not found", func(t *testing.T) {
-		deleteErr := tp.NewApplicationErrorWithCause(
-			"SKU not found",
-			swe.ErrTypeNICoObjectNotFound,
-			status.Error(codes.NotFound, "SKU not found"),
-		)
-		fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
-			deleteError: deleteErr,
-		})
+						require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+						assert.JSONEq(t, `{"source":"","message":"Site specified in request doesn't belong to current org's Provider","data":null}`, rec.Body.String())
+						assert.Empty(t, fixture.requests)
+						after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						assert.Equal(t, before, after)
+					})
+				}
+			},
+		},
+		{
+			name: "rejects non-admin before revealing associations",
+			run: func(t *testing.T) {
+				fixture := newSkuManagementFixture(t, []string{authz.TenantAdminRole})
+				skuDAO := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession)
+				before, err := skuDAO.Update(context.Background(), nil, cdbm.SkuUpdateInput{
+					SkuID:                "sku-1",
+					AssociatedMachineIds: []string{"machine-1"},
+				})
+				require.NoError(t, err)
 
-		rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
-		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-		require.Len(t, fixture.requests, 1)
-		assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
-		_, err := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession).Get(context.Background(), nil, "sku-1")
-		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
-	})
+				rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
 
-	t.Run("preserves record when Core delete fails", func(t *testing.T) {
-		deleteErr := tp.NewApplicationErrorWithCause(
-			"Core unavailable",
-			swe.ErrTypeNICoUnavailable,
-			status.Error(codes.Unavailable, "Core unavailable"),
-		)
-		fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
-			deleteError: deleteErr,
-		})
+				require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+				assert.JSONEq(t, `{"source":"","message":"User does not have Provider Admin role with org","data":null}`, rec.Body.String())
+				assert.Empty(t, fixture.requests)
+				after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, before, after)
+			},
+		},
+		{
+			name: "removes stale record when Core returns not found",
+			run: func(t *testing.T) {
+				deleteErr := tp.NewApplicationErrorWithCause(
+					"SKU not found",
+					swe.ErrTypeNICoObjectNotFound,
+					status.Error(codes.NotFound, "SKU not found"),
+				)
+				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+					deleteError: deleteErr,
+				})
 
-		rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "Core unavailable")
-		require.Len(t, fixture.requests, 1)
-		assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
-		_, err := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession).Get(context.Background(), nil, "sku-1")
-		assert.NoError(t, err)
-	})
+				rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
+				require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+				require.Len(t, fixture.requests, 1)
+				assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
+				_, err := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession).Get(context.Background(), nil, "sku-1")
+				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			},
+		},
+		{
+			name: "preserves record when Core delete fails",
+			run: func(t *testing.T) {
+				deleteErr := tp.NewApplicationErrorWithCause(
+					"Core unavailable",
+					swe.ErrTypeNICoUnavailable,
+					status.Error(codes.Unavailable, "Core unavailable"),
+				)
+				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+					deleteError: deleteErr,
+				})
 
-	t.Run("returns not found for unsaved SKU", func(t *testing.T) {
-		fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+				skuDAO := cdbm.NewSkuDAO(fixture.deleteHandler.dbSession)
+				before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
 
-		rec := fixture.request(t, http.MethodDelete, "missing-sku", nil, fixture.deleteHandler.Handle)
-		require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
-		assert.JSONEq(t, `{"source":"","message":"Could not find SKU with the specified ID","data":null}`, rec.Body.String())
-		assert.Empty(t, fixture.requests)
-	})
+				rec := fixture.request(t, http.MethodDelete, "sku-1", nil, fixture.deleteHandler.Handle)
+				require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "Core unavailable")
+				require.Len(t, fixture.requests, 1)
+				assert.Equal(t, corev1.Forge_DeleteSku_FullMethodName, fixture.requests[0].FullMethod)
+				after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, before, after)
+			},
+		},
+		{
+			name: "returns not found for unsaved SKU",
+			run: func(t *testing.T) {
+				fixture := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+
+				rec := fixture.request(t, http.MethodDelete, "missing-sku", nil, fixture.deleteHandler.Handle)
+				require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+				assert.JSONEq(t, `{"source":"","message":"Could not find SKU with the specified ID","data":null}`, rec.Body.String())
+				assert.Empty(t, fixture.requests)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, tc.run)
+	}
 }
 
 // skuQueryContextHook observes the context used for SKU projection queries.

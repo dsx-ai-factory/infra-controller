@@ -25,14 +25,14 @@ use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId}
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    ActionError, Callbacks, HostMachineInfo, HostnameQuerying, MachineInfo, NvueState,
-    POWER_CYCLE_DELAY, ResourceResetType,
+    ActionError, Callbacks, DeviceEffect, HostMachineInfo, HostnameQuerying, MachineInfo,
+    NvueState, POWER_CYCLE_DELAY, ResourceResetType,
 };
 use nv_redfish::schema::resource::PowerState;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcDhcpRecovery, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
@@ -48,6 +48,7 @@ fn abandon_nvos_dhcp_on_power_change(actions: &mut VecDeque<Action>) {
 #[derive(Debug)]
 struct SwitchLiveState {
     power_state: PowerState,
+    reboot_generation: u64,
     bmc_ip: Option<Ipv4Addr>,
     nvos_ip: Option<Ipv4Addr>,
     ipmi_port: Option<u16>,
@@ -61,6 +62,7 @@ impl SwitchLiveState {
     fn new(fsm: &SwitchFsm) -> Self {
         Self {
             power_state: fsm.power_state(),
+            reboot_generation: 0,
             bmc_ip: None,
             nvos_ip: None,
             ipmi_port: None,
@@ -98,6 +100,24 @@ impl Callbacks for SwitchCallbacks {
         self.set_power_state(reset_type)
     }
 
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        if !matches!(&effect, DeviceEffect::ResetBmcToDefaults(_)) {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "unsupported device effect"
+            )));
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.mailbox
+            .send(SwitchMessage::Bmc(BmcCommand::DeviceEffect {
+                effect,
+                reply: Some(reply),
+            }))
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
     fn state_refresh_indication(&self) {
         let _ = self
             .mailbox
@@ -126,8 +146,11 @@ pub(crate) struct SwitchActor {
     /// NVOS runs, and the state NICo's password rotation reaches. `None` for
     /// a hardware profile without one, which only tests configure.
     nvos: Option<Nvos>,
+    nvos_route_owner: Uuid,
     _bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
+    bmc_state: Option<bmc_mock::BmcState<SwitchCallbacks>>,
     bmc_dhcp_info: Option<DhcpResponseInfo>,
+    bmc_recovery: BmcDhcpRecovery,
     fsm: SwitchFsm,
     actions: VecDeque<Action>,
     /// Spreads a fleet that starts together over the idle interval.
@@ -173,13 +196,16 @@ impl SwitchActor {
             mat_id: Uuid::new_v4(),
             machine_config_section,
             nvos: Nvos::for_switch(&host_info, bmc_injection.clone()),
+            nvos_route_owner: Uuid::new_v4(),
             host_info,
             app_context,
             config,
             live_state: Arc::new(RwLock::new(SwitchLiveState::new(&fsm))),
             bmc_injection,
             _bmc_mock: None,
+            bmc_state: None,
             bmc_dhcp_info: None,
+            bmc_recovery: Default::default(),
             fsm,
             actions: actions.into_iter().collect(),
             first_run_delay,
@@ -232,13 +258,16 @@ impl SwitchActor {
             mat_id: persisted.mat_id,
             machine_config_section,
             nvos,
+            nvos_route_owner: Uuid::new_v4(),
             host_info,
             app_context,
             config,
             live_state: Arc::new(RwLock::new(live_state)),
             bmc_injection,
             _bmc_mock: None,
+            bmc_state: None,
             bmc_dhcp_info: None,
+            bmc_recovery: Default::default(),
             fsm,
             actions: actions.into_iter().collect(),
             first_run_delay,
@@ -283,6 +312,25 @@ impl SwitchActor {
             }
             return ActorResult::Noop;
         }
+        if self.bmc_recovery.next_attempt_in().is_zero() {
+            let info = MachineInfo::Host(self.host_info.clone());
+            if let Some(info) = self
+                .bmc_recovery
+                .advance(
+                    &self.app_context.bmc_registry,
+                    &self.app_context.dhcp_client,
+                    DhcpRequestInfo {
+                        mac_address: self.host_info.bmc_mac_address,
+                        relay_address: self.config.bmc_dhcp_relay_address,
+                        vendor_class: vendor_class(&info, DhcpRequester::Bmc),
+                    },
+                )
+                .await
+            {
+                self.live_state.write().unwrap().bmc_ip = Some(info.ip_address);
+                self.bmc_dhcp_info = Some(info);
+            }
+        }
         if let Some(delay) = self.first_run_delay.take() {
             self.schedule_run(mailbox, delay);
             return ActorResult::Noop;
@@ -293,7 +341,10 @@ impl SwitchActor {
         } else {
             self.config.run_interval_idle
         };
-        self.schedule_run(mailbox, jitter_interval(sleep_duration));
+        self.schedule_run(
+            mailbox,
+            jitter_interval(sleep_duration).min(self.bmc_recovery.next_attempt_in()),
+        );
         ActorResult::Noop
     }
 
@@ -477,13 +528,17 @@ impl SwitchActor {
             live_state.bmc_persistence.restore(bmc_mock.state())?;
             live_state.bmc_persistence.attach(bmc_mock.state());
         }
+        self.bmc_state = Some(bmc_mock.state().clone());
+        self.update_live_state();
 
         let bmc_handle = {
-            self.app_context
-                .bmc_registry
-                .write()
-                .await
-                .insert(dhcp_info.ip_address.to_string(), bmc_mock.router().clone());
+            self.bmc_recovery
+                .mount(
+                    &self.app_context.bmc_registry,
+                    dhcp_info.ip_address,
+                    bmc_mock.router().clone(),
+                )
+                .await;
             bmc_mock.start().await?.map(Arc::new)
         };
 
@@ -510,6 +565,7 @@ impl SwitchActor {
     fn set_system_power(&mut self, request: ResourceResetType) -> Result<(), ActionError> {
         use ResourceResetType::*;
 
+        let was_powered = self.fsm.power_state() == PowerState::On;
         match request {
             On | ForceOn => self.fsm_event(Event::PowerOn),
             GracefulShutdown | ForceOff => self.fsm_event(Event::PowerOff),
@@ -520,6 +576,12 @@ impl SwitchActor {
                     request
                 )));
             }
+        }
+        if was_powered
+            && self.fsm.power_state() == PowerState::Off
+            && matches!(request, GracefulRestart | ForceRestart | PowerCycle)
+        {
+            self.live_state.write().unwrap().reboot_generation += 1;
         }
         self.update_live_state();
         Ok(())
@@ -547,6 +609,9 @@ impl SwitchActor {
         let mut state = self.live_state.write().unwrap();
         state.power_state = self.fsm.power_state();
         state.state = self.fsm.state_string();
+        if let Some(bmc) = &self.bmc_state {
+            bmc.system_state.set_power_state(state.power_state);
+        }
     }
 
     /// Answers NVUE at `nvos_ip`. A route a previous lease held moves in
@@ -555,14 +620,16 @@ impl SwitchActor {
     /// straight from the old lease to the new.
     async fn mount_nvos(&self, nvos_ip: Ipv4Addr) {
         let previous = self.live_state.read().unwrap().nvos_ip;
-        {
-            let mut registry = self.app_context.bmc_registry.write().await;
-            if let Some(previous) = previous.filter(|previous| *previous != nvos_ip) {
-                registry.remove(&previous.to_string());
-            }
-            if let Some(nvos) = &self.nvos {
-                registry.insert(nvos_ip.to_string(), nvos.router.clone());
-            }
+        if let Some(nvos) = &self.nvos {
+            self.app_context
+                .bmc_registry
+                .mount(
+                    self.nvos_route_owner,
+                    previous,
+                    nvos_ip,
+                    nvos.router.clone(),
+                )
+                .await;
         }
         self.live_state.write().unwrap().nvos_ip = Some(nvos_ip);
     }
@@ -574,9 +641,8 @@ impl SwitchActor {
         if let Some(nvos_ip) = nvos_ip {
             self.app_context
                 .bmc_registry
-                .write()
-                .await
-                .remove(&nvos_ip.to_string());
+                .unmount(self.nvos_route_owner, nvos_ip)
+                .await;
         }
     }
 }
@@ -617,6 +683,19 @@ impl ActorCallbacks<SwitchMessage> for SwitchActor {
                     let _ = reply.send(result);
                 }
             }
+            SwitchMessage::Bmc(BmcCommand::DeviceEffect { effect, reply }) => {
+                let result = match effect {
+                    DeviceEffect::ResetBmcToDefaults(update) => {
+                        self.bmc_recovery.reset(update).await
+                    }
+                    DeviceEffect::AuxPowerCycle => Err(ActionError::BadRequest(eyre::eyre!(
+                        "unsupported device effect"
+                    ))),
+                };
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                }
+            }
             SwitchMessage::Bmc(BmcCommand::StateRefreshIndication) => {
                 self.update_live_state();
             }
@@ -641,6 +720,17 @@ struct SwitchActorHandle {
 pub(crate) struct SwitchHandle(Arc<SwitchActorHandle>);
 
 impl SwitchHandle {
+    /// Observes live BMC effects without contacting its leased address.
+    /// Returns None when the live BMC resource state is unavailable.
+    pub(crate) fn bmc_effect_snapshot(&self) -> Option<bmc_mock::persistence::BmcEffectSnapshot> {
+        self.0
+            .live_state
+            .read()
+            .unwrap()
+            .bmc_persistence
+            .effect_snapshot()
+    }
+
     /// A handle for `host_info` with no actor behind it, already holding an
     /// NVOS lease when `nvos_ip` is given.
     #[cfg(test)]
@@ -823,6 +913,10 @@ impl SwitchHandle {
     pub(crate) fn nvos_ip(&self) -> Option<Ipv4Addr> {
         self.0.live_state.read().unwrap().nvos_ip
     }
+
+    pub(crate) fn reboot_generation(&self) -> u64 {
+        self.0.live_state.read().unwrap().reboot_generation
+    }
 }
 
 #[cfg(test)]
@@ -972,6 +1066,120 @@ mod tests {
         actor.unmount_nvos().await;
         assert_eq!(routes(&actor, first, second).await, (false, false));
         assert_eq!(nvos_ip(&actor), None);
+    }
+
+    /// The exact Redfish reset used by decommission must reach the switch actor,
+    /// remove NVUE during the power drop and restart NVOS DHCP after the timer.
+    #[tokio::test]
+    async fn redfish_restarts_switch_nvos() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use serde_json::{Value, json};
+        use tower::ServiceExt;
+
+        const SYSTEM: &str = "/redfish/v1/Systems/System_0";
+        const RESET: &str = "/redfish/v1/Systems/System_0/Actions/ComputerSystem.Reset";
+
+        async fn system(router: &Router) -> Value {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(SYSTEM).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap()
+        }
+
+        for hardware in [
+            HardwareType::NvidiaSwitchNd5200Ld,
+            HardwareType::NvidiaSwitchN5700Ld,
+        ] {
+            let mut persisted = switch_tray_handle().persisted();
+            persisted.hw_type = hardware;
+            let mut actor = resumed(persisted);
+            // Begin at the same state as a switch with successful initial leases.
+            actor.first_run_delay = None;
+            actor.fsm_event(Event::Resume);
+            actor.fsm_event(Event::DhcpComplete);
+            actor.fsm_event(Event::DhcpComplete);
+            actor.actions.clear();
+            let nvos_ip = Ipv4Addr::new(192, 168, 128, 10);
+            actor.mount_nvos(nvos_ip).await;
+            let live = actor.live_state.clone();
+            let registry = actor.app_context.bmc_registry.clone();
+            let (runner, mailbox) = Actor::new();
+            let (router, bmc) = bmc_mock::machine_router(
+                &MachineInfo::Host(actor.host_info.clone()),
+                Arc::new(SwitchCallbacks {
+                    state: live.clone(),
+                    mailbox,
+                }),
+                actor.mat_id.to_string(),
+                false,
+                Default::default(),
+            );
+            actor.bmc_state = Some(bmc);
+            actor.update_live_state();
+            let task = tokio::spawn(runner.run(actor));
+            let before = system(&router).await;
+            assert_eq!(before["PowerState"], "On", "{hardware}");
+            assert_eq!(before["Actions"]["#ComputerSystem.Reset"]["target"], RESET);
+            let reset = || {
+                Request::builder()
+                    .method("POST")
+                    .uri(RESET)
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"ResetType": "ForceRestart"}).to_string()))
+                    .unwrap()
+            };
+            assert_eq!(
+                router.clone().oneshot(reset()).await.unwrap().status(),
+                StatusCode::OK
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let stopped = {
+                        let state = live.read().unwrap();
+                        state.power_state == PowerState::Off && state.nvos_ip.is_none()
+                    };
+                    if stopped && !registry.read().await.contains_key(&nvos_ip.to_string()) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("reset did not stop NVOS");
+            assert_eq!(system(&router).await["PowerState"], "Off");
+            assert_eq!(live.read().unwrap().reboot_generation, 1);
+            // A rejected restart while off must not manufacture a second reboot.
+            assert_eq!(
+                router.clone().oneshot(reset()).await.unwrap().status(),
+                StatusCode::BAD_REQUEST
+            );
+            tokio::time::timeout(POWER_CYCLE_DELAY + Duration::from_secs(2), async {
+                loop {
+                    if live.read().unwrap().power_state == PowerState::On {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("switch did not restart after its power cycle");
+            assert_eq!(system(&router).await["PowerState"], "On");
+            {
+                let state = live.read().unwrap();
+                assert_eq!(state.state, "NvosInit");
+                assert_eq!(state.nvos_ip, None);
+                assert_eq!(state.reboot_generation, 1);
+            }
+            // No API serves this unit fixture. NVOS stays unmounted pending DHCP.
+            // The Core integration test proves suppression acknowledgement and rebuild.
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
     }
 
     #[tokio::test]

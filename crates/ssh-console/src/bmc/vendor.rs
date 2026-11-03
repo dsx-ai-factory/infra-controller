@@ -37,6 +37,7 @@ pub enum BmcVendor {
 pub enum IpmiBmcVendor {
     Supermicro,
     NvidiaViking,
+    GigaComputing,
 }
 
 impl IpmiBmcVendor {
@@ -44,6 +45,7 @@ impl IpmiBmcVendor {
         match self {
             IpmiBmcVendor::Supermicro => "supermicro",
             IpmiBmcVendor::NvidiaViking => "nvidia_viking",
+            IpmiBmcVendor::GigaComputing => "giga_computing",
         }
     }
 }
@@ -82,6 +84,7 @@ impl BmcVendor {
             BMCVendor::Supermicro => BmcVendor::Ipmi(IpmiBmcVendor::Supermicro),
             BMCVendor::Hpe => BmcVendor::Ssh(SshBmcVendor::Hpe),
             BMCVendor::Nvidia => BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking),
+            BMCVendor::GigaComputing => BmcVendor::Ipmi(IpmiBmcVendor::GigaComputing),
             // Intentionally not doing a default `_` case so we get compiler errors (and can add more cases) later.
             // TODO: figure out what kind of connection power shelves use.
             BMCVendor::Liteon | BMCVendor::Delta | BMCVendor::Sushy | BMCVendor::Unknown => {
@@ -107,6 +110,8 @@ impl BmcVendor {
             Some(BmcVendor::Ipmi(IpmiBmcVendor::Supermicro))
         } else if s == IpmiBmcVendor::NvidiaViking.config_string() {
             Some(BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking))
+        } else if s == IpmiBmcVendor::GigaComputing.config_string() {
+            Some(BmcVendor::Ipmi(IpmiBmcVendor::GigaComputing))
         } else {
             None
         }
@@ -482,7 +487,7 @@ mod tests {
         machine_id: MachineId,
     }
 
-    const ALL_VENDORS: [(BmcVendor, &str); 7] = [
+    const ALL_VENDORS: [(BmcVendor, &str); 8] = [
         (BmcVendor::Ssh(SshBmcVendor::Dell), "dell"),
         (BmcVendor::Ssh(SshBmcVendor::Lenovo), "lenovo"),
         (BmcVendor::Ssh(SshBmcVendor::LenovoAmi), "lenovo_ami"),
@@ -492,6 +497,10 @@ mod tests {
         (
             BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking),
             "nvidia_viking",
+        ),
+        (
+            BmcVendor::Ipmi(IpmiBmcVendor::GigaComputing),
+            "giga_computing",
         ),
     ];
 
@@ -584,6 +593,8 @@ mod tests {
                     Yields(BmcVendor::Ssh(SshBmcVendor::Hpe)),
                 VendorDetectionInput { vendor_string: "nvidia", machine_id: host_id } =>
                     Yields(BmcVendor::Ipmi(IpmiBmcVendor::NvidiaViking)),
+                VendorDetectionInput { vendor_string: "gigacomputing", machine_id: host_id } =>
+                    Yields(BmcVendor::Ipmi(IpmiBmcVendor::GigaComputing)),
             }
 
             "unsupported host vendors preserve the API text in the error" {

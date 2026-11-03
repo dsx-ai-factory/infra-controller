@@ -23,7 +23,10 @@ use ::rpc::errors::RpcDataConversionError;
 use carbide_ib_fabric::errors::IbError;
 use carbide_redfish::libredfish::RedfishClientCreationError;
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
-use carbide_resource_pool::ResourcePoolRegistryError;
+use carbide_resource_pool::grpc::GrpcResourcePoolError;
+use carbide_resource_pool::registration::RegistrationError;
+use carbide_resource_pool::remote::RemoteResourcePoolError;
+use carbide_resource_pool::{ResourcePoolBackendError, ResourcePoolRegistryError};
 use carbide_site_explorer::EndpointExplorationServiceError;
 use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use config_version::ConfigVersionParseError;
@@ -32,12 +35,15 @@ use db::ip_allocator::DhcpError;
 use db::machine_interface_address::AddressAlreadyInUseError;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::resource_pool::binding::BindingError;
+use db::resource_pool::remote::RemoteAllocationError;
+use db::work_lock_manager::AcquireLockError;
 use db::{AnnotatedSqlxError, DatabaseError};
 use librms::RackManagerError;
 use mac_address::MacAddress;
 use model::errors::{ErrorCode, ErrorSubsystem, ModelError, OperatorError};
 use model::hardware_info::HardwareInfoError;
 use model::network_devices::LldpError;
+use model::resource_pool::remote::AllocationFailureCode;
 use model::site_explorer::EndpointExplorationError;
 use model::tenant::TenantError;
 use model::vpc::VpcCapabilityError;
@@ -185,6 +191,14 @@ pub enum CarbideError {
     #[error("resource pool database error: {0}")]
     ResourcePoolDatabaseError(#[source] ResourcePoolDatabaseError),
 
+    /// A remote allocation could not complete; its saved request may need cleanup.
+    #[error(transparent)]
+    RemoteResourcePool(Box<RemoteResourcePoolError>),
+
+    /// A remote pool definition could not be loaded or validated.
+    #[error(transparent)]
+    ResourcePoolRegistration(Box<RegistrationError>),
+
     #[error("hardware info error: {0}")]
     HardwareInfoError(#[from] HardwareInfoError),
 
@@ -327,6 +341,47 @@ impl From<ResourcePoolRegistryError> for CarbideError {
             ResourcePoolRegistryError::Database(error)
             | ResourcePoolRegistryError::Binding(BindingError::Database(error)) => error.into(),
             error => Self::FailedPrecondition(error.to_string()),
+        }
+    }
+}
+
+impl From<RemoteResourcePoolError> for CarbideError {
+    fn from(error: RemoteResourcePoolError) -> Self {
+        match error {
+            // Database failures, including a failed work-lock write, keep their
+            // SQL diagnostics out of the API status like any other `DBError`.
+            RemoteResourcePoolError::Database(error)
+            | RemoteResourcePoolError::Acquire(AcquireLockError::Database(error)) => error.into(),
+            error => Self::RemoteResourcePool(Box::new(error)),
+        }
+    }
+}
+
+/// Preserve the allocator's existing API error mapping when callers use the
+/// shared allocation operations. A changed request, or one whose earlier
+/// attempt is still being cleaned up, can be retried once that cleanup finishes.
+impl From<ResourcePoolBackendError> for CarbideError {
+    fn from(error: ResourcePoolBackendError) -> Self {
+        match error {
+            ResourcePoolBackendError::Database(error) => error.into(),
+            ResourcePoolBackendError::Integrated(error) => error.into(),
+            ResourcePoolBackendError::Remote(error) => error.into(),
+            ResourcePoolBackendError::Registration(error) => error.into(),
+            ResourcePoolBackendError::Registry(error) => error.into(),
+            ResourcePoolBackendError::Value(error) => RemoteResourcePoolError::Value(error).into(),
+            error @ (ResourcePoolBackendError::RequestChanged
+            | ResourcePoolBackendError::CleanupPending) => {
+                Self::FailedPrecondition(error.to_string())
+            }
+        }
+    }
+}
+
+impl From<RegistrationError> for CarbideError {
+    fn from(error: RegistrationError) -> Self {
+        match error {
+            RegistrationError::Database(error) => error.into(),
+            error => Self::ResourcePoolRegistration(Box::new(error)),
         }
     }
 }
@@ -517,6 +572,18 @@ impl OperatorError for CarbideError {
             | CarbideError::SitePrefixIsolationLimitExceeded { .. }
             | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
             CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
+            CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
+                Api,
+                match remote_resource_pool_status_code(error) {
+                    tonic::Code::InvalidArgument => 400,
+                    tonic::Code::FailedPrecondition => 412,
+                    tonic::Code::ResourceExhausted => 429,
+                    tonic::Code::Cancelled => 499,
+                    tonic::Code::Unavailable => 503,
+                    tonic::Code::DeadlineExceeded => 504,
+                    _ => 500,
+                },
+            ),
             CarbideError::RedfishError(error) if is_dpu_bios_attributes_not_ready(error) => {
                 EndpointExplorationError::INVALID_DPU_REDFISH_BIOS_RESPONSE_CODE
             }
@@ -541,6 +608,14 @@ impl OperatorError for CarbideError {
                  integration that failed, backing off briefly between attempts.",
             ),
             CarbideError::ResourceExhausted(_) | CarbideError::DhcpError(_) => {
+                Some("Check configured resource pools and available capacity.")
+            }
+            CarbideError::RemoteResourcePool(error)
+                if matches!(
+                    error.as_ref(),
+                    RemoteResourcePoolError::Rejected(AllocationFailureCode::ResourceExhausted)
+                ) =>
+            {
                 Some("Check configured resource pools and available capacity.")
             }
             CarbideError::TenantSitePrefixQuotaExceeded { .. } => Some(
@@ -568,6 +643,69 @@ fn test_carbide_error() {
 impl From<::measured_boot::Error> for CarbideError {
     fn from(value: measured_boot::Error) -> Self {
         CarbideError::internal(value.to_string())
+    }
+}
+
+/// `remote_resource_pool_status_code` separates rejected allocation requests
+/// from provider failures. Provider credentials and resource names belong to
+/// NICo, so those failures must not look like mistakes by the API caller.
+/// A provider that can't take the call is `Unavailable`. A call that reached
+/// its deadline is `DeadlineExceeded`, because the provider may still have
+/// allocated; recovery settles that request either way.
+fn remote_resource_pool_status_code(error: &RemoteResourcePoolError) -> tonic::Code {
+    match error {
+        RemoteResourcePoolError::Rejected(AllocationFailureCode::ResourceExhausted) => {
+            tonic::Code::ResourceExhausted
+        }
+        RemoteResourcePoolError::Rejected(AllocationFailureCode::InvalidArgument) => {
+            tonic::Code::InvalidArgument
+        }
+        RemoteResourcePoolError::Rejected(AllocationFailureCode::FailedPrecondition)
+        | RemoteResourcePoolError::NotCurrent => tonic::Code::FailedPrecondition,
+        RemoteResourcePoolError::Storage(error) => match error.as_ref() {
+            RemoteAllocationError::RequestConflict(_)
+            | RemoteAllocationError::GenerationExists(_)
+            | RemoteAllocationError::SlotInUse(_) => tonic::Code::FailedPrecondition,
+            RemoteAllocationError::Database(_) | RemoteAllocationError::BindingMismatch(_) => {
+                tonic::Code::Internal
+            }
+        },
+        RemoteResourcePoolError::Incomplete
+        | RemoteResourcePoolError::Provider(GrpcResourcePoolError::DeadlineExceeded) => {
+            tonic::Code::DeadlineExceeded
+        }
+        RemoteResourcePoolError::Provider(GrpcResourcePoolError::Rpc(error))
+            if error.code() == tonic::Code::DeadlineExceeded =>
+        {
+            tonic::Code::DeadlineExceeded
+        }
+        // An overloaded provider's `ResourceExhausted` is transient, not an
+        // exhausted pool; only `Rejected` reports exhaustion.
+        RemoteResourcePoolError::Busy
+        | RemoteResourcePoolError::Provider(
+            GrpcResourcePoolError::Busy
+            | GrpcResourcePoolError::Connect(_)
+            | GrpcResourcePoolError::Rpc(_),
+        )
+        | RemoteResourcePoolError::Acquire(
+            AcquireLockError::WorkAlreadyLocked(_)
+            | AcquireLockError::WorkLockManagerSend(_)
+            | AcquireLockError::WorkLockManagerReply(_)
+            | AcquireLockError::Timeout(_),
+        ) => tonic::Code::Unavailable,
+        RemoteResourcePoolError::Cancelled => tonic::Code::Cancelled,
+        RemoteResourcePoolError::Database(_)
+        | RemoteResourcePoolError::Acquire(AcquireLockError::Database(_))
+        | RemoteResourcePoolError::Value(_)
+        | RemoteResourcePoolError::InvalidRecord(_)
+        | RemoteResourcePoolError::InvalidResponse(_)
+        | RemoteResourcePoolError::Provider(
+            GrpcResourcePoolError::InvalidConfiguration(_)
+            | GrpcResourcePoolError::Preparation(_)
+            | GrpcResourcePoolError::Credentials { .. }
+            | GrpcResourcePoolError::Tls(_)
+            | GrpcResourcePoolError::InvalidResponse(_),
+        ) => tonic::Code::Internal,
     }
 }
 
@@ -609,6 +747,9 @@ impl From<CarbideError> for tonic::Status {
             e @ CarbideError::BmcMacIpMismatch { .. } => Status::invalid_argument(e.to_string()),
             CarbideError::UnhealthyHost => Status::failed_precondition(error.to_string()),
             CarbideError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
+            CarbideError::RemoteResourcePool(remote) => {
+                Status::new(remote_resource_pool_status_code(remote), remote.to_string())
+            }
             error @ (CarbideError::TenantSitePrefixQuotaExceeded { .. }
             | CarbideError::SitePrefixIsolationLimitExceeded { .. }) => {
                 Status::resource_exhausted(error.to_string())
@@ -920,22 +1061,169 @@ fn missing_allocation_range_preserves_status_through_wrappers() {
     }
 }
 
+/// Pool failures report the same distinction in gRPC status and operator metadata.
 #[test]
-fn resource_pool_database_errors_preserve_status() {
-    for (error, expected_code) in [
-        (
-            DatabaseError::FailedPrecondition("no allocation range".to_string()),
-            tonic::Code::FailedPrecondition,
-        ),
-        (
-            DatabaseError::query("allocate", sqlx::Error::RowNotFound),
-            tonic::Code::Internal,
-        ),
-    ] {
-        let error = ResourcePoolDatabaseError::from(error);
-        let status = tonic::Status::from(CarbideError::from(error));
-        assert_eq!(status.code(), expected_code);
-    }
+fn resource_pool_errors_preserve_status() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        [
+            Check {
+                scenario: "local precondition failure",
+                input: CarbideError::from(ResourcePoolDatabaseError::from(
+                    DatabaseError::FailedPrecondition("no allocation range".to_string()),
+                )),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "local database failure",
+                input: CarbideError::from(ResourcePoolDatabaseError::from(DatabaseError::query(
+                    "allocate",
+                    sqlx::Error::RowNotFound,
+                ))),
+                expect: (tonic::Code::Internal, "NICO-API-500".to_owned(), None),
+            },
+            Check {
+                scenario: "failed work-lock write is reported as a database error",
+                input: CarbideError::from(RemoteResourcePoolError::Acquire(
+                    AcquireLockError::Database(DatabaseError::query(
+                        "acquire work lock",
+                        sqlx::Error::RowNotFound,
+                    )),
+                )),
+                expect: (tonic::Code::Internal, "NICO-API-500".to_owned(), None),
+            },
+            Check {
+                scenario: "provider confirmed exhaustion includes capacity advice",
+                input: CarbideError::from(RemoteResourcePoolError::Rejected(
+                    AllocationFailureCode::ResourceExhausted,
+                )),
+                expect: (
+                    tonic::Code::ResourceExhausted,
+                    "NICO-API-429".to_owned(),
+                    Some("Check configured resource pools and available capacity.".to_owned()),
+                ),
+            },
+            Check {
+                scenario: "busy coordinator does not establish exhaustion",
+                input: CarbideError::from(RemoteResourcePoolError::Busy),
+                expect: (tonic::Code::Unavailable, "NICO-API-503".to_owned(), None),
+            },
+            Check {
+                scenario: "provider credentials do not belong to the API caller",
+                input: CarbideError::from(RemoteResourcePoolError::Provider(
+                    GrpcResourcePoolError::Rpc(
+                        tonic::Status::permission_denied("provider credentials rejected").into(),
+                    ),
+                )),
+                expect: (tonic::Code::Unavailable, "NICO-API-503".to_owned(), None),
+            },
+            Check {
+                scenario: "provider deadline remains distinguishable from unavailability",
+                input: CarbideError::from(RemoteResourcePoolError::Provider(
+                    GrpcResourcePoolError::Rpc(
+                        tonic::Status::deadline_exceeded("provider operation timed out").into(),
+                    ),
+                )),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "a saved request cannot be retried with different inputs",
+                input: CarbideError::from(RemoteResourcePoolError::from(
+                    RemoteAllocationError::RequestConflict(uuid::Uuid::nil()),
+                )),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "provider rejects the requested value",
+                input: CarbideError::from(RemoteResourcePoolError::Rejected(
+                    AllocationFailureCode::InvalidArgument,
+                )),
+                expect: (
+                    tonic::Code::InvalidArgument,
+                    "NICO-API-400".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "attempt changed before attachment",
+                input: CarbideError::from(RemoteResourcePoolError::NotCurrent),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "earlier attempt is still being cleaned up",
+                input: CarbideError::from(ResourcePoolBackendError::CleanupPending),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "unconfirmed completion leaves the result unknown",
+                input: CarbideError::from(RemoteResourcePoolError::Incomplete),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "overloaded provider is unavailable, not exhausted",
+                input: CarbideError::from(RemoteResourcePoolError::Provider(
+                    GrpcResourcePoolError::Rpc(
+                        tonic::Status::resource_exhausted("provider overloaded").into(),
+                    ),
+                )),
+                expect: (tonic::Code::Unavailable, "NICO-API-503".to_owned(), None),
+            },
+            Check {
+                scenario: "API shutdown cancels the allocation",
+                input: CarbideError::from(RemoteResourcePoolError::Cancelled),
+                expect: (tonic::Code::Cancelled, "NICO-API-499".to_owned(), None),
+            },
+            Check {
+                scenario: "invalid saved record is an internal failure",
+                input: CarbideError::from(RemoteResourcePoolError::InvalidRecord(
+                    "missing request",
+                )),
+                expect: (tonic::Code::Internal, "NICO-API-500".to_owned(), None),
+            },
+        ],
+        |error| {
+            let status = tonic::Status::from(error);
+            (
+                status.code(),
+                status
+                    .metadata()
+                    .get("nico-error-code")
+                    .expect("operator error code")
+                    .to_str()
+                    .expect("ASCII operator code")
+                    .to_owned(),
+                status
+                    .metadata()
+                    .get("nico-error-mitigation")
+                    .map(|mitigation| mitigation.to_str().expect("ASCII mitigation").to_owned()),
+            )
+        },
+    );
 }
 
 #[test]

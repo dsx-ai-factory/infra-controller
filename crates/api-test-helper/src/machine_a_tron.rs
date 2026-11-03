@@ -23,9 +23,12 @@ use bmc_mock::mac_address_pool::MacAddressPool;
 use forge_tls::client_config::get_root_ca_path;
 use futures::future::try_join_all;
 use machine_a_tron::{
-    BmcMockRegistry, DeviceHandle, DhcpClient, MachineATron, MachineATronConfig,
-    MachineATronContext, UdpDhcpService, api_throttler,
+    BmcMockRegistry, ControlState, DeviceHandle, DeviceStatusConfig, DhcpClient, MachineATron,
+    MachineATronConfig, MachineATronContext, SimulatorRegistry, UdpDhcpService, api_throttler,
 };
+// Expose the service and its router together so callers can retain one service
+// while mounting its wire API and observing that same instance.
+pub use rms_mock::{RmsMock, router as rms_service_router};
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, ForgeClientT, RetryConfig};
 use rpc::protos::forge_api_client::ForgeApiClient;
 use tokio::sync::oneshot;
@@ -166,6 +169,7 @@ pub async fn run_local(
             _stop_tx: stop_tx,
             _join_handle: join_handle,
             dhcp_service,
+            registry: simulators,
         },
     ))
 }
@@ -175,9 +179,30 @@ pub struct MachineATronHandle {
     _stop_tx: oneshot::Sender<bool>,
     _join_handle: JoinHandle<eyre::Result<()>>,
     dhcp_service: Option<UdpDhcpService>,
+    registry: SimulatorRegistry,
 }
 
 impl MachineATronHandle {
+    /// All running devices, including switches and power shelves.
+    ///
+    /// Host handles expose their DPU children through [`DeviceHandle::dpus`].
+    pub fn registry(&self) -> &SimulatorRegistry {
+        &self.registry
+    }
+
+    /// Builds an RMS service over this exact registry for wire calls and observation.
+    ///
+    /// Retain the returned service across rebuilds to preserve completed jobs and
+    /// reset generations. `redfish_port` is the simulated BMC listener's port.
+    pub fn rms_service(&self, config: rms_mock::RmsMockConfig, redfish_port: u16) -> Arc<RmsMock> {
+        let control_state = ControlState::new(
+            self.registry.clone(),
+            DeviceStatusConfig::new(redfish_port),
+            "integration-test".into(),
+        );
+        Arc::new(RmsMock::new(Arc::new(control_state), config))
+    }
+
     /// Stops the simulators and deletes their machines through the running API.
     pub async fn shutdown(self) -> eyre::Result<()> {
         self.shutdown_with_api_cleanup(true).await

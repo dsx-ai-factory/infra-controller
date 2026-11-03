@@ -299,6 +299,23 @@ impl RedfishClient {
             .map_err(map_redfish_client_creation_error)
     }
 
+    pub(super) async fn restore_bmc_root_ipmi_access(
+        &self,
+        bmc_ip_address: SocketAddr,
+        vendor: RedfishVendor,
+        credentials: Credentials,
+    ) -> Result<(), EndpointExplorationError> {
+        self.redfish_client_pool
+            .restore_bmc_root_ipmi_access(
+                &bmc_ip_address.ip().to_string(),
+                Some(bmc_ip_address.port()),
+                vendor,
+                credentials,
+            )
+            .await
+            .map_err(map_redfish_client_creation_error)
+    }
+
     pub(super) async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,

@@ -140,6 +140,7 @@ const (
 	Forge_FindIpAddress_FullMethodName                                      = "/forge.Forge/FindIpAddress"
 	Forge_FindMachineIds_FullMethodName                                     = "/forge.Forge/FindMachineIds"
 	Forge_FindMachinesByIds_FullMethodName                                  = "/forge.Forge/FindMachinesByIds"
+	Forge_FindHostStatesByIds_FullMethodName                                = "/forge.Forge/FindHostStatesByIds"
 	Forge_FindMachineStateHistories_FullMethodName                          = "/forge.Forge/FindMachineStateHistories"
 	Forge_FindMachineHealthHistories_FullMethodName                         = "/forge.Forge/FindMachineHealthHistories"
 	Forge_FindPowerShelfStateHistories_FullMethodName                       = "/forge.Forge/FindPowerShelfStateHistories"
@@ -569,6 +570,8 @@ const (
 	Forge_GetOperatingSystemCachableIpxeTemplateArtifacts_FullMethodName    = "/forge.Forge/GetOperatingSystemCachableIpxeTemplateArtifacts"
 	Forge_UpdateOperatingSystemCachableIpxeTemplateArtifacts_FullMethodName = "/forge.Forge/UpdateOperatingSystemCachableIpxeTemplateArtifacts"
 	Forge_ReWrapSecrets_FullMethodName                                      = "/forge.Forge/ReWrapSecrets"
+	Forge_FindRoutingProfileNames_FullMethodName                            = "/forge.Forge/FindRoutingProfileNames"
+	Forge_FindRoutingProfilesByNames_FullMethodName                         = "/forge.Forge/FindRoutingProfilesByNames"
 )
 
 // ForgeClient is the client API for Forge service.
@@ -797,6 +800,9 @@ type ForgeClient interface {
 	FindIpAddress(ctx context.Context, in *FindIpAddressRequest, opts ...grpc.CallOption) (*FindIpAddressResponse, error)
 	FindMachineIds(ctx context.Context, in *MachineSearchConfig, opts ...grpc.CallOption) (*MachineIdList, error)
 	FindMachinesByIds(ctx context.Context, in *MachinesByIdsRequest, opts ...grpc.CallOption) (*MachineList, error)
+	// Compact per-host state for monitoring: allocatability, update eligibility
+	// and the explored firmware report, read from one database snapshot.
+	FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error)
 	FindMachineStateHistories(ctx context.Context, in *MachineStateHistoriesRequest, opts ...grpc.CallOption) (*MachineStateHistories, error)
 	FindMachineHealthHistories(ctx context.Context, in *MachineHealthHistoriesRequest, opts ...grpc.CallOption) (*HealthHistories, error)
 	FindPowerShelfStateHistories(ctx context.Context, in *PowerShelfStateHistoriesRequest, opts ...grpc.CallOption) (*StateHistories, error)
@@ -1142,7 +1148,9 @@ type ForgeClient interface {
 	DeleteAllExpectedRackGroups(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(ctx context.Context, in *AttestQuoteRequest, opts ...grpc.CallOption) (*AttestQuoteResponse, error)
+	//
 	// InstanceType
+	//
 	CreateInstanceType(ctx context.Context, in *CreateInstanceTypeRequest, opts ...grpc.CallOption) (*CreateInstanceTypeResponse, error)
 	FindInstanceTypeIds(ctx context.Context, in *FindInstanceTypeIdsRequest, opts ...grpc.CallOption) (*FindInstanceTypeIdsResponse, error)
 	FindInstanceTypesByIds(ctx context.Context, in *FindInstanceTypesByIdsRequest, opts ...grpc.CallOption) (*FindInstanceTypesByIdsResponse, error)
@@ -1199,7 +1207,9 @@ type ForgeClient interface {
 	ListMeasurementTrustedMachines(ctx context.Context, in *ListMeasurementTrustedMachinesRequest, opts ...grpc.CallOption) (*ListMeasurementTrustedMachinesResponse, error)
 	ListMeasurementTrustedProfiles(ctx context.Context, in *ListMeasurementTrustedProfilesRequest, opts ...grpc.CallOption) (*ListMeasurementTrustedProfilesResponse, error)
 	ListAttestationSummary(ctx context.Context, in *ListAttestationSummaryRequest, opts ...grpc.CallOption) (*ListAttestationSummaryResponse, error)
+	//
 	// NetworkSecurityGroups
+	//
 	CreateNetworkSecurityGroup(ctx context.Context, in *CreateNetworkSecurityGroupRequest, opts ...grpc.CallOption) (*CreateNetworkSecurityGroupResponse, error)
 	FindNetworkSecurityGroupIds(ctx context.Context, in *FindNetworkSecurityGroupIdsRequest, opts ...grpc.CallOption) (*FindNetworkSecurityGroupIdsResponse, error)
 	FindNetworkSecurityGroupsByIds(ctx context.Context, in *FindNetworkSecurityGroupsByIdsRequest, opts ...grpc.CallOption) (*FindNetworkSecurityGroupsByIdsResponse, error)
@@ -1316,7 +1326,7 @@ type ForgeClient interface {
 	// Terminate active rack maintenance and transition the rack to Error.
 	TerminateRackMaintenance(ctx context.Context, in *RackMaintenanceTerminateRequest, opts ...grpc.CallOption) (*RackMaintenanceTerminateResponse, error)
 	// TPM CA certs Management
-	// rpc TpmDeleteCaCert(TpmCaCertDetails) returns (google.protobuf.Empty);
+	//rpc TpmDeleteCaCert(TpmCaCertDetails) returns (google.protobuf.Empty);
 	TpmAddCaCert(ctx context.Context, in *TpmCaCert, opts ...grpc.CallOption) (*TpmCaAddedCaStatus, error)
 	TpmShowCaCerts(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*TpmCaCertDetailCollection, error)
 	TpmShowUnmatchedEkCerts(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*TpmEkCertStatusCollection, error)
@@ -1370,6 +1380,18 @@ type ForgeClient interface {
 	GetAllSkuIds(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SkuIdList, error)
 	FindSkusByIds(ctx context.Context, in *SkusByIdsRequest, opts ...grpc.CallOption) (*SkuList, error)
 	UpdateSkuMetadata(ctx context.Context, in *SkuUpdateMetadataRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Replace the components and metadata of an existing SKU.
+	// Omitting `components` replaces the stored definition with empty values.
+	// Input `components.ethernet_devices` values are ignored; the response list
+	// is empty.
+	// Omitted description becomes empty; omitted device_type becomes unset.
+	// Preserves creation time and machine assignments, requests SKU verification,
+	// and returns the stored SKU with its associated machine IDs.
+	// The schema_version must equal the current SKU schema version. An empty ID,
+	// unsupported schema version, invalid storage constraints, or components
+	// matching another SKU return INVALID_ARGUMENT before absence is checked.
+	// A valid replacement that does not match another SKU returns NOT_FOUND
+	// when its target ID is absent. Other database failures return INTERNAL.
 	ReplaceSku(ctx context.Context, in *Sku, opts ...grpc.CallOption) (*Sku, error)
 	// Replace the complete component definition, preserving omitted metadata.
 	// Requests SKU verification and returns the replaced SKU with its associated machine IDs.
@@ -1405,7 +1427,9 @@ type ForgeClient interface {
 	// Lists the rack profiles from the effective runtime configuration.
 	// Rack profiles are configuration, not persisted rack resources.
 	ListRackProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListRackProfilesResponse, error)
+	//
 	// Compute Allocations
+	//
 	CreateComputeAllocation(ctx context.Context, in *CreateComputeAllocationRequest, opts ...grpc.CallOption) (*CreateComputeAllocationResponse, error)
 	FindComputeAllocationIds(ctx context.Context, in *FindComputeAllocationIdsRequest, opts ...grpc.CallOption) (*FindComputeAllocationIdsResponse, error)
 	FindComputeAllocationsByIds(ctx context.Context, in *FindComputeAllocationsByIdsRequest, opts ...grpc.CallOption) (*FindComputeAllocationsByIdsResponse, error)
@@ -1640,6 +1664,17 @@ type ForgeClient interface {
 	UpdateOperatingSystemCachableIpxeTemplateArtifacts(ctx context.Context, in *UpdateOperatingSystemIpxeTemplateArtifactRequest, opts ...grpc.CallOption) (*IpxeTemplateArtifactList, error)
 	// Secrets management
 	ReWrapSecrets(ctx context.Context, in *ReWrapSecretsRequest, opts ...grpc.CallOption) (*ReWrapSecretsResponse, error)
+	// Lists names from this server's loaded fnn.routing_profiles configuration,
+	// sorted lexicographically. All supplied filters must match. No FNN
+	// configuration or no matches returns an empty list. This is site inventory,
+	// not a tenant's permitted profiles, and excludes the inline admin VPC profile.
+	FindRoutingProfileNames(ctx context.Context, in *RoutingProfileSearchFilter, opts ...grpc.CallOption) (*RoutingProfileNameList, error)
+	// Retrieves configured definitions by exact, case-sensitive name. Unknown
+	// names are omitted; duplicates appear once; results are sorted by name.
+	// Empty requests or more than max_find_by_ids names return InvalidArgument.
+	// Each call reads this server's loaded configuration, without a snapshot
+	// guarantee across list and fetch calls or between server replicas.
+	FindRoutingProfilesByNames(ctx context.Context, in *RoutingProfilesByNamesRequest, opts ...grpc.CallOption) (*NamedRoutingProfileList, error)
 }
 
 type forgeClient struct {
@@ -2830,6 +2865,16 @@ func (c *forgeClient) FindMachinesByIds(ctx context.Context, in *MachinesByIdsRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineList)
 	err := c.cc.Invoke(ctx, Forge_FindMachinesByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HostStateList)
+	err := c.cc.Invoke(ctx, Forge_FindHostStatesByIds_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7129,6 +7174,26 @@ func (c *forgeClient) ReWrapSecrets(ctx context.Context, in *ReWrapSecretsReques
 	return out, nil
 }
 
+func (c *forgeClient) FindRoutingProfileNames(ctx context.Context, in *RoutingProfileSearchFilter, opts ...grpc.CallOption) (*RoutingProfileNameList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RoutingProfileNameList)
+	err := c.cc.Invoke(ctx, Forge_FindRoutingProfileNames_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindRoutingProfilesByNames(ctx context.Context, in *RoutingProfilesByNamesRequest, opts ...grpc.CallOption) (*NamedRoutingProfileList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(NamedRoutingProfileList)
+	err := c.cc.Invoke(ctx, Forge_FindRoutingProfilesByNames_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ForgeServer is the server API for Forge service.
 // All implementations should embed UnimplementedForgeServer
 // for forward compatibility.
@@ -7355,6 +7420,9 @@ type ForgeServer interface {
 	FindIpAddress(context.Context, *FindIpAddressRequest) (*FindIpAddressResponse, error)
 	FindMachineIds(context.Context, *MachineSearchConfig) (*MachineIdList, error)
 	FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error)
+	// Compact per-host state for monitoring: allocatability, update eligibility
+	// and the explored firmware report, read from one database snapshot.
+	FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error)
 	FindMachineStateHistories(context.Context, *MachineStateHistoriesRequest) (*MachineStateHistories, error)
 	FindMachineHealthHistories(context.Context, *MachineHealthHistoriesRequest) (*HealthHistories, error)
 	FindPowerShelfStateHistories(context.Context, *PowerShelfStateHistoriesRequest) (*StateHistories, error)
@@ -7700,7 +7768,9 @@ type ForgeServer interface {
 	DeleteAllExpectedRackGroups(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// Perform Attestation Procedure for Measured Boot
 	AttestQuote(context.Context, *AttestQuoteRequest) (*AttestQuoteResponse, error)
+	//
 	// InstanceType
+	//
 	CreateInstanceType(context.Context, *CreateInstanceTypeRequest) (*CreateInstanceTypeResponse, error)
 	FindInstanceTypeIds(context.Context, *FindInstanceTypeIdsRequest) (*FindInstanceTypeIdsResponse, error)
 	FindInstanceTypesByIds(context.Context, *FindInstanceTypesByIdsRequest) (*FindInstanceTypesByIdsResponse, error)
@@ -7757,7 +7827,9 @@ type ForgeServer interface {
 	ListMeasurementTrustedMachines(context.Context, *ListMeasurementTrustedMachinesRequest) (*ListMeasurementTrustedMachinesResponse, error)
 	ListMeasurementTrustedProfiles(context.Context, *ListMeasurementTrustedProfilesRequest) (*ListMeasurementTrustedProfilesResponse, error)
 	ListAttestationSummary(context.Context, *ListAttestationSummaryRequest) (*ListAttestationSummaryResponse, error)
+	//
 	// NetworkSecurityGroups
+	//
 	CreateNetworkSecurityGroup(context.Context, *CreateNetworkSecurityGroupRequest) (*CreateNetworkSecurityGroupResponse, error)
 	FindNetworkSecurityGroupIds(context.Context, *FindNetworkSecurityGroupIdsRequest) (*FindNetworkSecurityGroupIdsResponse, error)
 	FindNetworkSecurityGroupsByIds(context.Context, *FindNetworkSecurityGroupsByIdsRequest) (*FindNetworkSecurityGroupsByIdsResponse, error)
@@ -7874,7 +7946,7 @@ type ForgeServer interface {
 	// Terminate active rack maintenance and transition the rack to Error.
 	TerminateRackMaintenance(context.Context, *RackMaintenanceTerminateRequest) (*RackMaintenanceTerminateResponse, error)
 	// TPM CA certs Management
-	// rpc TpmDeleteCaCert(TpmCaCertDetails) returns (google.protobuf.Empty);
+	//rpc TpmDeleteCaCert(TpmCaCertDetails) returns (google.protobuf.Empty);
 	TpmAddCaCert(context.Context, *TpmCaCert) (*TpmCaAddedCaStatus, error)
 	TpmShowCaCerts(context.Context, *emptypb.Empty) (*TpmCaCertDetailCollection, error)
 	TpmShowUnmatchedEkCerts(context.Context, *emptypb.Empty) (*TpmEkCertStatusCollection, error)
@@ -7928,6 +8000,18 @@ type ForgeServer interface {
 	GetAllSkuIds(context.Context, *emptypb.Empty) (*SkuIdList, error)
 	FindSkusByIds(context.Context, *SkusByIdsRequest) (*SkuList, error)
 	UpdateSkuMetadata(context.Context, *SkuUpdateMetadataRequest) (*emptypb.Empty, error)
+	// Replace the components and metadata of an existing SKU.
+	// Omitting `components` replaces the stored definition with empty values.
+	// Input `components.ethernet_devices` values are ignored; the response list
+	// is empty.
+	// Omitted description becomes empty; omitted device_type becomes unset.
+	// Preserves creation time and machine assignments, requests SKU verification,
+	// and returns the stored SKU with its associated machine IDs.
+	// The schema_version must equal the current SKU schema version. An empty ID,
+	// unsupported schema version, invalid storage constraints, or components
+	// matching another SKU return INVALID_ARGUMENT before absence is checked.
+	// A valid replacement that does not match another SKU returns NOT_FOUND
+	// when its target ID is absent. Other database failures return INTERNAL.
 	ReplaceSku(context.Context, *Sku) (*Sku, error)
 	// Replace the complete component definition, preserving omitted metadata.
 	// Requests SKU verification and returns the replaced SKU with its associated machine IDs.
@@ -7963,7 +8047,9 @@ type ForgeServer interface {
 	// Lists the rack profiles from the effective runtime configuration.
 	// Rack profiles are configuration, not persisted rack resources.
 	ListRackProfiles(context.Context, *emptypb.Empty) (*ListRackProfilesResponse, error)
+	//
 	// Compute Allocations
+	//
 	CreateComputeAllocation(context.Context, *CreateComputeAllocationRequest) (*CreateComputeAllocationResponse, error)
 	FindComputeAllocationIds(context.Context, *FindComputeAllocationIdsRequest) (*FindComputeAllocationIdsResponse, error)
 	FindComputeAllocationsByIds(context.Context, *FindComputeAllocationsByIdsRequest) (*FindComputeAllocationsByIdsResponse, error)
@@ -8198,6 +8284,17 @@ type ForgeServer interface {
 	UpdateOperatingSystemCachableIpxeTemplateArtifacts(context.Context, *UpdateOperatingSystemIpxeTemplateArtifactRequest) (*IpxeTemplateArtifactList, error)
 	// Secrets management
 	ReWrapSecrets(context.Context, *ReWrapSecretsRequest) (*ReWrapSecretsResponse, error)
+	// Lists names from this server's loaded fnn.routing_profiles configuration,
+	// sorted lexicographically. All supplied filters must match. No FNN
+	// configuration or no matches returns an empty list. This is site inventory,
+	// not a tenant's permitted profiles, and excludes the inline admin VPC profile.
+	FindRoutingProfileNames(context.Context, *RoutingProfileSearchFilter) (*RoutingProfileNameList, error)
+	// Retrieves configured definitions by exact, case-sensitive name. Unknown
+	// names are omitted; duplicates appear once; results are sorted by name.
+	// Empty requests or more than max_find_by_ids names return InvalidArgument.
+	// Each call reads this server's loaded configuration, without a snapshot
+	// guarantee across list and fetch calls or between server replicas.
+	FindRoutingProfilesByNames(context.Context, *RoutingProfilesByNamesRequest) (*NamedRoutingProfileList, error)
 }
 
 // UnimplementedForgeServer should be embedded to have
@@ -8557,6 +8654,9 @@ func (UnimplementedForgeServer) FindMachineIds(context.Context, *MachineSearchCo
 }
 func (UnimplementedForgeServer) FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindMachinesByIds not implemented")
+}
+func (UnimplementedForgeServer) FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindHostStatesByIds not implemented")
 }
 func (UnimplementedForgeServer) FindMachineStateHistories(context.Context, *MachineStateHistoriesRequest) (*MachineStateHistories, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindMachineStateHistories not implemented")
@@ -9844,6 +9944,12 @@ func (UnimplementedForgeServer) UpdateOperatingSystemCachableIpxeTemplateArtifac
 }
 func (UnimplementedForgeServer) ReWrapSecrets(context.Context, *ReWrapSecretsRequest) (*ReWrapSecretsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReWrapSecrets not implemented")
+}
+func (UnimplementedForgeServer) FindRoutingProfileNames(context.Context, *RoutingProfileSearchFilter) (*RoutingProfileNameList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindRoutingProfileNames not implemented")
+}
+func (UnimplementedForgeServer) FindRoutingProfilesByNames(context.Context, *RoutingProfilesByNamesRequest) (*NamedRoutingProfileList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindRoutingProfilesByNames not implemented")
 }
 func (UnimplementedForgeServer) testEmbeddedByValue() {}
 
@@ -11960,6 +12066,24 @@ func _Forge_FindMachinesByIds_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).FindMachinesByIds(ctx, req.(*MachinesByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindHostStatesByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HostStatesByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindHostStatesByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindHostStatesByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindHostStatesByIds(ctx, req.(*HostStatesByIdsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -19675,6 +19799,42 @@ func _Forge_ReWrapSecrets_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindRoutingProfileNames_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RoutingProfileSearchFilter)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindRoutingProfileNames(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindRoutingProfileNames_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindRoutingProfileNames(ctx, req.(*RoutingProfileSearchFilter))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindRoutingProfilesByNames_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RoutingProfilesByNamesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindRoutingProfilesByNames(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindRoutingProfilesByNames_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindRoutingProfilesByNames(ctx, req.(*RoutingProfilesByNamesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Forge_ServiceDesc is the grpc.ServiceDesc for Forge service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -20145,6 +20305,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FindMachinesByIds",
 			Handler:    _Forge_FindMachinesByIds_Handler,
+		},
+		{
+			MethodName: "FindHostStatesByIds",
+			Handler:    _Forge_FindHostStatesByIds_Handler,
 		},
 		{
 			MethodName: "FindMachineStateHistories",
@@ -21857,6 +22021,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReWrapSecrets",
 			Handler:    _Forge_ReWrapSecrets_Handler,
+		},
+		{
+			MethodName: "FindRoutingProfileNames",
+			Handler:    _Forge_FindRoutingProfileNames_Handler,
+		},
+		{
+			MethodName: "FindRoutingProfilesByNames",
+			Handler:    _Forge_FindRoutingProfilesByNames_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

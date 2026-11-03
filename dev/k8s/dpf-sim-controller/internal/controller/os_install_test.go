@@ -27,13 +27,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nvidia/infra-controller/dev/k8s/dpf-sim-controller/internal/carbide"
+	"github.com/nvidia/infra-controller/dev/k8s/dpf-sim-controller/internal/redfish"
 )
 
 const (
-	testBFBName = "bf3-bfb"
-	testBFBURL  = "http://bfb.example/bf-bundle.bfb"
-	testTaskURI = "/redfish/v1/TaskService/Tasks/7"
-	testBMCPass = "s3cret"
+	testBFBName       = "bf3-bfb"
+	testBFBURL        = "http://bfb.example/bf-bundle.bfb"
+	testTaskURI       = "/redfish/v1/TaskService/Tasks/7"
+	testTaskReference = `{"path":"/redfish/v1/TaskService/Tasks/7","kind":"resource"}`
+	testBMCPass       = "s3cret"
 )
 
 // fakeBMC is a DPU BMC serving the two Redfish calls the simulator makes.
@@ -49,6 +51,7 @@ type fakeBMC struct {
 	taskState          string // task GET TaskState
 	taskMessage        string
 	taskBody           string
+	taskRequests       []string
 	posts              []map[string]any
 	gets               int
 	user, pass         string // credentials seen on the last request
@@ -79,8 +82,9 @@ func newFakeBMC(t *testing.T) *fakeBMC {
 			}
 			w.WriteHeader(b.updateCode)
 			_, _ = w.Write([]byte(b.updateBody))
-		case req.Method == http.MethodGet && req.URL.Path == testTaskURI:
+		case req.Method == http.MethodGet && (req.URL.RequestURI() == testTaskURI || req.URL.RequestURI() == b.taskLocation):
 			b.gets++
+			b.taskRequests = append(b.taskRequests, req.URL.RequestURI())
 			w.WriteHeader(b.taskCode)
 			if b.taskBody != "" {
 				_, _ = w.Write([]byte(b.taskBody))
@@ -228,8 +232,8 @@ func TestOSInstallSuccess(t *testing.T) {
 	if f.bmc.user != DefaultBMCUsername || f.bmc.pass != testBMCPass {
 		t.Errorf("credentials = %q/%q, want %q/%q", f.bmc.user, f.bmc.pass, DefaultBMCUsername, testBMCPass)
 	}
-	if got := f.dpu(t).Annotations[carbide.AnnSimBFBInstallTask]; got != testTaskURI {
-		t.Fatalf("task annotation = %q, want %q", got, testTaskURI)
+	if got := f.dpu(t).Annotations[carbide.AnnSimBFBInstallTask]; got != testTaskReference {
+		t.Fatalf("task annotation = %q, want %q", got, testTaskReference)
 	}
 
 	// While the task runs the phase holds and no second install is submitted.
@@ -301,8 +305,8 @@ func TestReconcileOSInstallTaskNotFoundFailsFast(t *testing.T) {
 	if cond.Reason != "TaskLost" || !strings.Contains(cond.Message, testTaskURI) {
 		t.Fatalf("lost task condition = %+v, want TaskLost naming %q", cond, testTaskURI)
 	}
-	if got := dpu.Annotations[carbide.AnnSimBFBInstallTask]; got != testTaskURI {
-		t.Fatalf("lost task annotation = %q, want %q retained for diagnosis", got, testTaskURI)
+	if got := dpu.Annotations[carbide.AnnSimBFBInstallTask]; got != testTaskReference {
+		t.Fatalf("lost task annotation = %q, want %q retained for diagnosis", got, testTaskReference)
 	}
 
 	// Error is terminal: another reconcile cannot poll or resubmit the lost task.
@@ -440,6 +444,71 @@ func TestReconcileOSInstallAdvancesOnlyAfterTask(t *testing.T) {
 	}
 }
 
+func TestReconcileOSInstallMonitor200Completes(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		restart, resourceBody bool
+	}{
+		{name: "monitor"},
+		{name: "restart", restart: true},
+		{name: "Location task resource", resourceBody: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInstallFixture(t, time.Second, time.Hour)
+			f.r.PhaseDwell = time.Millisecond
+			const monitor = "/opaque-monitor?task=7"
+			f.bmc.set(func(b *fakeBMC) {
+				b.updateBody, b.taskLocation, b.taskCode = `{}`, monitor, http.StatusAccepted
+				if tc.resourceBody {
+					b.taskCode = http.StatusOK
+				}
+			})
+			f.reconcileOnce(t)
+			if got := f.dpu(t).Annotations[carbide.AnnSimBFBInstallTask]; got != `{"path":"/opaque-monitor?task=7","kind":"monitor"}` {
+				t.Fatalf("monitor annotation=%q", got)
+			}
+			if tc.restart {
+				previous := f.r
+				f.r = &DPUDeviceReconciler{
+					Client: previous.Client, Scheme: previous.Scheme, Namespace: testNamespace,
+					PhaseDwell: time.Millisecond, SecretReader: previous.SecretReader,
+					osInstaller: newOSInstaller(previous.osInstaller.OSInstallConfig, previous.SecretReader, testNamespace),
+				}
+			}
+			f.reconcileOnce(t)
+			if got := f.dpu(t).Status.Phase; got != provisioningv1.DPUOSInstalling {
+				t.Fatalf("monitor running: phase=%q, want OS Installing", got)
+			}
+			f.bmc.set(func(b *fakeBMC) {
+				b.taskCode, b.taskBody = http.StatusOK, `{"Message":"image installed"}`
+				if tc.resourceBody {
+					b.taskBody = `{"TaskState":"Completed"}`
+				}
+			})
+			f.reconcileOnce(t)
+			dpu := f.dpu(t)
+			if dpu.Status.Phase != provisioningv1.DPURebooting {
+				t.Fatalf("monitor 200: phase=%q, want Rebooting", dpu.Status.Phase)
+			}
+			for _, key := range []string{carbide.AnnSimBFBInstallTask, carbide.AnnSimBFBInstallStarted} {
+				if _, ok := dpu.Annotations[key]; ok {
+					t.Errorf("annotation %s survived completion", key)
+				}
+			}
+			f.bmc.mu.Lock()
+			defer f.bmc.mu.Unlock()
+			if len(f.bmc.posts) != 1 || len(f.bmc.taskRequests) != 2 {
+				t.Fatalf("POSTs=%d GETs=%v, want one submission and two monitor polls", len(f.bmc.posts), f.bmc.taskRequests)
+			}
+			for _, uri := range f.bmc.taskRequests {
+				if uri != monitor {
+					t.Errorf("polled %q, want %q", uri, monitor)
+				}
+			}
+		})
+	}
+}
+
 // TestReconcileOSInstallDisabledNeverCallsBMC pins the default: without the
 // Redfish install the phase only dwells, and no BMC is contacted.
 func TestReconcileOSInstallDisabledNeverCallsBMC(t *testing.T) {
@@ -453,6 +522,74 @@ func TestReconcileOSInstallDisabledNeverCallsBMC(t *testing.T) {
 	}
 	if len(f.bmc.posts) != 0 || f.bmc.gets != 0 {
 		t.Fatalf("BMC saw %d posts and %d gets with the install disabled", len(f.bmc.posts), f.bmc.gets)
+	}
+}
+
+func TestParseInstallTask(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, path string
+		kind              redfish.TaskKind
+		wantErr           bool
+	}{
+		{name: "legacy", value: testTaskURI, path: testTaskURI, kind: redfish.TaskResource},
+		{name: "legacy monitor URI", value: "/opaque-monitor?task=7", path: "/opaque-monitor?task=7", kind: redfish.TaskResource},
+		{name: "resource", value: testTaskReference, path: testTaskURI, kind: redfish.TaskResource},
+		{name: "monitor", value: `{"path":"/monitor?task=7","kind":"monitor"}`, path: "/monitor?task=7", kind: redfish.TaskMonitor},
+		{name: "JSON with whitespace", value: " \n\t" + `{"path":"/monitor","kind":"monitor"}`, path: "/monitor", kind: redfish.TaskMonitor},
+		{name: "missing kind", value: `{"path":"/task"}`, path: "/task", kind: redfish.TaskResource},
+		{name: "empty kind", value: `{"path":"/task","kind":""}`, path: "/task", kind: redfish.TaskResource},
+		{name: "unknown kind", value: `{"path":"/task","kind":"other"}`, wantErr: true},
+		{name: "malformed JSON", value: `{"path":`, wantErr: true},
+		{name: "missing path", value: `{"kind":"monitor"}`, wantErr: true},
+		{name: "relative JSON path", value: `{"path":"task","kind":"monitor"}`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseInstallTask(tc.value)
+			if (err != nil) != tc.wantErr || got.Path != tc.path || got.Kind != tc.kind {
+				t.Fatalf("reference=%+v err=%v, want path=%q kind=%q err=%v", got, err, tc.path, tc.kind, tc.wantErr)
+			}
+			if !tc.wantErr {
+				encoded, err := json.Marshal(got)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if restored, err := parseInstallTask(string(encoded)); err != nil || restored != got {
+					t.Fatalf("round trip=%+v err=%v, want %+v", restored, err, got)
+				}
+			}
+		})
+	}
+}
+
+func TestOSInstallPersistedReference(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		invalid     bool
+	}{
+		{name: "legacy resource", value: testTaskURI},
+		{name: "missing kind", value: `{"path":"/redfish/v1/TaskService/Tasks/7"}`},
+		{name: "invalid kind", value: `{"path":"/task","kind":"other"}`, invalid: true},
+		{name: "relative JSON path", value: `{"path":"task","kind":"monitor"}`, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInstallFixture(t, time.Second, time.Hour)
+			if err := f.r.setInstallAnnotation(context.Background(), f.dpu(t), carbide.AnnSimBFBInstallTask, tc.value); err != nil {
+				t.Fatal(err)
+			}
+			f.bmc.set(func(b *fakeBMC) { b.taskBody = `{"Message":"no TaskState"}` })
+			advance, res := f.step(t)
+			if advance || len(f.bmc.posts) != 0 {
+				t.Fatal("saved reference advanced or resubmitted")
+			}
+			if tc.invalid {
+				f.requireError(t, "invalid persisted install task")
+				if f.bmc.gets != 0 {
+					t.Fatal("invalid reference polled BMC")
+				}
+			} else if res.RequeueAfter != f.r.osInstaller.PollInterval || f.dpu(t).Status.Phase != provisioningv1.DPUOSInstalling || f.bmc.gets != 1 {
+				t.Fatal("legacy resource without TaskState must retry its poll")
+			}
+		})
 	}
 }
 
@@ -507,9 +644,20 @@ func (c *failInstallPatch) Patch(ctx context.Context, obj client.Object, patch c
 }
 
 func TestOSInstallTaskPersistenceFailureNeverResubmits(t *testing.T) {
-	for _, committed := range []bool{false, true} {
-		t.Run(strconv.FormatBool(committed), func(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		committed, monitor bool
+	}{
+		{name: "not saved"},
+		{name: "saved", committed: true},
+		{name: "saved monitor", committed: true, monitor: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			committed := tc.committed
 			f := newInstallFixture(t, time.Second, time.Hour)
+			if tc.monitor {
+				f.bmc.set(func(b *fakeBMC) { b.updateBody, b.taskBody = `{}`, `{"Message":"installed"}` })
+			}
 			api := f.r.Client
 			f.r.DPUReader = api
 			f.r.Client = &failInstallPatch{Client: api, key: carbide.AnnSimBFBInstallTask, commit: committed, remaining: 1}
@@ -532,7 +680,7 @@ func TestOSInstallTaskPersistenceFailureNeverResubmits(t *testing.T) {
 				t.Fatalf("advance=%v, task save committed=%v", advance, committed)
 			}
 			if !committed {
-				f.requireError(t, "durable marker has no task path")
+				f.requireError(t, "durable marker has no task reference")
 			}
 			f.bmc.mu.Lock()
 			defer f.bmc.mu.Unlock()
@@ -552,7 +700,7 @@ func TestOSInstallMarkerWithoutTaskFailsClosed(t *testing.T) {
 	if advance, _ := f.step(t); advance {
 		t.Fatal("marker without task must not advance")
 	}
-	f.requireError(t, "durable marker has no task path")
+	f.requireError(t, "durable marker has no task reference")
 	if len(f.bmc.posts) != 0 {
 		t.Fatal("marker must prevent a new POST")
 	}

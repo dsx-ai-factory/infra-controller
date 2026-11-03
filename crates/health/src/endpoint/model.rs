@@ -330,7 +330,7 @@ pub struct SwitchData {
     pub nmxt_enabled: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum BmcCredentials {
     UsernamePassword {
         username: String,

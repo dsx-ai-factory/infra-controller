@@ -27,6 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use carbide_libmlx_model::device::identity::MlxDeviceSelector;
 pub use carbide_libmlx_model::firmware::FirmwareSpec;
 use rpc::protos::mlx_device::{
     FirmwareArtifactDigests as FirmwareArtifactDigestsPb,
@@ -91,8 +92,8 @@ impl From<FirmwareArtifactDigests> for FirmwareArtifactDigestsPb {
     }
 }
 
-/// `FirmwareUpdateContext` pins a checked workflow to its whole-workflow phase ID
-/// and approved artifact bytes. It is immutable once the operation is admitted.
+/// `FirmwareUpdateContext` pins a checked workflow to its whole-workflow phase ID,
+/// approved artifact bytes, and optional card selector. It is immutable after admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirmwareUpdateContext {
@@ -100,14 +101,26 @@ pub struct FirmwareUpdateContext {
     pub phase_id: String,
     /// Expected image and optional configuration bytes, checked before mutation.
     pub expected_digests: FirmwareArtifactDigests,
+    /// Optional reported base MAC or GUID checked against the live device before
+    /// mutation. Omission keeps saved request fingerprints unchanged and adds no
+    /// selector check to the existing preflight checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_device: Option<MlxDeviceSelector>,
 }
 
 impl FirmwareUpdateContext {
-    /// `validate` rejects malformed phase IDs, missing/extra configuration
-    /// digests, and sources outside unauthenticated HTTP(S). URLs may not contain
-    /// user information, query strings, or fragments. Downloads reject redirects.
+    /// `validate` rejects malformed phase IDs or device selectors, missing/extra
+    /// configuration digests, and sources outside unauthenticated HTTP(S).
+    /// URLs may not contain user information, query strings, or fragments.
+    /// Downloads reject redirects.
     /// Legacy submissions retain their separate, broader source contract.
     pub fn validate(&self, profile: &FirmwareFlasherProfile) -> FirmwareResult<()> {
+        if let Some(expected_device) = &self.expected_device {
+            expected_device
+                .clone()
+                .validate()
+                .map_err(|error| FirmwareError::ConfigError(error.to_string()))?;
+        }
         if self.phase_id.is_empty()
             || self.phase_id.len() > 256
             || !self.phase_id.bytes().all(|byte| byte.is_ascii_graphic())
@@ -795,9 +808,40 @@ mod tests {
                     image_sha256: [0; 32],
                     configuration_sha256: digest,
                 },
+                expected_device: None,
             };
             assert_eq!(context.validate(&profile).is_ok(), valid, "{scenario}");
         }
+    }
+
+    /// Direct Rust callers can construct a selector without wire validation;
+    /// checking the context must reject it before any submission is sent.
+    #[test]
+    fn update_context_rejects_an_invalid_typed_selector() {
+        let profile = FirmwareFlasherProfile::from_toml(
+            r#"
+            part_number = "part"
+            psid = "psid"
+            version = "version"
+            firmware_url = "https://host/image.bin"
+        "#,
+        )
+        .unwrap();
+        let context = FirmwareUpdateContext {
+            phase_id: "dispatch-1".into(),
+            expected_digests: FirmwareArtifactDigests {
+                image_sha256: [0; 32],
+                configuration_sha256: None,
+            },
+            expected_device: Some(MlxDeviceSelector::Guid("--".into())),
+        };
+
+        let error = context.validate(&profile).unwrap_err();
+        assert!(
+            matches!(error, FirmwareError::ConfigError(message) if message ==
+                "card selector base GUID must contain 1-256 UTF-8 bytes without surrounding whitespace or control characters, and cannot be -- or N/A"
+            )
+        );
     }
 
     /// Plain URLs do not make explicit authentication safe. Both credential
@@ -823,6 +867,7 @@ mod tests {
                 image_sha256: [0; 32],
                 configuration_sha256: Some([1; 32]),
             },
+            expected_device: None,
         };
         scenarios!(run = |(image, configuration): (Option<Credentials>, Option<Credentials>)| {
             let mut profile = profile.clone();

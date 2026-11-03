@@ -38,7 +38,9 @@ carbide-kms-provider = { path = "../kms-provider" }
 carbide-secrets = { path = "../secrets" }
 carbide-ssh-console = { path = "../ssh-console" }
 carbide-tls = { path = "../tls" }
-carbide-api-core = { path = "../api-core", default-features = false }
+carbide-api-core = { path = "../api-core", default-features = false, features = [
+  "test-support",
+] }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }
@@ -58,14 +60,18 @@ ctor = { workspace = true }
 eyre = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
+librms = { workspace = true }
 mac_address = { workspace = true }
 opentelemetry = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json = { workspace = true }
 serial_test = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"] }
 temp-dir = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+toml = { workspace = true }
+tonic = { workspace = true }
 tracing = { workspace = true }
 #these are alphabetized
 

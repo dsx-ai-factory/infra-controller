@@ -15,8 +15,10 @@
  * limitations under the License.
  */
 
-use carbide_test_support::Outcome::{Fails, Yields};
+use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_test_support::Outcome::{Fails, FailsWith, Yields};
 use carbide_test_support::{Case, check_cases, value_scenarios};
+use mac_address::MacAddress;
 
 use super::*;
 
@@ -71,9 +73,11 @@ fn card_selectors_reject_unusable_identities_without_normalizing() {
 
 // Later reports can repeat a saved identity. Ambiguity must stay an error so
 // changing report order cannot silently change the selected device.
+// Keep absence distinct from duplicates for callers inspecting the typed error.
 #[test]
 fn card_selectors_require_one_literal_observed_match() {
     use NicFirmwareCardSelector::{Guid, Mac};
+    use carbide_libmlx_model::device::identity::MlxDeviceSelectorError::{Ambiguous, NotFound};
 
     let mac_address = "02:ab:cd:01:02:03".parse().unwrap();
     assert_eq!(Mac(mac_address).to_string(), "base MAC 02:AB:CD:01:02:03");
@@ -97,17 +101,17 @@ fn card_selectors_require_one_literal_observed_match() {
             Case {
                 scenario: "GUID case is literal",
                 input: (Guid("opaque-base_guid".into()), vec![guid_device.clone()]),
-                expect: Fails,
+                expect: FailsWith(NotFound(Guid("opaque-base_guid".into()))),
             },
             Case {
                 scenario: "missing observed identity",
                 input: (Mac(mac_address), vec![guid_device.clone()]),
-                expect: Fails,
+                expect: FailsWith(NotFound(Mac(mac_address))),
             },
             Case {
                 scenario: "duplicate observed MAC",
                 input: (Mac(mac_address), vec![mac_device.clone(), mac_device]),
-                expect: Fails,
+                expect: FailsWith(Ambiguous(Mac(mac_address))),
             },
             Case {
                 scenario: "duplicate observed GUID",
@@ -115,10 +119,10 @@ fn card_selectors_require_one_literal_observed_match() {
                     Guid("opaque-Base_Guid".into()),
                     vec![guid_device.clone(), guid_device],
                 ),
-                expect: Fails,
+                expect: FailsWith(Ambiguous(Guid("opaque-Base_Guid".into()))),
             },
         ],
-        |(selector, devices)| selector.device_index(&devices).map_err(drop),
+        |(selector, devices)| selector.device_index(&devices),
     );
 }
 
