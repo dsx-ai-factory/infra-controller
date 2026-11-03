@@ -550,6 +550,23 @@ pub struct ResourceStatusInfo {
     pub status: Option<RedfishStatus>,
 }
 
+impl ResourceStatusInfo {
+    /// Builds a source observation from one decoded Redfish resource.
+    pub(crate) fn from_redfish(
+        resource_type: RedfishResourceType,
+        id: &str,
+        name: &str,
+        status: Option<&nv_redfish::schema::resource::Status>,
+    ) -> Self {
+        Self {
+            resource_type,
+            id: id.to_string(),
+            name: name.to_string(),
+            status: status.map(RedfishStatus::from_redfish),
+        }
+    }
+}
+
 /// Status attached to a periodically observed Redfish resource.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RedfishStatus {
@@ -561,6 +578,41 @@ pub struct RedfishStatus {
     pub health_rollup: Option<String>,
     /// Active Redfish conditions, or `None` when the BMC omitted the property.
     pub conditions: Option<Vec<RedfishCondition>>,
+}
+
+impl RedfishStatus {
+    fn from_redfish(status: &nv_redfish::schema::resource::Status) -> Self {
+        Self {
+            state: status.state.flatten().and_then(redfish_enum_string),
+            health: status.health.flatten().and_then(redfish_enum_string),
+            health_rollup: status.health_rollup.flatten().and_then(redfish_enum_string),
+            conditions: status
+                .conditions
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(|conditions| {
+                    conditions
+                        .iter()
+                        .map(|condition| RedfishCondition {
+                            timestamp: condition.timestamp.map(|value| value.to_string()),
+                            message_id: condition.message_id.clone(),
+                            severity: condition.severity.and_then(redfish_enum_string),
+                            condition_type: condition
+                                .condition_type
+                                .flatten()
+                                .and_then(redfish_enum_string),
+                        })
+                        .collect()
+                }),
+        }
+    }
+}
+
+fn redfish_enum_string(value: impl Serialize) -> Option<String> {
+    match serde_json::to_value(value).ok()? {
+        serde_json::Value::String(value) if value != "UnsupportedValue" => Some(value),
+        _ => None,
+    }
 }
 
 /// Bounded, machine-readable detail from one active Redfish condition.
@@ -631,7 +683,9 @@ pub enum CollectorEvent {
     CollectorRemoved,
     Log(Box<LogRecord>),
     Firmware(FirmwareInfo),
-    /// Periodic status observation for one top-level Redfish resource.
+    /// Source observation offered to the resource-status processor.
+    ResourceStatusObservation(Box<ResourceStatusInfo>),
+    /// Processed status record ready for log sinks.
     ResourceStatus(Box<ResourceStatusInfo>),
     HealthReport(Arc<HealthReport>),
 }
@@ -815,9 +869,62 @@ mod tests {
     use carbide_uuid::switch::SwitchId;
     use chrono::{TimeZone, Utc};
     use mac_address::MacAddress;
+    use serde_json::json;
 
     use super::*;
     use crate::endpoint::{MachineData, PowerShelfData, SharedSystemUuid, SwitchData};
+
+    #[test]
+    fn resource_status_observation_preserves_redfish_status() {
+        let status = serde_json::from_value(json!({
+            "State": "Enabled",
+            "Health": "Warning",
+            "HealthRollup": "Critical",
+            "Conditions": [{
+                "Timestamp": "2026-10-30T10:00:00Z",
+                "MessageId": "ResourceEvent.1.0.ResourceErrorsDetected",
+                "Severity": "Warning",
+                "ConditionType": "Alert"
+            }]
+        }))
+        .expect("resource status");
+
+        let info = ResourceStatusInfo::from_redfish(
+            RedfishResourceType::Firmware,
+            "BMC",
+            "Baseboard Management Controller",
+            Some(&status),
+        );
+
+        assert_eq!(info.resource_type, RedfishResourceType::Firmware);
+        assert_eq!(info.id, "BMC");
+        assert_eq!(info.name, "Baseboard Management Controller");
+        assert_eq!(
+            info.status,
+            Some(RedfishStatus {
+                state: Some("Enabled".to_string()),
+                health: Some("Warning".to_string()),
+                health_rollup: Some("Critical".to_string()),
+                conditions: Some(vec![RedfishCondition {
+                    timestamp: Some("2026-10-30T10:00:00Z".to_string()),
+                    message_id: "ResourceEvent.1.0.ResourceErrorsDetected".to_string(),
+                    severity: Some("Warning".to_string()),
+                    condition_type: Some("Alert".to_string()),
+                }]),
+            })
+        );
+    }
+
+    #[test]
+    fn resource_status_observation_preserves_missing_status() {
+        let info = ResourceStatusInfo::from_redfish(
+            RedfishResourceType::System,
+            "system-1",
+            "System",
+            None,
+        );
+        assert_eq!(info.status, None);
+    }
 
     #[derive(Clone, Copy)]
     enum ContextKind {

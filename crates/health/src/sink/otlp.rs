@@ -95,6 +95,7 @@ pub(crate) fn is_otlp_log_relevant(event: &CollectorEvent) -> bool {
             | CollectorEvent::MetricCollectionStart
             | CollectorEvent::MetricCollectionEnd
             | CollectorEvent::CollectorRemoved
+            | CollectorEvent::ResourceStatusObservation(_)
     )
 }
 

@@ -182,8 +182,7 @@ Collector defaults from the example config:
 | Entity discovery | `discovery_concurrency` | `1` | Concurrent endpoint identity resolutions. |
 | Entity metrics collector | `fetch_interval` | `"2m"` | Entity metrics polling cadence. |
 | Firmware collector | `firmware_refresh_interval` | `"30m"` | Firmware refresh cadence. |
-| Resource status collector | `poll_interval` | `"30m"` | System, Manager, Chassis, and FirmwareInventory status polling cadence. |
-| Manager collector | `poll_interval` | `"5m"` | Power-shelf manager (PMC) status polling cadence. Power-shelf endpoints only. |
+| Manager collector | `poll_interval` | `"5m"` | Redfish Manager polling cadence. Runs for power-shelf endpoints and, when resource-status processing is enabled, generic Redfish endpoints. |
 | Logs collector | `mode` | `"sse"` | Preferred BMC log collection mode. |
 | NMX-C collector | `grpc_port` | `9370` | Switch-host NMX-C gRPC endpoint port. |
 | NMX-C collector | `heartbeat_rate` | `30` | Subscribe heartbeat for NMX-C `DomainStateInfo` updates. |
@@ -400,7 +399,20 @@ Keep the following in mind when configuring health report records:
 
 ### Redfish resource status OTLP log contract
 
-When `[collectors.resource_status]` and `[sinks.otlp]` are enabled, each status poll emits one OTLP log record for every System, Manager, Chassis, and UpdateService/FirmwareInventory resource. Status polling is independent of firmware version inventory, metrics, and event-log collection. A resource is emitted even when its `Status` property is absent so missing status is distinguishable from healthy status.
+When `[processors.resource_status]` and `[sinks.otlp]` are enabled, NICo projects status observations from its existing source collectors into OTLP logs. Entity discovery supplies System and Chassis observations, the manager collector supplies Manager observations, and the firmware collector supplies UpdateService/FirmwareInventory observations. There is no separate status polling task: each resource type follows its source collector's cadence and reuses the Redfish response that collector already fetched. A resource is emitted even when its `Status` property is absent so missing status is distinguishable from healthy status.
+
+Enable the source collectors whose status you need. The manager collector is enabled by default; firmware collection is opt-in:
+
+```toml
+[collectors.firmware]
+enabled = true
+firmware_refresh_interval = "30m"
+
+[processors.resource_status]
+enabled = true
+```
+
+Firmware collection continues to emit its existing version inventory records for resources that provide a version. Resource-status records are also emitted for versionless FirmwareInventory resources.
 
 Resource-status records use `event.type = "redfish.resource_status"` and carry these structured attributes:
 
