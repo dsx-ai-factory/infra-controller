@@ -33,7 +33,7 @@ use rpc::{forge, site_explorer};
 
 use crate::config::NicoApiStateConfig;
 use crate::gate::{CallError, classify_grpc};
-use crate::nico::host_read::{HostDetail, full_host_detail};
+use crate::nico::host_read::{HostDetail, compact_host_detail, full_host_detail};
 use crate::nico::{NicoApi, NicoConnector};
 use crate::probes::nicoapi::preflight_ca;
 
@@ -123,6 +123,23 @@ impl NicoApi for GrpcNico {
             .machines
             .into_iter()
             .map(full_host_detail)
+            .collect()
+    }
+
+    async fn host_states_by_ids(&self, ids: &[MachineId]) -> Result<Vec<HostDetail>, CallError> {
+        let request = forge::HostStatesByIdsRequest {
+            host_ids: ids.to_vec(),
+        };
+        let reply = self
+            .client()
+            .find_host_states_by_ids(request)
+            .await
+            .map_err(grpc)?;
+        reply
+            .into_inner()
+            .hosts
+            .into_iter()
+            .map(compact_host_detail)
             .collect()
     }
 

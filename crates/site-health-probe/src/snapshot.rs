@@ -108,9 +108,25 @@ pub(crate) struct UnitsData {
     /// Units whose state was not in the pinned state table, published as
     /// `other`.
     pub unknown_states: u64,
+    /// Hosts only: every host was read with the compact host read.
+    pub compact_host_read: bool,
+    /// Hosts only: every host has allocatability. Never under the full read.
+    pub allocatable_known: bool,
+    /// Hosts only: every host has update eligibility. Never under the full
+    /// read.
+    pub update_eligible_known: bool,
 }
 
 impl UnitsData {
+    /// Whether every host has `predicate`, as a filter names it.
+    pub(crate) fn host_predicate_known(&self, predicate: &str) -> bool {
+        match predicate {
+            "allocatable" => self.allocatable_known,
+            "updateEligible" => self.update_eligible_known,
+            _ => false,
+        }
+    }
+
     /// Units that share nothing with an earlier snapshot.
     #[cfg(test)]
     pub(crate) fn new(units: Vec<Unit>, unknown_states: u64) -> Self {
@@ -156,6 +172,9 @@ impl<'a> UnitsBuilder<'a> {
         UnitsData {
             units: self.units,
             unknown_states,
+            compact_host_read: false,
+            allocatable_known: false,
+            update_eligible_known: false,
         }
     }
 }

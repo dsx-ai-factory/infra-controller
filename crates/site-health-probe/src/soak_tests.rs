@@ -59,7 +59,7 @@ use prometheus::proto::MetricFamily;
 use rpc::forge::TenantState;
 
 use crate::api::{ApiState, router};
-use crate::config::{ReaderConfig, StateConfig};
+use crate::config::{HostReadMode, ReaderConfig, StateConfig};
 use crate::e2e_tests::get;
 use crate::framework::{ObservationRecorder, Probe};
 use crate::gate::{CallError, CallGate};
@@ -154,7 +154,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static GLOBAL: CountingAllocator = CountingAllocator;
 
 /// A soak's site: hosts (two DPUs each), switches, power shelves, racks,
-/// and whether every host runs an instance.
+/// whether every host runs an instance, and how hosts are read.
 #[derive(Clone, Copy)]
 struct Scale {
     hosts: u32,
@@ -162,6 +162,7 @@ struct Scale {
     shelves: u32,
     racks: u32,
     instances: bool,
+    read: HostReadMode,
     /// The most heap the soak's sweeps may hold at their peak, above the
     /// fake site. Measured, with room for allocator and ordering noise.
     max_peak: i64,
@@ -173,6 +174,7 @@ const RACKS_250: Scale = Scale {
     shelves: 2_000,
     racks: 250,
     instances: false,
+    read: HostReadMode::Full,
     max_peak: 45 << 20,
 };
 
@@ -182,6 +184,7 @@ const RACKS_1000: Scale = Scale {
     shelves: 8_000,
     racks: 1_000,
     instances: true,
+    read: HostReadMode::Full,
     max_peak: 200 << 20,
 };
 
@@ -192,6 +195,7 @@ const RACKS_SMALL: Scale = Scale {
     shelves: 20,
     racks: 5,
     instances: false,
+    read: HostReadMode::Full,
     max_peak: i64::MAX,
 };
 
@@ -579,15 +583,12 @@ struct Soak {
 impl Soak {
     fn new(scale: Scale) -> Self {
         let t0 = crate::clock::now();
-        let cfg = StateConfig::default();
+        let mut cfg = StateConfig::default();
+        cfg.nico_api.host_read = scale.read;
         let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
             .expect("metrics setup");
         let store = Arc::new(SnapshotStore::new(&cfg.paging));
-        let collector = Arc::new(StateCollector::new(
-            Arc::clone(&store),
-            t0,
-            cfg.nico_api.host_read,
-        ));
+        let collector = Arc::new(StateCollector::new(Arc::clone(&store), t0));
         setup
             .registry
             .register(Box::new(Shared(Arc::clone(&collector))))
@@ -605,6 +606,7 @@ impl Soak {
                 timeout: Duration::from_secs(600),
             },
             cfg.nico_api.batch_size,
+            cfg.nico_api.host_read,
             Arc::new(FakeConnector(Arc::clone(&nico))),
             Arc::new(CallGate::new(
                 "nico-api",
@@ -979,6 +981,26 @@ async fn soak_250_racks_full_read() {
 #[ignore = "slow: 500 sweeps at 1,000 racks; run alone in release with --ignored"]
 async fn soak_1000_racks_full_read() {
     soak("1,000 racks, full read", RACKS_1000).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow: 500 sweeps at 250 racks; run alone in release with --ignored"]
+async fn soak_250_racks_compact_read() {
+    let scale = Scale {
+        read: HostReadMode::Compact,
+        ..RACKS_250
+    };
+    soak("250 racks, compact read", scale).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow: 500 sweeps at 1,000 racks; run alone in release with --ignored"]
+async fn soak_1000_racks_compact_read() {
+    let scale = Scale {
+        read: HostReadMode::Compact,
+        ..RACKS_1000
+    };
+    soak("1,000 racks, compact read", scale).await;
 }
 
 /// A cursor taken before a publication pages the units of its own snapshot,
