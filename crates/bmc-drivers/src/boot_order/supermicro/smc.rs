@@ -217,28 +217,16 @@ impl<B: Bmc> BootOrder<B> for SmcBootOrder {
         selector: &BootInterfaceSelector,
     ) -> Result<BootOrderStatus, PlatformError> {
         let mac = cx.boot_interface_mac(selector).await?;
-        let first = match cx.boot_options().await {
-            Ok(options) => {
-                let order = boot_order(cx.system().await?);
-                if order.is_empty() {
-                    None
-                } else {
-                    Some(standard_adapter_is_first(&order, &options, &mac))
-                }
-            }
-            Err(error) if boot_order_unknown(&error) => None,
-            Err(error) => return Err(error),
-        };
-        let boot_interface_first = match first {
-            Some(first) => first,
-            None => {
-                let resource = fixed_boot_order(cx).await?;
-                fixed_adapter_is_first(
-                    resource.fixed_boot_order().unwrap_or_default(),
-                    resource.uefi_network().unwrap_or_default(),
-                    &mac,
-                )
-            }
+        let order = boot_order(cx.system().await?);
+        let boot_interface_first = if order.is_empty() {
+            let resource = fixed_boot_order(cx).await?;
+            fixed_adapter_is_first(
+                resource.fixed_boot_order().unwrap_or_default(),
+                resource.uefi_network().unwrap_or_default(),
+                &mac,
+            )
+        } else {
+            standard_adapter_is_first(&order, &cx.boot_options().await?, &mac)
         };
         Ok(BootOrderStatus {
             boot_interface_first,
@@ -286,7 +274,10 @@ impl<B: Bmc> BootOrder<B> for SmcBootOrder {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::test_support::Fixture;
 
     const MAC: &str = "B8:E9:24:17:6D:72";
     const ADAPTER: &str =
@@ -331,6 +322,37 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A model with no standard boot order or boot options reports the
+    /// fixed boot order `configure` writes.
+    #[tokio::test]
+    async fn status_reads_the_fixed_boot_order_without_a_standard_boot_order() {
+        const SYSTEM: &str = "/redfish/v1/Systems/1";
+        const FIXED: &str = "/redfish/v1/Systems/1/Oem/Supermicro/FixedBootOrder";
+        let bmc = Fixture::new("Supermicro", "", "1", "1")
+            .document(
+                SYSTEM,
+                json!({"@odata.id": SYSTEM, "Id": "1", "Name": "System",
+                       "Boot": {"BootOrder": []},
+                       "Oem": {"Supermicro": {"FixedBootOrder": {"@odata.id": FIXED}}}}),
+            )
+            .document(
+                FIXED,
+                json!({"@odata.id": FIXED, "@odata.type": "#SmcFixedBootOrder.v1_0_0.SmcFixedBootOrder",
+                       "Id": "FixedBootOrder", "Name": "Fixed Boot Order",
+                       "FixedBootOrder": ["UEFI Network", "UEFI Hard Disk"],
+                       "UEFINetwork": [ADAPTER]}),
+            )
+            .build()
+            .await;
+        let cx = bmc.cx().await;
+
+        let status = SmcBootOrder
+            .status(&cx, &BootInterfaceSelector::Mac(MAC.parse().expect("MAC")))
+            .await
+            .expect("status reads the fixed boot order");
+        assert!(status.boot_interface_first);
     }
 
     #[test]

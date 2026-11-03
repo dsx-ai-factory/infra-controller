@@ -934,6 +934,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "carbide-uuid",
+ "eyre",
  "mac_address",
  "nv-redfish",
  "serde",

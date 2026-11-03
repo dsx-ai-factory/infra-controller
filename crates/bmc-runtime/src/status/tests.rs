@@ -178,7 +178,7 @@ fn task_polls_read_monitors_and_tasks_alike() {
             message: "refused".to_string(),
         })
     };
-    let cases: [Case; 6] = [
+    let cases: [Case; 7] = [
         (
             "monitor still running",
             pending(),
@@ -214,6 +214,7 @@ fn task_polls_read_monitors_and_tasks_alike() {
             }),
         ),
         ("monitor gone", bmc_error(404), Err(())),
+        ("monitor removed", bmc_error(410), Err(())),
     ];
     for (scenario, polled, expected) in cases {
         assert_eq!(status(polled).map_err(drop), expected, "{scenario}");

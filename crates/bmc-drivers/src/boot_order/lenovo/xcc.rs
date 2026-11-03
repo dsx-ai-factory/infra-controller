@@ -30,8 +30,9 @@ const GENERAL_HARD_DISK: &str = "Hard Disk";
 
 /// Whether an OEM network boot entry is the HTTP IPv4 option of the adapter
 /// with `mac`, as in `UEFI: SLOT2 (31/0/0) HTTP IPv4  Nvidia Network Adapter - A0:88:C2:08:53:C4`.
+/// XCC writes the MAC in uppercase, so `mac` is matched in any case.
 fn names_adapter(entry: &str, mac: &str) -> bool {
-    let suffix = format!(" - {mac}");
+    let suffix = format!(" - {}", mac.to_ascii_uppercase());
     ["HTTP IPv4  Mellanox", "HTTP IPv4  Nvidia"]
         .iter()
         .any(|prefix| {
@@ -170,6 +171,10 @@ mod tests {
         ] {
             assert!(!names_adapter(entry, mac), "{entry}");
         }
+        assert!(names_adapter(
+            "UEFI:   SLOT2 (31/0/0) HTTP IPv4  Nvidia Network Adapter - A0:88:C2:08:53:C4",
+            "a0:88:c2:08:53:c4"
+        ));
     }
 
     /// An empty order is what XCC reports while the host POSTs; writing

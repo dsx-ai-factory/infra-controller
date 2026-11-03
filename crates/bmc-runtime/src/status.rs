@@ -119,7 +119,8 @@ enum TaskPoll {
 /// Monitor. A Task answers with itself throughout. A monitor answers 202
 /// while the work runs and, once it finishes, with the operation's own
 /// response, such as Supermicro's `{"Success": …}`; a 4xx then means the
-/// operation was rejected.
+/// operation was rejected, except a 404 or 410, which means the monitor is
+/// gone rather than that the work failed.
 fn task_poll(
     polled: Result<ModificationResponse<Value>, PlatformError>,
 ) -> Result<TaskPoll, PlatformError> {
@@ -136,7 +137,7 @@ fn task_poll(
             status: status @ 400..=499,
             message,
             ..
-        }) if status != 404 => Ok(TaskPoll::Status(OperationStatus::Failed {
+        }) if !matches!(status, 404 | 410) => Ok(TaskPoll::Status(OperationStatus::Failed {
             state: format!("HTTP {status}"),
             message: Some(message),
         })),

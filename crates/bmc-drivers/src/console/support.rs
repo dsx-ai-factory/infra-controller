@@ -83,9 +83,10 @@ fn attr_value(text: &str) -> Value {
     }
 }
 
-/// Rates the checked attributes `attrs` reports: enabled when every one
-/// holds an enabled value, disabled when every one holds a disabled value,
-/// partial otherwise. Unreported attributes are skipped.
+/// Rates the checked attributes in `attrs`: enabled when every one holds an
+/// enabled value, disabled when every one holds a disabled value, partial
+/// otherwise. An unreported attribute is skipped only when it is optional;
+/// any other unreported attribute makes the console partial.
 pub(super) fn attr_status(
     attrs: &BTreeMap<String, Value>,
     expected: &[AttrExpectation],
@@ -97,7 +98,14 @@ pub(super) fn attr_status(
         let value = match attrs.get(expectation.key) {
             Some(Value::String(value)) => value.clone(),
             Some(Value::Bool(value)) => value.to_string(),
-            _ => continue,
+            Some(Value::Number(value)) => value.to_string(),
+            _ if expectation.optional => continue,
+            _ => {
+                message.push(format!("{}=unreported", expectation.key));
+                enabled = false;
+                disabled = false;
+                continue;
+            }
         };
         message.push(format!("{}={value}", expectation.key));
         enabled &= expectation.enabled.contains(&value.as_str());
@@ -170,11 +178,12 @@ mod tests {
     }
 
     #[test]
-    fn status_rates_only_reported_checked_attributes() {
+    fn status_rates_checked_attributes_and_skips_only_optional_unreported_ones() {
         let expected = [
             attr("a", &["on"], &["off"]),
             attr("b", &["on"], &["off"]),
             write_only("c", &["on"]),
+            attr("d", &["on"], &["off"]).optional(),
         ];
         let cases = [
             (
@@ -195,9 +204,14 @@ mod tests {
             (
                 "one unreported",
                 attrs(&[("a", "on")]),
-                ConsoleState::Enabled,
+                ConsoleState::Partial,
             ),
-            ("nothing reported", attrs(&[]), ConsoleState::Enabled),
+            ("nothing reported", attrs(&[]), ConsoleState::Partial),
+            (
+                "optional differs",
+                attrs(&[("a", "on"), ("b", "on"), ("d", "off")]),
+                ConsoleState::Partial,
+            ),
             (
                 "write-only differs",
                 attrs(&[("a", "on"), ("b", "on"), ("c", "off")]),
@@ -207,6 +221,13 @@ mod tests {
         for (name, reported, state) in cases {
             assert_eq!(attr_status(&reported, &expected).state, state, "{name}");
         }
+    }
+
+    #[test]
+    fn numeric_values_are_compared_as_text() {
+        let reported = BTreeMap::from([("baud".to_string(), json!(115200))]);
+        let status = attr_status(&reported, &[attr("baud", &["115200"], &[])]);
+        assert_eq!(status.state, ConsoleState::Enabled);
     }
 
     #[test]

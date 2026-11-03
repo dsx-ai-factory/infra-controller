@@ -55,6 +55,7 @@ axum = { workspace = true }
 bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+eyre = { workspace = true }
 nv-redfish = { features = ["bmc-http"], workspace = true }
 tokio = { features = ["macros", "rt"], workspace = true }
 url = { workspace = true }

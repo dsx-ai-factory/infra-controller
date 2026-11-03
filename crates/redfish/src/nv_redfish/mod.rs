@@ -38,7 +38,7 @@ use nv_redfish::core::query::{ExpandQuery, FilterQuery};
 use nv_redfish::core::upload::{HttpPushUriUpdateRequest, MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
-    Raw, Repair, RepairError, SessionCreateResponse,
+    Repair, RepairError, SessionCreateResponse,
 };
 use nv_redfish::oem::hpe::ilo_service_ext::ManagerType as HpeManagerType;
 use nv_redfish::{Error as NvError, ServiceRoot as NvServiceRoot};
@@ -401,22 +401,7 @@ impl Bmc for RedfishBmc {
         etag: Option<&ODataETag>,
         update: &V,
     ) -> Result<ModificationResponse<R>, Self::Error> {
-        let mut result = self.inner.update(id, etag, update).await;
-        // An ETag read earlier in an operation, or from a resource whose ETag
-        // follows the BMC clock, can be stale by the time it is written: retry
-        // once with the one the resource reports now.
-        if etag.is_some()
-            && matches!(
-                &result,
-                Err(BmcError::InvalidResponse { status, .. })
-                    if *status == reqwest::StatusCode::PRECONDITION_FAILED
-            )
-            && let Ok(current) = self.inner.get::<Raw>(id).await
-            && let Some(current) = current.etag()
-            && Some(current) != etag
-        {
-            result = self.inner.update(id, Some(current), update).await;
-        }
+        let result = self.inner.update(id, etag, update).await;
         self.finish_request("update", update, result)
     }
 
@@ -1715,98 +1700,6 @@ mod tests {
                 std::mem::take(&mut *revalidations.lock().unwrap()),
                 expected,
                 "{vendor}"
-            );
-            server.abort();
-        }
-    }
-
-    /// A write the BMC refuses with 412 for its ETag is retried once with the
-    /// ETag the resource reports now; one sent with `If-Match: *` is not.
-    #[tokio::test]
-    async fn stale_etag_writes_retry_once_with_the_current_etag() {
-        use axum::Router;
-        use axum::http::{StatusCode, header};
-        use axum::response::IntoResponse;
-        use axum::routing::get;
-        use serde_json::json;
-
-        const MANAGER: &str = "/redfish/v1/Managers/1";
-        for (scenario, sent, expected) in [
-            ("stale ETag", Some("\"1\""), (true, vec!["\"1\"", "\"2\""])),
-            ("wildcard", None, (false, vec!["*"])),
-        ] {
-            let if_matches = Arc::new(Mutex::new(Vec::new()));
-            let app = Router::new()
-                .route(
-                    "/redfish/v1",
-                    get(|| async {
-                        axum::Json(json!({
-                            "@odata.id": "/redfish/v1", "Id": "RootService",
-                            "Name": "Root Service", "Vendor": "Lenovo",
-                            "Links": {"Sessions": {
-                                "@odata.id": "/redfish/v1/SessionService/Sessions",
-                            }},
-                        }))
-                    }),
-                )
-                .route(
-                    MANAGER,
-                    get(|| async {
-                        (
-                            [(header::ETAG, "\"2\"")],
-                            axum::Json(json!({
-                                "@odata.id": MANAGER, "@odata.etag": "\"2\"",
-                                "Id": "1", "Name": "Manager",
-                            })),
-                        )
-                    })
-                    .patch({
-                        let if_matches = if_matches.clone();
-                        move |headers: axum::http::HeaderMap| async move {
-                            let if_match = headers
-                                .get(header::IF_MATCH)
-                                .and_then(|value| value.to_str().ok())
-                                .unwrap_or_default()
-                                .to_string();
-                            if_matches.lock().unwrap().push(if_match.clone());
-                            if if_match == "\"2\"" {
-                                axum::Json(json!({})).into_response()
-                            } else {
-                                StatusCode::PRECONDITION_FAILED.into_response()
-                            }
-                        }
-                    }),
-                );
-            let (address, server) = serve_tls(app).await;
-
-            let pool = NvRedfishClientPool::new(Arc::new(ArcSwap::from_pointee(None)));
-            let connection = pool
-                .connection_with_bmc_credentials(
-                    address,
-                    BmcCredentials::new("root".to_string(), "password".to_string()),
-                )
-                .await
-                .expect("the BMC connects");
-            let sent = sent.map(|etag| ODataETag::from(etag.to_string()));
-            let result = connection
-                .bmc
-                .update::<_, serde_json::Value>(
-                    &ODataId::from(MANAGER.to_string()),
-                    sent.as_ref(),
-                    &json!({"Oem": {}}),
-                )
-                .await;
-
-            assert_eq!(
-                (
-                    result.is_ok(),
-                    std::mem::take(&mut *if_matches.lock().unwrap())
-                ),
-                (
-                    expected.0,
-                    expected.1.iter().map(ToString::to_string).collect()
-                ),
-                "{scenario}"
             );
             server.abort();
         }
