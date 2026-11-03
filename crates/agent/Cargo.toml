@@ -152,6 +152,7 @@ carbide-test-support = { path = "../test-support" }
 rcgen = { workspace = true }
 prost = { workspace = true }
 rustls-pki-types = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
