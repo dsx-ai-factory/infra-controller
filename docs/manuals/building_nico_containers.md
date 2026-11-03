@@ -26,14 +26,6 @@ separated by architecture. Migrating from the former Tilt-only recipes starts
 with cold Cargo caches because their names changed. Old Tilt caches remain until
 the operator explicitly removes them; this workflow does not prune them.
 
-Serialize builds of the same service and architecture when Make and Tilt share
-a Docker daemon, including builds from different checkouts. The Cargo cache lock
-covers each build step, not the entire image build. Another build can replace the
-binary before it is copied into the runtime image; checksum verification then
-fails the build. A cached builder step can retain the mismatched checksum;
-stop competing builds and rebuild the affected image with Docker’s `--no-cache`
-option to regenerate both the binary and its checksum.
-
 The target selects `linux/amd64` or `linux/arm64` from `docker info`, accepting
 the daemon's `amd64`/`x86_64` and `arm64`/`aarch64` architecture names. Other
 operating systems or architectures are rejected before building. Architecture

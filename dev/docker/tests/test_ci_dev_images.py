@@ -37,7 +37,7 @@ class CiDevImagesTest(unittest.TestCase):
         self.assertEqual(restore["with"]["key"],
                          "sccache-dev-dhcp-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}")
         self.assertEqual(restore["with"]["restore-keys"], "sccache-dev-dhcp-${{ matrix.arch }}-")
-        self.assertTrue(restore["with"]["path"].startswith("${{ runner.temp }}/"))
+        self.assertEqual(restore["with"]["path"], "~/.cache/sccache-dev-dhcp")
         lookup = by_id["sccache-saved"]
         self.assertEqual(lookup["if"],
                          "github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'")
@@ -48,6 +48,10 @@ class CiDevImagesTest(unittest.TestCase):
         save = next(step for step in steps if step.get("uses") == "actions/cache/save@v4")
         self.assertEqual(save["if"], "steps.sccache-export.outcome == 'success'")
         self.assertEqual(save["with"]["key"], "${{ steps.sccache.outputs.cache-primary-key }}")
+        self.assertEqual(restore["with"]["path"], save["with"]["path"])
+        self.assertEqual(restore["with"]["path"], lookup["with"]["path"])
+        self.assertEqual(by_id["dev-build"]["env"]["SCCACHE_SEED_DIR"], export["env"]["CACHE_EXPORT_DIR"])
+        self.assertIn(restore["with"]["path"].replace("~", "${HOME}"), by_id["sccache-dir"]["run"])
         for step in (lookup, export, save):
             self.assertTrue(step["continue-on-error"])
         cleanup = steps[-1]

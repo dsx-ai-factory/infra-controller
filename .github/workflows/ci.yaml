@@ -1466,9 +1466,16 @@ jobs:
         id: sccache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/sccache-dev-dhcp
+          path: ~/.cache/sccache-dev-dhcp
           key: sccache-dev-dhcp-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: sccache-dev-dhcp-${{ matrix.arch }}-
+
+      - name: Locate development DHCP compiler cache
+        id: sccache-dir
+        run: |
+          dir="${HOME}/.cache/sccache-dev-dhcp"
+          mkdir -p "$dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       # Reuse the prepared compiler, but build the actual development recipes
       # so runtime dependencies and COPY paths are checked on both architectures.
@@ -1481,7 +1488,7 @@ jobs:
           PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
           KEA_VERSION: ${{ needs.prepare.outputs.kea_version }}
           DOCKER_BUILDKIT: '1'
-          SCCACHE_SEED_DIR: ${{ runner.temp }}/sccache-dev-dhcp
+          SCCACHE_SEED_DIR: ${{ steps.sccache-dir.outputs.dir }}
         run: |
           set -euo pipefail
           docker_context="$(docker context show)"
@@ -1535,7 +1542,7 @@ jobs:
         continue-on-error: true
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/sccache-dev-dhcp
+          path: ~/.cache/sccache-dev-dhcp
           key: ${{ steps.sccache.outputs.cache-primary-key }}
           lookup-only: true
 
@@ -1548,8 +1555,10 @@ jobs:
           BUILD_CONTAINER: ${{ steps.dev-build.outputs.compiler_image }}
           DOCKER_CONTEXT: ${{ steps.dev-build.outputs.docker_context }}
           BUILDX_BUILDER: ${{ steps.dev-build.outputs.docker_context }}
-          CACHE_EXPORT_DIR: ${{ runner.temp }}/sccache-dev-dhcp-export
+          CACHE_EXPORT_DIR: ${{ steps.sccache-dir.outputs.dir }}
         run: |
+          rm -rf "$CACHE_EXPORT_DIR"
+          mkdir -p "$CACHE_EXPORT_DIR"
           docker build --platform "linux/$ARCH" \
             --file dev/docker/Dockerfile.dev-services --target sccache-export \
             --build-arg CONTAINER_BUILD="$BUILD_CONTAINER" \
@@ -1561,7 +1570,7 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
-          path: ${{ runner.temp }}/sccache-dev-dhcp-export
+          path: ~/.cache/sccache-dev-dhcp
           key: ${{ steps.sccache.outputs.cache-primary-key }}
 
       - name: Remove development DHCP job images
