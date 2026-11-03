@@ -141,8 +141,12 @@ pub struct SwitchReachabilityConfig {
     /// Maximum number of switches probed at the same time in one pass. Each
     /// switch in flight holds at most one open connection attempt, so this
     /// bounds the pass's sockets and timeout waiters on large sites.
-    /// Defaults to 32. Deserialization rejects 0.
-    #[serde(default = "SwitchReachabilityConfig::default_max_concurrent_switches")]
+    /// Defaults to 32. Deserialization rejects 0 and values above the Tokio
+    /// semaphore limit that bounds the admission.
+    #[serde(
+        default = "SwitchReachabilityConfig::default_max_concurrent_switches",
+        deserialize_with = "deserialize_max_concurrent_switches"
+    )]
     pub max_concurrent_switches: std::num::NonZeroUsize,
 }
 
@@ -406,9 +410,10 @@ impl Default for NvLinkConfig {
     }
 }
 
-/// Rejects 0 and values the monitor's semaphore cannot represent.
-fn deserialize_partition_monitor_max_concurrent_groups<'de, D>(
+/// Rejects 0 and values a Tokio semaphore cannot represent, naming `field`.
+fn deserialize_semaphore_permits<'de, D>(
     deserializer: D,
+    field: &str,
 ) -> Result<std::num::NonZeroUsize, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -416,13 +421,30 @@ where
     let value = usize::deserialize(deserializer)?;
     if value > tokio::sync::Semaphore::MAX_PERMITS {
         return Err(serde::de::Error::custom(format!(
-            "partition_monitor_max_concurrent_groups must be at most {}, got {value}",
+            "{field} must be at most {}, got {value}",
             tokio::sync::Semaphore::MAX_PERMITS
         )));
     }
-    std::num::NonZeroUsize::new(value).ok_or_else(|| {
-        serde::de::Error::custom("partition_monitor_max_concurrent_groups must be at least 1")
-    })
+    std::num::NonZeroUsize::new(value)
+        .ok_or_else(|| serde::de::Error::custom(format!("{field} must be at least 1")))
+}
+
+fn deserialize_partition_monitor_max_concurrent_groups<'de, D>(
+    deserializer: D,
+) -> Result<std::num::NonZeroUsize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_semaphore_permits(deserializer, "partition_monitor_max_concurrent_groups")
+}
+
+fn deserialize_max_concurrent_switches<'de, D>(
+    deserializer: D,
+) -> Result<std::num::NonZeroUsize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_semaphore_permits(deserializer, "max_concurrent_switches")
 }
 
 #[cfg(test)]
@@ -461,6 +483,20 @@ mod test {
 
             "zero concurrency is rejected" {
                 r#"{"switch_reachability": {"max_concurrent_switches": 0}}"# => None,
+            }
+
+            "concurrency above the semaphore limit is rejected" {
+                &format!(
+                    r#"{{"switch_reachability": {{"max_concurrent_switches": {}}}}}"#,
+                    tokio::sync::Semaphore::MAX_PERMITS + 1
+                ) => None,
+            }
+
+            "concurrency at the semaphore limit is accepted" {
+                &format!(
+                    r#"{{"switch_reachability": {{"max_concurrent_switches": {}}}}}"#,
+                    tokio::sync::Semaphore::MAX_PERMITS
+                ) => Some(3),
             }
 
             "unknown keys are rejected" {

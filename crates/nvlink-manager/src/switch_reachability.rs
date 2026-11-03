@@ -33,6 +33,15 @@
 //! the report cannot leave the two out of step. Only passes without a stored
 //! alert count towards the threshold, and writes are confirmed after they
 //! succeed, so a failed write is retried on the next pass.
+//!
+//! The streak counts live in memory, so they are only meaningful if the same
+//! replica sees every pass. One replica therefore owns the monitor: it takes
+//! the work lock on its first pass and keeps it across passes, verifying with
+//! a fenced no-op transaction at the start of each pass that it still holds
+//! the lease. Other replicas find the lock taken and do nothing. When the
+//! owner stops or its lease is taken over, the next owner starts its counts
+//! from zero, so a takeover restarts the debounce; a stored alert is never
+//! affected by that, since its state is read from the database.
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
@@ -224,6 +233,13 @@ impl UnreachableTracker {
         }
     }
 
+    /// Forgets everything: this replica no longer owns the monitor, so its
+    /// counts no longer describe consecutive passes.
+    fn reset(&mut self) {
+        self.streaks.clear();
+        self.pending_writes.clear();
+    }
+
     /// Drops streaks of switch services no longer probed, such as NMX-T on a
     /// switch that stopped being primary, and pending writes of switches no
     /// longer probed at all.
@@ -301,14 +317,18 @@ struct SwitchOutcome {
 }
 
 /// Periodic task that probes ready switches and maintains their reachability
-/// alerts. Runs in every `nico-api` replica; the work lock lets one pass run
-/// at a time.
+/// alerts. Runs in every `nico-api` replica, but only the replica holding the
+/// work lock does any work, and it keeps the lock across passes so its
+/// in-memory streaks see every pass.
 pub struct SwitchReachabilityMonitor {
     db_pool: PgPool,
     config: SwitchReachabilityConfig,
     work_lock_manager_handle: WorkLockManagerHandle,
     prober: Arc<dyn SwitchProber>,
     tracker: Mutex<UnreachableTracker>,
+    /// The work lock while this replica owns the monitor. Released on drop,
+    /// so a stopped replica hands over within the lease timeout.
+    lock: tokio::sync::Mutex<Option<WorkLock>>,
 }
 
 impl SwitchReachabilityMonitor {
@@ -340,6 +360,7 @@ impl SwitchReachabilityMonitor {
             work_lock_manager_handle,
             prober,
             tracker: Mutex::new(UnreachableTracker::default()),
+            lock: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -376,12 +397,12 @@ impl SwitchReachabilityMonitor {
 
     /// Runs one pass. Returns the number of switches whose report was written.
     pub async fn run_single_iteration(&self) -> NvLinkManagerResult<usize> {
-        let span_id: String = format!("{:#x}", u64::from_le_bytes(rand::random::<[u8; 8]>()));
+        let pass_id: String = format!("{:#x}", u64::from_le_bytes(rand::random::<[u8; 8]>()));
         let span = tracing::span!(
             parent: None,
             tracing::Level::INFO,
             "switch_reachability_monitor",
-            span_id,
+            pass_id,
             otel.status_code = tracing::field::Empty,
             otel.status_message = tracing::field::Empty,
             metrics = tracing::field::Empty,
@@ -408,21 +429,76 @@ impl SwitchReachabilityMonitor {
         &self,
         metrics: &mut PassMetrics,
     ) -> NvLinkManagerResult<usize> {
-        let lock = match self
-            .work_lock_manager_handle
-            .try_acquire_lock(Self::ITERATION_WORK_KEY.into())
-            .await
-        {
-            Ok(lock) => lock,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "SwitchReachabilityMonitor failed to acquire work lock: Another instance of carbide running?",
-                );
-                return Ok(0);
+        let mut owned = self.lock.lock().await;
+        if owned.is_none() {
+            match self
+                .work_lock_manager_handle
+                .try_acquire_lock(Self::ITERATION_WORK_KEY.into())
+                .await
+            {
+                Ok(lock) => {
+                    tracing::info!("SwitchReachabilityMonitor: this replica now owns the monitor");
+                    *owned = Some(lock);
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "SwitchReachabilityMonitor: another replica owns the monitor"
+                    );
+                    return Ok(0);
+                }
             }
-        };
+        }
+        let lock = owned.as_ref().expect("lock was just acquired or kept");
+        if !self.still_owns(lock).await? {
+            tracing::warn!(
+                "SwitchReachabilityMonitor lease was taken over; dropping local streaks"
+            );
+            self.release(&mut owned);
+            return Ok(0);
+        }
+        match self.run_owned_pass(lock, metrics).await {
+            Ok(written) => Ok(written),
+            Err(PassFailure::LockLost) => {
+                self.release(&mut owned);
+                Err(NvLinkManagerError::internal(
+                    "work lock was lost during the pass; remaining writes abandoned".to_string(),
+                ))
+            }
+            Err(PassFailure::Other(error)) => Err(error),
+        }
+    }
 
+    /// Verifies the held lock still names this replica. A takeover changes the
+    /// lock's worker, which the fence detects as a failed precondition.
+    async fn still_owns(&self, lock: &WorkLock) -> NvLinkManagerResult<bool> {
+        let mut txn = self.db_pool.begin().await.map_err(|e| {
+            NvLinkManagerError::internal(format!("Failed to begin transaction: {e}"))
+        })?;
+        let owns = match lock.fence_transaction(&mut txn).await {
+            Ok(()) => true,
+            Err(db::DatabaseError::FailedPrecondition(_)) => false,
+            Err(error) => return Err(error.into()),
+        };
+        txn.rollback().await.ok();
+        Ok(owns)
+    }
+
+    /// Gives up ownership: drops the lock, which releases it, and forgets the
+    /// streaks, which only described this replica's consecutive passes.
+    fn release(&self, owned: &mut Option<WorkLock>) {
+        *owned = None;
+        self.tracker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reset();
+    }
+
+    async fn run_owned_pass(
+        &self,
+        lock: &WorkLock,
+        metrics: &mut PassMetrics,
+    ) -> Result<usize, PassFailure> {
         let (targets, stored) = {
             let mut conn = self.acquire().await?;
             let targets = db::switch::find_reachability_targets(conn.as_mut()).await?;
@@ -582,7 +658,7 @@ impl SwitchReachabilityMonitor {
                 }
             }
             let outcome = self
-                .write_report(&lock, switch_id, alerts, stored_report.is_some())
+                .write_report(lock, switch_id, alerts, stored_report.is_some())
                 .await;
             let ok = outcome.is_ok();
             if ok {
@@ -599,7 +675,7 @@ impl SwitchReachabilityMonitor {
                 .unwrap_or_else(PoisonError::into_inner)
                 .confirm(switch_id, &confirmed, ok);
             if let Err(WriteFailure::LockLost) = outcome {
-                return Err(Self::lock_lost());
+                return Err(PassFailure::LockLost);
             }
         }
 
@@ -613,25 +689,17 @@ impl SwitchReachabilityMonitor {
                 switch_id = %switch_id,
                 "Switch is no longer probed; removing its reachability report"
             );
-            match self.write_report(&lock, switch_id, Vec::new(), true).await {
+            match self.write_report(lock, switch_id, Vec::new(), true).await {
                 Ok(()) => written += 1,
                 Err(WriteFailure::LockLost) => {
                     metrics.write_failures += 1;
-                    return Err(Self::lock_lost());
+                    return Err(PassFailure::LockLost);
                 }
                 Err(WriteFailure::Other) => metrics.write_failures += 1,
             }
         }
 
         Ok(written)
-    }
-
-    /// The pass's lease was taken over by another replica, so its results
-    /// are stale and the rest of the pass is abandoned.
-    fn lock_lost() -> NvLinkManagerError {
-        NvLinkManagerError::internal(
-            "work lock was lost during the pass; remaining writes abandoned".to_string(),
-        )
     }
 
     async fn acquire(&self) -> NvLinkManagerResult<sqlx::pool::PoolConnection<sqlx::Postgres>> {
@@ -710,6 +778,26 @@ impl SwitchReachabilityMonitor {
                 Err(WriteFailure::Other)
             }
         }
+    }
+}
+
+/// Why an owned pass stopped early.
+enum PassFailure {
+    /// The lease was taken over by another replica mid-pass, so the remaining
+    /// results are stale and the pass is abandoned.
+    LockLost,
+    Other(NvLinkManagerError),
+}
+
+impl From<NvLinkManagerError> for PassFailure {
+    fn from(error: NvLinkManagerError) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<db::DatabaseError> for PassFailure {
+    fn from(error: db::DatabaseError) -> Self {
+        Self::Other(error.into())
     }
 }
 
@@ -1171,6 +1259,90 @@ mod tests {
             "four reachable switches were probed one at a time"
         );
         join_set.shutdown().await;
+        Ok(())
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn one_replica_owns_the_monitor_across_passes(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use db::work_lock_manager::KeepaliveConfig;
+        use model::switch::SwitchControllerState;
+
+        let mut txn = pool.begin().await?;
+        let switch =
+            db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
+        txn.commit().await?;
+        set_controller_state(&pool, &switch.id, &SwitchControllerState::Ready).await?;
+
+        let config = SwitchReachabilityConfig {
+            unreachable_alert_after: std::num::NonZeroU32::new(3).expect("non-zero"),
+            ..SwitchReachabilityConfig::default()
+        };
+        let prober = Arc::new(ScriptedProber::default());
+        prober.set(config.nvos_port, Some("connect failed: refused"));
+
+        // Replica A takes the lock on its first pass and keeps it, so its
+        // streak counts every pass.
+        let mut a_manager = JoinSet::new();
+        let a_handle =
+            db::work_lock_manager::start(&mut a_manager, pool.clone(), Default::default()).await?;
+        let a = SwitchReachabilityMonitor::with_prober(
+            pool.clone(),
+            config.clone(),
+            a_handle,
+            prober.clone(),
+        );
+        // Replica B treats a lease without keepalives as expired quickly.
+        let mut b_manager = JoinSet::new();
+        let b_handle = db::work_lock_manager::start(
+            &mut b_manager,
+            pool.clone(),
+            KeepaliveConfig {
+                interval: Duration::from_secs(3600),
+                timeout: Duration::from_millis(50),
+            },
+        )
+        .await?;
+        let b = SwitchReachabilityMonitor::with_prober(
+            pool.clone(),
+            config.clone(),
+            b_handle,
+            prober.clone(),
+        );
+
+        assert_eq!(a.run_single_iteration().await?, 0);
+        assert!(
+            a.lock.lock().await.is_some(),
+            "A keeps the lock between passes"
+        );
+        // B's passes do nothing while A owns the monitor, and do not count.
+        assert_eq!(b.run_single_iteration().await?, 0);
+        assert_eq!(b.run_single_iteration().await?, 0);
+        assert!(b.lock.lock().await.is_none());
+        assert!(b.tracker.lock().unwrap().streaks.is_empty());
+        // A's third consecutive pass raises the alert: B's passes in between
+        // did not dilute the count.
+        assert_eq!(a.run_single_iteration().await?, 0);
+        assert_eq!(a.run_single_iteration().await?, 1);
+        assert_eq!(
+            stored_alerts(&pool, &switch.id).await?.map(|a| a.len()),
+            Some(1)
+        );
+
+        // A's manager stops sending keepalives; B takes the lease over and
+        // becomes the owner. A notices on its next pass and forgets its state.
+        a_manager.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        prober.set(config.nvos_port, None);
+        assert_eq!(b.run_single_iteration().await?, 1, "B clears the alert");
+        assert!(b.lock.lock().await.is_some());
+        assert_eq!(a.run_single_iteration().await?, 0);
+        assert!(a.lock.lock().await.is_none(), "A gave up the lock");
+        assert!(a.tracker.lock().unwrap().streaks.is_empty());
+        assert_eq!(stored_alerts(&pool, &switch.id).await?, None);
+
+        b_manager.shutdown().await;
         Ok(())
     }
 

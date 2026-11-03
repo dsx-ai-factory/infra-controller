@@ -147,7 +147,10 @@ and removed on the first check that connects. Only checks without a stored
 alert count towards the threshold, so removing an alert by hand during an
 ongoing outage suppresses it for another `unreachable_alert_after` checks. The
 alert's `in_alert_since` is the first failed check of the run that raised it. A
-report write that fails is retried on the next pass. A switch that leaves the
+report write that fails is retried on the next pass. One `nico-api` replica owns
+the monitor at a time and keeps its work lock across passes so the counts see
+every pass; when that replica stops or loses its lease, the next owner counts
+from zero, so a takeover restarts the debounce without touching stored alerts. A switch that leaves the
 `ready` state or is deleted has its report removed on the next pass. A
 successful TCP connection proves only that the service accepts connections,
 not that it answers requests.

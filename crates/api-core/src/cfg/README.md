@@ -687,7 +687,7 @@ verified against its own host, which for rack endpoints is the switch NVOS IP.
 | `probe_timeout` | `Duration` | `10s` | Timeout for each TCP connection attempt. |
 | `nvos_port` | `u16` | `443` | Port probed on every ready switch's NVOS management address for [`SwitchUnreachable`](../../../../docs/architecture/health/health_probe_ids.md#switchunreachable). |
 | `nmx_t_port` | `u16` | `9352` | Port probed on primary switches, which host NMX-T, for [`NmxtUnreachable`](../../../../docs/architecture/health/health_probe_ids.md#nmxtunreachable). |
-| `max_concurrent_switches` | `NonZeroUsize` | `32` | Maximum number of switches probed at the same time in one pass. Each switch in flight holds at most one open connection attempt, so this bounds the pass's sockets and timeout waiters. 0 is rejected. |
+| `max_concurrent_switches` | `NonZeroUsize` | `32` | Maximum number of switches probed at the same time in one pass. Each switch in flight holds at most one open connection attempt, so this bounds the pass's sockets and timeout waiters. 0 and values above the Tokio semaphore limit are rejected. |
 
 Upgrade note: `enabled` previously defaulted to `false`. A site that sets
 `nvlink_config.enabled = true` without this key starts the certificate monitor
