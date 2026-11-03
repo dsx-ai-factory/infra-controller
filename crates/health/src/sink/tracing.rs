@@ -130,6 +130,7 @@ impl DataSink for TracingSink {
                     "Firmware info event"
                 );
             }
+            CollectorEvent::ResourceStatusObservation(_) => {}
             CollectorEvent::ResourceStatus(info) => {
                 tracing::info!(
                     endpoint = %context.endpoint_key(),

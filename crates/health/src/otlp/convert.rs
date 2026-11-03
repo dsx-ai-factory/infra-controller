@@ -532,7 +532,8 @@ fn convert_event(
                 ..Default::default()
             })
         }
-        CollectorEvent::Metric(_)
+        CollectorEvent::ResourceStatusObservation(_)
+        | CollectorEvent::Metric(_)
         | CollectorEvent::MetricCollectionStart
         | CollectorEvent::MetricCollectionEnd
         | CollectorEvent::CollectorRemoved => None,

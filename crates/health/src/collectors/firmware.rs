@@ -24,16 +24,21 @@ use nv_redfish::core::Bmc;
 use crate::HealthError;
 use crate::collectors::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
-use crate::sink::{CollectorEvent, DataSink, EventContext, FirmwareInfo};
+use crate::sink::{
+    CollectorEvent, DataSink, EventContext, FirmwareInfo, RedfishResourceType, ResourceStatusInfo,
+};
 
 pub struct FirmwareCollectorConfig {
     pub data_sink: Option<Arc<dyn DataSink>>,
+    /// Emit source observations for the resource-status processor.
+    pub emit_resource_status: bool,
 }
 
 pub struct FirmwareCollector<B: Bmc> {
     bmc: Arc<B>,
     event_context: EventContext,
     data_sink: Option<Arc<dyn DataSink>>,
+    emit_resource_status: bool,
 }
 
 impl<B: Bmc + 'static> PeriodicCollector<B> for FirmwareCollector<B> {
@@ -49,6 +54,7 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for FirmwareCollector<B> {
             bmc,
             event_context,
             data_sink: config.data_sink,
+            emit_resource_status: config.emit_resource_status,
         })
     }
 
@@ -87,6 +93,17 @@ impl<B: Bmc + 'static> FirmwareCollector<B> {
 
         for firmware_item in firmware_inventories.iter().flatten() {
             let firmware_data = firmware_item.raw();
+
+            if self.emit_resource_status {
+                self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
+                    ResourceStatusInfo::from_redfish(
+                        RedfishResourceType::Firmware,
+                        &firmware_data.id,
+                        &firmware_data.name,
+                        firmware_data.status.as_ref(),
+                    ),
+                )));
+            }
 
             let Some(version) = firmware_data.version.clone().flatten() else {
                 tracing::debug!(

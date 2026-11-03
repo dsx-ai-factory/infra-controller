@@ -2260,6 +2260,7 @@ mod tests {
         CollectorRemoved,
         Log,
         Firmware,
+        ResourceStatusObservation,
         ResourceStatus,
         HealthReport,
     }
@@ -2299,6 +2300,9 @@ mod tests {
                 CollectorEvent::CollectorRemoved => ObservedEvent::CollectorRemoved,
                 CollectorEvent::Log(_) => ObservedEvent::Log,
                 CollectorEvent::Firmware(_) => ObservedEvent::Firmware,
+                CollectorEvent::ResourceStatusObservation(_) => {
+                    ObservedEvent::ResourceStatusObservation
+                }
                 CollectorEvent::ResourceStatus(_) => ObservedEvent::ResourceStatus,
                 CollectorEvent::HealthReport(_) => ObservedEvent::HealthReport,
             };

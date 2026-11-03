@@ -33,10 +33,9 @@ use crate::collectors::{
     ManagerCollector, ManagerCollectorConfig, MetricsCollector, MetricsCollectorConfig,
     NmxcCollector, NmxcCollectorConfig, NmxcSchemaOverrideCollector,
     NmxcSchemaOverrideCollectorConfig, NmxtCollector, NmxtCollectorConfig, NvueRestCollector,
-    NvueRestCollectorConfig, ResourceStatusCollector, ResourceStatusCollectorConfig,
-    SensorCollector, SensorCollectorConfig, SseCursorSink, SseLogCollector, SseLogCollectorConfig,
-    StreamingCollectorStartContext, TelemetryCollector, TelemetryCollectorConfig,
-    spawn_gnmi_collector,
+    NvueRestCollectorConfig, SensorCollector, SensorCollectorConfig, SseCursorSink,
+    SseLogCollector, SseLogCollectorConfig, StreamingCollectorStartContext, TelemetryCollector,
+    TelemetryCollectorConfig, spawn_gnmi_collector,
 };
 use crate::config::{
     Configurable, LogCollectionMode, NmxcCollectorConfig as NmxcCollectorOptions, PeriodicLogConfig,
@@ -150,7 +149,7 @@ pub(super) fn collector_eligibility(
                 || ctx.telemetry_config.is_enabled()
                 || logs
                 || ctx.firmware_config.is_enabled()
-                || ctx.resource_status_config.is_enabled()
+                || ctx.resource_status_processor_enabled
                 || (ctx.manager_config.is_enabled()
                     && matches!(endpoint.metadata, Some(EndpointMetadata::PowerShelf(_))))
                 || ctx.leak_detector_config.is_enabled()
@@ -222,7 +221,11 @@ fn spawn_generic_redfish_collectors(
     // entity inventory, so discovery must also run for a logs-only deployment.
     let gpu_identity_enabled = ctx.attributes.gpu_identity;
 
-    if (sensors_enabled || metrics_enabled || gpu_inventory_enabled || gpu_identity_enabled)
+    if (sensors_enabled
+        || metrics_enabled
+        || gpu_inventory_enabled
+        || gpu_identity_enabled
+        || ctx.resource_status_processor_enabled)
         && !ctx.collectors.contains(CollectorKind::Discovery, &key)
     {
         let shared = ctx.collectors.inventory_for(&key);
@@ -235,6 +238,11 @@ fn spawn_generic_redfish_collectors(
             bmc.clone(),
             EntityDiscoveryCollectorConfig {
                 shared,
+                resource_status_sink: if ctx.resource_status_processor_enabled {
+                    data_sink.clone()
+                } else {
+                    None
+                },
                 request_concurrency: ctx.bmc_request_concurrency,
                 collect_shelf_power: power_shelf,
                 gpu_identity: gpu_identity_enabled,
@@ -627,6 +635,7 @@ fn spawn_generic_redfish_collectors(
             bmc.clone(),
             FirmwareCollectorConfig {
                 data_sink: data_sink.clone(),
+                emit_resource_status: ctx.resource_status_processor_enabled,
             },
             CollectorStartContext {
                 limiter: ctx.limiter.clone(),
@@ -651,48 +660,6 @@ fn spawn_generic_redfish_collectors(
                     endpoint = ?endpoint.addr,
                     rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     "Could not start firmware collector"
-                )
-            }
-        }
-    }
-
-    if let Configurable::Enabled(resource_status_cfg) = &ctx.resource_status_config
-        && !ctx.collectors.contains(CollectorKind::ResourceStatus, &key)
-    {
-        let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
-            format!("resource_status_collector_{registry_key}"),
-            metrics_prefix,
-        )?);
-        match Collector::start::<ResourceStatusCollector<BmcClient>>(
-            endpoint_arc.clone(),
-            bmc.clone(),
-            ResourceStatusCollectorConfig {
-                data_sink: data_sink.clone(),
-            },
-            CollectorStartContext {
-                limiter: ctx.limiter.clone(),
-                iteration_interval: resource_status_cfg.poll_interval,
-                collector_registry,
-                metrics_manager: ctx.metrics_manager.clone(),
-            },
-        ) {
-            Ok(collector) => {
-                ctx.collectors
-                    .insert(CollectorKind::ResourceStatus, key.clone().into(), collector);
-                tracing::info!(
-                    endpoint_key = %key,
-                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
-                    resource_status_collector_count =
-                        ctx.collectors.len(CollectorKind::ResourceStatus),
-                    "Started resource status collection for BMC endpoint"
-                );
-            }
-            Err(error) => {
-                tracing::error!(
-                    ?error,
-                    endpoint = ?endpoint.addr,
-                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
-                    "Could not start resource status collector"
                 )
             }
         }
@@ -745,7 +712,7 @@ fn spawn_generic_redfish_collectors(
     }
 
     if let Configurable::Enabled(manager_cfg) = &ctx.manager_config
-        && power_shelf
+        && (power_shelf || ctx.resource_status_processor_enabled)
         && !ctx.collectors.contains(CollectorKind::Manager, &key)
     {
         let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
@@ -757,6 +724,7 @@ fn spawn_generic_redfish_collectors(
             bmc.clone(),
             ManagerCollectorConfig {
                 data_sink: data_sink.clone(),
+                emit_resource_status: ctx.resource_status_processor_enabled,
             },
             CollectorStartContext {
                 limiter: ctx.limiter.clone(),
@@ -772,7 +740,7 @@ fn spawn_generic_redfish_collectors(
                     endpoint_key = %key,
                     rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     manager_collector_count = ctx.collectors.len(CollectorKind::Manager),
-                    "Started manager collection for power-shelf endpoint"
+                    "Started manager collection for BMC endpoint"
                 );
             }
             Err(error) => {
@@ -1310,7 +1278,7 @@ mod tests {
         config.collectors.sensors = Configurable::Enabled(Default::default());
         config.collectors.logs = Configurable::Enabled(Default::default());
         config.collectors.firmware = Configurable::Enabled(Default::default());
-        config.collectors.resource_status = Configurable::Enabled(Default::default());
+        config.processors.resource_status = Configurable::Enabled(Default::default());
         config.collectors.leak_detector = Configurable::Enabled(Default::default());
         config.collectors.nmxt = Configurable::Disabled;
         config.collectors.nmxc = Configurable::Disabled;
@@ -1334,18 +1302,19 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Firmware), 0);
-        assert_eq!(ctx.collectors.len(CollectorKind::ResourceStatus), 0);
+        assert_eq!(ctx.collectors.len(CollectorKind::Discovery), 0);
+        assert_eq!(ctx.collectors.len(CollectorKind::Manager), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::LeakDetector), 0);
     }
 
     #[tokio::test]
-    async fn resource_status_collector_starts_for_generic_redfish_endpoints() {
+    async fn resource_status_processor_starts_source_collectors_for_generic_redfish_endpoints() {
         let mut config = Config::default();
         config.collectors.sensors = Configurable::Disabled;
-        config.collectors.manager = Configurable::Disabled;
+        config.collectors.manager = Configurable::Enabled(Default::default());
         config.collectors.logs = Configurable::Disabled;
         config.collectors.firmware = Configurable::Disabled;
-        config.collectors.resource_status = Configurable::Enabled(Default::default());
+        config.processors.resource_status = Configurable::Enabled(Default::default());
         config.collectors.leak_detector = Configurable::Disabled;
 
         let mut ctx = context_with_config(config, "test_resource_status_start");
@@ -1363,7 +1332,8 @@ mod tests {
         )
         .expect("spawn should succeed");
 
-        assert_eq!(ctx.collectors.len(CollectorKind::ResourceStatus), 1);
+        assert_eq!(ctx.collectors.len(CollectorKind::Discovery), 1);
+        assert_eq!(ctx.collectors.len(CollectorKind::Manager), 1);
         assert_eq!(ctx.collectors.len(CollectorKind::Firmware), 0);
     }
 
