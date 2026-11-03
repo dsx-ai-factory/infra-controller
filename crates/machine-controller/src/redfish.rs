@@ -97,7 +97,7 @@ pub async fn host_power_control_with_location(
         "Host Power Control"
     );
     let requested_at = Utc::now();
-    // Boot-latched policy waits use these timestamps as accepted boot requests.
+    // Record restart and power-on requests only after the BMC accepts them.
     let record_after_success = matches!(
         action,
         SystemPowerControl::ForceRestart
