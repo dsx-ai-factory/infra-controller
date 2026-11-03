@@ -8,7 +8,7 @@ How NICo component tracing works, what it covers, how to turn it on and off and 
 
 - **nico-api** (the `carbide-api` binary) is NICo's primary tracing source and the subject of this
   document. **nico-dns** also emits traces, but with a separate simpler opt-in setup.
-  **nico-bmc-proxy** emits traces for each proxied BMC request when configured (see
+  **nico-bmc-proxy** adds spans to sampled caller traces when configured (see
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)) and **nico-pxe** for each boot request it
   serves (see [nico-pxe tracing](#nico-pxe-tracing)).
 - **nico-api traces are off by default**; two things must both be true before any spans are emitted:
@@ -53,7 +53,7 @@ The following binaries build an OTLP span exporter:
 - **nico-api** (`crates/api-core/src/logging/setup.rs`) - the rich, control-plane tracing this
   document is mostly about, off by default behind endpoint plus enabled-flag configuration
 - **nico-dns** (`crates/dns/src/main.rs`) - a separate, much simpler **opt-in** setup.
-- **nico-bmc-proxy** (`crates/bmc-proxy/src/setup.rs`) - one span per proxied BMC request, off by
+- **nico-bmc-proxy** (`crates/bmc-proxy/src/setup.rs`) - spans for sampled caller traces, off by
   default behind endpoint plus `[tracing] enabled` (see
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
 - **nico-pxe** (`crates/pxe/src/main.rs`) - request spans, off by default unless an OTLP
@@ -207,7 +207,7 @@ nico-api's:
 
 ### nico-bmc-proxy tracing
 
-nico-bmc-proxy traces each proxied Redfish request through the BMC credential proxy
+nico-bmc-proxy continues caller traces through the BMC credential proxy
 (`crates/bmc-proxy/src/proxy/`). It follows the same W3C propagation model as nico-api
 (issue [#2438](https://github.com/dsx-ai-factory/infra-controller/issues/2438)) so a call from nico-api or
 DPS stays one trace across the proxy hop (issue
@@ -228,8 +228,12 @@ DPS stays one trace across the proxy hop (issue
   itself and apply as well. A malformed endpoint is rejected when the
   exporter is built; the proxy logs a warning and serves BMC traffic without tracing rather than
   refusing to start.
-- **Ingress.** Each proxied request opens a `bmc_proxy_request` span and adopts any inbound
-  `traceparent`/`tracestate` via `trace_propagation::set_span_parent_from_headers`.
+- **Ingress and sampling.** The proxy inherits valid inbound `traceparent`/`tracestate`
+  context and the caller's sampling decision. Sampled requests export a `bmc_proxy_request`
+  span and outbound request spans. Unsampled requests propagate the inherited trace ID without
+  exporting spans. Requests with missing or malformed context receive a new, unsampled trace ID
+  that is propagated to nico-api metadata lookups and BMC requests without exporting spans.
+  The proxy uses parent-based sampling with root sampling disabled; sampling is decided by callers.
 - **Egress to BMC.** Upstream Redfish calls use a `reqwest-tracing` client so the active proxy
   span's W3C context is injected on the BMC leg. The inbound headers are dropped before the upstream
   request is assembled — `trace_propagation::is_propagated_header` asks the configured propagator

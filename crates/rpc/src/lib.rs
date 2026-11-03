@@ -79,6 +79,7 @@ pub use crate::protos::{agent_local, fmds, health, scout_firmware_upgrade, site_
 pub mod admission_retry;
 pub mod errors;
 pub mod forge_tls_client;
+mod grpc_client_tracing;
 pub mod libmlx;
 pub mod measured_boot;
 pub mod network;

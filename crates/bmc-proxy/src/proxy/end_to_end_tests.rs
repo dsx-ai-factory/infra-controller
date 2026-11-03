@@ -421,10 +421,13 @@ struct FakeNicoApi {
     inventory: FakeInventory,
     nvos: StoredNvos,
     lookups: Lookups,
+    headers: CapturedHeaders,
 }
 
 /// The switch and credential lookups a fake nico-api received, in order.
 type Lookups = Arc<Mutex<Vec<String>>>;
+
+type CapturedHeaders = Arc<Mutex<Vec<HeaderMap>>>;
 
 /// The NVOS username and password nico-api stores for the switch it knows,
 /// which a test changes as a rotation would.
@@ -492,6 +495,7 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
     }
 
     fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        self.headers.lock().unwrap().push(request.headers().clone());
         let lookup_delay = self.lookup_delay;
         let inventory = self.inventory;
         let nvos = self.nvos.clone();
@@ -651,16 +655,28 @@ async fn fake_nico_api_storing(
     inventory: FakeInventory,
     nvos: StoredNvos,
 ) -> (ForgeApiClient, Lookups) {
+    let (client, lookups, _) = fake_nico_api_capturing_headers(lookup_delay, inventory, nvos).await;
+    (client, lookups)
+}
+
+/// [`fake_nico_api_storing`], also capturing the headers of every wire request.
+async fn fake_nico_api_capturing_headers(
+    lookup_delay: Duration,
+    inventory: FakeInventory,
+    nvos: StoredNvos,
+) -> (ForgeApiClient, Lookups, CapturedHeaders) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake nico-api");
     let addr = listener.local_addr().expect("fake nico-api address");
     let lookups = Lookups::default();
+    let headers = Arc::new(Mutex::new(Vec::new()));
     let api = FakeNicoApi {
         lookup_delay,
         inventory,
         nvos,
         lookups: lookups.clone(),
+        headers: headers.clone(),
     };
     tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -673,7 +689,7 @@ async fn fake_nico_api_storing(
         &format!("http://{addr}"),
         &ForgeClientConfig::default(),
     ));
-    (client, lookups)
+    (client, lookups, headers)
 }
 
 fn root_password() -> BmcCredentials {
@@ -1264,6 +1280,98 @@ async fn proxy_resolving_through(inventory: FakeInventory) -> (BmcProxyState, Fa
     let (api_client, lookups) = fake_nico_api_with(Duration::ZERO, inventory).await;
     state.api_client = api_client;
     (state, bmc, lookups)
+}
+
+/// Metadata lookups and BMC requests follow the caller's sampling decision;
+/// requests without valid caller context propagate unsampled context.
+#[tokio::test]
+async fn outbound_requests_follow_parent_sampling_with_unsampled_roots() {
+    use opentelemetry::trace::TraceContextExt;
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use opentelemetry_sdk::trace::Sampler;
+
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    keep_callsites_enabled();
+    let metrics = MetricsCapture::start();
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_sampler(Sampler::ParentBased(Box::new(Sampler::AlwaysOff)))
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let _traced = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
+    );
+    let (addr, bmc) = spawn_fake_bmc();
+    let mut state = proxy_reaching(addr, root_password()).await;
+    let (api_client, _, api_headers) =
+        fake_nico_api_capturing_headers(Duration::ZERO, FakeInventory::NoSwitch, stored_nvos())
+            .await;
+    state.api_client = api_client;
+
+    for (scenario, traceparent, inherited, sampled) in [
+        ("absent", None, false, false),
+        (
+            "sampled",
+            Some("00-00000000000000000000000000000042-0000000000000055-01"),
+            true,
+            true,
+        ),
+        (
+            "unsampled",
+            Some("00-00000000000000000000000000000042-0000000000000055-00"),
+            true,
+            false,
+        ),
+        ("malformed", Some("invalid"), false, false),
+    ] {
+        exporter.reset();
+        api_headers.lock().unwrap().clear();
+        state
+            .credential_cache
+            .remove(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
+            .await;
+        let mut request = get(SYSTEM_PATH);
+        if let Some(value) = traceparent {
+            request
+                .headers_mut()
+                .insert("traceparent", value.parse().unwrap());
+        }
+        let answer = exchange(&metrics, &state, request).await;
+        assert_eq!(answer.status, 200, "{scenario}");
+        let mut headers = api_headers.lock().unwrap().clone();
+        assert!(
+            !headers.is_empty(),
+            "metadata requests were sent: {scenario}"
+        );
+        headers.push(bmc.received().last().expect("BMC request").headers.clone());
+        let trace_id = trace_propagation::extract_context(&headers[0])
+            .span()
+            .span_context()
+            .trace_id();
+        if inherited {
+            assert_eq!(trace_id, opentelemetry::TraceId::from(0x42), "{scenario}");
+        }
+        for headers in headers {
+            let context = trace_propagation::extract_context(&headers);
+            let span = context.span();
+            let context = span.span_context();
+            assert!(context.is_valid(), "{scenario}");
+            assert_eq!(context.is_sampled(), sampled, "{scenario}");
+            assert_eq!(context.trace_id(), trace_id, "{scenario}");
+        }
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(!spans.is_empty(), sampled, "{scenario}");
+        if sampled {
+            assert!(spans.iter().any(|span| span.name == "bmc_proxy_request"));
+            assert!(spans.iter().any(|span| span.name == "grpc_client_request"));
+            assert!(
+                spans
+                    .iter()
+                    .all(|span| span.span_context.trace_id() == opentelemetry::TraceId::from(0x42))
+            );
+        }
+    }
 }
 
 /// What a `GET` of `path` at an address the proxy has no credentials for
