@@ -65,6 +65,7 @@ pub async fn handle_ready(
             "Rack reprovision requested, transitioning from Ready to Maintenance",
         );
         state.config.reprovision_requested = false;
+        state.config.ingestion_in_progress = false;
         state.config.maintenance_requested = None;
         let mut txn = ctx.services.db_pool.begin().await?;
         db_rack::update(txn.as_mut(), id, &state.config).await?;

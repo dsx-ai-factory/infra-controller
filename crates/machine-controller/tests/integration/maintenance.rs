@@ -295,6 +295,12 @@ async fn reconcile(
         ));
     }
 
+    if matches!(case.entry_state, EntryState::Failed)
+        && entered.status.failure_details.cause != FailureCause::NoError
+    {
+        return Err("accepting maintenance did not clear the stale host failure".into());
+    }
+
     // Second iteration reconciles the operation with the backend.
     env.run_single_iteration().await;
     let machine = host.host.machine().await;

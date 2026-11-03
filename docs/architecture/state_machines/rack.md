@@ -16,42 +16,45 @@ When no device IDs are specified (all three lists empty), the scope is treated a
 
 ## Activities
 
-The request also carries an optional list of **maintenance activities** to perform. When the list is empty, all activities are performed (the default). Available activities:
+The request also carries an optional list of **maintenance activities** to perform. When the list is empty, all non-power activities are selected. Compute-host resets require an explicit `PowerSequence` activity. Available activities:
 
 | Activity | Proto `oneof` variant | Per-activity config | Description |
 |----------|----------------------|---------------------|-------------|
-| Firmware Upgrade | `FirmwareUpgradeActivity` | `firmware_version` — target firmware ID (empty = default firmware for the rack hardware type) | Reprovisioning and firmware upgrade via RMS. |
-| Configure NMX Cluster | `ConfigureNmxClusterActivity` | *(extend as needed)* | NMX cluster configuration. |
-| Power Sequence | `PowerSequenceActivity` | *(extend as needed)* | Power-on/off/reset sequencing. |
+| Firmware Upgrade | `FirmwareUpgradeActivity` | `firmware_version`: SOT JSON (required for explicit selection). `components`: empty selects all. `access_token`: optional. `force_update`: defaults to false. | Reprovisioning and firmware upgrade via RMS. |
+| NVOS Update | `NvosUpdateActivity` | `config_json`: SOT JSON passed to RMS `ApplySwitchSystemImage` (required for explicit selection). `access_token`: optional. | NVOS image update for scoped switches through RMS. |
+| Power Sequence | `PowerSequenceActivity` | None | Explicitly reset all rack compute hosts before NMX-C configuration; device scope does not narrow this batch. |
+| Configure NMX Cluster | `ConfigureNmxClusterActivity` | None | NMX cluster configuration. |
 
 Each activity is represented as a `MaintenanceActivityConfig` message with a `oneof activity` field. The `oneof` discriminant identifies the activity type, and each variant carries only the configuration fields relevant to that activity.
 
-Activities that are not in the list are skipped during the maintenance cycle. The state machine always starts at `FirmwareUpgrade(Start)` (to consume the scope), but immediately advances to the next requested activity if firmware upgrade was not requested.
+Selected activities execute in firmware upgrade, NVOS update, power sequence, then NMX-C configuration order, regardless of request ordering. An on-demand NVOS update alone does not reset compute hosts. See the [rack maintenance flow](rackstatemachine.md#maintenance-r_maintenance) for ingestion, reboot completion, and resume behavior.
 
-### Firmware Version Resolution
+### Firmware Configuration Source
 
-The firmware used during the upgrade depends on how the maintenance was triggered:
+The update configuration depends on how maintenance was requested:
 
-| Trigger | `firmware_version` | Firmware used |
-|---------|-------------------|---------------|
-| Ingestion (Discovering → Maintenance) | *(not applicable)* | Default firmware for the rack hardware type |
-| Reprovision (`reprovision_requested`) | *(not applicable)* | Default firmware for the rack hardware type |
-| On-demand CLI, no version specified | *(empty)* | Default firmware for the rack hardware type |
-| On-demand CLI, version specified | e.g. `"fw-v2.1"` | Looked up by ID via `rack_firmware` table |
+| Trigger | Configuration source |
+|---------|----------------------|
+| Ingestion or ordinary reprovision | Rack-profile `firmware_object` |
+| On-demand, activities omitted or empty | Rack-profile `firmware_object` |
+| On-demand, explicit firmware upgrade | SOT JSON in `FirmwareUpgradeActivity.firmware_version` |
+| On-demand, explicit NVOS update | SOT JSON in `NvosUpdateActivity.config_json` |
 
-When a `firmware_version` is supplied through the CLI, the maintenance handler resolves it by looking up the firmware record by ID (`db_rack_firmware::find_by_id`). If the ID is not found, the rack transitions to **Error**. If the firmware exists but is not marked as available, the firmware upgrade is skipped. When no version is specified (or the maintenance was triggered through ingestion/reprovision), the default firmware for the rack's hardware type is used as before.
+Explicit update activities require nonempty, valid JSON; the API rejects missing or invalid JSON. Despite its name, `firmware_version` carries SOT JSON, not a firmware record ID. Omitted or empty access tokens are passed to RMS as `NOAUTH`.
+
+Without a configured rack-profile firmware object, implicit update phases are skipped. NVOS update instead enters `Error` if a scoped switch is already waiting for that update. See the [rack maintenance flow](rackstatemachine.md#maintenance-r_maintenance) for details.
 
 ## Flow
 
 ```text
 ┌────────┐       ┌──────────────┐       ┌──────────┐       ┌─────────────────┐
 │ Caller │──────▶│ gRPC Endpoint│──────▶│ Postgres │       │ Rack State      │
-│ (CLI)  │       │ OnDemandRack │       │          │       │ Handler (Ready) │
+│ (CLI)  │       │ OnDemandRack │       │          │       │ Handler         │
 │        │       │ Maintenance  │       │          │       │                 │
 └────────┘       └──────┬───────┘       └────┬─────┘       └────────┬────────┘
                         │                    │                      │
                         │ 1. Load rack       │                      │
-                        │    verify Ready    │                      │
+                        │ verify Ready/Error │                      │
                         │ 2. Set config.     │                      │
                         │    maintenance_    │                      │
                         │    requested=scope │                      │
@@ -60,7 +63,7 @@ When a `firmware_version` is supplied through the CLI, the maintenance handler r
                         │ 3. Return OK       │                      │
                         │◀───────────────────│                      │
                         │                    │                      │
-                        │                    │  4. Poll rack (Ready)│
+                        │                    │  4. Poll rack       │
                         │                    │◀─────────────────────│
                         │                    │                      │
                         │                    │  5. Detect           │
@@ -69,16 +72,16 @@ When a `firmware_version` is supplied through the CLI, the maintenance handler r
                         │                    │                      │
                         │                    │  6. Transition to    │
                         │                    │     Maintenance      │
-                        │                    │    (FirmwareUpgrade/  │
-                        │                    │     Start)           │
+                        │                    │ (first selected     │
+                        │                    │  activity)          │
                         │                    │◀─────────────────────│
 ```
 
 1. The caller invokes the `OnDemandRackMaintenance` gRPC method with a `rack_id` and optional device-ID lists.
 2. The handler validates that the rack is in `Ready` or `Error` state and no maintenance is already pending.
 3. It writes a `MaintenanceScope` to `RackConfig.maintenance_requested` and persists the config.
-4. On the next state-handler tick, `handle_ready` detects `maintenance_requested` and transitions the rack to `Maintenance(FirmwareUpgrade(Start))`.
-5. The `start_firmware_upgrade` function consumes the scope. If a `firmware_version` was specified, it resolves the firmware by ID; otherwise it uses the default firmware for the rack hardware type. It then filters device reprovisioning and firmware-upgrade operations to only the specified devices (or all devices if the scope is full-rack).
+4. On the next state-handler tick, `handle_ready` or `handle_error` detects `maintenance_requested` and enters the first selected maintenance activity.
+5. Update activities use the configuration source described above and filter device reprovisioning and firmware-upgrade operations to the scope. An explicitly selected power sequence resets all rack compute hosts, regardless of device scope.
 6. After maintenance completes, the rack flows through `Validating` back to `Ready` as usual.
 
 ## gRPC API
@@ -93,16 +96,26 @@ rpc OnDemandRackMaintenance(RackMaintenanceOnDemandRequest) returns (RackMainten
 
 ```protobuf
 message FirmwareUpgradeActivity {
-  string firmware_version = 1;          // empty = default firmware for rack hardware type
+  string firmware_version = 1;  // SOT JSON, required for explicit selection
+  repeated string components = 2;  // empty = all components
+  optional string access_token = 3;  // omitted/empty = NOAUTH
+  bool force_update = 4;
 }
-message ConfigureNmxClusterActivity {}  // extend as needed
-message PowerSequenceActivity {}        // extend as needed
+message NvosUpdateActivity {
+  reserved 1;
+  reserved "firmware_object_id";
+  string config_json = 2;  // SOT JSON, required for explicit selection
+  optional string access_token = 3;  // omitted/empty = NOAUTH
+}
+message ConfigureNmxClusterActivity {}
+message PowerSequenceActivity {}  // explicit compute-host Reset
 
 message MaintenanceActivityConfig {
   oneof activity {
     FirmwareUpgradeActivity firmware_upgrade = 1;
     ConfigureNmxClusterActivity configure_nmx_cluster = 2;
     PowerSequenceActivity power_sequence = 3;
+    NvosUpdateActivity nvos_update = 4;
   }
 }
 
@@ -110,12 +123,12 @@ message RackMaintenanceScope {
   repeated string machine_ids = 1;
   repeated string switch_ids = 2;
   repeated string power_shelf_ids = 3;
-  repeated MaintenanceActivityConfig activities = 4;  // empty = all
+  repeated MaintenanceActivityConfig activities = 4;  // empty = all except power sequence
 }
 
 message RackMaintenanceOnDemandRequest {
   common.RackId rack_id = 1;
-  RackMaintenanceScope scope = 2;  // unset/empty = full rack, all activities
+  RackMaintenanceScope scope = 2;  // unset/empty = full rack, non-power activities
 }
 
 message RackMaintenanceOnDemandResponse {}
@@ -164,20 +177,12 @@ Power shelves continue to use the component manager backend directly (they do no
 | `Switches` | Resolves `rack_id` from first switch, delegates to `on_demand_rack_maintenance` with `switch_ids` and `firmware_version` |
 | `PowerShelves` | Handled directly by the component manager power shelf backend (no state machine interaction) |
 
-### Example: CLI triggers compute tray firmware upgrade
+### Example: compute tray firmware upgrade
 
-```bash
-nico-cli component firmware update \
-  --compute-trays machine-001,machine-002 \
-  --target-version fw-v2.1
-```
-
-This results in:
-
-1. `UpdateComponentFirmware` is called with `ComputeTrays { machine_ids: [machine-001, machine-002] }` and `target_version: "fw-v2.1"`.
+1. The caller sends `UpdateComponentFirmware` with `ComputeTrays { machine_ids: [machine-001, machine-002] }` and the SOT JSON object encoded in `target_version`.
 2. Machine `machine-001` is looked up to discover `rack_id = rack-42`.
-3. `OnDemandRackMaintenance` is called with `rack_id = rack-42`, `machine_ids = [machine-001, machine-002]`, and `FirmwareUpgradeActivity { firmware_version: "fw-v2.1" }`.
-4. The rack state machine picks up the request, resolves firmware `fw-v2.1` from the `rack_firmware` table, and runs the firmware upgrade via RMS for the specified machines.
+3. `OnDemandRackMaintenance` is called with `rack_id = rack-42`, `machine_ids = [machine-001, machine-002]`, and a `FirmwareUpgradeActivity` carrying that same JSON in `firmware_version`.
+4. The rack state machine runs the firmware upgrade via RMS for the specified machines, using the supplied JSON rather than looking up a firmware record ID.
 
 ## Preconditions
 

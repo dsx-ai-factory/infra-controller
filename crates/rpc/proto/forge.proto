@@ -8225,7 +8225,8 @@ message ConfigureNmxClusterActivity {
 }
 
 message PowerSequenceActivity {
-  // Per-activity configuration (extend as needed).
+  // Explicitly reboot all rack compute hosts before NMX-C configuration.
+  // Pending maintenance, instances, or ineligible hosts block the entire batch.
 }
 
 // A single maintenance activity with its per-activity configuration.
@@ -8241,13 +8242,14 @@ message MaintenanceActivityConfig {
 
 // Scope of an on-demand rack maintenance request: which devices to include
 // and which activities to run. When all three device-id lists are empty the
-// full rack is maintained. When the activities list is empty all activities
-// are run.
+// full rack is maintained. Empty activities select all non-power activities;
+// compute resets require an explicit PowerSequenceActivity.
 message RackMaintenanceScope {
   repeated string machine_ids = 1;
   repeated string switch_ids = 2;
   repeated string power_shelf_ids = 3;
-  // Which maintenance activities to run. Empty means all activities.
+  // Activities run in firmware, NVOS, power sequence, then NMX-C order.
+  // Empty selects all non-power activities; power sequence must be explicit.
   repeated MaintenanceActivityConfig activities = 4;
 }
 
