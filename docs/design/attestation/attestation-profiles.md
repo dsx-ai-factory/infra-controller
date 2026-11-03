@@ -650,7 +650,7 @@ a derived class always has two `_`-separated fields, and `any` has one.
 ### 6.3 The admin CLI
 
 The commands sit under the existing `attestation spdm` group, alongside the
-`trigger`, `get`, `list`, and `cancel` commands that act on the machines these
+`trigger`, `get`, `list`, `cancel`, and `stop` commands that act on the machines these
 profiles decide:
 
 ```text
@@ -782,9 +782,12 @@ returns to scheduling. An empty selection then follows the skip path. If the
 selected IDs stay the same, it evaluates their latest results.
 
 Device removals and profile edits therefore do not restart an in-progress job.
-If a removed device leaves the job stuck, request cancellation of that job so
-the controller can recheck the selection after cancellation completes. A new
-manual trigger creates a separate job and does not replace the job the
+If a removed device leaves the job stuck, use `attestation spdm job stop` with
+that job's ID. Unfinished devices fail after BMC cleanup, allowing the controller
+to recheck the selection. If the selected IDs still match, failed latest results
+put the machine in its attestation failure state; a successful new run can let it
+recover. See [job stop semantics](spdm-jobs.md#progress-cancellation-and-stop).
+A new manual trigger creates a separate job and does not replace the job the
 managed-host controller is waiting for. The final selection check requires
 the BMC to respond when the resolved profile needs inventory; BMC errors leave
 the machine polling for a later retry. Jobs started directly through the
@@ -1112,7 +1115,8 @@ is attesting under".
 `job_id` identifies the scheduling attempt. It is present only when devices
 were scheduled, including a `PartiallySatisfied` outcome. Use it with
 `GetAttestation` to read that job's device details in
-`SpdmGetAttestationResponse`, or with `CancelAttestation` to request cancellation.
+`SpdmGetAttestationResponse`, with `CancelAttestation` to request cancellation,
+or with `StopAttestation` to fail unfinished work after BMC cleanup.
 
 `started_at` records when the job's device rows were written. Every row in the
 job carries the same value, also returned as `SpdmAttestationDetails.started_at`.

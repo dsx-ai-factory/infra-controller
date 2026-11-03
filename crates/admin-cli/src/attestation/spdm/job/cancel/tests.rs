@@ -27,37 +27,43 @@ use crate::attestation::spdm::job::Cmd as JobCmd;
 use crate::cfg::cli_options::{CliCommand, CliOptions};
 
 #[test]
-fn job_cancel_command_path() {
+fn job_cancel_and_stop_command_paths() {
     let job_id = "12345678-1234-5678-90ab-cdef01234567";
     let expected = Uuid::parse_str(job_id).unwrap();
 
-    // Parse the public tree so cancellation stays under jobs and preserves its UUID.
+    // Parse the public tree so both operator actions preserve the command and UUID.
     scenarios!(
         run = |args: &[&str]| {
             CliOptions::try_parse_from(
                 std::iter::once("nico-admin-cli").chain(args.iter().copied()),
             )
             .map(|options| {
-                let Some(CliCommand::Attestation(AttestationCmd::Spdm(SpdmCmd::Job(
-                    JobCmd::Cancel(args),
-                )))) = options.commands else {
-                    panic!("expected the public SPDM job cancel command path");
+                let Some(CliCommand::Attestation(AttestationCmd::Spdm(SpdmCmd::Job(command)))) = options.commands else {
+                    panic!("expected the public SPDM job command path");
                 };
-                args.job_id
+                match command {
+                    JobCmd::Cancel(args) => ("cancel", args.job_id),
+                    JobCmd::Stop(args) => ("stop", args.job_id),
+                    _ => panic!("expected cancel or stop"),
+                }
             })
             .map_err(|error| error.kind())
         };
         "canonical path" {
-            &["attestation", "spdm", "job", "cancel", job_id][..] => Yields(expected),
+            &["attestation", "spdm", "job", "cancel", job_id][..] => Yields(("cancel", expected)),
+            &["attestation", "spdm", "job", "stop", job_id][..] => Yields(("stop", expected)),
         }
         "jobs alias" {
-            &["attestation", "spdm", "jobs", "cancel", job_id][..] => Yields(expected),
+            &["attestation", "spdm", "jobs", "cancel", job_id][..] => Yields(("cancel", expected)),
+            &["attestation", "spdm", "jobs", "stop", job_id][..] => Yields(("stop", expected)),
         }
         "job ID is required" {
             &["attestation", "spdm", "job", "cancel"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+            &["attestation", "spdm", "job", "stop"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
         }
         "job ID must be a UUID" {
             &["attestation", "spdm", "job", "cancel", "invalid"][..] => FailsWith(ErrorKind::ValueValidation),
+            &["attestation", "spdm", "job", "stop", "invalid"][..] => FailsWith(ErrorKind::ValueValidation),
         }
         "ungrouped cancel is removed" {
             &["attestation", "spdm", "cancel", job_id][..] => FailsWith(ErrorKind::InvalidSubcommand),

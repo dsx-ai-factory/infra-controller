@@ -3657,6 +3657,13 @@ impl Forge for Api {
         crate::handlers::attestation::cancel_attestation(self, request).await
     }
 
+    async fn stop_attestation(
+        &self,
+        request: tonic::Request<::rpc::Uuid>,
+    ) -> Result<tonic::Response<()>, Status> {
+        crate::handlers::attestation::stop_attestation(self, request).await
+    }
+
     async fn list_attestation(
         &self,
         request: tonic::Request<rpc::SpdmListAttestationRequest>,

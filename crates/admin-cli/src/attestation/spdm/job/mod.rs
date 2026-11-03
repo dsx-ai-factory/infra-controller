@@ -18,6 +18,7 @@
 mod cancel;
 mod get;
 mod list;
+mod stop;
 
 use clap::Parser;
 
@@ -27,6 +28,10 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "Cancel an attestation job")]
     Cancel(cancel::args::Args),
+    #[clap(
+        about = "Stop an attestation job, failing unfinished device attestations after BMC cleanup"
+    )]
+    Stop(stop::Args),
     #[clap(about = "Get SPDM attestation details for a given job id")]
     Get(get::args::Args),
     #[clap(about = "List SPDM attestation jobs by status")]

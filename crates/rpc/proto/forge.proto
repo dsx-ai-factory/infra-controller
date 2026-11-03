@@ -1098,6 +1098,10 @@ service Forge {
   // SPDM attestation APIs start
   rpc TriggerMachineAttestation(SpdmMachineAttestationTriggerRequest) returns (SpdmMachineAttestationTriggerResponse);
   rpc CancelAttestation(common.UUID) returns (google.protobuf.Empty);
+  // Stops unfinished device attestations with a failed result after BMC cleanup.
+  // Asynchronous and idempotent; preserves terminal results. Returns NOT_FOUND
+  // for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+  rpc StopAttestation(common.UUID) returns (google.protobuf.Empty);
 
   rpc ListAttestation(SpdmListAttestationRequest) returns (SpdmListAttestationResponse);
   rpc GetAttestation(common.UUID) returns (SpdmGetAttestationResponse);

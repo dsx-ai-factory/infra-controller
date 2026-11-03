@@ -392,6 +392,7 @@ fn from_component_integrity(
         job_id: *job_id,
         started_at: *time_now,
         cancelled_at: None,
+        stop_requested_at: None,
         completed_at: None,
     }
 }

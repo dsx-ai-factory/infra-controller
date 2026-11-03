@@ -176,6 +176,21 @@ pub(crate) async fn cancel_attestation(
     Ok(Response::new(()))
 }
 
+pub(crate) async fn stop_attestation(
+    api: &Api,
+    request: Request<::rpc::Uuid>,
+) -> Result<Response<()>, Status> {
+    log_request_data(&request);
+    let job_id: Uuid = Uuid::try_from(request.into_inner())
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
+
+    // Persist the request and invalidate old worker snapshots together.
+    let mut txn = api.txn_begin().await?;
+    db::attestation::spdm::stop_attestation_job(txn.as_mut(), &job_id).await?;
+    txn.commit().await?;
+    Ok(Response::new(()))
+}
+
 fn convert_model_status_to_rpc_status(
     model_status: model_spdm::SpdmAttestationStatus,
 ) -> rpc::SpdmAttestationStatus {

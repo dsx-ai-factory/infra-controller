@@ -104,7 +104,10 @@ pub mod spdm {
         pub job_id: uuid::Uuid,
         // timestamps
         pub started_at: DateTime<Utc>,
+        /// Operator cancellation time, or an earlier BMC cleanup start preserved by stop.
         pub cancelled_at: Option<DateTime<Utc>>,
+        /// An operator stop fails unfinished work after evidence collection cleanup.
+        pub stop_requested_at: Option<DateTime<Utc>>,
         pub completed_at: Option<DateTime<Utc>>,
     }
 
@@ -311,6 +314,7 @@ pub mod spdm {
                 job_id: row.try_get("job_id")?,
                 started_at: row.try_get("started_at")?,
                 cancelled_at: row.try_get("cancelled_at")?,
+                stop_requested_at: row.try_get("stop_requested_at")?,
                 completed_at: row.try_get("completed_at")?,
             })
         }

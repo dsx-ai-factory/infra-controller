@@ -1038,7 +1038,7 @@ pub(in crate::tests) mod tests {
             scenario: &'static str,
             initially_cancelling: bool,
             finish_collection: bool,
-            user_cancelled: bool,
+            operator_outcome: Option<SpdmAttestationState>,
             cancel_error: Option<libredfish::RedfishError>,
         }
 
@@ -1059,28 +1059,28 @@ pub(in crate::tests) mod tests {
             scenario,
             initially_cancelling,
             finish_collection,
-            user_cancelled,
+            operator_outcome,
             cancel_error,
         } in [
             Case {
                 scenario: "a running task times out and confirmed stop permits retry",
                 initially_cancelling: false,
                 finish_collection: true,
-                user_cancelled: false,
+                operator_outcome: None,
                 cancel_error: None,
             },
             Case {
                 scenario: "confirmed stop permits retry",
                 initially_cancelling: true,
                 finish_collection: true,
-                user_cancelled: false,
+                operator_outcome: None,
                 cancel_error: None,
             },
             Case {
                 scenario: "cancellation request failure still observes the cleanup deadline",
                 initially_cancelling: true,
                 finish_collection: false,
-                user_cancelled: false,
+                operator_outcome: None,
                 cancel_error: Some(libredfish::RedfishError::GenericError {
                     error: "temporary cancellation failure".to_string(),
                 }),
@@ -1089,7 +1089,14 @@ pub(in crate::tests) mod tests {
                 scenario: "user cancellation wins without extending cleanup",
                 initially_cancelling: true,
                 finish_collection: false,
-                user_cancelled: true,
+                operator_outcome: Some(SpdmAttestationState::Cancelled),
+                cancel_error: None,
+            },
+            Case {
+                scenario: "operator stop fails without extending automatic cleanup",
+                initially_cancelling: true,
+                finish_collection: false,
+                operator_outcome: Some(SpdmAttestationState::Failed("Stopped by operator".into())),
                 cancel_error: None,
             },
         ] {
@@ -1256,10 +1263,16 @@ pub(in crate::tests) mod tests {
                 sqlx::query("UPDATE spdm_machine_devices_attestation SET state_version = $2 WHERE job_id = $1")
                     .bind(job_id).bind(old_version).execute(&env.pool).await?;
             }
-            if user_cancelled {
-                env.api
-                    .cancel_attestation(Request::new(job_id.into()))
-                    .await?;
+            if let Some(outcome) = &operator_outcome {
+                if *outcome == SpdmAttestationState::Cancelled {
+                    env.api
+                        .cancel_attestation(Request::new(job_id.into()))
+                        .await?;
+                } else {
+                    env.api
+                        .stop_attestation(Request::new(job_id.into()))
+                        .await?;
+                }
             }
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
@@ -1270,8 +1283,8 @@ pub(in crate::tests) mod tests {
                     &job_id,
                 )
                 .await?;
-                let expected = if user_cancelled {
-                    SpdmAttestationState::Cancelled
+                let expected = if let Some(outcome) = &operator_outcome {
+                    outcome.clone()
                 } else if finish_collection {
                     SpdmAttestationState::TriggerEvidenceCollection {
                         retry_count: 1,
@@ -1287,7 +1300,7 @@ pub(in crate::tests) mod tests {
                 assert!(!snapshot.evidence_collection_locked, "{scenario}");
                 assert_eq!(
                     snapshot.completed_at.is_some(),
-                    user_cancelled,
+                    operator_outcome.is_some(),
                     "{scenario}"
                 );
                 assert!(
@@ -1295,7 +1308,7 @@ pub(in crate::tests) mod tests {
                     "cleanup must not read evidence"
                 );
             }
-            if !finish_collection && !user_cancelled {
+            if !finish_collection && operator_outcome.is_none() {
                 // The Failed handler records completion on the following iteration.
                 env.run_spdm_controller_iteration_no_requeue().await;
                 for device in &devices {
@@ -1314,11 +1327,12 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn test_cancelled_by_user_goes_into_cancelled(
+    async fn test_operator_requests_finish_after_collection_cleanup(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
         struct Case {
             scenario: &'static str,
+            stop: bool,
             trigger_iterations: usize,
             cancel_error: Option<libredfish::RedfishError>,
             finish_collection: bool,
@@ -1327,6 +1341,7 @@ pub(in crate::tests) mod tests {
         let cases = [
             Case {
                 scenario: "cancel before collection starts",
+                stop: false,
                 trigger_iterations: 2,
                 cancel_error: None,
                 finish_collection: false,
@@ -1334,6 +1349,7 @@ pub(in crate::tests) mod tests {
             },
             Case {
                 scenario: "retry a transient cancellation failure, then wait for the BMC",
+                stop: false,
                 trigger_iterations: 3,
                 cancel_error: Some(libredfish::RedfishError::GenericError {
                     error: "temporary cancellation failure".to_string(),
@@ -1343,6 +1359,7 @@ pub(in crate::tests) mod tests {
             },
             Case {
                 scenario: "unsupported cancellation releases the lock only at the deadline",
+                stop: false,
                 trigger_iterations: 3,
                 cancel_error: Some(libredfish::RedfishError::NotSupported(
                     "cancel task".to_string(),
@@ -1352,10 +1369,37 @@ pub(in crate::tests) mod tests {
             },
             Case {
                 scenario: "a collection claim without a task ID uses the deadline",
+                stop: false,
                 trigger_iterations: 2,
                 cancel_error: None,
                 finish_collection: false,
                 claim_without_task: true,
+            },
+            Case {
+                scenario: "stop before collection fails unfinished work",
+                stop: true,
+                trigger_iterations: 2,
+                cancel_error: None,
+                finish_collection: false,
+                claim_without_task: false,
+            },
+            Case {
+                scenario: "stop retains the lock until the BMC confirms cleanup",
+                stop: true,
+                trigger_iterations: 3,
+                cancel_error: None,
+                finish_collection: true,
+                claim_without_task: false,
+            },
+            Case {
+                scenario: "stop fails at the cleanup deadline when cancellation is unsupported",
+                stop: true,
+                trigger_iterations: 3,
+                cancel_error: Some(libredfish::RedfishError::NotSupported(
+                    "cancel task".to_string(),
+                )),
+                finish_collection: false,
+                claim_without_task: false,
             },
         ];
         let env = create_test_env_with_overrides(
@@ -1366,7 +1410,24 @@ pub(in crate::tests) mod tests {
             },
         )
         .await;
+        // Invalid and absent jobs retain the API's distinct error contracts.
+        for (value, code) in [
+            ("invalid".to_string(), tonic::Code::InvalidArgument),
+            (uuid::Uuid::new_v4().to_string(), tonic::Code::NotFound),
+        ] {
+            let error = env
+                .api
+                .stop_attestation(Request::new(rpc::Uuid { value }))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), code);
+        }
         for case in cases {
+            let expected_state = if case.stop {
+                SpdmAttestationState::Failed("Stopped by operator".to_string())
+            } else {
+                SpdmAttestationState::Cancelled
+            };
             // Host setup performs its own attestation before the scenario starts.
             env.redfish_sim.set_evidence_collection_running(false);
             let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
@@ -1400,9 +1461,15 @@ pub(in crate::tests) mod tests {
             if let Some(error) = case.cancel_error {
                 env.redfish_sim.set_next_task_cancel_error(error);
             }
-            env.api
-                .cancel_attestation(Request::new(job_id.into()))
-                .await?;
+            if case.stop {
+                env.api
+                    .stop_attestation(Request::new(job_id.into()))
+                    .await?;
+            } else {
+                env.api
+                    .cancel_attestation(Request::new(job_id.into()))
+                    .await?;
+            }
             env.run_spdm_controller_iteration_no_requeue().await;
 
             let mut txn = env.db_txn().await;
@@ -1464,11 +1531,7 @@ pub(in crate::tests) mod tests {
                 );
             }
             if !waiting {
-                assert!(
-                    devices
-                        .iter()
-                        .all(|device| device.state == SpdmAttestationState::Cancelled)
-                );
+                assert!(devices.iter().all(|device| device.state == expected_state));
                 continue;
             }
 
@@ -1508,18 +1571,34 @@ pub(in crate::tests) mod tests {
                 env.redfish_sim.set_evidence_collection_running(false);
             } else {
                 // Advance the persisted deadline without a real two-minute sleep.
-                sqlx::query("UPDATE spdm_machine_devices_attestation SET cancelled_at = NOW() - INTERVAL '2 minutes' WHERE job_id = $1")
+                sqlx::query("UPDATE spdm_machine_devices_attestation
+                    SET cancelled_at = CASE WHEN cancelled_at IS NOT NULL THEN NOW() - INTERVAL '2 minutes' END,
+                        stop_requested_at = CASE WHEN stop_requested_at IS NOT NULL THEN NOW() - INTERVAL '2 minutes' END
+                    WHERE job_id = $1")
                     .bind(job_id).execute(&env.pool).await?;
             }
-            let cancelled_at: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT cancelled_at FROM spdm_machine_devices_attestation WHERE job_id = $1 LIMIT 1")
-                .bind(job_id).fetch_one(&env.pool).await?;
-            // Repeated user requests must not postpone the original deadline.
-            env.api
-                .cancel_attestation(Request::new(job_id.into()))
+            let request_time_query = "SELECT COALESCE(stop_requested_at, cancelled_at)
+                FROM spdm_machine_devices_attestation WHERE job_id = $1 LIMIT 1";
+            let requested_at: chrono::DateTime<Utc> = sqlx::query_scalar(request_time_query)
+                .bind(job_id)
+                .fetch_one(&env.pool)
                 .await?;
-            let repeated_cancelled_at: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT cancelled_at FROM spdm_machine_devices_attestation WHERE job_id = $1 LIMIT 1")
-                .bind(job_id).fetch_one(&env.pool).await?;
-            assert_eq!(cancelled_at, repeated_cancelled_at, "{}", case.scenario);
+            // Repeated user requests must not postpone the original deadline.
+            if case.stop {
+                env.api
+                    .stop_attestation(Request::new(job_id.into()))
+                    .await?;
+            } else {
+                env.api
+                    .cancel_attestation(Request::new(job_id.into()))
+                    .await?;
+            }
+            let repeated_requested_at: chrono::DateTime<Utc> =
+                sqlx::query_scalar(request_time_query)
+                    .bind(job_id)
+                    .fetch_one(&env.pool)
+                    .await?;
+            assert_eq!(requested_at, repeated_requested_at, "{}", case.scenario);
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
@@ -1529,12 +1608,7 @@ pub(in crate::tests) mod tests {
                     &job_id,
                 )
                 .await?;
-                assert_eq!(
-                    snapshot.state,
-                    SpdmAttestationState::Cancelled,
-                    "{}",
-                    case.scenario
-                );
+                assert_eq!(snapshot.state, expected_state, "{}", case.scenario);
                 assert!(!snapshot.evidence_collection_locked, "{}", case.scenario);
                 assert!(snapshot.completed_at.is_some(), "{}", case.scenario);
                 assert!(

@@ -497,6 +497,7 @@ const (
 	Forge_FindInstancesByDpuExtensionService_FullMethodName                 = "/forge.Forge/FindInstancesByDpuExtensionService"
 	Forge_TriggerMachineAttestation_FullMethodName                          = "/forge.Forge/TriggerMachineAttestation"
 	Forge_CancelAttestation_FullMethodName                                  = "/forge.Forge/CancelAttestation"
+	Forge_StopAttestation_FullMethodName                                    = "/forge.Forge/StopAttestation"
 	Forge_ListAttestation_FullMethodName                                    = "/forge.Forge/ListAttestation"
 	Forge_GetAttestation_FullMethodName                                     = "/forge.Forge/GetAttestation"
 	Forge_ListMachineAttestationStatuses_FullMethodName                     = "/forge.Forge/ListMachineAttestationStatuses"
@@ -1475,6 +1476,10 @@ type ForgeClient interface {
 	// SPDM attestation APIs start
 	TriggerMachineAttestation(ctx context.Context, in *SpdmMachineAttestationTriggerRequest, opts ...grpc.CallOption) (*SpdmMachineAttestationTriggerResponse, error)
 	CancelAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Stops unfinished device attestations with a failed result after BMC cleanup.
+	// Asynchronous and idempotent; preserves terminal results. Returns NOT_FOUND
+	// for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+	StopAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	ListAttestation(ctx context.Context, in *SpdmListAttestationRequest, opts ...grpc.CallOption) (*SpdmListAttestationResponse, error)
 	GetAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*SpdmGetAttestationResponse, error)
 	// Lists fleet predictions in pages or assesses one machine using current attesters.
@@ -6431,6 +6436,16 @@ func (c *forgeClient) CancelAttestation(ctx context.Context, in *UUID, opts ...g
 	return out, nil
 }
 
+func (c *forgeClient) StopAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_StopAttestation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) ListAttestation(ctx context.Context, in *SpdmListAttestationRequest, opts ...grpc.CallOption) (*SpdmListAttestationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SpdmListAttestationResponse)
@@ -8076,6 +8091,10 @@ type ForgeServer interface {
 	// SPDM attestation APIs start
 	TriggerMachineAttestation(context.Context, *SpdmMachineAttestationTriggerRequest) (*SpdmMachineAttestationTriggerResponse, error)
 	CancelAttestation(context.Context, *UUID) (*emptypb.Empty, error)
+	// Stops unfinished device attestations with a failed result after BMC cleanup.
+	// Asynchronous and idempotent; preserves terminal results. Returns NOT_FOUND
+	// for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+	StopAttestation(context.Context, *UUID) (*emptypb.Empty, error)
 	ListAttestation(context.Context, *SpdmListAttestationRequest) (*SpdmListAttestationResponse, error)
 	GetAttestation(context.Context, *UUID) (*SpdmGetAttestationResponse, error)
 	// Lists fleet predictions in pages or assesses one machine using current attesters.
@@ -9696,6 +9715,9 @@ func (UnimplementedForgeServer) TriggerMachineAttestation(context.Context, *Spdm
 }
 func (UnimplementedForgeServer) CancelAttestation(context.Context, *UUID) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelAttestation not implemented")
+}
+func (UnimplementedForgeServer) StopAttestation(context.Context, *UUID) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method StopAttestation not implemented")
 }
 func (UnimplementedForgeServer) ListAttestation(context.Context, *SpdmListAttestationRequest) (*SpdmListAttestationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListAttestation not implemented")
@@ -18464,6 +18486,24 @@ func _Forge_CancelAttestation_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_StopAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UUID)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).StopAttestation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_StopAttestation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).StopAttestation(ctx, req.(*UUID))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_ListAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SpdmListAttestationRequest)
 	if err := dec(in); err != nil {
@@ -21683,6 +21723,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelAttestation",
 			Handler:    _Forge_CancelAttestation_Handler,
+		},
+		{
+			MethodName: "StopAttestation",
+			Handler:    _Forge_StopAttestation_Handler,
 		},
 		{
 			MethodName: "ListAttestation",
