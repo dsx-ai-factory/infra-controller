@@ -129,10 +129,12 @@ fn task_poll(
         Ok(ModificationResponse::Empty | ModificationResponse::Message(_)) => {
             Ok(TaskPoll::Status(OperationStatus::Completed))
         }
-        Ok(ModificationResponse::Entity(body)) => Ok(match serde_json::from_value::<Task>(body) {
-            Ok(task) => TaskPoll::Task(Box::new(task)),
-            Err(_) => TaskPoll::Status(OperationStatus::Completed),
-        }),
+        Ok(ModificationResponse::Entity(body)) => Ok(
+            match is_task(&body).then(|| serde_json::from_value::<Task>(body)) {
+                Some(Ok(task)) => TaskPoll::Task(Box::new(task)),
+                _ => TaskPoll::Status(OperationStatus::Completed),
+            },
+        ),
         Err(PlatformError::Bmc {
             status: status @ 400..=499,
             message,
@@ -143,6 +145,16 @@ fn task_poll(
         })),
         Err(error) => Err(error),
     }
+}
+
+/// Whether a body is a Task rather than the operation's own response, such
+/// as the resource it created, which also carries an `@odata.id`, `Id` and
+/// `Name`: a Task names its type or reports its state.
+fn is_task(body: &Value) -> bool {
+    body.get("@odata.type")
+        .and_then(Value::as_str)
+        .is_some_and(|odata_type| odata_type.starts_with("#Task."))
+        || body.get("TaskState").is_some()
 }
 
 /// The job a task handed its work to, if it did.

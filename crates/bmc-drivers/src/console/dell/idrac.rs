@@ -42,11 +42,13 @@ const BIOS_ATTRS: &[AttrExpectation] = &[
         ],
         &["Off"],
     ),
+    // Absent on iDRAC 10; BIOS setup writes it only where reported.
     attr(
         REDIR_AFTER_BOOT.name,
         &[REDIR_AFTER_BOOT.text()],
         &["Disabled"],
-    ),
+    )
+    .optional(),
     attr(
         OLDER_SERIAL_PORT_ADDRESS.name,
         &[
@@ -59,7 +61,8 @@ const BIOS_ATTRS: &[AttrExpectation] = &[
         EXT_SERIAL_CONNECTOR.name,
         &[EXT_SERIAL_CONNECTOR.text()],
         &[],
-    ),
+    )
+    .optional(),
     attr(FAIL_SAFE_BAUD.name, &[FAIL_SAFE_BAUD.text()], &[]),
     attr(CON_TERM_TYPE.name, &[CON_TERM_TYPE.text()], &[]),
 ];
@@ -147,6 +150,25 @@ mod tests {
         let shell = spec.as_ssh_shell().expect("SSH shell");
         assert_eq!(shell.activate.as_slice(), b"connect com2");
         assert_eq!(shell.escape_filter, EscapeSeq::Single(0x1c));
+    }
+
+    /// A BIOS without the settings BIOS setup writes only where reported, as
+    /// iDRAC 10 lacks `RedirAfterBoot`, still reads as enabled.
+    #[test]
+    fn bios_status_skips_the_settings_some_bioses_lack() {
+        let attributes = [
+            ("SerialComm", "OnConRedirAuto"),
+            ("SerialPortAddress", "Serial1Com2Serial2Com1"),
+            ("FailSafeBaud", "115200"),
+            ("ConTermType", "Vt100Vt220"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), serde_json::json!(value)))
+        .collect();
+        assert_eq!(
+            attr_status(&attributes, BIOS_ATTRS).state,
+            ConsoleState::Enabled
+        );
     }
 
     #[test]

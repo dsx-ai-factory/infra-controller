@@ -178,7 +178,7 @@ fn task_polls_read_monitors_and_tasks_alike() {
             message: "refused".to_string(),
         })
     };
-    let cases: [Case; 7] = [
+    let cases: [Case; 8] = [
         (
             "monitor still running",
             pending(),
@@ -193,6 +193,15 @@ fn task_polls_read_monitors_and_tasks_alike() {
             "monitor finished with Supermicro's response",
             Ok(ModificationResponse::Entity(json!({
                 "Success": {"code": "Base.1.10.Success", "message": "Successfully Completed Request."}
+            }))),
+            Ok(OperationStatus::Completed),
+        ),
+        (
+            "monitor finished with the resource it created",
+            Ok(ModificationResponse::Entity(json!({
+                "@odata.id": "/redfish/v1/AccountService/Accounts/3",
+                "Id": "3",
+                "Name": "User Account",
             }))),
             Ok(OperationStatus::Completed),
         ),

@@ -63,7 +63,9 @@ const ATTRIBUTES: &[BiosAttribute] = &[
     INFINITE_BOOT,
 ];
 
-const INFINITE_BOOT: BiosAttribute = BiosAttribute::string("BootSeqRetry", "Enabled").required();
+/// Written only where the BIOS reports it: iDRAC rejects a whole write that
+/// names an attribute its BIOS lacks.
+const INFINITE_BOOT: BiosAttribute = BiosAttribute::string("BootSeqRetry", "Enabled");
 
 /// The serial connector the console uses, on BIOSes that have the setting.
 pub(crate) const EXT_SERIAL_CONNECTOR: BiosAttribute =
@@ -390,6 +392,21 @@ mod tests {
             "a setting differs" { with("BootSeqRetry", "Disabled") => false }
             "in effect but legacy boot mode" { with(BOOT_MODE, "Bios") => false }
         );
+    }
+
+    #[test]
+    fn boot_seq_retry_is_written_only_where_reported() {
+        let writes = |current: serde_json::Value| {
+            expected_settings(
+                &serde_json::from_value(json!({"attributes": current})).expect("settings"),
+                &BiosSettings::default(),
+                "NIC.Slot.7-1-1",
+            )
+            .attributes
+            .contains_key("BootSeqRetry")
+        };
+        assert!(!writes(json!({})));
+        assert!(writes(json!({"BootSeqRetry": "Disabled"})));
     }
 
     #[test]
