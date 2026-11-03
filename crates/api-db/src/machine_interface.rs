@@ -4041,6 +4041,31 @@ async fn delete_dhcp_addresses_from_interface(
     Ok(removed)
 }
 
+/// Validates a new Domain reference under the interface row lock.
+/// Retained references may already point at a deleted Domain. Address cleanup
+/// can preserve or clear those references; only adding or rebinding needs a live
+/// target. Read the current reference after locking so a concurrent rebind
+/// cannot make the same-ID exception apply to a stale snapshot.
+async fn validate_domain_reference_update(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    domain_id: Option<DomainId>,
+) -> DatabaseResult<()> {
+    let Some(domain_id) = domain_id else {
+        return Ok(());
+    };
+    let query = "SELECT domain_id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
+    let current_domain: Option<Option<DomainId>> = sqlx::query_scalar(query)
+        .bind(interface_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if current_domain.is_some_and(|current| current != Some(domain_id)) {
+        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
+    }
+    Ok(())
+}
+
 /// Updates hostname and domain together for a machine interface.
 async fn update_hostname_and_domain(
     txn: &mut PgConnection,
@@ -4048,9 +4073,7 @@ async fn update_hostname_and_domain(
     hostname: &str,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<bool> {
-    if let Some(domain_id) = domain_id {
-        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
-    }
+    validate_domain_reference_update(txn, interface_id, domain_id).await?;
 
     // The old zone loses the name and the new zone gains it, so both serials
     // advance when the row actually changed. The sub-select in RETURNING runs
@@ -4163,9 +4186,7 @@ pub async fn update_segment_id(
     segment_id: NetworkSegmentId,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<()> {
-    if let Some(domain_id) = domain_id {
-        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
-    }
+    validate_domain_reference_update(txn, interface_id, domain_id).await?;
 
     // The interface's names leave the old zone and appear in the new one, so
     // both serials advance when the row actually changed. The sub-select in

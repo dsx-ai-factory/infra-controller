@@ -92,7 +92,9 @@ pub(crate) async fn update(
         .id
         .ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let mut domain = domain::find_by_uuid_for_delete(txn.as_mut(), uuid)
+    // Serial-bump writers can already own this row while syncing an interface.
+    // The update's timestamp/live-row predicates detect conflicting writes.
+    let mut domain = domain::find_by_uuid(&mut txn, uuid)
         .await?
         .filter(|domain| domain.deleted.is_none())
         .ok_or_else(|| CarbideError::NotFoundError {
