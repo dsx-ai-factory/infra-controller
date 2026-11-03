@@ -4,86 +4,224 @@ This document contains the complete Finite State Machine (FSM) that illustrates 
 
 ## High-Level Overview
 
-The main flow shows the primary states and transitions between them:
+The compact diagram shows one route through the main lifecycle. The tables retain every overview transition, including alternate paths and the unreleased [NIC Firmware Recovery](#nic-firmware-recovery) engine:
 
 ```mermaid
 stateDiagram-v2
     direction TB
-
-    state "DpuDiscoveringState" as DpuDiscoveringState
-    state "DPUInit" as DPUInit
-    state "HostInit" as HostInit
+    [*] --> DpuDiscoveringState
+    DpuDiscoveringState --> DPUInit
+    DPUInit --> HostInit
+    HostInit --> HostInit_HI_Discovered
     state "HostInit/Discovered" as HostInit_HI_Discovered
-    state "BomValidating" as BomValidating
-    state "Validation" as Validation
-    state "Measuring" as Measuring
-    state "Ready" as Ready
-    state "Decommissioning" as Decommissioning
-    state "Decommissioned (terminal)" as Decommissioned
-    state "Assigned" as Assigned
-    state "HostReprovision" as HostReprovision
-    state "DPUReprovision" as DPUReprovision
-    state "PostAssignedMeasuring" as PostAssignedMeasuring
-    state "WaitingForCleanup" as WaitingForCleanup
-    state "AnyNotAssignedState" as AnyNotAssignedState
-    state "Failed" as Failed
-    state "ForceDeletion" as ForceDeletion
-
-    [*] --> DpuDiscoveringState : Site Explorer creates managed host
-
-    DpuDiscoveringState --> DPUInit : All DPU Security Boot Configured / DPU Reboot
-    DpuDiscoveringState --> HostInit : No DPU
-
-    DPUInit --> HostInit : DPU Ready
-
-    HostInit --> BomValidating : Host Configured
-    HostInit --> HostInit_HI_Discovered : See HostInit diagram
     HostInit_HI_Discovered --> Ready
-
-    BomValidating --> Validation : BOM Valid AND Validation Enabled
-    BomValidating --> HostInit_HI_Discovered : BOM Valid AND Validation Disabled
-
-    Validation --> HostInit_HI_Discovered : Validation Complete
-    Measuring --> Ready : Measurements Valid
-
-    Ready --> HostInit : BIOS Password Setup Needed
-    Ready --> Assigned : Instance Assigned
-    Ready --> HostReprovision : Host Reprovision Request
-    Ready --> DPUReprovision : DPU Reprovision Request
-    Ready --> Measuring : Redo Measurements Request
-    Ready --> BomValidating : BOM Validation Request
-    Ready --> Validation : Machine Validation Request
-    Ready --> Decommissioning : Decommission Request
-
-    Assigned --> PostAssignedMeasuring : Measurements required
-    Assigned --> WaitingForCleanup : Cleanup
-    Assigned --> HostReprovision : Host reprovision needed
-    Assigned --> DPUReprovision
-
-    HostReprovision --> Ready : Reprovision Complete
-    HostReprovision --> Assigned : Reprovision Complete
-
-    DPUReprovision --> Assigned : if came from Assigned
-    DPUReprovision --> HostInit_HI_Discovered : if came from Ready
-    DPUReprovision --> HostReprovision : Host reprovision requested
-
-    WaitingForCleanup --> BomValidating
-
-    PostAssignedMeasuring --> WaitingForCleanup : Measurements complete
-
-    Decommissioning --> Decommissioned : Device reset and credential deletion complete
-
-    AnyNotAssignedState --> Failed : Any failure condition
-    Failed --> AnyNotAssignedState : Recovery
-    Failed --> ForceDeletion : Admin forced deletion
-    Failed --> Failed: Unrecoverable condition
-
-    ForceDeletion --> [*] : Force deletion complete
+    Ready --> Assigned
+    Assigned --> WaitingForCleanup
 ```
+
+For edges without a condition label in the overview, **State details** refers to the destination-specific diagrams below. `Decommissioned` is terminal.
+
+### Discovery and Preparation
+
+The following table lists these overview transitions:
+
+| From | To | Condition |
+| --- | --- | --- |
+| `[*]` | `DpuDiscoveringState` | Site Explorer creates managed host |
+| `DpuDiscoveringState` | `DPUInit` | All DPU Security Boot Configured / DPU Reboot |
+| `DpuDiscoveringState` | `HostInit` | No DPU |
+| `DPUInit` | `HostInit` | DPU Ready |
+| `HostInit` | `BomValidating` | Host Configured |
+| `HostInit` | `HostInit/Discovered` | See HostInit diagram |
+| `HostInit/Discovered` | `Ready` | State details |
+| `BomValidating` | `Validation` | BOM Valid AND Validation Enabled |
+| `BomValidating` | `HostInit/Discovered` | BOM Valid AND Validation Disabled |
+| `Validation` | `HostInit/Discovered` | Validation Complete |
+
+### Assignment and Host Work
+
+The following table lists these overview transitions:
+
+| From | To | Condition |
+| --- | --- | --- |
+| `Measuring` | `Ready` | Measurements Valid |
+| `Ready` | `HostInit` | BIOS Password Setup Needed |
+| `Ready` | `Assigned` | Instance Assigned |
+| `Ready` | `HostReprovision` | Host Reprovision Request |
+| `Ready` | `DPUReprovision` | DPU Reprovision Request |
+| `Ready` | `Measuring` | Redo Measurements Request |
+| `Ready` | `BomValidating` | BOM Validation Request |
+| `Ready` | `Validation` | Machine Validation Request |
+| `Ready` | `Decommissioning` | Decommission Request |
+| `Assigned` | `PostAssignedMeasuring` | Measurements required |
+| `Assigned` | `WaitingForCleanup` | Cleanup |
+| `Assigned` | `HostReprovision` | Host reprovision needed |
+| `Assigned` | `DPUReprovision` | State details |
+| `HostReprovision` | `Ready` | Reprovision Complete |
+| `HostReprovision` | `Assigned` | Reprovision Complete |
+| `DPUReprovision` | `Assigned` | if came from Assigned |
+| `DPUReprovision` | `HostInit/Discovered` | if came from Ready |
+| `DPUReprovision` | `HostReprovision` | Host reprovision requested |
+| `WaitingForCleanup` | `BomValidating` | State details |
+| `PostAssignedMeasuring` | `WaitingForCleanup` | Measurements complete |
+| `Decommissioning` | `Decommissioned` | Device reset and credential deletion complete |
+
+### Firmware Recovery and Failure
+
+The following table lists these overview transitions:
+
+| From | To | Condition |
+| --- | --- | --- |
+| `NicFirmwareUpdating` | `HostInit/Discovered` | Baseline initial preparation complete |
+| `NicFirmwareUpdating` | `Ready` | Baseline ready continuation complete |
+| `NicFirmwareUpdating` | `Assigned` | Allocation complete |
+| `NicFirmwareUpdating` | `Assigned` | Restored allocation failure |
+| `NicFirmwareUpdating` | `Reset` | Eligible reset after restored failure |
+| `NicFirmwareUpdating` | `WaitingForCleanup` | Baseline restoration complete |
+| `AnyNotAssignedState` | `Failed` | Failure outside NIC firmware recovery |
+| `Failed` | `AnyNotAssignedState` | Recovery |
+| `Failed` | `ForceDeletion` | Admin forced deletion |
+| `Failed` | `Failed` | Unrecoverable condition |
+| `ForceDeletion` | `[*]` | Force deletion complete |
 
 ### `Failed` recovery semantics
 
 `FailureCause::BiosSetupFailed` is set when BIOS setup retries are exhausted during ingestion or instance deprovisioning. The Failed handler polls `is_bios_setup` and auto-recovers into `SetBootOrder` once the BMC reports success.
+
+## NIC Firmware Recovery
+
+This section documents unreleased recovery work in [PR #8596](https://github.com/dsx-ai-factory/infra-controller/pull/8596). The `ManagedHostState::NicFirmwareUpdating` engine reconciles an already persisted operation. Production lifecycle admission is separate work in [issue #6680](https://github.com/dsx-ai-factory/infra-controller/issues/6680); these diagrams deliberately have no incoming admission edge.
+
+NICo Core freezes the operation's purpose, ordered cards, firmware inputs, execution options, and original lockdown policies. It saves each card's progress and the supervisor's receipt, which records accepted work and its results. After a Core restart, Core reloads that operation and reconciles the retained supervisor receipt. It does not select new targets or repeat completed firmware writes. Supervisor daemon loss leaves unfinished work blocked for explicit reconciliation. A host reboot can remove the default supervisor journal. Reconcile any lost or interrupted work with the card before permitting a new mutation.
+
+### Execution and Activation
+
+Cards execute in target order. This diagram shows observation, unlock, and execution for each card. Self-loops represent the polling, retry, and readback waits defined in the [phase descriptions](#phase-behavior):
+
+```mermaid
+stateDiagram-v2
+    state "ObservingSupervisor" as Observe
+    state "Unlocking" as Unlock
+    state "UpdatingFirmware" as Update
+    state "RestoringLockdown" as Restore
+
+    Observe --> Observe
+    Observe --> Unlock : Initial supervisor saved, no receipt
+    Observe --> Update : Retained receipt
+    Unlock --> Unlock
+    Unlock --> Update : Unlocked readback
+    Update --> Update
+    Update --> Observe : Next card
+    Update --> Restore : Safely settled failure
+```
+
+After the last successful card, activation and fresh inventory lead to policy restoration. The second diagram continues from the same `UpdatingFirmware` phase:
+
+```mermaid
+stateDiagram-v2
+    state "UpdatingFirmware" as Update
+    state "Rebooting" as Reboot
+    state "Reobserving" as Inventory
+    state "RestoringLockdown" as Restore
+
+    Update --> Reboot : Last card, host reboot
+    Update --> Inventory : Last card, card reset
+    Reboot --> Reboot
+    Reboot --> Inventory : Covering reboot report
+    Inventory --> Inventory
+    Inventory --> Restore : All cards verified
+```
+
+### Restoration and Continuation
+
+Core checks every original lockdown policy before parking a failure or resuming the operation's purpose. The self-loop waits for independent policy readback:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "RestoringLockdown" as Restore
+    state "Failed (firmware phase)" as FirmwareFailed
+    state "HostInit/Discovered" as Prepare
+    state "Ready" as Ready
+    state "Assigned/DpaProvisioning" as Allocate
+    state "WaitingForCleanup/Init" as Cleanup
+    state "Assigned/WaitingForRebootToReady" as Release
+    state "Reset" as Reset
+
+    Restore --> Restore
+    Restore --> FirmwareFailed : Restored, failure retained
+    Restore --> Prepare : Initial preparation
+    Restore --> Ready : Baseline ready
+    Restore --> Allocate : Allocation
+    Restore --> Cleanup : Baseline restoration
+    FirmwareFailed --> Release : Deleted owner, no recorded failure
+    FirmwareFailed --> Reset : Eligible reset
+```
+
+The following table maps each saved purpose to its successful continuation:
+
+| Purpose | Continuation |
+| --- | --- |
+| Baseline initial preparation | `HostInit/Discovered`, preserving `skip_reboot_wait` |
+| Baseline ready | `Ready`, only for an already prepared host whose admitted recipe preserves readiness qualification |
+| Allocation | `Assigned/DpaProvisioning` |
+| Baseline restoration | `WaitingForCleanup/Init`, preserving the cleanup context |
+
+Firmware and lockdown checks alone do not establish readiness for the direct `Ready` continuation. Admission must preserve that qualification. Before handoff, Core transactionally rechecks the controller state version, ownership, attachments, and recorded host or DPU failures. Busy interface or DPU locks defer completion for another iteration without changing the operation.
+
+Destination-specific diagrams later on this page show their internal transitions. Firmware continuation edges are centralized in this section.
+
+### Failure and Ownership Changes
+
+A recorded host or DPU failure, or ineligible allocation ownership, stops new firmware submissions and pending unlocks. Core continues observing work that might already have started. After those effects settle safely, it restores the original policies and records failure:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "ObservingSupervisor" as Observe
+    state "Unlocking" as Unlock
+    state "UpdatingFirmware" as Update
+    state "Reobserving" as Inventory
+    state "RestoringLockdown" as Restore
+
+    Observe --> Restore : Failure or owner loss
+    Unlock --> Restore : Failure or owner loss
+    Update --> Restore : Failure or owner loss
+    Inventory --> Restore : Failure or owner loss
+    Restore --> Restore : New stop during success, card zero
+```
+
+Baseline work requires no instance owner. Allocation requires its original live instance. Baseline restoration permits the original deleted instance or no instance; disappearance of that cleanup owner does not stop restoration. A replacement owner is never eligible.
+
+A completed receipt establishes settled execution. An unsuccessful receipt permits restoration only when execution failed or was canceled before configuration or firmware writing, with no reported successful mutation, reset, or verification. Uncertain terminal effects require operator intervention.
+
+In `Rebooting`, Core completes the persisted activation handshake, including reboot retries, before reacting to a stop. A new stop during successful restoration restarts policy checks at the first card. Restoration already recording a failure preserves its position and original reason.
+
+### Phase Behavior
+
+- **`ObservingSupervisor`:** Core polls for the current card's receipt. During receipt-free initial observation, Core can establish or refresh `supervisor_instance_id` before permitting `Unlocking`. After leaving that phase, a missing receipt from a replacement supervisor cannot renew submission permission. A retained receipt resumes `UpdatingFirmware`. Without a stop reason or retained receipt, `InvalidTask`, `Conflict`, and `Unsupported` delivery errors require operator intervention. Unresolved terminal evidence also requires intervention.
+- **`Unlocking`:** Core observes lockdown and changes it only when needed and the saved key identity permits it. An independent unlocked readback advances to `UpdatingFirmware`. Missing replies wait; change acknowledgements and reported errors return to observation.
+- **`UpdatingFirmware`:** Core delivers the frozen request under the saved operation and supervisor identities. Without a receipt, an eligible retry resends that identical request only to the saved supervisor instance, which deduplicates it. Scout checks that instance before submitting; a replacement without the receipt blocks resubmission and requires reconciliation. Once a receipt exists or submission is prohibited, delivery only observes accepted work. Successful evidence for every requested step advances to the next card, or after the last card to `Rebooting` or `Reobserving`. A safely settled unsuccessful execution enters `RestoringLockdown` with a failure; unavailable or missing receipts alone never establish safe settlement.
+- **`Rebooting`:** Core commits activation intent and each attempt timestamp before requesting power. Health overrides can block the reboot. A failed or timed-out power call leaves this phase pending. An authenticated reboot report covering activation and the latest attempt advances to `Reobserving`.
+- **`Reobserving`:** Core waits for one inventory containing every saved card at the requested installed and running firmware version. Both collection and Core receipt times must follow the activation boundary. Missing, stale, partial, ambiguous, or mismatched evidence waits; matching evidence enters `RestoringLockdown`. A stop instead begins restoration without claiming successful inventory convergence.
+- **`RestoringLockdown`:** Core reconciles every original policy with independent readback. Originally unlocked cards remain unlocked. Missing replies wait; acknowledgements and reported errors return to observation. After all cards, a retained failure enters `NicFirmwareUpdating/Failed`; success resumes the continuation after the transactional checks above.
+- **`Failed`:** Core retains the operation and receipts after policy restoration. A deleted original allocation can resume `Assigned/WaitingForRebootToReady` when no host or DPU failure remains and the transactional checks pass. An eligible managed-host reset can enter `Reset`. Otherwise Core requires intervention and includes any current recorded failure without replacing the saved firmware reason.
+
+For host activation, the freshness boundary is the database time when Core received the covering reboot report. For card reset, it is the database time when Core processed the last card's completion. Keep the Scout host and Core database clocks synchronized. Core does not compensate for skew: an ahead clock can make old collection appear fresh, while a behind clock can delay acceptance of new inventory.
+
+Lockdown readback verifies `Locked` or `Unlocked`; it does not identify the installed key or repair external rekeying.
+
+### Recovery Diagnostics
+
+Reboot calls have a 120-second attempt deadline. The retry interval is the greater of 180 seconds and `machine_state_controller.failure_retry_time`, whose default is 90 minutes. Neither a timeout nor a lost reply abandons the operation. There is no maximum reboot-attempt count or overall workflow deadline. Active phases have no state service-level agreement (SLA); restored `Failed` has a zero SLA for observability.
+
+Missing IKM versions, credential backend errors, and credential lookup timeouts return lockdown changes to observation and retry. They do not automatically become terminal failures. For retained phase errors and controller outcomes, use [state-history diagnostics](../../playbooks/stuck_objects/diagnostic_tools.md#query-state-history). Inspect [manual intervention alerts](../../observability/alerts.md#manual-intervention-alerts), including `carbide_object_manual_intervention_required`, when the controller cannot safely proceed. During uncertain active work, preserve the operation and its evidence rather than bypassing its guards.
+
+Clearing a recorded cause does not restart a parked firmware recipe. After original-policy restoration, recovery is an [eligible managed-host reset](../../manuals/nico-admin-cli/commands/managed-host/managed-host-reset-set.md) or the deleted-allocation release described above. Reset is rejected before firmware `Failed`; its existing DPF, instance, and health preconditions still apply. Instance power requests remain rejected throughout `NicFirmwareUpdating`.
+
+Firmware handling precedes ordinary maintenance, DPU reprovisioning, restart verification, and reset dispatch. Tenant allocation status is `Updating`, or `Failed` in the firmware failure phase; baseline restoration reports `Terminating`. Operator force deletion and direct BMC power retain their existing manual semantics. They do not establish safe firmware completion or restored lockdown.
+
+The supervisor's host claim serializes cooperating callers. Mutation paths that omit the claim can bypass that protection, including direct `FirmwareFlasher` calls, legacy integrations, and independently launched vendor tools. Do not run those mutation paths concurrently with `NicFirmwareUpdating`. If completion is uncertain, preserve the operation and reconcile its process and hardware effects before another mutation.
 
 ## DPU Discovery State Details (DpuDiscoveringState)
 
@@ -964,7 +1102,7 @@ stateDiagram-v2
     state "Validation/RebootHost" as Validation_V_RebootHost
     state ForceDeletion
 
-    AnyNotAssignedState --> Failed
+    AnyNotAssignedState --> Failed : Failure outside NIC firmware recovery
     Failed --> HostInit_HI_WaitingForLockdown_HI_WFL_TimeWaitForDPUDown : Discovery Failure On discovery succeeded
     Failed --> Failed : Reboot with retry count
     Failed --> WaitingForCleanup_C_Init : NVMECleanFailed Cleaned up successfully after a failure
