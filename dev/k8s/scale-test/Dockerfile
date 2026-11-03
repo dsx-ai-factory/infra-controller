@@ -19,12 +19,15 @@ COPY dev/k8s/scale-test/ ./
 RUN CGO_ENABLED=0 go test -c -tags devsite     -o /out/probe.test     ./internal/probe/ \
  && CGO_ENABLED=0 go test -c -tags devcluster  -o /out/cluster.test   ./internal/cluster/ \
  && CGO_ENABLED=0 go test -c -tags acceptance  -o /out/inventory.test ./harness/ \
+ && CGO_ENABLED=0 go test -c -tags acceptance  -o /out/history.test   ./internal/history/ \
  && /out/cluster.test   -test.list '^TestAgainstARealCluster$' | grep -qx TestAgainstARealCluster \
  && /out/probe.test     -test.list '^TestAgainstARealProbe$'   | grep -qx TestAgainstARealProbe \
- && /out/inventory.test -test.list '^TestAcceptance$'          | grep -qx TestAcceptance
+ && /out/inventory.test -test.list '^TestAcceptance$'          | grep -qx TestAcceptance \
+ && /out/history.test   -test.list '^TestAcceptanceReplaysARealProbeCapture$' | grep -qx TestAcceptanceReplaysARealProbeCapture
 
 FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 COPY --from=build /out/probe.test     /tests/probe.test
 COPY --from=build /out/cluster.test   /tests/cluster.test
 COPY --from=build /out/inventory.test /tests/inventory.test
+COPY --from=build /out/history.test   /tests/history.test
 USER 65532:65532
