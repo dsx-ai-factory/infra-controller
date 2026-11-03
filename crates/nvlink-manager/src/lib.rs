@@ -346,8 +346,21 @@ struct NmxcPartitionOperation {
 pub enum NmxcPartitionOperationType {
     Create,
     Remove(u32),                 // NMX-C partition ID
+    RemoveDefaultPartition(u32), // NMX-C partition ID
     RemoveUnknownPartition(u32), // NMX-C partition ID
     Update(u32),                 // NMX-C partition ID
+}
+
+impl NmxcPartitionOperationType {
+    /// The failure stage a rejected delete of an untracked partition reports. Only the NMX-C
+    /// default partition's delete is fatal to the pass; an emptied unknown or tray default
+    /// partition that NMX-C refuses to delete is retried next pass like any other operation.
+    fn untracked_delete_failure_stage(&self) -> NmxcOperationFailureStage {
+        match self {
+            Self::RemoveDefaultPartition(_) => NmxcOperationFailureStage::DeleteDefaultPartition,
+            _ => NmxcOperationFailureStage::DeletePartition,
+        }
+    }
 }
 
 struct NmxcOperationError {
@@ -560,7 +573,7 @@ impl PartitionProcessingContext {
             .or_default()
             .push(NmxcPartitionOperation {
                 domain_uuid: None,
-                operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(
+                operation_type: NmxcPartitionOperationType::RemoveDefaultPartition(
                     default_nmx_c_id,
                 ),
                 gpu_uids: vec![],
@@ -3299,7 +3312,8 @@ impl NvlPartitionMonitor {
                             }),
                         }
                     }
-                    NmxcPartitionOperationType::RemoveUnknownPartition(nmx_c_partition_id) => {
+                    NmxcPartitionOperationType::RemoveDefaultPartition(nmx_c_partition_id)
+                    | NmxcPartitionOperationType::RemoveUnknownPartition(nmx_c_partition_id) => {
                         let request = libnmxc::nmxc_model::DeletePartitionRequest {
                             context: None,
                             partition_id: Some(libnmxc::nmxc_model::PartitionId {
@@ -3311,7 +3325,9 @@ impl NvlPartitionMonitor {
                         match nmxc_client.delete_partition(request).await {
                             Ok(_) => Ok(()),
                             Err(e) => Err(NmxcOperationError {
-                                failure_stage: NmxcOperationFailureStage::DeleteDefaultPartition,
+                                failure_stage: operation
+                                    .operation_type
+                                    .untracked_delete_failure_stage(),
                                 error: e.to_string(),
                                 nmx_c_partition_id: nmx_c_partition_id.to_string(),
                                 create_partition_request: String::new(),
@@ -3497,7 +3513,8 @@ impl NvlPartitionMonitor {
                         // Partition membership is not tracked in the partitions table. The status observation of the
                         // added/removed GPUs will be updated.
                     }
-                    NmxcPartitionOperationType::RemoveUnknownPartition(_) => {
+                    NmxcPartitionOperationType::RemoveDefaultPartition(_)
+                    | NmxcPartitionOperationType::RemoveUnknownPartition(_) => {
                         // No-op, since default partition membership is not tracked in the partitions table. The status observation of the
                         // added/removed GPUs will be updated.
                     }
@@ -4359,7 +4376,7 @@ mod nmxc_operation_tests {
         let logical_partition_id = NvLinkLogicalPartitionId::default();
         let operation = NmxcPartitionOperation {
             domain_uuid: None,
-            operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(42),
+            operation_type: NmxcPartitionOperationType::RemoveDefaultPartition(42),
             gpu_uids: vec![],
             name: String::new(),
             db_partition_id: None,
@@ -4373,7 +4390,7 @@ mod nmxc_operation_tests {
                 &operation,
                 Duration::from_millis(250),
                 Err(NmxcOperationError {
-                    failure_stage: NmxcOperationFailureStage::DeleteDefaultPartition,
+                    failure_stage: operation.operation_type.untracked_delete_failure_stage(),
                     error: "delete failed".to_string(),
                     nmx_c_partition_id: "42".to_string(),
                     create_partition_request: String::new(),
@@ -4407,6 +4424,46 @@ mod nmxc_operation_tests {
             ),
             1
         );
+    }
+
+    /// A rejected delete of an emptied unknown or tray default partition, such as one left
+    /// behind by NVLink isolation, is recorded as a failed operation but does not abort the pass.
+    #[test]
+    fn rejected_unknown_partition_delete_is_not_fatal() {
+        // Emits the same latency series that the test above measures, so take the capture
+        // lock to keep the two from running concurrently.
+        let _serialized = MetricsCapture::start();
+        let operation = NmxcPartitionOperation {
+            domain_uuid: None,
+            operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(9),
+            gpu_uids: vec![],
+            name: String::new(),
+            db_partition_id: None,
+        };
+        let mut metrics = NvlPartitionMonitorMetrics::new();
+
+        let result = finish_nmxc_operation(
+            &mut metrics,
+            &NvLinkLogicalPartitionId::default(),
+            &operation,
+            Duration::from_millis(250),
+            Err(NmxcOperationError {
+                failure_stage: operation.operation_type.untracked_delete_failure_stage(),
+                error: "delete failed".to_string(),
+                nmx_c_partition_id: "9".to_string(),
+                create_partition_request: String::new(),
+            }),
+        );
+
+        assert!(
+            !result.expect("not fatal to the pass"),
+            "reported as not succeeded"
+        );
+        let change = AppliedChange {
+            operation: NmxcMetricOperation::RemoveDefaultPartition,
+            status: NmxcMetricOperationStatus::Failed,
+        };
+        assert_eq!(metrics.applied_changes.get(&change), Some(&1));
     }
 }
 
@@ -5727,6 +5784,10 @@ mod machine_group_tests {
         const GPU_B: u64 = 0x1001;
         const OTHER_TRAY_GPU: u64 = 0x2000;
 
+        // The hosts here have no machine rows, so isolation status writes fail and each pass
+        // records a `health_not_recorded` group outcome. Take the capture lock so those counts
+        // never land in a concurrent test that measures that series.
+        let _serialized = MetricsCapture::start();
         let mut join_set = JoinSet::new();
         let work_lock_manager =
             db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;

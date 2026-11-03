@@ -266,21 +266,27 @@ nico-admin-cli -a "$API" machine nvlink-info show "$HOST_ID" > nvlink-info-host.
 export HOST_UIDS="$(grep -oE '"guid": *[0-9]+' nvlink-info-host.json | grep -oE '[0-9]+$')"
 export SLOT="$(grep -oE '"slot_id": *[0-9]+' nvlink-info-host.json | head -1 | grep -oE '[0-9]+$')"
 
-query_partitions partitions-verify.json
-for uid in $HOST_UIDS; do
-  if partition_members partitions-verify.json | grep -qxF "$(printf 'tray_partition_%s\t%s' "$SLOT" "$uid")"; then
-    echo "IN TRAY PARTITION: $uid"
-  else
-    echo "NOT IN TRAY PARTITION: $uid"
-  fi
-done
+if [ -z "$HOST_UIDS" ] || [ -z "$SLOT" ]; then
+  echo "NO NVLINK GPUS OR SLOT YET: do not release the host"
+elif query_partitions partitions-verify.json; then
+  missing=0
+  for uid in $HOST_UIDS; do
+    if partition_members partitions-verify.json | grep -qxF "$(printf 'tray_partition_%s\t%s' "$SLOT" "$uid")"; then
+      echo "IN TRAY PARTITION: $uid"
+    else
+      echo "NOT IN TRAY PARTITION: $uid"
+      missing=1
+    fi
+  done
+  [ "$missing" -eq 0 ] && echo "ALL $(echo $HOST_UIDS | wc -w | tr -d " ") HOST GPUS IN TRAY PARTITION"
+fi
 ```
 
 Confirm that:
 
-- every host GPU UID prints `IN TRAY PARTITION`. For a reinstalled tray whose
-  instance requests a tenant partition, confirm that the UIDs are in the
-  tenant's partition instead;
+- the check prints `ALL <n> HOST GPUS IN TRAY PARTITION`, where `<n>` is the
+  number of GPUs on the tray. For a reinstalled tray whose instance requests a
+  tenant partition, confirm that the UIDs are in the tenant's partition instead;
 - for a replacement, `check_gpus_partitioned partitions-old.json "$GPU_UIDS"`
   prints `NOT PARTITIONED` for the old tray's UIDs from step 1;
 - `nv show sdn partition <id>` on the leader NVSwitch shows no `0.0.0.0`
