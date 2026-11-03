@@ -108,7 +108,9 @@ separate mechanisms keep HBN down while `nico-api` is unreachable.
 [`register()`](https://github.com/dsx-ai-factory/infra-controller/blob/5207e5a672b53c253d0428d12df080200b77bb7e/crates/agent/src/lib.rs#L469) (defined at
 [`lib.rs#L886`](https://github.com/dsx-ai-factory/infra-controller/blob/5207e5a672b53c253d0428d12df080200b77bb7e/crates/agent/src/lib.rs#L886)) before it starts the main loop.
 `register()` retries `DiscoverMachine` against `nico-api` with a fixed backoff
-of 60 seconds for up to 10080 attempts, which is one week. See
+of 60 seconds for up to 10,080 retries after the initial call, allowing up to
+10,081 attempts. The backoff waits total up to seven days; connection and request
+time is additional, so this is not an overall one-week deadline. See
 [`registration.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/5207e5a672b53c253d0428d12df080200b77bb7e/crates/host-support/src/registration.rs#L162-L163) and the
 defaults in
 [`agent_config.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/5207e5a672b53c253d0428d12df080200b77bb7e/crates/host-support/src/agent_config.rs#L522-L545). After
@@ -568,7 +570,7 @@ implemented:
 | Q6 | Must a designated machine still accept a DHCP answer when the control plane returns? | This decides whether W6 is needed and how a network move is performed. |
 | Q7 | Does the host OS of a designated machine also need a static address? | The issue names the BMC and the DPU. A site-controller host usually gets its address from the parent datacenter. |
 | Q8 | When the network-boot attempt gets no answer, does UEFI fall through to the next boot entry (`DISK`), and after what timeout, on the DPU and on the host? | The DPU boot order is `BOOT0=NET-OOB-IPV4-HTTP`, `BOOT1=DISK` ([`user-data`](https://github.com/dsx-ai-factory/infra-controller/blob/5207e5a672b53c253d0428d12df080200b77bb7e/pxe/templates/user-data#L156-L157), [`bf.cfg`](https://github.com/dsx-ai-factory/infra-controller/blob/5207e5a672b53c253d0428d12df080200b77bb7e/crates/api/files/bf.cfg#L123-L124)). A normal boot gets an iPXE `exit` from [`ipxe.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/5207e5a672b53c253d0428d12df080200b77bb7e/crates/api-core/src/ipxe.rs#L295), which needs `nico-pxe` and `nico-api`. The code does not establish the fall-through or its timeout. It needs a test on hardware. |
-| Q9 | Which clock measures the retention window? | During the outage the DPU has no NTP, because `carbide-ntp.forge` is in the cluster. A wall-clock timestamp can be wrong after a reboot, and a monotonic clock restarts at boot. Neither is verified here. |
+| Q9 | Which clock measures the retention window? | A cluster-local `carbide-ntp.forge` service can be unavailable during the outage; an independent site time service may remain reachable (see W5). If no trusted time service is available, a wall-clock timestamp can be wrong after a reboot, and a monotonic clock restarts at boot. How retention age survives a reboot in that case remains an open design question. |
 | Q10 | Must validation reject a designated machine that has an instance allocation, or a designation on an allocated machine? | It bounds the stale-tenant exposure in the Security section. |
 
 ---
@@ -596,7 +598,7 @@ flowchart TD
         NetBoot --> Hbn["HBN pod starts<br/>init patch deletes nvue_startup.yaml"]
         NetBoot --> Agent["DPU Agent Start"]
         Agent -.->|"5. Resolve carbide-api.forge (Fails)"| DNS
-        Agent -.->|"6. register() DiscoverMachine, retries every 60 s"| API
+        Agent -.->|"6. register() DiscoverMachine, 60 s retry backoff"| API
         Agent -.->|"7. FindInterfaces, then resolve carbide-pxe.forge"| API
         Agent --> Blocked["Agent never reaches its main loop"]
         Hbn --> Blank["HBN stays unconfigured<br/>(Cold-Start Deadlock)"]
@@ -614,7 +616,7 @@ flowchart TD
     subgraph CURRENT["At the pinned commit"]
         Start1["HBN pod start: init patch deletes nvue_startup.yaml"] --> Blank1["HBN has no NVUE configuration"]
         Agent1["Agent Start"] --> Reg1["register(): DiscoverMachine"]
-        Reg1 -->|"API down"| Retry1["Retry every 60 s, up to 10080 times"]
+        Reg1 -->|"API down"| Retry1["Up to 10,080 retries (10,081 attempts)<br/>60 s backoff: up to 7 days of waits<br/>Connection/request time is additional"]
         Reg1 -->|"API up"| HostId1["get_host_machine_id_retry: FindInterfaces"]
         HostId1 -->|"Fails"| Exit1["Agent exits"]
         HostId1 -->|"OK"| Fetch1["PeriodicConfigFetcher fetch"]
