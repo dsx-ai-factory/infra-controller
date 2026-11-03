@@ -76,6 +76,7 @@ pub(super) mod network_devices;
 pub(super) mod network_security_group;
 pub(super) mod network_segment;
 pub(super) mod nic_firmware;
+mod nic_firmware_operation;
 pub(super) mod nic_lockdown_credential_rotation;
 pub(super) mod nmxc_browse;
 pub(super) mod nvl_partition;
