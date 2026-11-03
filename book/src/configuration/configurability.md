@@ -961,6 +961,11 @@ scope          = "mqtt:publish mqtt:subscribe"
 `[*.auth.basic]` / `[*.auth.oauth2]` shape. See
 [`crates/api-core/src/cfg/README.md` → MqttAuthConfig / MqttOAuth2Config](../../../crates/api-core/src/cfg/README.md#mqttauthconfig).
 
+The `nico-dsx-exchange-consumer` chart reads its own MQTT credential and takes no Vault
+settings unless you opt in. Refer to
+[DSX Exchange Consumer Credential](../../../docs/configuration/credential-sources.md#dsx-exchange-consumer-credential)
+for the supported sources and rotation behavior.
+
 ### Network ports and firewall
 
 NICo services need both in-cluster and out-of-cluster reachability. The
