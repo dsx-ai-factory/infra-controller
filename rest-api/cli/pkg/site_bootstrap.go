@@ -730,7 +730,22 @@ func (api bootstrapResourceAPI) getResource(client *Client, id string) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	return decodeBootstrapObject(body)
+	resource, err := decodeBootstrapObject(body)
+	if err != nil {
+		return nil, err
+	}
+	if !api.matchesResourceScope(resource) {
+		return nil, fmt.Errorf("%w: site IP block must be a managed provider root", errInvalidBootstrapResource)
+	}
+	return resource, nil
+}
+
+func (api bootstrapResourceAPI) matchesResourceScope(resource map[string]any) bool {
+	if api.category != "siteIpBlocks" {
+		return true
+	}
+	// Older provider-root responses omitted managed; tenant ownership still excludes allocations.
+	return resource["managed"] != false && resource["tenantId"] == nil
 }
 
 func (api bootstrapResourceAPI) findByName(client *Client, request map[string]any) (map[string]any, bool, error) {
@@ -783,7 +798,7 @@ func (api bootstrapResourceAPI) findMatching(client *Client, match map[string]an
 			return nil, false, err
 		}
 		for _, item := range items {
-			if bootstrapValueMatches(match, api.normalizePrefix(item)) {
+			if api.matchesResourceScope(item) && bootstrapValueMatches(match, api.normalizePrefix(item)) {
 				matches = append(matches, item)
 			}
 		}

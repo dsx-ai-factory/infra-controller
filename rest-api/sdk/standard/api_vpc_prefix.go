@@ -48,7 +48,7 @@ Create a VPC Prefix for the org.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-The VPC must be Ready and use FNN, and its Site must be Registered. `ipBlockId` must identify a Ready tenant IP Block at the VPC's Site. The selected IP Block determines whether the VPC Prefix uses IPv4 or IPv6.
+The VPC must be Ready and use FNN, and its Site must be Registered. `ipBlockId` must identify a Ready IP Block granted to the Tenant through an Allocation (`managed: true`) at the VPC's Site. Tenant-created roots (`managed: false`) are not supported; see https://github.com/dsx-ai-factory/infra-controller/issues/3900. The selected IP Block determines whether the VPC Prefix uses IPv4 or IPv6.
 
 Specify exactly one allocation selector. `prefixLength` lets NICo IPAM choose an available CIDR. `prefix` requests an exact, network-aligned CIDR contained by the selected IP Block. Both modes share the same allocation state; an unavailable explicit CIDR is rejected rather than replaced. A prefix equal to its IP Block reserves the whole block.
 

@@ -501,44 +501,87 @@ func TestBootstrapSitePrerequisitesWaitsForAutoCreatedSiteIPBlock(t *testing.T) 
 	assert.NotContains(t, api.postOrder, "provider-org/ipblock")
 }
 
-func TestDiscoverExistingResourceByIDOnly(t *testing.T) {
-	api := newBootstrapTestAPI()
-	api.addSiteIPBlock("provider-org")
-	server := httptest.NewServer(api)
-	t.Cleanup(server.Close)
+func TestSiteBootstrap_DiscoverExistingResource(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		id        string
+		match     bool
+		blocks    []map[string]any
+		wantID    string
+		wantError bool
+		wantGets  []string
+	}{
+		{
+			name: "ID only accepts legacy provider root without managed field",
+			id:   "site-ipblock-1", blocks: []map[string]any{{"id": "site-ipblock-1"}},
+			wantID: "site-ipblock-1", wantGets: []string{"provider-org/ipblock/site-ipblock-1"},
+		},
+		{
+			name: "stale ID falls back to selector", id: "stale-site-ipblock", match: true,
+			blocks: []map[string]any{{"id": "site-ipblock-1", "managed": true}}, wantID: "site-ipblock-1",
+			wantGets: []string{"provider-org/ipblock/stale-site-ipblock", "provider-org/ipblock"},
+		},
+		{
+			name: "selector excludes private and allocated blocks", match: true,
+			blocks: []map[string]any{
+				{"id": "private", "managed": false, "tenantId": "tenant-1"},
+				{"id": "allocated", "managed": true, "tenantId": "tenant-1"},
+				{"id": "site-ipblock-1", "managed": true, "tenantId": nil},
+			},
+			wantID: "site-ipblock-1", wantGets: []string{"provider-org/ipblock"},
+		},
+		{
+			name: "private selector match remains unavailable", match: true,
+			blocks:    []map[string]any{{"id": "private", "managed": false, "tenantId": "tenant-1"}},
+			wantError: true, wantGets: []string{"provider-org/ipblock"},
+		},
+		{
+			name: "explicit private ID is rejected", id: "private",
+			blocks:    []map[string]any{{"id": "private", "managed": false, "tenantId": "tenant-1"}},
+			wantError: true, wantGets: []string{"provider-org/ipblock/private"},
+		},
+		{
+			name: "explicit allocated ID is rejected", id: "allocated",
+			blocks:    []map[string]any{{"id": "allocated", "managed": true, "tenantId": "tenant-1"}},
+			wantError: true, wantGets: []string{"provider-org/ipblock/allocated"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newBootstrapTestAPI()
+			api.addSiteIPBlock("provider-org")
+			template := api.get("provider-org", "ipblock", "site-ipblock-1")
+			delete(api.collection("provider-org", "ipblock"), "site-ipblock-1")
+			for _, fields := range tt.blocks {
+				block := cloneBootstrapTestMap(template)
+				for key, value := range fields {
+					block[key] = value
+				}
+				api.put("provider-org", "ipblock", block)
+			}
+			server := httptest.NewServer(api)
+			t.Cleanup(server.Close)
+			manifest := completeBootstrapTestManifest()
+			resource := &bootstrapExistingResource{ID: tt.id}
+			if tt.match {
+				resource.Match = manifest.SiteIPBlocks.Match
+			}
+			client := NewClient(server.URL, "provider-org", "token", nil, false)
+			bootstrap := newTestSiteBootstrap(t, client, manifest, nil)
+			bootstrap.references["site"] = map[string]any{"id": "site-1"}
 
-	manifest := completeBootstrapTestManifest()
-	resource := &bootstrapExistingResource{ID: "site-ipblock-1"}
-	client := NewClient(server.URL, "provider-org", "token", nil, false)
-	bootstrap := newTestSiteBootstrap(t, client, manifest, nil)
-
-	response, err := bootstrap.discoverExistingResource(bootstrap.operations.siteIPBlock, "fabric", resource)
-	require.NoError(t, err)
-	assert.Equal(t, "site-ipblock-1", response["id"])
-	assert.Equal(t, []string{"provider-org/ipblock/site-ipblock-1"}, api.getOrder)
-}
-
-func TestDiscoverExistingResourceFallsBackFromStaleIDToMatch(t *testing.T) {
-	api := newBootstrapTestAPI()
-	api.addSiteIPBlock("provider-org")
-	server := httptest.NewServer(api)
-	t.Cleanup(server.Close)
-
-	manifest := completeBootstrapTestManifest()
-	resource := manifest.SiteIPBlocks
-	resource.ID = "stale-site-ipblock"
-	client := NewClient(server.URL, "provider-org", "token", nil, false)
-	bootstrap := newTestSiteBootstrap(t, client, manifest, nil)
-	bootstrap.references["site"] = map[string]any{"id": "site-1"}
-
-	response, err := bootstrap.discoverExistingResource(bootstrap.operations.siteIPBlock, "fabric", resource)
-	require.NoError(t, err)
-	assert.Equal(t, "site-ipblock-1", response["id"])
-	assert.Equal(t, "site-ipblock-1", resource.ID)
-	assert.Equal(t, []string{
-		"provider-org/ipblock/stale-site-ipblock",
-		"provider-org/ipblock",
-	}, api.getOrder)
+			response, err := bootstrap.discoverExistingResource(bootstrap.operations.siteIPBlock, "fabric", resource)
+			if tt.wantError {
+				require.ErrorIs(t, err, errInvalidBootstrapResource)
+				assert.Equal(t, tt.id, resource.ID)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantID, response["id"])
+				assert.Equal(t, tt.wantID, resource.ID)
+			}
+			assert.Equal(t, tt.wantGets, api.getOrder)
+			assert.Empty(t, api.postOrder)
+		})
+	}
 }
 
 func TestSiteBootstrapCommandWritesReplayableManifest(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
@@ -50,6 +51,29 @@ func testUpdateSite(t *testing.T, dbSession *cdb.Session, site *cdbm.Site) *cdbm
 	assert.Nil(t, err)
 	return site
 }
+
+type siteUpdateBudgetHook struct {
+	enabled    bool
+	missing    bool
+	deadlines  []time.Time
+	failLookup bool
+}
+
+func (hook *siteUpdateBudgetHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if hook.enabled && strings.Contains(event.Query, `"site"`) {
+		deadline, ok := ctx.Deadline()
+		hook.missing = hook.missing || !ok
+		hook.deadlines = append(hook.deadlines, deadline)
+		if hook.failLookup && strings.HasPrefix(event.Query, "SELECT") && strings.Contains(event.Query, `FROM "site" AS "st"`) {
+			canceled, cancel := context.WithCancel(ctx)
+			cancel()
+			return canceled
+		}
+	}
+	return ctx
+}
+
+func (*siteUpdateBudgetHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 type testCsm struct {
 	l        net.Listener
@@ -555,6 +579,9 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 }
 
 func TestUpdateSiteHandler_Handle(t *testing.T) {
+	t.Run("tenant mutation fence returns typed conflict", func(t *testing.T) {
+		checkTenantIPBlockSiteConflict(t, http.MethodPatch)
+	})
 	ctx := context.Background()
 	tcsm := &testCsm{}
 	tcsm.setup(t)
@@ -593,6 +620,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 	st6 := testSiteBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, ipu, nil, nil, &cdbm.SiteConfig{NativeNetworking: true, NetworkSecurityGroup: true})
 	stPower := testSiteBuildSite(t, dbSession, ip, "test-site-power", cdbm.SiteStatusRegistered, ipu, nil, nil, &cdbm.SiteConfig{})
 
+	common.TestBuildTenantSite(t, dbSession, mtn, st5, mu)
 	common.TestBuildTenantSite(t, dbSession, tn, st6, tnu)
 	common.TestBuildVPC(t, dbSession, "test-vpc", ip, tn, st6, nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu)
 
@@ -618,20 +646,51 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 		reqData *model.APISiteUpdateRequest
 	}
 	tests := []struct {
-		name               string
-		fields             fields
-		args               args
-		wantErr            bool
-		query              url.Values
-		wantStatus         *string
-		respMessage        string
-		siteManagerErr     bool
-		csmEnabled         bool
-		verifyTenantUpdate bool
-		verifyChildSpanner bool
-		verifyFlow         bool
-		verifyVpcSlaac     bool
+		name                string
+		fields              fields
+		args                args
+		wantErr             bool
+		query               url.Values
+		wantStatus          *string
+		respMessage         string
+		siteManagerErr      bool
+		csmEnabled          bool
+		verifyTenantUpdate  bool
+		verifyChildSpanner  bool
+		verifyFlow          bool
+		verifyVpcSlaac      bool
+		verifyTenantPrefix  bool
+		verifyHandlerBudget bool
+		failSiteLookup      bool
+		wantStatusCode      int
 	}{
+		{
+			name:           "Site lookup failure returns internal server error",
+			fields:         fields{dbSession: dbSession, tc: &tmocks.Client{}, cfg: cfg},
+			args:           args{site: st, org: ipOrg, user: ipu, reqData: &model.APISiteUpdateRequest{Name: cutil.GetPtr("test-site")}},
+			failSiteLookup: true,
+			wantErr:        true,
+			wantStatusCode: http.StatusInternalServerError,
+			respMessage:    "Failed to retrieve Site",
+		},
+		{
+			name:           "missing Site returns not found",
+			fields:         fields{dbSession: dbSession, tc: &tmocks.Client{}, cfg: cfg},
+			args:           args{site: &cdbm.Site{ID: uuid.New()}, org: ipOrg, user: ipu, reqData: &model.APISiteUpdateRequest{Name: cutil.GetPtr("missing-site")}},
+			wantErr:        true,
+			wantStatusCode: http.StatusNotFound,
+			respMessage:    "Could not retrieve Site to update",
+		},
+		{
+			name:   "dual-role tenant cannot enable tenant prefixes on another provider Site",
+			fields: fields{dbSession: dbSession, tc: &tmocks.Client{}, cfg: cfg},
+			args: args{site: st5, org: mOrg, user: mu, reqData: &model.APISiteUpdateRequest{
+				Capabilities: &model.APISiteCapabilitiesUpdateRequest{TenantSitePrefix: cutil.GetPtr(true)},
+			}},
+			wantErr: true, wantStatusCode: http.StatusForbidden,
+			respMessage:        "Only the Site's Infrastructure Provider can modify tenantSitePrefix",
+			verifyTenantPrefix: true,
+		},
 		{
 			name: "test Site update API endpoint success",
 			fields: fields{
@@ -647,15 +706,17 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 					Name:                          cutil.GetPtr("test-site-updated"),
 					Description:                   cutil.GetPtr("Test updated description"),
 					RenewRegistrationToken:        cutil.GetPtr(true),
+					Capabilities:                  &model.APISiteCapabilitiesUpdateRequest{TenantSitePrefix: cutil.GetPtr(false)},
 					SerialConsoleHostname:         cutil.GetPtr("nico.acme.com"),
 					IsSerialConsoleEnabled:        cutil.GetPtr(true),
 					SerialConsoleIdleTimeout:      cutil.GetPtr(120),
 					SerialConsoleMaxSessionLength: cutil.GetPtr(240),
 				},
 			},
-			csmEnabled:         true,
-			wantErr:            false,
-			verifyChildSpanner: true,
+			csmEnabled:          true,
+			verifyHandlerBudget: true,
+			wantErr:             false,
+			verifyChildSpanner:  true,
 		},
 		{
 			name: "test Site update API endpoint rejects Provider modification of inventory-managed Flow",
@@ -1025,13 +1086,30 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
+			hook := &siteUpdateBudgetHook{enabled: tt.verifyHandlerBudget || tt.failSiteLookup, failLookup: tt.failSiteLookup}
+			if hook.enabled {
+				tt.fields.dbSession.DB.AddQueryHook(hook)
+			}
+			started := time.Now()
 			err := ush.Handle(ec)
+			hook.enabled = false
 			assert.Nil(t, err)
+			if tt.verifyHandlerBudget {
+				require.False(t, hook.missing, "all Site queries must share the handler budget")
+				require.GreaterOrEqual(t, len(hook.deadlines), 2)
+				require.WithinDuration(t, started.Add(cutil.WorkflowContextTimeout), hook.deadlines[0], time.Second)
+				for _, deadline := range hook.deadlines {
+					require.Equal(t, hook.deadlines[0], deadline, "token renewal must not restart the lock budget")
+				}
+			}
 
 			if rec.Code != http.StatusOK {
 				t.Logf("body: %s", rec.Body.Bytes())
 			}
 			require.Equal(t, tt.wantErr, rec.Code != http.StatusOK)
+			if tt.wantStatusCode != 0 {
+				require.Equal(t, tt.wantStatusCode, rec.Code)
+			}
 			if tt.respMessage != "" {
 				assert.Contains(t, rec.Body.String(), tt.respMessage)
 			}
@@ -1040,6 +1118,12 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 				require.NoError(t, getErr)
 				require.NotNil(t, storedSite.Config)
 				assert.True(t, storedSite.Config.VpcSlaac)
+			}
+			if tt.verifyTenantPrefix {
+				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
+				require.NoError(t, getErr)
+				require.NotNil(t, storedSite.Config)
+				assert.False(t, storedSite.Config.TenantSitePrefix)
 			}
 			if tt.verifyFlow {
 				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
@@ -2480,6 +2564,9 @@ func TestGetAllSiteHandler_NullConfig(t *testing.T) {
 }
 
 func TestDeleteSiteHandler_Handle(t *testing.T) {
+	t.Run("tenant mutation fence returns typed conflict", func(t *testing.T) {
+		checkTenantIPBlockSiteConflict(t, http.MethodDelete)
+	})
 	ctx := context.Background()
 
 	tcsm := &testCsm{}
