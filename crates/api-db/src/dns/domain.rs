@@ -233,7 +233,19 @@ pub async fn persist_reserved(
         .fetch_one(txn)
         .await
         .map(Domain::from)
-        .map_err(|error| DatabaseError::query(query, error))
+        .map_err(|error| {
+            let error = DatabaseError::query(query, error);
+            if error.violates_constraint("domains_live_vpc_zone_key") {
+                DatabaseError::InvalidArgument(format!(
+                    "VPC {} already owns a domain",
+                    value
+                        .vpc_id
+                        .expect("only a VPC-owned insert can hit this index")
+                ))
+            } else {
+                error
+            }
+        })
 }
 
 /// Creates the initial domain in an empty `domains` table.

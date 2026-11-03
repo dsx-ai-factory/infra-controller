@@ -265,6 +265,7 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteHandlerType(t, got, http.MethodPatch, domainPath+"/:id/firmware", apiHandler.UpdateNVLinkDomainFirmwareHandler{})
 
 			dnsDomainPath := "/org/:orgName/" + cfg.GetAPIName() + "/domain"
+			assertRouteBefore(t, got, http.MethodGet, domainPath, http.MethodGet, dnsDomainPath+"/:domainId")
 			assertRouteHandlerType(t, got, http.MethodPost, dnsDomainPath, apiHandler.CreateDomainHandler{})
 			assertRouteHandlerType(t, got, http.MethodGet, dnsDomainPath, apiHandler.GetAllDomainHandler{})
 			assertRouteHandlerType(t, got, http.MethodGet, dnsDomainPath+"/:domainId", apiHandler.GetDomainHandler{})

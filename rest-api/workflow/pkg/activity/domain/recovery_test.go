@@ -65,8 +65,14 @@ func TestManageDomain_ReconcileReservedDomains(t *testing.T) {
 				require.NoError(t, err)
 				rows = append(rows, row)
 			}
-			_, err = session.DB.ExecContext(ctx, `UPDATE domain SET recovery_next_at = current_timestamp - interval '1 second'`)
-			require.NoError(t, err)
+			// ClaimRecovery orders equal-attempt rows by updated, then ID. Give
+			// the cancellation case a deterministic first claim even when the
+			// inserts receive the same timestamp.
+			for i, row := range rows {
+				_, err = session.DB.ExecContext(ctx, `UPDATE domain SET recovery_next_at = current_timestamp - interval '1 second', updated = ? WHERE id = ?`,
+					time.Date(2026, time.January, 1, 0, 0, i, 0, time.UTC), row.ID)
+				require.NoError(t, err)
+			}
 
 			client := &tmocks.Client{}
 			pool := sc.NewClientPool(nil)

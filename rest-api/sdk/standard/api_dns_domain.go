@@ -438,7 +438,7 @@ func (r ApiGetAllDomainRequest) PageSize(pageSize int32) ApiGetAllDomainRequest 
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to CREATED_ASC, with Domain ID ascending as the tie-breaker.
 func (r ApiGetAllDomainRequest) OrderBy(orderBy string) ApiGetAllDomainRequest {
 	r.orderBy = &orderBy
 	return r
@@ -508,6 +508,10 @@ func (a *DNSDomainAPIService) GetAllDomainExecute(r ApiGetAllDomainRequest) ([]D
 	}
 	if r.orderBy != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	} else {
+		var defaultValue string = "CREATED_ASC"
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", defaultValue, "form", "")
+		r.orderBy = &defaultValue
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

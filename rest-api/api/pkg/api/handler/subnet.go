@@ -1369,6 +1369,9 @@ func (dsh DeleteSubnetHandler) Handle(c echo.Context) error {
 		statusMsg := "Subnet deletion successfully initiated on Site"
 		_, derr = sDAO.Update(ctx, tx, cdbm.SubnetUpdateInput{SubnetId: subnet.ID, Status: &status})
 		if derr != nil {
+			if errors.Is(derr, cdbm.ErrSubnetAttachmentPending) {
+				return cutil.NewAPIError(http.StatusConflict, "Subnet VPC reassignment is pending reconciliation", nil)
+			}
 			logger.Error().Err(derr).Msg("error setting Subnet status to deleting")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Subnet status, DB error", nil)
 		}

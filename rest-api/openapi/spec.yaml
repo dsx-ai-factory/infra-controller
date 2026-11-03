@@ -2948,7 +2948,7 @@ paths:
               example-1:
                 value:
                   name: tenant.example.com
-                  siteId: 72771e6a-6f5e-4de4-a5b9-1266c4197811
+                  siteId: ea144def-d68f-44c3-9485-4b103fa2686f
       responses:
         '201':
           description: Created
@@ -2968,6 +2968,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Domain'
+              example:
+                id: 3c5a130c-6545-42cf-ae41-14236b70d05a
+                name: tenant.example.com
+                siteId: ea144def-d68f-44c3-9485-4b103fa2686f
+                tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                status: Pending
+                created: '2019-08-24T14:15:22Z'
+                updated: '2019-08-24T14:15:22Z'
         '409':
           $ref: '#/components/responses/GenericHttpError'
         '400':
@@ -3026,9 +3034,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+            default: CREATED_ASC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to CREATED_ASC, with Domain ID ascending as the tie-breaker.
       responses:
         '200':
           description: OK
@@ -3042,8 +3051,8 @@ paths:
             X-Pagination:
               schema:
                 type: string
-                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy":"CREATED_DESC"}'
-              description: Pagination result in JSON format
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy":null}'
+              description: Pagination result in JSON format. orderBy echoes the supplied query value and is null when omitted, even though the effective default is CREATED_ASC.
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -23369,6 +23378,14 @@ components:
       title: Domain
       type: object
       description: A tenant-owned DNS zone at a Site.
+      examples:
+        - id: 3c5a130c-6545-42cf-ae41-14236b70d05a
+          name: tenant.example.com
+          siteId: ea144def-d68f-44c3-9485-4b103fa2686f
+          tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+          status: Ready
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
       properties:
         id:
           type: string
@@ -23413,6 +23430,9 @@ components:
       title: DomainCreateRequest
       type: object
       description: Request data for creating a tenant-owned DNS Domain at a Site.
+      examples:
+        - name: tenant.example.com
+          siteId: ea144def-d68f-44c3-9485-4b103fa2686f
       properties:
         name:
           type: string

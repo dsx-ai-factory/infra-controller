@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
 use model::dns::NewDomain;
@@ -97,6 +98,26 @@ async fn live_domain_pins_its_vpc(pool: sqlx::PgPool) {
     // so we can still delete the domain and its VPC below.
     let mut attempt = sqlx::Acquire::begin(&mut txn).await.expect("savepoint");
     let duplicate = persist_owned(attempt.as_mut(), "second.example", Some(vpc_id)).await;
+    attempt.rollback().await.expect("release savepoint");
+    assert!(
+        matches!(duplicate, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("already owns a domain")),
+        "{duplicate:?}"
+    );
+
+    let mut attempt = sqlx::Acquire::begin(&mut txn).await.expect("savepoint");
+    let reserved_id = DomainId::new();
+    db::dns::domain::lock_id_exclusive(attempt.as_mut(), reserved_id)
+        .await
+        .expect("lock the new reserved identity");
+    let duplicate = db::dns::domain::persist_reserved(
+        NewDomain {
+            vpc_id: Some(vpc_id),
+            ..NewDomain::new("reserved.example")
+        },
+        reserved_id,
+        attempt.as_mut(),
+    )
+    .await;
     attempt.rollback().await.expect("release savepoint");
     assert!(
         matches!(duplicate, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("already owns a domain")),

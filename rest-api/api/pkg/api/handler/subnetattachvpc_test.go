@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
@@ -49,6 +50,71 @@ type subnetAttachVpcFixture struct {
 	proxiedRequest  *grpcproxy.Request
 	readRequest     *grpcproxy.Request
 	setCoreResponse func(*corev1.NetworkSegment)
+}
+
+type subnetDeleteReservationHook struct {
+	reserve func()
+	fired   bool
+}
+
+func (h *subnetDeleteReservationHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !h.fired && strings.HasPrefix(event.Query, `UPDATE "subnet"`) && strings.Contains(event.Query, `"status" = 'Deleting'`) {
+		h.fired = true
+		h.reserve()
+	}
+	return ctx
+}
+
+func (*subnetDeleteReservationHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+func TestDeleteSubnetHandler_ConcurrentAttachment(t *testing.T) {
+	f := newSubnetAttachVpcFixture(t, nil)
+	ctx := context.Background()
+	block := testIPBlockBuildIPBlock(t, f.dbSession, "delete-race-block", f.site, f.provider, &f.tenant.ID,
+		cdbm.IPBlockRoutingTypeDatacenterOnly, "192.0.2.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, f.user)
+	dao := cdbm.NewSubnetDAO(f.dbSession)
+	_, err := dao.Update(ctx, nil, cdbm.SubnetUpdateInput{SubnetId: f.subnet.ID, IPv4BlockID: &block.ID})
+	require.NoError(t, err)
+	intent := cdbm.SubnetAttachIntent{
+		ID: uuid.New(), SubnetID: f.subnet.ID, TenantID: f.tenant.ID, SiteID: f.site.ID,
+		ControllerSegmentID: *f.subnet.ControllerNetworkSegmentID,
+		SourceVpcID:         f.sourceVpc.ID, TargetVpcID: f.targetVpc.ID,
+		SourceControllerVpcID: *f.sourceVpc.ControllerVpcID, TargetControllerVpcID: *f.targetVpc.ControllerVpcID,
+		SegmentVersion: "V1-T1",
+	}
+	// Commit the competing reservation after the handler's initial GET but
+	// immediately before its guarded Deleting UPDATE reaches PostgreSQL.
+	hook := &subnetDeleteReservationHook{reserve: func() {
+		reserved, err := cdb.WithTxResult(ctx, f.dbSession, func(tx *cdb.Tx) (bool, error) {
+			return dao.ReserveAttachment(ctx, tx, intent)
+		})
+		require.NoError(t, err)
+		require.True(t, reserved)
+	}}
+	f.dbSession.DB.AddQueryHook(hook)
+	rec := httptest.NewRecorder()
+	ec := echo.New().NewContext(httptest.NewRequest(http.MethodDelete, "/", nil), rec)
+	ec.SetParamNames("orgName", "id")
+	ec.SetParamValues(f.org, f.subnet.ID.String())
+	ec.Set("user", f.user)
+	client := &tmocks.Client{}
+	pool := sc.NewClientPool(nil)
+	pool.IDClientMap[f.site.ID.String()] = client
+	handler := NewDeleteSubnetHandler(f.dbSession, client, pool, common.GetTestConfig())
+	require.NoError(t, handler.Handle(ec))
+	require.True(t, hook.fired)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "Subnet VPC reassignment is pending reconciliation")
+	current, err := dao.GetByID(ctx, nil, f.subnet.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, cdbm.SubnetStatusReady, current.Status)
+	require.Equal(t, &intent.ID, current.AttachIntentID)
+	client.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+
+	// An absent row must retain the ordinary missing-row error, not a pending
+	// attachment conflict merely because the guarded UPDATE affected no rows.
+	_, err = dao.Update(ctx, nil, cdbm.SubnetUpdateInput{SubnetId: uuid.New(), Status: cutil.GetPtr(cdbm.SubnetStatusDeleting)})
+	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 }
 
 func newSubnetAttachVpcFixture(t *testing.T, workflowErr error) subnetAttachVpcFixture {

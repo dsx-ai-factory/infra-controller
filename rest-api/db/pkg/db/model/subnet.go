@@ -52,6 +52,8 @@ const (
 )
 
 var (
+	// ErrSubnetAttachmentPending means deletion lost to a reserved VPC reassignment.
+	ErrSubnetAttachmentPending = errors.New("subnet VPC reassignment is pending reconciliation")
 	// SubnetOrderByFields is a list of valid order by fields for the Subnet model
 	SubnetOrderByFields = []string{"name", "status", "created", "updated"}
 	// SubnetRelatedEntities is a list of valid relation by fields for the Subnet model
@@ -800,7 +802,11 @@ func (ssd SubnetSQLDAO) Update(ctx context.Context, tx *db.Tx, input SubnetUpdat
 				return nil, rowsErr
 			}
 			if rows != 1 {
-				return nil, fmt.Errorf("Subnet deletion rejected: attachment is pending or Subnet changed")
+				// Keep missing-row errors distinct from a concurrent attachment.
+				if _, err := ssd.GetByID(ctx, tx, input.SubnetId, nil); err != nil {
+					return nil, err
+				}
+				return nil, ErrSubnetAttachmentPending
 			}
 		}
 	}
