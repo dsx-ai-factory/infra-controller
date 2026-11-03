@@ -6684,7 +6684,44 @@ paths:
               schema:
                 $ref: '#/components/schemas/ExpectedSwitch'
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: |-
+            Invalid request data or an Expected Switch update that cannot be applied. This includes:
+
+            - An invalid Expected Switch ID, a body `id` that does not match the URL ID, or malformed request data.
+            - Changing the physical BMC MAC address through `bmcMacAddress`.
+            - An empty `nvosInterfaces` list, invalid or duplicate NVOS MAC addresses, or more than one interface marked primary.
+            - Setting `nvosInterfaces[].ipAddress` when the replacement list does not contain exactly one interface, or supplying an empty, malformed, unspecified, multicast, or IPv4 limited-broadcast NVOS address.
+            - An invalid non-empty `bmcIpAddress`, invalid credentials or metadata, or a partial NVOS credential update without the corresponding stored username or password.
+
+            Field validation errors include details in `data`. Other rejections may return `data: null` and explain the failure in `message`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                invalid-nvos-ip-address:
+                  value:
+                    source: nico
+                    message: Failed to validate ExpectedSwitch update request data
+                    data:
+                      nvosInterfaces: ipAddress must be a valid IPv4 or IPv6 address that is not unspecified, multicast, or limited broadcast
+                nvos-ip-address-requires-single-interface:
+                  value:
+                    source: nico
+                    message: Failed to validate ExpectedSwitch update request data
+                    data:
+                      nvosInterfaces: ipAddress requires exactly one nvosInterfaces entry
+                immutable-bmc-mac-address:
+                  value:
+                    source: nico
+                    message: Failed to validate Expected Switch update data
+                    data:
+                      bmcMacAddress: BMC MAC address cannot be changed after creation
+                mismatched-expected-switch-id:
+                  value:
+                    source: nico
+                    message: If provided, Expected Switch ID specified in request data must match URL request value
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -32659,6 +32696,13 @@ components:
           type: string
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           description: MAC address of this NVOS ethernet port.
+        ipAddress:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional static IPv4 or IPv6 address. May be set only when the Expected Switch has exactly one NVOS interface. It must not be unspecified, multicast, or IPv4 limited broadcast.
+          example: '192.0.2.20'
         isPrimary:
           type: boolean
           description: Whether this port is the primary (eth0) NVOS port that NICo manages through RMS. At most one port per switch can be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
@@ -33023,9 +33067,11 @@ components:
           writeOnly: true
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosInterfaces:
-          type: array
+          type:
+            - array
+            - 'null'
           minItems: 1
-          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          description: Replace the Expected Switch's NVOS ethernet port set, including its optional static IP address. Omission or null preserves the stored ports and address; an empty array is rejected because a switch must keep at least one NVOS port. A supplied list without an ipAddress clears the previous NVOS address. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
           items:
             $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
