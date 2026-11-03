@@ -77,6 +77,34 @@ def merged(first, second):
 def component_values(global_values, values):
     return merged({'global': global_values}, values)
 
+def rest_trace_env(env, endpoint):
+    result = merged({}, env)
+    if not (result.get('OTEL_EXPORTER_OTLP_ENDPOINT') or result.get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')):
+        result['OTEL_EXPORTER_OTLP_ENDPOINT'] = endpoint
+    if not (result.get('OTEL_EXPORTER_OTLP_PROTOCOL') or result.get('OTEL_EXPORTER_OTLP_TRACES_PROTOCOL')):
+        result['OTEL_EXPORTER_OTLP_PROTOCOL'] = 'grpc'
+    return result
+
+def configure_rest_tracing(values, namespace):
+    endpoint = 'http://tempo.%s.svc.cluster.local:4317' % namespace
+    for component in ['api', 'certManager', 'siteManager']:
+        component_config = values[component]
+        component_config['extraEnv'] = rest_trace_env(component_config.get('extraEnv', {}), endpoint)
+    values['siteAgent']['envConfig'] = rest_trace_env(values['siteAgent'].get('envConfig', {}), endpoint)
+    for component in ['api', 'workflow']:
+        values[component].setdefault('config', {}).setdefault('tracing', {})['enabled'] = True
+
+    workflow = values['workflow']
+    for worker, service in [('cloudWorker', 'nico-rest-cloud-worker'), ('siteWorker', 'nico-rest-site-worker')]:
+        worker_config = workflow.setdefault(worker, {})
+        # Resolve shared and worker settings before adding defaults: a worker
+        # may override the shared endpoint using either OTLP endpoint variable.
+        env = merged(workflow.get('extraEnv', {}), worker_config.get('extraEnv', {}))
+        env = rest_trace_env(env, endpoint)
+        if not env.get('OTEL_SERVICE_NAME') and not workflow['config']['tracing'].get('serviceName'):
+            env['OTEL_SERVICE_NAME'] = service
+        worker_config['extraEnv'] = env
+
 def helm_json_flags(values, prefix=''):
     flags = []
     for key, value in values.items():
@@ -1160,6 +1188,8 @@ helm_chart(
 )
 
 rest_values = tilt_values['rest']
+if enable_observability:
+    configure_rest_tracing(rest_values, observability_namespace)
 rest_global = rest_values['global']
 rest_image_keys = [(
     'global.image.repository',
