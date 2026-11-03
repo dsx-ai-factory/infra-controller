@@ -114,9 +114,7 @@ mod tests {
             _legacy_boot: bool,
             _credential_key: &CredentialKey,
         ) -> Result<(), eyre::Report> {
-            Err(eyre::eyre!(
-                "Error: Unable to establish IPMI v2 / RMCP+ session"
-            ))
+            Err(eyre::eyre!("unable to establish IPMI v2 / RMCP+ session"))
         }
     }
 
@@ -140,7 +138,7 @@ mod tests {
             ("bmc_cold_reset", "no credentials for key found"),
             (
                 "chassis_power_reset",
-                "Error: Unable to establish IPMI v2 / RMCP+ session",
+                "unable to establish IPMI v2 / RMCP+ session",
             ),
         ] {
             let (result, logs) = capture_logs_async(async {
