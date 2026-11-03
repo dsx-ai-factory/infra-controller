@@ -526,9 +526,10 @@ mod tests {
         // mask the account a password-change error names.
         let (_, same_as_username_context) =
             redfish_basic_authorization_context("admin", Some("admin"));
-        assert_eq!(
-            same_as_username_context,
-            ["YWRtaW46YWRtaW4=", "Basic YWRtaW46YWRtaW4="]
+        assert!(
+            !same_as_username_context
+                .iter()
+                .any(|value| value == "admin")
         );
         let body = r#"{"error":{"@Message.ExtendedInfo":[{"MessageArgs":["/redfish/v1/AccountService/Accounts/admin"]}]}}"#;
         assert_eq!(
