@@ -97,7 +97,7 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 					return dao.StageRejectedOwned(ctx, tx, d.ID, *d.ControllerDomainID, d.RecoveryToken)
 				})
 				if err != nil || !staged {
-					return fmt.Errorf("Domain rejection staging failed: staged=%t err=%v", staged, err)
+					return fmt.Errorf("domain rejection staging failed: staged=%t err=%v", staged, err)
 				}
 				// The persisted Rejecting state prevents an older create from
 				// completing Ready, even when this cancellation's reply is lost.
@@ -106,11 +106,11 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 			return fmt.Errorf("reserved Core create unconfirmed: %s", apiErr.Message)
 		}
 		if resource.GetId().GetValue() != d.ControllerDomainID.String() || cdbm.NormalizeForwardDomainName(resource.GetName()) != d.Hostname {
-			return fmt.Errorf("Core returned a different Domain for reserved ID")
+			return fmt.Errorf("core returned a different Domain for reserved ID")
 		}
 		changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusPending, cdbm.DomainStatusReady, false)
 		if err != nil || !changed {
-			return fmt.Errorf("Domain Ready CAS failed: changed=%t err=%v", changed, err)
+			return fmt.Errorf("domain Ready CAS failed: changed=%t err=%v", changed, err)
 		}
 	case cdbm.DomainStatusRejecting:
 		return m.cancelRejected(ctx, dao, d, stc)
@@ -122,15 +122,15 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 			if apiErr.Code == http.StatusPreconditionFailed {
 				changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusDeleting, cdbm.DomainStatusReady, false)
 				if err != nil || !changed {
-					return fmt.Errorf("Domain referenced-delete restoration failed: changed=%t err=%v", changed, err)
+					return fmt.Errorf("domain referenced-delete restoration failed: changed=%t err=%v", changed, err)
 				}
 				return nil
 			}
-			return fmt.Errorf("Core deletion/cancellation unconfirmed: %s", apiErr.Message)
+			return fmt.Errorf("core deletion/cancellation unconfirmed: %s", apiErr.Message)
 		}
 		changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusDeleting, cdbm.DomainStatusDeleting, true)
 		if err != nil || !changed {
-			return fmt.Errorf("Domain delete CAS failed: changed=%t err=%v", changed, err)
+			return fmt.Errorf("domain delete CAS failed: changed=%t err=%v", changed, err)
 		}
 	default:
 		return fmt.Errorf("unexpected Domain recovery status %q", d.Status)
@@ -143,11 +143,11 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 func (m ManageDomain) cancelRejected(ctx context.Context, dao cdbm.DomainDAO, d *cdbm.Domain, stc tclient.Client) error {
 	req := &corev1.DomainDeletionRequest{Id: &corev1.DomainId{Value: d.ControllerDomainID.String()}, CancelReservedId: true}
 	if apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteDomain_FullMethodName, req, nil, d.SiteID.String()); apiErr != nil {
-		return fmt.Errorf("Core rejection cancellation unconfirmed: %s", apiErr.Message)
+		return fmt.Errorf("core rejection cancellation unconfirmed: %s", apiErr.Message)
 	}
 	changed, err := dao.CompleteRecovery(ctx, d.ID, *d.ControllerDomainID, *d.RecoveryToken, cdbm.DomainStatusRejecting, cdbm.DomainStatusError, false)
 	if err != nil || !changed {
-		return fmt.Errorf("Domain rejection completion failed: changed=%t err=%v", changed, err)
+		return fmt.Errorf("domain rejection completion failed: changed=%t err=%v", changed, err)
 	}
 	return nil
 }

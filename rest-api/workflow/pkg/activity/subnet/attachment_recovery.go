@@ -87,7 +87,7 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	}
 	site, err := cdbm.NewSiteDAO(ms.dbSession).GetByID(ctx, nil, s.SiteID, nil, false, false)
 	if err != nil || site.Status != cdbm.SiteStatusRegistered {
-		return fmt.Errorf("Site is unavailable for Subnet recovery: %v", err)
+		return fmt.Errorf("site is unavailable for Subnet recovery: %v", err)
 	}
 	stc, err := ms.siteClientPool.GetClientByID(s.SiteID)
 	if err != nil {
@@ -98,14 +98,14 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 		apiErr := siteproxy.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindNetworkSegmentsByIds_FullMethodName,
 			&corev1.NetworkSegmentsByIdsRequest{NetworkSegmentsIds: []*corev1.NetworkSegmentId{{Value: s.ControllerNetworkSegmentID.String()}}}, result, s.SiteID.String())
 		if apiErr != nil {
-			return nil, fmt.Errorf("Core segment read failed: %s", apiErr.Message)
+			return nil, fmt.Errorf("core segment read failed: %s", apiErr.Message)
 		}
 		if len(result.GetNetworkSegments()) != 1 || result.GetNetworkSegments()[0].GetId().GetValue() != s.ControllerNetworkSegmentID.String() {
-			return nil, fmt.Errorf("Core segment identity not confirmed")
+			return nil, fmt.Errorf("core segment identity not confirmed")
 		}
 		segment := result.GetNetworkSegments()[0]
 		if segment.GetConfig().GetSegmentType() != corev1.NetworkSegmentType_TENANT || segment.GetStatus().GetLifecycle().GetVersion() == "" {
-			return nil, fmt.Errorf("Core tenant segment version not confirmed")
+			return nil, fmt.Errorf("core tenant segment version not confirmed")
 		}
 		return segment, nil
 	}
@@ -132,7 +132,7 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	if vpc != s.AttachSourceControllerVpcID.String() {
 		// Core may move a segment without changing its version, so the old
 		// request is not proven impossible. Preserve it for manual recovery.
-		return fmt.Errorf("Core segment moved to a third VPC at the recorded version; manual reconciliation required")
+		return fmt.Errorf("core segment moved to a third VPC at the recorded version; manual reconciliation required")
 	}
 	request := &corev1.AttachNetworkSegmentToVpcRequest{
 		NetworkSegmentId:       &corev1.NetworkSegmentId{Value: s.ControllerNetworkSegmentID.String()},
@@ -146,10 +146,10 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 		if definitiveAttachmentRejection(apiErr.Code) {
 			return cancelIntent()
 		}
-		return fmt.Errorf("Core attach unconfirmed: %s", apiErr.Message)
+		return fmt.Errorf("core attach unconfirmed: %s", apiErr.Message)
 	}
 	if response.GetId().GetValue() != s.ControllerNetworkSegmentID.String() || response.GetConfig().GetVpcId().GetValue() != s.AttachTargetControllerVpcID.String() {
-		return fmt.Errorf("Core attach returned unexpected identity")
+		return fmt.Errorf("core attach returned unexpected identity")
 	}
 	// A Core response can be replayed or delayed. Always re-read confirmed
 	// state before CAS completion. If the lease expired, completion fails.
@@ -158,7 +158,7 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 		return err
 	}
 	if segment.GetConfig().GetVpcId().GetValue() != s.AttachTargetControllerVpcID.String() {
-		return fmt.Errorf("Core target not confirmed after attach")
+		return fmt.Errorf("core target not confirmed after attach")
 	}
 	changed, err := cdb.WithTxResult(ctx, ms.dbSession, func(tx *cdb.Tx) (bool, error) { return dao.CompleteAttachment(ctx, tx, intent) })
 	if err != nil || !changed {
