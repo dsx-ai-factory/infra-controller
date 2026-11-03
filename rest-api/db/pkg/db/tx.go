@@ -14,6 +14,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 const (
@@ -55,18 +57,20 @@ func BeginTx(ctx context.Context, dbSession *Session, txOptions *sql.TxOptions) 
 	// will block indefinitely.
 	_, err = tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
 	if err != nil {
-		wrappedTx.RollbackWithLog(log.Logger)
+		wrappedTx.RollbackWithLog(ctx, log.Logger)
 		return nil, err
 	}
 
 	return wrappedTx, nil
 }
 
-// RollbackTx is called deferred in functions that create a transaction
-// if transaction was committed, this will do nothing
+// RollbackTx rolls back an uncommitted transaction when committed is non-nil.
+// ctx must be the context passed to BeginTx; it controls cancellation filtering
+// and trace fields on rollback failure logs. Completed transactions and failures
+// after cancellation are quiet.
 func RollbackTx(ctx context.Context, tx *Tx, committed *bool) {
 	if committed != nil && !*committed {
-		tx.RollbackWithLog(log.Logger)
+		tx.RollbackWithLog(ctx, log.Logger)
 	}
 }
 
@@ -190,11 +194,14 @@ func (tx *Tx) Rollback() error {
 }
 
 // RollbackWithLog rolls back the transaction and logs failures through logger.
-// Already-completed transactions are ignored. Use Rollback when the caller
+// ctx must be the context used to begin the transaction. Cleanup is always
+// attempted; completed transactions and failures after cancellation are quiet.
+// Trace fields are added when ctx carries a span. Use Rollback when the caller
 // needs to inspect or propagate the rollback error.
-func (tx *Tx) RollbackWithLog(logger zerolog.Logger) {
+func (tx *Tx) RollbackWithLog(ctx context.Context, logger zerolog.Logger) {
 	err := tx.Rollback()
-	if err != nil && !errors.Is(err, sql.ErrTxDone) {
+	if err != nil && !errors.Is(err, sql.ErrTxDone) && ctx.Err() == nil {
+		logger = cotel.LoggerWithTrace(ctx, logger)
 		logger.Error().Err(err).Msg("failed to rollback transaction")
 	}
 }

@@ -748,8 +748,9 @@ func GetAllAllocationConstraintsForInstanceType(ctx context.Context, tx *cdb.Tx,
 	return acs, tot, nil
 }
 
-// RollbackTx is called deferred in functions that create a transaction
-// if transaction was committed, this will do nothing
+// RollbackTx delegates deferred cleanup to cdb.RollbackTx.
+// ctx must be the context passed to cdb.BeginTx; it controls cancellation
+// filtering and trace fields on rollback failure logs.
 func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
 	cdb.RollbackTx(ctx, tx, committed)
 }

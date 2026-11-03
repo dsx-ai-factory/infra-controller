@@ -26,6 +26,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/extra/bundebug"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func testTxGetTestSession(t *testing.T) *Session {
@@ -151,11 +152,20 @@ func TestBeginTx(t *testing.T) {
 				original := log.Logger
 				log.Logger = zerolog.New(&logs)
 				t.Cleanup(func() { log.Logger = original })
-				tx, err := BeginTx(context.Background(), &Session{DB: bdb}, nil)
+				spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+					TraceID: trace.TraceID{3},
+					SpanID:  trace.SpanID{4},
+				})
+				ctx := trace.ContextWithSpanContext(context.Background(), spanContext)
+				tx, err := BeginTx(ctx, &Session{DB: bdb}, nil)
 				require.ErrorIs(t, err, setupErr)
 				assert.Nil(t, tx)
 				if tc.wantLog {
 					assert.Contains(t, logs.String(), tc.rollbackErr.Error())
+					var record map[string]any
+					require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+					assert.Equal(t, spanContext.TraceID().String(), record["trace_id"])
+					assert.Equal(t, spanContext.SpanID().String(), record["span_id"])
 				} else {
 					assert.Empty(t, logs.String())
 				}
@@ -810,10 +820,12 @@ func TestRollbackTx(t *testing.T) {
 		committed     bool
 		nilFlag       bool
 		alreadyClosed bool
+		canceled      bool
 		wantLog       bool
 	}{
 		{name: "successful rollback"},
-		{name: "rollback failure is logged", rollbackErr: rollbackErr, wantLog: true},
+		{name: "rollback failure is logged with trace fields", rollbackErr: rollbackErr, wantLog: true},
+		{name: "canceled context suppresses a non-context rollback error", rollbackErr: rollbackErr, canceled: true},
 		{name: "committed transaction is skipped", committed: true},
 		{name: "nil flag is skipped", nilFlag: true},
 		{name: "already closed transaction is quiet", alreadyClosed: true},
@@ -844,10 +856,25 @@ func TestRollbackTx(t *testing.T) {
 			if tc.nilFlag {
 				committed = nil
 			}
-			RollbackTx(context.Background(), tx, committed)
+			spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: trace.TraceID{1},
+				SpanID:  trace.SpanID{2},
+			})
+			ctx, cancel := context.WithCancel(trace.ContextWithSpanContext(context.Background(), spanContext))
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			// The mock transaction uses Background so database/sql's cancellation
+			// goroutine cannot race this check of cleanup's logging policy.
+			RollbackTx(ctx, tx, committed)
 			if tc.wantLog {
 				assert.Contains(t, logs.String(), rollbackErr.Error())
 				assert.Contains(t, logs.String(), "failed to rollback transaction")
+				var record map[string]any
+				require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+				assert.Equal(t, spanContext.TraceID().String(), record["trace_id"])
+				assert.Equal(t, spanContext.SpanID().String(), record["span_id"])
 			} else {
 				assert.Empty(t, logs.String())
 			}
@@ -876,10 +903,17 @@ func TestTx_RollbackWithLog(t *testing.T) {
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs).With().Str("MachineID", "machine-1").Logger()
 	tx := &Tx{tx: btx}
-	tx.RollbackWithLog(logger)
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{5},
+		SpanID:  trace.SpanID{6},
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), spanContext)
+	tx.RollbackWithLog(ctx, logger)
 	var record map[string]any
 	require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
 	assert.Equal(t, "machine-1", record["MachineID"])
+	assert.Equal(t, spanContext.TraceID().String(), record["trace_id"])
+	assert.Equal(t, spanContext.SpanID().String(), record["span_id"])
 	assert.Equal(t, "error", record["level"])
 	assert.Equal(t, rollbackErr.Error(), record["error"])
 	assert.Equal(t, "failed to rollback transaction", record["message"])

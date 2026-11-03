@@ -576,3 +576,48 @@ func TestBundb_CreatePrefix(t *testing.T) {
 		})
 	}
 }
+
+func TestBundb_rollbackTxWithLog(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		canceled bool
+	}{
+		{name: "active context logs rollback failure"},
+		{name: "canceled context suppresses a non-context rollback error", canceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlDB, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			bdb := bun.NewDB(sqlDB, pgdialect.New())
+			t.Cleanup(func() {
+				mock.ExpectClose()
+				require.NoError(t, bdb.Close())
+			})
+			storage := NewBunStorage(bdb, nil)
+			mock.ExpectBegin()
+			tx, err := storage.beginTx(context.Background())
+			require.NoError(t, err)
+			rollbackErr := errors.New("rollback connection failure")
+			mock.ExpectRollback().WillReturnError(rollbackErr)
+			var logs bytes.Buffer
+			original := log.Logger
+			log.Logger = zerolog.New(&logs)
+			t.Cleanup(func() { log.Logger = original })
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			// Isolate the logging policy from database/sql's cancellation goroutine
+			// by keeping the mock transaction's context active.
+			storage.rollbackTxWithLog(ctx, tx)
+			if tc.canceled {
+				assert.Empty(t, logs.String())
+			} else {
+				assert.Contains(t, logs.String(), rollbackErr.Error())
+				assert.Contains(t, logs.String(), "failed to rollback transaction")
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
