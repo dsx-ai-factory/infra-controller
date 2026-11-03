@@ -35,7 +35,6 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	siteWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/site"
 )
@@ -135,7 +134,7 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 
 	// Check for name uniqueness for the Site within the scope of the Provider
 	stDAO := cdbm.NewSiteDAO(csh.dbSession)
-	sts, tot, err := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Name: &apiRequest.Name, InfrastructureProviderIDs: []uuid.UUID{ip.ID}}, paginator.PageInput{}, nil)
+	sts, tot, err := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Name: &apiRequest.Name, InfrastructureProviderIDs: []uuid.UUID{ip.ID}}, cdbp.PageInput{}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("db error checking for name uniqueness of Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Site, error reading from data store", nil)
@@ -239,7 +238,7 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 			}
 
 			// Refresh Site object
-			refreshedSite, serr := stDAO.GetByID(ctx, tx, st.ID, nil, false)
+			refreshedSite, serr := stDAO.GetByID(ctx, tx, st.ID, nil, false, false)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error retrieving Site from DB")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to refresh Site data with registration token, error communicating with data store", nil)
@@ -356,7 +355,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	}
 
 	// Check that Site exists
-	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	es, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Site DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site to update", nil)
@@ -419,7 +418,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 
 	// Check for name uniqueness for the Site
 	if apiRequest.Name != nil && *apiRequest.Name != es.Name {
-		sts, tot, serr := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Name: apiRequest.Name, InfrastructureProviderIDs: []uuid.UUID{es.InfrastructureProviderID}}, paginator.PageInput{}, nil)
+		sts, tot, serr := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{Name: apiRequest.Name, InfrastructureProviderIDs: []uuid.UUID{es.InfrastructureProviderID}}, cdbp.PageInput{}, nil)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("db error checking for name uniqueness of Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to update Site, error reading from data store", nil)
@@ -503,7 +502,6 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 				siteUpdateInput.Config = &cdbm.SiteConfigUpdateInput{
 					NativeNetworking:          apiRequest.Capabilities.NativeNetworking,
 					NetworkSecurityGroup:      apiRequest.Capabilities.NetworkSecurityGroup,
-					NVLinkPartition:           apiRequest.Capabilities.NVLinkPartition,
 					Flow:                      apiRequest.Capabilities.Flow,
 					ImageBasedOperatingSystem: apiRequest.Capabilities.ImageBasedOperatingSystem,
 					DPSPowerManagement:        apiRequest.Capabilities.DPSPowerManagement,
@@ -616,7 +614,7 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gsh.dbSession)
 
-	st, err := stDAO.GetByID(ctx, nil, stID, qIncludeRelations, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, qIncludeRelations, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Site with specified ID", nil)
@@ -644,11 +642,10 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 		}
 		if tsCount > 0 {
 			ts = &tss[0]
-			isAssociated = true
 		}
 
 		if !isAssociated {
-			enabled, serr := common.TenantHasTargetedInstanceCreation(ctx, nil, gsh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &st.ID})
+			enabled, serr := common.TenantHasSiteAccess(ctx, nil, gsh.dbSession, tenant, st.ID)
 			if serr != nil {
 				logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
@@ -849,7 +846,7 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 
 	if provider != nil {
 		// Retrieve Sites from Provider perspective
-		sites, _, serr := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{InfrastructureProviderIDs: []uuid.UUID{provider.ID}}, paginator.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		sites, _, serr := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{InfrastructureProviderIDs: []uuid.UUID{provider.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("error retrieving all Sites by param from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites", nil)
@@ -869,18 +866,16 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 		}
 
 		for _, ts := range tss {
-			siteIDs.Add(ts.SiteID)
 			tsMap[ts.SiteID] = &ts
 		}
 
-		// Add the Sites where the Tenant has effective TargetedInstanceCreation,
-		// honoring per-site TenantSite.config overrides.
-		privilegedSiteIDs, serr := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, gash.dbSession, tenant)
+		// Add the Sites the Tenant can access through an Allocation or effective TargetedInstanceCreation.
+		accessibleSiteIDs, serr := getTenantSiteIDs(ctx, gash.dbSession, tenant)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("error resolving privileged Site access for Tenant")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability, DB error", nil)
 		}
-		for _, siteID := range privilegedSiteIDs {
+		for _, siteID := range accessibleSiteIDs {
 			siteIDs.Add(siteID)
 		}
 	}
@@ -888,7 +883,7 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 	filter.SiteIDs = siteIDs.ToSlice()
 
 	// Get Sites from DB
-	sites, total, err := stDAO.GetAll(ctx, nil, filter, paginator.PageInput{Offset: pageRequest.Offset, Limit: pageRequest.Limit, OrderBy: pageRequest.OrderBy}, qIncludeRelations)
+	sites, total, err := stDAO.GetAll(ctx, nil, filter, cdbp.PageInput{Offset: pageRequest.Offset, Limit: pageRequest.Limit, OrderBy: pageRequest.OrderBy}, qIncludeRelations)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Sites from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites, DB error", nil)
@@ -918,8 +913,13 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 	apiSites := []model.APISite{}
 	for _, site := range sites {
 		apiSite := model.NewAPISite(site, ssdMap[site.ID.String()], tsMap[site.ID])
-		// Attach machine stats for the site if they exist.
-		apiSite.MachineStats = machineStats[site.ID]
+		// Requested stats are populated even when the Site has nothing to count.
+		if includeMachineStats {
+			apiSite.MachineStats = machineStats[site.ID]
+			if apiSite.MachineStats == nil {
+				apiSite.MachineStats = model.NewAPISiteMachineStats()
+			}
+		}
 		// Attach GPU stats when requested. Sites with no GPUs get an empty
 		// array (not null), matching the single-site GPU stats endpoint.
 		if includeGpuStats {
@@ -1037,7 +1037,7 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(dsh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Site from DB by ID")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Site with ID in URL", nil)
@@ -1161,7 +1161,7 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gssdh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Site with specified ID", nil)
@@ -1178,25 +1178,12 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 	}
 
 	if !isAssociated && tenant != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(gssdh.dbSession)
-
-		_, tsCount, serr := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{stID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		enabled, serr := common.TenantHasSiteAccess(ctx, nil, gssdh.dbSession, tenant, st.ID)
 		if serr != nil {
-			logger.Error().Err(serr).Msg("error retrieving TenantSite from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant/Site association to determine access to Site, DB error", nil)
+			logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
 		}
-		if tsCount > 0 {
-			isAssociated = true
-		}
-
-		if !isAssociated {
-			enabled, serr := common.TenantHasTargetedInstanceCreation(ctx, nil, gssdh.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &st.ID})
-			if serr != nil {
-				logger.Error().Err(serr).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
-				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability for Site, DB error", nil)
-			}
-			isAssociated = enabled
-		}
+		isAssociated = enabled
 	}
 
 	if !isAssociated {

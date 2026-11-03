@@ -11,7 +11,6 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
-	cclient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -126,7 +125,7 @@ func (mibp *ManageInfiniBandPartition) CreateInfiniBandPartitionOnSite(ctx conte
 	// Call Core gRPC API endpoint
 	grpcClient := mibp.coreGrpcAtomicClient.GetClient()
 	if grpcClient == nil {
-		return cclient.ErrCoreGrpcClientNotConnected
+		return cClient.ErrCoreGrpcClientNotConnected
 	}
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 

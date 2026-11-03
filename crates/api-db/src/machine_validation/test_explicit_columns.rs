@@ -20,9 +20,9 @@ use chrono::{DateTime, Duration, Utc};
 use config_version::ConfigVersion;
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::machine_validation::{
-    MachineValidationAttemptState, MachineValidationPlugin, MachineValidationResult,
-    MachineValidationRunItemState, MachineValidationTest, MachineValidationTestAddRequest,
-    MachineValidationTestsGetRequest,
+    MachineValidationAttemptLogStream, MachineValidationAttemptState, MachineValidationPlugin,
+    MachineValidationResult, MachineValidationRunItemState, MachineValidationTest,
+    MachineValidationTestAddRequest, MachineValidationTestsGetRequest,
 };
 use sqlx::{Connection, PgPool};
 
@@ -129,6 +129,14 @@ async fn exercise_run_queries(
         ConditionalWrite::Applied(())
     );
     expected.last_heartbeat_at = Some(heartbeat);
+
+    let current_on_demand = find_active_on_demand_machine_validation_by_id_and_machine_id(
+        txn.as_mut(),
+        &expected.id,
+        &machine_id,
+    )
+    .await?;
+    assert_run(&current_on_demand, &expected);
 
     let active = find_active(txn.as_mut()).await?;
     assert_eq!(active.len(), 1);
@@ -256,7 +264,7 @@ async fn exercise_config_queries(
     assert_eq!(expected.description, description);
     assert_eq!(expected.config, config);
     assert_eq!(expected.version.version_nr(), 1);
-    let configs = machine_validation_config::find_configs(txn.as_mut()).await?;
+    let configs = machine_validation_config::find_configs(txn.as_mut(), &[]).await?;
     assert_eq!(configs.len(), 1);
     assert_eq!(
         serde_json::to_value(&configs[0])?,
@@ -266,6 +274,11 @@ async fn exercise_config_queries(
     assert_eq!(
         serde_json::to_value(&removed)?,
         serde_json::to_value(&expected)?
+    );
+    assert!(
+        machine_validation_config::find_configs(txn.as_mut(), &[])
+            .await?
+            .is_empty()
     );
     txn.rollback().await?;
     Ok(())
@@ -286,6 +299,7 @@ async fn validation_execution_queries_survive_added_columns(
          ALTER TABLE machine_validation_tests ADD COLUMN test_added_column text;
          ALTER TABLE machine_validation_run_items ADD COLUMN test_added_column text;
          ALTER TABLE machine_validation_attempts ADD COLUMN test_added_column text;
+         ALTER TABLE machine_validation_attempt_logs ADD COLUMN test_added_column text;
          ALTER TABLE machine_validation_results ADD COLUMN test_added_column text;",
     )
     .execute(&mut *migration)
@@ -405,6 +419,29 @@ async fn exercise_execution_queries(
         .expect("the run plan created an attempt");
 
     let start_time: DateTime<Utc> = "2026-09-01T12:00:00Z".parse()?;
+    let log_content = "checked seven devices\n";
+    // Set `created_at` explicitly so the readback checks a known timestamp.
+    sqlx::query(
+        "INSERT INTO machine_validation_attempt_logs
+            (attempt_id, sequence, stream, created_at, content)
+         VALUES ($1, 1, 'stdout', $2, $3)",
+    )
+    .bind(attempt_id)
+    .bind(start_time)
+    .bind(log_content)
+    .execute(txn.as_mut())
+    .await?;
+    let chunks =
+        machine_validation_execution::find_attempt_log_chunks(txn.as_mut(), &attempt_id, 0, 1)
+            .await?;
+    assert_eq!(chunks.len(), 1);
+    let chunk = &chunks[0];
+    assert_eq!(chunk.attempt_id, attempt_id);
+    assert_eq!(chunk.sequence, 1);
+    assert_eq!(chunk.stream, MachineValidationAttemptLogStream::Stdout);
+    assert_eq!(chunk.created_at, start_time);
+    assert_eq!(chunk.content, log_content);
+
     let result = MachineValidationResult {
         validation_id: run.id,
         name: request.name.clone(),

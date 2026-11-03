@@ -96,6 +96,36 @@ cat >> "$SITE_BADKEY" <<EOF
     $DC_ASN:101: {}
     jumphosts: {}
 EOF
+# A key equal to a fixed import (the template already renders <datacenterAsn>:50100).
+SITE_DUP="$TMP/site-dup.yaml"; base_site "$SITE_DUP"
+cat >> "$SITE_DUP" <<EOF
+  routeTargetsToImport:
+    $DC_ASN:101: {}
+    $DC_ASN:50100: {}
+EOF
+# One collision per fixed target: the BMC and the admin-network imports too.
+SITE_DUP_BMC="$TMP/site-dup-bmc.yaml"; base_site "$SITE_DUP_BMC"
+cat >> "$SITE_DUP_BMC" <<EOF
+  routeTargetsToImport:
+    $DC_ASN:900: {}
+EOF
+SITE_DUP_ADMIN="$TMP/site-dup-admin.yaml"; base_site "$SITE_DUP_ADMIN"
+cat >> "$SITE_DUP_ADMIN" <<EOF
+  routeTargetsToImport:
+    $DC_ASN:50400: {}
+EOF
+# The same number under another ASN is a different target, not a duplicate
+# (the README's "<siteControllerRoutesAsn>:50100 when the ASNs differ" case).
+SITE_ZERO="$TMP/site-leading-zero.yaml"; base_site "$SITE_ZERO"
+cat >> "$SITE_ZERO" <<EOF
+  routeTargetsToImport:
+    "$DC_ASN:050100": {}
+EOF
+SITE_OTHER_ASN="$TMP/site-other-asn.yaml"; base_site "$SITE_OTHER_ASN"
+cat >> "$SITE_OTHER_ASN" <<EOF
+  routeTargetsToImport:
+    4266040000:50100: {}
+EOF
 
 # ── template: renders the nested key, ignores the top-level one ─────────────
 echo "=== startupSMN.template: fnn.routeTargetsToImport is rendered ==="
@@ -157,6 +187,21 @@ assert_true  "the rejection asks for a map of numeric targets" "grep -q \"'fnn.r
 assert_true  "the rejection names the shape it got"            "grep -q 'not a seq' '$TMP/err'"
 assert_false "a non-numeric key fails validation"              "validate '$SITE_BADKEY'"
 assert_true  "the rejection names the offending key"           "grep -q \"key 'jumphosts' is not a full numeric route target\" '$TMP/err'"
+
+# ── build script validation: no duplicate of a fixed import (#7785) ──────────
+echo ""
+echo "=== build-dpu-install-iso.sh: a key equal to a fixed import is rejected (#7785) ==="
+render "$SITE_DUP" > "$TMP/dup.yaml"
+assert_eq "without the check the template renders the key twice" 2 "$(imported_targets "$TMP/dup.yaml" | grep -c -F "$DC_ASN:50100" || true)"
+assert_false "a key equal to a fixed import fails validation"  "validate '$SITE_DUP'"
+assert_true  "the rejection names the key and the fixed field" "grep -q \"key '$DC_ASN:50100' duplicates the fixed import <datacenterAsn>:<fnn.commonSiteControllerRouteTarget>\" '$TMP/err'"
+assert_false "a key equal to the BMC import fails validation"   "validate '$SITE_DUP_BMC'"
+assert_true  "the rejection names commonManagedNodeBmcRouteTarget" "grep -q \"key '$DC_ASN:900' duplicates the fixed import <datacenterAsn>:<fnn.commonManagedNodeBmcRouteTarget>\" '$TMP/err'"
+assert_false "a key equal to the admin-network import fails validation" "validate '$SITE_DUP_ADMIN'"
+assert_true  "the rejection names commonAdminNetworkTarget"     "grep -q \"key '$DC_ASN:50400' duplicates the fixed import <datacenterAsn>:<fnn.commonAdminNetworkTarget>\" '$TMP/err'"
+assert_true  "the same number under another ASN passes"        "validate '$SITE_OTHER_ASN'"
+assert_false "a key with leading zeros fails validation"         "validate '$SITE_ZERO'"
+assert_true  "the rejection asks for decimal without leading zeros" "grep -q \"key '$DC_ASN:050100' is not a full numeric route target <asn>:<n> (decimal, no leading zeros)\" '$TMP/err'"
 
 # ── the shipped sample, with its commented block enabled ─────────────────────
 echo ""

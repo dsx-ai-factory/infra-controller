@@ -120,7 +120,8 @@ func handleTokenEndpoint(res http.ResponseWriter, req *http.Request, config Mock
 		if expectedPassword, exists := config.ValidCredentials[username]; exists && expectedPassword == password {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(config.Responses.AdminLogin))
+			// Mock response writes are best-effort if the client closes the connection.
+			_, _ = res.Write([]byte(config.Responses.AdminLogin))
 		} else {
 			res.WriteHeader(http.StatusUnauthorized)
 		}
@@ -129,7 +130,7 @@ func handleTokenEndpoint(res http.ResponseWriter, req *http.Request, config Mock
 		if config.ValidCodes[code] {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(config.Responses.Token))
+			_, _ = res.Write([]byte(config.Responses.Token))
 		} else {
 			res.WriteHeader(http.StatusBadRequest)
 		}
@@ -138,7 +139,7 @@ func handleTokenEndpoint(res http.ResponseWriter, req *http.Request, config Mock
 		if refreshToken == "valid-refresh-token" {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(`{"access_token":"new-access-token","expires_in":3600,"refresh_expires_in":1800,"refresh_token":"new-refresh-token","token_type":"Bearer"}`))
+			_, _ = res.Write([]byte(`{"access_token":"new-access-token","expires_in":3600,"refresh_expires_in":1800,"refresh_token":"new-refresh-token","token_type":"Bearer"}`))
 		} else {
 			res.WriteHeader(http.StatusBadRequest)
 		}
@@ -147,7 +148,7 @@ func handleTokenEndpoint(res http.ResponseWriter, req *http.Request, config Mock
 			(clientID == "test-client" && clientSecret == "test-secret") {
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(`{"access_token":"service-access-token","expires_in":3600,"token_type":"Bearer"}`))
+			_, _ = res.Write([]byte(`{"access_token":"service-access-token","expires_in":3600,"token_type":"Bearer"}`))
 		} else {
 			res.WriteHeader(http.StatusUnauthorized)
 		}
@@ -164,7 +165,7 @@ func handleIDPEndpoint(res http.ResponseWriter, req *http.Request, config MockKe
 	if token == "admin-access-token" || config.ValidTokens[token] {
 		res.Header().Set("Content-Type", "application/json")
 		res.WriteHeader(http.StatusOK)
-		res.Write([]byte(config.Responses.IDPs))
+		_, _ = res.Write([]byte(config.Responses.IDPs))
 	} else {
 		res.WriteHeader(http.StatusUnauthorized)
 	}
@@ -176,7 +177,7 @@ func handleUserInfoEndpoint(res http.ResponseWriter, req *http.Request, config M
 	if config.ValidTokens[token] {
 		res.Header().Set("Content-Type", "application/json")
 		res.WriteHeader(http.StatusOK)
-		res.Write([]byte(config.Responses.UserInfo))
+		_, _ = res.Write([]byte(config.Responses.UserInfo))
 	} else {
 		res.WriteHeader(http.StatusUnauthorized)
 	}
@@ -200,7 +201,7 @@ func handleLogoutEndpoint(res http.ResponseWriter, req *http.Request, config Moc
 func handleJWKSEndpoint(res http.ResponseWriter, req *http.Request, config MockKeycloakServerConfig) {
 	res.Header().Set("Content-Type", "application/json")
 	res.WriteHeader(http.StatusOK)
-	res.Write([]byte(config.Responses.JWKS))
+	_, _ = res.Write([]byte(config.Responses.JWKS))
 }
 
 // Local reference to config package functions for backward compatibility

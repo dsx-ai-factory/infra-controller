@@ -28,6 +28,21 @@ tests:
           path: data["mat.toml"]
           pattern: 'log_format = "compact"'
 
+  - it: should leave the ScoutStream reconnect interval to the binary default
+    asserts:
+      - notMatchRegex:
+          path: data["mat.toml"]
+          pattern: 'scout_stream_reconnect_interval'
+
+  - it: should pass scoutStreamReconnectInterval through to mat.toml
+    set:
+      machineATron:
+        scoutStreamReconnectInterval: "24h"
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'scout_stream_reconnect_interval = "24h"'
+
   - it: should configure custom host count via pods structure
     set:
       pods:

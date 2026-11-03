@@ -7,8 +7,10 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -142,30 +144,52 @@ func TestExpectedRackDAO_UpdateMultiple(t *testing.T) {
 	site := TestBuildSite(t, session, provider, "group-site", user)
 	dao := NewExpectedRackDAO(session)
 	for _, tc := range []struct {
-		name  string
-		group *string
+		name      string
+		update    ExpectedRackUpdateInput
+		wantError string
 	}{
-		{name: "supplied", group: new("new-group")},
+		{name: "supplied", update: ExpectedRackUpdateInput{RackGroupID: new("new-group")}},
 		{name: "omitted"},
+		{
+			name:      "mixed name presence",
+			update:    ExpectedRackUpdateInput{Name: new(""), RackGroupID: new("new-group")},
+			wantError: "name must be supplied for every expected rack update or omitted from every update",
+		},
+		{
+			name:      "mixed description presence",
+			update:    ExpectedRackUpdateInput{Description: new(""), RackGroupID: new("new-group")},
+			wantError: "description must be supplied for every expected rack update or omitted from every update",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ids := []uuid.UUID{uuid.New(), uuid.New()}
-			_, err := dao.CreateMultiple(ctx, nil, []ExpectedRackCreateInput{
-				{ExpectedRackID: ids[0], SiteID: site.ID, RackID: tc.name + "-a", RackProfileID: "profile", RackGroupID: new("old-group"), CreatedBy: user.ID},
-				{ExpectedRackID: ids[1], SiteID: site.ID, RackID: tc.name + "-b", RackProfileID: "profile", RackGroupID: new("preserve-group"), CreatedBy: user.ID},
+			before, err := dao.CreateMultiple(ctx, nil, []ExpectedRackCreateInput{
+				{ExpectedRackID: ids[0], SiteID: site.ID, RackID: tc.name + "-a", RackProfileID: "profile", RackGroupID: new("old-group"), Name: "first-name", Description: "first-description", CreatedBy: user.ID},
+				{ExpectedRackID: ids[1], SiteID: site.ID, RackID: tc.name + "-b", RackProfileID: "profile", RackGroupID: new("preserve-group"), Name: "second-name", Description: "second-description", CreatedBy: user.ID},
 			})
 			if !assert.NoError(t, err) {
 				return
 			}
+			update := tc.update
+			update.ExpectedRackID = ids[0]
 			rows, err := dao.UpdateMultiple(ctx, nil, []ExpectedRackUpdateInput{
-				{ExpectedRackID: ids[0], RackGroupID: tc.group}, {ExpectedRackID: ids[1]},
+				update, {ExpectedRackID: ids[1]},
 			})
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				for _, original := range before {
+					stored, err := dao.Get(ctx, nil, original.ID, nil, false)
+					require.NoError(t, err)
+					assert.Equal(t, original, *stored)
+				}
+				return
+			}
 			if !assert.NoError(t, err) || !assert.Len(t, rows, 2) {
 				return
 			}
 			want := "old-group"
-			if tc.group != nil {
-				want = *tc.group
+			if tc.update.RackGroupID != nil {
+				want = *tc.update.RackGroupID
 			}
 			assert.Equal(t, &want, rows[0].RackGroupID)
 			assert.Equal(t, new("preserve-group"), rows[1].RackGroupID)
@@ -680,7 +704,25 @@ func TestExpectedRackDAO_Update(t *testing.T) {
 		input              ExpectedRackUpdateInput
 		expectedError      bool
 		verifyChildSpanner bool
+		check              func(*testing.T, *ExpectedRack)
 	}{
+		{
+			desc: "Clear Name and Description while preserving RackID, profile, and labels",
+			input: ExpectedRackUpdateInput{
+				ExpectedRackID: erExp[0].ID,
+				Name:           cutil.GetPtr(""),
+				Description:    cutil.GetPtr(""),
+			},
+			check: func(t *testing.T, before *ExpectedRack) {
+				persisted, err := erd.Get(ctx, nil, erExp[0].ID, nil, false)
+				require.NoError(t, err)
+				assert.Empty(t, persisted.Name)
+				assert.Empty(t, persisted.Description)
+				assert.Equal(t, before.RackID, persisted.RackID)
+				assert.Equal(t, before.RackProfileID, persisted.RackProfileID)
+				assert.Equal(t, before.Labels, persisted.Labels)
+			},
+		},
 		{
 			desc: "Update RackProfileID",
 			input: ExpectedRackUpdateInput{
@@ -741,14 +783,16 @@ func TestExpectedRackDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			before, err := erd.Get(ctx, nil, tc.input.ExpectedRackID, nil, false)
+			require.NoError(t, err)
 			got, err := erd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if err != nil {
 				t.Logf("%s", err.Error())
 			}
 			if !tc.expectedError {
-				assert.Nil(t, err)
-				assert.NotNil(t, got)
+				require.NoError(t, err)
+				require.NotNil(t, got)
 				if tc.input.RackID != nil {
 					assert.Equal(t, *tc.input.RackID, got.RackID)
 				}
@@ -768,6 +812,9 @@ func TestExpectedRackDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
+				}
+				if tc.check != nil {
+					tc.check(t, before)
 				}
 			}
 		})
@@ -790,6 +837,79 @@ func TestExpectedRackDAO_Update_NotFound(t *testing.T) {
 		Name:           cutil.GetPtr("Should not exist"),
 	})
 	assert.Error(t, err)
+}
+
+func TestExpectedRackSQLDAO_DeleteIfUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedRackSetupSchema(t, dbSession)
+
+	existing, _, _, _ := testExpectedRackDAOCreateExpectedRacks(ctx, t, dbSession)
+	dao := NewExpectedRackDAO(dbSession)
+	unchanged, err := dao.Get(ctx, nil, existing[0].ID, nil, false)
+	require.NoError(t, err)
+	beforeUpdate, err := dao.Get(ctx, nil, existing[1].ID, nil, false)
+	require.NoError(t, err)
+	afterUpdate, err := dao.Update(ctx, nil, ExpectedRackUpdateInput{
+		ExpectedRackID: beforeUpdate.ID,
+		Name:           cutil.GetPtr("API-name"),
+	})
+	require.NoError(t, err)
+	require.True(t, afterUpdate.Updated.After(beforeUpdate.Updated))
+	other, err := dao.Get(ctx, nil, existing[2].ID, nil, false)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		id          uuid.UUID
+		updated     time.Time
+		wantDeleted bool
+		want        *ExpectedRack
+	}{
+		{
+			name:        "matching version deletes the row",
+			id:          unchanged.ID,
+			updated:     unchanged.Updated,
+			wantDeleted: true,
+		},
+		{
+			name:    "changed version preserves the row",
+			id:      beforeUpdate.ID,
+			updated: beforeUpdate.Updated,
+			want:    afterUpdate,
+		},
+		{
+			name:    "future timestamp preserves the older stored row",
+			id:      other.ID,
+			updated: other.Updated.Add(time.Second),
+			want:    other,
+		},
+		{
+			name:    "absent row preserves another row with the same timestamp",
+			id:      uuid.New(),
+			updated: other.Updated,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDeleted, deleted)
+
+			stored, err := dao.Get(ctx, nil, tc.id, nil, false)
+			if tc.want == nil {
+				assert.ErrorIs(t, err, db.ErrDoesNotExist)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, stored)
+		})
+	}
+
+	stored, err := dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, other, stored)
 }
 
 func TestExpectedRackDAO_Delete(t *testing.T) {

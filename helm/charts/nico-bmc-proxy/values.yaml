@@ -107,6 +107,10 @@ auth:
   ## SPIFFE service-id of the API allowed full access (allowed_principals + ACL).
   apiPrincipal: nico-api
 
+## nico-api Service the default config dials,
+## configFiles.nicoBmcProxyConfig replaces the default config
+apiServiceName: nico-api
+
 configFiles:
   nicoBmcProxyConfig: ""
 
@@ -115,6 +119,44 @@ bmcProxy:
   allowedPrincipals: []
   ## Redirect handling mode: follow_same_origin (default) or return_to_client (experimental).
   redirectMode: follow_same_origin
+
+## The proxy's own client certificate for switches whose NVUE REST API
+## requires one (NVUE mTLS), and the CA a switch's certificate must chain to.
+## Enabled, the chart asks cert-manager for the certificate, mounts its Secret
+## read-only at mountPath, and sets all four keys of the proxy's [tls.switch]
+## through NICO_BMC_PROXY__TLS__SWITCH__* environment variables, which take
+## precedence over any [tls.switch] in configFiles.nicoBmcProxyConfig.
+## Disabled, the chart sets none of them: the proxy reaches a switch as it
+## reaches a BMC, presenting no client certificate and accepting any server
+## certificate, unless configFiles.nicoBmcProxyConfig has a [tls.switch].
+switchTls:
+  enabled: false
+  ## The site's switch issuer: the CA behind it must be the one the switches
+  ## trust for client certificates.
+  issuerRef:
+    kind: ClusterIssuer
+    name: vault-nico-issuer
+    group: cert-manager.io
+  name: nico-bmc-proxy-switch-client-certificate
+  secretName: nico-bmc-proxy-switch-client-certificate
+  mountPath: /var/run/secrets/switch-client
+  duration: 720h0m0s
+  renewBefore: 360h0m0s
+  ## At least one URI SAN is required when enabled: the identity the
+  ## switches' client policy allows the proxy. The issuer and any cert-manager
+  ## approver policy must allow it too.
+  uris: []
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+    rotationPolicy: Always
+  ## PEM CA bundle a switch's certificate must chain to. The default is the
+  ## site root the chart mounts from Secret/nico-roots.
+  caCertPath: /var/run/secrets/nico-roots/ca.crt
+  ## DNS name every switch's certificate carries, when they share one instead
+  ## of carrying their IPs. Empty checks each switch's certificate against
+  ## its IP, whatever name configFiles.nicoBmcProxyConfig gives.
+  tlsServerName: ""
 
 vaultClusterInfo: {}
 

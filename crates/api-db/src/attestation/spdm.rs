@@ -390,7 +390,14 @@ pub async fn get_attestations_for_machine_id(
     Ok(attestation_details)
 }
 
-/// this loads a device attestation from the DB
+/// `load_snapshot_for_machine_and_device_id` loads one device attestation with
+/// its BMC connection data.
+///
+/// A topology `bmc_info.machine_interface_id` selects the interface. Without
+/// an ID, the query selects an attached BMC interface. If the named interface
+/// no longer exists, is not attached to this machine, or is not a BMC
+/// interface, the snapshot keeps its topology metadata without using a
+/// different BMC connection.
 pub async fn load_snapshot_for_machine_and_device_id(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -402,20 +409,28 @@ pub async fn load_snapshot_for_machine_and_device_id(
             mda.metadata, mda.ca_certificate_link, mda.ca_certificate,
             mda.evidence_target, mda.evidence, mda.state_version,
             mda.state_outcome, mda.completed_at, mda.started_at, mda.cancelled_at,
-            jsonb_strip_nulls(
-                COALESCE(mt.topology->'bmc_info', '{}'::jsonb) ||
-                jsonb_build_object(
-                    'machine_interface_id', mi.id,
-                    'ip', host(mia.address),
-                    'mac', mi.mac_address::text
+            CASE WHEN mi.id IS NULL THEN
+                COALESCE(mt.topology->'bmc_info', '{}'::jsonb) - 'ip' - 'mac'
+            ELSE
+                jsonb_strip_nulls(
+                    COALESCE(mt.topology->'bmc_info', '{}'::jsonb) ||
+                    jsonb_build_object(
+                        'machine_interface_id', mi.id,
+                        'ip', host(mia.address),
+                        'mac', mi.mac_address::text
+                    )
                 )
-            ) AS bmc_info
+            END AS bmc_info
         FROM spdm_machine_devices_attestation AS mda
         LEFT JOIN machine_topologies AS mt
             ON mt.machine_id = mda.machine_id
-        JOIN machine_interfaces AS mi
+        LEFT JOIN machine_interfaces AS mi
             ON mi.machine_id = mda.machine_id
             AND mi.interface_type = 'Bmc'
+            AND (
+                mt.topology #>> '{bmc_info,machine_interface_id}' IS NULL
+                OR mi.id::text = mt.topology #>> '{bmc_info,machine_interface_id}'
+            )
         LEFT JOIN LATERAL (
             SELECT address
             FROM machine_interface_addresses

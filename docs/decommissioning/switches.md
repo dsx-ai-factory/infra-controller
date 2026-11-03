@@ -43,7 +43,19 @@ If progress stops or errors persist, refer to [Troubleshooting](index.md#trouble
 NICo performs these operations in order:
 
 1. Suppresses Site Explorer for the switch BMC. Site Explorer will skip this endpoint during periodic exploration to avoid instability and authentication lockout.
-2. Uses the RMS component-manager backend to submit and poll an NVOS factory-reset job to completion. The RMS reset wipes NVOS configuration, restarts the switch, and resets the NVOS password to factory default.
+2. Submits an NVOS factory-reset job through RMS and waits for completion.
+   NICo sets `allow_ssh_fallback` to `true`. RMS uses SSH fallback only when an
+   NVUE connection or TLS failure occurs before the reset is submitted.
+   Certificate verification failures also trigger SSH fallback. Authentication
+   failures, rejected reset requests, and uncertain submission outcomes do not.
+
+   RMS uses the switch's configured NVOS credentials to log in over SSH. The
+   username must be `admin`. RMS does not verify the switch's SSH host key.
+   Use this workflow only on a management network protected against connection
+   interception.
+
+   The reset clears the NVOS configuration, restarts the switch, and restores
+   the factory-default NVOS password.
 3. Suppresses DHCP for the switch's NVOS interface. DHCP Request packets coming from this interface MAC are dropped.
 4. Reboots the switch.
 5. Creates a DHCP suppression for the switch BMC.

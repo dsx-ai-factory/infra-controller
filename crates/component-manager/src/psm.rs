@@ -421,9 +421,13 @@ impl PowerShelfManager for PsmPowerShelfBackend {
         let mut results = Vec::with_capacity(endpoints.len());
         for ep in endpoints {
             let Some(shelf) = response.powershelves.iter().find(|s| {
-                s.pmc
-                    .as_ref()
-                    .is_some_and(|pmc| pmc.mac_address == ep.pmc_mac.to_string())
+                s.pmc.as_ref().is_some_and(|pmc| {
+                    // PSM emits canonical colon-delimited MACs; the parser also accepts
+                    // malformed octet widths.
+                    parse_mac(&pmc.mac_address).is_ok_and(|mac| {
+                        mac == ep.pmc_mac && pmc.mac_address.eq_ignore_ascii_case(&mac.to_string())
+                    })
+                })
             }) else {
                 results.push(ComponentPowerStateResult {
                     mac_address: ep.pmc_mac,
@@ -449,9 +453,29 @@ impl PowerShelfManager for PsmPowerShelfBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
     use carbide_test_support::value_scenarios;
+    use tonic::transport::Server;
+    use tonic::transport::server::TcpIncoming;
+    use tonic::{Request, Response, Status};
 
     use super::*;
+
+    /// PSM registers devices and reads cached inventory; the passive API must
+    /// reject that getter before it can cause those effects.
+    #[tokio::test]
+    async fn registering_power_getter_is_not_a_passive_capability() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let backend = PsmPowerShelfBackend {
+            client: psm::powershelf_manager_client::PowershelfManagerClient::new(
+                TraceInjectService::new(channel),
+            ),
+        };
+        // The passive API must never invoke this backend's registering getter.
+        assert_eq!(backend.power_state_source(), None);
+    }
 
     #[test]
     fn psm_fw_state_maps_each_variant() {
@@ -508,6 +532,217 @@ mod tests {
         ];
         let macs = mac_strings(&eps);
         assert_eq!(macs, vec!["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"]);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum PsmCall {
+        Register(Vec<String>),
+        Inventory(Vec<String>),
+    }
+
+    struct TestPsm {
+        inventory: Vec<psm::PowerShelf>,
+        calls: Arc<Mutex<Vec<PsmCall>>>,
+    }
+
+    #[tonic::async_trait]
+    impl psm::powershelf_manager_server::PowershelfManager for TestPsm {
+        async fn register_powershelves(
+            &self,
+            request: Request<psm::RegisterPowershelvesRequest>,
+        ) -> Result<Response<psm::RegisterPowershelvesResponse>, Status> {
+            let macs: Vec<_> = request
+                .into_inner()
+                .registration_requests
+                .into_iter()
+                .map(|registration| registration.pmc_mac_address)
+                .collect();
+            let responses = macs
+                .iter()
+                .map(|mac| psm::RegisterPowershelfResponse {
+                    pmc_mac_address: mac.clone(),
+                    status: psm::StatusCode::Success as i32,
+                    ..Default::default()
+                })
+                .collect();
+            self.calls.lock().unwrap().push(PsmCall::Register(macs));
+            Ok(Response::new(psm::RegisterPowershelvesResponse {
+                responses,
+            }))
+        }
+
+        async fn get_powershelves(
+            &self,
+            request: Request<psm::PowershelfRequest>,
+        ) -> Result<Response<psm::GetPowershelvesResponse>, Status> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(PsmCall::Inventory(request.into_inner().pmc_macs));
+            Ok(Response::new(psm::GetPowershelvesResponse {
+                powershelves: self.inventory.clone(),
+            }))
+        }
+
+        async fn update_firmware(
+            &self,
+            _request: Request<psm::UpdateFirmwareRequest>,
+        ) -> Result<Response<psm::UpdateFirmwareResponse>, Status> {
+            Err(Status::unimplemented("unexpected firmware update"))
+        }
+
+        async fn get_firmware_update_status(
+            &self,
+            _request: Request<psm::GetFirmwareUpdateStatusRequest>,
+        ) -> Result<Response<psm::GetFirmwareUpdateStatusResponse>, Status> {
+            Err(Status::unimplemented("unexpected firmware status read"))
+        }
+
+        async fn list_available_firmware(
+            &self,
+            _request: Request<psm::PowershelfRequest>,
+        ) -> Result<Response<psm::ListAvailableFirmwareResponse>, Status> {
+            Err(Status::unimplemented("unexpected firmware listing"))
+        }
+
+        async fn set_dry_run(
+            &self,
+            _request: Request<psm::SetDryRunRequest>,
+        ) -> Result<Response<()>, Status> {
+            Err(Status::unimplemented("unexpected dry run change"))
+        }
+
+        async fn power_off(
+            &self,
+            _request: Request<psm::PowershelfRequest>,
+        ) -> Result<Response<psm::PowerControlResponse>, Status> {
+            Err(Status::unimplemented("unexpected power off"))
+        }
+
+        async fn power_on(
+            &self,
+            _request: Request<psm::PowershelfRequest>,
+        ) -> Result<Response<psm::PowerControlResponse>, Status> {
+            Err(Status::unimplemented("unexpected power on"))
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_power_read_matches_mac_values_and_preserves_missing_shelves() {
+        let endpoints = [
+            ("10.0.0.2", "AA:BB:CC:DD:EE:02"),
+            ("10.0.0.1", "AA:BB:CC:DD:EE:01"),
+            ("10.0.0.3", "AA:BB:CC:DD:EE:03"),
+        ]
+        .map(|(ip, mac)| PowerShelfEndpoint {
+            pmc_ip: ip.parse().unwrap(),
+            pmc_mac: mac.parse().unwrap(),
+            pmc_vendor: PowerShelfVendor::Liteon,
+            pmc_credentials: Credentials::UsernamePassword {
+                username: "admin".into(),
+                password: "test-password".into(),
+            },
+        });
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let service = TestPsm {
+            inventory: vec![
+                psm::PowerShelf {
+                    pmc: Some(psm::PowerManagementController {
+                        mac_address: "not-a-mac".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                psm::PowerShelf {
+                    pmc: Some(psm::PowerManagementController {
+                        mac_address: "0AA:BB:CC:DD:EE:1".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                psm::PowerShelf {
+                    pmc: Some(psm::PowerManagementController {
+                        mac_address: "aa:bb:cc:dd:ee:01".into(),
+                        ..Default::default()
+                    }),
+                    psus: vec![
+                        psm::PowerSupplyUnit {
+                            power_state: false,
+                            ..Default::default()
+                        },
+                        psm::PowerSupplyUnit {
+                            power_state: true,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                psm::PowerShelf {
+                    pmc: Some(psm::PowerManagementController {
+                        mac_address: "AA:BB:CC:DD:EE:03".into(),
+                        ..Default::default()
+                    }),
+                    psus: vec![psm::PowerSupplyUnit {
+                        power_state: false,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            calls: calls.clone(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind PSM test server");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(
+            Server::builder()
+                .add_service(psm::powershelf_manager_server::PowershelfManagerServer::new(service))
+                .serve_with_incoming(TcpIncoming::from(listener)),
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let backend = PsmPowerShelfBackend::connect(&url, None).await?;
+            backend.get_power_state(&endpoints).await
+        })
+        .await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+
+        assert_eq!(
+            result
+                .expect("power read timeout")
+                .expect("read PSM inventory"),
+            vec![
+                ComponentPowerStateResult {
+                    mac_address: endpoints[0].pmc_mac,
+                    power_state: Err("power shelf not found in PSM inventory".into()),
+                },
+                ComponentPowerStateResult {
+                    mac_address: endpoints[1].pmc_mac,
+                    power_state: Ok(Some(PowerState::On)),
+                },
+                ComponentPowerStateResult {
+                    mac_address: endpoints[2].pmc_mac,
+                    power_state: Ok(Some(PowerState::Off)),
+                },
+            ],
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[
+                PsmCall::Register(vec![
+                    "AA:BB:CC:DD:EE:02".into(),
+                    "AA:BB:CC:DD:EE:01".into(),
+                    "AA:BB:CC:DD:EE:03".into(),
+                ]),
+                PsmCall::Inventory(vec![
+                    "AA:BB:CC:DD:EE:02".into(),
+                    "AA:BB:CC:DD:EE:01".into(),
+                    "AA:BB:CC:DD:EE:03".into(),
+                ]),
+            ],
+        );
     }
 
     #[tokio::test]

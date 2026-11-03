@@ -391,11 +391,10 @@ impl<B: Bmc> ExploredComputerSystem<B> {
         })
     }
 
-    pub(crate) fn secure_boot_status(&self) -> Result<SecureBootStatus, Error<B>> {
-        let secure_boot = self
-            .secure_boot
-            .as_ref()
-            .ok_or_else(Error::bmc_not_provided("SecureBoot resource"))?;
+    pub(crate) fn secure_boot_status(&self) -> Result<Option<SecureBootStatus>, Error<B>> {
+        let Some(secure_boot) = self.secure_boot.as_ref() else {
+            return Ok(None);
+        };
         let enabled = secure_boot
             .secure_boot_enable()
             .ok_or_else(Error::bmc_not_provided(
@@ -407,9 +406,9 @@ impl<B: Bmc> ExploredComputerSystem<B> {
                 .ok_or_else(Error::bmc_not_provided(
                     "SecureBootCurrentBootType in SecureBoot resource",
                 ))?;
-        Ok(SecureBootStatus {
+        Ok(Some(SecureBootStatus {
             is_enabled: enabled && current_boot == SecureBootCurrentBootType::Enabled,
-        })
+        }))
     }
 
     pub(crate) fn boot_order_first_option(&self) -> Option<&BootOption<B>> {
@@ -855,6 +854,7 @@ mod tests {
                 boot_interface_mac: None,
                 error_classifier: &|_| None,
                 retry_timeout: std::time::Duration::ZERO,
+                explore_drive_firmware: false,
             };
             let config = Config {
                 need_bios: enabled_resource == Some("Bios"),

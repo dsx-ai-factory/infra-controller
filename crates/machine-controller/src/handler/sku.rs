@@ -200,6 +200,18 @@ fn should_ignore_unassigned_machine(host_handler_params: &HostHandlerParams) -> 
         .ignore_unassigned_machines
 }
 
+pub(super) fn is_sku_verification_requested(mh_snapshot: &ManagedHostStateSnapshot) -> bool {
+    mh_snapshot
+        .host_snapshot
+        .status
+        .hw_sku
+        .as_ref()
+        .and_then(|ss| ss.verify_request_time)
+        .is_some_and(|request_time| {
+            request_time > mh_snapshot.host_snapshot.state.version.timestamp()
+        })
+}
+
 pub(crate) async fn handle_bom_validation_requested(
     host_handler_params: &HostHandlerParams,
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -260,14 +272,7 @@ pub(crate) async fn handle_bom_validation_requested(
 
     // Case 2.1: Verification explicitly requested
     // If there is a request for verification pending, update the inventory regardless of other configs
-    if let Some(verify_request_time) = mh_snapshot
-        .host_snapshot
-        .status
-        .hw_sku
-        .as_ref()
-        .and_then(|ss| ss.verify_request_time)
-        && verify_request_time > mh_snapshot.host_snapshot.state.version.timestamp()
-    {
+    if is_sku_verification_requested(mh_snapshot) {
         tracing::info!(
             machine_id=%mh_snapshot.host_snapshot.id,
             sku_id=%sku_id,
@@ -611,17 +616,7 @@ pub(crate) async fn handle_bom_validation_state(
                         })
                         .with_txn(txn),
                     )
-                } else if mh_snapshot
-                    .host_snapshot
-                    .status
-                    .hw_sku
-                    .as_ref()
-                    .is_some_and(|ss| {
-                        ss.verify_request_time.is_some_and(|t| {
-                            t > mh_snapshot.host_snapshot.state.version.timestamp()
-                        })
-                    })
-                {
+                } else if is_sku_verification_requested(mh_snapshot) {
                     // New verification requested, try again
                     advance_to_updating_inventory(txn, mh_snapshot).await
                 } else if should_allow_allocation_on_validation_failure(host_handler_params) {

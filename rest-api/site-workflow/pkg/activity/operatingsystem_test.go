@@ -386,12 +386,12 @@ func TestManageOsImageInventory_DiscoverOsImageInventory(t *testing.T) {
 			})
 
 			ctx := context.Background()
-			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockWantCount, tt.args.wantTotalItems)
 			if tt.args.findIDsError != nil {
-				ctx = context.WithValue(ctx, "wantError", tt.args.findIDsError)
+				ctx = context.WithValue(ctx, cClient.MockWantError, tt.args.findIDsError)
 			}
 			if tt.args.fallbackError != nil {
-				ctx = context.WithValue(ctx, "wantError", tt.args.fallbackError)
+				ctx = context.WithValue(ctx, cClient.MockWantError, tt.args.fallbackError)
 			}
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize

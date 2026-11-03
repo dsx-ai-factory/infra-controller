@@ -105,6 +105,21 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		// Nested route-target validation must reject conflicting VNI sources through create requests.
+		{
+			name: "test invalid VPC create request - routing profile target with VNI and vniSelf",
+			fields: fields{
+				Name:                      "test-name",
+				SiteID:                    uuid.NewString(),
+				NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
+				RoutingProfileOverrides: &APIVpcRoutingProfileOverrides{
+					RouteTargetImports: &APIVpcRouteTargets{
+						{ASN: 64_512, VNI: cutil.GetPtr(uint32(0)), VniSelf: true},
+					},
+				},
+			},
+			wantErr: true,
+		},
 		// Explicit non-FNN requests identify the rejected virtualization type.
 		{
 			name: "test invalid VPC create request - routing profile overrides on non-FNN VPC",
@@ -326,6 +341,19 @@ func TestAPIVpcUpdateRequest_Validate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		// Nested route-target validation must independently reject conflicting VNI sources through updates.
+		{
+			name: "test invalid VPC update request - routing profile target with VNI and vniSelf",
+			fields: fields{
+				Name: "test-name",
+				RoutingProfileOverrides: &APIVpcRoutingProfileOverrides{
+					RouteTargetImports: &APIVpcRouteTargets{
+						{ASN: 64_512, VNI: cutil.GetPtr(uint32(0)), VniSelf: true},
+					},
+				},
+			},
+			wantErr: true,
+		},
 		{
 			name: "test valid VPC update request - invalid names are specified names exceeded 256 char",
 			fields: fields{
@@ -396,27 +424,48 @@ func TestAPIVpcUpdateRequest_Validate(t *testing.T) {
 	}
 }
 
-// TestAPIVpcRoutingProfileOverrides_Validate verifies the API rejects values
-// that cannot be represented by Core while preserving valid presence semantics.
+// TestAPIVpcRoutingProfileOverrides_Validate verifies the API rejects conflicting
+// route-target sources and malformed prefixes while preserving valid presence semantics.
 func TestAPIVpcRoutingProfileOverrides_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
 		profile *APIVpcRoutingProfileOverrides
 		wantErr bool
 	}{
-		// Empty lists, duplicate prefixes, host bits, and both IP families are valid Core inputs.
+		// REST validation accepts empty lists, duplicate prefixes, host bits, both IP families, and full-width integers.
 		{
-			name: "accepts Core-compatible values",
+			name: "accepts REST-supported values",
 			profile: &APIVpcRoutingProfileOverrides{
 				RouteTargetImports: &APIVpcRouteTargets{
-					{ASN: 0, VNI: 0},
-					{ASN: math.MaxUint32, VNI: math.MaxUint32},
+					{ASN: 0, VNI: cutil.GetPtr(uint32(0))}, // Literal zero remains a supported predecessor value.
+					{ASN: math.MaxUint32, VNI: cutil.GetPtr(uint32(math.MaxUint32))},
+					{ASN: 64_512, VniSelf: true}, // Symbolic resolution carries no competing literal.
 				},
 				RouteTargetsOnExports:        &APIVpcRouteTargets{},
 				AcceptedLeaksFromUnderlay:    &[]string{"10.0.0.1/24", "10.0.0.1/24", "2001:db8::1/64"},
 				AllowedAnycastPrefixes:       &[]string{},
 				LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
 			},
+		},
+		// Supplying both sources is ambiguous and must fail before the request reaches Core.
+		{
+			name: "rejects symbolic target with nonzero literal",
+			profile: &APIVpcRoutingProfileOverrides{
+				RouteTargetImports: &APIVpcRouteTargets{
+					{ASN: 64_512, VNI: cutil.GetPtr(uint32(17)), VniSelf: true},
+				},
+			},
+			wantErr: true,
+		},
+		// Explicit literal zero is still a competing source and must be rejected.
+		{
+			name: "rejects symbolic export target with literal zero",
+			profile: &APIVpcRoutingProfileOverrides{
+				RouteTargetsOnExports: &APIVpcRouteTargets{
+					{ASN: 64_512, VNI: cutil.GetPtr(uint32(0)), VniSelf: true},
+				},
+			},
+			wantErr: true,
 		},
 		// Malformed prefixes must not reach Core's IpNetwork parser.
 		{
@@ -443,7 +492,12 @@ func TestAPIVpcRoutingProfileOverrides_Validate(t *testing.T) {
 // TestAPIVpcRoutingProfileOverrides_ToDB verifies optional values retain their
 // presence and explicit-empty semantics in the persisted representation.
 func TestAPIVpcRoutingProfileOverrides_ToDB(t *testing.T) {
-	imports := APIVpcRouteTargets{{ASN: 64512, VNI: 17}}
+	// Include nonzero, zero, and symbolic targets because literal-zero presence is significant.
+	imports := APIVpcRouteTargets{
+		{ASN: 64_512, VNI: cutil.GetPtr(uint32(17))},
+		{ASN: 64_513, VNI: cutil.GetPtr(uint32(0))},
+		{ASN: 64_514, VniSelf: true},
+	}
 	emptyTargets := APIVpcRouteTargets{}
 	emptyPrefixes := []string{}
 	profile := &APIVpcRoutingProfileOverrides{
@@ -458,7 +512,11 @@ func TestAPIVpcRoutingProfileOverrides_ToDB(t *testing.T) {
 	dbProfile := profile.ToDB()
 	require.NotNil(t, dbProfile)
 	require.NotNil(t, dbProfile.RouteTargetImports)
-	assert.Equal(t, []cdbm.VpcRouteTarget{{ASN: 64512, VNI: 17}}, *dbProfile.RouteTargetImports)
+	assert.Equal(t, []cdbm.VpcRouteTarget{
+		{ASN: 64_512, VNI: 17},
+		{ASN: 64_513, VNI: 0},
+		{ASN: 64_514, VniSelf: true},
+	}, *dbProfile.RouteTargetImports)
 	require.NotNil(t, dbProfile.RouteTargetsOnExports)
 	assert.Empty(t, *dbProfile.RouteTargetsOnExports)
 	require.NotNil(t, dbProfile.LeakDefaultRouteFromUnderlay)
@@ -470,10 +528,16 @@ func TestAPIVpcRoutingProfileOverrides_ToDB(t *testing.T) {
 // TestAPIVpcRoutingProfileOverrides_FromDB verifies persisted optional values
 // retain their presence and explicit-empty semantics in the API representation.
 func TestAPIVpcRoutingProfileOverrides_FromDB(t *testing.T) {
+	// Include nonzero, zero, and symbolic targets because literal-zero presence is significant.
+	imports := []cdbm.VpcRouteTarget{
+		{ASN: 64_512, VNI: 17},
+		{ASN: 64_513, VNI: 0},
+		{ASN: 64_514, VniSelf: true},
+	}
 	emptyTargets := []cdbm.VpcRouteTarget{}
 	emptyPrefixes := []string{}
 	dbProfile := &cdbm.VpcRoutingProfileOverrides{
-		RouteTargetImports:            &[]cdbm.VpcRouteTarget{{ASN: 64512, VNI: 17}},
+		RouteTargetImports:            &imports,
 		RouteTargetsOnExports:         &emptyTargets,
 		LeakDefaultRouteFromUnderlay:  cutil.GetPtr(false),
 		TenantLeakCommunitiesAccepted: cutil.GetPtr(true),
@@ -484,7 +548,11 @@ func TestAPIVpcRoutingProfileOverrides_FromDB(t *testing.T) {
 	profile := &APIVpcRoutingProfileOverrides{}
 	profile.FromDB(dbProfile)
 	require.NotNil(t, profile.RouteTargetImports)
-	assert.Equal(t, APIVpcRouteTargets{{ASN: 64512, VNI: 17}}, *profile.RouteTargetImports)
+	assert.Equal(t, APIVpcRouteTargets{
+		{ASN: 64_512, VNI: cutil.GetPtr(uint32(17))},
+		{ASN: 64_513, VNI: cutil.GetPtr(uint32(0))},
+		{ASN: 64_514, VniSelf: true},
+	}, *profile.RouteTargetImports)
 	require.NotNil(t, profile.RouteTargetsOnExports)
 	assert.Empty(t, *profile.RouteTargetsOnExports)
 	require.NotNil(t, profile.LeakDefaultRouteFromUnderlay)
@@ -686,6 +754,12 @@ func TestNewAPIVpc(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := NewAPIVpc(tt.args.dbVpc, tt.args.dbsds, false)
+			encoded, err := json.Marshal(got)
+			require.NoError(t, err)
+			var response map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &response))
+			require.Contains(t, response, "networkSecurityGroupPropagationDetails")
+			assert.JSONEq(t, "null", string(response["networkSecurityGroupPropagationDetails"]))
 
 			assert.Equal(t, tt.want.ID, got.ID)
 			assert.Equal(t, tt.want.Name, got.Name)
@@ -714,12 +788,15 @@ func TestNewAPIVpc(t *testing.T) {
 		})
 	}
 
+	// Pair symbolic desired state with concrete effective state to prove VNI presence remains distinct.
 	profileVpc := cdbm.Vpc{
 		ID: uuid.New(),
 		RoutingProfileOverrides: &cdbm.VpcRoutingProfileOverrides{
+			RouteTargetImports:           &[]cdbm.VpcRouteTarget{{ASN: 64_512, VniSelf: true}},
 			LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
 		},
 		EffectiveRoutingProfile: &cdbm.VpcEffectiveRoutingProfile{
+			RouteTargetImports:           []cdbm.VpcRouteTarget{{ASN: 64_512, VNI: 4_001}},
 			LeakDefaultRouteFromUnderlay: true,
 			Internal:                     true,
 			AccessTier:                   7,
@@ -730,6 +807,17 @@ func TestNewAPIVpc(t *testing.T) {
 		// Desired configuration remains visible even when the resolved state is gated.
 		unprivileged := NewAPIVpc(profileVpc, nil, false)
 		require.NotNil(t, unprivileged.RoutingProfileOverrides)
+		require.NotNil(t, unprivileged.RoutingProfileOverrides.RouteTargetImports)
+		require.Len(t, *unprivileged.RoutingProfileOverrides.RouteTargetImports, 1)
+		desiredTarget := (*unprivileged.RoutingProfileOverrides.RouteTargetImports)[0]
+		assert.Nil(t, desiredTarget.VNI)
+		assert.True(t, desiredTarget.VniSelf)
+
+		// Symbolic responses omit vni instead of conflating absence with literal zero.
+		encodedTarget, err := json.Marshal(desiredTarget)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"asn":64512,"vniSelf":true}`, string(encodedTarget))
+
 		assert.Nil(t, unprivileged.EffectiveRoutingProfile)
 		unprivilegedJSON, err := json.Marshal(unprivileged)
 		require.NoError(t, err)
@@ -740,12 +828,21 @@ func TestNewAPIVpc(t *testing.T) {
 		// Authorized responses expose resolved values and canonical empty lists.
 		privileged := NewAPIVpc(profileVpc, nil, true)
 		require.NotNil(t, privileged.EffectiveRoutingProfile)
+		require.Len(t, privileged.EffectiveRoutingProfile.RouteTargetImports, 1)
+		require.NotNil(t, privileged.EffectiveRoutingProfile.RouteTargetImports[0].VNI)
+		assert.Equal(t, uint32(4_001), *privileged.EffectiveRoutingProfile.RouteTargetImports[0].VNI)
+		assert.False(t, privileged.EffectiveRoutingProfile.RouteTargetImports[0].VniSelf)
 		assert.True(t, privileged.EffectiveRoutingProfile.Internal)
 		assert.Equal(t, uint32(7), privileged.EffectiveRoutingProfile.AccessTier)
 		assert.NotNil(t, privileged.EffectiveRoutingProfile.AcceptedLeaksFromUnderlay)
 		assert.Empty(t, privileged.EffectiveRoutingProfile.AcceptedLeaksFromUnderlay)
 		assert.NotNil(t, privileged.EffectiveRoutingProfile.AllowedAnycastPrefixes)
 		assert.Empty(t, privileged.EffectiveRoutingProfile.AllowedAnycastPrefixes)
+
+		// Preserve the false value so responses expose the complete route-target contract.
+		encoded, err := json.Marshal(privileged)
+		require.NoError(t, err)
+		assert.Contains(t, string(encoded), `"vniSelf":false`)
 	})
 }
 

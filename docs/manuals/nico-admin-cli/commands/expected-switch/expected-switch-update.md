@@ -12,7 +12,7 @@ nico-admin-cli-expected-switch-update - Update expected switch
 nico-admin-cli expected-switch update
 [-a|--bmc-mac-address] [--id]
 [-u|--bmc-username] [-p|--bmc-password]
-[-s|--switch-serial-number] [--nvos-mac-address]
+[-s|--switch-serial-number] [--nvos-interface]
 [--nvos-username] [--nvos-password] [--meta-name]
 [--meta-description] [--label] [--rack_id]
 [--bmc-ip-address] [--extended] [--nvos-ip-address]
@@ -27,7 +27,9 @@ Update an expected switch.
 Select the switch by either BMC MAC address or ID. Supply at least one
 update field. Omitted fields and empty metadata names or descriptions
 remain unchanged. Supplied labels replace the whole label collection.
-Supplied NVOS MAC addresses replace the stored list.
+Supplied NVOS ports (--nvos-interface) replace the stored set as a
+whole, so move the primary by resending every port with the new
+',primary' marker.
 
 Supply a username, password, or both for BMC or NVOS. Each omitted
 credential field keeps its stored value. NVOS credentials must contain
@@ -71,9 +73,12 @@ BMC password of the expected switch
 
 Switch serial number of the expected switch
 
-`--nvos-mac-address <NVOS_MAC_ADDRESSES>`
+`--nvos-interface <MAC[,primary]>`
 
-NVOS MAC address(es) of the expected switch
+An NVOS ethernet port of the expected switch. Repeat for each port to
+replace the stored set. Append ',primary' to mark the primary port
+(eth0); when none is marked the first is primary and a single port is
+always primary
 
 `--nvos-username <NVOS_USERNAME>`
 
@@ -117,13 +122,10 @@ internal UUIDs that are used to associate instances.
 `--nvos-ip-address <NVOS_IP_ADDRESS>`
 
 Static IP for the single wired NVOS port. The updated switch must have
-exactly one NVOS MAC address. When Core supports PATCH or masked
-updates, omit --nvos-mac-address only if the stored list already
-contains exactly one MAC; otherwise, supply exactly one
---nvos-mac-address to replace the list. Older servers that support NVOS
-IPs but replace the full record require exactly one --nvos-mac-address
-in this command; omitted fields can be cleared. Servers without NVOS IP
-support ignore this field
+exactly one NVOS port. When Core supports PATCH or masked updates, omit
+--nvos-interface only if the stored set already contains exactly one
+port; otherwise, supply exactly one --nvos-interface to replace the set. 
+Servers without NVOS IP support ignore this field
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
@@ -157,6 +159,7 @@ nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --bmc-
 nico-admin-cli expected-switch update --id 12345678-1234-5678-90ab-cdef01234567 --switch-serial-number DGX-H100-640GB
 nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --nvos-password mynewpassword
 nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --nvos-username admin --nvos-password mynewpassword
+nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 --nvos-interface aa:bb:cc:dd:ee:ff,primary --nvos-interface aa:bb:cc:dd:ee:00
 ```
 
 ---

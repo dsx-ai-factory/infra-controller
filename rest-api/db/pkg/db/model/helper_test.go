@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -22,6 +23,7 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -82,8 +84,6 @@ func testInitDB(t *testing.T) *db.Session {
 		bundebug.WithEnabled(false),
 		bundebug.FromEnv(""),
 	))
-
-	rand.Seed(time.Now().UnixNano())
 
 	return dbSession
 }
@@ -443,7 +443,7 @@ func testGenerateStarfleetID() string {
 
 func testGenerateMacAddress(t *testing.T) string {
 	buf := make([]byte, 6)
-	_, err := rand.Read(buf)
+	_, err := cryptorand.Read(buf)
 	assert.NoError(t, err)
 	// Set the local bit
 	buf[0] = (buf[0] | 2) & 0xfe // Set local bit, ensure unicast address
@@ -453,7 +453,7 @@ func testGenerateMacAddress(t *testing.T) string {
 // testCommonTraceProviderSetup creates a test provider and spanner
 func testCommonTraceProviderSetup(t *testing.T, ctx context.Context) (trace.Tracer, trace.SpanContext, context.Context) {
 	// OTEL spanner configuration
-	provider := trace.NewNoopTracerProvider()
+	provider := noop.NewTracerProvider()
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID: trace.TraceID{0x01},
 		SpanID:  trace.SpanID{0x01},

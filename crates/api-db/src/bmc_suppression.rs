@@ -17,7 +17,9 @@
 
 //! Per-subsystem suppression requests for BMC MAC addresses.
 
+use carbide_uuid::DbTable;
 use mac_address::MacAddress;
+use model::allocation_type::AllocationType;
 use model::bmc_suppression::{
     BmcSuppression, BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
 };
@@ -34,7 +36,8 @@ pub async fn upsert(
     txn: &mut PgConnection,
     input: &NewBmcSuppression,
 ) -> DatabaseResult<BmcSuppression> {
-    const QUERY: &str = "INSERT INTO bmc_suppressions (
+    let query = format!(
+        "INSERT INTO bmc_suppressions (
         bmc_mac_address,
         subsystem,
         source,
@@ -42,22 +45,18 @@ pub async fn upsert(
     ) VALUES ($1, $2, $3, $4)
     ON CONFLICT (bmc_mac_address, subsystem, source) DO UPDATE SET
         reason = EXCLUDED.reason
-    RETURNING
-        bmc_mac_address,
-        subsystem,
-        source,
-        reason,
-        requested_at,
-        acknowledged_at";
+    RETURNING {}",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(input.bmc_mac_address)
         .bind(input.subsystem)
         .bind(input.source)
         .bind(&input.reason)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns the suppression rows for the selected BMC MAC addresses in
@@ -69,21 +68,48 @@ pub async fn find_many(
     subsystem: BmcSuppressionSubsystem,
     source: BmcSuppressionSource,
 ) -> DatabaseResult<Vec<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        source,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
     WHERE bmc_mac_address = ANY($1) AND subsystem = $2 AND source = $3
-    ORDER BY bmc_mac_address";
+    ORDER BY bmc_mac_address",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(bmc_mac_addresses)
         .bind(subsystem)
         .bind(source)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(&query, e))
+}
+
+/// Returns all suppression sources for a BMC in the selected subsystem.
+pub async fn find_for_bmc(
+    db: impl DbReader<'_>,
+    bmc_mac_address: MacAddress,
+    subsystem: BmcSuppressionSubsystem,
+) -> DatabaseResult<Vec<BmcSuppressionSource>> {
+    const QUERY: &str =
+        "SELECT source FROM bmc_suppressions WHERE bmc_mac_address = $1 AND subsystem = $2";
+    sqlx::query_scalar(QUERY)
+        .bind(bmc_mac_address)
+        .bind(subsystem)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
+/// Returns endpoint IPs paused by DPF provisioning, using their BMC interface identity.
+pub async fn dpf_suppressed_ips(db: impl DbReader<'_>) -> DatabaseResult<Vec<std::net::IpAddr>> {
+    const QUERY: &str = "SELECT DISTINCT mia.address FROM bmc_suppressions s
+        JOIN machine_interfaces mi ON mi.mac_address = s.bmc_mac_address
+        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+        WHERE s.subsystem = $1 AND s.source = $2";
+    sqlx::query_scalar(QUERY)
+        .bind(BmcSuppressionSubsystem::SiteExplorer)
+        .bind(BmcSuppressionSource::DpfProvisioning)
         .fetch_all(db)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
@@ -96,29 +122,33 @@ pub async fn find(
     subsystem: BmcSuppressionSubsystem,
     source: BmcSuppressionSource,
 ) -> DatabaseResult<Option<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        source,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
-    WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3";
+    WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(bmc_mac_address)
         .bind(subsystem)
         .bind(source)
         .fetch_optional(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
-/// Whether decommissioning must still wait for this endpoint to acknowledge DHCP suppression.
-/// An acknowledgement or an expected static IP without DHCP history satisfies the wait.
-/// Missing interface records do not establish DHCP history. If a MAC has several
-/// interfaces, every record must have a null `last_dhcp` before bypassing the wait.
+/// Returns whether decommissioning still needs a DHCP suppression acknowledgement.
+///
+/// A recorded DHCP acknowledgement for decommissioning satisfies the wait.
+/// Otherwise, skip it only when the MAC has at least one interface, every
+/// interface has a current static allocation, and none of its addresses fall
+/// within a configured network prefix. NICo cannot rely on seeing DHCP for
+/// these external addresses.
+///
+/// Check the addresses themselves: assigning another address family can move
+/// a managed reservation onto `static-assignments`, and older external
+/// allocations can remain on ordinary segments.
 pub async fn is_dhcp_acknowledgement_pending(
     db: impl DbReader<'_>,
     mac_address: MacAddress,
@@ -128,38 +158,24 @@ pub async fn is_dhcp_acknowledgement_pending(
             SELECT 1 FROM bmc_suppressions
             WHERE bmc_mac_address = $1 AND subsystem = $2 AND source = $3
                 AND acknowledged_at IS NOT NULL
-        ) AND NOT (
-            EXISTS (
-                SELECT 1 FROM machine_interfaces
-                WHERE mac_address = $1 AND last_dhcp IS NULL
+        ) AND NOT COALESCE((
+            SELECT bool_and(EXISTS (
+                SELECT 1 FROM machine_interface_addresses address
+                WHERE address.interface_id = interface.id AND address.allocation_type = $4
             ) AND NOT EXISTS (
-                SELECT 1 FROM machine_interfaces
-                WHERE mac_address = $1 AND last_dhcp IS NOT NULL
-            ) AND (
-                EXISTS (
-                    SELECT 1 FROM expected_machines
-                    WHERE bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL
-                ) OR EXISTS (
-                    SELECT 1 FROM expected_machines,
-                        LATERAL jsonb_array_elements(host_nics) AS interface
-                    WHERE interface->>'mac_address' = $4
-                        AND interface->>'fixed_ip' IS NOT NULL
-                ) OR EXISTS (
-                    SELECT 1 FROM expected_switches
-                    WHERE (bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL)
-                        OR ($1 = ANY(nvos_mac_addresses) AND nvos_ip_address IS NOT NULL)
-                ) OR EXISTS (
-                    SELECT 1 FROM expected_power_shelves
-                    WHERE bmc_mac_address = $1 AND bmc_ip_address IS NOT NULL
-                )
-            )
-        )";
+                SELECT 1 FROM machine_interface_addresses address
+                JOIN network_prefixes prefix ON address.address <<= prefix.prefix
+                WHERE address.interface_id = interface.id
+            ))
+            FROM machine_interfaces interface
+            WHERE interface.mac_address = $1
+        ), false)";
 
     sqlx::query_scalar(QUERY)
         .bind(mac_address)
         .bind(BmcSuppressionSubsystem::Dhcp)
         .bind(BmcSuppressionSource::Decommissioning)
-        .bind(mac_address.to_string())
+        .bind(AllocationType::Static)
         .fetch_one(db)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
@@ -170,22 +186,19 @@ pub async fn find_all_by_subsystem(
     db: impl DbReader<'_>,
     subsystem: BmcSuppressionSubsystem,
 ) -> DatabaseResult<Vec<BmcSuppression>> {
-    const QUERY: &str = "SELECT
-        bmc_mac_address,
-        subsystem,
-        source,
-        reason,
-        requested_at,
-        acknowledged_at
+    let query = format!(
+        "SELECT {}
     FROM bmc_suppressions
     WHERE subsystem = $1
-    ORDER BY bmc_mac_address, source";
+    ORDER BY bmc_mac_address, source",
+        BmcSuppression::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(subsystem)
         .fetch_all(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Acknowledges pending suppression requests for the selected BMC MAC addresses.
@@ -326,7 +339,10 @@ pub async fn delete_many_for_source(
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::assert_outcome;
     use mac_address::MacAddress;
+    use model::allocation_type::AllocationType;
     use model::bmc_suppression::{
         BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
     };
@@ -361,111 +377,185 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn dhcp_acknowledgement_bypass_requires_expected_static_ip_and_no_dhcp_history(
-        pool: sqlx::PgPool,
-    ) {
+    async fn dhcp_wait_uses_current_interface_assignments(pool: sqlx::PgPool) {
+        struct Interface<'a> {
+            segment: uuid::Uuid,
+            addresses: &'a [(std::net::IpAddr, AllocationType)],
+            has_dhcp_history: bool,
+        }
+
         let mut txn = pool.begin().await.unwrap();
-        sqlx::query(
-            r#"INSERT INTO expected_machines
-                (serial_number, bmc_mac_address, bmc_username, bmc_password, bmc_ip_address, host_nics)
-            VALUES
-                ('static-machine', '02:00:00:00:00:01', 'root', 'password', '192.0.2.1',
-                 $1),
-                ('dynamic-machine', '02:00:00:00:00:06', 'root', 'password', NULL, '[]'),
-                ('missing-interface', '02:00:00:00:00:07', 'root', 'password', '192.0.2.7', '[]'),
-                ('observed-dhcp', '02:00:00:00:00:08', 'root', 'password', '192.0.2.8', '[]'),
-                ('mixed-history', '02:00:00:00:00:09', 'root', 'password', '192.0.2.9', '[]')"#,
-        )
-        .bind(sqlx::types::Json(serde_json::json!([
-            {"mac_address": mac(2), "fixed_ip": "192.0.2.2"},
-            {"mac_address": mac(12), "fixed_ip": null},
-            {"mac_address": mac(14), "fixed_ip": "192.0.2.14"},
-            {"mac_address": "invalid-mac", "fixed_ip": "192.0.2.99"},
-        ])))
-        .execute(txn.as_mut())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO expected_switches
-                (serial_number, bmc_mac_address, bmc_username, bmc_password,
-                 bmc_ip_address, nvos_mac_addresses, nvos_ip_address)
-            VALUES
-                ('static-switch', '02:00:00:00:00:03', 'root', 'password',
-                 '192.0.2.3', ARRAY['02:00:00:00:00:04'::macaddr], '192.0.2.4'),
-                ('dynamic-nvos', '02:00:00:00:00:0d', 'root', 'password',
-                 '192.0.2.13', ARRAY['02:00:00:00:00:0b'::macaddr], NULL)",
-        )
-        .execute(txn.as_mut())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO expected_power_shelves
-                (serial_number, bmc_mac_address, bmc_username, bmc_password, bmc_ip_address)
-            VALUES ('static-shelf', '02:00:00:00:00:05', 'root', 'password', '192.0.2.5')",
-        )
-        .execute(txn.as_mut())
-        .await
-        .unwrap();
-        let segment_id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO network_segments (name, version, network_segment_type)
-             VALUES ('dhcp-wait-test', 'V1-T0', 'underlay') RETURNING id",
-        )
-        .fetch_one(txn.as_mut())
-        .await
-        .unwrap();
-        for last in [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14] {
-            sqlx::query(
-                "INSERT INTO machine_interfaces
-                    (segment_id, mac_address, primary_interface, hostname, last_dhcp)
-                 VALUES ($1, $2, false, 'dhcp-wait-test',
-                    CASE WHEN $3 THEN now() ELSE NULL END)",
+        let mut segments = Vec::new();
+        for name in [
+            "dhcp-wait-test",
+            crate::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME,
+        ] {
+            let id: uuid::Uuid = sqlx::query_scalar(
+                "INSERT INTO network_segments (name, version, network_segment_type)
+                 VALUES ($1, 'V1-T0', 'underlay') RETURNING id",
             )
-            .bind(segment_id)
-            .bind(mac(last))
-            .bind(last == 8)
-            .execute(txn.as_mut())
+            .bind(name)
+            .fetch_one(txn.as_mut())
             .await
             .unwrap();
+            segments.push(id);
         }
-        let other_segment_id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO network_segments (name, version, network_segment_type)
-             VALUES ('other-dhcp-wait-test', 'V1-T0', 'underlay') RETURNING id",
-        )
-        .fetch_one(txn.as_mut())
-        .await
-        .unwrap();
+        let [managed, external]: [uuid::Uuid; 2] = segments.try_into().unwrap();
         sqlx::query(
-            "INSERT INTO machine_interfaces
-                (segment_id, mac_address, primary_interface, hostname, last_dhcp)
-             VALUES ($1, $2, false, 'other-dhcp-wait-test', now())",
+            "INSERT INTO network_prefixes (segment_id, prefix)
+             VALUES ($1, '192.0.2.0/24'), ($1, '2001:db8::/64')",
         )
-        .bind(other_segment_id)
-        .bind(mac(9))
+        .bind(managed)
         .execute(txn.as_mut())
         .await
         .unwrap();
 
-        for (scenario, last, bypass) in [
-            ("expected machine BMC", 1, true),
-            ("expected machine interface", 2, true),
-            ("serialized MAC with hex letters", 14, true),
-            ("expected switch BMC", 3, true),
-            ("expected switch NVOS", 4, true),
-            ("expected power shelf BMC", 5, true),
-            ("expected BMC without a static IP", 6, false),
-            ("missing interface is not null DHCP history", 7, false),
-            ("static IP with observed DHCP", 8, false),
-            ("one interface has DHCP history", 9, false),
-            ("no expected declaration", 10, false),
-            ("static BMC does not exempt dynamic NVOS", 11, false),
-            ("fixed IP on a different machine interface", 12, false),
+        // Expected inventory alone must not exempt a managed reservation.
+        // Legacy external assignments can also exist on ordinary segments.
+        sqlx::query(
+            "INSERT INTO expected_machines
+                (serial_number, bmc_mac_address, bmc_username, bmc_password, bmc_ip_address)
+             VALUES
+                ('managed-reservation', '02:00:00:00:00:01', 'root', 'password', '192.0.2.2'),
+                ('legacy-external', '02:00:00:00:00:06', 'root', 'password', '198.51.100.12')",
+        )
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+
+        for (scenario, last, interfaces, pending) in [
+            (
+                "managed reservation before its first DHCP request",
+                1,
+                &[Interface {
+                    segment: managed,
+                    addresses: &[("192.0.2.2".parse().unwrap(), AllocationType::Static)],
+                    has_dhcp_history: false,
+                }][..],
+                true,
+            ),
+            (
+                "external assignment with old DHCP history and no expected inventory",
+                2,
+                &[Interface {
+                    segment: external,
+                    addresses: &[("198.51.100.4".parse().unwrap(), AllocationType::Static)],
+                    has_dhcp_history: true,
+                }][..],
+                false,
+            ),
+            (
+                "removed external assignment awaiting DHCP reconciliation",
+                3,
+                &[Interface {
+                    segment: external,
+                    addresses: &[],
+                    has_dhcp_history: false,
+                }][..],
+                true,
+            ),
+            (
+                "external and managed interfaces sharing a MAC",
+                4,
+                &[
+                    Interface {
+                        segment: external,
+                        addresses: &[("198.51.100.8".parse().unwrap(), AllocationType::Static)],
+                        has_dhcp_history: false,
+                    },
+                    Interface {
+                        segment: managed,
+                        addresses: &[("192.0.2.9".parse().unwrap(), AllocationType::Static)],
+                        has_dhcp_history: false,
+                    },
+                ][..],
+                true,
+            ),
+            (
+                "removed external assignment with retained DHCP outside managed prefixes",
+                5,
+                &[Interface {
+                    segment: external,
+                    addresses: &[("198.51.100.10".parse().unwrap(), AllocationType::Dhcp)],
+                    has_dhcp_history: true,
+                }][..],
+                true,
+            ),
+            (
+                "legacy external assignment on an ordinary segment",
+                6,
+                &[Interface {
+                    segment: managed,
+                    addresses: &[("198.51.100.12".parse().unwrap(), AllocationType::Static)],
+                    has_dhcp_history: false,
+                }][..],
+                false,
+            ),
+            (
+                "external static IPv4 with managed DHCP IPv6 on one interface",
+                7,
+                &[Interface {
+                    segment: external,
+                    addresses: &[
+                        ("198.51.100.14".parse().unwrap(), AllocationType::Static),
+                        ("2001:db8::10".parse().unwrap(), AllocationType::Dhcp),
+                    ],
+                    has_dhcp_history: true,
+                }][..],
+                true,
+            ),
+            (
+                "external and addressless interfaces sharing a MAC",
+                8,
+                &[
+                    Interface {
+                        segment: external,
+                        addresses: &[("198.51.100.16".parse().unwrap(), AllocationType::Static)],
+                        has_dhcp_history: false,
+                    },
+                    Interface {
+                        segment: managed,
+                        addresses: &[],
+                        has_dhcp_history: false,
+                    },
+                ][..],
+                true,
+            ),
         ] {
-            assert_eq!(
+            upsert(txn.as_mut(), &upsert_input(last, DHCP, scenario))
+                .await
+                .unwrap();
+            for interface in interfaces {
+                let interface_id = sqlx::query_scalar(
+                    "INSERT INTO machine_interfaces
+                        (segment_id, mac_address, primary_interface, hostname, last_dhcp)
+                     VALUES ($1, $2, false, 'dhcp-wait-test',
+                        CASE WHEN $3 THEN now() ELSE NULL END)
+                     RETURNING id",
+                )
+                .bind(interface.segment)
+                .bind(mac(last))
+                .bind(interface.has_dhcp_history)
+                .fetch_one(txn.as_mut())
+                .await
+                .unwrap();
+                for &(address, allocation_type) in interface.addresses {
+                    crate::machine_interface_address::insert(
+                        txn.as_mut(),
+                        interface_id,
+                        address,
+                        allocation_type,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            assert_outcome(
                 super::is_dhcp_acknowledgement_pending(txn.as_mut(), mac(last))
                     .await
-                    .unwrap(),
-                !bypass,
-                "{scenario}",
+                    .map_err(|error| error.to_string()),
+                Yields(pending),
+                scenario,
             );
         }
     }
@@ -756,6 +846,10 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(retried.bmc_mac_address, mac(1));
+        assert_eq!(retried.subsystem, SITE_EXPLORER);
+        assert_eq!(retried.source, DECOMMISSIONING);
+        assert_eq!(retried.reason, "decommissioning retry");
         assert_eq!(retried.requested_at, initial.requested_at);
         assert_eq!(retried.acknowledged_at, initial.acknowledged_at);
 
@@ -949,6 +1043,54 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+    #[crate::sqlx_test]
+    async fn dpf_source_migration_preserves_existing_suppressions(pool: sqlx::PgPool) {
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::raw_sql(
+            "ALTER TABLE bmc_suppressions DROP CONSTRAINT bmc_suppressions_source_check;
+            ALTER TABLE bmc_suppressions ADD CONSTRAINT bmc_suppressions_source_check
+            CHECK (source IN ('decommissioning', 'bmc_credential_rotation', 'factory_reset_bmc'));",
+        )
+        .execute(conn.as_mut())
+        .await
+        .unwrap();
+        for (last, source) in [
+            (1, DECOMMISSIONING),
+            (2, ROTATION),
+            (3, BmcSuppressionSource::FactoryResetBmc),
+        ] {
+            let mut input = upsert_input(last, SITE_EXPLORER, "active workflow");
+            input.source = source;
+            upsert(conn.as_mut(), &input).await.unwrap();
+        }
+        let before = find_all_by_subsystem(conn.as_mut(), SITE_EXPLORER)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261019084224_dpf_provisioning_suppression.sql"
+        ))
+        .execute(conn.as_mut())
+        .await
+        .unwrap();
+        assert_eq!(
+            find_all_by_subsystem(conn.as_mut(), SITE_EXPLORER)
+                .await
+                .unwrap(),
+            before
+        );
+        let mut input = upsert_input(4, SITE_EXPLORER, "DPF provisioning");
+        input.source = BmcSuppressionSource::DpfProvisioning;
+        upsert(conn.as_mut(), &input).await.unwrap();
+        super::delete(conn.as_mut(), mac(4), SITE_EXPLORER, input.source)
+            .await
+            .unwrap();
+        assert_eq!(
+            find_all_by_subsystem(conn.as_mut(), SITE_EXPLORER)
+                .await
+                .unwrap(),
+            before
         );
     }
 }

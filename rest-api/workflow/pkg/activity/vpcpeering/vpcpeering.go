@@ -50,7 +50,7 @@ func (mvp ManageVpcPeering) UpdateVpcPeeringsInDB(
 
 	// Check if Site exists in DB
 	stDAO := cdbm.NewSiteDAO(mvp.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received VPC Peering inventory for unknown or deleted Site")

@@ -14,8 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
+use carbide_uuid::DbTable;
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::vpc::VpcId;
 use model::resource_pool::OwnerType;
@@ -32,15 +35,18 @@ pub async fn persist(
     value: VpcDpuLoopback,
     txn: &mut PgConnection,
 ) -> Result<VpcDpuLoopback, DatabaseError> {
-    let query = "INSERT INTO vpc_dpu_loopbacks (dpu_id, vpc_id, loopback_ip)
-                           VALUES ($1, $2, $3) RETURNING dpu_id, vpc_id, loopback_ip";
-    sqlx::query_as(query)
+    let query = format!(
+        "INSERT INTO vpc_dpu_loopbacks (dpu_id, vpc_id, loopback_ip)
+                           VALUES ($1, $2, $3) RETURNING {}",
+        VpcDpuLoopback::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(value.dpu_id)
         .bind(value.vpc_id)
         .bind(value.loopback_ip)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn delete_and_deallocate(
@@ -77,7 +83,8 @@ pub async fn delete_and_deallocate(
         }
     };
 
-    query.push("  RETURNING dpu_id, vpc_id, loopback_ip ");
+    query.push("  RETURNING ");
+    query.push(VpcDpuLoopback::db_table_columns());
 
     let deleted_loopbacks: Vec<VpcDpuLoopback> = query
         .build_query_as()
@@ -120,7 +127,8 @@ pub async fn delete_and_deallocate_for_vpcs(
     query.push_bind(dpu_id);
     query.push(" AND vpc_id = ANY(");
     query.push_bind(vpc_ids);
-    query.push(") RETURNING dpu_id, vpc_id, loopback_ip");
+    query.push(") RETURNING ");
+    query.push(VpcDpuLoopback::db_table_columns());
 
     let deleted_loopbacks: Vec<VpcDpuLoopback> = query
         .build_query_as()
@@ -147,20 +155,58 @@ pub async fn delete_and_deallocate_for_vpcs(
     Ok(())
 }
 
+/// Releases candidate DPU/VPC loopbacks absent from the current service interfaces and supplied
+/// retained host memberships, keeping row deletion and resource-pool release in the caller's
+/// Instance transaction. The caller must hold the Instance row lock and pass the host memberships
+/// that remain after the current network-config update.
+pub async fn release_unretained_instance_loopbacks(
+    common_pools: &model::resource_pool::common::CommonPools,
+    txn: &mut PgConnection,
+    instance_id: InstanceId,
+    candidate_memberships: &HashSet<(DpuMachineId, VpcId)>,
+    retained_host_memberships: &HashSet<(DpuMachineId, VpcId)>,
+) -> Result<(), DatabaseError> {
+    if candidate_memberships.is_empty() {
+        return Ok(());
+    }
+
+    // Read service memberships from the locked Instance so a concurrent service-interface write
+    // cannot follow this loopback-release decision.
+    let retained_memberships =
+        crate::instance::find_service_vpc_memberships(&mut *txn, instance_id)
+            .await?
+            .into_iter()
+            .chain(retained_host_memberships.iter().copied())
+            .collect::<HashSet<_>>();
+    let mut releasable_by_dpu = HashMap::<DpuMachineId, Vec<VpcId>>::new();
+    for &(dpu_id, vpc_id) in candidate_memberships {
+        if !retained_memberships.contains(&(dpu_id, vpc_id)) {
+            releasable_by_dpu.entry(dpu_id).or_default().push(vpc_id);
+        }
+    }
+
+    for (dpu_id, vpc_ids) in releasable_by_dpu {
+        delete_and_deallocate_for_vpcs(common_pools, &dpu_id, &vpc_ids, txn).await?;
+    }
+    Ok(())
+}
+
 pub async fn find(
     txn: &mut PgConnection,
     dpu_id: &DpuMachineId,
     vpc_id: &VpcId,
 ) -> Result<Option<VpcDpuLoopback>, DatabaseError> {
-    let query =
-        "SELECT dpu_id, vpc_id, loopback_ip from vpc_dpu_loopbacks WHERE dpu_id=$1 AND vpc_id=$2";
+    let query = format!(
+        "SELECT {} from vpc_dpu_loopbacks WHERE dpu_id=$1 AND vpc_id=$2",
+        VpcDpuLoopback::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(dpu_id)
         .bind(vpc_id)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Allocate loopback ip for a vpc and dpu if not allocated yet.

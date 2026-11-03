@@ -35,6 +35,8 @@ use crate::metadata::Metadata;
 
 mod slas;
 pub mod switch_id;
+#[cfg(test)]
+mod test_decode;
 
 #[derive(Debug, Clone)]
 pub struct NewSwitch {
@@ -220,27 +222,31 @@ pub struct Switch {
     pub health_reports: HealthReportSources,
 }
 
+/// Decodes a `Switch`, preserving supported absence in nullable JSON columns.
+/// Present values that cannot be decoded return `sqlx::Error` instead.
 impl<'r> FromRow<'r, PgRow> for Switch {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let controller_state: sqlx::types::Json<SwitchControllerState> =
             row.try_get("controller_state")?;
         let config: sqlx::types::Json<SwitchConfig> = row.try_get("config")?;
-        let status: Option<sqlx::types::Json<SwitchStatus>> = row.try_get("status").ok();
+        // `db::switch::update` writes JSON null for an absent status;
+        // newly created switches have SQL NULL instead. Accept both.
+        let status: Option<sqlx::types::Json<Option<SwitchStatus>>> = row.try_get("status")?;
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
-            row.try_get("controller_state_outcome").ok();
+            row.try_get("controller_state_outcome")?;
         let switch_maintenance_requested: Option<sqlx::types::Json<SwitchMaintenanceRequest>> =
-            row.try_get("switch_maintenance_requested").ok();
+            row.try_get("switch_maintenance_requested")?;
         let switch_reprovisioning_requested: Option<sqlx::types::Json<SwitchReprovisionRequest>> =
-            row.try_get("switch_reprovisioning_requested").ok();
+            row.try_get("switch_reprovisioning_requested")?;
         let firmware_upgrade_status: Option<sqlx::types::Json<RackFirmwareUpgradeStatus>> =
-            row.try_get("firmware_upgrade_status").ok();
+            row.try_get("firmware_upgrade_status")?;
         let nvos_update_status: Option<sqlx::types::Json<SwitchNvosUpdateStatus>> =
-            row.try_get("nvos_update_status").ok();
+            row.try_get("nvos_update_status")?;
         let fabric_manager_status: Option<sqlx::types::Json<FabricManagerStatus>> =
-            row.try_get("fabric_manager_status").ok().flatten();
+            row.try_get("fabric_manager_status")?;
 
         let health_reports: HealthReportSources = row
-            .try_get::<sqlx::types::Json<HealthReportSources>, _>("health_reports")
+            .try_get::<Option<sqlx::types::Json<HealthReportSources>>, _>("health_reports")?
             .map(|j| j.0)
             .unwrap_or_default();
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
@@ -250,21 +256,17 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             labels: labels.0,
         };
         let bmc_info = row
-            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")
-            .ok()
-            .flatten()
+            .try_get::<Option<sqlx::types::Json<BmcInfo>>, _>("bmc_info")?
             .map(|j| j.0);
         Ok(Switch {
             id: row.try_get("id")?,
             config: config.0,
-            status: status.map(|s| s.0),
+            status: status.and_then(|s| s.0),
             deleted: row.try_get("deleted")?,
-            bmc_mac_address: row.try_get("bmc_mac_address").ok().flatten(),
+            bmc_mac_address: row.try_get("bmc_mac_address")?,
             bmc_info,
-            bmc_credential_rotation_requested: row
-                .try_get("bmc_credential_rotation_requested")
-                .unwrap_or(false),
-            decommission_requested: row.try_get("decommission_requested").unwrap_or(false),
+            bmc_credential_rotation_requested: row.try_get("bmc_credential_rotation_requested")?,
+            decommission_requested: row.try_get("decommission_requested")?,
             controller_state: Versioned {
                 value: controller_state.0,
                 version: row.try_get("controller_state_version")?,
@@ -275,14 +277,13 @@ impl<'r> FromRow<'r, PgRow> for Switch {
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
             nvos_update_status: nvos_update_status.map(|j| j.0),
             fabric_manager_status: fabric_manager_status.map(|j| j.0),
-            // A reader may overlap the additive migration during a rolling deployment.
-            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid").ok().flatten(),
+            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid")?,
             metadata,
             version: row.try_get("version")?,
-            is_primary: row.try_get("is_primary").unwrap_or(false),
-            rack_id: row.try_get("rack_id").ok().flatten(),
-            slot_number: row.try_get("slot_number").ok().flatten(),
-            tray_index: row.try_get("tray_index").ok().flatten(),
+            is_primary: row.try_get("is_primary")?,
+            rack_id: row.try_get("rack_id")?,
+            slot_number: row.try_get("slot_number")?,
+            tray_index: row.try_get("tray_index")?,
             health_reports,
         })
     }
@@ -306,6 +307,29 @@ pub fn derive_switch_aggregate_health(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InitializingState {
     WaitForOsMachineInterface,
+}
+
+/// Sub-states of `ConfiguringState::DisableMtls`.
+///
+/// `Start` submits an RMS job that resets existing mTLS bindings over the
+/// switch's SSH workflow, which does not require a working NVUE endpoint.
+/// `WaitForComplete` polls the returned job id until the operation finishes.
+/// Only after it completes does initial ingestion install current certificates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisableMtlsState {
+    Start,
+    WaitForComplete { job_id: String },
+}
+
+impl std::fmt::Display for DisableMtlsState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DisableMtlsState::Start => write!(f, "Start"),
+            DisableMtlsState::WaitForComplete { job_id } => {
+                write!(f, "WaitForComplete({job_id})")
+            }
+        }
+    }
 }
 
 /// Sub-states of `ConfiguringState::ConfigureCertificate`.
@@ -332,6 +356,12 @@ impl std::fmt::Display for ConfigureCertificateState {
 /// Sub-state for SwitchControllerState::Configuring
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfiguringState {
+    /// Initial ingestion only: reset stale mTLS bindings before installing
+    /// certificates. Variants are additive, so states persisted before this
+    /// variant existed still deserialize.
+    DisableMtls {
+        disable_mtls: DisableMtlsState,
+    },
     ConfigureCertificate {
         configure_certificate: ConfigureCertificateState,
     },
@@ -396,7 +426,9 @@ pub enum SwitchDecommissioningState {
     RebootingSwitch,
     /// Waits for NVOS DHCP suppression acknowledgement after requesting the reboot,
     /// then advances to [`Self::SuppressingBmcDhcp`].
-    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForNvosDhcpAcknowledgement,
     /// Records BMC DHCP suppression and advances to [`Self::FactoryResetBmc`]
     /// without waiting for suppression acknowledgement.
@@ -406,7 +438,9 @@ pub enum SwitchDecommissioningState {
     FactoryResetBmc,
     /// Waits for BMC DHCP suppression acknowledgement, then advances to
     /// [`Self::DeletingManagedCredentials`].
-    /// Endpoints with an expected static IP and no recorded DHCP contact skip this wait.
+    /// An endpoint skips this wait if its MAC has at least one recorded interface,
+    /// every interface has a current `AllocationType::Static` address, and no
+    /// current address lies within any configured network prefix.
     WaitingForBmcDhcpAcknowledgement,
     /// Deletes managed BMC and NVOS credentials and their credential-rotation records,
     /// then advances to [`Self::Decommissioned`] once cleanup succeeds.
@@ -1076,6 +1110,26 @@ mod tests {
         let state = SwitchControllerState::Ready;
         let serialized = serde_json::to_string(&state).unwrap();
         assert_eq!(serialized, r#"{"state":"ready"}"#);
+        assert_eq!(
+            serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
+            state
+        );
+    }
+
+    #[test]
+    fn disable_mtls_state_persists_job_id() {
+        let state = SwitchControllerState::Configuring {
+            config_state: ConfiguringState::DisableMtls {
+                disable_mtls: DisableMtlsState::WaitForComplete {
+                    job_id: "job-1".to_string(),
+                },
+            },
+        };
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"state":"configuring","config_state":{"DisableMtls":{"disable_mtls":{"WaitForComplete":{"job_id":"job-1"}}}}}"#
+        );
         assert_eq!(
             serde_json::from_str::<SwitchControllerState>(&serialized).unwrap(),
             state

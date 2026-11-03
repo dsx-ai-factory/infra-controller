@@ -86,6 +86,10 @@ type Store interface {
 	// Use this for pause operations rather than Update to make intent clear.
 	SetEnabled(ctx context.Context, id uuid.UUID, enabled bool) (*dbmodel.TaskSchedule, error)
 
+	// Disable terminally deactivates a schedule by setting enabled=false and
+	// next_run_at=NULL while preserving last_run_at.
+	Disable(ctx context.Context, id uuid.UUID) error
+
 	// Resume sets enabled=true and, for interval/cron schedules, atomically
 	// updates next_run_at in the same statement. Pass nil nextRunAt for
 	// one-time schedules that were paused before firing (next_run_at unchanged).
@@ -350,6 +354,18 @@ func (s *PostgresStore) SetEnabled(
 	}
 
 	return s.Get(ctx, id)
+}
+
+// Disable implements Store.
+func (s *PostgresStore) Disable(ctx context.Context, id uuid.UUID) error {
+	_, err := s.idb(ctx).NewUpdate().
+		TableExpr("task_schedule").
+		Set("enabled = FALSE").
+		Set("next_run_at = NULL").
+		Where("id = ?", id).
+		Exec(ctx)
+
+	return err
 }
 
 // Resume implements Store.

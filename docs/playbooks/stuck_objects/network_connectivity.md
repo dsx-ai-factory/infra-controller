@@ -70,38 +70,105 @@ remains quarantined.
 
 ## Scout Boot NIC Selection
 
-During discovery, Scout keeps network configuration only on the interface
-whose MAC address NICo supplied as the single `mac=` kernel command-line
-argument. The script requires exactly one valid `mac=` value, exactly one
-matching interface, carrier on that interface, and at least one global IP
-address before it changes any other interface.
+Use this section when Scout uses an unexpected interface, retains competing
+global routes, or fails to recover when its selected link is unavailable.
 
-For other predictable Ethernet interface names (`enx*`, `enp*`, and `enP*`)
-that are using Scout's default DHCP network definition, Scout writes
-`/run/systemd/network/00-forge-scout-nonpreferred.network`. This runtime rule
-disables DHCP and IPv6 router advertisements and then reloads systemd-networkd.
-Scout waits roughly 30 seconds for global addresses and routes on those
-interfaces to disappear.
+The Scout loader downloads the full Scout filesystem and starts it with
+`systemctl soft-reboot`. Images with the
+[early boot-MAC policy](https://github.com/dsx-ai-factory/infra-controller/pull/7671)
+prepare networkd policy from
+the single `mac=` kernel argument before interfaces receive network
+configuration. The selected MAC has DHCP enabled for IPv4 and IPv6. Other data
+interfaces matching `enx*`, `enp*`, or `enP*` have DHCP and IPv6 router
+advertisements disabled. Their links remain available for LLDP.
 
-This networkd cleanup is MAC-based and does not administratively bring the
-other links down. Scout separately classifies auxiliary interfaces during
-registration using Mellanox SF/VF and PCI virtual-function metadata. If
-validation, networkd reload, or address removal fails, Scout logs the
-reason and continues startup so discovery remains fail-open.
+The runtime files are `00-forge-scout-preferred.network` and
+`01-forge-scout-nonpreferred.network` under `/run/systemd/network`.
+Each image with this policy recreates them. Preparation removes the known legacy
+`00-forge-scout-nonpreferred.network` from `/etc/systemd/network` and
+`/run/systemd/network`, including a rule inherited from an older loader.
+Cloud-init still handles provisioning; it does not configure Scout networking.
 
-When Scout uses the wrong path or retains multiple global routes, check:
+The helper is `/opt/forge/forge-scout-network.sh`. Its `prepare` call runs from
+`systemd-network-generator.service`, and full Scout's
+`systemd-networkd-wait-online.service` calls its `wait-online` mode.
+The loader's `rc.local` and full Scout's `forge-scout-pre.sh` call the helper
+without arguments for the later configuration check. Each Scout service
+restart runs that pre-start check again. In files and logs, *preferred* means
+the interface selected by `mac=`. *Broad networking* means the default
+`/etc/systemd/network/dhcp.network` can supply DHCP on the other data NICs.
+
+Missing, repeated, or malformed `mac=` values keep broad DHCP bootstrap.
+With one valid value, readiness requires exactly one matching interface,
+carrier, and a usable global address. Tentative IPv6 addresses and addresses
+with failed duplicate-address detection do not qualify. The helper waits up
+to 120 seconds by default for the selected interface. If the interface,
+carrier, or usable address remains absent, it removes its restrictions and
+restores broad networking. Multiple interfaces with the selected MAC trigger
+immediate recovery instead of waiting. An address-inspection error is a failure,
+not evidence that the selected interface is unavailable.
+Full Scout also runs native wait-online and, if needed, waits for a routable
+fallback link. Each of those waits has its own 120-second default budget.
+The loader retries failed checks only on another download-loop iteration;
+the helper's failure does not itself require another iteration. A successful
+download can advance to full Scout with broad networking active.
+`newrootfs=none` checks once. Full Scout checks again after loading modules.
+
+The later configuration call checks readiness again, then allows a separate
+120 seconds by default for configuration to converge. It verifies that the
+selected interface remains usable and competing global addresses and routes
+disappear. An inspection, reload, or withdrawal error
+does not by itself remove a healthy selection. Inspect the reported failure;
+continued startup does not prove that network configuration succeeded.
+
+Run these read-only checks as root inside Scout:
 
 ```bash
 cat /proc/cmdline
-networkctl status
-cat /run/systemd/network/00-forge-scout-nonpreferred.network
+ip -brief link show
 ip address show scope global
-ip route show
+ip -4 route show table all
+ip -6 route show table all
+networkctl --no-pager --all status
+cat /run/systemd/network/00-forge-scout-preferred.network
+cat /run/systemd/network/01-forge-scout-nonpreferred.network
+systemctl show systemd-network-generator.service systemd-networkd-wait-online.service \
+  -p Id -p ActiveState -p Result -p ExecMainStatus
+journalctl -b --no-pager -u systemd-network-generator.service \
+  -u systemd-networkd.service -u systemd-networkd-wait-online.service \
+  -u rc-local.service -u forge-scout.service
 ```
 
-Look in the Scout console or journal for `Selected preferred network interface`
-and `Skipping Scout network configuration`. A skip message includes a `reason`
-that identifies which prerequisite was not met.
+The two runtime files are absent after successful broad-network recovery,
+invalid input, or handoff to an older full image. That older image uses
+`/etc/systemd/network/00-forge-scout-nonpreferred.network` when selection was
+usable at handoff. Inspect that file when `networkctl` reports it as effective;
+its match must exclude the selected interface. A new full image must remove it.
+Otherwise, check both runtime files and the effective network file
+reported for each interface. In full Scout, a failed wait-online unit is a
+failure even if the final addresses look correct. The helper's final
+`Scout network configuration finished` line includes `result`, `reason`, and
+`exit_status` to distinguish preparation, recovery, and failure.
+The `Selected preferred network interface` and `Skipping Scout network configuration`
+messages identify the selected MAC and interface or the reason selection was skipped.
+
+In the early full-image wait, `result=fallback` with `exit_status=0` means
+broad networking is usable and startup can proceed. A later configuration
+call that times out on a valid selected NIC returns nonzero even after
+restoring broad networking. Before handoff, another loader download-loop
+iteration retries the check if one occurs. After handoff, the check runs in
+`forge-scout.service`'s pre-start script on a service restart or through the
+manual retry in [Check Recovery and Image Compatibility](../../development/vm_pxe_client.md#check-recovery-and-image-compatibility).
+The pre-start script logs a helper failure and continues; that failure alone
+does not restart the service.
+
+Missing, repeated, or malformed `mac=` input instead makes
+preparation and later configuration report `result=skipped` with
+`exit_status=0`. A later check also reports `skipped` with reason
+`preferred_interface_count` after successful recovery from duplicate MACs.
+
+For a repeatable two-NIC test, including older images and recovery, refer to
+[Verify Scout Boot NIC Selection](../../development/vm_pxe_client.md#verify-scout-boot-nic-selection).
 
 ## PXE and HTTP Boot
 

@@ -115,9 +115,9 @@ func TestManageExpectedMachineInventory_DiscoverExpectedMachineInventory(t *test
 			)
 
 			ctx := context.Background()
-			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockWantCount, tt.args.wantTotalItems)
 			if tt.args.findIDsError != nil {
-				ctx = context.WithValue(ctx, "wantError", tt.args.findIDsError)
+				ctx = context.WithValue(ctx, cClient.MockWantError, tt.args.findIDsError)
 			}
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize

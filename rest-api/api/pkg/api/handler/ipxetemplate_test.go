@@ -65,6 +65,7 @@ func buildIpxeTemplateFixture(t *testing.T) (*ipxeTemplateTestFixture, func()) {
 	f.tnUser = testMachineBuildUser(t, dbSession, uuid.NewString(), []string{f.tnOrg}, []string{authz.TenantAdminRole})
 	f.tenant = testMachineBuildTenant(t, dbSession, f.tnOrg, "ipxet-tenant")
 	testBuildTenantSiteAssociation(t, dbSession, f.tnOrg, f.tenant.ID, f.site.ID, f.tnUser.ID)
+	common.TestBuildAllocation(t, dbSession, f.site, f.tenant, "ipxet-allocation", f.provUser)
 
 	templateDAO := cdbm.NewIpxeTemplateDAO(dbSession)
 	availTmpl, err := templateDAO.Create(ctx, nil, cdbm.IpxeTemplateCreateInput{

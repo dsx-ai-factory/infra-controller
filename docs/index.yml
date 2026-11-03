@@ -48,6 +48,8 @@ navigation:
               path: getting-started/prerequisites/software.md
             - page: BMC and Out-of-Band Setup
               path: getting-started/prerequisites/bmc-oob-setup.md
+        - page: Sizing and Scale Guidance
+          path: getting-started/sizing-and-scale.md
         - page: Building NICo Containers
           path: manuals/building_nico_containers.md
           slug: building-nico-containers
@@ -155,6 +157,8 @@ navigation:
               path: manuals/networking/infiniband_partitioning.md
         - page: Tenant Management
           path: configuration/tenant_management.md
+        - page: SSH Console Setup and Access
+          path: configuration/ssh-console.md
         - page: Tenant Management with Keycloak
           path: configuration/tenant-management-keycloak.md
         - page: Image-Based Operating Systems
@@ -167,12 +171,16 @@ navigation:
           path: configuration/machine_identity.md
         - page: Secrets Storage
           path: configuration/secrets-storage.md
+        - page: KMIP KEK Provider
+          path: configuration/kmip-kek-provider.md
         - page: Credential Sources
           path: configuration/credential-sources.md
         - page: Host Naming
           path: configuration/host-naming.md
         - page: DNS
           path: configuration/dns.md
+        - page: DNS Service Endpoints
+          path: configuration/dns-service-endpoints.md
         - page: Flow Component Managers
           path: configuration/flow-component-manager.md
           slug: flow-component-managers
@@ -399,6 +407,46 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - section: NIC Firmware CLI Reference
+              contents:
+                - link: NIC Firmware Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic.md
+                - link: Profile Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile.md
+                - link: Create a Profile
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-create.md
+                - link: Show a Profile
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-show.md
+                - link: List Profiles
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-list.md
+                - link: Update a Profile
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-update.md
+                - link: Delete a Profile
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-delete.md
+                - link: Site Selection Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-site.md
+                - link: List Site Selections
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-site-list.md
+                - link: Set a Site Selection
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-site-set.md
+                - link: Clear a Site Selection
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-site-clear.md
+                - link: Tenant Selection Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-tenant.md
+                - link: Show a Tenant Selection
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-tenant-show.md
+                - link: Set a Tenant Selection
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-tenant-set.md
+                - link: Clear a Tenant Selection
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-tenant-clear.md
+                - link: Machine and Card Selection Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-machine.md
+                - link: Show Machine and Card Selections
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-machine-show.md
+                - link: Set Machine and Card Selections
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-machine-set.md
+                - link: Show Desired Firmware
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-desired.md
             - page: NICo mTLS and Authorization
               path: manuals/nico-api-auth.md
             - page: Re-creating Issuer/CA in Local Dev

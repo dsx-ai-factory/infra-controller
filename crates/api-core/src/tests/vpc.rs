@@ -16,9 +16,12 @@
  */
 use std::collections::HashMap;
 use std::ops::DerefMut;
+use std::sync::Arc;
 use std::time::Duration;
 
+use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_test_support::Outcome::FailsWith;
 use carbide_test_support::{Case, check_cases_async};
 use carbide_uuid::vpc::VpcId;
@@ -27,6 +30,11 @@ use config_version::ConfigVersion;
 use db::vpc::{self};
 use db::{self, ObjectColumnFilter};
 use model::metadata::Metadata;
+use model::resource_pool::binding::{
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
+    ResourcePoolValueDomain,
+};
+use model::resource_pool::common::{EXTERNAL_VPC_VNI, VPC_VNI};
 use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 use model::vpc::{
     NewVpc, PowerResourceGroupUpdate, UpdateVpc, UpdateVpcVirtualization, VpcDefinition,
@@ -34,6 +42,9 @@ use model::vpc::{
 };
 use rpc::forge::forge_server::Forge;
 
+use crate::api::Api;
+use crate::cfg::file::RouteTargetConfig;
+use crate::test_support::builder::TestApiBuilder;
 use crate::test_support::metadata;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
@@ -196,6 +207,22 @@ async fn vpc_vni_pool_state(env: &TestEnv) -> Result<VpcVniPoolState, sqlx::Erro
     .await
 }
 
+/// Adds one explicit VNI through the public pool API so rollback tests can
+/// isolate a post-allocation failure in four-byte-ASN route-target encoding.
+async fn grow_explicit_vni(env: &TestEnv, pool_name: &str, vni: u32) -> Result<(), tonic::Status> {
+    let end = vni
+        .checked_add(1)
+        .expect("test VNI range must not overflow");
+    env.api
+        .admin_grow_resource_pool(tonic::Request::new(rpc::forge::GrowResourcePoolRequest {
+            text: format!(
+                "[{pool_name}]\ntype = \"integer\"\nranges = [{{ start = \"{vni}\", end = \"{end}\", auto_assign = false }}]"
+            ),
+        }))
+        .await
+        .map(drop)
+}
+
 async fn create_routing_profile_vpc(
     env: &TestEnv,
     name: &str,
@@ -227,6 +254,1019 @@ async fn create_routing_profile_vpc(
         .create_vpc(request.tonic_request())
         .await?
         .into_inner())
+}
+
+/// Rebuilds the API over existing test state with an internal route target
+/// that a four-byte ASN cannot encode for VNIs above 65535, modeling runtime
+/// configuration drift after VPC creation.
+async fn api_with_incompatible_internal_route_target(env: &TestEnv) -> Result<Api, eyre::Report> {
+    let mut config = env.config.as_ref().clone();
+    config
+        .fnn
+        .as_mut()
+        .expect("fixture FNN configuration")
+        .routing_profiles
+        .get_mut("INTERNAL")
+        .expect("internal fixture profile")
+        .route_target_imports = Some(vec![RouteTargetConfig {
+        asn: 429_000_000, // Four-byte ASN restricts the resolved local administrator.
+        vni: None,
+        vni_self: true, // Resolve after the VPC already holds its high VNI.
+    }]);
+
+    // Resolve the same persisted pool bindings for the replacement API instance.
+    let mut txn = env.pool.begin().await?;
+    let resource_pool_registry =
+        ResourcePoolRegistry::resolve(PoolDefinitionSource::ListenOnly, &mut txn, &HashMap::new())
+            .await?;
+    txn.commit().await?;
+
+    // Reuse the database while replacing only runtime configuration.
+    Ok(TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_resource_pool_registry(resource_pool_registry)
+    .with_runtime_config(Arc::new(config))
+    .build())
+}
+
+#[crate::sqlx_test]
+async fn vpc_consumers_preserve_independent_named_integrated_bindings(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let selections = [
+        (VPC_VNI, "internal-local"),
+        (EXTERNAL_VPC_VNI, "external-local"),
+    ]
+    .into_iter()
+    .map(|(pool_name, backend_name)| {
+        (
+            pool_name.to_string(),
+            ResourcePoolSelection {
+                pool_name: pool_name.to_string(),
+                value_domain: ResourcePoolValueDomain::Integer,
+                backend_name: Some(backend_name.to_string()),
+                backend_kind: ResourcePoolBackendKind::Integrated,
+                authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
+                remote_pool: pool_name.to_string(),
+            },
+        )
+    })
+    .collect();
+    let mut txn = pool.begin().await?;
+    ResourcePoolRegistry::resolve(
+        PoolDefinitionSource::SeedConfiguration,
+        &mut txn,
+        &selections,
+    )
+    .await?;
+    let bindings = db::resource_pool::binding::all(&mut *txn).await?;
+    txn.commit().await?;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    for binding in &bindings {
+        assert_eq!(
+            &env.api
+                .resource_pool_registry
+                .get(&binding.pool_name)
+                .unwrap()
+                .binding,
+            binding
+        );
+    }
+
+    let created = create_routing_profile_vpc(&env, "named-backends", None).await?;
+    let vpc_id = created.id.expect("VPC ID");
+    let internal_vni = created.status.unwrap().vni.unwrap();
+    let external = env
+        .api
+        .change_vpc_routing_profile(tonic::Request::new(
+            rpc::forge::VpcChangeRoutingProfileRequest {
+                id: Some(vpc_id),
+                if_version_match: Some(created.version),
+                routing_profile_type: "EXTERNAL".to_string(),
+                vni: Some(50001),
+            },
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(external.active_vni, 50001);
+    let saved_bindings = db::resource_pool::binding::all(&env.pool).await?;
+    for binding in &bindings {
+        let vni = if binding.pool_name == VPC_VNI {
+            internal_vni
+        } else {
+            external.active_vni
+        };
+        assert_eq!(
+            saved_bindings
+                .iter()
+                .find(|saved| saved.pool_name == binding.pool_name),
+            Some(binding)
+        );
+        assert_eq!(
+            resource_pool_entry_state(&env, &binding.pool_name, i32::try_from(vni)?).await?,
+            ResourcePoolEntryState::Allocated {
+                owner: vpc_id.to_string(),
+                owner_type: OwnerType::Vpc.to_string(),
+            }
+        );
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    enum Creation {
+        Api,
+        Configured,
+    }
+
+    let env = create_test_env(pool).await;
+    // Both creation paths allocate before inserting the VPC row.
+    sqlx::query("ALTER TABLE vpcs ADD CONSTRAINT reject_vpc_creation CHECK (name NOT LIKE 'failed-create-%') NOT VALID")
+        .execute(&env.pool)
+        .await?;
+    // Keep a separate connection so these reads only see committed state.
+    let mut observer = env.pool.acquire().await?;
+    let pool_query = "SELECT to_jsonb(resource_pool) FROM resource_pool ORDER BY name, value";
+    let before: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
+        .fetch_all(&mut *observer)
+        .await?;
+    for (name, creation) in [
+        ("failed-create-api", Creation::Api),
+        ("failed-create-configured", Creation::Configured),
+    ] {
+        let error = match creation {
+            Creation::Api => {
+                let error = env
+                    .api
+                    .create_vpc(
+                        VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                            .metadata(rpc::Metadata {
+                                name: name.to_string(),
+                                ..Default::default()
+                            })
+                            .network_virtualization_type(
+                                rpc::forge::VpcVirtualizationType::Flat as i32,
+                            )
+                            .tonic_request(),
+                    )
+                    .await
+                    .expect_err("injected VPC insert failure");
+                assert_eq!(error.code(), tonic::Code::Internal, "{name}");
+                assert_eq!(error.message(), "internal database error", "{name}");
+                std::error::Error::source(&error)
+                    .expect("database status source")
+                    .source()
+                    .expect("original database error")
+                    .downcast_ref::<db::DatabaseError>()
+                    .expect("typed database error")
+                    .to_string()
+            }
+            Creation::Configured => db_init::create_initial_vpcs(
+                &env.pool,
+                &HashMap::from([(
+                    name.to_string(),
+                    VpcDefinition {
+                        organization_id: Some(FIXTURE_TENANT_ORG_ID.to_string()),
+                        network_virtualization_type: VpcVirtualizationType::Flat,
+                        routing_profile_type: None,
+                        routing_profile_overrides: None,
+                        vni: None,
+                    },
+                )]),
+                &env.common_pools.ethernet.pool_vpc_vni,
+                &env.api.resource_pool_registry,
+            )
+            .await
+            .expect_err("injected configured VPC insert failure")
+            .to_string(),
+        };
+        assert!(error.contains("reject_vpc_creation"), "{name}: {error}");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM vpcs WHERE name = $1")
+            .bind(name)
+            .fetch_one(&mut *observer)
+            .await?;
+        assert_eq!(count, 0, "{name}");
+        let after: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
+            .fetch_all(&mut *observer)
+            .await?;
+        assert_eq!(after, before, "{name}");
+    }
+    Ok(())
+}
+
+/// Verifies a post-insert effective-profile failure rolls back both VPC
+/// persistence and the exact VNI allocation selected by the request.
+#[crate::sqlx_test]
+async fn vpc_creation_rolls_back_unencodable_symbolic_route_target(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Configure a symbolic four-byte-ASN target that fails only with a high VNI.
+    let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
+    overrides
+        .fnn_config
+        .as_mut()
+        .expect("fixture FNN configuration")
+        .routing_profiles
+        .get_mut("INTERNAL")
+        .expect("internal fixture profile")
+        .route_target_imports = Some(vec![RouteTargetConfig {
+        asn: 429_000_000, // Four-byte ASN restricts the resolved local administrator.
+        vni: None,        // Keep the configured target unresolved until creation allocates a VNI.
+        vni_self: true,   // The requested high VNI must fail the four-byte-ASN encoding limit.
+    }]);
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    let requested_vni = 65_536;
+
+    // Prepare the tenant and one explicit high VNI before capturing committed pool state.
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "unencodable-create".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(rpc::Metadata {
+                name: "unencodable-create".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+    grow_explicit_vni(&env, VPC_VNI, requested_vni).await?;
+    let allocations_before = vpc_vni_pool_state(&env).await?;
+    let vpc_id = VpcId::new();
+
+    // Creation reaches response conversion only after allocating and inserting the VPC.
+    let error = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("unencodable-create")
+                .id(vpc_id)
+                .metadata(rpc::Metadata {
+                    name: "unencodable-create".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL".to_string())
+                .vni(requested_vni)
+                .tonic_request(),
+        )
+        .await
+        .expect_err("resolved route target must reject the high VNI");
+
+    // The late failure must leave neither the VPC row nor an allocated pool value.
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("cannot both exceed 65535"));
+    let found = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![vpc_id],
+        }))
+        .await?
+        .into_inner();
+    assert!(found.vpcs.is_empty());
+    assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
+    Ok(())
+}
+
+/// Verifies an allocator-selected VNI incompatibility rolls back creation
+/// without blaming a valid create request.
+#[crate::sqlx_test]
+async fn vpc_creation_reports_allocator_route_target_failure_as_failed_precondition(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Configure a symbolic target whose encoding depends on the allocated VNI.
+    let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
+    overrides
+        .fnn_config
+        .as_mut()
+        .expect("fixture FNN configuration")
+        .routing_profiles
+        .get_mut("INTERNAL")
+        .expect("internal fixture profile")
+        .route_target_imports = Some(vec![RouteTargetConfig {
+        asn: 429_000_000,
+        vni: None,
+        vni_self: true,
+    }]);
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    let allocated_vni = 65_536;
+
+    // Make the high VNI the only automatic choice.
+    let disabled =
+        sqlx::query("UPDATE resource_pool SET auto_assign = FALSE WHERE name = $1 AND auto_assign")
+            .bind(VPC_VNI)
+            .execute(&env.pool)
+            .await?;
+    assert!(disabled.rows_affected() > 0);
+    env.api
+        .admin_grow_resource_pool(tonic::Request::new(
+            rpc::forge::GrowResourcePoolRequest {
+                text: format!(
+                    "[{VPC_VNI}]\ntype = \"integer\"\nranges = [{{ start = \"{allocated_vni}\", end = \"{}\", auto_assign = true }}]",
+                    allocated_vni + 1,
+                ),
+            },
+        ))
+        .await?;
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "allocator-incompatible".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(rpc::Metadata {
+                name: "allocator-incompatible".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+    let allocations_before = vpc_vni_pool_state(&env).await?;
+    let vpc_id = VpcId::new();
+
+    // Omit the VNI so Core selects the incompatible value.
+    let error = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("allocator-incompatible")
+                .id(vpc_id)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL".to_string())
+                .tonic_request(),
+        )
+        .await
+        .expect_err("allocator-selected VNI must reject the effective profile");
+
+    // The transaction must roll back as a server-state failure.
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("cannot both exceed 65535"));
+    let found = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![vpc_id],
+        }))
+        .await?
+        .into_inner();
+    assert!(found.vpcs.is_empty());
+    assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
+    Ok(())
+}
+
+/// Verifies an allocator-selected VNI that makes a request-supplied symbolic
+/// target unencodable is reported as server state and rolls back, allowing
+/// clients to retry an otherwise valid create request.
+#[crate::sqlx_test]
+async fn vpc_creation_reports_allocator_override_failure_as_failed_precondition(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Keep the named profile encodable so only the request override can fail.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let allocated_vni = 65_536;
+
+    // Make the high VNI the only automatic choice and create its tenant.
+    let disabled =
+        sqlx::query("UPDATE resource_pool SET auto_assign = FALSE WHERE name = $1 AND auto_assign")
+            .bind(VPC_VNI)
+            .execute(&env.pool)
+            .await?;
+    assert!(disabled.rows_affected() > 0);
+    env.api
+        .admin_grow_resource_pool(tonic::Request::new(
+            rpc::forge::GrowResourcePoolRequest {
+                text: format!(
+                    "[{VPC_VNI}]\ntype = \"integer\"\nranges = [{{ start = \"{allocated_vni}\", end = \"{}\", auto_assign = true }}]",
+                    allocated_vni + 1,
+                ),
+            },
+        ))
+        .await?;
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "allocator-override-incompatible".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(rpc::Metadata {
+                name: "allocator-override-incompatible".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+    let allocations_before = vpc_vni_pool_state(&env).await?;
+    let vpc_id = VpcId::new();
+
+    // Submit a symbolic override while leaving VNI selection to Core.
+    let error = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder("allocator-override-incompatible")
+                .id(vpc_id)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL".to_string())
+                .routing_profile_overrides(rpc::forge::VpcRoutingProfileOverrides {
+                    route_target_imports: Some(rpc::common::RouteTargets {
+                        values: vec![rpc::common::RouteTarget {
+                            asn: 429_000_000, // Four-byte ASN makes the high VNI unencodable.
+                            vni: None,        // Preserve absence so vni_self supplies the value.
+                            vni_self: true,   // Resolve against Core's selected VNI.
+                        }],
+                    }),
+                    ..Default::default()
+                })
+                .tonic_request(),
+        )
+        .await
+        .expect_err("allocator-selected VNI must reject the request override");
+
+    // Classify the allocator result as server state and roll back all writes.
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("cannot both exceed 65535"));
+    let found = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![vpc_id],
+        }))
+        .await?
+        .into_inner();
+    assert!(found.vpcs.is_empty());
+    assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
+    Ok(())
+}
+
+/// Verifies one retained incompatible effective profile is logged and omitted
+/// without preventing the same Find request from returning compatible VPCs.
+#[crate::sqlx_test]
+async fn find_vpcs_by_ids_omits_retained_incompatible_effective_profile(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Create one high-VNI VPC and one ordinary VPC before changing runtime policy.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let incompatible_vni = 65_536;
+    grow_explicit_vni(&env, VPC_VNI, incompatible_vni).await?;
+    let incompatible =
+        create_routing_profile_vpc(&env, "retained-incompatible", Some(incompatible_vni)).await?;
+    let compatible = create_routing_profile_vpc(&env, "retained-compatible", None).await?;
+    let incompatible_id = incompatible.id.expect("incompatible VPC ID");
+    let compatible_id = compatible.id.expect("compatible VPC ID");
+    let api = api_with_incompatible_internal_route_target(&env).await?;
+
+    // Read both VPCs after the named profile becomes incompatible only with the high VNI.
+    let (response, logs) = capture_logs_async(api.find_vpcs_by_ids(tonic::Request::new(
+        rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![incompatible_id, compatible_id],
+        },
+    )))
+    .await;
+    let found_by_id: HashMap<_, _> = response?
+        .into_inner()
+        .vpcs
+        .into_iter()
+        .map(|vpc| (vpc.id.expect("found VPC ID"), vpc))
+        .collect();
+
+    // Omit only the incompatible derived profile while retaining both records.
+    assert_eq!(found_by_id.len(), 2);
+    assert!(
+        found_by_id[&incompatible_id]
+            .status
+            .as_ref()
+            .and_then(|status| status.effective_routing_profile.as_ref())
+            .is_none()
+    );
+    assert!(
+        found_by_id[&compatible_id]
+            .status
+            .as_ref()
+            .and_then(|status| status.effective_routing_profile.as_ref())
+            .is_some()
+    );
+
+    // Emit one actionable warning identifying the incompatible retained VPC.
+    let warning = logs
+        .iter()
+        .find(|log| {
+            log.message == "omitting incompatible effective routing profile from VPC response"
+        })
+        .expect("retained incompatibility warning");
+    let incompatible_id_string = incompatible_id.to_string();
+    assert_eq!(
+        warning.field("vpc_id"),
+        Some(incompatible_id_string.as_str())
+    );
+    assert!(
+        warning
+            .field("error")
+            .is_some_and(|error| error.contains("cannot both exceed 65535"))
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    enum Growth {
+        PublicApi,
+        OlderReplica,
+    }
+
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "late-external-pool".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(rpc::Metadata {
+                name: "late-external-pool".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+    for (scenario, growth) in [
+        ("public", Growth::PublicApi),
+        ("older", Growth::OlderReplica),
+    ] {
+        // The external pool is optional at startup. Remove its fixture inventory
+        // before constructing either consumer; the required internal pool stays.
+        let mut txn = env.pool.begin().await?;
+        for query in [
+            "DELETE FROM resource_pool WHERE name = $1",
+            "DELETE FROM resource_pool_def WHERE name = $1",
+            "DELETE FROM resource_pool_binding WHERE pool_name = $1",
+        ] {
+            sqlx::query(query)
+                .bind(EXTERNAL_VPC_VNI)
+                .execute(txn.as_mut())
+                .await?;
+        }
+        txn.commit().await?;
+
+        let mut consumers = Vec::new();
+        for name in ["local", "replica"] {
+            let mut txn = env.pool.begin().await?;
+            let registry = ResourcePoolRegistry::resolve(
+                PoolDefinitionSource::ListenOnly,
+                &mut txn,
+                &HashMap::new(),
+            )
+            .await?;
+            txn.commit().await?;
+            assert!(registry.get(VPC_VNI).is_some());
+            assert!(registry.get(EXTERNAL_VPC_VNI).is_none());
+            let api = TestApiBuilder::new(
+                env.pool.clone(),
+                env.common_pools.clone(),
+                env.api.work_lock_manager_handle.clone(),
+            )
+            .with_resource_pool_registry(registry)
+            .with_runtime_config(env.config.clone())
+            .build();
+            let request = VpcCreationRequest::builder("late-external-pool")
+                .id(VpcId::new())
+                .metadata(rpc::Metadata {
+                    name: format!("{scenario}-{name}"),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("EXTERNAL".to_string())
+                .tonic_request()
+                .into_inner();
+            // Every intentional miss increments the global counter, including
+            // the cases that do not assert its value below.
+            let metrics = MetricsCapture::start();
+            let create = api.create_vpc(tonic::Request::new(request.clone()));
+            let result = if name == "local" && matches!(growth, Growth::PublicApi) {
+                let metric_name = "carbide_resource_pool_lifecycle_failures_total";
+                let (result, logs) = capture_logs_async(create).await;
+                let events: Vec<_> = logs
+                    .iter()
+                    .filter(|log| log.field("metric_name") == Some(metric_name))
+                    .collect();
+                assert_eq!(events.len(), 1, "{logs:?}");
+                let event = events[0];
+                assert_eq!(
+                    event.field("event_name"),
+                    Some("resource_pool_allocation_failed")
+                );
+                assert_eq!(event.field("pool"), Some(EXTERNAL_VPC_VNI));
+                let labels = [
+                    ("operation", "allocate"),
+                    ("failure", "configuration"),
+                    ("failure_policy", "required"),
+                    ("allocation_mode", "automatic"),
+                    ("value_type", "integer"),
+                ];
+                for (key, value) in labels {
+                    assert_eq!(event.field(key), Some(value), "{key}");
+                }
+                // Tests without a `MetricsCapture` can increment this shared
+                // counter. The log capture above checks this request's event.
+                let observed = metrics.counter_delta(metric_name, &labels);
+                assert!(
+                    observed >= 1.0,
+                    "expected at least one external pool allocation failure, observed {observed}"
+                );
+                result
+            } else {
+                create.await
+            };
+            let error = result.expect_err("external pool has not been created");
+            assert_eq!(
+                error.code(),
+                tonic::Code::FailedPrecondition,
+                "{scenario}/{name}"
+            );
+            assert!(error.message().contains(EXTERNAL_VPC_VNI), "{error}");
+            consumers.push((api, request));
+        }
+
+        match growth {
+            Growth::PublicApi => {
+                // The range end is exclusive; provide one value for each consumer.
+                consumers[0]
+                    .0
+                    .admin_grow_resource_pool(tonic::Request::new(rpc::forge::GrowResourcePoolRequest {
+                        text: format!(
+                            "[{EXTERNAL_VPC_VNI}]\ntype = \"integer\"\nranges = [{{ start = \"50001\", end = \"50003\" }}]"
+                        ),
+                    }))
+                    .await?;
+            }
+            Growth::OlderReplica => {
+                // A replica predating backend bindings can add inventory during
+                // a rolling upgrade. It does not write `resource_pool_binding`.
+                let mut txn = env.pool.begin().await?;
+                db::resource_pool::populate(
+                    &env.common_pools.ethernet.pool_external_vpc_vni,
+                    &mut txn,
+                    vec![50001, 50002],
+                    true,
+                )
+                .await?;
+                txn.commit().await?;
+            }
+        }
+
+        let mut created_vpcs = Vec::new();
+        for (api, request) in &consumers {
+            let created = api
+                .create_vpc(tonic::Request::new(request.clone()))
+                .await?
+                .into_inner();
+            assert_eq!(created.id, request.id, "{scenario}");
+            let vni = created.status.as_ref().unwrap().vni.unwrap();
+            assert!((50001..=50002).contains(&vni), "{scenario}");
+            assert_eq!(
+                resource_pool_entry_state(&env, EXTERNAL_VPC_VNI, i32::try_from(vni)?).await?,
+                ResourcePoolEntryState::Allocated {
+                    owner: request.id.unwrap().to_string(),
+                    owner_type: OwnerType::Vpc.to_string(),
+                },
+                "{scenario}"
+            );
+            created_vpcs.push(created);
+        }
+
+        let api = &consumers[0].0;
+        let mut current = created_vpcs[0].clone();
+        let vpc_id = current.id.expect("VPC ID");
+        let external_vni = current.status.as_ref().unwrap().vni.unwrap();
+        // Switch away and release the external VNI, then request that exact
+        // value again. Each operation must work with the same startup registry.
+        for (profile, active_pool, inactive_pool, requested_vni) in [
+            ("INTERNAL", VPC_VNI, EXTERNAL_VPC_VNI, None),
+            ("EXTERNAL", EXTERNAL_VPC_VNI, VPC_VNI, Some(external_vni)),
+        ] {
+            let inactive_vni = current.status.as_ref().unwrap().vni.unwrap();
+            let routed = api
+                .change_vpc_routing_profile(tonic::Request::new(
+                    rpc::forge::VpcChangeRoutingProfileRequest {
+                        id: Some(vpc_id),
+                        if_version_match: Some(current.version.clone()),
+                        routing_profile_type: profile.to_string(),
+                        vni: requested_vni,
+                    },
+                ))
+                .await?
+                .into_inner();
+            assert_eq!(
+                routed.version.parse::<ConfigVersion>()?.version_nr(),
+                current.version.parse::<ConfigVersion>()?.version_nr() + 1,
+                "{scenario}/{profile}"
+            );
+            let saved = find_test_vpc(&env, vpc_id).await?;
+            assert_eq!(saved.version, routed.version);
+            assert_eq!(saved.status.as_ref().unwrap().vni, Some(routed.active_vni));
+            assert_eq!(
+                forge_vpc_config(&saved).routing_profile_type.as_deref(),
+                Some(profile)
+            );
+            if let Some(requested_vni) = requested_vni {
+                assert_eq!(routed.active_vni, requested_vni);
+            }
+            assert_eq!(
+                resource_pool_entry_state(&env, active_pool, i32::try_from(routed.active_vni)?)
+                    .await?,
+                ResourcePoolEntryState::Allocated {
+                    owner: vpc_id.to_string(),
+                    owner_type: OwnerType::Vpc.to_string(),
+                }
+            );
+            let released = api
+                .release_vpc_inactive_vni(tonic::Request::new(
+                    rpc::forge::VpcReleaseInactiveVniRequest {
+                        id: Some(vpc_id),
+                        if_version_match: Some(routed.version.clone()),
+                        expected_inactive_vni: Some(inactive_vni),
+                    },
+                ))
+                .await?
+                .into_inner();
+            assert_eq!(released.released_inactive_vni, inactive_vni);
+            current = released.vpc.expect("updated VPC");
+            assert_eq!(
+                current.version.parse::<ConfigVersion>()?.version_nr(),
+                routed.version.parse::<ConfigVersion>()?.version_nr() + 1
+            );
+            assert_eq!(find_test_vpc(&env, vpc_id).await?, current);
+            assert_eq!(
+                resource_pool_entry_state(&env, inactive_pool, i32::try_from(inactive_vni)?)
+                    .await?,
+                ResourcePoolEntryState::Free
+            );
+        }
+
+        // Both external values are allocated here. Finding an Integrated pool
+        // must not depend on it still having a free value.
+        for ((api, _), created) in consumers.iter().zip(&created_vpcs) {
+            let vpc_id = created.id.expect("VPC ID");
+            api.delete_vpc(VpcDeletionRequest::builder().id(vpc_id).tonic_request())
+                .await?;
+            assert!(
+                db::vpc::find_by(&env.pool, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
+                    .await?
+                    .is_empty()
+            );
+            assert_eq!(
+                resource_pool_entry_state(
+                    &env,
+                    EXTERNAL_VPC_VNI,
+                    i32::try_from(created.status.as_ref().unwrap().vni.unwrap())?,
+                )
+                .await?,
+                ResourcePoolEntryState::Free
+            );
+            assert!(api.resource_pool_registry.get(EXTERNAL_VPC_VNI).is_none());
+        }
+        let binding =
+            db::resource_pool::binding::load(&mut *env.pool.acquire().await?, EXTERNAL_VPC_VNI)
+                .await?;
+        assert_eq!(
+            binding.is_some(),
+            matches!(growth, Growth::PublicApi),
+            "{scenario}"
+        );
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    enum Allocation {
+        AutomaticCreation,
+        ExactRouting,
+        ConfiguredCreation,
+    }
+    const LIFECYCLE_FAILURES_METRIC: &str = "carbide_resource_pool_lifecycle_failures_total";
+
+    let mut txn = pool.begin().await?;
+    let registry = ResourcePoolRegistry::resolve(
+        PoolDefinitionSource::SeedConfiguration,
+        &mut txn,
+        &HashMap::from([(
+            VPC_VNI.to_string(),
+            ResourcePoolSelection {
+                pool_name: VPC_VNI.to_string(),
+                value_domain: ResourcePoolValueDomain::Integer,
+                backend_name: None,
+                backend_kind: ResourcePoolBackendKind::Integrated,
+                authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
+                remote_pool: VPC_VNI.to_string(),
+            },
+        )]),
+    )
+    .await?;
+    txn.commit().await?;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let source = create_routing_profile_vpc(&env, "binding-read-failure", None).await?;
+    let create_request = VpcCreationRequest::builder("binding-read-failure")
+        .id(VpcId::new())
+        .metadata(rpc::Metadata {
+            name: "binding-read-create".to_string(),
+            ..Default::default()
+        })
+        .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+        .routing_profile_type("EXTERNAL".to_string())
+        .tonic_request()
+        .into_inner();
+    let deletion_target = env
+        .api
+        .create_vpc(tonic::Request::new(create_request.clone()))
+        .await?
+        .into_inner();
+    // Only the internal backend is cached. Looking up the wrong pool would
+    // skip the failing binding read for the external operations.
+    let api = TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_resource_pool_registry(registry)
+    .with_runtime_config(env.config.clone())
+    .build();
+    assert!(api.resource_pool_registry.get(VPC_VNI).is_some());
+    assert!(api.resource_pool_registry.get(EXTERNAL_VPC_VNI).is_none());
+    let create_request = rpc::forge::VpcCreationRequest {
+        id: Some(VpcId::new()),
+        ..create_request
+    };
+    let mut observer = env.pool.acquire().await?;
+    let pool_query = "SELECT to_jsonb(resource_pool) FROM resource_pool ORDER BY name, value";
+    let vpc_query = "SELECT to_jsonb(vpcs) FROM vpcs ORDER BY id";
+    let pools_before: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
+        .fetch_all(&mut *observer)
+        .await?;
+    let vpcs_before: Vec<serde_json::Value> = sqlx::query_scalar(vpc_query)
+        .fetch_all(&mut *observer)
+        .await?;
+    // Keep inventory readable so routing gets as far as loading the binding.
+    sqlx::query("ALTER TABLE resource_pool_binding RENAME TO unavailable_resource_pool_binding")
+        .execute(&env.pool)
+        .await?;
+    for (allocation, allocation_mode, pool_name, owner_id) in [
+        (
+            Allocation::AutomaticCreation,
+            "automatic",
+            EXTERNAL_VPC_VNI,
+            create_request.id,
+        ),
+        (
+            Allocation::ExactRouting,
+            "requested",
+            EXTERNAL_VPC_VNI,
+            source.id,
+        ),
+        (Allocation::ConfiguredCreation, "automatic", VPC_VNI, None),
+    ] {
+        let metrics = MetricsCapture::start();
+        let (result, logs) = capture_logs_async(async {
+            match allocation {
+                Allocation::AutomaticCreation => api
+                    .create_vpc(tonic::Request::new(create_request.clone()))
+                    .await
+                    .map(drop),
+                Allocation::ExactRouting => api
+                    .change_vpc_routing_profile(tonic::Request::new(
+                        rpc::forge::VpcChangeRoutingProfileRequest {
+                            id: source.id,
+                            if_version_match: Some(source.version.clone()),
+                            routing_profile_type: "EXTERNAL".to_string(),
+                            vni: Some(50001),
+                        },
+                    ))
+                    .await
+                    .map(drop),
+                Allocation::ConfiguredCreation => db_init::create_initial_vpcs(
+                    &env.pool,
+                    &HashMap::from([(
+                        "binding-read-configured".to_string(),
+                        VpcDefinition {
+                            organization_id: Some(FIXTURE_TENANT_ORG_ID.to_string()),
+                            network_virtualization_type: VpcVirtualizationType::Flat,
+                            routing_profile_type: None,
+                            routing_profile_overrides: None,
+                            vni: None,
+                        },
+                    )]),
+                    &env.common_pools.ethernet.pool_vpc_vni,
+                    &ResourcePoolRegistry::default(),
+                )
+                .await
+                .map_err(tonic::Status::from),
+            }
+        })
+        .await;
+        let error = result.expect_err("the binding table is unavailable");
+        assert_eq!(
+            error.code(),
+            tonic::Code::Internal,
+            "{pool_name}/{allocation_mode}"
+        );
+        assert_eq!(error.message(), "internal database error");
+        let source = std::error::Error::source(&error)
+            .expect("database status source")
+            .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+            .expect("Carbide error source");
+        let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+            panic!("expected the original database error: {source:?}");
+        };
+        assert!(
+            annotated.to_string().contains("resource_pool_binding"),
+            "{annotated}"
+        );
+        let events: Vec<_> = logs
+            .iter()
+            .filter(|log| log.field("metric_name") == Some(LIFECYCLE_FAILURES_METRIC))
+            .collect();
+        assert_eq!(events.len(), 1, "{pool_name}/{allocation_mode}: {logs:?}");
+        let event = events[0];
+        assert_eq!(
+            event.field("event_name"),
+            Some("resource_pool_allocation_failed")
+        );
+        assert_eq!(event.field("pool"), Some(pool_name));
+        let logged_owner: VpcId = event.field("owner_id").expect("allocation owner").parse()?;
+        if let Some(owner_id) = owner_id {
+            assert_eq!(logged_owner, owner_id);
+        }
+        assert!(
+            event
+                .field("error")
+                .unwrap()
+                .contains("resource_pool_binding")
+        );
+        let labels = [
+            ("operation", "allocate"),
+            ("failure", "database"),
+            ("failure_policy", "required"),
+            ("allocation_mode", allocation_mode),
+            ("value_type", "integer"),
+        ];
+        for (key, value) in labels {
+            assert_eq!(
+                event.field(key),
+                Some(value),
+                "{pool_name}/{allocation_mode}: {key}"
+            );
+        }
+        assert_eq!(
+            metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &labels),
+            1.0
+        );
+        let pools_after: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
+            .fetch_all(&mut *observer)
+            .await?;
+        let vpcs_after: Vec<serde_json::Value> = sqlx::query_scalar(vpc_query)
+            .fetch_all(&mut *observer)
+            .await?;
+        assert_eq!(pools_after, pools_before);
+        assert_eq!(vpcs_after, vpcs_before);
+    }
+
+    // Deletion removes the VPC row before loading the allocation's backend.
+    // A failed lookup must leave both the VPC and its allocation in place.
+    let error = api
+        .delete_vpc(
+            VpcDeletionRequest::builder()
+                .id(deletion_target.id.unwrap())
+                .tonic_request(),
+        )
+        .await
+        .expect_err("the binding table is unavailable during deletion");
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error)
+        .expect("database status source")
+        .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+        .expect("Carbide error source");
+    let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    assert!(
+        annotated.to_string().contains("resource_pool_binding"),
+        "{annotated}"
+    );
+    let pools_after: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
+        .fetch_all(&mut *observer)
+        .await?;
+    let vpcs_after: Vec<serde_json::Value> = sqlx::query_scalar(vpc_query)
+        .fetch_all(&mut *observer)
+        .await?;
+    assert_eq!(pools_after, pools_before);
+    assert_eq!(vpcs_after, vpcs_before);
+    sqlx::query("ALTER TABLE unavailable_resource_pool_binding RENAME TO resource_pool_binding")
+        .execute(&env.pool)
+        .await?;
+    Ok(())
 }
 
 /// Verifies VPC assignment waits for a concurrent NSG update but commits without
@@ -734,9 +1774,17 @@ async fn change_vpc_routing_profile_rolls_back_allocation_on_write_failure(
             ))
             .await
             .expect_err("injected VPC write failure");
+        assert_eq!(error.code(), tonic::Code::Internal, "{vni:?}");
+        assert_eq!(error.message(), "internal database error", "{vni:?}");
+        let source = std::error::Error::source(&error)
+            .expect("database status source")
+            .source()
+            .expect("original database error")
+            .downcast_ref::<db::DatabaseError>()
+            .expect("typed database error");
         assert!(
-            error.message().contains("reject_profile_change"),
-            "{vni:?}: {error}"
+            source.violates_constraint("reject_profile_change"),
+            "{vni:?}: {source}"
         );
         assert_eq!(find_test_vpc(&env, vpc_id).await?, before, "{vni:?}");
         assert_eq!(
@@ -745,6 +1793,57 @@ async fn change_vpc_routing_profile_rolls_back_allocation_on_write_failure(
             "{vni:?}"
         );
     }
+    Ok(())
+}
+
+/// Verifies profile transitions reject a destination route target that cannot
+/// encode the selected VNI before changing the VPC or retaining an allocation.
+#[crate::sqlx_test]
+async fn change_vpc_routing_profile_rejects_unencodable_destination_without_changes(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Make only the destination profile depend on a two-byte local administrator.
+    let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
+    overrides
+        .fnn_config
+        .as_mut()
+        .expect("fixture FNN configuration")
+        .routing_profiles
+        .get_mut("EXTERNAL")
+        .expect("external fixture profile")
+        .route_targets_on_exports = Some(vec![RouteTargetConfig {
+        asn: 429_000_000, // Four-byte ASN makes the high destination VNI unencodable.
+        vni: None,        // Defer the encoding decision until the destination VNI is selected.
+        vni_self: true,   // Resolve from the requested transition allocation.
+    }]);
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    let before = create_routing_profile_vpc(&env, "unencodable-transition", None).await?;
+    let vpc_id = before.id.expect("created VPC ID");
+    let destination_vni = 65_536;
+
+    // Add one explicit destination value and capture both VPC and pool state.
+    grow_explicit_vni(&env, EXTERNAL_VPC_VNI, destination_vni).await?;
+    let allocations_before = vpc_vni_pool_state(&env).await?;
+
+    // Attempt the transition whose symbolic export cannot encode the selected VNI.
+    let error = env
+        .api
+        .change_vpc_routing_profile(tonic::Request::new(
+            rpc::forge::VpcChangeRoutingProfileRequest {
+                id: Some(vpc_id),
+                if_version_match: Some(before.version.clone()),
+                routing_profile_type: "EXTERNAL".to_string(),
+                vni: Some(destination_vni),
+            },
+        ))
+        .await
+        .expect_err("destination profile must reject the unencodable VNI");
+
+    // Rejection must precede the VPC write and roll back the exact allocation.
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("cannot both exceed 65535"));
+    assert_eq!(find_test_vpc(&env, vpc_id).await?, before);
+    assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
     Ok(())
 }
 
@@ -832,6 +1931,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         SeededWrongPool,
         OverlappingPools,
         InvalidDestinationVni,
+        MissingAutomaticRange,
         ExhaustedDestination,
         MissingDestinationPool,
     }
@@ -869,6 +1969,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         Failure::SeededWrongPool,
         Failure::OverlappingPools,
         Failure::InvalidDestinationVni,
+        Failure::MissingAutomaticRange,
         Failure::ExhaustedDestination,
         Failure::MissingDestinationPool,
     ] {
@@ -971,11 +2072,27 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
                     message: "between 1 and 16777215",
                 }
             }
-            Failure::ExhaustedDestination => {
+            Failure::MissingAutomaticRange => {
                 sqlx::query("UPDATE resource_pool SET auto_assign = false WHERE name = $1")
                     .bind(external_pool)
                     .execute(&env.pool)
                     .await?;
+                ExpectedFailure {
+                    destination: "EXTERNAL",
+                    code: tonic::Code::FailedPrecondition,
+                    message: "has no automatic allocation range",
+                }
+            }
+            Failure::ExhaustedDestination => {
+                let automatic_values = original_external_values
+                    .iter()
+                    .filter(|(_, auto_assign)| *auto_assign)
+                    .count();
+                assert!(automatic_values > 0, "destination has an automatic range");
+                // Other owners consume the range so this VPC has no retained VNI to reuse.
+                for _ in 0..automatic_values {
+                    allocate_external_vni(&env, VpcId::new()).await?;
+                }
                 ExpectedFailure {
                     destination: "EXTERNAL",
                     code: tonic::Code::ResourceExhausted,
@@ -996,6 +2113,8 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         };
         let before = find_test_vpc(&env, vpc_id).await?;
         let allocations_before = vpc_vni_pool_state(&env).await?;
+        // Allocation failures share the global counter measured by other tests.
+        let metrics = MetricsCapture::start();
         let error = env
             .api
             .change_vpc_routing_profile(tonic::Request::new(
@@ -1008,6 +2127,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
             ))
             .await
             .expect_err(expected.message);
+        drop(metrics);
         assert_eq!(error.code(), expected.code, "{failure:?}: {error}");
         assert!(
             error.message().contains(expected.message),
@@ -1471,6 +2591,176 @@ async fn create_fnn_vpc_requires_existing_tenant(
 }
 
 #[crate::sqlx_test]
+async fn create_vpc_rejects_allocations_without_external_pool(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant_org = "missing-external-pool";
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: tenant_org.to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(rpc::Metadata {
+                name: tenant_org.to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+
+    let mut txn = env.pool.begin().await?;
+    for query in [
+        "DELETE FROM resource_pool WHERE name = $1",
+        "DELETE FROM resource_pool_def WHERE name = $1",
+        "DELETE FROM resource_pool_binding WHERE pool_name = $1",
+    ] {
+        sqlx::query(query)
+            .bind(EXTERNAL_VPC_VNI)
+            .execute(txn.as_mut())
+            .await?;
+    }
+    let registry =
+        ResourcePoolRegistry::resolve(PoolDefinitionSource::ListenOnly, &mut txn, &HashMap::new())
+            .await?;
+    txn.commit().await?;
+    assert!(registry.get(EXTERNAL_VPC_VNI).is_none());
+    let api = TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_resource_pool_registry(registry)
+    .with_runtime_config(env.config.clone())
+    .build();
+    let before = vpc_vni_pool_state(&env).await?;
+
+    for (requested_vni, assignment_mode) in [(Some(50001u32), "explicit"), (None, "automatic")] {
+        let mut request = VpcCreationRequest::builder(tenant_org)
+            .metadata(rpc::Metadata {
+                name: "missing-pool-vni".to_string(),
+                ..Default::default()
+            })
+            .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+            .routing_profile_type("EXTERNAL".to_string())
+            .tonic_request()
+            .into_inner();
+        request.vni = requested_vni;
+        // These failures emit the global counter even without asserting it here.
+        let metrics = MetricsCapture::start();
+        let error = api
+            .create_vpc(tonic::Request::new(request))
+            .await
+            .expect_err("a missing pool must reject both allocation modes");
+        drop(metrics);
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            error.message(),
+            format!("resource-pool `{EXTERNAL_VPC_VNI}` has no {assignment_mode} allocation range")
+        );
+        assert_eq!(vpc_vni_pool_state(&env).await?, before);
+    }
+    let persisted_ids = api
+        .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {
+            tenant_org_id: Some(tenant_org.to_string()),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner()
+        .vpc_ids;
+    assert!(persisted_ids.is_empty());
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn create_vpc_rejects_unconfigured_assignment_mode(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    for (scenario, auto_assign, requested_vni) in [
+        ("automatic-vni-only", true, Some(20001u32)),
+        ("explicit-vni-only", false, None),
+    ] {
+        let tenant = create_fixture_tenant(&env, scenario).await?;
+        sqlx::query("UPDATE resource_pool SET auto_assign = $2 WHERE name = $1")
+            .bind(env.common_pools.ethernet.pool_vpc_vni.name())
+            .bind(auto_assign)
+            .execute(&env.pool)
+            .await?;
+        let before = vpc_vni_pool_state(&env).await?;
+        let mut request = VpcCreationRequest::builder(&tenant.organization_id)
+            .metadata(rpc::forge::Metadata {
+                name: "unconfigured-mode".to_string(),
+                ..Default::default()
+            })
+            .tonic_request()
+            .into_inner();
+        request.vni = requested_vni;
+        // These failures emit the global counter even without asserting it here.
+        let metrics = MetricsCapture::start();
+        let error = env
+            .api
+            .create_vpc(tonic::Request::new(request))
+            .await
+            .expect_err("the pool must reject an unconfigured assignment mode");
+        drop(metrics);
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        let assignment_mode = if requested_vni.is_some() {
+            "explicit"
+        } else {
+            "automatic"
+        };
+        assert_eq!(
+            error.message(),
+            format!(
+                "resource-pool `{}` has no {assignment_mode} allocation range",
+                env.common_pools.ethernet.pool_vpc_vni.name()
+            ),
+            "{scenario}"
+        );
+        assert_eq!(vpc_vni_pool_state(&env).await?, before, "{scenario}");
+
+        let expected_ids = if auto_assign {
+            let automatic = env
+                .api
+                .create_vpc(
+                    VpcCreationRequest::builder(&tenant.organization_id)
+                        .metadata(rpc::forge::Metadata {
+                            name: "automatic-vni".to_string(),
+                            ..Default::default()
+                        })
+                        .tonic_request(),
+                )
+                .await?
+                .into_inner();
+            assert!(
+                automatic
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.vni)
+                    .is_some()
+            );
+            vec![automatic.id.expect("created VPC ID")]
+        } else {
+            vec![]
+        };
+        let persisted_ids = env
+            .api
+            .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {
+                tenant_org_id: Some(tenant.organization_id),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner()
+            .vpc_ids;
+        assert_eq!(persisted_ids, expected_ids, "{scenario}");
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
 #[allow(deprecated)]
 async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Build an FNN config with distinct access tiers so the create path
@@ -1620,17 +2910,35 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
         .unwrap()
         .into_inner();
 
-    // A VNI is allocated
-    assert!(forge_vpc.status.as_ref().and_then(|s| s.vni).is_some());
+    // The requested VNI is allocated.
+    assert_eq!(forge_vpc.status.as_ref().and_then(|s| s.vni), Some(60001));
     // The 'config' VNI and the status VNI match
     assert_eq!(
         forge_vpc_config(&forge_vpc).vni,
         forge_vpc.status.as_ref().and_then(|s| s.vni)
     );
 
-    // Create another VPC by explicitly selecting a VNI from
-    // the allowed pool, but use the same VNI, so it should fail.
-    let _ = env
+    let vpc_id = forge_vpc.id.unwrap();
+    let vni_pool = env.common_pools.ethernet.pool_vpc_vni.name();
+    assert_eq!(
+        resource_pool_entry_state(&env, vni_pool, 60001).await?,
+        ResourcePoolEntryState::Allocated {
+            owner: vpc_id.to_string(),
+            owner_type: OwnerType::Vpc.to_string(),
+        }
+    );
+    assert!(
+        db::resource_pool::stats(&env.pool, vni_pool)
+            .await?
+            .non_auto_assign_free
+            > 0,
+        "other explicit VNIs must remain free so this is a conflict, not exhaustion"
+    );
+    let original_vpc = find_test_vpc(&env, vpc_id).await?;
+    let original_allocations = vpc_vni_pool_state(&env).await?;
+
+    // Reusing the allocated VNI must fail without changing either VPC or pool state.
+    let error = env
         .api
         .create_vpc(
             VpcCreationRequest::builder(&tenant.organization_id)
@@ -1642,15 +2950,30 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
                 .tonic_request(),
         )
         .await
-        .unwrap_err();
+        .expect_err("an already allocated explicit VNI must be rejected");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "VNI `60001` cannot be requested or is already allocated"
+    );
+    assert_eq!(find_test_vpc(&env, vpc_id).await?, original_vpc);
+    assert_eq!(vpc_vni_pool_state(&env).await?, original_allocations);
+    assert_eq!(
+        env.api
+            .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {
+                tenant_org_id: Some(tenant.organization_id.clone()),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner()
+            .vpc_ids,
+        vec![vpc_id],
+        "the rejected request must not persist a second VPC"
+    );
 
     // Clean it up so the rest of our tests can work with a single VPC in the DB.
     env.api
-        .delete_vpc(
-            VpcDeletionRequest::builder()
-                .id(forge_vpc.id.unwrap())
-                .tonic_request(),
-        )
+        .delete_vpc(VpcDeletionRequest::builder().id(vpc_id).tonic_request())
         .await
         .unwrap()
         .into_inner();
@@ -2365,7 +3688,163 @@ async fn update_vpc_rejects_unresolvable_routing_profile_base(
     Ok(())
 }
 
-/// Verifies inline routing-profile values survive persistence, omitted update
+/// Verifies a post-update effective-profile failure rolls back the persisted
+/// overrides and version while preserving the VPC's existing VNI allocation.
+#[crate::sqlx_test]
+async fn update_vpc_rolls_back_unencodable_symbolic_route_target(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Keep the base profile concrete so the VPC is valid before the update.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let active_vni = 65_536;
+
+    // Create a valid high-VNI VPC before introducing the unencodable override.
+    grow_explicit_vni(&env, VPC_VNI, active_vni).await?;
+    let before = create_routing_profile_vpc(&env, "unencodable-update", Some(active_vni)).await?;
+    let vpc_id = before.id.expect("created VPC ID");
+    let allocations_before = vpc_vni_pool_state(&env).await?;
+
+    // Apply a symbolic four-byte-ASN target that becomes invalid only after VNI substitution.
+    let error = env
+        .api
+        .update_vpc(
+            VpcUpdateRequest::builder()
+                .set_id(Some(vpc_id))
+                .routing_profile_overrides(rpc::forge::VpcRoutingProfileOverrides {
+                    route_target_imports: Some(rpc::common::RouteTargets {
+                        values: vec![rpc::common::RouteTarget {
+                            asn: 429_000_000, // Four-byte ASN rejects the active high VNI.
+                            vni: None,        // Preserve symbolic form through request conversion.
+                            vni_self: true,   // Resolve against the already allocated high VNI.
+                        }],
+                    }),
+                    ..Default::default()
+                })
+                .tonic_request(),
+        )
+        .await
+        .expect_err("effective profile must reject the unencodable target");
+
+    // The failed response conversion must roll back the preceding database update.
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("cannot both exceed 65535"));
+    assert_eq!(find_test_vpc(&env, vpc_id).await?, before);
+    assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
+    Ok(())
+}
+
+/// Verifies unrelated updates remain available for a retained incompatible
+/// profile and an explicit empty route-target list can repair that profile.
+#[crate::sqlx_test]
+async fn update_vpc_can_manage_and_repair_retained_incompatible_profile(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Create a valid high-VNI VPC before changing its named runtime profile.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let active_vni = 65_536;
+    grow_explicit_vni(&env, VPC_VNI, active_vni).await?;
+    let created =
+        create_routing_profile_vpc(&env, "retained-update-repair", Some(active_vni)).await?;
+    let vpc_id = created.id.expect("created VPC ID");
+    let api = api_with_incompatible_internal_route_target(&env).await?;
+
+    // Apply an unrelated metadata update while the retained profile is incompatible.
+    let updated = api
+        .update_vpc(tonic::Request::new(rpc::forge::VpcUpdateRequest {
+            id: Some(vpc_id),
+            metadata: Some(rpc::Metadata {
+                name: "manageable retained VPC".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner()
+        .vpc
+        .expect("updated VPC");
+
+    // Commit the unrelated change while omitting only the incompatible derived profile.
+    assert_eq!(
+        updated
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.name.as_str()),
+        Some("manageable retained VPC")
+    );
+    assert!(
+        updated
+            .status
+            .as_ref()
+            .and_then(|status| status.effective_routing_profile.as_ref())
+            .is_none()
+    );
+
+    // Mask the inherited bad import target while preserving the complete metadata message.
+    let repaired = api
+        .update_vpc(
+            VpcUpdateRequest::builder()
+                .set_id(Some(vpc_id))
+                .metadata(updated.metadata.clone().expect("updated VPC metadata"))
+                .routing_profile_overrides(rpc::forge::VpcRoutingProfileOverrides {
+                    route_target_imports: Some(rpc::common::RouteTargets { values: vec![] }),
+                    ..Default::default()
+                })
+                .tonic_request(),
+        )
+        .await?
+        .into_inner()
+        .vpc
+        .expect("repaired VPC");
+
+    // The strict routing-policy update must return a complete effective profile.
+    assert!(
+        repaired
+            .status
+            .as_ref()
+            .and_then(|status| status.effective_routing_profile.as_ref())
+            .is_some()
+    );
+
+    // Read through the public API to prove both updates persisted.
+    let persisted = api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![vpc_id],
+        }))
+        .await?
+        .into_inner()
+        .vpcs
+        .pop()
+        .expect("persisted repaired VPC");
+    assert_eq!(
+        persisted
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.name.as_str()),
+        Some("manageable retained VPC")
+    );
+    assert!(
+        persisted
+            .status
+            .as_ref()
+            .and_then(|status| status.effective_routing_profile.as_ref())
+            .is_some()
+    );
+    assert!(
+        forge_vpc_config(&persisted)
+            .routing_profile_overrides
+            .as_ref()
+            .and_then(|overrides| overrides.route_target_imports.as_ref())
+            .is_some_and(|targets| targets.values.is_empty())
+    );
+    Ok(())
+}
+
+/// Verifies inline routing-profile values survive persistence, symbolic targets
+/// remain stored while effective targets resolve from the VPC, omitted update
 /// fields preserve them, and present definitions replace them while inheriting
 /// unset properties from the base profile. An explicitly empty definition
 /// restores full inheritance, preventing unrelated updates from erasing policy
@@ -2388,7 +3867,8 @@ async fn vpc_routing_profile_overrides_can_be_updated(
                 crate::cfg::file::FnnRoutingProfileConfig {
                     route_target_imports: Some(vec![crate::cfg::file::RouteTargetConfig {
                         asn: 65000,
-                        vni: 100,
+                        vni: Some(100),
+                        vni_self: false,
                     }]),
                     internal: Some(true),
                     leak_default_route_from_underlay: Some(true),
@@ -2521,12 +4001,27 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         Some(&expected_effective_profile)
     );
 
+    // Pair symbolic import and export replacements with the VNI-resolved profile,
+    // retaining the named base's inherited properties in the complete fixture.
     let updated_id = updated.id.expect("updated VPC ID");
+    let allocated_vni = updated
+        .status
+        .as_ref()
+        .and_then(|status| status.vni)
+        .expect("FNN VPC should have an allocated VNI");
     let updated_routing_profile_overrides = rpc::forge::VpcRoutingProfileOverrides {
+        route_target_imports: Some(rpc::common::RouteTargets {
+            values: vec![rpc::common::RouteTarget {
+                asn: 429_000_001,
+                vni: None,      // Preserve the symbolic import in persisted overrides.
+                vni_self: true, // Resolve only when producing the effective profile.
+            }],
+        }),
         route_targets_on_exports: Some(rpc::common::RouteTargets {
             values: vec![rpc::common::RouteTarget {
-                asn: 65100,
-                vni: 200,
+                asn: 429_000_000,
+                vni: None,      // Preserve the symbolic export in persisted overrides.
+                vni_self: true, // Exercise the export conversion independently.
             }],
         }),
         leak_tenant_host_routes_to_underlay: Some(true),
@@ -2534,12 +4029,14 @@ async fn vpc_routing_profile_overrides_can_be_updated(
     };
     let updated_effective_profile = rpc::forge::VpcEffectiveRoutingProfile {
         route_target_imports: vec![rpc::common::RouteTarget {
-            asn: 65000,
-            vni: 100,
+            asn: 429_000_001,
+            vni: Some(allocated_vni),
+            vni_self: false,
         }],
         route_targets_on_exports: vec![rpc::common::RouteTarget {
-            asn: 65100,
-            vni: 200,
+            asn: 429_000_000,
+            vni: Some(allocated_vni),
+            vni_self: false,
         }],
         leak_default_route_from_underlay: true,
         leak_tenant_host_routes_to_underlay: true,
@@ -2551,8 +4048,8 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         ..Default::default()
     };
 
-    // Replace the inline definition. Properties omitted from the new message
-    // must inherit from the base rather than retain the previous overrides.
+    // Replace the inline definition with symbolic imports and exports. Other
+    // omitted properties inherit from the base rather than retain prior overrides.
     let updated = env
         .api
         .update_vpc(
@@ -2581,8 +4078,8 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         Some(&updated_effective_profile)
     );
 
-    // Read through the public API to prove both the replacement definition and
-    // its newly resolved effective profile were persisted.
+    // Read through the public API to prove the replacement definition persisted
+    // and its effective profile resolves again from the current configuration.
     let found = env
         .api
         .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
@@ -2609,7 +4106,8 @@ async fn vpc_routing_profile_overrides_can_be_updated(
     let inherited_effective_profile = rpc::forge::VpcEffectiveRoutingProfile {
         route_target_imports: vec![rpc::common::RouteTarget {
             asn: 65000,
-            vni: 100,
+            vni: Some(100),
+            vni_self: false,
         }],
         leak_default_route_from_underlay: true,
         allowed_anycast_prefixes: vec![rpc::forge::PrefixFilterPolicyEntry {
@@ -2650,8 +4148,8 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         Some(&inherited_effective_profile)
     );
 
-    // Read through the public API to prove the empty definition remains
-    // present and the fully inherited effective profile was persisted.
+    // Read through the public API to prove the empty definition persisted and
+    // the effective profile is recomputed from the current named base.
     let found = env
         .api
         .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
@@ -2731,6 +4229,7 @@ async fn initial_vpc_inline_overrides_are_rejected_before_existing_vpc_check(
         &env.pool,
         &initial_vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
+        &env.api.resource_pool_registry,
     )
     .await?;
 
@@ -2754,6 +4253,7 @@ async fn initial_vpc_inline_overrides_are_rejected_before_existing_vpc_check(
         &env.pool,
         &vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
+        &env.api.resource_pool_registry,
     )
     .await
     .expect_err("seeded inline overrides must always be rejected");
@@ -3495,6 +4995,74 @@ async fn release_vpc_inactive_vni_preserves_active_state_and_rejects_replay(
         );
     }
 
+    Ok(())
+}
+
+/// Verifies inactive-VNI cleanup commits for a retained incompatible profile
+/// while omitting only the runtime-derived effective profile from responses.
+#[crate::sqlx_test]
+async fn release_vpc_inactive_vni_commits_with_incompatible_retained_profile(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Create a valid high-VNI VPC with one retained external allocation.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let active_vni = 65_536;
+    grow_explicit_vni(&env, VPC_VNI, active_vni).await?;
+    let created = create_routing_profile_vpc(&env, "retained-cleanup", Some(active_vni)).await?;
+    let vpc_id = created.id.expect("created VPC ID");
+    let retained_vni = allocate_external_vni(&env, vpc_id).await?;
+    let api = api_with_incompatible_internal_route_target(&env).await?;
+
+    // Release the inactive allocation after runtime policy becomes incompatible.
+    let result = api
+        .release_vpc_inactive_vni(tonic::Request::new(
+            rpc::forge::VpcReleaseInactiveVniRequest {
+                id: Some(vpc_id),
+                if_version_match: Some(created.version.clone()),
+                expected_inactive_vni: Some(u32::try_from(retained_vni)?),
+            },
+        ))
+        .await?
+        .into_inner();
+
+    // Return the committed cleanup while omitting the incompatible derived profile.
+    assert_eq!(result.released_inactive_vni, u32::try_from(retained_vni)?);
+    let updated = result.vpc.expect("updated VPC");
+    assert_ne!(updated.version, created.version);
+    assert_eq!(
+        updated.status.as_ref().and_then(|status| status.vni),
+        Some(active_vni)
+    );
+    assert!(
+        updated
+            .status
+            .as_ref()
+            .and_then(|status| status.effective_routing_profile.as_ref())
+            .is_none()
+    );
+
+    // Read through the public API to prove the release and version advance persisted.
+    let persisted = api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![vpc_id],
+        }))
+        .await?
+        .into_inner()
+        .vpcs
+        .pop()
+        .expect("persisted VPC after cleanup");
+    assert_eq!(persisted, updated);
+    assert_eq!(
+        resource_pool_entry_state(
+            &env,
+            env.common_pools.ethernet.pool_external_vpc_vni.name(),
+            retained_vni,
+        )
+        .await?,
+        ResourcePoolEntryState::Free
+    );
     Ok(())
 }
 

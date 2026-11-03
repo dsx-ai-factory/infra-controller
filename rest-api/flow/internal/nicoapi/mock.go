@@ -8,6 +8,9 @@ import (
 	"errors"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -18,6 +21,7 @@ type mockClient struct {
 	powerStates                   map[string]PowerState
 	machineInterfaces             map[string]MachineInterface
 	expectedSwitches              map[string]ExpectedSwitchInfo // keyed by BMC MAC
+	leakingRackIds                []string
 	leakingMachineIds             []string
 	leakingSwitchIds              []string
 	firmwareUpdateTimeWindowErr   error // If set, SetFirmwareUpdateTimeWindow will return this error
@@ -138,12 +142,20 @@ func (c *mockClient) GetMachines(ctx context.Context) ([]MachineDetail, error) {
 	return result, nil
 }
 
+func (c *mockClient) GetLeakingRackIds(ctx context.Context) ([]string, error) {
+	return c.leakingRackIds, nil
+}
+
 func (c *mockClient) GetLeakingMachineIds(ctx context.Context) ([]string, error) {
 	return c.leakingMachineIds, nil
 }
 
 func (c *mockClient) GetLeakingSwitchIds(ctx context.Context) ([]string, error) {
 	return c.leakingSwitchIds, nil
+}
+
+func (c *mockClient) SetLeakingRackIds(ids []string) {
+	c.leakingRackIds = ids
 }
 
 func (c *mockClient) SetLeakingMachineIds(ids []string) {
@@ -798,4 +810,10 @@ func (c *mockClient) SetDecommissionSwitchError(err error) {
 // (mock only).
 func (c *mockClient) SetDecommissionPowerShelfError(err error) {
 	c.decommissionPowerShelfErr = err
+}
+
+// GetComponentPowerDetails leaves passive power details explicitly unsupported
+// in the generic mock. Focused service tests supply the observations they need.
+func (c *mockClient) GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "mock power details are not configured")
 }

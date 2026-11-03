@@ -63,7 +63,7 @@ message ExploredEndpoint {
   // The version of `report`.
   // Will increase every time the report gets updated.
   string report_version = 3;
-  /// Whether the endpoint will be explored in the next site-explorer run
+  // Whether exploration is queued. Pending requests remain queued while suppressed.
   bool exploration_requested = 4;
   // The current preingestion state
   string preingestion_state = 5;
@@ -77,6 +77,12 @@ message ExploredEndpoint {
   string last_redfish_powercycle = 9;
   // Flag to prevent site explorer from taking remediation actions on redfish errors
   bool pause_remediation = 10;
+  // Periodic exploration, re-exploration, and immediate report refresh are paused
+  // while any DPU waits for DPF readiness or handles a DPF-requested reboot.
+  // Periodic exploration and queued refreshes resume when all Site Explorer
+  // suppressions are cleared. Re-exploration requests are rejected while paused.
+  // Ad-hoc Explore is unaffected. False when no DPF suppression exists.
+  bool exploration_paused_for_dpf = 11;
 }
 
 // Information about explored DPU that was discovered via Site Exploration

@@ -75,6 +75,10 @@ CORE_POLICY = GatePolicy(
             "This administrative job reports the completed build to Slack on "
             "protected refs."
         ),
+        "prune-sccache": (
+            "This housekeeping job deletes superseded sccache archives on main "
+            "and does not validate build output."
+        ),
         "core-ci-pass": "A job cannot depend on itself.",
     },
 )
@@ -338,6 +342,7 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
             "build-machine-lifecycle-test-aarch64",
         }
     ),
+    "control_plane_dpu_changed": frozenset({"test-control-plane-dpu"}),
     "proto_files_changed": frozenset({"proto-police"}),
     "core_rpc_proto_files_changed": frozenset({"check-rest-core-proto-sync"}),
 }

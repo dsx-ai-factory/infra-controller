@@ -1262,7 +1262,7 @@ func (c *Config) WatchSecretFilePaths() {
 						eventsWG.Done()
 						return
 					}
-					if !(event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
+					if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) {
 						continue
 					}
 					eventFilePath := filepath.Clean(event.Name)

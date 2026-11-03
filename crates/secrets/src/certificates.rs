@@ -18,6 +18,17 @@ use async_trait::async_trait;
 
 use crate::SecretsError;
 
+/// Build a machine URI SAN from the site trust domain, base path, and machine ID.
+/// Leading and trailing slashes around the base path are normalized.
+pub fn machine_spiffe_uri(trust_domain: &str, machine_base_path: &str, machine_id: &str) -> String {
+    let base = machine_base_path.trim().trim_matches('/');
+    if base.is_empty() {
+        format!("spiffe://{trust_domain}/{machine_id}")
+    } else {
+        format!("spiffe://{trust_domain}/{base}/{machine_id}")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Certificate {
     pub issuing_ca: Vec<u8>,

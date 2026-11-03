@@ -24,7 +24,12 @@ func ExampleWorkerPool() {
 	if err != nil {
 		log.Fatalf("Failed to start worker pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			log.Printf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	// Submit tasks using TaskFunc for simple operations
 	for i := 0; i < 5; i++ {
@@ -63,7 +68,12 @@ func ExampleWorkerPool_withResults() {
 	if err != nil {
 		log.Fatalf("Failed to start worker pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			log.Printf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	// Create a result channel
 	results := make(chan JobResult, 5)
@@ -145,7 +155,12 @@ func ExampleWorkerPool_customTasks() {
 	if err != nil {
 		log.Fatalf("Failed to start worker pool: %v", err)
 	}
-	defer pool.Stop()
+	defer func() {
+		err := pool.Stop()
+		if err != nil {
+			log.Printf("Failed to stop worker pool: %v", err)
+		}
+	}()
 
 	// Submit data processing tasks
 	for i := 0; i < 3; i++ {

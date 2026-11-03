@@ -45,19 +45,16 @@ func TestGetAllAuditEntryHandler_Handle(t *testing.T) {
 
 	// build audit entries
 	totalCount := 50
-	var auditEntries []cdbm.AuditEntry
 	for i := 0; i < totalCount; i++ {
-		var ae *cdbm.AuditEntry
 		if i%2 == 0 {
 			if i%4 == 0 {
-				ae = common.TestBuildAuditEntry(t, dbSession, org1, &org1user.ID, http.StatusCreated)
+				common.TestBuildAuditEntry(t, dbSession, org1, &org1user.ID, http.StatusCreated)
 			} else {
-				ae = common.TestBuildAuditEntry(t, dbSession, org1, &org1user.ID, http.StatusBadRequest)
+				common.TestBuildAuditEntry(t, dbSession, org1, &org1user.ID, http.StatusBadRequest)
 			}
 		} else {
-			ae = common.TestBuildAuditEntry(t, dbSession, org2, &org2user.ID, http.StatusCreated)
+			common.TestBuildAuditEntry(t, dbSession, org2, &org2user.ID, http.StatusCreated)
 		}
-		auditEntries = append(auditEntries, *ae)
 	}
 
 	// Setup echo server/context

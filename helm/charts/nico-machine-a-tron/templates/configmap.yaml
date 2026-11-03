@@ -112,6 +112,9 @@ data:
     dpu_bmc_password = {{ $dpuPassword | quote }}
     {{- end }}
     api_refresh_interval = {{ $root.Values.machineATron.apiRefreshInterval | quote }}
+    {{- if $root.Values.machineATron.scoutStreamReconnectInterval }}
+    scout_stream_reconnect_interval = {{ $root.Values.machineATron.scoutStreamReconnectInterval | quote }}
+    {{- end }}
 
     {{/*
     DHCP Configuration

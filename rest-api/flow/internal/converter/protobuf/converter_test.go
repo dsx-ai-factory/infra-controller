@@ -1771,3 +1771,26 @@ func TestScheduledOperationFrom(t *testing.T) {
 		})
 	}
 }
+
+// TestTaskKindTo keeps every supported task kind identifiable in brief context,
+// including lifecycle work that OperationType cannot represent.
+func TestTaskKindTo(t *testing.T) {
+	cases := []struct {
+		kind taskcommon.TaskType
+		want pb.TaskKind
+	}{
+		// These are distinct wire values, not one shared "other task" category.
+		{taskcommon.TaskTypePowerControl, pb.TaskKind_TASK_KIND_POWER_CONTROL},
+		{taskcommon.TaskTypeFirmwareControl, pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL},
+		{taskcommon.TaskTypeBringUp, pb.TaskKind_TASK_KIND_BRING_UP},
+		{taskcommon.TaskTypeDecommission, pb.TaskKind_TASK_KIND_DECOMMISSION},
+		{taskcommon.TaskTypeInjectExpectation, pb.TaskKind_TASK_KIND_INJECT_EXPECTATION},
+		// A kind unknown to this binary must not be mislabeled as power work.
+		{taskcommon.TaskTypeUnknown, pb.TaskKind_TASK_KIND_UNSPECIFIED},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			require.Equal(t, tc.want, TaskKindTo(tc.kind))
+		})
+	}
+}

@@ -222,6 +222,25 @@ async fn exercise_power_shelf_reader(
     assert_eq!(actual.metadata, expected.metadata);
     assert_eq!(actual.version, expected.version);
     assert_eq!(actual.health_reports, expected.health_reports);
+
+    // `update` serializes `None` as JSON null, not SQL NULL. Reload it so
+    // this checks the stored representation, not the clone it returns.
+    expected.status = None;
+    update(&expected, txn.as_mut()).await?;
+    let status_is_json_null: bool = sqlx::query_scalar(
+        "SELECT status IS NOT DISTINCT FROM 'null'::jsonb FROM power_shelves WHERE id = $1",
+    )
+    .bind(expected.id)
+    .fetch_one(txn.as_mut())
+    .await?;
+    assert!(
+        status_is_json_null,
+        "status must be JSON null, not SQL NULL"
+    );
+    let reloaded = find_by(&mut txn, ObjectColumnFilter::One(IdColumn, &expected.id)).await?;
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded[0].status, None);
+
     txn.rollback().await?;
     Ok(())
 }

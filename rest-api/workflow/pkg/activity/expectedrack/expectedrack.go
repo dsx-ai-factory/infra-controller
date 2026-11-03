@@ -6,6 +6,7 @@ package expectedrack
 import (
 	"context"
 	"errors"
+	"maps"
 	"reflect"
 
 	"github.com/google/uuid"
@@ -55,7 +56,7 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mer.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -150,20 +151,33 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 			(reported.RackGroupID != nil && !reflect.DeepEqual(cur.RackGroupID, reported.RackGroupID)) ||
 			cur.Name != reported.Name ||
 			cur.Description != reported.Description ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
+			!maps.Equal(cur.Labels, reported.Labels) {
 			// nil labels in nico can mean we need to clear out existing labels in DB.
 			// A nil value will not trigger an update in the DAO layer, so use an empty map.
 			labels := reported.Labels
 			if cur.Labels != nil && labels == nil {
 				labels = map[string]string{}
 			}
-			_, uerr := erDAO.Update(ctx, nil, cdbm.ExpectedRackUpdateInput{
-				ExpectedRackID: cur.ID,
-				RackProfileID:  &reported.RackProfileID,
-				RackGroupID:    reported.RackGroupID,
-				Name:           &reported.Name,
-				Description:    &reported.Description,
-				Labels:         labels,
+			uerr := cdb.WithTx(ctx, mer.dbSession, func(tx *cdb.Tx) error {
+				// Recheck `Updated` under the row lock to preserve REST edits since
+				// our initial read, and keep the lock until the inventory update commits.
+				locked, err := erDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				_, uerr := erDAO.Update(ctx, tx, cdbm.ExpectedRackUpdateInput{
+					ExpectedRackID: cur.ID,
+					RackProfileID:  &reported.RackProfileID,
+					RackGroupID:    reported.RackGroupID,
+					Name:           &reported.Name,
+					Description:    &reported.Description,
+					Labels:         labels,
+				})
+				return uerr
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedRackID", cur.ID.String()).Str("RackID", rackID).Msg("failed to update ExpectedRack in DB")
@@ -171,9 +185,9 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 		}
 	}
 
-	// Delete any Expected Rack present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
-	// The source of truth for NICo is reportedRackIDs.
+	// Delete stale records missing from `reportedRackIDs` only after the final
+	// page (or when paging is disabled). Matching the saved `Updated` timestamp
+	// in `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedRackInventory.GetInventoryPage()) {
 		for _, er := range existingExpectedRacks {
 			if _, keep := reportedRackIDs[er.RackID]; keep {
@@ -183,9 +197,13 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 			if site.IsTimeWithinStaleInventoryThreshold(er.Updated) {
 				continue
 			}
-			logger.Info().Str("ExpectedRackID", er.ID.String()).Str("RackID", er.RackID).Msg("deleting ExpectedRack from DB since it was no longer reported in inventory from Site")
-			if derr := erDAO.Delete(ctx, nil, er.ID); derr != nil {
+			deleted, derr := erDAO.DeleteIfUnchanged(ctx, nil, er.ID, er.Updated)
+			if derr != nil {
 				logger.Error().Err(derr).Str("ExpectedRackID", er.ID.String()).Msg("failed to delete ExpectedRack from DB")
+				continue
+			}
+			if deleted {
+				logger.Info().Str("ExpectedRackID", er.ID.String()).Str("RackID", er.RackID).Msg("deleted ExpectedRack no longer reported in inventory from Site")
 			}
 		}
 	}

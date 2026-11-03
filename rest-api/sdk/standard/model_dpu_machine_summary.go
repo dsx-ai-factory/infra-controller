@@ -55,6 +55,8 @@ type DpuMachineSummary struct {
 	LastRebooted NullableTime `json:"lastRebooted"`
 	// Physical placement of the DPU Machine within its Rack, when known
 	PlacementInRack NullablePlacementInRack `json:"placementInRack"`
+	// LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.
+	LldpNeighbors []MachineLldpNeighbor `json:"lldpNeighbors"`
 }
 
 type _DpuMachineSummary DpuMachineSummary
@@ -63,7 +65,7 @@ type _DpuMachineSummary DpuMachineSummary
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuMachineSummary(id string, infrastructureProviderId string, siteId string, hostMachineId string, dpuAgentVersion string, bmcInfo NullableMachineBMCInfo, dmiData NullableMachineDMIData, interfaces []DpuMachineInterface, softwareComponents []DpuMachineSoftwareComponent, health NullableMachineHealth, labels map[string]string, state string, dpuNetworkConfig NullableDpuNetworkConfig, lastRebooted NullableTime, placementInRack NullablePlacementInRack) *DpuMachineSummary {
+func NewDpuMachineSummary(id string, infrastructureProviderId string, siteId string, hostMachineId string, dpuAgentVersion string, bmcInfo NullableMachineBMCInfo, dmiData NullableMachineDMIData, interfaces []DpuMachineInterface, softwareComponents []DpuMachineSoftwareComponent, health NullableMachineHealth, labels map[string]string, state string, dpuNetworkConfig NullableDpuNetworkConfig, lastRebooted NullableTime, placementInRack NullablePlacementInRack, lldpNeighbors []MachineLldpNeighbor) *DpuMachineSummary {
 	this := DpuMachineSummary{}
 	this.Id = id
 	this.InfrastructureProviderId = infrastructureProviderId
@@ -80,6 +82,7 @@ func NewDpuMachineSummary(id string, infrastructureProviderId string, siteId str
 	this.DpuNetworkConfig = dpuNetworkConfig
 	this.LastRebooted = lastRebooted
 	this.PlacementInRack = placementInRack
+	this.LldpNeighbors = lldpNeighbors
 	return &this
 }
 
@@ -465,6 +468,30 @@ func (o *DpuMachineSummary) SetPlacementInRack(v PlacementInRack) {
 	o.PlacementInRack.Set(&v)
 }
 
+// GetLldpNeighbors returns the LldpNeighbors field value
+func (o *DpuMachineSummary) GetLldpNeighbors() []MachineLldpNeighbor {
+	if o == nil {
+		var ret []MachineLldpNeighbor
+		return ret
+	}
+
+	return o.LldpNeighbors
+}
+
+// GetLldpNeighborsOk returns a tuple with the LldpNeighbors field value
+// and a boolean to check if the value has been set.
+func (o *DpuMachineSummary) GetLldpNeighborsOk() ([]MachineLldpNeighbor, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.LldpNeighbors, true
+}
+
+// SetLldpNeighbors sets field value
+func (o *DpuMachineSummary) SetLldpNeighbors(v []MachineLldpNeighbor) {
+	o.LldpNeighbors = v
+}
+
 func (o DpuMachineSummary) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -490,6 +517,7 @@ func (o DpuMachineSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize["dpuNetworkConfig"] = o.DpuNetworkConfig.Get()
 	toSerialize["lastRebooted"] = o.LastRebooted.Get()
 	toSerialize["placementInRack"] = o.PlacementInRack.Get()
+	toSerialize["lldpNeighbors"] = o.LldpNeighbors
 	return toSerialize, nil
 }
 
@@ -513,6 +541,7 @@ func (o *DpuMachineSummary) UnmarshalJSON(data []byte) (err error) {
 		"dpuNetworkConfig",
 		"lastRebooted",
 		"placementInRack",
+		"lldpNeighbors",
 	}
 
 	allProperties := make(map[string]interface{})

@@ -26,8 +26,8 @@ use crate::{
     machine_validation, managed_host, managed_switch, mlx, network_devices, network_security_group,
     network_segment, nvl_domain, nvl_logical_partition, nvl_partition, nvlink_nmxc_endpoints,
     operating_system, os_image, ping, power_shelf, rack, redfish, resource_pool, rms, route_server,
-    scout_stream, secrets, set, site_explorer, site_prefix, sku, spx_partition, ssh, switch,
-    tenant, tenant_keyset, tpm_ca, trim_table, version, vpc, vpc_peering, vpc_prefix,
+    scout_stream, secrets, set, site_explorer, site_prefix, sku, spx_maintenance, spx_partition,
+    ssh, switch, tenant, tenant_keyset, tpm_ca, trim_table, version, vpc, vpc_peering, vpc_prefix,
 };
 
 const MAX_INTERNAL_PAGE_SIZE: usize = 100;
@@ -237,6 +237,17 @@ pub(crate) enum CliCommand {
     ExpectedRack(expected_rack::Cmd),
     #[clap(about = "Expected rack group handling", subcommand)]
     ExpectedRackGroup(expected_rack_group::Cmd),
+    /// Administrator-owned expected NVLink domain declarations
+    ///
+    /// A domain is an administrator-managed group of compute and switch trays within a RackGroup.
+    /// No NVLink management state machine consumes these declarations yet.
+    /// NVLink management is planned to move from rack-based
+    /// to domain-based state machines, which will use these declarations to define domains.
+    #[clap(
+        about = "Administrator-owned expected NVLink domain declarations",
+        subcommand
+    )]
+    ExpectedNvlinkDomain(crate::expected_nvlink_domain::Cmd),
     #[clap(about = "Expected switch handling", subcommand, visible_alias = "ew")]
     ExpectedSwitch(expected_switch::Cmd),
     #[clap(
@@ -389,6 +400,8 @@ pub(crate) enum CliCommand {
         visible_alias = "spx"
     )]
     SpxPartition(spx_partition::Cmd),
+    #[clap(about = "Configure Spectrum-X plane maintenance on a machine")]
+    SpxMaintenance(spx_maintenance::Args),
     #[clap(about = "SSH Util functions", subcommand)]
     Ssh(ssh::Cmd),
     #[clap(about = "Switch management", subcommand, visible_alias = "sw")]

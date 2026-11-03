@@ -8,6 +8,8 @@ A small authenticated HTTP/2 proxy for BMC access:
 - fetches the BMC's credentials from nico-api over gRPC
 - proxies the HTTP request to the target BMC
 
+The same path serves a switch's NVOS management interface. When nico-api identifies an address as a switch's NVOS interface, the proxy forwards the request to the switch's NVUE REST API with the switch's NVOS admin credentials. A caller reaches `/nvue_v1/` paths the same way it reaches `/redfish/v1/` paths on a BMC. Where switches require a client certificate, [`tls.switch`](#tlsswitch) gives the proxy its own.
+
 The point is to keep BMC authentication and credential handling in one place, while allowing multiple higher-level systems to coexist as peers.
 
 ## Configuration
@@ -24,7 +26,14 @@ Important configuration fields:
 - `metrics_endpoint`: metrics listen address, default `[::]:1080`
 - `allowed_principals`: authorized caller principals, for example `spiffe-service-id/<name>`
 - `tls.*`: server certificate, key, and trust roots for mTLS
-- `nico_api.*`: nico-api gRPC endpoint and mTLS material used for BMC IP resolution and `GetBmcCredentials`
+- `tls.switch`: optional client certificate and CA bundle for switches whose
+  NVUE REST API requires a client certificate; see [`tls.switch`](#tlsswitch)
+- `carbide_api.*`: nico-api gRPC endpoint (`api_url`) and mTLS material (`root_ca`,
+  `client_cert`, `client_key`) used to resolve targets and fetch their BMC or NVOS
+  credentials. Without the table, the proxy dials
+  `https://nico-api.nico-system.svc.cluster.local:1079` with the files under
+  `/var/run/secrets/spiffe.io`; a table must set all four keys. The Helm chart's default
+  config dials its `apiServiceName` in the release namespace
 - `auth.trust.*`: SPIFFE trust domain and allowed base paths
 - `auth.acls`: per-principal ACL rules for HTTP method and path authorization
 - `auth.cli_certs`: optional criteria for externally issued admin/client certs
@@ -53,7 +62,7 @@ identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"
 root_cafile_path = "/var/run/secrets/spiffe.io/ca.crt"
 admin_root_cafile_path = "/etc/nico/nico-bmc-proxy/site/admin_root_cert_pem"
 
-[nico_api]
+[carbide_api]
 root_ca = "/var/run/secrets/spiffe.io/ca.crt"
 client_cert = "/var/run/secrets/spiffe.io/tls.crt"
 client_key = "/var/run/secrets/spiffe.io/tls.key"
@@ -66,7 +75,10 @@ spiffe_machine_base_path = "/nico-system/machine/"
 additional_issuer_cns = []
 
 [auth.acls]
-"spiffe-service-id/dpf" = ["/redfish/v1/**"]
+"spiffe-service-id/dpf" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/redfish/v1/**",
+]
 ```
 
 ### Inbound TLS
@@ -91,6 +103,77 @@ file read that has already started cannot be cancelled; shutdown waits for it
 to finish. TCP accept errors retry after one second; shutdown interrupts that
 wait. These timers do not limit connection concurrency.
 
+### `tls.switch`
+
+A switch's NVUE REST API can require a client certificate (NVUE mTLS). The optional `[tls.switch]`
+table gives the proxy its own client certificate for switches, and the CA bundle their
+certificates must chain to:
+
+```toml
+[tls.switch]
+ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+client_cert_path = "/var/run/secrets/switch-client/tls.crt"
+client_key_path = "/var/run/secrets/switch-client/tls.key"
+tls_server_name = "switches.example.internal"
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `ca_cert_path` | Yes | PEM bundle of the CAs a switch's certificate must chain to. A PEM syntax error anywhere in it fails the load. A certificate that parses but is not a usable trust anchor is skipped, and at least one must be usable. The system trust store is not used. |
+| `client_cert_path` | Yes | PEM certificate chain the proxy presents to switches. |
+| `client_key_path` | Yes | PEM private key of `client_cert_path`, as PKCS#8, PKCS#1, or SEC1. |
+| `tls_server_name` | No | The DNS name every switch's certificate carries, when switches share one instead of carrying their IPs. Omitted or empty, a switch's certificate must carry the IP the proxy connects to. An IP address or any other non-DNS name stops the proxy at startup. |
+
+Other keys in the table are rejected, and so are unknown keys under `[tls]`: a misspelled
+`[tls.switch]` stops the proxy instead of leaving switches reached without it.
+
+The table applies only to addresses nico-api identifies as a switch's NVOS management interface,
+the requests whose span has `bmc_proxy.target = "switch_nvos"`. The proxy presents its client
+certificate when the switch asks for one, and sends the request only once the switch's certificate
+chains to `ca_cert_path` and is valid for `tls_server_name`, or else for the switch's IP.
+`tls_server_name` serves that check alone: the proxy still connects to the switch's IP, names the
+IP in `Host`, and sends no SNI. Only HTTP/1.1 is offered to switches, and the `HTTP_PROXY` family
+of environment variables is ignored for them: an HTTPS forward proxy's certificate would be held to
+the switch CA too. With a host [`bmc_proxy`](#configuration) override, a dev/test setting,
+requests to switches go to that host instead, and the table applies to it: its certificate must
+chain to `ca_cert_path` and carry `tls_server_name`, or else the override host's name. The request
+then names the override host in `Host`, and in SNI when it is a DNS name.
+
+A switch whose certificate fails that check receives neither the request nor its credentials. The
+proxy counts the attempt in `carbide_bmc_proxy_upstream_certificate_rejected_total`, and drops the
+credentials it cached for the address, since the address may have passed to a BMC, whose
+self-signed certificate the check refuses. A request whose body can be sent again is replayed
+once with freshly resolved credentials, as one a BMC answers `401` or `403` is, and reaches the
+address as what nico-api now says it is. When the replay fails the check too, or the body cannot
+be sent again, the caller gets `502`, naming the certificate's fault. Breakers never count these
+failures; see [`admission.breaker`](#admissionbreaker).
+
+BMC addresses are reached as without the table: no client certificate is presented, and the BMC's
+certificate is accepted as presented. Without the table, switches are reached the same way, and a
+switch that requires a client certificate refuses the request; NVOS reads it, credentials
+included, and answers `400`.
+
+The files must load at startup, or the proxy does not start. Once a request to a switch finds
+five minutes passed since their last check, they are checked again in the background, and that
+request and the ones after it use the material loaded before until the check ends. When any of the
+files changed, all three are reloaded; when none did, nothing is, and the connections to switches
+stay open. A failed reload keeps the certificate, key, and CA bundle loaded before, increments
+`carbide_bmc_proxy_switch_tls_reload_failures_total`, and is retried by the first request to a
+switch 30 seconds later, rather than five minutes. Adding or removing the table takes a restart.
+
+An expired or not yet valid certificate in `client_cert_path` or `ca_cert_path` still loads, so
+it does not stop the proxy or its BMC traffic, but the load and every check after it increment
+`carbide_bmc_proxy_switch_tls_certificate_out_of_validity_total` with the file as `file`
+(`client_certificate` or `ca_bundle`). A switch refuses an expired client certificate. An expired
+CA is only reported: the proxy keeps trusting it, and still accepts a switch whose certificate it
+anchors, so remove a CA from the bundle to stop trusting it.
+
+`NICO_BMC_PROXY__TLS__SWITCH__CA_CERT_PATH`, `NICO_BMC_PROXY__TLS__SWITCH__CLIENT_CERT_PATH`,
+`NICO_BMC_PROXY__TLS__SWITCH__CLIENT_KEY_PATH`, and `NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME`
+set the same keys and take precedence over the file, key by key: a key no variable sets keeps the
+file's value, and an empty `NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME` unsets a name the file
+gives. The Helm chart sets all four from `switchTls`.
+
 ### `redirects.mode`
 
 `follow_same_origin` follows up to five redirects within the original scheme, host, and effective
@@ -114,9 +197,11 @@ cross-origin redirect is rejected instead of being followed.
 `return_to_client` disables automatic following and returns safe redirects using the same rewrite
 so the caller can make a separately authorized request. This mode is experimental.
 
-Both modes reject non-HTTP(S), malformed, ambiguous, credential-bearing, and other cross-origin
-redirect targets. On a non-redirect response such as a Redfish session creation `201`, the proxy
-rewrites a safe same-BMC `Location` and omits an unsafe one without changing the response status.
+Both modes reject redirect URLs with a non-empty username or any password before following
+or rewriting them. Non-HTTP(S), malformed, ambiguous, other cross-origin targets, and returned
+Locations containing known upstream credentials are also rejected. On a non-redirect response
+such as a Redfish session creation `201`, the proxy rewrites a safe same-BMC `Location` and omits
+an unsafe one without changing the response status.
 
 `NICO_BMC_PROXY__REDIRECTS__MODE` overrides the TOML value because environment providers are merged
 after the configuration file. The Helm chart always sets that variable from
@@ -128,18 +213,59 @@ after the configuration file. The Helm chart always sets that variable from
 
 ```toml
 [auth.acls]
-"spiffe-service-id/nico-api" = ["/**"]
+"spiffe-service-id/nico-api" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/**",
+]
 "spiffe-service-id/nv-dps" = [
   "GET /redfish/v1",
   "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains",
   "GET,PATCH,DELETE /redfish/v1/Managers/BMC/NodeManager/Domains/*",
+  "GET /nvue_v1/platform/environment/**",
 ]
 ```
 
-Each ACL entry has the form:
+ACL entries match only the request path, not the target type. A principal
+that reaches switches lists the `/nvue_v1/` paths of the switches' NVUE REST
+API alongside its `/redfish/v1/` paths.
+
+Each ACL entry is a string with this form, or a table with the same string in `pattern`:
 
 ```text
 [!]VERB[,VERB...] /path/pattern
+```
+
+Structured allow entries can also set `allow_escapes` to let their wildcards consume specific
+percent escapes. Entries of both forms can appear in the same principal's ordered list:
+
+```toml
+[auth.acls]
+"spiffe-service-id/nvue-admin" = [
+  { pattern = "/nvue_v1/**", allow_escapes = ["%2F", "%3A"] },
+]
+```
+
+`allow_escapes` applies only to that entry, with these values:
+
+- Omitted or `[]`: wildcards consume no percent escapes, as with string entries.
+- A list of exact `%HH` spellings: wildcards may consume any number of those octets, ignoring
+  hexadecimal case. Order and duplicates have no effect; other escapes must be literal in
+  `pattern`. For example, `["%2F"]` accepts additional encoded slashes in a variable ID.
+- `["*"]`: wildcards may consume any escape that passes the path guard below. This is an
+  explicit unrestricted escape-matching grant; `"*"` must be the sole list element.
+
+The list affects only wildcard matching; literals still distinguish encoded and plain forms.
+Non-empty `allow_escapes` on a deny entry, unknown table fields, and invalid list values are
+configuration errors. Existing shipped principal ACLs retain the default strict policy.
+For an unrestricted escape-matching grant to the API principal, an operator can replace its
+ACL with the following; authentication, target lookup, path validation, and class limits still
+apply:
+
+```toml
+[auth.acls]
+"spiffe-service-id/nico-api" = [
+  { pattern = "/**", allow_escapes = ["*"] },
+]
 ```
 
 Rules:
@@ -166,13 +292,69 @@ Path matching syntax:
   Valid: `/redfish/v1/Systems/*Boot/SecureBoot`
   Invalid: `/redfish/v1/Systems/sys*tem/SecureBoot`
 - At most one `**` is allowed in an ACL path.
+- By default, allow wildcards cannot consume percent escapes: each `%HH` (case-ignored) must
+  appear in the matching rule. `allow_escapes` opts individual entries into wildcard escape
+  matching. Ordinary path letters remain case-sensitive. Without opt-in, `%23*` allows
+  `%23Resource` but not `%23Resource%20Name`.
+- Deny wildcards continue to match percent escapes. The first matching rule wins.
+- An incomplete or non-hexadecimal escape in an ACL entry is a configuration error.
+
+Ambiguous paths return `400` before ACL evaluation: dot segments (including encoded forms),
+raw backslashes, malformed escapes, encoded `\`, ASCII controls or `%`, and characters the
+upstream URL parser would rewrite, such as braces. Other escapes reach the ACL encoded and
+receive `403` unless a matching allow rule spells the escapes literally or permits their
+consumption with `allow_escapes`. Even `["*"]` cannot bypass these pre-ACL rejections.
+The proxy forwards the original path and query spelling to the BMC; query parameters are
+outside path matching.
+
+Encoded slashes (`%2F`) reach the ACL encoded.
+For example, Cumulus/NVUE API can contain `changeset/<user>/<timestamp>` paths. A rule such as
+`GET,PATCH /nvue_v1/revision/changeset%2Fadmin%2F*` allows revisions for `admin`, with both
+encoded slashes spelled literally. The final wildcard cannot consume additional escapes;
+`GET /nvue_v1/**` alone does not authorize the encoded ID. The proxy preserves the encoded
+slashes on the upstream request.
+
+Alternatively, `allow_escapes = ["%2F"]` on a rule for `/nvue_v1/revision/*` accommodates
+variable IDs with additional encoded slashes. The broader NVUE example above also lists
+`%3A` for clients that encode colons in IPv6 CIDR values.
+The `allow_escapes` opt-in is to support non-Redfish APIs. DMTF URI restrictions apply to
+Redfish resources, not to arbitrary upstream HTTP endpoints. Therefore, the more restrictive DMTF
+spec can be problematic there. The `allow_escapes`, therefore, is to accommodate the non-Redfish
+targets via the bmc-proxy, without the guarantee that the encoded path components will be
+interpreted by the upstream correctly (the upstream is responsible for this).
+
+[RFC 3986 section 2.3](https://www.rfc-editor.org/rfc/rfc3986.html#section-2.3) treats an encoded
+unreserved character such as `%4A` as URI-equivalent to `J`. By default, the ACL requires
+explicit encoded resource exceptions. This bounded support avoids the
+additional decoding rules and maintenance cost of general URI canonicalization. ACL matching
+therefore keeps escapes encoded: a rule for `J*` does not allow `%4AResource`, and a rule for
+`%4A*` does not allow `JResource`.
+
+Nested encoding is outside this compatibility boundary: `%252e%252e` becomes `%2e%2e` after
+one full decoding pass and `..` after a second. The proxy rejects `%25` (encoded `%`) with
+`400` before ACL evaluation, even when an ACL explicitly names it. This keeps the supported
+encoding depth explicit. Normalization limited to unreserved characters would leave `%25`
+encoded; [RFC 3986 section 2.4](https://www.rfc-editor.org/rfc/rfc3986.html#section-2.4) describes
+the interpretation risks of repeated decoding.
+
+The chart and dev configurations include `GET /redfish/v1/Registries/%23*` for escaped registry
+names. Add similarly narrow rules for other required Redfish resources. These exceptions are
+compatibility accommodations: [Redfish URI rules](https://redfish.dmtf.org/schemas/DSP0266_1.20.1.html#universal-resource-identifiers)
+forbid percent encoding outside query parameters.
+
+Class matching never changes the ACL decision. Class limits can still reject an authorized
+request—for example, with `429` when its queue is full.
+
+Path rejections increment `carbide_bmc_proxy_authorization_denied_total` with
+`authorization_layer="request_path"` and a bounded HTTP method label. Diagnostic logs include
+`event_name="bmc_proxy_request_path_rejected"`, the path, and a bounded rejection reason.
 
 Examples:
 
 - `"/**"`
-  Allow a principal to access any path with any method.
+  Allow any method on paths without percent escapes.
 - `"GET /redfish/v1/**"`
-  Allow only `GET` requests anywhere under `/redfish/v1`.
+  Allow `GET` below `/redfish/v1` on paths without percent escapes.
 - `"!POST,PATCH /redfish/v1/Systems/*/SecureBoot/**"`
   Deny writes below any system's `SecureBoot` subtree.
 - `"GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains"`
@@ -401,8 +583,9 @@ its class's budget: a shorter attempt was cut short by its wait for a slot,
 and a streamed upload that times out may have been slowed by its caller, so
 neither counts. A status counts as the BMC's answer to the last attempt, after
 any replay with fresh credentials. A connection the BMC closes without
-answering, a body that stalls after the answer, and a failure of the proxy's
-own, such as a credential lookup, never count. Every other freed slot counts
+answering, a body that stalls after the answer, a failure of the proxy's
+own, such as a credential lookup, and a switch certificate the proxy refuses
+(see [`tls.switch`](#tlsswitch)) never count. Every other freed slot counts
 as a success, including one whose request stopped waiting, or got its slot too
 late to use it: such requests dilute the failures, and one can be the request
 that closes the breaker.
@@ -555,7 +738,7 @@ An alternative approach is to have nico-api be the only service that talks to BM
 
 nico-api routes its own eligible BMC Redfish traffic through nico-bmc-proxy when its static `[bmc_proxy]` configuration section is enabled: machine-lifecycle traffic and the credentialed exploration of endpoints whose stored root credential is established. Credential-subject operations (credential setup, BMC session minting, password rotation, UEFI password management) and the other documented exceptions stay direct, so nico-api still holds BMC credentials. The routing contract, including every direct-path exception, is in [`crates/api-core/src/cfg/README.md`](../api-core/src/cfg/README.md#bmcproxyconfig--bmc_proxy).
 
-We soon expect that [DPS] will support configuration of an authenticating proxy like this one, to manage power configuration on BMC's. DPS is a standalone service that should not have a direct dependency on nico-api. So nico-bmc-proxy serves an implementation of such a proxy, although any proxy that implements similar functionality can work.
+We soon expect that [DPS] will support configuration of an authenticating proxy like this one, to manage power configuration on BMCs, and on NVLink switch trays through their NVUE REST API. DPS is a standalone service that should not have a direct dependency on nico-api. So nico-bmc-proxy serves an implementation of such a proxy, although any proxy that implements similar functionality can work.
 
 Future work can move the remaining direct paths behind the proxy so that nico-api no longer holds BMC credentials at all.
 
@@ -594,19 +777,19 @@ flowchart TB
     subgraph ProxyBoundary["nico-bmc-proxy"]
         MTLS[mTLS termination + SPIFFE/external cert authn]
         ALLOW[principal allow-list]
-        LOOKUP[nico-api: BMC IP -> BMC identity]
+        LOOKUP[nico-api: IP -> MAC, BMC or switch NVOS interface]
         CREDS[nico-api: credential lookup]
         FORWARD[upstream HTTP proxy]
     end
 
-    subgraph BMCBoundary["BMC"]
-        Redfish[Redfish / HTTPS]
+    subgraph BMCBoundary["BMC or switch NVOS"]
+        Redfish[Redfish or NVUE REST / HTTPS]
     end
 
     Client --> MTLS --> ALLOW --> LOOKUP --> CREDS --> FORWARD --> Redfish
 ```
 
-The caller authenticates with a client certificate. If the caller is authorized, nico-bmc-proxy looks up the target BMC, retrieves the corresponding credentials, and performs the backend request itself.
+The caller authenticates with a client certificate. If the caller is authorized, nico-bmc-proxy looks up the target, retrieves the credentials for what it is, and performs the backend request itself.
 
 ### Request Sequence
 
@@ -615,27 +798,41 @@ sequenceDiagram
     participant Client
     participant Proxy as nico-bmc-proxy
     participant API as nico-api
-    participant BMC
+    participant BMC as BMC or switch NVOS
 
     Client->>Proxy: HTTPS + HTTP/2 + client cert
     Client->>Proxy: GET /redfish/v1/...<br/>Forwarded: host=10.0.0.42
     Proxy->>Proxy: authenticate + authorize principal
     Proxy->>API: FindMacAddressByBmcIp(10.0.0.42)
-    API-->>Proxy: BMC MAC / identity
-    Proxy->>API: GetBmcCredentials(BMC MAC)
-    API-->>Proxy: BMC credentials
-    Proxy->>BMC: HTTPS request + provided BMC credentials
-    BMC-->>Proxy: Redfish response
+    API-->>Proxy: MAC at the address
+    Proxy->>API: FindSwitchIds(nvos_mac = MAC)
+    API-->>Proxy: no switch (a BMC) or one switch (its NVOS interface)
+    alt a BMC
+        Proxy->>API: GetBmcCredentials(MAC)
+        API-->>Proxy: BMC credentials
+    else a switch's NVOS interface
+        Proxy->>API: GetSwitchNvosCredentials(switch)
+        API-->>Proxy: NVOS admin credentials
+    end
+    Proxy->>BMC: HTTPS request + provided credentials
+    BMC-->>Proxy: Redfish or NVUE response
     Proxy-->>Client: proxied response
 ```
+
+The resolved credentials are cached by address, so the three lookups run
+once per address until the upstream rejects the credentials or the entry
+idles out. If nico-api denies `FindSwitchIds`, because it predates the
+proxy's switch support or lost the proxy's grant for that method, the proxy
+treats every address as a BMC for five minutes and then probes again.
+`carbide_bmc_proxy_switch_probe_denied_total` counts each denial.
 
 ## Future Direction
 
 This crate is meant to implement a clean architectural boundary, but the implementation still couples to nico in slightly uncomfortable ways:
 
 1. It's still a component of the infra-controller repo, so it's not fully independent
-2. It expects nico-api to resolve proxied BMC IPs through `FindMacAddressByBmcIp`.
-3. It expects nico-api to return credentials from `GetBmcCredentials` for every proxied BMC.
+2. It expects nico-api to resolve proxied IPs through `FindMacAddressByBmcIp` and `FindSwitchIds`.
+3. It expects nico-api to return credentials from `GetBmcCredentials` for every proxied BMC, and from `GetSwitchNvosCredentials` for every proxied switch.
 
 Point #1 doesn't really need to be solved, since there's no problem storing the crate in this repo and taking advantage of existing code. But future work can focus on making nico-bmc-proxy:
 

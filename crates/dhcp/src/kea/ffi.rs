@@ -40,6 +40,8 @@ pub unsafe extern "C" fn load(a: *mut libc::c_void) -> libc::c_int {
         }
     };
 
+    crate::tracing_setup::init();
+
     // SAFETY: Initial lint enablement: this C++ boundary needs owner review.
     // Kea keeps `a` as a live `LibraryHandle` for the synchronous matching-ABI
     // shim call, whose C++ implementation must not unwind into Rust.
@@ -48,6 +50,8 @@ pub unsafe extern "C" fn load(a: *mut libc::c_void) -> libc::c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unload() -> libc::c_int {
+    crate::tracing_setup::shutdown();
+
     // SAFETY: Initial lint enablement: this C++ boundary needs owner review.
     // The linked no-argument shim has the matching C ABI and must not unwind.
     unsafe { shim_unload() }

@@ -232,6 +232,8 @@ async fn find_machines_includes_spectrum_x_capabilities(
     Ok(())
 }
 
+/// Scout polls reuse the persisted firmware attempt identity even without a
+/// selected profile; leaving and re-entering ApplyFirmware starts a new one.
 #[sqlx_test]
 async fn dpa_scout_request_returns_typed_mlx_action(
     pool: PgPool,
@@ -269,6 +271,64 @@ async fn dpa_scout_request_returns_typed_mlx_action(
     assert_eq!(applied, db::ConditionalWrite::Applied(()));
     txn.commit().await.unwrap();
 
+    let dpa = db::dpa_interface::find_by_ids(&env.api().database_connection, &[dpa_id], false)
+        .await?
+        .pop()
+        .expect("persisted ApplyFirmware entry");
+    let first_operation_id = format!("dpa-firmware:{dpa_id}:{}", dpa.controller_state.version);
+
+    // Neither a new poll nor the absence of a target may allocate another ID.
+    for _ in 0..2 {
+        let action = env
+            .api()
+            .process_scout_req_for_test(managed_host.host.id)
+            .await?;
+        let Action::MlxAction(mlx_action) = action else {
+            panic!("expected typed mlx action");
+        };
+        assert_eq!(
+            mlx_action.device_actions,
+            vec![fac::MlxDeviceAction {
+                pci_name: "0000:cc:00.0".to_string(),
+                command: Some(fac::mlx_device_action::Command::ApplyFirmwareOperation(
+                    fac::MlxDeviceApplyFirmwareOperation {
+                        profile: None,
+                        operation_id: first_operation_id.clone(),
+                    }
+                )),
+            }]
+        );
+    }
+
+    // Persist a later visit to ApplyFirmware for the same card. Its target is
+    // still absent, so only the state entry distinguishes the new operation.
+    let mut state_version = dpa.controller_state.version;
+    for state in [
+        model::dpa_interface::DpaInterfaceControllerState::ApplyProfile,
+        model::dpa_interface::DpaInterfaceControllerState::ApplyFirmware,
+    ] {
+        let next_version = state_version.increment();
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            db::dpa_interface::try_update_controller_state(
+                &mut txn,
+                dpa_id,
+                state_version,
+                next_version,
+                &state,
+            )
+            .await?,
+            db::ConditionalWrite::Applied(())
+        );
+        txn.commit().await?;
+        state_version = next_version;
+    }
+    let dpa = db::dpa_interface::find_by_ids(&env.api().database_connection, &[dpa_id], false)
+        .await?
+        .pop()
+        .expect("persisted second ApplyFirmware entry");
+    let next_operation_id = format!("dpa-firmware:{dpa_id}:{}", dpa.controller_state.version);
+    assert_ne!(first_operation_id, next_operation_id);
     let action = env
         .api()
         .process_scout_req_for_test(managed_host.host.id)
@@ -276,19 +336,18 @@ async fn dpa_scout_request_returns_typed_mlx_action(
     let Action::MlxAction(mlx_action) = action else {
         panic!("expected typed mlx action");
     };
-    let device_action = mlx_action
-        .device_actions
-        .into_iter()
-        .next()
-        .expect("device action");
-
-    assert_eq!(device_action.pci_name, "0000:cc:00.0");
-    assert!(matches!(
-        device_action.command,
-        Some(fac::mlx_device_action::Command::ApplyFirmware(
-            fac::MlxDeviceApplyFirmware { profile: None }
-        ))
-    ));
+    assert_eq!(
+        mlx_action.device_actions,
+        vec![fac::MlxDeviceAction {
+            pci_name: "0000:cc:00.0".to_string(),
+            command: Some(fac::mlx_device_action::Command::ApplyFirmwareOperation(
+                fac::MlxDeviceApplyFirmwareOperation {
+                    profile: None,
+                    operation_id: next_operation_id,
+                }
+            )),
+        }]
+    );
 
     Ok(())
 }

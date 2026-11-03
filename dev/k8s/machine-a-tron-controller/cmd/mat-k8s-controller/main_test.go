@@ -41,6 +41,7 @@ func TestParseOptions_DefaultsAndEnvironment(t *testing.T) {
 	assert.Equal(t, sourcelist.DefaultDebounce, opts.sourceListDebounce)
 	assert.Equal(t, defaultHealthAddr, opts.healthAddr)
 	assert.Equal(t, defaultHealthStaleAfter, opts.healthStaleAfter)
+	assert.Equal(t, controller.ServiceGranularityDevice, opts.serviceGranularity)
 
 	env := map[string]string{
 		"NAMESPACE":            "other",
@@ -48,6 +49,7 @@ func TestParseOptions_DefaultsAndEnvironment(t *testing.T) {
 		"SOURCE_LIST_DEBOUNCE": "7s",
 		"HEALTH_ADDR":          ":9091",
 		"HEALTH_STALE_AFTER":   "3m",
+		"SERVICE_GRANULARITY":  "pod",
 	}
 	opts, err = parseOptions([]string{"--sync-interval=10s"}, envFrom(env))
 	require.NoError(t, err)
@@ -57,6 +59,7 @@ func TestParseOptions_DefaultsAndEnvironment(t *testing.T) {
 	assert.Equal(t, 7*time.Second, opts.sourceListDebounce)
 	assert.Equal(t, ":9091", opts.healthAddr)
 	assert.Equal(t, 3*time.Minute, opts.healthStaleAfter)
+	assert.Equal(t, controller.ServiceGranularityPod, opts.serviceGranularity)
 
 	// A variable set to the empty value is the flag's default like any other
 	// value: it disables the listener instead of restoring the built-in
@@ -85,6 +88,7 @@ func TestParseOptions_RejectsInvalidValues(t *testing.T) {
 		{"source list on the pod network", []string{"--source-list-addr=10.0.0.5:8090"}, nil, notLoopback, false},
 		{"source list on a host name", []string{"--source-list-addr=localhost:8090"}, nil, notLoopback, false},
 		{"source list address from the environment", nil, map[string]string{"SOURCE_LIST_ADDR": "0.0.0.0:8090"}, notLoopback, false},
+		{"unknown service granularity", []string{"--service-granularity=rack"}, nil, `service granularity must be "device" or "pod", got "rack"`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parseOptions(tc.args, envFrom(tc.env))

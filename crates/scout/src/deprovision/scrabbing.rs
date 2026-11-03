@@ -15,12 +15,15 @@
  * limitations under the License.
  */
 use std::fs;
+use std::process::Stdio;
 use std::str::FromStr;
 
 use ::rpc::forge as rpc;
 use carbide_host_support::hardware_enumeration::discovery_ibs;
 use carbide_instrument::emit;
 use carbide_uuid::machine::MachineId;
+use libmlx::firmware::operation::SupervisorConfig;
+use libmlx::runner::error::MlxRunnerError;
 use regex::Regex;
 use scout::CarbideClientError;
 use serde::Deserialize;
@@ -30,6 +33,7 @@ use crate::cfg::Options;
 use crate::client::create_forge_client;
 use crate::deprovision::cmdrun;
 use crate::metrics::{ScoutStorageDeviceCleanup, StorageDeviceType};
+use crate::mlx_access::DirectMlxAccess;
 use crate::{CarbideClientResult, IN_QEMU_VM, platform};
 
 fn check_memory_overwrite_efi_var() -> Result<(), CarbideClientError> {
@@ -908,109 +912,119 @@ async fn all_hdd_cleanup() -> Result<(), CarbideClientError> {
 //     Ok(())
 // }
 
-// Set KEEP_IB_LINK_UP on all non-DPU IB devices.
-// This ensures the port link state remains up independent of host OS,
-// making the port visible to UFM regardless of driver state.
-// Sets P1 (required) and P2 (optional, for dual-port devices).
-async fn set_ib_link_up() -> Result<(), CarbideClientError> {
-    match discovery_ibs() {
-        Ok(ibs) => {
-            for ib in ibs {
-                if let Some(p) = ib.pci_properties {
-                    let slot = p.slot.unwrap();
-                    // Set P1 (required - all IB devices have P1)
-                    match cmdrun::run_prog(
-                        "mlxconfig",
-                        ["-y", "-d", &slot, "set", "KEEP_IB_LINK_UP_P1=1"],
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            tracing::info!(
-                                device = %slot,
-                                "Set KEEP_IB_LINK_UP_P1=1 on IB device successfully",
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                device = %slot,
-                                error = %e,
-                                "Failed to set KEEP_IB_LINK_UP_P1=1 on IB device",
-                            );
-                            return Err(e);
-                        }
-                    }
-                    // Set P2 (optional - only dual-port devices have P2)
-                    match cmdrun::run_prog(
-                        "mlxconfig",
-                        ["-y", "-d", &slot, "set", "KEEP_IB_LINK_UP_P2=1"],
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            tracing::info!(
-                                device = %slot,
-                                "Set KEEP_IB_LINK_UP_P2=1 on IB device successfully",
-                            );
-                        }
-                        Err(e) => {
-                            // P2 may not exist on single-port devices, ignore error
-                            tracing::debug!(
-                                device = %slot,
-                                error = %e,
-                                "KEEP_IB_LINK_UP_P2 not available on IB device (single-port)",
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to discover IB devices");
-            return Err(CarbideClientError::GenericError(format!(
-                "Failed to get ibs: {e}"
-            )));
-        }
-    }
-
-    Ok(())
+// Reset non-DPU IB devices to IB mode, then keep their links visible to UFM
+// regardless of host driver state. Enumeration and every command share the
+// supervisor's host claim so firmware work cannot start between these steps.
+async fn reset_ib_devices() -> Result<(), CarbideClientError> {
+    let config = SupervisorConfig::from_env()
+        .map_err(|error| CarbideClientError::GenericError(error.to_string()))?;
+    reset_ib_devices_with(
+        &config,
+        || {
+            discovery_ibs()
+                .map_err(|error| {
+                    CarbideClientError::GenericError(format!(
+                        "failed to discover IB devices: {error}"
+                    ))
+                })?
+                .into_iter()
+                .filter_map(|ib| ib.pci_properties)
+                .map(|properties| {
+                    properties.slot.ok_or_else(|| {
+                        CarbideClientError::GenericError("IB device has no PCI slot".to_string())
+                    })
+                })
+                .collect()
+        },
+        run_ib_mlxconfig,
+    )
+    .await
 }
 
-// reuse hardware_enumeration::discovery_ibs to get all the non-DPU devices.
-// in forge case, all the non-DPU device should be VPI device or IB-only device
-// `reset` will set the link_type to IB for all the devices.
-// It calls set_ib_link_up() to set KEEP_IB_LINK_UP for P1/P2 which is now default state.
-async fn reset_ib_devices() -> Result<(), CarbideClientError> {
-    match discovery_ibs() {
-        Ok(ibs) => {
-            for ib in ibs {
-                if let Some(p) = ib.pci_properties {
-                    let slot = p.slot.unwrap();
-                    match cmdrun::run_prog("mlxconfig", ["-y", "-d", &slot, "reset"]).await {
-                        Ok(_) => {
-                            tracing::info!(device = %slot, "Reset IB device successfully");
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                device = %slot,
-                                error = %e,
-                                "Failed to reset IB device",
-                            );
-                            return Err(e);
-                        }
+/// Keep exclusion across discovery and both configuration passes. The injected
+/// boundaries let tests prove refusal before enumeration and command settlement.
+async fn reset_ib_devices_with(
+    config: &SupervisorConfig,
+    discover: impl FnOnce() -> Result<Vec<String>, CarbideClientError>,
+    mut run_mlxconfig: impl AsyncFnMut(&str, &[&str]) -> Result<(), MlxRunnerError>,
+) -> Result<(), CarbideClientError> {
+    let mut access = DirectMlxAccess::acquire(config, "IB device reset")
+        .map_err(|error| CarbideClientError::GenericError(error.to_string()))?;
+    let result = async {
+        let slots = discover()?;
+        for slot in &slots {
+            if let Err(error) = run_mlxconfig(slot, &["reset"]).await {
+                access.observe_error(&error);
+                return Err(CarbideClientError::GenericError(format!(
+                    "failed to reset IB device {slot}: {error}"
+                )));
+            }
+            tracing::info!(device = %slot, "Reset IB device successfully");
+        }
+
+        for slot in &slots {
+            if let Err(error) = run_mlxconfig(slot, &["set", "KEEP_IB_LINK_UP_P1=1"]).await {
+                access.observe_error(&error);
+                return Err(CarbideClientError::GenericError(format!(
+                    "failed to set KEEP_IB_LINK_UP_P1 on IB device {slot}: {error}"
+                )));
+            }
+            tracing::info!(device = %slot, "Set KEEP_IB_LINK_UP_P1=1 on IB device successfully");
+
+            match run_mlxconfig(slot, &["set", "KEEP_IB_LINK_UP_P2=1"]).await {
+                Ok(()) => {
+                    tracing::info!(device = %slot, "Set KEEP_IB_LINK_UP_P2=1 on IB device successfully");
+                }
+                Err(error) => {
+                    access.observe_error(&error);
+                    // P2 is optional on single-port cards, but a lost wait
+                    // result does not tell us that the command has stopped.
+                    if matches!(error, MlxRunnerError::ProcessUnsettled { .. }) {
+                        return Err(CarbideClientError::GenericError(format!(
+                            "could not confirm KEEP_IB_LINK_UP_P2 completed on IB device {slot}: {error}"
+                        )));
                     }
+                    tracing::debug!(
+                        device = %slot,
+                        %error,
+                        "KEEP_IB_LINK_UP_P2 not available on IB device (single-port)",
+                    );
                 }
             }
         }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to discover IB devices");
-            return Err(CarbideClientError::GenericError(format!(
-                "Failed to get ibs: {e}"
-            )));
-        }
+        Ok(())
     }
+    .await;
+    match (result, access.finish()) {
+        (result, Ok(())) => result,
+        (Err(command_error), Err(access_error)) => Err(CarbideClientError::GenericError(format!(
+            "{command_error}; {access_error}"
+        ))),
+        (Ok(()), Err(error)) => Err(CarbideClientError::GenericError(error.to_string())),
+    }
+}
 
-    set_ib_link_up().await
+/// A spawn failure is safe to release; a failed wait after spawn is not.
+/// These direct commands retain their existing wait-until-exit behavior. If
+/// Scout stops waiting, the durable claim still prevents another MLX command.
+async fn run_ib_mlxconfig(slot: &str, args: &[&str]) -> Result<(), MlxRunnerError> {
+    let command = format!("mlxconfig -y -d {slot} {}", args.join(" "));
+    let output = tokio::process::Command::new("mlxconfig")
+        .args(["-y", "-d", slot])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?
+        .wait_with_output()
+        .await
+        .map_err(|source| MlxRunnerError::ProcessUnsettled {
+            command: command.clone(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(MlxRunnerError::command_execution(command, output));
+    }
+    Ok(())
 }
 
 async fn do_cleanup(machine_id: &MachineId) -> CarbideClientResult<rpc::MachineCleanupInfo> {
@@ -1156,7 +1170,8 @@ pub(crate) async fn run_no_api(tpm_path: &str) -> Result<(), CarbideClientError>
 
     tracing::info!("Skipping NVMe and HDD/SAS cleanup in no-api path; RESET owns storage cleanup.");
 
-    // P1 errors are propagated (fail startup), P2 errors are handled internally in reset_ib_devices()
+    // P1 failure stops startup. Optional P2 rejection may continue only after
+    // its process has stopped; unknown completion keeps hardware access blocked.
     reset_ib_devices().await?;
     tracing::debug!("IB devices reset OK");
     Ok(())
@@ -1164,7 +1179,200 @@ pub(crate) async fn run_no_api(tpm_path: &str) -> Result<(), CarbideClientError>
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::os::unix::fs::PermissionsExt;
+
+    use libmlx::firmware::operation::has_unresolved_firmware_claim;
+
     use super::*;
+
+    /// Keep claim tests in a private root accepted by supervisor validation,
+    /// independently of the build's ordinary temporary-directory permissions.
+    fn ib_reset_fixture() -> (tempfile::TempDir, SupervisorConfig) {
+        let root = match std::env::var_os("LIBMLX_TEST_STATE_DIRECTORY") {
+            Some(parent) => tempfile::tempdir_in(parent),
+            None => tempfile::tempdir(),
+        }
+        .expect("create private IB reset fixture");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+            .expect("make IB reset fixture private");
+        let config = SupervisorConfig {
+            state_directory: root.path().join("firmware"),
+            ..SupervisorConfig::default()
+        };
+        (root, config)
+    }
+
+    /// A firmware owner blocks discovery itself. Releasing that owner lets
+    /// the same reset path run all three commands under one new claim.
+    #[tokio::test]
+    async fn ib_reset_claim_precedes_enumeration_and_commands() {
+        let (_root, config) = ib_reset_fixture();
+        let owner = DirectMlxAccess::acquire(&config, "firmware owner").unwrap();
+        let marker = config.state_directory.join("mutation.json");
+        let original = fs::read(&marker).unwrap();
+
+        let error = reset_ib_devices_with(
+            &config,
+            || panic!("IB enumeration must not run while another owner holds the claim"),
+            async |_: &str, _: &[&str]| {
+                panic!("mlxconfig must not run while another owner holds the claim")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot acquire direct MLX"));
+        assert_eq!(fs::read(&marker).unwrap(), original);
+        owner.finish().unwrap();
+
+        // This positive control also proves the claim covers enumeration and
+        // every command, rather than rejecting all attempts unconditionally.
+        let mut discovered = false;
+        let mut commands = Vec::new();
+        reset_ib_devices_with(
+            &config,
+            || {
+                assert!(has_unresolved_firmware_claim(&config).unwrap());
+                discovered = true;
+                Ok(vec!["0000:01:00.0".to_string()])
+            },
+            async |slot: &str, args: &[&str]| {
+                assert!(has_unresolved_firmware_claim(&config).unwrap());
+                commands.push(format!("{slot} {}", args.join(" ")));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert!(discovered);
+        assert_eq!(
+            commands,
+            [
+                "0000:01:00.0 reset",
+                "0000:01:00.0 set KEEP_IB_LINK_UP_P1=1",
+                "0000:01:00.0 set KEEP_IB_LINK_UP_P2=1",
+            ]
+        );
+        assert!(!has_unresolved_firmware_claim(&config).unwrap());
+    }
+
+    /// Settled optional P2 rejection may continue to another card. An uncertain
+    /// reset or port update retains the host claim and its command diagnostic.
+    #[tokio::test]
+    async fn ib_reset_command_errors_respect_process_settlement() {
+        struct Case {
+            scenario: &'static str,
+            failed_args: &'static [&'static str],
+            command_error: fn() -> MlxRunnerError,
+            expected_command_count: usize,
+            retains_claim: bool,
+        }
+        let cases = [
+            Case {
+                scenario: "uncertain reset completion stops and retains",
+                failed_args: &["reset"],
+                command_error: || MlxRunnerError::ProcessUnsettled {
+                    command: "mlxconfig reset".to_string(),
+                    source: io::Error::other("wait failed"),
+                },
+                expected_command_count: 1,
+                retains_claim: true,
+            },
+            Case {
+                scenario: "uncertain required P1 completion stops and retains",
+                failed_args: &["set", "KEEP_IB_LINK_UP_P1=1"],
+                command_error: || MlxRunnerError::ProcessUnsettled {
+                    command: "mlxconfig set KEEP_IB_LINK_UP_P1=1".to_string(),
+                    source: io::Error::other("wait failed"),
+                },
+                expected_command_count: 3,
+                retains_claim: true,
+            },
+            Case {
+                scenario: "settled optional P2 rejection continues and releases",
+                failed_args: &["set", "KEEP_IB_LINK_UP_P2=1"],
+                command_error: || MlxRunnerError::CommandExecution {
+                    command: "mlxconfig set KEEP_IB_LINK_UP_P2=1".to_string(),
+                    exit_code: Some(1),
+                    stdout: String::new(),
+                    stderr: "parameter unavailable on single-port device".to_string(),
+                },
+                expected_command_count: 6,
+                retains_claim: false,
+            },
+            Case {
+                scenario: "uncertain optional P2 completion stops and retains",
+                failed_args: &["set", "KEEP_IB_LINK_UP_P2=1"],
+                command_error: || MlxRunnerError::ProcessUnsettled {
+                    command: "mlxconfig set KEEP_IB_LINK_UP_P2=1".to_string(),
+                    source: io::Error::other("wait failed"),
+                },
+                expected_command_count: 4,
+                retains_claim: true,
+            },
+        ];
+        let all_commands = [
+            "0000:01:00.0 reset",
+            "0000:02:00.0 reset",
+            "0000:01:00.0 set KEEP_IB_LINK_UP_P1=1",
+            "0000:01:00.0 set KEEP_IB_LINK_UP_P2=1",
+            "0000:02:00.0 set KEEP_IB_LINK_UP_P1=1",
+            "0000:02:00.0 set KEEP_IB_LINK_UP_P2=1",
+        ];
+        for case in cases {
+            let (_root, config) = ib_reset_fixture();
+            let marker = config.state_directory.join("mutation.json");
+            let mut original_claim = None;
+            let mut commands = Vec::new();
+            let result = reset_ib_devices_with(
+                &config,
+                || {
+                    original_claim = Some(fs::read(&marker).unwrap());
+                    Ok(vec!["0000:01:00.0".to_string(), "0000:02:00.0".to_string()])
+                },
+                async |slot: &str, args: &[&str]| {
+                    assert!(has_unresolved_firmware_claim(&config).unwrap());
+                    commands.push(format!("{slot} {}", args.join(" ")));
+                    if slot == "0000:01:00.0" && args == case.failed_args {
+                        return Err((case.command_error)());
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(result.is_err(), case.retains_claim, "{}", case.scenario);
+            assert_eq!(
+                commands,
+                all_commands[..case.expected_command_count],
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                has_unresolved_firmware_claim(&config).unwrap(),
+                case.retains_claim,
+                "{}",
+                case.scenario
+            );
+            if case.retains_claim {
+                let error = result.unwrap_err().to_string();
+                let failed_args = case.failed_args.join(" ");
+                for detail in [
+                    "0000:01:00.0",
+                    failed_args.as_str(),
+                    "wait failed",
+                    "hardware access remains blocked",
+                ] {
+                    assert!(error.contains(detail), "{}: {error}", case.scenario);
+                }
+                assert_eq!(
+                    fs::read(&marker).unwrap(),
+                    original_claim.expect("IB discovery must run after acquiring the claim"),
+                    "{}",
+                    case.scenario
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_parse_namespace_params_512b_first() {

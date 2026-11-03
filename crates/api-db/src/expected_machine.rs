@@ -44,7 +44,7 @@ pub async fn find_by_bmc_mac_address(
         fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
         sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
         bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile
+        host_lifecycle_profile, server_name
         FROM expected_machines WHERE bmc_mac_address=$1";
     sqlx::query_as(sql)
         .bind(bmc_mac_address)
@@ -61,7 +61,7 @@ pub async fn find_by_id(
         fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
         sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
         bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile
+        host_lifecycle_profile, server_name
         FROM expected_machines WHERE id=$1";
     sqlx::query_as(sql)
         .bind(id)
@@ -78,7 +78,7 @@ pub async fn find_many_by_bmc_mac_address(
         fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
         sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
         bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile
+        host_lifecycle_profile, server_name
         FROM expected_machines WHERE bmc_mac_address=ANY($1)";
     let v: Vec<ExpectedMachine> = sqlx::query_as(sql)
         .bind(bmc_mac_addresses)
@@ -160,7 +160,7 @@ pub async fn find_by_interface_mac_address(
         fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
         sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
         bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile
+        host_lifecycle_profile, server_name
         FROM expected_machines WHERE host_nics @> $1::jsonb";
     let mac_address = serde_json::json!([{ "mac_address": interface_mac_address.to_string() }]);
     sqlx::query_as(query)
@@ -201,7 +201,7 @@ pub async fn find_all(txn: impl DbReader<'_>) -> DatabaseResult<Vec<ExpectedMach
         fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
         sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
         bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile
+        host_lifecycle_profile, server_name
         FROM expected_machines";
     sqlx::query_as(sql)
         .fetch_all(txn)
@@ -227,7 +227,7 @@ pub async fn find_all_for_replace(txn: &mut PgConnection) -> DatabaseResult<Vec<
         fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
         sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
         bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile
+        host_lifecycle_profile, server_name
         FROM expected_machines ORDER BY id";
     sqlx::query_as(query)
         .fetch_all(txn)
@@ -244,7 +244,7 @@ pub async fn find_all_by_rack_id(
         fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
         sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
         bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-        host_lifecycle_profile
+        host_lifecycle_profile, server_name
         FROM expected_machines WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
@@ -363,16 +363,24 @@ pub async fn create(
     txn: &mut PgConnection,
     machine: ExpectedMachine,
 ) -> DatabaseResult<ExpectedMachine> {
+    for interface in &machine.data.interfaces {
+        interface
+            .validate_identity()
+            .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
+        interface
+            .validate_ifnames()
+            .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
+    }
     let id = machine.id.unwrap_or_else(Uuid::new_v4);
     let query = "INSERT INTO expected_machines
-            (id, bmc_mac_address, bmc_username, bmc_password, serial_number, fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels, sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled, bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation, host_lifecycle_profile)
+            (id, bmc_mac_address, bmc_username, bmc_password, serial_number, fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels, sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled, bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation, host_lifecycle_profile, server_name)
             VALUES
-            ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::text[], $7, $8, $9::jsonb, $10::varchar, $11::jsonb, $12, $13, $14, $15::inet, $16, $17, $18, $19::jsonb)
+            ($1::uuid, $2::macaddr, $3::varchar, $4::varchar, $5::varchar, $6::text[], $7, $8, $9::jsonb, $10::varchar, $11::jsonb, $12, $13, $14, $15::inet, $16, $17, $18, $19::jsonb, $20::varchar)
             RETURNING id, bmc_mac_address, bmc_username, bmc_password, serial_number,
                 fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
                 sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
                 bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-                host_lifecycle_profile";
+                host_lifecycle_profile, server_name";
 
     sqlx::query_as(query)
         .bind(id)
@@ -399,6 +407,7 @@ pub async fn create(
         .bind(machine.data.dpu_policy)
         .bind(machine.data.bmc_ip_allocation)
         .bind(sqlx::types::Json(&machine.data.host_lifecycle_profile))
+        .bind(&machine.data.server_name)
         .fetch_one(txn)
         .await
         .map_err(|err: sqlx::Error| match err {
@@ -463,7 +472,7 @@ pub async fn find_for_update(
                 fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
                 sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
                 bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-                host_lifecycle_profile
+                host_lifecycle_profile, server_name
                 FROM expected_machines WHERE id=$1 FOR UPDATE";
             sqlx::query_as(query)
                 .bind(id)
@@ -476,7 +485,7 @@ pub async fn find_for_update(
                 fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels,
                 sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled,
                 bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation,
-                host_lifecycle_profile
+                host_lifecycle_profile, server_name
                 FROM expected_machines WHERE bmc_mac_address=$1 FOR UPDATE";
             sqlx::query_as(query)
                 .bind(mac_address)
@@ -555,6 +564,14 @@ pub async fn clear(txn: &mut PgConnection) -> Result<(), DatabaseError> {
 /// Updates an existing expected machine. If id is set, matches by ID; otherwise matches by
 /// `bmc_mac_address`. Includes `bmc_ip_address` when the operator configures a static BMC IP.
 pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> DatabaseResult<()> {
+    for interface in &machine.data.interfaces {
+        interface
+            .validate_identity()
+            .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
+        interface
+            .validate_ifnames()
+            .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
+    }
     macro_rules! update_expected_machine_query {
         ($where_clause:literal) => {
             concat!(
@@ -568,7 +585,8 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
                      bmc_retain_credentials=COALESCE($14, bmc_retain_credentials), \
                      dpu_mode=$15, \
                      bmc_ip_allocation=$16, \
-                     host_lifecycle_profile=COALESCE($17, host_lifecycle_profile) \
+                     host_lifecycle_profile=COALESCE($17, host_lifecycle_profile), \
+                     server_name=$18 \
                  WHERE ",
                 $where_clause,
             )
@@ -577,11 +595,11 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
 
     let (query, target_id) = match machine.id {
         Some(id) => (
-            update_expected_machine_query!("id=$18::uuid"),
+            update_expected_machine_query!("id=$19::uuid"),
             id.to_string(),
         ),
         None => (
-            update_expected_machine_query!("bmc_mac_address=$18::macaddr"),
+            update_expected_machine_query!("bmc_mac_address=$19::macaddr"),
             machine.bmc_mac_address.to_string(),
         ),
     };
@@ -607,6 +625,7 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
             (!machine.data.host_lifecycle_profile.is_empty())
                 .then_some(sqlx::types::Json(&machine.data.host_lifecycle_profile)),
         )
+        .bind(&machine.data.server_name)
         .bind(&target_id)
         .execute(&mut *txn)
         .await

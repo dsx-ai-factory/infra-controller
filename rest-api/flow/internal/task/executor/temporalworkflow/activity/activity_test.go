@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
@@ -158,6 +159,25 @@ func TestFirmwareControlDataCipherAvailability(t *testing.T) {
 	}
 }
 
+func TestFirmwareControlValidationErrorIsNonRetryable(t *testing.T) {
+	acts, manager := newCapabilityTestActivities(
+		t,
+		capability.CapabilityFirmwareControl,
+	)
+	manager.firmwareValidationErr = errors.New("unsupported firmware options")
+
+	err := acts.FirmwareControl(
+		context.Background(),
+		newActivityTestTarget(),
+		operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade},
+	)
+
+	var applicationErr *temporal.ApplicationError
+	require.ErrorAs(t, err, &applicationErr)
+	require.True(t, applicationErr.NonRetryable())
+	require.False(t, manager.called)
+}
+
 func TestActivityRequiresOperationInterfaceAfterCapabilityValidation(t *testing.T) {
 	acts := newDescriptorOnlyActivities(
 		t,
@@ -291,9 +311,10 @@ func capabilityCheckedActivityCalls(
 }
 
 type capabilityTestManager struct {
-	descriptor   cmcatalog.Descriptor
-	called       bool
-	firmwareInfo operations.FirmwareControlTaskInfo
+	descriptor            cmcatalog.Descriptor
+	called                bool
+	firmwareInfo          operations.FirmwareControlTaskInfo
+	firmwareValidationErr error
 }
 
 func (m *capabilityTestManager) Descriptor() cmcatalog.Descriptor {
@@ -334,6 +355,12 @@ func (m *capabilityTestManager) FirmwareControl(
 	m.called = true
 	m.firmwareInfo = info
 	return nil
+}
+
+func (m *capabilityTestManager) ValidateFirmwareControl(
+	operations.FirmwareControlTaskInfo,
+) error {
+	return m.firmwareValidationErr
 }
 
 func (m *capabilityTestManager) GetFirmwareStatus(

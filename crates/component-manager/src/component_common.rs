@@ -6,10 +6,32 @@
 use mac_address::MacAddress;
 use model::machine::PowerState;
 
+/// A managed component within a rack's compute trays, switches, or power shelves.
+#[derive(Clone, Copy, Debug)]
+pub enum RackComponent {
+    /// Compute BMC
+    ComputeBmc,
+    /// Switch BMC
+    SwitchBmc,
+    /// Switch NVOS
+    SwitchNvos,
+    /// Powershelf PMC
+    PowerShelfPmc,
+}
+
+/// Backend providing fresh power observations without registering or mutating devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerStateSource {
+    /// Direct BMC Redfish reads.
+    Redfish,
+    /// Live reads through Rack Management Service.
+    Rms,
+}
+
 /// `ComponentPowerStateResult` identifies a component and its power observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentPowerStateResult {
-    /// Management-controller MAC: BMC for switches, PMC for power shelves.
+    /// Management-controller MAC: BMC for compute trays/switches, PMC for shelves.
     pub mac_address: MacAddress,
     /// `Ok(Some(_))` is an observation, including an explicit `Unknown` state.
     /// `Ok(None)` means the backend supplied no state; `Err` describes a failed

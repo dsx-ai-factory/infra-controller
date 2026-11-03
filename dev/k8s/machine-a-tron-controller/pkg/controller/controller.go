@@ -57,6 +57,9 @@ const (
 	AnnotationIPMIListenPort = "nvidia-infra-controller/mat-ipmi-listen-port"
 	// AnnotationSSHListenPort is the SSH listen port annotation.
 	AnnotationSSHListenPort = "nvidia-infra-controller/mat-ssh-listen-port"
+	// AnnotationPublishedAddresses is the number of externalIPs a per-pod
+	// Service publishes.
+	AnnotationPublishedAddresses = "nvidia-infra-controller/mat-published-addresses"
 
 	// MachineTypeHost is the machine type for hosts.
 	MachineTypeHost = "host"
@@ -65,6 +68,12 @@ const (
 	// MachineTypeNvos is the machine type for a switch's NVOS endpoint, which
 	// NICo reaches for NMX-C rather than for the switch's BMC.
 	MachineTypeNvos = "nvos"
+	// MachineTypePodBMC is the machine type of the per-pod Service carrying
+	// every BMC address of a machine-a-tron pod.
+	MachineTypePodBMC = "pod-bmc"
+	// MachineTypePodNvos is the machine type of the per-pod Service carrying
+	// every switch NVOS address of a machine-a-tron pod.
+	MachineTypePodNvos = "pod-nvos"
 
 	// PortNameRedfish is the name of the Redfish port.
 	PortNameRedfish = "redfish"
@@ -74,12 +83,50 @@ const (
 	PortNameSSH = "ssh"
 	// PortNameNmxc is the name of the NMX-C gRPC port on an NVOS Service.
 	PortNameNmxc = "nmxc"
+	// PortNameNvue is the name of the NVUE REST API port on an NVOS Service.
+	PortNameNvue = "nvue"
 
 	// NmxcPort is the port NICo expects NMX-C on at a switch NVOS address.
 	NmxcPort = 9370
+	// NvuePort is the port NICo expects the NVUE REST API on at a switch NVOS
+	// address.
+	NvuePort = 443
 
 	// DefaultConcurrency is the default number of concurrent workers for K8s API calls.
 	DefaultConcurrency = 50
+)
+
+// ServiceGranularity selects how many Services carry the BMC and NVOS
+// addresses a machine-a-tron pod reports.
+type ServiceGranularity string
+
+const (
+	// ServiceGranularityDevice builds one Service per BMC and one per switch
+	// NVOS endpoint, each publishing one externalIP together with the
+	// device's dynamic IPMI and SSH ports. It is the default.
+	ServiceGranularityDevice ServiceGranularity = "device"
+	// ServiceGranularityPod builds one Service per pod for all its BMC
+	// addresses on the Redfish port and one for all its NVOS addresses on the
+	// NMX-C port, so a pod takes two clusterIPs rather than one per device.
+	// The per-device IPMI and SSH ports are not published.
+	ServiceGranularityPod ServiceGranularity = "pod"
+)
+
+// ParseServiceGranularity returns the granularity s names.
+func ParseServiceGranularity(s string) (ServiceGranularity, error) {
+	switch g := ServiceGranularity(s); g {
+	case ServiceGranularityDevice, ServiceGranularityPod:
+		return g, nil
+	default:
+		return "", fmt.Errorf("service granularity must be %q or %q, got %q", ServiceGranularityDevice, ServiceGranularityPod, s)
+	}
+}
+
+// Name prefixes of the per-pod Services. They cannot collide with the
+// per-device names mat-bmc-host-*, mat-bmc-dpu-* and mat-nvos-<uuid>.
+const (
+	podBMCServicePrefix  = "mat-bmc-pod"
+	podNvosServicePrefix = "mat-nvos-pod"
 )
 
 // ServiceBuilder builds Kubernetes Services from machine status.
@@ -90,6 +137,12 @@ type ServiceBuilder struct {
 	// (api-state, power-state) are included on Services. When false (default),
 	// these annotations are omitted to reduce K8s API update churn.
 	EnableStateAnnotations bool
+	// Granularity selects per-device Services (the zero value) or per-pod
+	// Services.
+	Granularity ServiceGranularity
+	// Logger reports devices a per-pod Service cannot carry. The zero value
+	// logs nothing.
+	Logger zerolog.Logger
 	// OwnerRefs maps pod names to their Deployment's OwnerReference.
 	// Services are owned by the machine-a-tron Deployment they route to.
 	OwnerRefs map[string]metav1.OwnerReference
@@ -117,6 +170,57 @@ func shortHash(s string) string {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(s))
 	return fmt.Sprintf("%08x", h.Sum32())
+}
+
+// podServiceName appends podName to prefix as a DNS-1035 label. A pod name
+// is a label value, so upper-case letters are lowered and other characters
+// outside [a-z0-9-] are replaced; a rewritten or over-long name is shortened
+// to its first 12 characters plus a hash of the pod name, as BuildServiceName
+// does. An empty pod name (single-pod mode) yields prefix alone.
+func podServiceName(prefix, podName string) string {
+	if podName == "" {
+		return prefix
+	}
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return '-'
+		}
+	}, podName)
+	if safe != podName || len(prefix)+1+len(safe) > 63 {
+		head := strings.Trim(safe[:min(12, len(safe))], "-")
+		if head != "" {
+			head += "-"
+		}
+		safe = head + shortHash(podName)
+	}
+	return prefix + "-" + safe
+}
+
+// selector is the pod selector of a Service routing to podName: the base
+// selector plus the pod name label in multi-pod deployments.
+func (b *ServiceBuilder) selector(podName string) map[string]string {
+	selector := make(map[string]string, len(b.BaseSelector)+1)
+	for k, v := range b.BaseSelector {
+		selector[k] = v
+	}
+	if podName != "" {
+		selector[LabelPodName] = podName
+	}
+	return selector
+}
+
+// ownerReferences returns the reference to podName's Deployment when it is
+// known, so the Service is garbage-collected with the Deployment.
+func (b *ServiceBuilder) ownerReferences(podName string) []metav1.OwnerReference {
+	if ownerRef, ok := b.OwnerRefs[podName]; ok {
+		return []metav1.OwnerReference{ownerRef}
+	}
+	return nil
 }
 
 // BuildService creates a Kubernetes Service for a machine's BMC.
@@ -181,35 +285,19 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 		annotations[AnnotationSSHListenPort] = strconv.Itoa(int(machine.BMC.SSH.ListenPort))
 	}
 
-	// Build selector - include pod name for multi-pod deployments
-	selector := make(map[string]string)
-	for k, v := range b.BaseSelector {
-		selector[k] = v
-	}
-	if podName != "" {
-		selector[LabelPodName] = podName
-	}
-
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   b.Namespace,
-			Labels:      labels,
-			Annotations: annotations,
+			Name:            name,
+			Namespace:       b.Namespace,
+			Labels:          labels,
+			Annotations:     annotations,
+			OwnerReferences: b.ownerReferences(podName),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeClusterIP,
-			Selector: selector,
+			Selector: b.selector(podName),
 			Ports:    ports,
 		},
-	}
-
-	// Set owner reference to the machine-a-tron Deployment this service routes to.
-	// Uses podName as key (empty string for single-pod mode).
-	if b.OwnerRefs != nil {
-		if ownerRef, ok := b.OwnerRefs[podName]; ok {
-			svc.OwnerReferences = []metav1.OwnerReference{ownerRef}
-		}
 	}
 
 	// Publish the BMC IP as an externalIP; clusterIP is left for the apiserver to allocate.
@@ -222,12 +310,13 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 
 // BuildNvosService creates a Kubernetes Service for a switch's NVOS endpoint.
 //
-// NICo reaches a rack's NMX-C at a switch NVOS address on port 9370. The
-// Service publishes the switch's leased NVOS address as an externalIP, as the
-// BMC Service publishes the BMC address, with an apiserver-allocated
-// clusterIP, and forwards that port to machine-a-tron's bmc-mock listener,
-// where the hosted NMX-C mock tells switches apart by the address each
-// request was sent to.
+// NICo reaches a rack's NMX-C at a switch NVOS address on port 9370, and the
+// switch's NVUE REST API there on port 443. The Service publishes the switch's
+// leased NVOS address as an externalIP, as the BMC Service publishes the BMC
+// address, with an apiserver-allocated clusterIP, and forwards both ports to
+// machine-a-tron's bmc-mock listener, where the hosted NMX-C mock and the
+// switch's NVUE mock tell switches apart by the address each request was
+// sent to.
 func (b *ServiceBuilder) BuildNvosService(machine *matclient.MachineStatus, podName string) *corev1.Service {
 	labels := map[string]string{
 		LabelManagedBy:   LabelManagedByValue,
@@ -236,34 +325,29 @@ func (b *ServiceBuilder) BuildNvosService(machine *matclient.MachineStatus, podN
 	}
 
 	annotations := map[string]string{
-		AnnotationAPIState:          machine.APIState,
-		AnnotationPowerState:        machine.PowerState,
 		AnnotationRedfishListenPort: strconv.Itoa(int(machine.BMC.Redfish.ListenPort)),
 		AnnotationNvosIP:            *machine.NvosIP,
+	}
+	if b.EnableStateAnnotations {
+		annotations[AnnotationAPIState] = machine.APIState
+		annotations[AnnotationPowerState] = machine.PowerState
 	}
 	if machine.HardwareType != nil {
 		annotations[AnnotationHardwareType] = *machine.HardwareType
 	}
 
-	selector := make(map[string]string)
-	for k, v := range b.BaseSelector {
-		selector[k] = v
-	}
-	if podName != "" {
-		selector[LabelPodName] = podName
-	}
-
-	svc := &corev1.Service{
+	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        BuildNvosServiceName(machine.MatID),
-			Namespace:   b.Namespace,
-			Labels:      labels,
-			Annotations: annotations,
+			Name:            BuildNvosServiceName(machine.MatID),
+			Namespace:       b.Namespace,
+			Labels:          labels,
+			Annotations:     annotations,
+			OwnerReferences: b.ownerReferences(podName),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:        corev1.ServiceTypeClusterIP,
 			ExternalIPs: []string{*machine.NvosIP},
-			Selector:    selector,
+			Selector:    b.selector(podName),
 			Ports: []corev1.ServicePort{
 				{
 					Name:       PortNameNmxc,
@@ -271,34 +355,193 @@ func (b *ServiceBuilder) BuildNvosService(machine *matclient.MachineStatus, podN
 					Port:       NmxcPort,
 					TargetPort: intstr.FromInt32(int32(machine.BMC.Redfish.ListenPort)),
 				},
+				{
+					Name:       PortNameNvue,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       NvuePort,
+					TargetPort: intstr.FromInt32(int32(machine.BMC.Redfish.ListenPort)),
+				},
 			},
 		},
 	}
+}
 
-	if b.OwnerRefs != nil {
-		if ownerRef, ok := b.OwnerRefs[podName]; ok {
-			svc.OwnerReferences = []metav1.OwnerReference{ownerRef}
+// portPair is a Service port and the listener port it targets.
+type portPair struct {
+	port, targetPort int32
+}
+
+func (p portPair) less(o portPair) bool {
+	return p.port < o.port || p.port == o.port && p.targetPort < o.targetPort
+}
+
+// commonPortPair returns the pair most of pairs report; a tie goes to the
+// lower pair so the choice does not depend on report order.
+func commonPortPair(pairs []portPair) portPair {
+	counts := make(map[portPair]int, 1)
+	for _, pair := range pairs {
+		counts[pair]++
+	}
+	var common portPair
+	best := 0
+	for pair, count := range counts {
+		if count > best || count == best && pair.less(common) {
+			common, best = pair, count
+		}
+	}
+	return common
+}
+
+// buildPodService builds the per-pod Service publishing addresses, sorted
+// and deduplicated, on ports towards podName's machine-a-tron listener on
+// listenPort.
+func (b *ServiceBuilder) buildPodService(name, machineType string, ports []corev1.ServicePort, listenPort int32, addresses []string, podName string) *corev1.Service {
+	slices.Sort(addresses)
+	addresses = slices.Compact(addresses)
+
+	labels := map[string]string{
+		LabelManagedBy:   LabelManagedByValue,
+		LabelMachineType: machineType,
+	}
+	if podName != "" {
+		labels[LabelPodName] = podName
+	}
+
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: b.Namespace,
+			Labels:    labels,
+			Annotations: map[string]string{
+				AnnotationRedfishListenPort:  strconv.Itoa(int(listenPort)),
+				AnnotationPublishedAddresses: strconv.Itoa(len(addresses)),
+			},
+			OwnerReferences: b.ownerReferences(podName),
+		},
+		Spec: corev1.ServiceSpec{
+			Type:        corev1.ServiceTypeClusterIP,
+			ExternalIPs: addresses,
+			Selector:    b.selector(podName),
+			Ports:       ports,
+		},
+	}
+}
+
+// tcpServicePort builds a TCP Service port forwarding port to targetPort.
+func tcpServicePort(name string, port, targetPort int32) corev1.ServicePort {
+	return corev1.ServicePort{
+		Name:       name,
+		Protocol:   corev1.ProtocolTCP,
+		Port:       port,
+		TargetPort: intstr.FromInt32(targetPort),
+	}
+}
+
+// buildPodServices builds the per-pod BMC and NVOS Services of podName. The
+// shared listener lets one Service carry every address, since machine-a-tron
+// selects the simulated device by the authority each request was sent to. A
+// device reporting another port pair than the rest of its pod keeps a
+// per-device Service.
+func (b *ServiceBuilder) buildPodServices(status *matclient.MachinesStatusResponse, podName string) []*corev1.Service {
+	type bmcEndpoint struct {
+		machine     *matclient.MachineStatus
+		machineType string
+		parentMatID string
+	}
+	var bmcs []bmcEndpoint
+	var switches []*matclient.MachineStatus
+	for i := range status.Machines {
+		machine := &status.Machines[i]
+		if hasAddress(machine.BMC.IP) {
+			bmcs = append(bmcs, bmcEndpoint{machine: machine, machineType: MachineTypeHost})
+		}
+		for j := range machine.DPUs {
+			dpu := &machine.DPUs[j]
+			if hasAddress(dpu.BMC.IP) {
+				bmcs = append(bmcs, bmcEndpoint{machine: dpu, machineType: MachineTypeDPU, parentMatID: machine.MatID})
+			}
+		}
+		if machine.DeviceKind == matclient.DeviceKindSwitch && hasAddress(machine.NvosIP) {
+			switches = append(switches, machine)
 		}
 	}
 
-	return svc
+	var services []*corev1.Service
+	if len(bmcs) > 0 {
+		pairs := make([]portPair, len(bmcs))
+		for i, endpoint := range bmcs {
+			pairs[i] = portPair{int32(endpoint.machine.BMC.Redfish.ReachablePort), int32(endpoint.machine.BMC.Redfish.ListenPort)}
+		}
+		common := commonPortPair(pairs)
+		addresses := make([]string, 0, len(bmcs))
+		for i, endpoint := range bmcs {
+			if pairs[i] != common {
+				b.Logger.Warn().
+					Str("pod", podName).
+					Str("mat_id", endpoint.machine.MatID).
+					Int32("port", pairs[i].port).
+					Int32("target_port", pairs[i].targetPort).
+					Msg("device reports another Redfish port pair than its pod, keeping a per-device Service")
+				services = append(services, b.BuildService(endpoint.machine, endpoint.machineType, endpoint.parentMatID, podName))
+				continue
+			}
+			addresses = append(addresses, *endpoint.machine.BMC.IP)
+		}
+		ports := []corev1.ServicePort{tcpServicePort(PortNameRedfish, common.port, common.targetPort)}
+		services = append(services, b.buildPodService(podServiceName(podBMCServicePrefix, podName), MachineTypePodBMC, ports, common.targetPort, addresses, podName))
+	}
+	if len(switches) > 0 {
+		pairs := make([]portPair, len(switches))
+		for i, machine := range switches {
+			pairs[i] = portPair{NmxcPort, int32(machine.BMC.Redfish.ListenPort)}
+		}
+		common := commonPortPair(pairs)
+		addresses := make([]string, 0, len(switches))
+		for i, machine := range switches {
+			if pairs[i] != common {
+				b.Logger.Warn().
+					Str("pod", podName).
+					Str("mat_id", machine.MatID).
+					Int32("target_port", pairs[i].targetPort).
+					Msg("switch reports another listen port than its pod, keeping a per-device NVOS Service")
+				services = append(services, b.BuildNvosService(machine, podName))
+				continue
+			}
+			addresses = append(addresses, *machine.NvosIP)
+		}
+		ports := []corev1.ServicePort{
+			tcpServicePort(PortNameNmxc, NmxcPort, common.targetPort),
+			tcpServicePort(PortNameNvue, NvuePort, common.targetPort),
+		}
+		services = append(services, b.buildPodService(podServiceName(podNvosServicePrefix, podName), MachineTypePodNvos, ports, common.targetPort, addresses, podName))
+	}
+	return services
+}
+
+// hasAddress reports whether a status address field carries a lease.
+func hasAddress(ip *string) bool {
+	return ip != nil && *ip != ""
 }
 
 // BuildServicesFromStatus builds Services for all machines in the status response.
 // podName is used to create pod-specific selectors for multi-pod deployments.
 func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatusResponse, podName string) []*corev1.Service {
+	if b.Granularity == ServiceGranularityPod {
+		return b.buildPodServices(status, podName)
+	}
+
 	var services []*corev1.Service
 
 	for _, machine := range status.Machines {
 		// Build service for the host only after DHCP has assigned its BMC IP,
 		// so every Service publishes a BMC address in spec.externalIPs.
-		if machine.BMC.IP != nil && *machine.BMC.IP != "" {
+		if hasAddress(machine.BMC.IP) {
 			services = append(services, b.BuildService(&machine, MachineTypeHost, "", podName))
 		}
 
 		// Build services for DPUs under the same BMC IP gate.
 		for _, dpu := range machine.DPUs {
-			if dpu.BMC.IP != nil && *dpu.BMC.IP != "" {
+			if hasAddress(dpu.BMC.IP) {
 				services = append(services, b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName))
 			}
 		}
@@ -306,7 +549,7 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 		// A switch is also reachable at its NVOS address once DHCP has assigned
 		// one; an empty address is withheld like an empty BMC address, so it
 		// never reaches externalIPs or the service diff.
-		if machine.DeviceKind == matclient.DeviceKindSwitch && machine.NvosIP != nil && *machine.NvosIP != "" {
+		if machine.DeviceKind == matclient.DeviceKindSwitch && hasAddress(machine.NvosIP) {
 			services = append(services, b.BuildNvosService(&machine, podName))
 		}
 	}
@@ -320,7 +563,7 @@ type ServiceDiff struct {
 	Update   []*corev1.Service
 	Recreate []*corev1.Service // Services that need delete+create because the immutable clusterIP must change
 	Delete   []string
-	Errors   []error // desired Services withdrawn because another one publishes the same BMC IP
+	Errors   []error // desired addresses withdrawn because another Service publishes them
 }
 
 // computeServiceDiff calculates the differences between desired and existing services.
@@ -348,32 +591,38 @@ func computeServiceDiff(desired []*corev1.Service, existing []*corev1.Service, l
 		return strings.Compare(a.Name, b.Name)
 	})
 
-	// Report a Service whose BMC IP another Service already publishes and drop it
-	// from desiredMap so an existing one is deleted; the apiserver does not check
-	// externalIPs for uniqueness.
-	bmcIPs := make(map[string]string)
+	// Withdraw an address that a Service earlier by name already publishes:
+	// kube-proxy would merge both Services on it, and the apiserver does not
+	// check externalIPs for uniqueness. A Service left without addresses is
+	// dropped from desiredMap so an existing one is deleted.
+	addresses := make(map[string]string)
 	publishable := make([]*corev1.Service, 0, len(deduped))
 	for _, svc := range deduped {
-		duplicate := false
+		kept := make([]string, 0, len(svc.Spec.ExternalIPs))
 		for _, ip := range svc.Spec.ExternalIPs {
-			if owner, claimed := bmcIPs[ip]; claimed {
-				logger.Warn().
-					Str("service", svc.Name).
-					Str("other_service", owner).
-					Str("bmc_ip", ip).
-					Msg("BMC IP already published by another service, withdrawing")
-				diff.Errors = append(diff.Errors,
-					fmt.Errorf("service %s publishes BMC IP %s already published by %s", svc.Name, ip, owner))
-				duplicate = true
-				break
+			owner, claimed := addresses[ip]
+			if !claimed {
+				addresses[ip] = svc.Name
+				kept = append(kept, ip)
+				continue
 			}
+			logger.Warn().
+				Str("service", svc.Name).
+				Str("other_service", owner).
+				Str("address", ip).
+				Msg("address already published by another service, withdrawing it")
+			diff.Errors = append(diff.Errors,
+				fmt.Errorf("service %s publishes address %s already published by %s", svc.Name, ip, owner))
 		}
-		if duplicate {
+		if len(kept) == 0 && len(svc.Spec.ExternalIPs) > 0 {
 			delete(desiredMap, svc.Name)
 			continue
 		}
-		for _, ip := range svc.Spec.ExternalIPs {
-			bmcIPs[ip] = svc.Name
+		if len(kept) < len(svc.Spec.ExternalIPs) {
+			svc.Spec.ExternalIPs = kept
+			if _, counted := svc.Annotations[AnnotationPublishedAddresses]; counted {
+				svc.Annotations[AnnotationPublishedAddresses] = strconv.Itoa(len(kept))
+			}
 		}
 		publishable = append(publishable, svc)
 	}
@@ -384,7 +633,7 @@ func computeServiceDiff(desired []*corev1.Service, existing []*corev1.Service, l
 		existingSvc, exists := existingMap[svc.Name]
 		if !exists {
 			diff.Create = append(diff.Create, svc)
-		} else if _, collides := bmcIPs[existingSvc.Spec.ClusterIP]; collides {
+		} else if _, collides := addresses[existingSvc.Spec.ClusterIP]; collides {
 			// clusterIP is immutable, so recreate with an apiserver-allocated one.
 			logger.Warn().
 				Str("service", svc.Name).
@@ -551,7 +800,7 @@ func isControllerLabel(k string) bool {
 // controller owns on device Pods.
 func isControllerAnnotation(k string) bool {
 	switch k {
-	case AnnotationBMCIP, AnnotationNvosIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort:
+	case AnnotationBMCIP, AnnotationNvosIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort, AnnotationPublishedAddresses:
 		return true
 	default:
 		return false

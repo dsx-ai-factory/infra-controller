@@ -633,6 +633,7 @@ mod tests {
     use tonic::transport::server::Connected;
     use tonic::transport::{Identity, Server, ServerTlsConfig};
 
+    use super::proto::subscribe_response::Response;
     use super::*;
     use crate::bmc::CredentialProvider;
     use crate::collectors::nvue::gnmi::sample_processor::{
@@ -644,7 +645,9 @@ mod tests {
         NvueGnmiSubscriptionConfig, NvueGnmiSubscriptionMode,
     };
     use crate::endpoint::test_support::test_endpoint;
-    use crate::endpoint::{BmcAddr, BmcCredentials};
+    use crate::endpoint::{
+        BmcAddr, BmcCredentials, EndpointMetadata, SwitchData, SwitchEndpointRole,
+    };
     use crate::metrics::MetricsManager;
     use crate::otlp::convert::build_metrics_export_request;
     use crate::sink::{
@@ -672,11 +675,24 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingMetricSink(StdMutex<Vec<(EventContext, MetricSample)>>);
+    struct RecordingMetricSink {
+        samples: StdMutex<Vec<(EventContext, MetricSample)>>,
+        pruned_keys: StdMutex<Vec<String>>,
+    }
 
     impl DataSink for RecordingMetricSink {
         fn sink_type(&self) -> &'static str {
             "recording_metric"
+        }
+
+        fn prune_metric_key(
+            &self,
+            _context: &EventContext,
+            key: &str,
+            _metric_type: &str,
+            _unit: &str,
+        ) {
+            self.pruned_keys.lock().unwrap().push(key.to_string());
         }
 
         fn try_handle_event(
@@ -685,7 +701,7 @@ mod tests {
             event: &CollectorEvent,
         ) -> Result<(), HealthError> {
             if let CollectorEvent::Metric(sample) = event {
-                self.0
+                self.samples
                     .lock()
                     .expect("recording sink lock")
                     .push((context.clone(), (**sample).clone()));
@@ -807,7 +823,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let published = sink
-                        .0
+                        .samples
                         .lock()
                         .expect("recorded metrics")
                         .iter()
@@ -1291,10 +1307,20 @@ mod tests {
                 .expect("closures"),
             connection_established_timestamp: Gauge::new("test_established", "test")
                 .expect("established gauge"),
+            connection_established_timestamp_seconds: Gauge::new(
+                "test_established_seconds",
+                "test",
+            )
+            .expect("established seconds gauge"),
             notifications_received_total: Counter::new("test_notifications", "test")
                 .expect("notifications"),
             last_notification_timestamp: Gauge::new("test_last_notification", "test")
                 .expect("last notification"),
+            last_notification_timestamp_seconds: Gauge::new(
+                "test_last_notification_seconds",
+                "test",
+            )
+            .expect("last notification seconds"),
             notification_processing_seconds: Histogram::with_opts(HistogramOpts::new(
                 "test_processing",
                 "test",
@@ -1332,7 +1358,7 @@ mod tests {
 
         assert_eq!(service.active_requests.load(Ordering::SeqCst), 1);
 
-        let samples = sink.0.lock().expect("recorded metric lock").clone();
+        let samples = sink.samples.lock().expect("recorded metric lock").clone();
         assert_eq!(samples.len(), 3);
 
         assert!(samples.iter().all(|(context, sample)| {
@@ -1475,6 +1501,7 @@ mod tests {
             registry,
             Some(sink.clone()),
             None,
+            &mut Default::default(),
         )
         .expect("real gNMI collector");
 
@@ -1585,12 +1612,10 @@ mod tests {
             .send(proto::subscribe_response::Response::SyncResponse(false))
             .await;
 
-        // A false sync must time out, release the entire RPC, and leave both rows exposed.
+        // A false sync must time out, release the entire RPC, and leave cached rows intact.
         wait_for_rpc_close(&mut incomplete.completed).await;
 
-        let export = metrics.export_telemetry().unwrap();
-        assert!(export.contains("instance_id=\"removed-event\""));
-        assert!(export.contains("instance_id=\"concurrent-event\""));
+        assert!(recording.pruned_keys.lock().unwrap().is_empty());
 
         for in_band_error in [true, false] {
             let mut failed = next_snapshot(subscriptions, live).await;
@@ -1602,8 +1627,7 @@ mod tests {
                 wait_for_rpc_close(&mut failed.completed).await;
             }
 
-            let export = metrics.export_telemetry().unwrap();
-            assert!(export.contains("instance_id=\"removed-event\""));
+            assert!(recording.pruned_keys.lock().unwrap().is_empty());
         }
 
         let mut snapshot = next_snapshot(subscriptions, live).await;
@@ -1621,8 +1645,18 @@ mod tests {
         wait_for_rpc_close(&mut snapshot.completed).await;
 
         let export = metrics.export_telemetry().unwrap();
-        assert!(!export.contains("instance_id=\"removed-event\""));
-        assert!(!export.contains("instance_id=\"concurrent-event\""));
+
+        let mut pruned = recording.pruned_keys.lock().unwrap().clone();
+        pruned.sort();
+
+        assert_eq!(
+            pruned,
+            [
+                "nvue_gnmi_events:concurrent-event",
+                "nvue_gnmi_events:removed-event"
+            ]
+        );
+
         assert!(export.contains("unrelated-interface"));
     }
 
@@ -1677,6 +1711,7 @@ mod tests {
         sink.handle_event(
             &crate::sink::EventContext::from_endpoint(&endpoint, NVUE_GNMI_SAMPLE_STREAM_ID),
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "unrelated-interface".into(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.into(),
                 metric_type: "interface_reading".into(),
@@ -1697,6 +1732,7 @@ mod tests {
             registry,
             Some(sink),
             None,
+            &mut Default::default(),
         )
         .unwrap();
 
@@ -1719,15 +1755,27 @@ mod tests {
 
         live.publish(&recording, "repopulated-event").await;
 
-        let export = metrics.export_telemetry().unwrap();
-        assert!(export.contains("instance_id=\"repopulated-event\""));
+        assert!(
+            !recording
+                .pruned_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|key| key.ends_with(":repopulated-event"))
+        );
 
         let mut interrupted = next_snapshot(&mut subscriptions, &live).await;
         live.fail(tonic::Code::Unavailable).await;
         wait_for_rpc_close(&mut interrupted.completed).await;
 
-        let export = metrics.export_telemetry().unwrap();
-        assert!(export.contains("instance_id=\"repopulated-event\""));
+        assert!(
+            !recording
+                .pruned_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|key| key.ends_with(":repopulated-event"))
+        );
 
         let replacement = tokio::time::timeout(Duration::from_secs(4), subscriptions.recv())
             .await
@@ -1810,6 +1858,7 @@ mod tests {
                 registry,
                 Some(sink),
                 None,
+                &mut Default::default(),
             )
             .unwrap();
 
@@ -1837,7 +1886,7 @@ mod tests {
 
             let mut snapshot = next_snapshot(&mut subscriptions, &live).await;
 
-            let emitted = recording.0.lock().unwrap().len();
+            let emitted = recording.samples.lock().unwrap().len();
 
             snapshot
                 .send(proto::subscribe_response::Response::SyncResponse(true))
@@ -1857,7 +1906,7 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(recording.0.lock().unwrap().len(), emitted);
+            assert_eq!(recording.samples.lock().unwrap().len(), emitted);
 
             live.publish(&recording, "restored-reading").await;
 
@@ -1872,6 +1921,247 @@ mod tests {
 
             wait_for_rpc_close(&mut pending.completed).await;
 
+            wait_for_transport_shutdown(service, sockets).await;
+        }
+    }
+
+    async fn assert_replacement_readings(
+        live: &[ControlledSubscription],
+        recording: &RecordingMetricSink,
+        metrics: &MetricsManager,
+        text_update: proto::Update,
+    ) {
+        let export = metrics.export_telemetry().unwrap();
+
+        assert!(
+            export.contains("retained_scalar"),
+            "unchanged scalar must be republished: {export}"
+        );
+
+        assert!(
+            !export.contains("old-serial"),
+            "retired contexts must be removed: {export}"
+        );
+
+        {
+            let samples = recording.samples.lock().unwrap();
+
+            let (context, sample) = samples
+                .iter()
+                .find(|(context, sample)| {
+                    context.switch_serial() == Some("new-serial")
+                        && sample.metric_type == "retained_scalar"
+                })
+                .expect("retained scalar under the replacement context");
+
+            assert_eq!(context.switch_serial(), Some("new-serial"));
+            assert_eq!(sample.value, 7.0);
+        }
+
+        let event = live
+            .iter()
+            .find(|subscription| subscription.stream_index() == 2)
+            .unwrap();
+
+        event
+            .send(Response::Update(proto::Notification {
+                update: vec![text_update],
+                ..Default::default()
+            }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !recording.samples.lock().unwrap().iter().any(|(_, sample)| {
+                sample
+                    .labels
+                    .iter()
+                    .any(|(key, value)| key == "text" && value == "changed text")
+            }) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        {
+            let samples = recording.samples.lock().unwrap();
+            let (context, sample) = samples.last().unwrap();
+
+            assert_eq!(sample.value, 4.0);
+            assert_eq!(context.switch_serial(), Some("new-serial"));
+        }
+
+        let scalar = live
+            .iter()
+            .find(|subscription| subscription.stream_index() != 2)
+            .unwrap();
+
+        scalar
+            .send(Response::Update(proto::Notification {
+                delete: vec![Path {
+                    elem: vec![PathElem {
+                        name: "value".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while metrics
+                .export_telemetry()
+                .unwrap()
+                .contains("retained_scalar")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("source Delete must remove the retained scalar");
+    }
+
+    async fn assert_metadata_replacement_retains_readings(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let (opened, mut subscriptions) = mpsc::channel(4);
+        *service.controlled_subscriptions.lock().unwrap() = Some(opened);
+        let mut endpoint = test_endpoint("55:66:77:88:99:cf".parse().unwrap());
+        endpoint.addr.ip = "127.0.0.1".parse().unwrap();
+        let metrics = Arc::new(MetricsManager::new("test").unwrap());
+        let recording = Arc::new(RecordingMetricSink::default());
+
+        let sink = Arc::new(CompositeDataSink::new(
+            vec![
+                recording.clone(),
+                Arc::new(PrometheusSink::new(metrics.clone(), "test_sink").unwrap()),
+            ],
+            metrics.clone(),
+        ));
+
+        let mut config = reconciliation_config(port);
+        config.reconcile_interval = None;
+        config.system_events_enabled = true;
+
+        config.additional_subscriptions = vec![NvueGnmiSubscriptionConfig {
+            name: "retained".into(),
+            mode: NvueGnmiSubscriptionMode::OnChange,
+            updates_only: true,
+            paths: vec![vec!["value".into()]],
+            metrics: vec![NvueGnmiMetricConfig {
+                path: vec!["value".into()],
+                metric_type: "retained_scalar".into(),
+                labels: Vec::new(),
+                output: NvueGnmiMetricOutput::Gauge {
+                    unit: "count".into(),
+                },
+            }],
+            ..Default::default()
+        }];
+
+        let update = |path: &str, value: &str| proto::Update {
+            path: Some(Path {
+                elem: path
+                    .split('/')
+                    .map(|name| PathElem {
+                        name: name.into(),
+                        key: if name == "system-event" {
+                            [("event-id".into(), "retained-event".into())].into()
+                        } else {
+                            Default::default()
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            val: Some(proto::TypedValue {
+                value: Some(proto::typed_value::Value::StringVal(value.into())),
+            }),
+            ..Default::default()
+        };
+
+        let mut retained = Default::default();
+
+        for serial in ["old-serial", "new-serial"] {
+            endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
+                id: None,
+                serial: Some(serial.into()),
+                slot_number: None,
+                tray_index: None,
+                nvlink_domain_uuid: None,
+                endpoint_role: SwitchEndpointRole::Host,
+                is_primary: false,
+                nmxc_enabled: false,
+                nmxt_enabled: false,
+            }));
+
+            let collector = spawn_gnmi_collector(
+                &endpoint,
+                &config,
+                Arc::new(DelayedRefreshProvider::default()),
+                Arc::new(
+                    metrics
+                        .create_collector_registry("replacement".into(), "test")
+                        .unwrap(),
+                ),
+                Some(sink.clone()),
+                None,
+                &mut retained,
+            )
+            .unwrap();
+
+            let mut live = Vec::new();
+
+            for _ in 0..2 {
+                let subscription =
+                    tokio::time::timeout(Duration::from_secs(2), subscriptions.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+
+                subscription.send(Response::SyncResponse(true)).await;
+                live.push(subscription);
+            }
+
+            if serial == "old-serial" {
+                let critical = update("system-events/system-event/state/severity", "critical");
+
+                for (index, update) in [(2, critical), (0, update("value", "7"))] {
+                    let stream = live
+                        .iter()
+                        .find(|stream| stream.stream_index() == index)
+                        .unwrap();
+
+                    stream
+                        .send(Response::Update(proto::Notification {
+                            update: vec![update],
+                            ..Default::default()
+                        }))
+                        .await;
+                }
+
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while recording.samples.lock().unwrap().len() < 2 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                assert_replacement_readings(
+                    &live,
+                    &recording,
+                    &metrics,
+                    update("system-events/system-event/state/text", "changed text"),
+                )
+                .await;
+            }
+
+            collector.stop().await;
             wait_for_transport_shutdown(service, sockets).await;
         }
     }
@@ -2026,6 +2316,7 @@ mod tests {
         assert_post_sync_collector_recovery(port, &service, &sockets).await;
         assert_event_reconciliation(port, &service, &sockets).await;
         assert_metric_reconciliation(port, &service, &sockets).await;
+        assert_metadata_replacement_retains_readings(port, &service, &sockets).await;
 
         shutdown_sender.send(()).expect("stop server");
         server_task

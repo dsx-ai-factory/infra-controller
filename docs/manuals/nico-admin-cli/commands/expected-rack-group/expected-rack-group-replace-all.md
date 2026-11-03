@@ -19,6 +19,11 @@ nico-admin-cli expected-rack-group replace-all
 
 Replace all expected rack groups from a JSON file
 
+This operation clears all existing groups before inserting replacements.
+Any expected NVLink domain declaration blocks it, even if the
+replacement preserves the referenced group. Delete all declarations with
+expected-nvlink-domain delete first.
+
 ## OPTIONS
 
 `-f, --filename <FILENAME>`
@@ -49,9 +54,9 @@ Sort output by specified field
 
 *Possible values:*
 
-> - primary-id: Sort by the primary ID
->
-> - state: Sort by state
+- primary-id: Sort by the primary ID
+
+- state: Sort by state
 
 `-h, --help`
 

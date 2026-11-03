@@ -789,7 +789,7 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Delete the capability
-	mcd.DeleteByID(ctx, nil, mcToDelete.ID, false)
+	require.NoError(t, mcd.DeleteByID(ctx, nil, mcToDelete.ID, false))
 
 	// Machine Set 2
 	ms2 := []Machine{}

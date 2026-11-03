@@ -42,6 +42,23 @@ async fn test_rack_metadata_defaults(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     assert!(rack.metadata.labels.is_empty());
     assert_eq!(rack.version.version_nr(), 1);
     assert_eq!(rack.controller_state.version, rack.version);
+    assert!(rack.controller_state_outcome.is_none());
+    assert!(rack.firmware_upgrade_job.is_none());
+    assert!(rack.nvos_update_job.is_none());
+    assert_eq!(
+        rack.health_reports,
+        model::health::HealthReportSources::default()
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT controller_state_outcome IS NULL AND health_reports IS NULL
+                    AND firmware_upgrade_job IS NULL AND nvos_update_job IS NULL
+             FROM racks WHERE id = $1",
+        )
+        .bind(&rack_id)
+        .fetch_one(txn.as_mut())
+        .await?
+    );
 
     txn.rollback().await?;
     Ok(())

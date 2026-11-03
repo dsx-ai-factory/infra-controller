@@ -286,8 +286,9 @@ mod tests {
         endpoint.addr.port = Some(9443);
 
         endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "switch-1".to_string(),
+            serial: Some("switch-1".to_string()),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,

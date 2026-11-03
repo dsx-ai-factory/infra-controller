@@ -3,6 +3,8 @@
 
 package managerapi
 
+import "context"
+
 // BootstrapExpansion - Bootstrap Expansion
 type BootstrapExpansion interface{}
 
@@ -11,7 +13,7 @@ type BootstrapInterface interface {
 	// List all the apis of Bootstrap here
 	Init()
 	Start()
-	DownloadAndStoreCreds(otpOverride []byte) error
+	DownloadAndStoreCreds(ctx context.Context, otpOverride []byte) error
 	CheckRegistration() error
 
 	BootstrapExpansion

@@ -55,6 +55,33 @@
 //! version on PowerOn.  This makes upload retries safe: a failed or repeated
 //! upload keeps the same queue entry available for the next attempt.
 //!
+//! ### BlueField OS install (BFB)
+//! On a BlueField BMC (`UpdateServiceConfig::dpu_os`), a SimpleUpdate that
+//! targets `DPU_OS` installs a BFB instead of staging firmware. After the
+//! transfer delay the BMC restarts the DPU, as the rshim push does on real
+//! hardware. The install lands, and its task completes, on the DPU's next
+//! power-on. Each change of the installed image advances a generation counter,
+//! and `BootProgress` reports `OSRunning` only once the DPU has booted the
+//! current generation. DPU snapshots retain the disk, task IDs and unfinished
+//! install together. Restore resumes the same install and fences startup power-on
+//! until its recovery restart is admitted. Recovery replays the last captured
+//! install, including its restart and image, even if it completed after capture.
+//! Requests accepted after that save and unrelated host firmware tasks are not
+//! recovered. A snapshot without `dpu_update`, including one from before this
+//! format was introduced, cannot recover an unfinished BFB task.
+//!
+//! ### Task records
+//! Task IDs are `{epoch}-{n}`. New tasks use a fresh random epoch for each BMC
+//! construction or restore, with a counter local to that epoch. Restored tasks
+//! keep their original IDs. A task that
+//! finished and is no longer needed for staging moves to a bounded history
+//! (`TASK_HISTORY_CAPACITY` per BMC, oldest out first). A lookup returns a live
+//! or remembered task and 404 for any other ID; the mock never reports a task
+//! it did not run. NICo polls a task to a terminal state before it starts the
+//! next one on the same BMC, so the history outlives every in-repo poll loop.
+//! Host firmware consumers already treat a 404 as "check the inventory
+//! version", as they do on hardware that drops finished jobs.
+//!
 //! ### Response format
 //! Every upload response includes **both** the `Location` header (for Dell/DGX H100)
 //! and a full Task JSON body (for GB200/GB300/Lenovo), satisfying all platform
@@ -68,9 +95,9 @@
 //! buffering to avoid unbounded memory use.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -79,27 +106,31 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
-use crate::json::{JsonExt, JsonPatch};
-use crate::redfish::Builder;
+use crate::json::JsonExt;
+use crate::redfish::ModelExt;
 use crate::{Callbacks, http, redfish};
 
 pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     redfish::Resource {
         odata_id: Cow::Borrowed("/redfish/v1/UpdateService"),
-        odata_type: Cow::Borrowed("#UpdateService.v1_9_0.UpdateService"),
+        odata_type: Cow::Borrowed(redfish::schema::update_service::UpdateService::ODATA_TYPE),
         id: Cow::Borrowed("UpdateService"),
         name: Cow::Borrowed("Update Service"),
     }
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> UpdateServiceBuilder {
-    UpdateServiceBuilder {
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(
+    resource: &redfish::Resource,
+) -> redfish::schema::update_service::UpdateService {
+    redfish::schema::update_service::UpdateService::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
 pub(crate) fn simple_update_target() -> String {
@@ -162,6 +193,9 @@ pub(crate) struct UpdateServiceConfig {
     pub(crate) host_bmc_inventory_id: Option<String>,
     /// Inventory ID for the host UEFI/BIOS firmware entry.
     pub(crate) host_uefi_inventory_id: Option<String>,
+    /// Whether this BMC manages a BlueField OS, so a SimpleUpdate targeting
+    /// `DPU_OS` installs a BFB and the system reports `BootProgress`.
+    pub(crate) dpu_os: bool,
 }
 
 impl Default for UpdateServiceConfig {
@@ -175,6 +209,7 @@ impl Default for UpdateServiceConfig {
             advertise_legacy_http_push_uri: false,
             host_bmc_inventory_id: None,
             host_uefi_inventory_id: None,
+            dpu_os: false,
         }
     }
 }
@@ -210,6 +245,18 @@ impl UpdateServiceConfig {
 pub(crate) enum TaskState {
     Running,
     Completed,
+    /// The operation failed; the payload is the task message.
+    Exception(String),
+}
+
+impl TaskState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Exception(_) => "Exception",
+        }
+    }
 }
 
 pub(crate) struct FirmwareTask {
@@ -234,6 +281,9 @@ pub(crate) struct FirmwareTask {
 pub(crate) enum FirmwareComponent {
     Bmc,
     Uefi,
+    /// A BFB install on a BlueField. It completes on the DPU's power-on, not
+    /// on a timer, and stages no firmware version.
+    DpuOs,
     /// Any other inventory entry (a DPU component appended by the platform, or
     /// an id the platform does not recognise).
     Other,
@@ -245,9 +295,10 @@ impl FirmwareTask {
     }
 
     pub(crate) fn to_json(&self) -> serde_json::Value {
-        let (state_str, pct) = match self.state {
-            TaskState::Running => ("Running", 0),
-            TaskState::Completed => ("Completed", 100),
+        let (pct, status) = match self.state {
+            TaskState::Running => (0, "OK"),
+            TaskState::Completed => (100, "OK"),
+            TaskState::Exception(_) => (100, "Critical"),
         };
         json!({
             "@odata.id": self.odata_id(),
@@ -256,14 +307,20 @@ impl FirmwareTask {
             "PercentComplete": pct,
             "StartTime": "2024-01-30T09:00:52+00:00",
             "TaskMonitor": format!("{}/Monitor", self.odata_id()),
-            "TaskState": state_str,
-            // TaskStatus is always "OK" — "Warning" would signal a degraded
-            // condition and cause carbide consumers to treat the upload as failed.
-            "TaskStatus": "OK",
+            "TaskState": self.state.as_str(),
+            // A running or completed task reports "OK" — "Warning" would signal
+            // a degraded condition and cause carbide consumers to treat the
+            // upload as failed.
+            "TaskStatus": status,
             "Messages": [{
                 "MessageId": "Update.1.0.OperationTransitionedToJob",
                 "Message": match (&self.state, self.component) {
+                    (TaskState::Exception(message), _) => message.as_str(),
+                    (TaskState::Running, FirmwareComponent::DpuOs) => "BFB install in progress.",
                     (TaskState::Running, _) => "Firmware upload in progress.",
+                    (TaskState::Completed, FirmwareComponent::DpuOs) => {
+                        "BFB installed; the DPU restarted into the new image."
+                    }
                     (TaskState::Completed, FirmwareComponent::Bmc) => {
                         "Firmware staged; version will be applied after the next BMC reset."
                     }
@@ -271,9 +328,262 @@ impl FirmwareTask {
                         "Firmware staged; version will be applied after the next host power-on."
                     }
                 },
-                "Severity": "OK"
+                "Severity": status
             }]
         })
+    }
+}
+
+/// Finished tasks each BMC remembers for later lookups.
+const TASK_HISTORY_CAPACITY: usize = 32;
+
+/// Inventory ID that a BFB install targets on a BlueField BMC.
+const DPU_OS_INVENTORY_ID: &str = "DPU_OS";
+
+/// File name of the vanilla BFB that NICo installs to decommission a DPU.
+const PRE_INGESTION_BFB: &str = "preingestion.bfb";
+
+/// The OS image on a BlueField's disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DpuOsImage {
+    /// A NICo-managed image that runs the DPU agent: `forge.bfb`, a DPF
+    /// bundle, or the agent image a netboot installs.
+    Managed,
+    /// The vanilla pre-ingestion BFB that decommissioning installs. It runs no
+    /// NICo agent.
+    PreIngestion,
+}
+
+impl DpuOsImage {
+    /// Classify a SimpleUpdate `ImageURI` by its file name. Any BFB other than
+    /// the pre-ingestion image is a managed image.
+    fn from_image_uri(image_uri: &str) -> Self {
+        if image_uri.rsplit('/').next() == Some(PRE_INGESTION_BFB) {
+            Self::PreIngestion
+        } else {
+            Self::Managed
+        }
+    }
+}
+
+/// What a BlueField BMC knows about the DPU's disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DpuOsStatus {
+    /// The installed image, or `None` for an empty disk.
+    pub image: Option<DpuOsImage>,
+    /// Number of times the installed image has changed. A new value means a
+    /// new install; consumers compare it with the last value they saw.
+    pub generation: u64,
+}
+
+/// Why a BFB install was not accepted.
+#[derive(Debug, PartialEq, Eq)]
+enum BfbInstallRefused {
+    /// This BMC manages no DPU OS.
+    NoDpuOs,
+    /// An earlier install is restarting the DPU and has not landed yet.
+    RestartInProgress,
+}
+
+/// Read-only access to a BlueField's [`DpuOsStatus`] that does not keep the
+/// BMC alive, so an embedder can observe the disk without a lifetime cycle.
+#[derive(Clone, Debug)]
+pub struct DpuOsStatusSource {
+    update_service: std::sync::Weak<UpdateServiceState>,
+}
+
+impl DpuOsStatusSource {
+    /// The current status, or `None` once the BMC is dropped or when it
+    /// manages no DPU OS.
+    pub fn status(&self) -> Option<DpuOsStatus> {
+        self.update_service.upgrade()?.dpu_os_status()
+    }
+}
+
+/// A BFB install that has not landed yet.
+#[derive(Clone, Serialize, Deserialize)]
+struct BfbInstall {
+    task_id: String,
+    image: DpuOsImage,
+    /// The transfer finished and this install owns restart dispatch. Runtime
+    /// admission still gates lifecycle publication until the backend accepts it.
+    rebooting: bool,
+    #[serde(skip)]
+    recovering: bool,
+    #[serde(skip)]
+    restart_pending: Option<BfbRestartEvents>,
+}
+
+// Backend callbacks may publish lifecycle events before their response arrives.
+// Buffer those observations until acceptance, or discard them on rejection.
+#[derive(Clone, Default)]
+struct BfbRestartEvents {
+    power_on: bool,
+    boot_completed: bool,
+}
+
+// Equality describes the portable snapshot. Runtime recovery and dispatch
+// observations are omitted, like their serde representation.
+impl PartialEq for BfbInstall {
+    fn eq(&self, other: &Self) -> bool {
+        self.task_id == other.task_id
+            && self.image == other.image
+            && self.rebooting == other.rebooting
+    }
+}
+
+impl Eq for BfbInstall {}
+
+/// The last boot stage the BMC observed, for `BootProgress`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BootRecord {
+    last_state: String,
+    time: String,
+    /// The image generation this boot started from.
+    generation: u64,
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct DpuOs {
+    image: Option<DpuOsImage>,
+    generation: u64,
+    install: Option<BfbInstall>,
+    boot: Option<BootRecord>,
+}
+
+impl DpuOs {
+    fn set_image(&mut self, image: Option<DpuOsImage>) {
+        if self.image != image {
+            self.image = image;
+            self.generation += 1;
+        }
+    }
+
+    fn record_boot(&mut self, last_state: &'static str) {
+        self.boot = Some(BootRecord {
+            last_state: last_state.to_owned(),
+            time: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            generation: self.generation,
+        });
+    }
+}
+
+/// DPU-only task and disk state captured under tasks -> dpu_os -> finished.
+/// Firmware upload payloads and callback error text are deliberately excluded.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PersistedDpuUpdate {
+    epoch: u32,
+    next_task_id: u64,
+    os: DpuOs,
+    tasks: Vec<PersistedDpuTask>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedDpuTask {
+    id: String,
+    state: BmcTaskState,
+}
+
+/// Payload-free Redfish task states used by effect observations and snapshots.
+/// Serialization, display and parsing use these exact, case-sensitive wire names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BmcTaskState {
+    /// The accepted operation has not reached a terminal state.
+    Running,
+    /// The BMC reports the operation completed.
+    Completed,
+    /// The operation failed or was superseded.
+    Exception,
+}
+
+impl std::fmt::Display for BmcTaskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Exception => "Exception",
+        })
+    }
+}
+
+/// An unrecognized, case-sensitive Redfish task-state name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unknown BMC task state")]
+pub struct UnknownBmcTaskState;
+
+impl std::str::FromStr for BmcTaskState {
+    type Err = UnknownBmcTaskState;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "Running" => Ok(Self::Running),
+            "Completed" => Ok(Self::Completed),
+            "Exception" => Ok(Self::Exception),
+            _ => Err(UnknownBmcTaskState),
+        }
+    }
+}
+
+impl PersistedDpuUpdate {
+    pub(crate) fn status(&self) -> DpuOsStatus {
+        DpuOsStatus {
+            image: self.os.image,
+            generation: self.os.generation,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        let mut ids = std::collections::HashSet::new();
+        let terminal_count = self
+            .tasks
+            .iter()
+            .filter(|task| task.state != BmcTaskState::Running)
+            .count();
+        if self.next_task_id == 0
+            || self.tasks.len() > TASK_HISTORY_CAPACITY + 1
+            || terminal_count > TASK_HISTORY_CAPACITY
+        {
+            return Err("invalid DPU task allocator or history size");
+        }
+        for task in &self.tasks {
+            let valid_id = task.id.split_once('-').is_some_and(|(epoch, counter)| {
+                u32::from_str_radix(epoch, 16)
+                    .ok()
+                    .zip(counter.parse::<u64>().ok())
+                    .is_some_and(|(parsed_epoch, n)| {
+                        epoch == format!("{parsed_epoch:08x}")
+                            && n > 0
+                            && (parsed_epoch != self.epoch || n < self.next_task_id)
+                    })
+            });
+            if !valid_id || !ids.insert(task.id.as_str()) {
+                return Err("invalid or duplicate DPU task ID");
+            }
+            if task.state == BmcTaskState::Running
+                && !self
+                    .os
+                    .install
+                    .as_ref()
+                    .is_some_and(|install| install.task_id == task.id)
+            {
+                return Err("running DPU task has no install");
+            }
+        }
+        if let Some(install) = &self.os.install
+            && !self
+                .tasks
+                .iter()
+                .any(|task| task.id == install.task_id && task.state == BmcTaskState::Running)
+        {
+            return Err("DPU install has no running task");
+        }
+        if self.os.boot.as_ref().is_some_and(|boot| {
+            !matches!(boot.last_state.as_str(), "OSBootStarted" | "OSRunning")
+                || boot.generation > self.os.generation
+        }) {
+            return Err("invalid DPU boot record");
+        }
+        Ok(())
     }
 }
 
@@ -287,9 +597,14 @@ pub struct UpdateServiceState {
     /// Written atomically with the task Completed transition to avoid the race
     /// window where PowerOn fires between the two writes.
     staged_firmware: RwLock<HashMap<String, String>>,
-    /// Live tasks keyed by task ID.  Pruned after `apply_staged_firmware` so the
-    /// map does not grow without bound in long-running load tests.
+    /// Live tasks keyed by task ID: running, or completed and not yet applied.
+    /// Applied and failed tasks move to `finished`, so the map does not grow
+    /// without bound in long-running load tests.
     tasks: RwLock<HashMap<String, FirmwareTask>>,
+    /// Bounded history of finished tasks, oldest first.
+    finished: RwLock<VecDeque<FirmwareTask>>,
+    /// Fresh for a new BMC and every restore. Saved tasks keep their original IDs.
+    task_id_epoch: AtomicU32,
     next_task_id: AtomicU64,
     task_completion_delay: Duration,
     task_completion_jitter: Duration,
@@ -301,6 +616,9 @@ pub struct UpdateServiceState {
     pub host_bmc_inventory_id: Option<String>,
     /// Inventory ID for the host UEFI/BIOS firmware entry.
     pub host_uefi_inventory_id: Option<String>,
+    /// BlueField OS state, or `None` for a BMC that manages no DPU OS. Lock
+    /// order: `tasks`, then `dpu_os`, then `finished`.
+    dpu_os: Option<std::sync::Mutex<DpuOs>>,
 }
 
 impl UpdateServiceState {
@@ -315,6 +633,8 @@ impl UpdateServiceState {
             pending_upgrades: RwLock::new(config.pending_upgrades),
             staged_firmware: RwLock::new(HashMap::new()),
             tasks: RwLock::new(HashMap::new()),
+            finished: RwLock::new(VecDeque::new()),
+            task_id_epoch: AtomicU32::new(rand::random()),
             next_task_id: AtomicU64::new(1),
             task_completion_delay: config.task_completion_delay,
             task_completion_jitter: config.task_completion_jitter,
@@ -322,6 +642,7 @@ impl UpdateServiceState {
             advertise_legacy_http_push_uri: config.advertise_legacy_http_push_uri,
             host_bmc_inventory_id: config.host_bmc_inventory_id,
             host_uefi_inventory_id: config.host_uefi_inventory_id,
+            dpu_os: config.dpu_os.then(Default::default),
         }
     }
 
@@ -376,8 +697,49 @@ impl UpdateServiceState {
         }
     }
 
+    /// A live or remembered task, or `None` for an ID this BMC instance never
+    /// issued or has forgotten.
     pub(crate) fn find_task(&self, id: &str) -> Option<serde_json::Value> {
-        self.tasks.read().unwrap().get(id).map(|t| t.to_json())
+        if let Some(task) = self.tasks.read().unwrap().get(id) {
+            return Some(task.to_json());
+        }
+        self.finished
+            .read()
+            .unwrap()
+            .iter()
+            .find(|task| task.id == id)
+            .map(FirmwareTask::to_json)
+    }
+
+    pub(crate) fn task_states(&self) -> HashMap<String, BmcTaskState> {
+        // Match the retirement lock order so live and retained tasks are one observation.
+        let tasks = self.tasks.read().unwrap();
+        let finished = self.finished.read().unwrap();
+        tasks
+            .values()
+            .chain(finished.iter())
+            .map(|task| {
+                (
+                    task.id.clone(),
+                    match task.state {
+                        TaskState::Running => BmcTaskState::Running,
+                        TaskState::Completed => BmcTaskState::Completed,
+                        TaskState::Exception(_) => BmcTaskState::Exception,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Move finished tasks out of the live map into the bounded history.
+    fn retire_tasks(&self, tasks: &mut HashMap<String, FirmwareTask>, ids: &[String]) {
+        let mut finished = self.finished.write().unwrap();
+        for task in ids.iter().filter_map(|id| tasks.remove(id)) {
+            if finished.len() == TASK_HISTORY_CAPACITY {
+                finished.pop_front();
+            }
+            finished.push_back(task);
+        }
     }
 
     /// Create a task in `Running` state for `component_id`.
@@ -395,10 +757,7 @@ impl UpdateServiceState {
         component_id: &str,
         target_version: String,
     ) -> (String, serde_json::Value) {
-        let task_id = self
-            .next_task_id
-            .fetch_add(1, Ordering::Relaxed)
-            .to_string();
+        let task_id = self.next_task_id();
         let task = FirmwareTask {
             id: task_id.clone(),
             component_id: component_id.to_string(),
@@ -419,19 +778,11 @@ impl UpdateServiceState {
         }
 
         let state = std::sync::Arc::clone(self);
-        let delay = self.task_completion_delay;
-        let jitter = self.task_completion_jitter;
+        let delay = self.completion_delay();
         let component = component_id.to_string();
         // JoinHandle dropped intentionally — see module doc for rationale.
         drop(tokio::spawn(async move {
-            // True random jitter to desynchronise resets across many simulated hosts.
-            let jitter_ms = jitter.as_millis();
-            let jitter_offset = if jitter_ms == 0 {
-                0u64
-            } else {
-                rand::random::<u64>() % jitter_ms as u64
-            };
-            tokio::time::sleep(delay + Duration::from_millis(jitter_offset)).await;
+            tokio::time::sleep(delay).await;
 
             // Mark Completed and stage the version atomically under the tasks
             // write-lock.  Reading target_version from the task struct (rather than
@@ -458,6 +809,23 @@ impl UpdateServiceState {
         }));
 
         (odata_id, running_json)
+    }
+
+    /// The configured completion delay plus true random jitter, which
+    /// desynchronises resets across many simulated hosts.
+    fn completion_delay(&self) -> Duration {
+        let jitter_ms = self.task_completion_jitter.as_millis();
+        let jitter_offset = if jitter_ms == 0 {
+            0u64
+        } else {
+            rand::random::<u64>() % jitter_ms as u64
+        };
+        self.task_completion_delay + Duration::from_millis(jitter_offset)
+    }
+
+    fn next_task_id(&self) -> String {
+        let n = self.next_task_id.fetch_add(1, Ordering::Relaxed);
+        format!("{:08x}-{n}", self.task_id_epoch.load(Ordering::Relaxed))
     }
 
     /// Peek the first pending upgrade without consuming it.
@@ -497,7 +865,9 @@ impl UpdateServiceState {
             let mut tasks = self.tasks.write().unwrap();
             tasks
                 .values_mut()
-                .filter(|t| t.state == TaskState::Running)
+                .filter(|t| {
+                    t.state == TaskState::Running && t.component != FirmwareComponent::DpuOs
+                })
                 .map(|t| {
                     t.state = TaskState::Completed;
                     (t.component_id.clone(), t.target_version.clone())
@@ -519,8 +889,9 @@ impl UpdateServiceState {
     /// Host power-on applies all staged components. A BMC-only reset uses
     /// `apply_staged_bmc_firmware` so it cannot activate UEFI firmware.
     ///
-    /// Completed tasks are pruned from the map after their firmware is applied
-    /// so the map does not grow without bound in long-running load tests.
+    /// Completed tasks move to the bounded history after their firmware is
+    /// applied, so the live map does not grow without bound in long-running
+    /// load tests and a late poll still reads the task.
     /// Successfully applied components are also removed from `pending_upgrades`
     /// so a subsequent peek returns the next entry in the ordered map.
     pub(crate) fn apply_staged_firmware(&self) {
@@ -537,17 +908,18 @@ impl UpdateServiceState {
     fn apply_staged_component(&self, component: Option<FirmwareComponent>) {
         let applies = |task: &FirmwareTask| {
             task.state == TaskState::Completed
+                && task.component != FirmwareComponent::DpuOs
                 && component.is_none_or(|kind| task.component == kind)
         };
-        // Collect component IDs of completed tasks and prune them from the map.
+        // Collect component IDs of completed tasks and retire them to history.
         let completed_components: Vec<String> = {
             let mut tasks = self.tasks.write().unwrap();
-            let completed: Vec<String> = tasks
+            let (ids, completed): (Vec<String>, Vec<String>) = tasks
                 .values()
                 .filter(|t| applies(t))
-                .map(|t| t.component_id.clone())
-                .collect();
-            tasks.retain(|_, t| !applies(t));
+                .map(|t| (t.id.clone(), t.component_id.clone()))
+                .unzip();
+            self.retire_tasks(&mut tasks, &ids);
             completed
         };
 
@@ -588,6 +960,418 @@ impl UpdateServiceState {
     }
 }
 
+impl UpdateServiceState {
+    pub(crate) fn persisted_dpu_update(&self) -> Option<PersistedDpuUpdate> {
+        let tasks = self.tasks.read().unwrap();
+        let os = self.dpu_os.as_ref()?.lock().unwrap();
+        let finished = self.finished.read().unwrap();
+        Some(PersistedDpuUpdate {
+            epoch: self.task_id_epoch.load(Ordering::Relaxed),
+            next_task_id: self.next_task_id.load(Ordering::Relaxed),
+            os: os.clone(),
+            tasks: tasks
+                .values()
+                .chain(finished.iter())
+                .filter(|task| task.component == FirmwareComponent::DpuOs)
+                .map(|task| PersistedDpuTask {
+                    id: task.id.clone(),
+                    state: match task.state {
+                        TaskState::Running => BmcTaskState::Running,
+                        TaskState::Completed => BmcTaskState::Completed,
+                        TaskState::Exception(_) => BmcTaskState::Exception,
+                    },
+                })
+                .collect(),
+        })
+    }
+
+    pub(crate) fn validate_dpu_update(
+        &self,
+        saved: &PersistedDpuUpdate,
+    ) -> Result<(), &'static str> {
+        saved.validate()?;
+        if self.dpu_os.is_none() {
+            return Err("DPU update snapshot does not match the BMC profile");
+        }
+        if saved.os.install.is_some() && tokio::runtime::Handle::try_current().is_err() {
+            return Err("DPU install recovery requires a Tokio runtime");
+        }
+        Ok(())
+    }
+
+    /// Restore before serving requests. Pending installs keep their IDs and are
+    /// fenced from startup PowerOn until their own recovery restart is admitted.
+    pub(crate) fn restore_dpu_update<C: Callbacks>(
+        self: &std::sync::Arc<Self>,
+        saved: &PersistedDpuUpdate,
+        callbacks: Option<std::sync::Arc<C>>,
+        power: std::sync::Weak<crate::redfish::computer_system::SystemState<C>>,
+    ) {
+        let pending = {
+            let mut tasks = self.tasks.write().unwrap();
+            let mut os = self
+                .dpu_os
+                .as_ref()
+                .expect("validated DPU profile")
+                .lock()
+                .unwrap();
+            let mut finished = self.finished.write().unwrap();
+            tasks.clear();
+            finished.clear();
+            // A stale snapshot can be loaded after unsaved tasks were issued.
+            // Retain saved task IDs, but never reuse their allocator namespace.
+            let mut used_epochs: std::collections::HashSet<_> = saved
+                .tasks
+                .iter()
+                .filter_map(|task| task.id.split_once('-'))
+                .filter_map(|(epoch, _)| u32::from_str_radix(epoch, 16).ok())
+                .collect();
+            used_epochs.insert(saved.epoch);
+            used_epochs.insert(self.task_id_epoch.load(Ordering::Relaxed));
+            let epoch = loop {
+                let candidate = rand::random();
+                if !used_epochs.contains(&candidate) {
+                    break candidate;
+                }
+            };
+            self.task_id_epoch.store(epoch, Ordering::Relaxed);
+            self.next_task_id.store(1, Ordering::Relaxed);
+            *os = saved.os.clone();
+            let pending = os.install.as_mut().map(|install| {
+                install.rebooting = false;
+                install.recovering = true;
+                install.restart_pending = None;
+                install.task_id.clone()
+            });
+            for saved in &saved.tasks {
+                let task = FirmwareTask {
+                    id: saved.id.clone(),
+                    component_id: DPU_OS_INVENTORY_ID.to_owned(),
+                    target_version: String::new(),
+                    component: FirmwareComponent::DpuOs,
+                    state: match saved.state {
+                        BmcTaskState::Running => TaskState::Running,
+                        BmcTaskState::Completed => TaskState::Completed,
+                        BmcTaskState::Exception => {
+                            TaskState::Exception("BFB install failed before snapshot.".to_owned())
+                        }
+                    },
+                };
+                if task.state == TaskState::Running {
+                    tasks.insert(task.id.clone(), task);
+                } else {
+                    finished.push_back(task);
+                }
+            }
+            pending
+        };
+        if let Some(id) = pending {
+            self.schedule_bfb_restart(id, callbacks, Some(power));
+        }
+    }
+
+    /// The BlueField disk image and its generation, or `None` for a BMC that
+    /// manages no DPU OS.
+    pub fn dpu_os_status(&self) -> Option<DpuOsStatus> {
+        let os = self.dpu_os.as_ref()?.lock().unwrap();
+        Some(DpuOsStatus {
+            image: os.image,
+            generation: os.generation,
+        })
+    }
+
+    /// Whether a DPU restart callback is waiting for backend admission.
+    /// After publishing PowerOn, embedders must hold subsequent boot actions
+    /// while this is true, then read the committed disk before choosing an OS.
+    /// Returns false when this BMC manages no DPU OS.
+    pub fn dpu_restart_admission_pending(&self) -> bool {
+        self.dpu_os.as_ref().is_some_and(|os| {
+            os.lock()
+                .unwrap()
+                .install
+                .as_ref()
+                .is_some_and(|install| install.restart_pending.is_some())
+        })
+    }
+
+    /// A weak, read-only source of [`DpuOsStatus`] for this BMC.
+    pub fn dpu_os_status_source(self: &std::sync::Arc<Self>) -> DpuOsStatusSource {
+        DpuOsStatusSource {
+            update_service: std::sync::Arc::downgrade(self),
+        }
+    }
+
+    /// Record an image that was installed without a BFB task, such as the
+    /// agent image a netboot writes, or the disk contents an embedder restores
+    /// at startup. Advances the generation only when the image changes.
+    /// Returns the resulting status, or `None` for a BMC with no DPU OS.
+    pub fn record_dpu_os_image(&self, image: Option<DpuOsImage>) -> Option<DpuOsStatus> {
+        let mut os = self.dpu_os.as_ref()?.lock().unwrap();
+        os.set_image(image);
+        Some(DpuOsStatus {
+            image: os.image,
+            generation: os.generation,
+        })
+    }
+
+    /// `BootProgress` for the BlueField system, or `None` when this BMC
+    /// manages no DPU OS or has not seen a boot yet. A DPU that is not powered
+    /// on reports `None` as its last state, and `OSRunning` holds only for the
+    /// boot of the current image generation.
+    pub(crate) fn dpu_boot_progress(&self, powered_on: bool) -> Option<serde_json::Value> {
+        let os = self.dpu_os.as_ref()?.lock().unwrap();
+        let boot = os.boot.as_ref()?;
+        if !powered_on {
+            return Some(json!({ "LastState": "None" }));
+        }
+        let last_state = if boot.last_state == "OSRunning" && boot.generation != os.generation {
+            "OSBootStarted"
+        } else {
+            boot.last_state.as_str()
+        };
+        Some(json!({
+            "LastState": last_state,
+            "LastStateTime": boot.time,
+        }))
+    }
+
+    /// Accept a BFB install and return its task. An install still in transfer
+    /// is superseded and its task fails. Once an install has begun restarting
+    /// the DPU it owns the DPU until it lands or fails, and a new install is
+    /// refused, as a BMC refuses an update while one is in progress. After the
+    /// transfer delay the BMC restarts the DPU through `callbacks`; the image
+    /// lands on the next power-on (see `on_dpu_power_on`).
+    fn start_bfb_install<C: Callbacks>(
+        self: &std::sync::Arc<Self>,
+        image: DpuOsImage,
+        callbacks: Option<std::sync::Arc<C>>,
+        power: Option<std::sync::Weak<crate::redfish::computer_system::SystemState<C>>>,
+    ) -> Result<(String, serde_json::Value), BfbInstallRefused> {
+        let dpu_os = self.dpu_os.as_ref().ok_or(BfbInstallRefused::NoDpuOs)?;
+        let task_id = self.next_task_id();
+        let task = FirmwareTask {
+            id: task_id.clone(),
+            component_id: DPU_OS_INVENTORY_ID.to_string(),
+            target_version: String::new(),
+            state: TaskState::Running,
+            component: FirmwareComponent::DpuOs,
+        };
+        let response = (task.odata_id(), task.to_json());
+        {
+            let mut tasks = self.tasks.write().unwrap();
+            let mut os = dpu_os.lock().unwrap();
+            // The restart decision and this check share the `dpu_os` lock, so a
+            // claimed restart can never be for a replaced install.
+            if os
+                .install
+                .as_ref()
+                .is_some_and(|install| install.rebooting || install.recovering)
+            {
+                return Err(BfbInstallRefused::RestartInProgress);
+            }
+            let previous = os.install.replace(BfbInstall {
+                task_id: task_id.clone(),
+                image,
+                rebooting: false,
+                recovering: false,
+                restart_pending: None,
+            });
+            if let Some(previous) = previous
+                && let Some(task) = tasks.get_mut(&previous.task_id)
+            {
+                task.state = TaskState::Exception("Superseded by a newer BFB install.".to_string());
+                self.retire_tasks(&mut tasks, &[previous.task_id]);
+            }
+            tasks.insert(task_id.clone(), task);
+        }
+
+        self.schedule_bfb_restart(task_id, callbacks, power);
+        Ok(response)
+    }
+
+    fn schedule_bfb_restart<C: Callbacks>(
+        self: &std::sync::Arc<Self>,
+        task_id: String,
+        callbacks: Option<std::sync::Arc<C>>,
+        power: Option<std::sync::Weak<crate::redfish::computer_system::SystemState<C>>>,
+    ) {
+        let state = std::sync::Arc::downgrade(self);
+        let delay = self.completion_delay();
+        drop(tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            // A replaced BMC must not dispatch its old delayed restart.
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            if !state.begin_bfb_reboot(&task_id) {
+                return;
+            }
+            let reset_type = if power
+                .and_then(|source| source.upgrade())
+                .and_then(|system| system.power_state())
+                == Some(nv_redfish::resource::PowerState::Off)
+            {
+                crate::ResourceResetType::On
+            } else {
+                crate::ResourceResetType::ForceRestart
+            };
+            let restart = match callbacks {
+                Some(callbacks) => {
+                    let result = callbacks.computer_system_reset(reset_type).await;
+                    // The backend owns the current power state. A lagging BMC
+                    // observation can choose the wrong operation. A rejected
+                    // request has no effect, so try the alternate once. Internal
+                    // errors can have an unknown outcome and are never retried.
+                    if matches!(&result, Err(crate::ActionError::BadRequest(_))) {
+                        let alternate = if reset_type == crate::ResourceResetType::On {
+                            crate::ResourceResetType::ForceRestart
+                        } else {
+                            crate::ResourceResetType::On
+                        };
+                        callbacks.computer_system_reset(alternate).await
+                    } else {
+                        result
+                    }
+                }
+                None => Err(crate::ActionError::Internal(eyre::eyre!(
+                    "BMC has no DPU power control"
+                ))),
+            };
+            match restart {
+                Ok(()) => state.admit_bfb_restart(&task_id),
+                Err(error) => {
+                    state.fail_bfb_install(&task_id, &format!("DPU restart failed: {error}"))
+                }
+            }
+        }));
+    }
+
+    /// Claim restart dispatch for `task_id`. New installs are refused until
+    /// it lands or fails, but lifecycle events cannot apply the image before
+    /// the callback accepts the restart. A superseded task cannot claim it.
+    fn begin_bfb_reboot(&self, task_id: &str) -> bool {
+        let Some(dpu_os) = &self.dpu_os else {
+            return false;
+        };
+        let mut os = dpu_os.lock().unwrap();
+        match &mut os.install {
+            Some(install) if install.task_id == task_id && !install.rebooting => {
+                install.rebooting = true;
+                install.restart_pending = Some(BfbRestartEvents::default());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn admit_bfb_restart(&self, task_id: &str) {
+        let Some(dpu_os) = &self.dpu_os else { return };
+        let mut tasks = self.tasks.write().unwrap();
+        let mut os = dpu_os.lock().unwrap();
+        let events = match os.install.as_mut() {
+            Some(install) if install.task_id == task_id && install.rebooting => {
+                install.recovering = false;
+                install.restart_pending.take()
+            }
+            _ => None,
+        };
+        if let Some(events) = events
+            && events.power_on
+            && let Some(install) = os.install.take()
+        {
+            self.apply_bfb_install(&mut tasks, &mut os, install);
+            os.record_boot(if events.boot_completed {
+                "OSRunning"
+            } else {
+                "OSBootStarted"
+            });
+        }
+    }
+
+    // Called with tasks -> dpu_os held. Retiring the task takes finished last,
+    // so observers cannot see the committed image with a still-running task.
+    fn apply_bfb_install(
+        &self,
+        tasks: &mut HashMap<String, FirmwareTask>,
+        os: &mut DpuOs,
+        install: BfbInstall,
+    ) {
+        os.image = Some(install.image);
+        os.generation += 1;
+        if let Some(task) = tasks.get_mut(&install.task_id) {
+            task.state = TaskState::Completed;
+            self.retire_tasks(tasks, &[install.task_id]);
+        }
+    }
+
+    fn fail_bfb_install(&self, task_id: &str, message: &str) {
+        let Some(dpu_os) = &self.dpu_os else {
+            return;
+        };
+        let mut tasks = self.tasks.write().unwrap();
+        let mut os = dpu_os.lock().unwrap();
+        if os
+            .install
+            .as_ref()
+            .is_some_and(|install| install.task_id == task_id)
+        {
+            os.install = None;
+        }
+        if let Some(task) = tasks.get_mut(task_id)
+            && task.state == TaskState::Running
+        {
+            task.state = TaskState::Exception(message.to_string());
+            self.retire_tasks(&mut tasks, &[task_id.to_string()]);
+        }
+    }
+
+    /// The DPU powered on. An install whose restart was issued lands now: the
+    /// image changes, the generation advances and its task completes. Every
+    /// power-on starts a new boot, so `BootProgress` leaves `OSRunning`.
+    pub(crate) fn on_dpu_power_on(&self) {
+        let Some(dpu_os) = &self.dpu_os else {
+            return;
+        };
+        let mut tasks = self.tasks.write().unwrap();
+        let mut os = dpu_os.lock().unwrap();
+        let admitted = match os.install.as_mut() {
+            Some(install) if install.rebooting => {
+                if let Some(events) = &mut install.restart_pending {
+                    events.power_on = true;
+                    events.boot_completed = false;
+                    false
+                } else {
+                    !install.recovering
+                }
+            }
+            _ => false,
+        };
+        if admitted && let Some(install) = os.install.take() {
+            self.apply_bfb_install(&mut tasks, &mut os, install);
+        }
+        os.record_boot("OSBootStarted");
+    }
+
+    /// The DPU finished booting. With an image on disk, its OS is now running.
+    pub(crate) fn on_dpu_boot_completed(&self) {
+        let Some(dpu_os) = &self.dpu_os else {
+            return;
+        };
+        let mut os = dpu_os.lock().unwrap();
+        if let Some(events) = os
+            .install
+            .as_mut()
+            .and_then(|install| install.restart_pending.as_mut())
+            && events.power_on
+        {
+            events.boot_completed = true;
+        }
+        if os.image.is_some() {
+            os.record_boot("OSRunning");
+        }
+    }
+}
+
 /// Drain a request body frame-by-frame without buffering to avoid memory
 /// pressure when handling large firmware images.  Errors are silently ignored
 /// — the mock does not inspect the uploaded content.
@@ -599,6 +1383,8 @@ async fn discard_body(body: Body) {
 
 #[derive(Deserialize, Default)]
 struct SimpleUpdateRequest {
+    #[serde(rename = "ImageURI")]
+    image_uri: Option<String>,
     #[serde(rename = "Targets", default)]
     targets: Vec<String>,
 }
@@ -606,15 +1392,18 @@ struct SimpleUpdateRequest {
 /// Advertise only the push URI(s) that this platform's BMC actually supports.
 async fn get_update_service<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let us = &state.update_service_state;
-    let mut b = builder(&resource())
-        .firmware_inventory(&redfish::software_inventory::firmware_inventory_collection());
+    let mut b = builder(&resource()).firmware_inventory(
+        redfish::software_inventory::firmware_inventory_collection()
+            .odata_id
+            .as_ref(),
+    );
     if us.advertise_multipart_push_uri {
         b = b.multipart_http_push_uri(MULTIPART_UPLOAD_PATH);
     }
     if us.advertise_legacy_http_push_uri {
-        b = b.apply_patch(json!({ "HttpPushUri": resource().odata_id }));
+        b = b.http_push_uri(resource().odata_id.as_ref());
     }
-    b.build().into_ok_response()
+    b.into_json().into_ok_response()
 }
 
 /// Redfish SimpleUpdate (Dell iDRAC, BFB/DPU path).
@@ -622,7 +1411,7 @@ async fn update_firmware_simple_update<C: Callbacks>(
     State(state): State<BmcState<C>>,
     body: Option<axum::Json<SimpleUpdateRequest>>,
 ) -> Response {
-    let targets = body.map(|b| b.0.targets).unwrap_or_default();
+    let SimpleUpdateRequest { image_uri, targets } = body.map(|b| b.0).unwrap_or_default();
 
     // Infer component from the first Redfish target path.
     // e.g. `/redfish/v1/UpdateService/FirmwareInventory/HostBMC_0` → `HostBMC_0`
@@ -631,6 +1420,28 @@ async fn update_firmware_simple_update<C: Callbacks>(
         .and_then(|t| t.rsplit('/').next())
         .map(str::to_owned)
     {
+        if id == DPU_OS_INVENTORY_ID {
+            let Some(image_uri) = image_uri else {
+                return http::bad_request("ImageURI is required to install a BFB");
+            };
+            let image = DpuOsImage::from_image_uri(&image_uri);
+            return match state.update_service_state.start_bfb_install(
+                image,
+                state.callbacks.clone(),
+                Some(std::sync::Arc::downgrade(&state.system_state)),
+            ) {
+                Ok((task_odata_id, task_json)) => accepted_task_response(&task_odata_id, task_json),
+                Err(BfbInstallRefused::NoDpuOs) => http::not_found(),
+                // bmcweb refuses an update while another is in progress this way.
+                Err(BfbInstallRefused::RestartInProgress) => http::registry_error(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Base.1.13.0.ServiceTemporarilyUnavailable",
+                    "The service is temporarily unavailable.  Retry in 30 seconds.",
+                    &["30"],
+                    "Wait for the indicated retry duration and retry the operation.",
+                ),
+            };
+        }
         // Targets is explicit: look up the desired version WITHOUT consuming the
         // pending_upgrades map so a follow-up multipart upload for a different
         // component can still peek its own entry.
@@ -672,13 +1483,17 @@ fn upload_response(
 ) -> Response {
     let (task_odata_id, running_task_json) =
         update_state.record_upload(component_id, target_version);
+    accepted_task_response(&task_odata_id, running_task_json)
+}
 
+/// 202 Accepted with the task's `Location` and its JSON body.
+fn accepted_task_response(task_odata_id: &str, task_json: serde_json::Value) -> Response {
     // Use into_response(ACCEPTED) + Location header.  into_response_with_location
     // sets 200; we override the status after insertion.
-    let location = axum::http::HeaderValue::from_str(&task_odata_id).unwrap_or_else(|_| {
+    let location = axum::http::HeaderValue::from_str(task_odata_id).unwrap_or_else(|_| {
         axum::http::HeaderValue::from_static("/redfish/v1/TaskService/Tasks/0")
     });
-    let mut response = running_task_json.into_ok_response_with_location(location);
+    let mut response = task_json.into_ok_response_with_location(location);
     *response.status_mut() = axum::http::StatusCode::ACCEPTED;
     response
 }
@@ -707,33 +1522,6 @@ async fn get_firmware_inventory_resource<C: Callbacks>(
         .unwrap_or_else(http::not_found)
 }
 
-pub(crate) struct UpdateServiceBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for UpdateServiceBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl UpdateServiceBuilder {
-    pub(crate) fn build(self) -> serde_json::Value {
-        self.value
-    }
-
-    pub(crate) fn firmware_inventory(self, v: &redfish::Collection<'_>) -> Self {
-        self.apply_patch(v.nav_property("FirmwareInventory"))
-    }
-
-    /// Multipart HTTP push URI (AMI/GB200/GB300 consumers).
-    pub(crate) fn multipart_http_push_uri(self, uri: &str) -> Self {
-        self.apply_patch(json!({ "MultipartHttpPushUri": uri }))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -749,7 +1537,7 @@ mod tests {
             .iter()
             .map(|(id, v)| {
                 software_inventory::builder(&software_inventory::firmware_inventory_resource(id))
-                    .version(v)
+                    .version(*v)
                     .build()
             })
             .collect();
@@ -842,6 +1630,26 @@ mod tests {
         assert!(pending_pairs(&state).is_empty());
     }
 
+    #[test]
+    fn task_state_observations_keep_the_redfish_wire_names() {
+        for (state, wire) in [
+            (BmcTaskState::Running, "Running"),
+            (BmcTaskState::Completed, "Completed"),
+            (BmcTaskState::Exception, "Exception"),
+        ] {
+            assert_eq!(state.to_string(), wire);
+            assert_eq!(wire.parse::<BmcTaskState>().unwrap(), state);
+            assert_eq!(serde_json::to_value(state).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<BmcTaskState>(json!(wire)).unwrap(),
+                state
+            );
+        }
+        for invalid in ["", "running", "Starting", " Running"] {
+            assert!(invalid.parse::<BmcTaskState>().is_err(), "{invalid:?}");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn task_starts_running_then_completes() {
         let state = make_state(&[("HostBMC_0", "24.09.17")], &[("HostBMC_0", "24.10.00")]);
@@ -852,15 +1660,17 @@ mod tests {
             "Running tasks must emit OK not Warning"
         );
         assert_eq!(running_json["PercentComplete"], 0);
+        let task_id = task_path.rsplit('/').next().unwrap();
+        assert_eq!(state.task_states()[task_id], BmcTaskState::Running);
 
         // Yield to the runtime so the spawned task can run (delay=ZERO, no advance needed).
         tokio::task::yield_now().await;
 
-        let task_id = task_path.rsplit('/').next().unwrap();
         let completed = state.find_task(task_id).unwrap();
         assert_eq!(completed["TaskState"], "Completed");
         assert_eq!(completed["TaskStatus"], "OK");
         assert_eq!(completed["PercentComplete"], 100);
+        assert_eq!(state.task_states()[task_id], BmcTaskState::Completed);
     }
 
     #[tokio::test(start_paused = true)]
@@ -984,11 +1794,13 @@ mod tests {
         );
     }
 
-    /// Completed tasks are pruned from the map after apply_staged_firmware.
+    /// Applied tasks leave the live map but stay readable from the history,
+    /// which keeps only the newest `TASK_HISTORY_CAPACITY` tasks.
     #[tokio::test(start_paused = true)]
-    async fn completed_tasks_pruned_after_apply() {
+    async fn applied_tasks_move_to_a_bounded_history() {
         let state = make_state(&[("HostBMC_0", "24.09.17")], &[]);
-        state.record_upload("HostBMC_0", "24.10.00".into());
+        let (first, _) = state.record_upload("HostBMC_0", "24.10.00".into());
+        let first = first.rsplit('/').next().unwrap().to_owned();
         tokio::task::yield_now().await;
 
         assert_eq!(state.tasks.read().unwrap().len(), 1);
@@ -996,8 +1808,40 @@ mod tests {
         assert_eq!(
             state.tasks.read().unwrap().len(),
             0,
-            "completed task must be pruned"
+            "applied task leaves the live map"
         );
+        let task = state
+            .find_task(&first)
+            .expect("applied task stays readable");
+        assert_eq!(task["TaskState"], "Completed");
+        assert_eq!(task["Id"], first.as_str());
+        assert_eq!(state.task_states()[&first], BmcTaskState::Completed);
+
+        for _ in 0..TASK_HISTORY_CAPACITY {
+            state.record_upload("HostBMC_0", "24.10.00".into());
+            tokio::task::yield_now().await;
+            state.apply_staged_firmware();
+        }
+        assert_eq!(state.finished.read().unwrap().len(), TASK_HISTORY_CAPACITY);
+        assert_eq!(state.find_task(&first), None, "oldest record is evicted");
+        assert!(!state.task_states().contains_key(&first));
+        assert_eq!(state.task_states().len(), TASK_HISTORY_CAPACITY);
+    }
+
+    /// Task IDs carry a per-instance epoch, so an ID issued before a restart
+    /// does not name a task of the new instance.
+    #[test]
+    fn task_ids_do_not_alias_across_instances() {
+        let before = make_state(&[], &[]);
+        let after = make_state(&[], &[]);
+        assert_ne!(
+            before.task_id_epoch.load(Ordering::Relaxed),
+            after.task_id_epoch.load(Ordering::Relaxed)
+        );
+        let id_before = before.next_task_id();
+        let id_after = after.next_task_id();
+        assert_ne!(id_before, id_after);
+        assert!(id_before.ends_with("-1") && id_after.ends_with("-1"));
     }
 
     #[test]
@@ -1113,8 +1957,6 @@ mod tests {
         );
     }
 
-    use std::sync::Arc as StdArc;
-
     use axum::body::to_bytes;
     use axum::http::{Method, Request, StatusCode};
     use tower::ServiceExt;
@@ -1227,7 +2069,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_returns_202_with_location_and_running_task_body() {
-        let (router, _) = make_router("24.09.17", "24.10.00");
+        let (router, state) = make_router("24.09.17", "24.10.00");
         let resp = post_empty(&router, MULTIPART_UPLOAD_PATH).await;
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         assert!(
@@ -1237,6 +2079,11 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
         assert_eq!(body["TaskState"], "Running");
+        let snapshot = state.snapshot_source().effect_snapshot().unwrap();
+        assert_eq!(
+            snapshot.tasks[body["Id"].as_str().unwrap()],
+            BmcTaskState::Running
+        );
         assert_eq!(
             body["TaskStatus"], "OK",
             "Running task must not emit Warning"
@@ -1278,153 +2125,6 @@ mod tests {
         )
         .await;
         assert_eq!(inv["Version"], "24.10.00");
-    }
-
-    #[tokio::test]
-    async fn lenovo_gb300_requires_full_lockdown_to_restore_bios_policy() {
-        use libredfish::{EnabledDisabled, Endpoint, RedfishClientPool};
-        let (router, _) = make_platform_router(
-            HardwareType::LenovoGB300Nvl,
-            "bmc-old",
-            "bmc-new",
-            None,
-            None,
-        );
-        let (_server, url) = crate::test_support::serve_https("gb300-lockdown", router);
-        let client = RedfishClientPool::builder()
-            .danger_accept_invalid_certs()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap()
-            .create_client(Endpoint {
-                host: url.host_str().unwrap().to_owned(),
-                port: url.port(),
-                user: None,
-                password: None,
-            })
-            .await
-            .unwrap();
-        client.lockdown_bmc(EnabledDisabled::Enabled).await.unwrap();
-        let status = client.lockdown_status().await.unwrap();
-        assert!(
-            !status.is_fully_enabled(),
-            "BMC-only command must leave BIOS USB unlocked: {status:?}"
-        );
-        client.lockdown(EnabledDisabled::Enabled).await.unwrap();
-        let status = client.lockdown_status().await.unwrap();
-        assert!(
-            status.is_fully_enabled(),
-            "full policy must restore BIOS and BMC: {status:?}"
-        );
-    }
-
-    /// Exercise the same legacy client used by the Core controller, including
-    /// its LenovoGB300 multipart rejection. This verifies the mock's raw-push
-    /// compatibility, not support for this endpoint on physical Lenovo hardware.
-    #[tokio::test]
-    async fn lenovo_gb300_legacy_client_raw_push_activates_bmc() {
-        use libredfish::model::service_root::RedfishVendor;
-        use libredfish::model::update_service::ComponentType;
-        use libredfish::{Endpoint, RedfishClientPool, RedfishError};
-
-        let (router, state) = make_platform_router(
-            HardwareType::LenovoGB300Nvl,
-            "bmc-old",
-            "bmc-new",
-            Some("uefi-old"),
-            Some("uefi-new"),
-        );
-        let bios_before = get_json(&router, "/redfish/v1/Systems/System_0").await["BiosVersion"]
-            .as_str()
-            .expect("Lenovo System_0 must report its BIOS version")
-            .to_owned();
-        let system_router = router.clone();
-        let received = StdArc::new(std::sync::Mutex::new(Vec::new()));
-        let captured = received.clone();
-        let router = router.layer(axum::middleware::from_fn(
-            move |request: Request<axum::body::Body>, next: axum::middleware::Next| {
-                let captured = captured.clone();
-                async move {
-                    if request.method() == Method::POST
-                        && request.uri().path() == "/redfish/v1/UpdateService"
-                    {
-                        let (parts, body) = request.into_parts();
-                        let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
-                        *captured.lock().unwrap() = bytes.to_vec();
-                        next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
-                            .await
-                    } else {
-                        next.run(request).await
-                    }
-                }
-            },
-        ));
-        let (_server, url) = crate::test_support::serve_https("gb300-http-push", router);
-        let client = RedfishClientPool::builder()
-            .danger_accept_invalid_certs()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap()
-            .create_client(Endpoint {
-                host: url.host_str().unwrap().to_owned(),
-                port: url.port(),
-                user: None,
-                password: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            client.std_redfish().vendor,
-            Some(RedfishVendor::LenovoGB300)
-        );
-        assert_eq!(
-            client.get_update_service().await.unwrap().http_push_uri,
-            "/redfish/v1/UpdateService",
-        );
-        let artifact = tempfile::NamedTempFile::new().unwrap();
-        let payload = b"mock firmware payload, not a physical firmware image";
-        std::fs::write(artifact.path(), payload).unwrap();
-        assert!(matches!(
-            client
-                .update_firmware_multipart(
-                    artifact.path(),
-                    true,
-                    Duration::from_secs(5),
-                    ComponentType::BMC,
-                )
-                .await,
-            Err(RedfishError::NotSupported(_))
-        ));
-        assert!(received.lock().unwrap().is_empty());
-        let task = client
-            .update_firmware(tokio::fs::File::open(artifact.path()).await.unwrap())
-            .await
-            .unwrap();
-        assert_eq!(&*received.lock().unwrap(), payload);
-        state.update_service_state.complete_all_tasks_for_test();
-        assert_eq!(
-            serde_json::to_value(client.get_task(&task.id).await.unwrap()).unwrap()["TaskState"],
-            "Completed"
-        );
-        let inventory = || {
-            state
-                .update_service_state
-                .find_firmware_inventory("BMC")
-                .unwrap()
-        };
-        assert_eq!(inventory()["Version"], "bmc-old");
-        client.bmc_reset(None).await.unwrap();
-        assert_eq!(inventory()["Version"], "bmc-new");
-        assert_eq!(
-            state.update_service_state.find_firmware_inventory("UEFI"),
-            None,
-            "Lenovo exposes BIOS on System_0, not a synthetic firmware inventory entry"
-        );
-        assert_eq!(
-            get_json(&system_router, "/redfish/v1/Systems/System_0").await["BiosVersion"],
-            bios_before,
-            "BMC activation must leave the host BIOS unchanged"
-        );
     }
 
     #[tokio::test]
@@ -1496,6 +2196,13 @@ mod tests {
                     state.on_event(&crate::bmc_state::BmcEvent::PowerOn);
                 }
                 assert_eq!(get_json(&router, path).await["Version"], new);
+                // A poll after activation still reads this task's own record.
+                let task = get_json(&router, &task_path).await;
+                assert_eq!(task["TaskState"], "Completed");
+                assert_eq!(
+                    task["Messages"][0]["Message"],
+                    format!("Firmware staged; version will be applied after the next {event}.")
+                );
                 if path == &bmc_path {
                     assert_eq!(get_json(&router, &uefi_path).await["Version"], "uefi-old");
                 }
@@ -1566,5 +2273,915 @@ mod tests {
             bios["Version"], "01.05.03",
             "BIOS was never uploaded; must be unchanged"
         );
+    }
+
+    const PRE_INGESTION_URI: &str =
+        "carbide-pxe.forge//public/blobs/internal/aarch64/preingestion.bfb";
+    const MANAGED_URI: &str = "carbide-pxe.forge//public/blobs/internal/aarch64/forge.bfb";
+
+    fn dpu_os_state(delay: Duration) -> Arc<UpdateServiceState> {
+        Arc::new(UpdateServiceState::from_config(UpdateServiceConfig {
+            task_completion_delay: delay,
+            task_completion_jitter: Duration::ZERO,
+            dpu_os: true,
+            ..Default::default()
+        }))
+    }
+
+    fn task_state(state: &UpdateServiceState, task_path: &str) -> serde_json::Value {
+        state
+            .find_task(task_path.rsplit('/').next().unwrap())
+            .unwrap()["TaskState"]
+            .clone()
+    }
+
+    #[test]
+    fn bfb_image_kind_follows_the_image_file_name() {
+        for (image_uri, expected) in [
+            (PRE_INGESTION_URI, DpuOsImage::PreIngestion),
+            (MANAGED_URI, DpuOsImage::Managed),
+            (
+                "http://dpf-bfb-registry/bfb/dpf-operator-system-bf-bundle.bfb",
+                DpuOsImage::Managed,
+            ),
+        ] {
+            assert_eq!(
+                DpuOsImage::from_image_uri(image_uri),
+                expected,
+                "{image_uri}"
+            );
+        }
+    }
+
+    /// A power-on during the transfer is not the install's restart, so the
+    /// image stays and the task keeps running.
+    #[tokio::test(start_paused = true)]
+    async fn bfb_install_ignores_power_on_before_its_restart() {
+        let state = dpu_os_state(Duration::from_secs(600));
+        let (task_path, _) = state
+            .start_bfb_install::<crate::test_support::TestCallbacks>(
+                DpuOsImage::PreIngestion,
+                None,
+                None,
+            )
+            .unwrap();
+        tokio::task::yield_now().await;
+        state.on_dpu_power_on();
+        assert_eq!(task_state(&state, &task_path), "Running");
+        assert_eq!(
+            state.dpu_os_status(),
+            Some(DpuOsStatus {
+                image: None,
+                generation: 0
+            })
+        );
+    }
+
+    /// Without DPU power control the BMC cannot restart the DPU, so the task
+    /// fails and no later power-on installs the image.
+    #[tokio::test(start_paused = true)]
+    async fn bfb_install_fails_when_the_dpu_cannot_restart() {
+        let state = dpu_os_state(Duration::ZERO);
+        let (task_path, _) = state
+            .start_bfb_install::<crate::test_support::TestCallbacks>(
+                DpuOsImage::PreIngestion,
+                None,
+                None,
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let task = state
+            .find_task(task_path.rsplit('/').next().unwrap())
+            .unwrap();
+        assert_eq!(task["TaskState"], "Exception");
+        assert_eq!(task["TaskStatus"], "Critical");
+        assert_eq!(
+            state.task_states()[task_path.rsplit('/').next().unwrap()],
+            BmcTaskState::Exception
+        );
+        state.on_dpu_power_on();
+        assert_eq!(state.dpu_os_status().unwrap().image, None);
+    }
+
+    /// A retried install replaces the open one: the old task fails and only
+    /// the new one lands.
+    #[tokio::test(start_paused = true)]
+    async fn newer_bfb_install_supersedes_the_open_one() {
+        let state = dpu_os_state(Duration::from_secs(600));
+        let (first, _) = state
+            .start_bfb_install::<crate::test_support::TestCallbacks>(
+                DpuOsImage::PreIngestion,
+                None,
+                None,
+            )
+            .unwrap();
+        let (second, _) = state
+            .start_bfb_install::<crate::test_support::TestCallbacks>(
+                DpuOsImage::Managed,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(task_state(&state, &first), "Exception");
+        assert_eq!(task_state(&state, &second), "Running");
+        // The first install's timer fires first but no longer owns the install.
+        let first_id = first.rsplit('/').next().unwrap();
+        assert!(!state.begin_bfb_reboot(first_id));
+        assert!(state.begin_bfb_reboot(second.rsplit('/').next().unwrap()));
+        state.admit_bfb_restart(second.rsplit('/').next().unwrap());
+        state.on_dpu_power_on();
+        assert_eq!(task_state(&state, &second), "Completed");
+        assert_eq!(
+            state.dpu_os_status(),
+            Some(DpuOsStatus {
+                image: Some(DpuOsImage::Managed),
+                generation: 1
+            })
+        );
+    }
+
+    /// Power control that parks each restart until the test releases it, so
+    /// a request can arrive after the restart was admitted but before the
+    /// backend received it.
+    #[derive(Default)]
+    struct GatedRestart {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        restarts: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl Callbacks for GatedRestart {
+        async fn computer_system_reset(
+            &self,
+            _reset_type: crate::ResourceResetType,
+        ) -> Result<(), crate::ActionError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.restarts.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err(crate::ActionError::Internal(eyre::eyre!(
+                    "restart rejected"
+                )))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn state_refresh_indication(&self) {}
+    }
+
+    /// Once an install's restart is admitted, a replacement is refused, so
+    /// the only restart the DPU receives belongs to the install that lands.
+    #[tokio::test]
+    async fn replacement_during_restart_dispatch_is_refused() {
+        let state = dpu_os_state(Duration::ZERO);
+        let power = Arc::new(GatedRestart::default());
+        let (first, _) = state
+            .start_bfb_install(DpuOsImage::PreIngestion, Some(power.clone()), None)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), power.entered.notified())
+            .await
+            .expect("restart dispatch started");
+
+        assert_eq!(
+            state.start_bfb_install(DpuOsImage::Managed, Some(power.clone()), None),
+            Err(BfbInstallRefused::RestartInProgress)
+        );
+        power.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while power.restarts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restart dispatched");
+        assert_eq!(
+            state.tasks.read().unwrap().len(),
+            1,
+            "the refused install has no task"
+        );
+        state.on_dpu_power_on();
+        assert_eq!(task_state(&state, &first), "Completed");
+        assert_eq!(
+            state.dpu_os_status(),
+            Some(DpuOsStatus {
+                image: Some(DpuOsImage::PreIngestion),
+                generation: 1
+            })
+        );
+        // The landed install no longer owns the DPU.
+        assert!(
+            state
+                .start_bfb_install(DpuOsImage::Managed, Some(power.clone()), None)
+                .is_ok()
+        );
+        assert_eq!(power.restarts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dpu_os_status_source_reads_without_keeping_the_bmc_alive() {
+        let state = dpu_os_state(Duration::ZERO);
+        let source = state.dpu_os_status_source();
+        state.record_dpu_os_image(Some(DpuOsImage::PreIngestion));
+        assert_eq!(
+            source.status(),
+            Some(DpuOsStatus {
+                image: Some(DpuOsImage::PreIngestion),
+                generation: 1
+            })
+        );
+        drop(state);
+        assert_eq!(source.status(), None);
+    }
+
+    #[test]
+    fn boot_progress_reports_running_only_for_the_booted_generation() {
+        let state = dpu_os_state(Duration::ZERO);
+        assert_eq!(state.dpu_boot_progress(true), None, "no boot observed yet");
+        state.record_dpu_os_image(Some(DpuOsImage::Managed));
+        state.on_dpu_power_on();
+        assert_eq!(
+            state.dpu_boot_progress(true).unwrap()["LastState"],
+            "OSBootStarted"
+        );
+        state.on_dpu_boot_completed();
+        assert_eq!(
+            state.dpu_boot_progress(true).unwrap()["LastState"],
+            "OSRunning"
+        );
+        assert_eq!(state.dpu_boot_progress(false).unwrap()["LastState"], "None");
+        // An image change without a reboot leaves the running OS stale.
+        state.record_dpu_os_image(Some(DpuOsImage::PreIngestion));
+        assert_eq!(
+            state.dpu_boot_progress(true).unwrap()["LastState"],
+            "OSBootStarted"
+        );
+        // A boot with an empty disk never reaches a running OS.
+        state.record_dpu_os_image(None);
+        state.on_dpu_power_on();
+        state.on_dpu_boot_completed();
+        assert_eq!(
+            state.dpu_boot_progress(true).unwrap()["LastState"],
+            "OSBootStarted"
+        );
+    }
+
+    fn bluefield3_dpu_info() -> crate::MachineInfo {
+        let mut pool = crate::test_support::TEST_MAC_POOL.lock().unwrap();
+        crate::MachineInfo::Dpu(crate::DpuMachineInfo::new(
+            HardwareType::DellPowerEdgeR750,
+            &mut pool,
+            crate::DpuSettings::default(),
+        ))
+    }
+
+    fn bluefield3_dpu_bmc() -> (
+        axum::Router,
+        crate::bmc_state::BmcState<crate::test_support::TestCallbacks>,
+    ) {
+        let machine_info = bluefield3_dpu_info();
+        create_test_bmc(
+            &machine_info,
+            TestBmcConfig::default(),
+            "test-dpu".into(),
+            false,
+            MachineRouterOptions {
+                firmware_upgrade_duration: Some(Duration::ZERO),
+                ..Default::default()
+            },
+        )
+    }
+
+    async fn post_bfb(router: &axum::Router) -> (StatusCode, String) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(simple_update_target())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"ImageURI": MANAGED_URI,
+                "Targets": ["/redfish/v1/UpdateService/FirmwareInventory/DPU_OS"]})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let location = response
+            .headers()
+            .get("location")
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        (status, location)
+    }
+
+    #[tokio::test]
+    async fn stale_snapshot_restores_keep_old_tasks_but_never_reuse_the_allocator() {
+        let (router, original) = bluefield3_dpu_bmc();
+        let mut old = String::new();
+        // A retained old-epoch counter can exceed the new epoch's counter.
+        for count in 1..=2 {
+            let (status, path) = post_bfb(&router).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            original
+                .callbacks
+                .as_ref()
+                .unwrap()
+                .wait_for_command_count(count)
+                .await;
+            original.on_event(&crate::BmcEvent::PowerOn);
+            old = path;
+        }
+        let snapshot = original.persisted();
+        let mut issued = std::collections::HashSet::new();
+        for _ in 0..2 {
+            let (router, restored) = bluefield3_dpu_bmc();
+            restored.restore_persisted(&snapshot).unwrap();
+            let (status, new) = post_bfb(&router).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_ne!(new, old);
+            assert!(
+                issued.insert(new),
+                "a stale snapshot reused an unsaved task ID"
+            );
+            assert_eq!(get_json(&router, &old).await["TaskState"], "Completed");
+            // A new snapshot contains tasks from both epochs and must validate.
+            let saved = restored.persisted();
+            saved.validate().unwrap();
+            let (_, again) = bluefield3_dpu_bmc();
+            again.restore_persisted(&saved).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn non_dpu_bmc_rejects_the_dpu_os_target() {
+        let (router, state) = create_test_bmc(
+            &crate::test_support::host_info(HardwareType::WiwynnGB200Nvl),
+            TestBmcConfig::default(),
+            "host".into(),
+            false,
+            Default::default(),
+        );
+        let (status, _) = post_bfb(&router).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(state.update_service_state.task_states().is_empty());
+    }
+
+    /// Backend validation can lead or lag the BMC's published power state.
+    #[tokio::test]
+    async fn bfb_restart_recovers_from_both_power_observation_lags() {
+        use nv_redfish::resource::PowerState;
+        struct Backend {
+            power: std::sync::Mutex<PowerState>,
+            commands: std::sync::Mutex<Vec<crate::ResourceResetType>>,
+            internal_failure: bool,
+        }
+        impl Callbacks for Backend {
+            async fn computer_system_reset(
+                &self,
+                request: crate::ResourceResetType,
+            ) -> Result<(), crate::ActionError> {
+                self.commands.lock().unwrap().push(request);
+                if self.internal_failure {
+                    return Err(crate::ActionError::Internal(eyre::eyre!(
+                        "backend unavailable"
+                    )));
+                }
+                let mut power = self.power.lock().unwrap();
+                crate::validate_power_reset(*power, request)?;
+                *power = PowerState::On;
+                Ok(())
+            }
+            fn state_refresh_indication(&self) {}
+        }
+        for (actual, observed, internal_failure, expected) in [
+            (
+                PowerState::Off,
+                PowerState::On,
+                false,
+                vec![
+                    crate::ResourceResetType::ForceRestart,
+                    crate::ResourceResetType::On,
+                ],
+            ),
+            (
+                PowerState::On,
+                PowerState::Off,
+                false,
+                vec![
+                    crate::ResourceResetType::On,
+                    crate::ResourceResetType::ForceRestart,
+                ],
+            ),
+            (
+                PowerState::Off,
+                PowerState::On,
+                true,
+                vec![crate::ResourceResetType::ForceRestart],
+            ),
+        ] {
+            let backend = Arc::new(Backend {
+                power: std::sync::Mutex::new(actual),
+                commands: Default::default(),
+                internal_failure,
+            });
+            let (router, state) = crate::machine_router(
+                &bluefield3_dpu_info(),
+                backend.clone(),
+                "lagging-power".into(),
+                false,
+                MachineRouterOptions {
+                    firmware_upgrade_duration: Some(Duration::ZERO),
+                    ..Default::default()
+                },
+            );
+            state.system_state.set_power_state(observed);
+            let (status, path) = post_bfb(&router).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let finished = if internal_failure {
+                        task_state(&state.update_service_state, &path) == "Exception"
+                    } else {
+                        backend.commands.lock().unwrap().len() == expected.len()
+                            && *backend.power.lock().unwrap() == PowerState::On
+                    };
+                    if finished {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(*backend.commands.lock().unwrap(), expected);
+            state.on_event(&crate::BmcEvent::PowerOn);
+            if internal_failure {
+                assert_eq!(get_json(&router, &path).await["TaskState"], "Exception");
+                assert_eq!(
+                    state.update_service_state.dpu_os_status().unwrap().image,
+                    None
+                );
+            } else {
+                assert_eq!(*backend.power.lock().unwrap(), PowerState::On);
+                assert_eq!(get_json(&router, &path).await["TaskState"], "Completed");
+                assert_eq!(
+                    state.update_service_state.dpu_os_status().unwrap().image,
+                    Some(DpuOsImage::Managed)
+                );
+            }
+        }
+    }
+
+    /// Restore both transfer and admitted-restart snapshots. Startup power-on
+    /// cannot finish the task before the recovered worker dispatches its restart.
+    // Submit the refusal probe before the spawned worker runs, so it exercises
+    // the recovery fence rather than an already-admitted restart.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bfb_snapshot_resumes_the_original_task_and_keeps_completed_history() {
+        for admitted in [false, true] {
+            let old = dpu_os_state(Duration::from_secs(600));
+            let (path, _) = old
+                .start_bfb_install::<crate::test_support::TestCallbacks>(
+                    DpuOsImage::PreIngestion,
+                    None,
+                    None,
+                )
+                .unwrap();
+            if admitted {
+                assert!(old.begin_bfb_reboot(path.rsplit('/').next().unwrap()));
+                old.admit_bfb_restart(path.rsplit('/').next().unwrap());
+            }
+            let saved = old.persisted_dpu_update().unwrap();
+            let saved: PersistedDpuUpdate =
+                serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            let (router, restored) = bluefield3_dpu_bmc();
+            let mut snapshot = restored.persisted();
+            // Use the public snapshot format, including its pre-mutation validation.
+            let mut json = serde_json::to_value(&snapshot).unwrap();
+            json["dpu_update"] = serde_json::to_value(saved).unwrap();
+            snapshot = serde_json::from_value(json).unwrap();
+            restored.restore_persisted(&snapshot).unwrap();
+            let (status, _) = post_bfb(&router).await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "recovery owns the install"
+            );
+            let live = restored.persisted();
+            let round_trip = serde_json::from_str(&serde_json::to_string(&live).unwrap()).unwrap();
+            assert!(
+                live == round_trip,
+                "runtime recovery fence must not affect snapshot equality"
+            );
+            restored.on_event(&crate::BmcEvent::PowerOn);
+            assert_eq!(get_json(&router, &path).await["TaskState"], "Running");
+            assert_eq!(
+                restored
+                    .update_service_state
+                    .dpu_os_status()
+                    .unwrap()
+                    .generation,
+                0
+            );
+            restored
+                .callbacks
+                .as_ref()
+                .unwrap()
+                .wait_for_command_count(1)
+                .await;
+            assert_eq!(
+                restored
+                    .callbacks
+                    .as_ref()
+                    .unwrap()
+                    .commands
+                    .lock()
+                    .unwrap()
+                    .as_slice(),
+                &[crate::ResourceResetType::ForceRestart],
+                "recovered On DPU must restart"
+            );
+            restored.on_event(&crate::BmcEvent::PowerOn);
+            let expected = DpuOsStatus {
+                image: Some(DpuOsImage::PreIngestion),
+                generation: 1,
+            };
+            assert_eq!(get_json(&router, &path).await["TaskState"], "Completed");
+            assert_eq!(
+                restored.update_service_state.dpu_os_status(),
+                Some(expected)
+            );
+            let completed = restored.persisted();
+            let (fresh_router, fresh) = bluefield3_dpu_bmc();
+            fresh.restore_persisted(&completed).unwrap();
+            fresh.on_event(&crate::BmcEvent::PowerOn);
+            fresh.on_event(&crate::BmcEvent::PowerOn);
+            assert_eq!(
+                get_json(&fresh_router, &path).await["TaskState"],
+                "Completed"
+            );
+            assert_eq!(fresh.update_service_state.dpu_os_status(), Some(expected));
+            assert!(
+                fresh
+                    .callbacks
+                    .as_ref()
+                    .unwrap()
+                    .commands
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            );
+            let next = fresh.update_service_state.next_task_id();
+            assert_ne!(next, path.rsplit('/').next().unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn bfb_recovery_waits_for_restart_admission_before_publishing_completion() {
+        for fail in [true, false] {
+            let old = dpu_os_state(Duration::from_secs(600));
+            let (path, _) = old
+                .start_bfb_install::<crate::test_support::TestCallbacks>(
+                    DpuOsImage::PreIngestion,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let gate = Arc::new(GatedRestart {
+                fail,
+                ..Default::default()
+            });
+            let (_, restored) = crate::machine_router(
+                &bluefield3_dpu_info(),
+                gate.clone(),
+                "recovery-admission".into(),
+                false,
+                MachineRouterOptions {
+                    firmware_upgrade_duration: Some(Duration::ZERO),
+                    ..Default::default()
+                },
+            );
+            let mut snapshot = serde_json::to_value(restored.persisted()).unwrap();
+            snapshot["dpu_update"] =
+                serde_json::to_value(old.persisted_dpu_update().unwrap()).unwrap();
+            restored
+                .restore_persisted(&serde_json::from_value(snapshot).unwrap())
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+                .await
+                .unwrap();
+            restored.on_event(&crate::BmcEvent::PowerOn);
+            restored.on_event(&crate::BmcEvent::BootCompleted);
+            let while_pending = task_state(&restored.update_service_state, &path);
+            let disk_while_pending = restored.update_service_state.dpu_os_status().unwrap();
+            let pending_snapshot = restored.persisted();
+            let round_trip =
+                serde_json::from_value(serde_json::to_value(&pending_snapshot).unwrap()).unwrap();
+            assert!(
+                pending_snapshot == round_trip,
+                "runtime dispatch events changed portable snapshot equality"
+            );
+            gate.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while gate.restarts.load(Ordering::SeqCst) == 0
+                    || task_state(&restored.update_service_state, &path) == "Running"
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                task_state(&restored.update_service_state, &path),
+                if fail { "Exception" } else { "Completed" }
+            );
+            assert_eq!(
+                while_pending, "Running",
+                "unaccepted restart published completion"
+            );
+            assert_eq!(
+                disk_while_pending,
+                DpuOsStatus {
+                    image: None,
+                    generation: 0
+                }
+            );
+            let expected = if fail {
+                DpuOsStatus {
+                    image: None,
+                    generation: 0,
+                }
+            } else {
+                DpuOsStatus {
+                    image: Some(DpuOsImage::PreIngestion),
+                    generation: 1,
+                }
+            };
+            assert_eq!(
+                restored.update_service_state.dpu_os_status(),
+                Some(expected)
+            );
+            if !fail {
+                assert_eq!(
+                    restored
+                        .update_service_state
+                        .dpu_boot_progress(true)
+                        .unwrap()["LastState"],
+                    "OSRunning"
+                );
+            }
+            restored.on_event(&crate::BmcEvent::PowerOn);
+            assert_eq!(
+                restored.update_service_state.dpu_os_status(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_dpu_snapshots_do_not_mutate_any_bmc_resources() {
+        let state = dpu_os_state(Duration::from_secs(600));
+        let (path, _) = state
+            .start_bfb_install::<crate::test_support::TestCallbacks>(
+                DpuOsImage::Managed,
+                None,
+                None,
+            )
+            .unwrap();
+        let saved = state.persisted_dpu_update().unwrap();
+        for defect in ["duplicate", "counter", "missing task", "profile"] {
+            let (_, target) = bluefield3_dpu_bmc();
+            let before = target.persisted();
+            let mut update = saved.clone();
+            match defect {
+                "duplicate" => update.tasks.push(update.tasks[0].clone()),
+                "counter" => update.next_task_id = 1,
+                "missing task" => update.tasks.clear(),
+                "profile" => {}
+                _ => unreachable!(),
+            }
+            let mut json = serde_json::to_value(&before).unwrap();
+            json["dpu_update"] = serde_json::to_value(update).unwrap();
+            let invalid = serde_json::from_value(json).unwrap();
+            if defect == "profile" {
+                let (_, host) = create_test_bmc(
+                    &crate::test_support::host_info(HardwareType::WiwynnGB200Nvl),
+                    TestBmcConfig::default(),
+                    "host".into(),
+                    false,
+                    MachineRouterOptions::default(),
+                );
+                let host_before = host.persisted();
+                let mut json = serde_json::to_value(&host_before).unwrap();
+                json["dpu_update"] = serde_json::to_value(&saved).unwrap();
+                assert!(
+                    host.restore_persisted(&serde_json::from_value(json).unwrap())
+                        .is_err()
+                );
+                assert!(host.persisted() == host_before);
+            } else {
+                assert!(target.restore_persisted(&invalid).is_err(), "{defect}");
+                assert!(target.persisted() == before, "{defect}");
+            }
+        }
+        assert_eq!(task_state(&state, &path), "Running");
+        // Legacy snapshots have no update field and keep the fresh disk defaults.
+        let (_, target) = bluefield3_dpu_bmc();
+        let mut legacy = serde_json::to_value(target.persisted()).unwrap();
+        legacy.as_object_mut().unwrap().remove("dpu_update");
+        target
+            .restore_persisted(&serde_json::from_value(legacy).unwrap())
+            .unwrap();
+        assert_eq!(
+            target.update_service_state.dpu_os_status().unwrap().image,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn dpu_snapshots_commit_the_disk_and_task_together() {
+        let state = dpu_os_state(Duration::from_secs(600));
+        let (path, _) = state
+            .start_bfb_install::<crate::test_support::TestCallbacks>(
+                DpuOsImage::Managed,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(state.begin_bfb_reboot(path.rsplit('/').next().unwrap()));
+        state.admit_bfb_restart(path.rsplit('/').next().unwrap());
+        let worker = std::thread::spawn({
+            let state = state.clone();
+            move || state.on_dpu_power_on()
+        });
+        for _ in 0..100 {
+            let saved = state.persisted_dpu_update().unwrap();
+            saved.validate().unwrap();
+            let task = &saved.tasks[0];
+            match task.state {
+                BmcTaskState::Running => {
+                    assert_eq!(saved.os.image, None);
+                    assert!(saved.os.install.is_some());
+                }
+                BmcTaskState::Completed => {
+                    assert_eq!(saved.os.image, Some(DpuOsImage::Managed));
+                    assert_eq!(saved.os.generation, 1);
+                    assert!(saved.os.install.is_none());
+                }
+                BmcTaskState::Exception => panic!("install unexpectedly failed"),
+            }
+        }
+        worker.join().unwrap();
+        assert_eq!(task_state(&state, &path), "Completed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_a_bmc_cancels_its_delayed_bfb_restart() {
+        let state = dpu_os_state(Duration::from_secs(10));
+        let power = Arc::new(GatedRestart::default());
+        let source = state.dpu_os_status_source();
+        state
+            .start_bfb_install(DpuOsImage::Managed, Some(power.clone()), None)
+            .unwrap();
+        drop(state);
+        assert_eq!(source.status(), None);
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        assert_eq!(power.restarts.load(Ordering::SeqCst), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), power.entered.notified())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn snapshot_history_cannot_exceed_the_terminal_capacity() {
+        let state = dpu_os_state(Duration::ZERO);
+        let mut saved = state.persisted_dpu_update().unwrap();
+        saved.next_task_id = 100;
+        saved.tasks = (1..=TASK_HISTORY_CAPACITY + 1)
+            .map(|n| PersistedDpuTask {
+                id: format!("{:08x}-{n}", saved.epoch),
+                state: BmcTaskState::Completed,
+            })
+            .collect();
+        assert!(saved.validate().is_err());
+        saved.tasks.pop();
+        saved.validate().unwrap();
+    }
+
+    /// Drive a BFB install through the Redfish routes: the task completes only
+    /// after the DPU restarts into the new image, and `BootProgress` reaches
+    /// `OSRunning` only once that image has booted. A later managed install
+    /// brings the managed image back.
+    #[tokio::test]
+    async fn bfb_install_lands_on_restart_and_boot_progress_follows() {
+        let (router, state) = bluefield3_dpu_bmc();
+        let callbacks = state.callbacks.clone().unwrap();
+        let system_id = state.system_state.primary_system_odata_id().unwrap();
+        state
+            .update_service_state
+            .record_dpu_os_image(Some(DpuOsImage::Managed));
+        state.on_event(&crate::bmc_state::BmcEvent::BootCompleted);
+        callbacks
+            .computer_system_reset(crate::ResourceResetType::ForceOff)
+            .await
+            .unwrap();
+
+        for (round, (image_uri, image)) in [
+            (PRE_INGESTION_URI, DpuOsImage::PreIngestion),
+            (MANAGED_URI, DpuOsImage::Managed),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let generation = state
+                .update_service_state
+                .dpu_os_status()
+                .unwrap()
+                .generation;
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(simple_update_target())
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "ImageURI": image_uri,
+                                "Targets": ["redfish/v1/UpdateService/FirmwareInventory/DPU_OS"],
+                                "TransferProtocol": "HTTP",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let task_path = response.headers()["Location"].to_str().unwrap().to_owned();
+            let task: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(task["TaskState"], "Running");
+            assert_eq!(task["@odata.id"], task_path);
+            callbacks.wait_for_command_count(round + 2).await;
+            assert_eq!(
+                callbacks.commands.lock().unwrap()[round + 1],
+                if round == 0 {
+                    crate::ResourceResetType::On
+                } else {
+                    crate::ResourceResetType::ForceRestart
+                }
+            );
+            assert_eq!(get_json(&router, &task_path).await["TaskState"], "Running");
+            state.on_event(&crate::bmc_state::BmcEvent::PowerOn);
+            let completed = get_json(&router, &task_path).await;
+            assert_eq!(completed["TaskState"], "Completed");
+            assert_eq!(
+                state.update_service_state.dpu_os_status(),
+                Some(DpuOsStatus {
+                    image: Some(image),
+                    generation: generation + 1
+                })
+            );
+            assert_eq!(
+                get_json(&router, &system_id).await["BootProgress"]["LastState"],
+                "OSBootStarted"
+            );
+            state.on_event(&crate::bmc_state::BmcEvent::BootCompleted);
+            assert_eq!(
+                get_json(&router, &system_id).await["BootProgress"]["LastState"],
+                "OSRunning"
+            );
+            assert_eq!(
+                completed["Messages"][0]["Message"],
+                "BFB installed; the DPU restarted into the new image."
+            );
+        }
+    }
+
+    /// A SimpleUpdate without an image cannot install a BFB.
+    #[tokio::test]
+    async fn bfb_install_requires_an_image_uri() {
+        let (router, _) = bluefield3_dpu_bmc();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(simple_update_target())
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"Targets":["/redfish/v1/UpdateService/FirmwareInventory/DPU_OS"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

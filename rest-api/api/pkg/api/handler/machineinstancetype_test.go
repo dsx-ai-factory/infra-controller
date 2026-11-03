@@ -261,7 +261,7 @@ func TestCreateMachineInstanceTypeHandler_Handle(t *testing.T) {
 
 			require.Equal(t, tt.wantStatusCode, rec.Code)
 			if rec.Code != http.StatusCreated {
-				fmt.Println(string(rec.Body.Bytes()))
+				fmt.Println(rec.Body.String())
 				return
 			}
 

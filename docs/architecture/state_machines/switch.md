@@ -27,9 +27,10 @@ stateDiagram-v2
     [*] --> Created : Switch created
 
     Created --> Initializing : controller processes switch
-    Initializing --> Configuring : all NVOS interfaces associated
-    Initializing --> Error : no NVOS MACs or MAC conflict
-    Configuring --> FetchInfo : certificate config and password rotation done
+    Initializing --> Configuring : primary NVOS interface associated
+    Initializing --> Error : no NVOS MACs, no primary, or MAC conflict
+    Configuring --> FetchInfo : mTLS reset, certificate config and password rotation done
+    Configuring --> Error : mTLS disable or certificate job failed
     FetchInfo --> Validating : slot and tray lookup complete
     Validating --> BomValidating : validation complete
     BomValidating --> Ready : BOM validation complete
@@ -57,8 +58,8 @@ stateDiagram-v2
 | State | Description |
 |-------|-------------|
 | **Created** | Switch record exists in NICo; awaiting first controller tick. |
-| **Initializing** | Controller waits for expected switch NVOS MAC associations. Sub-state: `WaitForOsMachineInterface`. |
-| **Configuring** | Switch is being configured. Sub-states: `ConfigureCertificate` (`Start` → `WaitForComplete { job_id }`), then `RotateOsPassword`. See [Switch Certificate Configuration](switch_configure_certificate.md). |
+| **Initializing** | Controller associates discovered NVOS interfaces and waits for the expected switch's primary NVOS interface. Sub-state: `WaitForOsMachineInterface`. |
+| **Configuring** | Switch is being configured. Sub-states: `DisableMtls` (`Start` → `WaitForComplete { job_id }`), `ConfigureCertificate` (`Start` → `WaitForComplete { job_id }`), then `RotateOsPassword`. Refer to [Switch Certificate Configuration](switch_configure_certificate.md). |
 | **FetchInfo** | Controller fetches rack placement info (slot and tray) from the component manager backend and persists it on the switch record. Warn-and-continue on lookup failure. |
 | **Validating** | Switch is being validated. Sub-state: `ValidationComplete`. |
 | **BomValidating** | BOM (Bill of Materials) validation. Sub-state: `BomValidationComplete`. |
@@ -75,8 +76,13 @@ stateDiagram-v2
 |------|-----|----------------------|
 | *(create)* | Created | Switch created |
 | Created | Initializing (`WaitForOsMachineInterface`) | Controller processes switch |
-| Initializing (`WaitForOsMachineInterface`) | Configuring (`ConfigureCertificate` `Start`) | All NVOS interfaces associated for expected switch |
-| Initializing (`WaitForOsMachineInterface`) | Error | Expected switch has empty `nvos_mac_addresses` or MAC owned by another switch |
+| Initializing (`WaitForOsMachineInterface`) | Configuring (`DisableMtls` `Start`) | Primary NVOS interface associated for expected switch |
+| Configuring (`DisableMtls` `Start`) | Configuring (`DisableMtls` `WaitForComplete`) | Component manager returns RMS `BatchDisableSwitchMtls` job ID |
+| Configuring (`DisableMtls` `Start`) | Configuring (`ConfigureCertificate` `Start`) | No `rack_id`, no component manager, no services, or backend does not support the operation (skip disable step) |
+| Configuring (`DisableMtls` `Start`) | Error | Missing BMC MAC or endpoint, or the submission outcome is unknown |
+| Configuring (`DisableMtls` `WaitForComplete`) | Configuring (`ConfigureCertificate` `Start`) | RMS disable job and every child `Completed` |
+| Configuring (`DisableMtls` `WaitForComplete`) | Error | RMS job `Failed`, or its outcome cannot be observed |
+| Initializing (`WaitForOsMachineInterface`) | Error | Expected switch declares no NVOS ethernet ports, has no resolvable primary port, or declares a MAC owned by another switch |
 | Configuring (`ConfigureCertificate` `Start`) | Configuring (`ConfigureCertificate` `WaitForComplete`) | Component manager returns RMS job ID (`domain_name` = `rack_id`) |
 | Configuring (`ConfigureCertificate` `Start`) | Configuring (`RotateOsPassword`) | No `rack_id` or no component manager (skip certificate step) |
 | Configuring (`ConfigureCertificate` `WaitForComplete`) | Configuring (`RotateOsPassword`) | RMS job `Completed` |
@@ -115,10 +121,12 @@ stateDiagram-v2
 | Decommissioning (`NvosFactoryResetOutcomeUnknown { error }`) | Same sub-state | Handler reports `ManualInterventionRequired`; no automatic reset resubmission |
 | Decommissioning (`SuppressingNvosDhcp`) | Decommissioning (`RebootingSwitch`) | NVOS DHCP suppression is recorded |
 | Decommissioning (`RebootingSwitch`) | Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Redfish accepts `ForceRestart` |
-| Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Decommissioning (`SuppressingBmcDhcp`) | DHCP acknowledges the NVOS suppression |
+| Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Same sub-state | NVOS DHCP acknowledgement is required and not yet recorded |
+| Decommissioning (`WaitingForNvosDhcpAcknowledgement`) | Decommissioning (`SuppressingBmcDhcp`) | No NVOS DHCP acknowledgement pending |
 | Decommissioning (`SuppressingBmcDhcp`) | Decommissioning (`FactoryResetBmc`) | BMC DHCP suppression is recorded |
 | Decommissioning (`FactoryResetBmc`) | Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Redfish accepts the BMC factory-reset request |
-| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Decommissioning (`DeletingManagedCredentials`) | DHCP acknowledges the BMC suppression |
+| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Same sub-state | BMC DHCP acknowledgement is required and not yet recorded |
+| Decommissioning (`WaitingForBmcDhcpAcknowledgement`) | Decommissioning (`DeletingManagedCredentials`) | No BMC DHCP acknowledgement pending |
 | Decommissioning (`DeletingManagedCredentials`) | Decommissioning (`Decommissioned`) | Managed BMC and NVOS credentials and convergence records are deleted |
 | Deleting | *(end)* | Final delete committed |
 
@@ -147,8 +155,12 @@ Managed-switch decommissioning requires the RMS switch backend and starts only
 from `Ready`. After Site Explorer acknowledges suppression, the controller
 submits the NVOS factory reset, persists the returned job ID, and polls that
 job until RMS reports `Completed`. It then suppresses NVOS DHCP, requests a
-switch reboot through Redfish, and waits for DHCP suppression acknowledgement
-before resetting the BMC and deleting managed credentials.
+switch reboot through Redfish, and completes the NVOS DHCP wait before
+suppressing BMC DHCP and resetting the BMC. It then completes the BMC DHCP wait
+before deleting managed credentials. Either endpoint can complete its wait
+without acknowledgement. Refer to
+[DHCP Suppression Acknowledgement](../../decommissioning/index.md#dhcp-suppression-acknowledgement)
+for the shared rule.
 
 Transient handler errors leave the switch in its current sub-state for a
 later retry. A failed RMS reset job reports `ManualInterventionRequired`

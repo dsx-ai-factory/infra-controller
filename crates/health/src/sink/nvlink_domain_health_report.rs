@@ -203,8 +203,9 @@ mod tests {
             },
             collector_type: "nmxc",
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: None,
-                serial: "SW-001".to_string(),
+                serial: Some("SW-001".to_string()),
                 slot_number: None,
                 tray_index: None,
                 nvlink_domain_uuid: Some(domain_id),

@@ -573,6 +573,10 @@ mod tests {
                 (http::Method::GET, "/redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0", ANYONE) => ("inventory".to_string(), 300),
             }
 
+            "class wildcards continue to match percent escapes" {
+                (http::Method::GET, "/redfish/v1/UpdateService/FirmwareInventory/%23FW_BMC_0", ANYONE) => ("inventory".to_string(), 300),
+            }
+
             "a class that sets no budget" {
                 (http::Method::GET, "/redfish/v1/EventService/Subscriptions", ANYONE) => ("events".to_string(), 60),
             }

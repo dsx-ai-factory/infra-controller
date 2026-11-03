@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -154,7 +155,7 @@ func TestDomainSQLDAO_Create(t *testing.T) {
 				}
 			}
 			if tc.tx != nil {
-				tc.tx.Commit()
+				require.NoError(t, tc.tx.Commit())
 			}
 
 			if tc.verifyChildSpanner {

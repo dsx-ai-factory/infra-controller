@@ -158,6 +158,7 @@ struct SwitchDetail {
 struct SwitchNvosPortRecord {
     mac: String,
     service_port: Option<u32>,
+    is_primary: bool,
     addresses: Vec<SwitchNvosAddressRecord>,
 }
 
@@ -172,6 +173,7 @@ impl From<&rpc::forge::SwitchNvosPortInfo> for SwitchNvosPortRecord {
         Self {
             mac: info.mac.clone().unwrap_or_else(|| "N/A".to_string()),
             service_port: info.service_port,
+            is_primary: info.is_primary,
             addresses: info
                 .addresses
                 .iter()
@@ -204,6 +206,7 @@ fn switch_nvos_port_records(
         .map(|info| SwitchNvosPortRecord {
             mac: info.mac.clone().unwrap_or_else(|| "N/A".to_string()),
             service_port: info.port,
+            is_primary: false,
             addresses: info
                 .ip
                 .as_ref()
@@ -368,11 +371,13 @@ mod tests {
                     address(forge::AddressFamily::V4, "10.2.14.52"),
                     address(forge::AddressFamily::V6, "2001:db8::10"),
                 ],
+                is_primary: true,
             },
             forge::SwitchNvosPortInfo {
                 mac: Some("44:44:33:33:01:01".to_string()),
                 service_port: None,
                 addresses: vec![address(forge::AddressFamily::V4, "10.2.14.53")],
+                is_primary: false,
             },
         ];
 
@@ -381,11 +386,13 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].mac, "44:44:33:33:01:00");
         assert_eq!(records[0].service_port, Some(8443));
+        assert!(records[0].is_primary);
         assert_eq!(records[0].addresses[0].address_family, "IPv4");
         assert_eq!(records[0].addresses[0].address, "10.2.14.52");
         assert_eq!(records[0].addresses[1].address_family, "IPv6");
         assert_eq!(records[0].addresses[1].address, "2001:db8::10");
         assert_eq!(records[1].mac, "44:44:33:33:01:01");
+        assert!(!records[1].is_primary);
         assert_eq!(records[1].addresses[0].address, "10.2.14.53");
     }
 

@@ -666,7 +666,7 @@ func TestNetworkSecurityGroupSQLDAO_Update(t *testing.T) {
 				if tc.expectedRules != nil {
 					assert.Equal(t, len(tc.expectedRules), len(got.Rules))
 
-					for i, _ := range tc.expectedRules {
+					for i := range tc.expectedRules {
 						assert.True(t, proto.Equal(got.Rules[i], tc.expectedRules[i]))
 					}
 				}

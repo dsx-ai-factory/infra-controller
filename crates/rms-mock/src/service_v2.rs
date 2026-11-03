@@ -17,10 +17,8 @@
 
 //! `RackManagerV2` service implementation.
 //!
-//! V2 is a separate gRPC service with a single method. Note that V1 declares a
-//! method of the same name taking different message types; keeping the two
-//! impls in separate files makes it hard to reach for the wrong one. The V1
-//! spelling stays unimplemented.
+//! The mock supports V2 fabric configuration without layouts. V1 fabric
+//! configuration and V2 system validation return `Unimplemented`.
 
 use librms::protos::rack_manager_v2::rack_manager_v2_server::RackManagerV2;
 
@@ -43,6 +41,13 @@ impl RackManagerV2 for RmsMock {
         tonic::Status,
     > {
         let req = request.get_ref();
+
+        if req.layout.is_some() {
+            return Err(tonic::Status::unimplemented(
+                "fabric layouts are not implemented by the RMS mock",
+            ));
+        }
+
         let inventory = self.inventory.nodes();
         let refs = crate::resolve::resolve_nodes(&inventory, req.nodes.as_ref());
         let Some(first) = refs.first() else {
@@ -68,8 +73,18 @@ impl RackManagerV2 for RmsMock {
 
         Ok(tonic::Response::new(
             rms_v2::ConfigureScaleUpFabricManagerResponse {
+                selected_fabrics: Vec::new(),
                 job_id: job_id.into(),
             },
+        ))
+    }
+
+    async fn start_system_validation(
+        &self,
+        _request: tonic::Request<rms_v2::StartSystemValidationRequest>,
+    ) -> Result<tonic::Response<rms_v2::StartSystemValidationResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "system validation is not implemented by the RMS mock",
         ))
     }
 }

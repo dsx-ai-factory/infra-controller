@@ -12,8 +12,10 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // init registers the FirmwareControl workflow descriptor with the package registry.
@@ -61,13 +63,7 @@ func firmwareControl(
 	// Histories without this marker retain every component's rule steps.
 	selectionVersion := workflow.GetVersion(ctx, firmwareLayeredComponentSelectionChangeID, workflow.DefaultVersion, 1)
 	if selectionVersion != workflow.DefaultVersion {
-		executionTargets = maps.Clone(typeToTargets)
-		for componentType := range executionTargets {
-			_, selected := extractComponentTargetVersion(info.TargetVersion, componentType)
-			if !selected {
-				delete(executionTargets, componentType)
-			}
-		}
+		executionTargets = selectFirmwareTargets(typeToTargets, info.TargetVersion)
 	}
 
 	report, err := executeRuleBasedOperation(
@@ -80,6 +76,19 @@ func firmwareControl(
 	)
 
 	return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, report)
+}
+
+func selectFirmwareTargets(
+	targets map[devicetypes.ComponentType]common.Target,
+	targetVersion string,
+) map[devicetypes.ComponentType]common.Target {
+	selectedTargets := maps.Clone(targets)
+	for componentType := range selectedTargets {
+		if _, selected := extractComponentTargetVersion(targetVersion, componentType); !selected {
+			delete(selectedTargets, componentType)
+		}
+	}
+	return selectedTargets
 }
 
 // checkFirmwareUpdatePrerequisites validates that firmware update can proceed.

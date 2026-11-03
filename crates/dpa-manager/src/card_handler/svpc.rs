@@ -435,13 +435,24 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             });
         };
 
-        if let Some(ref firmware_report) = card_state.firmware_report {
-            let reset_ok = firmware_report.reset.unwrap_or(true);
-            if firmware_report.flashed && reset_ok {
+        if let Some(ref operation) = card_state.firmware_operation {
+            if operation.operation_id != dpa_interface.firmware_operation_id() {
+                tracing::debug!(
+                    dpa_interface_id = %dpa_interface.id,
+                    operation_id = %operation.operation_id,
+                    "ignoring firmware progress from an earlier state entry"
+                );
+                return Ok(HandlerResult {
+                    new_state: None,
+                    txn: None,
+                });
+            }
+            if operation.is_complete() {
                 let new_state = DpaInterfaceControllerState::ApplyProfile;
                 tracing::info!(
                     next_state = ?new_state,
-                    observed_version = firmware_report.observed_version.as_deref().unwrap_or("none"),
+                    operation_id = %operation.operation_id,
+                    observed_version = operation.report.observed_version.as_deref().unwrap_or("none"),
                     "firmware report received and successfully applied, transitioning"
                 );
                 return Ok(HandlerResult {
@@ -449,11 +460,11 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
                     txn: None,
                 });
             }
-            tracing::warn!(
-                flashed = firmware_report.flashed,
-                reset = ?firmware_report.reset,
-                observed_version = firmware_report.observed_version.as_deref().unwrap_or("none"),
-                "firmware report received but not successful, waiting for retry"
+            tracing::debug!(
+                operation_id = %operation.operation_id,
+                operation_state = ?operation.state,
+                diagnostic = ?operation.diagnostic,
+                "firmware operation is not complete; remaining in ApplyFirmware"
             );
         }
 

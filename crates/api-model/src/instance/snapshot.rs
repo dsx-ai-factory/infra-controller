@@ -32,6 +32,7 @@ use crate::instance::config::infiniband::InstanceInfinibandConfig;
 use crate::instance::config::nvlink::InstanceNvLinkConfig;
 use crate::instance::config::spx::InstanceSpxConfig;
 use crate::instance::config::tenant_config::TenantConfig;
+use crate::instance::nic_firmware::InstanceNicFirmwareSnapshot;
 use crate::instance::status::InstanceStatusObservations;
 use crate::metadata::Metadata;
 use crate::os::{InlineIpxe, OperatingSystem, OperatingSystemVariant};
@@ -115,6 +116,10 @@ pub struct InstanceSnapshot {
     /// The Instance might not yet be in that state, but work would be underway
     /// to get the Instance into this state
     pub config: InstanceConfig,
+    /// Frozen operator firmware inputs and attachment bindings, outside replaceable
+    /// configuration. `None` means no snapshot was recorded, including legacy instances,
+    /// or instance deletion cleared the selection context during release/cancellation.
+    pub nic_firmware_snapshot: Option<InstanceNicFirmwareSnapshot>,
     /// Current version of all instance configurations except the networking related ones
     pub config_version: ConfigVersion,
 
@@ -182,6 +187,8 @@ pub struct InstanceSnapshotPgJson {
     nvlink_config_version: String,
     spx_config: InstanceSpxConfig,
     spx_config_version: String,
+    #[serde(default)]
+    nic_firmware_snapshot: Option<InstanceNicFirmwareSnapshot>,
     config_version: String,
     phone_home_last_contact: Option<DateTime<Utc>>,
     use_custom_pxe_on_boot: bool,
@@ -255,6 +262,7 @@ pub fn from_pg_json_and_os(
         instance_type_id: value.instance_type_id,
         metadata,
         config,
+        nic_firmware_snapshot: value.nic_firmware_snapshot,
         config_version: value.config_version.parse().map_err(|e| {
             sqlx::error::Error::ColumnDecode {
                 index: "config_version".to_string(),
@@ -380,6 +388,7 @@ impl TryFrom<InstanceSnapshotPgJson> for InstanceSnapshot {
             instance_type_id: value.instance_type_id,
             metadata,
             config,
+            nic_firmware_snapshot: value.nic_firmware_snapshot,
             config_version: value.config_version.parse().map_err(|e| {
                 sqlx::error::Error::ColumnDecode {
                     index: "config_version".to_string(),
@@ -445,7 +454,7 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::scenarios;
+    use carbide_test_support::{Check, check_values, scenarios};
     use chrono::Utc;
     use mac_address::MacAddress;
     use uuid::Uuid;
@@ -453,7 +462,15 @@ mod tests {
     use super::*;
     use crate::instance::config::extension_services::InstanceExtensionServiceConfig;
     use crate::instance::config::network::InstanceServiceInterfaceConfig;
+    use crate::instance::config::spx::{InstanceSpxAttachment, SpxAttachmentType};
+    use crate::instance::nic_firmware::NicFirmwareAllocationTarget;
+    use crate::nic_firmware::{
+        NicFirmwareApproach, NicFirmwareArtifact, NicFirmwareCardSelection,
+        NicFirmwareCardSelector, NicFirmwareProfile, NicFirmwareProfileConfig,
+        NicFirmwareProfileEntry, NicFirmwareProfileId,
+    };
     use crate::os::{InlineIpxe, OperatingSystemVariant};
+    use crate::tenant::TenantNicFirmwareConfig;
 
     /// Builds the smallest valid service-interface record so these tests can
     /// focus on attachment identity rather than point-to-point prefix validation.
@@ -495,6 +512,7 @@ mod tests {
             nvlink_config_version: version.clone(),
             spx_config: InstanceSpxConfig::default(),
             spx_config_version: version.clone(),
+            nic_firmware_snapshot: None,
             config_version: version.clone(),
             phone_home_last_contact: None,
             use_custom_pxe_on_boot: false,
@@ -538,6 +556,120 @@ mod tests {
         };
         pg_json.network_config.service_interfaces = vec![service_interface(attachment_id)];
         pg_json
+    }
+
+    /// Both database loading paths must distinguish unrecorded legacy state,
+    /// captured absence and captured requirements without consulting live rows.
+    #[test]
+    fn nic_firmware_snapshot_preserves_presence_and_contents() {
+        let version = ConfigVersion::initial();
+        let profile_id: NicFirmwareProfileId = "frozen-profile".parse().expect("valid profile ID");
+        let mac_address = MacAddress::new([2, 0, 0, 0, 0, 1]);
+        let mut captured = InstanceNicFirmwareSnapshot {
+            tenant_organization_id: "TenantA".parse().expect("valid tenant ID"),
+            tenant: None,
+            machine_config_version: version,
+            machine_profile_id: Some(profile_id.clone()),
+            card_selections: vec![NicFirmwareCardSelection {
+                selector: NicFirmwareCardSelector::Mac(mac_address),
+                profile_id: profile_id.clone(),
+            }],
+            profiles: vec![NicFirmwareProfile {
+                id: profile_id.clone(),
+                version,
+                config: NicFirmwareProfileConfig {
+                    entries: vec![NicFirmwareProfileEntry {
+                        firmware: carbide_libmlx_model::firmware::FirmwareSpec {
+                            part_number: "PN".to_string(),
+                            psid: "PSID".to_string(),
+                            version: "1.0".to_string(),
+                        },
+                        image: NicFirmwareArtifact {
+                            url: "https://firmware.example/image.bin"
+                                .parse()
+                                .expect("valid URL"),
+                            sha256: "a".repeat(64),
+                        },
+                        device_config: Some(NicFirmwareArtifact {
+                            url: "https://firmware.example/config.bin"
+                                .parse()
+                                .expect("valid URL"),
+                            sha256: "b".repeat(64),
+                        }),
+                        approach: NicFirmwareApproach::Scout,
+                    }],
+                },
+            }],
+            targets: vec![NicFirmwareAllocationTarget {
+                attachment: InstanceSpxAttachment {
+                    device: "SuperNIC".to_string(),
+                    device_instance: 0,
+                    mac_address: Some(mac_address.to_string()),
+                    spx_partition_id: carbide_uuid::spx::SpxPartitionId::new(),
+                    attachment_type: SpxAttachmentType::Physical,
+                    attachment_vf: None,
+                    attachment_ovs: None,
+                },
+                dpa_interface_id: carbide_uuid::dpa_interface::DpaInterfaceId::new(),
+                machine_id: crate::test_support::machine_snapshot::host_machine_id().into(),
+                mac_address,
+                pci_name: "01:00.0".to_string(),
+                observed_device: None,
+                observed_at: None,
+                blocked_reason: "physical NIC update target is not qualified".to_string(),
+            }],
+        };
+        let missing_tenant = captured.clone();
+        captured.tenant = Some(TenantNicFirmwareConfig {
+            organization_id: captured.tenant_organization_id.clone(),
+            profile_id: None,
+            version,
+        });
+        let unselected_tenant = captured.clone();
+        captured
+            .tenant
+            .as_mut()
+            .expect("tenant is present")
+            .profile_id = Some(profile_id);
+
+        let cases = [
+            // Older row JSON has no snapshot field and must remain unrecorded.
+            ("legacy field omitted", None, true),
+            // SQL NULL records the same legacy absence without inventing inputs.
+            ("legacy SQL NULL", None, false),
+            // Missing tenant rows are valid allocation inputs, distinct from legacy absence.
+            ("missing tenant captured", Some(missing_tenant), false),
+            // An existing tenant with no selection still has a captured version.
+            ("unselected tenant captured", Some(unselected_tenant), false),
+            // Profile entries, both digests and blocked bindings must survive both decoders.
+            ("profile content captured", Some(captured), false),
+        ];
+        check_values(
+            cases.into_iter().map(|(scenario, captured, omit)| Check {
+                scenario,
+                input: (captured.clone(), omit),
+                expect: (captured.clone(), captured),
+            }),
+            |(captured, omit)| {
+                let mut row = minimal_pg_json();
+                row.os_ipxe_script = "#!ipxe".to_string();
+                row.nic_firmware_snapshot = captured;
+                let mut json = serde_json::to_value(row).expect("serialize instance row");
+                if omit {
+                    json.as_object_mut()
+                        .expect("instance row is an object")
+                        .remove("nic_firmware_snapshot");
+                }
+                let row: InstanceSnapshotPgJson =
+                    serde_json::from_value(json.clone()).expect("decode instance row");
+                let ordinary = InstanceSnapshot::try_from(row).expect("load ordinary snapshot");
+
+                let row = serde_json::from_value(json).expect("decode row with merged OS");
+                let merged = from_pg_json_and_os(row, ordinary.config.os)
+                    .expect("load snapshot with merged OS");
+                (ordinary.nic_firmware_snapshot, merged.nic_firmware_snapshot)
+            },
+        );
     }
 
     /// Verifies snapshots written before service interfaces existed remain

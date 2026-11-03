@@ -691,14 +691,14 @@ func NewAPINetworkSecurityGroupPropagationDetails(s *cdbm.NetworkSecurityGroupPr
 	}
 
 	details := &APINetworkSecurityGroupPropagationDetails{
-		ObjectID:                s.NetworkSecurityGroupPropagationObjectStatus.Id,
-		Details:                 s.NetworkSecurityGroupPropagationObjectStatus.Details,
-		RelatedInstanceIds:      s.NetworkSecurityGroupPropagationObjectStatus.RelatedInstanceIds,
-		UnpropagatedInstanceIds: s.NetworkSecurityGroupPropagationObjectStatus.UnpropagatedInstanceIds,
+		ObjectID:                s.Id,
+		Details:                 s.Details,
+		RelatedInstanceIds:      s.RelatedInstanceIds,
+		UnpropagatedInstanceIds: s.UnpropagatedInstanceIds,
 	}
 
 	if time.Now().Before(networkSecurityGroupPropagationObjectIDDeprecationTime) {
-		details.ObjectIDDeprecated = cutil.GetPtr(s.NetworkSecurityGroupPropagationObjectStatus.Id)
+		details.ObjectIDDeprecated = cutil.GetPtr(s.Id)
 	}
 
 	status, found := NetworkSecurityGroupRuleAPIPropagationDetailedStatusFromProtobufPropagationStatus[s.Status]

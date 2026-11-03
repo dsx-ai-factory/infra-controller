@@ -47,6 +47,10 @@ pub struct SiteExplorerConfig {
     /// honor the same knob as DHCP.
     #[serde(skip)]
     pub retained_boot_interface_window: Option<chrono::Duration>,
+    /// Whether proactive host discovery can use IPv6-only admin segments. Setup copies
+    /// `[fnn.admin_vpc].enabled`; this is not an independent `[site_explorer]` setting.
+    #[serde(skip)]
+    pub admin_fnn_enabled: bool,
     /// The interval at which site explorer runs.
     #[serde(
         default = "SiteExplorerConfig::default_run_interval",
@@ -54,7 +58,8 @@ pub struct SiteExplorerConfig {
         serialize_with = "as_std_duration"
     )]
     pub run_interval: std::time::Duration,
-    /// The maximum amount of nodes that are explored concurrently.
+    /// The maximum amount of nodes that are explored concurrently. `0` is
+    /// treated as `1`.
     #[serde(default = "SiteExplorerConfig::default_concurrent_explorations")]
     pub concurrent_explorations: u64,
     /// How many routine (non-requested) endpoints should be explored in a single run.
@@ -63,11 +68,14 @@ pub struct SiteExplorerConfig {
     /// `exploration_requested` flag set are always attempted, regardless of this
     /// value, because operators rely on that flag for guaranteed next-tick attempts.
     /// Within the budget, three tiers share the slots: 70 percent for unexplored
-    /// endpoints (oldest interface first), 20 percent for endpoints preingestion
-    /// parked with `waiting_for_explorer_refresh` in a state that reads the next
-    /// report (oldest report first), and 10 percent for the routine refresh of
-    /// the oldest reports. Slots a tier cannot fill go to the other tiers in
-    /// that order, so no slot is left unused while any tier has candidates.
+    /// endpoints (oldest interface first), 20 percent for endpoints waiting on
+    /// their next report, those at an expected machine, switch or power shelf
+    /// BMC MAC never explored successfully and those preingestion parked with
+    /// `waiting_for_explorer_refresh` in a state that reads the next report
+    /// (oldest report first), and 10 percent for the routine refresh of the
+    /// oldest reports, among them every undeclared endpoint that never answered.
+    /// Slots a tier cannot fill go to the other tiers in that order, so no slot
+    /// is left unused while any tier has candidates.
     /// Below a budget of ten the smaller shares round to zero.
     /// Parallelism for every kind of exploration is still bounded by
     /// `concurrent_explorations`.
@@ -77,6 +85,15 @@ pub struct SiteExplorerConfig {
     /// `explorations_per_run`.
     #[serde(default = "SiteExplorerConfig::default_explorations_per_run")]
     pub explorations_per_run: u64,
+
+    /// How many explorations of a BMC in a row must time out before its
+    /// `BmcExplorationFailure` alert prevents allocations. Other exploration
+    /// errors prevent allocations immediately. `1` blocks on the first timeout.
+    /// Until then the BMC is re-explored ahead of the routine refresh.
+    #[serde(
+        default = "SiteExplorerConfig::default_exploration_timeouts_before_prevent_allocations"
+    )]
+    pub exploration_timeouts_before_prevent_allocations: u32,
 
     /// When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true
     #[serde(
@@ -89,6 +106,32 @@ pub struct SiteExplorerConfig {
     /// How many ManagedHosts should be created in a single run.
     #[serde(default = "SiteExplorerConfig::default_machines_created_per_run")]
     pub machines_created_per_run: u64,
+
+    /// How many ManagedHosts `create_machines` creates at the same time within
+    /// one run. Each in-flight creation holds one admin-lock admission permit
+    /// (`admin_lock_admission_permits`, default 16) and one pool connection,
+    /// so the effective value is clamped to one below the permit count. A
+    /// permit count of 1 still allows one creation, which then holds the only
+    /// permit while it runs. `1` creates hosts one after another and `0` is
+    /// treated as `1`.
+    #[serde(default = "SiteExplorerConfig::default_machine_creation_concurrency")]
+    pub machine_creation_concurrency: u64,
+
+    /// The minimum time between the extra identify-and-create passes for the
+    /// switches and power shelves whose endpoints have completed preingestion
+    /// while `create_machines` still has hosts to create in a run. A pass
+    /// starts once this interval has elapsed since the run started or since
+    /// the previous pass and the host creations already in flight have
+    /// finished. The pass also runs once at the end of every run, and
+    /// `switches_created_per_run` and `power_shelves_created_per_run` count
+    /// across all passes of a run. `0s` disables the extra passes. Read at
+    /// startup. A change needs a restart.
+    #[serde(
+        default = "SiteExplorerConfig::default_switch_and_power_shelf_pass_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub switch_and_power_shelf_pass_interval: std::time::Duration,
 
     /// Whether SiteExplorer should rotate/update Switch NVOS admin credentials
     #[serde(
@@ -190,6 +233,33 @@ pub struct SiteExplorerConfig {
     /// CompareResult for side-by-side validation).
     #[serde(default = "SiteExplorerConfig::default_explore_mode")]
     pub explore_mode: SiteExplorerExploreMode,
+    /// Whether nv-redfish exploration reads drive firmware versions from each
+    /// host's Redfish Storage subsystems and reports each enabled drive with
+    /// a usable model and version as a
+    /// `Drive_<Model>_<DriveId>` firmware inventory entry, which host firmware
+    /// configuration can select. Adds one request per Storage subsystem and
+    /// per drive to every exploration. Takes effect only when `explore_mode`
+    /// is `nv-redfish`: `libredfish` ignores it, and `compare-result` reads
+    /// the drives but returns the libredfish report, which omits them.
+    #[serde(default)]
+    pub explore_drive_firmware: bool,
+}
+
+impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
+    fn from(config: &SiteExplorerConfig) -> Self {
+        Self {
+            create_machines: config.create_machines.clone(),
+            machines_created_per_run: config.machines_created_per_run,
+            machine_creation_concurrency: config.machine_creation_concurrency,
+            switch_and_power_shelf_pass_interval: config.switch_and_power_shelf_pass_interval,
+            create_power_shelves: config.create_power_shelves.clone(),
+            power_shelves_created_per_run: config.power_shelves_created_per_run,
+            create_switches: config.create_switches.clone(),
+            switches_created_per_run: config.switches_created_per_run,
+            admin_fnn_enabled: config.admin_fnn_enabled,
+            retained_boot_interface_window: config.retained_boot_interface_window,
+        }
+    }
 }
 
 impl Default for SiteExplorerConfig {
@@ -197,11 +267,17 @@ impl Default for SiteExplorerConfig {
         SiteExplorerConfig {
             enabled: Self::default_enabled(),
             retained_boot_interface_window: None,
+            admin_fnn_enabled: false,
             run_interval: Self::default_run_interval(),
             concurrent_explorations: Self::default_concurrent_explorations(),
             explorations_per_run: Self::default_explorations_per_run(),
+            exploration_timeouts_before_prevent_allocations:
+                Self::default_exploration_timeouts_before_prevent_allocations(),
             create_machines: Self::default_create_machines(),
             machines_created_per_run: Self::default_machines_created_per_run(),
+            machine_creation_concurrency: Self::default_machine_creation_concurrency(),
+            switch_and_power_shelf_pass_interval:
+                Self::default_switch_and_power_shelf_pass_interval(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: bmc_proxy(None),
@@ -216,6 +292,7 @@ impl Default for SiteExplorerConfig {
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             explore_mode: Self::default_explore_mode(),
+            explore_drive_firmware: false,
         }
     }
 }
@@ -227,11 +304,15 @@ impl PartialEq for SiteExplorerConfig {
         let Self {
             enabled,
             retained_boot_interface_window,
+            admin_fnn_enabled,
             run_interval,
             concurrent_explorations,
             explorations_per_run,
+            exploration_timeouts_before_prevent_allocations,
             create_machines,
             machines_created_per_run,
+            machine_creation_concurrency,
+            switch_and_power_shelf_pass_interval,
             rotate_switch_nvos_credentials,
             override_target_ip,
             override_target_port,
@@ -246,16 +327,22 @@ impl PartialEq for SiteExplorerConfig {
             dpu_policy,
             deprecated_force_dpu_nic_mode,
             explore_mode,
+            explore_drive_firmware,
         } = self;
 
         enabled.load(AtomicOrdering::Relaxed) == other.enabled.load(AtomicOrdering::Relaxed)
             && *retained_boot_interface_window == other.retained_boot_interface_window
+            && *admin_fnn_enabled == other.admin_fnn_enabled
             && *run_interval == other.run_interval
             && *concurrent_explorations == other.concurrent_explorations
             && *explorations_per_run == other.explorations_per_run
+            && *exploration_timeouts_before_prevent_allocations
+                == other.exploration_timeouts_before_prevent_allocations
             && create_machines.load(AtomicOrdering::Relaxed)
                 == other.create_machines.load(AtomicOrdering::Relaxed)
             && *machines_created_per_run == other.machines_created_per_run
+            && *machine_creation_concurrency == other.machine_creation_concurrency
+            && *switch_and_power_shelf_pass_interval == other.switch_and_power_shelf_pass_interval
             && rotate_switch_nvos_credentials.load(AtomicOrdering::Relaxed)
                 == other
                     .rotate_switch_nvos_credentials
@@ -278,6 +365,7 @@ impl PartialEq for SiteExplorerConfig {
             && *dpu_policy == other.dpu_policy
             && *deprecated_force_dpu_nic_mode == other.deprecated_force_dpu_nic_mode
             && *explore_mode == other.explore_mode
+            && *explore_drive_firmware == other.explore_drive_firmware
     }
 }
 
@@ -307,10 +395,26 @@ impl SiteExplorerConfig {
         360
     }
 
+    pub const fn default_exploration_timeouts_before_prevent_allocations() -> u32 {
+        3
+    }
+
     /// Machines created per completed exploration cycle. Caps ingestion rate
     /// independently of how many hosts exploration has identified.
     pub const fn default_machines_created_per_run() -> u64 {
         100
+    }
+
+    /// Managed hosts created at the same time within one cycle: a quarter of
+    /// the default admission permits, so the other gated flows keep theirs.
+    pub const fn default_machine_creation_concurrency() -> u64 {
+        4
+    }
+
+    /// Interval of the switch and power shelf pass while hosts are being
+    /// created.
+    pub const fn default_switch_and_power_shelf_pass_interval() -> std::time::Duration {
+        std::time::Duration::from_secs(15 * 60)
     }
 
     pub fn default_rotate_switch_nvos_credentials() -> Arc<AtomicBool> {

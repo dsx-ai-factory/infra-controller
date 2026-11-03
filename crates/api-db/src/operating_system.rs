@@ -18,6 +18,7 @@
 use carbide_ipxe_renderer::{
     IpxeTemplateArtifact, IpxeTemplateArtifactCacheStrategy, IpxeTemplateParameter,
 };
+use carbide_uuid::{DbColumns, DbTable};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::{FromRow, PgConnection};
@@ -136,19 +137,50 @@ pub struct OperatingSystem {
     pub ipxe_definition_hash: Option<String>,
 }
 
+// The derive doesn't support SQLx field attributes. Keep `type_` mapped to
+// SQL's `type` column, matching `FromRow`.
+impl DbTable for OperatingSystem {
+    fn db_table_name() -> &'static str {
+        "operating_systems"
+    }
+
+    fn db_table_columns() -> DbColumns {
+        DbColumns::new(&[
+            "id",
+            "name",
+            "description",
+            "org",
+            "type",
+            "status",
+            "is_active",
+            "allow_override",
+            "phone_home_enabled",
+            "user_data",
+            "created",
+            "updated",
+            "deleted",
+            "ipxe_script",
+            "ipxe_template_id",
+            "ipxe_parameters",
+            "ipxe_artifacts",
+            "ipxe_definition_hash",
+        ])
+    }
+}
+
 pub async fn get(
     txn: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     id: Uuid,
 ) -> Result<OperatingSystem, DatabaseError> {
-    let query = "SELECT id, name, description, org, type, status, is_active, allow_override,
-        phone_home_enabled, user_data, created, updated, deleted,
-        ipxe_script, ipxe_template_id, ipxe_parameters, ipxe_artifacts, ipxe_definition_hash
-        FROM operating_systems WHERE id = $1 AND deleted IS NULL";
-    sqlx::query_as::<_, OperatingSystem>(query)
+    let query = format!(
+        "SELECT {} FROM operating_systems WHERE id = $1 AND deleted IS NULL",
+        OperatingSystem::db_table_columns()
+    );
+    sqlx::query_as::<_, OperatingSystem>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(id)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Fetches multiple operating systems by id. Missing ids are skipped (no error).
@@ -159,15 +191,15 @@ pub async fn get_many(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let query = "SELECT id, name, description, org, type, status, is_active, allow_override,
-        phone_home_enabled, user_data, created, updated, deleted,
-        ipxe_script, ipxe_template_id, ipxe_parameters, ipxe_artifacts, ipxe_definition_hash
-        FROM operating_systems WHERE id = ANY($1) AND deleted IS NULL";
-    sqlx::query_as::<_, OperatingSystem>(query)
+    let query = format!(
+        "SELECT {} FROM operating_systems WHERE id = ANY($1) AND deleted IS NULL",
+        OperatingSystem::db_table_columns()
+    );
+    sqlx::query_as::<_, OperatingSystem>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(ids)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns only ids for operating systems matching the filter (optional org). Order by name.
@@ -216,14 +248,15 @@ pub async fn create(
     input: &CreateOperatingSystem,
 ) -> Result<OperatingSystem, DatabaseError> {
     let row = if let Some(id) = input.id {
-        let query = "INSERT INTO operating_systems
+        let query = format!(
+            "INSERT INTO operating_systems
             (id, name, description, org, type, status, is_active, allow_override, phone_home_enabled, user_data,
              ipxe_script, ipxe_template_id, ipxe_parameters, ipxe_artifacts, ipxe_definition_hash)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-            RETURNING id, name, description, org, type, status, is_active, allow_override,
-            phone_home_enabled, user_data, created, updated, deleted,
-            ipxe_script, ipxe_template_id, ipxe_parameters, ipxe_artifacts, ipxe_definition_hash";
-        sqlx::query_as::<_, OperatingSystem>(query)
+            RETURNING {}",
+            OperatingSystem::db_table_columns()
+        );
+        sqlx::query_as::<_, OperatingSystem>(sqlx::AssertSqlSafe(query.as_str()))
             .bind(id)
             .bind(&input.name)
             .bind(&input.description)
@@ -241,16 +274,17 @@ pub async fn create(
             .bind(&input.ipxe_definition_hash)
             .fetch_one(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))?
+            .map_err(|e| DatabaseError::query(&query, e))?
     } else {
-        let query = "INSERT INTO operating_systems
+        let query = format!(
+            "INSERT INTO operating_systems
             (name, description, org, type, status, is_active, allow_override, phone_home_enabled, user_data,
              ipxe_script, ipxe_template_id, ipxe_parameters, ipxe_artifacts, ipxe_definition_hash)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            RETURNING id, name, description, org, type, status, is_active, allow_override,
-            phone_home_enabled, user_data, created, updated, deleted,
-            ipxe_script, ipxe_template_id, ipxe_parameters, ipxe_artifacts, ipxe_definition_hash";
-        sqlx::query_as::<_, OperatingSystem>(query)
+            RETURNING {}",
+            OperatingSystem::db_table_columns()
+        );
+        sqlx::query_as::<_, OperatingSystem>(sqlx::AssertSqlSafe(query.as_str()))
             .bind(&input.name)
             .bind(&input.description)
             .bind(&input.org)
@@ -267,7 +301,7 @@ pub async fn create(
             .bind(&input.ipxe_definition_hash)
             .fetch_one(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))?
+            .map_err(|e| DatabaseError::query(&query, e))?
     };
     Ok(row)
 }
@@ -333,16 +367,17 @@ pub async fn update(
         .as_deref()
         .or(existing.ipxe_definition_hash.as_deref());
 
-    let query = "UPDATE operating_systems SET
+    let query = format!(
+        "UPDATE operating_systems SET
         name = $1, description = $2, is_active = $3, allow_override = $4,
         phone_home_enabled = $5, user_data = $6, ipxe_script = $7,
         ipxe_template_id = $8, ipxe_parameters = $9, ipxe_artifacts = $10,
         ipxe_definition_hash = $11, status = $12, updated = NOW()
         WHERE id = $13 AND deleted IS NULL
-        RETURNING id, name, description, org, type, status, is_active, allow_override,
-        phone_home_enabled, user_data, created, updated, deleted,
-        ipxe_script, ipxe_template_id, ipxe_parameters, ipxe_artifacts, ipxe_definition_hash";
-    sqlx::query_as::<_, OperatingSystem>(query)
+        RETURNING {}",
+        OperatingSystem::db_table_columns()
+    );
+    sqlx::query_as::<_, OperatingSystem>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(name)
         .bind(description)
         .bind(is_active)
@@ -358,7 +393,7 @@ pub async fn update(
         .bind(input.id)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn delete(txn: &mut PgConnection, id: Uuid) -> Result<(), DatabaseError> {
@@ -379,6 +414,7 @@ pub async fn delete(txn: &mut PgConnection, id: Uuid) -> Result<(), DatabaseErro
 
 #[cfg(test)]
 mod tests {
+    use model::operating_system_definition::{OS_TYPE_IPXE, OS_TYPE_TEMPLATED_IPXE};
     use uuid::Uuid;
 
     use super::*;
@@ -399,58 +435,130 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn test_create_persists_org(pool: sqlx::PgPool) {
-        struct Case {
-            name: &'static str,
-            input_org: Option<String>,
-            expected_org: Option<String>,
+    async fn test_create_and_get_preserve_record_columns(pool: sqlx::PgPool) {
+        // Both INSERT paths and `get` use the same column list. Check the
+        // decoded values, including `type_`, nullable fields, and JSON data.
+        fn assert_record(actual: &OperatingSystem, expected: &OperatingSystem, operation: &str) {
+            let context = format!("{operation} for {}", expected.name);
+            assert_eq!(actual.id, expected.id, "{context}: id");
+            assert_eq!(actual.name, expected.name, "{context}: name");
+            assert_eq!(
+                actual.description, expected.description,
+                "{context}: description"
+            );
+            assert_eq!(actual.org, expected.org, "{context}: org");
+            assert_eq!(actual.type_, expected.type_, "{context}: type_");
+            assert_eq!(actual.status, expected.status, "{context}: status");
+            assert_eq!(actual.is_active, expected.is_active, "{context}: is_active");
+            assert_eq!(
+                actual.allow_override, expected.allow_override,
+                "{context}: allow_override"
+            );
+            assert_eq!(
+                actual.phone_home_enabled, expected.phone_home_enabled,
+                "{context}: phone_home_enabled"
+            );
+            assert_eq!(actual.user_data, expected.user_data, "{context}: user_data");
+            assert_eq!(actual.created, expected.created, "{context}: created");
+            assert_eq!(actual.updated, expected.updated, "{context}: updated");
+            assert_eq!(actual.deleted, expected.deleted, "{context}: deleted");
+            assert_eq!(
+                actual.ipxe_script, expected.ipxe_script,
+                "{context}: ipxe_script"
+            );
+            assert_eq!(
+                actual.ipxe_template_id, expected.ipxe_template_id,
+                "{context}: ipxe_template_id"
+            );
+            assert_eq!(
+                actual.ipxe_parameters, expected.ipxe_parameters,
+                "{context}: ipxe_parameters"
+            );
+            assert_eq!(
+                actual.ipxe_artifacts, expected.ipxe_artifacts,
+                "{context}: ipxe_artifacts"
+            );
+            assert_eq!(
+                actual.ipxe_definition_hash, expected.ipxe_definition_hash,
+                "{context}: ipxe_definition_hash"
+            );
         }
 
         let cases = [
-            Case {
-                name: "no-org-os",
-                input_org: None,
-                expected_org: None,
-            },
-            Case {
-                name: "org-os",
-                input_org: Some("acme".to_string()),
-                expected_org: Some("acme".to_string()),
-            },
-        ];
-
-        for case in cases {
-            let mut txn = pool.begin().await.unwrap();
-            let input = CreateOperatingSystem {
+            CreateOperatingSystem {
                 id: None,
-                name: case.name.to_string(),
+                name: "no-org-os".to_string(),
                 description: None,
-                org: case.input_org.clone(),
-                type_: model::operating_system_definition::OS_TYPE_IPXE.to_string(),
+                org: None,
+                type_: OS_TYPE_IPXE.to_string(),
                 status: OS_STATUS_READY.to_string(),
                 is_active: true,
                 allow_override: false,
-                phone_home_enabled: false,
+                phone_home_enabled: true,
                 user_data: None,
                 ipxe_script: Some("#!ipxe\nboot".to_string()),
                 ipxe_template_id: None,
                 ipxe_parameters: None,
                 ipxe_artifacts: None,
                 ipxe_definition_hash: None,
-            };
+            },
+            CreateOperatingSystem {
+                id: Some(Uuid::new_v4()),
+                name: "org-os".to_string(),
+                description: Some("Template-based operating system".to_string()),
+                org: Some("acme".to_string()),
+                type_: OS_TYPE_TEMPLATED_IPXE.to_string(),
+                status: OS_STATUS_PROVISIONING.to_string(),
+                is_active: false,
+                allow_override: true,
+                phone_home_enabled: false,
+                user_data: Some("#cloud-config\nhostname: test-host".to_string()),
+                ipxe_script: None,
+                ipxe_template_id: Some("ubuntu-template".to_string()),
+                ipxe_parameters: Some(serde_json::json!([
+                    {"name": "arch", "value": "aarch64"}
+                ])),
+                ipxe_artifacts: Some(serde_json::json!([
+                    {"name": "kernel", "url": "https://example.com/vmlinuz", "cache_strategy": 2}
+                ])),
+                ipxe_definition_hash: Some("0123456789abcdef".repeat(4)),
+            },
+        ];
+
+        for input in cases {
+            let mut txn = pool.begin().await.unwrap();
+            // The timestamp defaults use the transaction's `NOW()` value.
+            let timestamp: DateTime<Utc> = sqlx::query_scalar("SELECT NOW()")
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap();
+
             let created = create(&mut txn, &input).await.unwrap();
-            assert_eq!(
-                created.org, case.expected_org,
-                "created.org for {}",
-                case.name
-            );
+            assert!(!created.id.is_nil(), "{} has an ID", input.name);
+            let expected = OperatingSystem {
+                id: input.id.unwrap_or(created.id),
+                name: input.name,
+                description: input.description,
+                org: input.org,
+                type_: input.type_,
+                status: input.status,
+                is_active: input.is_active,
+                allow_override: input.allow_override,
+                phone_home_enabled: input.phone_home_enabled,
+                user_data: input.user_data,
+                created: timestamp,
+                updated: timestamp,
+                deleted: None,
+                ipxe_script: input.ipxe_script,
+                ipxe_template_id: input.ipxe_template_id,
+                ipxe_parameters: input.ipxe_parameters.map(sqlx::types::Json),
+                ipxe_artifacts: input.ipxe_artifacts.map(sqlx::types::Json),
+                ipxe_definition_hash: input.ipxe_definition_hash,
+            };
+            assert_record(&created, &expected, "create");
 
             let fetched = get(&mut *txn, created.id).await.unwrap();
-            assert_eq!(
-                fetched.org, case.expected_org,
-                "fetched.org for {}",
-                case.name
-            );
+            assert_record(&fetched, &expected, "get");
         }
     }
 }

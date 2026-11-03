@@ -228,7 +228,7 @@ func (s *Site) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuer
 // SiteDAO is the data access interface for Site
 type SiteDAO interface {
 	//
-	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool) (*Site, error)
+	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (*Site, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterInput, page paginator.PageInput, includeRelations []string) (sites []Site, total int, err error)
 	// GetCount returns total count of rows for specified filter
@@ -248,7 +248,10 @@ type SiteSQLDAO struct {
 }
 
 // GetByID returns a Site by its ID
-func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool) (_ *Site, retErr error) {
+func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (_ *Site, retErr error) {
+	if forUpdate && tx == nil {
+		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
+	}
 	// Create a child span and set the attributes for current request
 	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetByID")
 	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
@@ -257,6 +260,10 @@ func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, incl
 	st := &Site{}
 
 	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id)
+	if forUpdate {
+		// Exclude Site deletion while allowing child inserts to check their Site foreign key.
+		query = query.For("NO KEY UPDATE OF st")
+	}
 	for _, relation := range includeRelations {
 		query = query.Relation(relation)
 	}
@@ -428,7 +435,7 @@ func (ssd SiteSQLDAO) Create(ctx context.Context, tx *db.Tx, input SiteCreateInp
 		return nil, err
 	}
 
-	nst, err := ssd.GetByID(ctx, tx, st.ID, nil, false)
+	nst, err := ssd.GetByID(ctx, tx, st.ID, nil, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +608,7 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 		}
 	}
 
-	ust, err := ssd.GetByID(ctx, tx, st.ID, nil, false)
+	ust, err := ssd.GetByID(ctx, tx, st.ID, nil, false, false)
 	if err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
@@ -24,6 +25,7 @@ import (
 //   - grpc.error       status message, only present on failure
 //
 // The log level is derived from the status code via LevelFromCode.
+// A valid context also supplies trace_id/span_id, including unsampled traces.
 func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
@@ -38,7 +40,8 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		st, _ := status.FromError(err)
 		service, method := splitFullMethod(info.FullMethod)
 
-		ev := log.WithLevel(LevelFromCode(st.Code())).
+		logger := cotel.LoggerWithTrace(ctx, log.Logger)
+		ev := logger.WithLevel(LevelFromCode(st.Code())).
 			Str("grpc.service", service).
 			Str("grpc.method", method).
 			Str("grpc.code", st.Code().String()).

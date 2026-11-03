@@ -1,474 +1,271 @@
 # AGENTS.md
 
-This file provides guidance for AI coding agents working in the
-`infra-controller` repository.
+NVIDIA Infra Controller (NICo) provides site-local, zero-trust bare-metal
+lifecycle management through Rust and Go APIs, with DPU-enforced isolation.
+It handles inventory, Redfish management, hardware testing and firmware, IP/DNS,
+power control, provisioning, wiping, release, and trust during Tenant switching.
+APIs, configurations, and features may change between releases. See the
+[architecture](docs/architecture/overview.md) for component responsibilities. Use
+[dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller)
+for repository, PR, issue, and source links.
 
-## Project Overview
+## Scope and precedence
 
-**NVIDIA Infra Controller (NICo)** is an API-based microservice written in Rust
-and Golang that provides site-local, zero-trust, bare-metal lifecycle
-management with DPU-enforced isolation. It automates the complexity of the
-bare-metal lifecycle to fast-track building next-generation AI Cloud offerings.
+Follow the user's requested outcome and applicable instructions. Read the nearest
+`AGENTS.md` for each affected component and the relevant sections of
+[STYLE_GUIDE.md](STYLE_GUIDE.md) before changing Rust, Go, or protobuf code.
+Explicit exceptions here, including test selection below, narrow the style guide.
+For repository conventions, follow `STYLE_GUIDE.md` over conflicting user-global
+`AGENTS.md` guidance. Explicit task instructions still take precedence.
 
-> **Status:** Active development. APIs, configurations, and features may
-> change without notice between releases.
+Follow [Engineering Guidelines](CONTRIBUTING.md#engineering-guidelines) for scope,
+reuse, evidence, and verification. Preserve others' work. Do not edit any
+`AGENTS.md` file or `STYLE_GUIDE.md` unless the user requests those changes.
+Never commit secrets or local environment files; keep local secrets in
+gitignored `.local_envrc` and follow [secret scanning](CONTRIBUTING.md#secret-scanning).
 
-The canonical GitHub repository is
-[dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller/).
-Use this organization for links to the repository, its files, issues, and pull
-requests.
+When asked to update agent guidance, add only durable repository constraints or
+required workflows that apply beyond a single PR. A review incident may reveal
+such a constraint; record the general rule, not the incident. State its scope,
+action, and consequence, backed by code, CI, a contract, or a documented
+maintainer decision. Keep PR narratives, review disputes, and PR-specific
+workarounds or exceptions in the relevant PR or issue, not in `AGENTS.md`.
+Keep component-only rules with the component and shared rules here; link
+canonical procedures instead of repeating them.
 
-### Key Responsibilities
+## Find the authoritative source
 
-- Hardware inventory management and orchestration
-- Redfish-based hardware management
-- Hardware testing and firmware updates
-- IP address allocation and DNS services
-- Power control (on/off/reset)
-- Provisioning, wiping, and node-release orchestration
-- Machine trust enforcement during tenant switching
+- Rust implementations: `crates/`; package names, descriptions, and dependencies:
+  the workspace and individual `Cargo.toml` files. Directory and package names
+  can differ (`crates/api/` is `nico-api`); check before using `cargo -p`.
+- Rust toolchain: `rust-toolchain.toml`; formatting/custom-lint nightly:
+  `Makefile.toml`. Go version: the applicable `go.mod`.
+- Core uses Tokio, Tonic with Rustls/aws_lc_rs, Axum, SQLx, OpenTelemetry,
+  structured logfmt Tracing, and protobuf. See `Cargo.toml` for versions and
+  compatibility constraints, including the Axum pin.
+- Build, packaging, and shared tasks: `Makefile*.toml` and `include/`; CI:
+  `.github/workflows/ci.yaml`; custom Clippy lints: `lints/`.
+- Helm charts: `helm/`; local tools, test configs, and certificates: `dev/`; DPU
+  components: `bluefield/`; boot artifacts: `pxe/`; mdBook content: `book/`.
+- REST commands and conventions: [rest-api/AGENTS.md](rest-api/AGENTS.md).
+- CLI help/reference generation: [crates/admin-cli/AGENTS.md](crates/admin-cli/AGENTS.md).
+- Operator documentation: `docs/`, with navigation in `docs/index.yml` and Fern
+  configuration in `fern/`. See [development setup](docs/development.md) for prerequisites.
 
-## Repository Structure
+## Build, test, and lint
 
-```text
-infra-controller/
-├── crates/              # Rust crate implementations. To discover all crates
-│                        # and their purpose, run `ls crates/` or see the
-│                        # [workspace] members list in `Cargo.toml` — each
-│                        # crate's own `Cargo.toml` has a `description` field.
-│                        # Note: the directory name does NOT always equal the
-│                        # crate name (e.g. crates/api/ → crate nico-api).
-│                        # Use `grep '^name =' crates/<dir>/Cargo.toml | head -1`
-│                        # to get the actual crate name before running
-│                        # `cargo test -p <name>` or similar.
-├── book/                # mdBook documentation
-├── deploy/              # Kubernetes deployment configs and Kustomization overlays
-├── dev/                 # Local dev tools (Dockerfiles, test configs, certs)
-├── helm/                # Helm chart for Kubernetes deployment
-├── bluefield/           # BlueField DPU-specific components
-├── pxe/                 # PXE boot artifact generation
-├── lints/               # Custom Clippy lints (carbide-lints crate)
-├── include/             # Shared Makefile fragments
-├── .github/             # GitHub Actions workflows and templates
-├── rest-api/            # Golang-based REST API
-├── Cargo.toml           # Workspace dependency management
-├── Makefile.toml        # Primary build/task automation
-├── Makefile-build.toml  # Build-specific tasks
-└── Makefile-package.toml # Packaging tasks
-```
+Install `cargo-make` with `cargo install cargo-make`. Use the task definitions and
+[verification guidance](CONTRIBUTING.md#verification) for prerequisites, scope,
+and reporting results. Core workflows primarily use cargo-make; use direct Cargo
+commands where listed below. REST workflows use the top-level or `rest-api/`
+Makefiles.
 
-## Technology Stack
+| Purpose | Command |
+| --- | --- |
+| Debug or release Rust build | `cargo build` / `cargo build --release` |
+| Admin CLI build | `cargo make build-cli` |
+| All Rust tests | `cargo test` |
+| Rust tests, with debug prerequisites | `cargo make correctly-execute-tests` |
+| Focused Rust test after prerequisite setup | `cargo test -p <package> <test-filter>` |
+| Full local Core verification | `cargo make pre-commit-verify` |
+| Workspace lint, format, and dependency checks | `cargo make pre-commit-verify-workspace` |
+| Core release artifacts and tests | `cargo make build-and-test-release-container-services` |
+| Format using the CI rustfmt options | `cargo make format-nightly` |
+| Format with stable rustfmt | `cargo fmt --all` |
+| Check formatting | `cargo make check-format-nightly` |
+| Clippy / custom lints | `cargo make clippy` / `cargo make carbide-lints` |
+| Event identity / metric catalogue | `cargo make check-event-names` / `cargo make check-metric-docs` |
+| Dependencies / licenses / bans | `cargo make check-workspace-deps` / `cargo make check-licenses` / `cargo make check-bans` |
+| Optional independent default-feature package builds | `cargo make check-isolated-package-builds` |
 
-### gRPC API and components
+Clippy treats warnings as errors. `make help` lists top-level entrypoints,
+including `make core/check-isolated-package-builds`. REST uses `make rest-build`,
+`make rest-test`, `make rest-lint`, `make rest-fmt`, `make rest-helm-lint`,
+`make rest-docker-build-local`, `make rest-kind-reset`, or `make rest-api/<target>`.
+Run Go service tests through these Make targets, which start required PostgreSQL
+and mock Core/Flow gRPC services. Do not run `go test` directly: Site Agent tests
+can retry every `40s` until the `10m` timeout instead of failing promptly. See
+[REST testing](rest-api/AGENTS.md#testing) for module-specific targets.
 
-- **Language:** Rust (edition 2024, toolchain pinned in `rust-toolchain.toml`)
-- **Async runtime:** Tokio
-- **gRPC framework:** Tonic (with TLS via Rustls/aws_lc_rs)
-- **HTTP framework:** Axum (pinned; see `Cargo.toml` for compatibility rationale)
-- **Database:** SQLx (compile-time checked queries)
-- **Observability:** OpenTelemetry, Tracing (structured logfmt logging)
-- **Build tool:** `cargo-make` (TOML task runner)
-- **API definitions:** Protocol Buffers (protobuf)
+Use the stable toolchain for ordinary builds/tests. `format-nightly`,
+`check-format-nightly`, and `carbide-lints` use the pinned nightly task setup.
+Independent package builds are optional maintenance, not a required CI gate.
 
-### REST API and components
+## Test selection
 
-- **Language (REST API):** Golang 1.26.x
+Inventory relevant existing tests before adding coverage. Each new test or row
+must protect an observable contract or distinct failure boundary that retained
+coverage does not protect. Cover reachable combinations when they change behavior
+or precedence; do not enumerate a Cartesian product just because inputs are enums
+or booleans. Remove or merge redundant cases.
 
-## Build, Test, and Lint Commands
+Put each proof at the narrowest layer that can exercise it. Higher-level tests
+should add wiring, persistence, transactions, concurrency, or external-effect
+coverage rather than repeat a lower-level matrix. These selection rules narrow
+STYLE_GUIDE.md's advice to enumerate branches/input variants; its table helpers
+and layout remain authoritative.
 
-### REST API contract conventions
+Prefer table-driven tests and `carbide-test-support` helpers; see
+[Testing](STYLE_GUIDE.md#testing) for helper APIs and table layout. Use grouped
+`scenarios!` / `value_scenarios!` or explicit `check_cases` / `check_values` when
+cases share one operation and assertion form. When cases share setup but need
+different assertions, use a local case table with each check beside its inputs.
 
-- Do not use `omitempty` on REST API response fields. Clients must be able to
-  distinguish an empty value from a field unsupported by the API version.
-- Paginated operations must implement deterministic ordering before pagination
-  and document every supported `orderBy` value and its default in OpenAPI. Do
-  not rely on an upstream API or database's implicit result order.
+- State-machine branch tests: reload persisted state after the controller
+  iteration and assert branch-owned fields/counters. Unchanged visible state or
+  no external call alone does not prove the branch ran.
+- Retry tests: inject the claimed transient failure, then prove a later iteration
+  retries while preserving the expected externally visible state. A simulator's
+  unsupported response does not prove transient recovery.
+- CLI table changes: test the public command's rendered headers and populated and
+  empty cell values, not only a formatting helper.
+- Rack fixtures: align capability counts with instantiated inventory; use zero
+  for unsupported component types.
 
-Core Rust build, test, lint, and packaging workflows are primarily exposed
-through `cargo-make`. Use direct Cargo commands where this document explicitly
-lists them. REST API workflows use the top-level or `rest-api/` Makefiles.
+## Contracts and implementation
 
-```bash
-cargo install cargo-make
-```
+Use the narrowest Rust visibility required by actual callers. Do not widen
+production APIs just for tests or to silence dead-code warnings; see
+[visibility](STYLE_GUIDE.md#visibility).
 
-### Building
+REST response fields preserve empty values. Use `omitempty` only for date-gated
+attribute removal or opt-in `includeRelation` expansions; see the scoped REST
+guide for those contracts. Paginated operations must order results before slicing
+and document supported `orderBy` values and defaults in OpenAPI. Do not depend
+on implicit upstream ordering.
 
-```bash
-# Standard debug build (all workspace crates)
-cargo build
-
-# Release build
-cargo build --release
-
-# Full CI build + test (mirrors what CI runs)
-cargo make build-and-test-release-container-services
-
-# Build the admin CLI locally
-cargo make build-cli
-```
-
-### Testing
-
-```bash
-# Run all tests
-cargo test
-
-# Build prerequisites first, then test (recommended for integration tests)
-cargo make correctly-execute-tests
-```
-
-When writing tests, prefer the **table-driven** style and helpers from
-`carbide-test-support`; use the [Testing section in `STYLE_GUIDE.md`](STYLE_GUIDE.md#testing)
-for table structure and API details. Use grouped `scenarios!` / `value_scenarios!`
-or explicit `check_cases` / `check_values` when cases share one operation and
-assertion form. When cases share setup but require different assertions, use a
-local case table that keeps each case's check next to its inputs.
-
-Before adding coverage, inventory the relevant unit, database, controller, and
-integration tests. Each new test should have one reason to exist: an observable
-contract or distinct failure boundary that no retained test protects. Use the
-smallest set of cases that exercise different behavior. Do not enumerate a
-Cartesian product merely because inputs are booleans or enums; enumerate a
-combination only when it is reachable and protects distinct observable behavior
-or a distinct failure boundary, including precedence between conflicting inputs.
-
-Place each proof at the narrowest layer that can exercise the contract.
-Higher-level tests should prove wiring, persistence, transaction behavior,
-concurrency, or external effects that lower-level tests cannot; do not repeat a
-lower-level case matrix at higher layers. For every new test or row, ask:
-**What regression does this catch that no retained test catches?** If there is
-no concrete answer, merge it into existing coverage or delete it.
-
-`STYLE_GUIDE.md` remains the source for helper APIs and table layout. For
-changes written by agents, the rules above for choosing cases replace its
-recommendation to enumerate every branch and input variant.
-
-For state-machine branch tests, reload persisted state after the controller
-iteration and assert the branch-owned fields or counters. An unchanged visible
-state or absence of an external action does not prove which branch ran.
-For retry tests, inject the claimed transient failure and assert that a later
-iteration retries it while preserving the expected externally visible state. A
-simulator's default unsupported response does not prove transient recovery.
-
-For user-visible CLI table changes, exercise the public command in a test and
-assert the rendered headers plus populated and empty cell values. Helper-only
-tests do not prove the table contract.
-
-Keep test rack-profile capability counts aligned with the inventory the fixture
-actually instantiates. Use zero for unsupported component types so tests do not
-generate expected-but-absent discovery errors.
-
-### Linting and Formatting
-
-```bash
-# Run all pre-commit checks (what CI runs)
-cargo make pre-commit-verify-workspace
-
-# Individual checks:
-cargo make clippy              # Clippy linter (warnings = errors)
-cargo make carbide-lints       # Custom lints (requires nightly setup)
-cargo make check-format-nightly # Check rustfmt formatting
-cargo make check-event-names    # Validate production Event identity uniqueness
-cargo make check-metric-docs    # Check production Event metric catalogue coverage
-cargo make check-workspace-deps # Validate dependency declarations in Cargo.toml
-cargo make check-licenses      # Validate no restricted licenses introduced
-cargo make check-bans          # Check for banned dependencies
-
-# Optional maintenance check (not part of required CI or pre-commit):
-cargo make check-isolated-package-builds # Check each package with default features
-
-# Auto-fix formatting:
-cargo fmt --all
-cargo make format-nightly      # Also sort imports
-```
-
-> **Note:** The nightly toolchain is used only for `check-format-nightly` and
-> `carbide-lints`. The stable toolchain pinned in `rust-toolchain.toml` is used
-> for everything else.
-
-### Top-level Makefile entrypoints
-
-A top-level [`Makefile`](Makefile) at the repo root provides a thin
-discoverable entrypoint for selected Core workflows and the `rest-api/` Go
-services. It delegates to cargo-make or `rest-api/Makefile`.
-
-```bash
-make help                # default goal: list available targets
-make core/check-isolated-package-builds # optional independent default-feature builds
-make rest-build          # build rest-api Go binaries
-make rest-test           # run rest-api unit tests (starts Postgres and mock gRPC servers)
-make rest-lint           # lint rest-api
-make rest-fmt            # go fmt check on rest-api
-make rest-helm-lint      # helm lint rest charts
-make rest-docker-build-local
-make rest-kind-reset     # spin up the local kind dev cluster (~10 min)
-make rest-api/<target>   # pass any target through to rest-api/Makefile
-```
-
-Test the `rest-api/` Go services through these targets or the `rest-api/Makefile` ones they
-delegate to, not by calling `go test` yourself. The targets start the PostgreSQL container and
-the mock Core and Flow gRPC servers the tests connect to, and skipping that setup does not fail
-fast: the `site-agent` tests retry on a `40s` backoff until the `10m` test timeout. See the
-[Testing section in `rest-api/AGENTS.md`](rest-api/AGENTS.md#testing) for which target covers
-which module.
-
-Published container artifacts must pin external base images by immutable
-digest. When architecture-specific targets share a base image, define one
-overridable variable so their versions cannot drift independently.
-
-## Agent Work Scope
-
-Agents may carry out user-requested work throughout the repository under the
-applicable guidelines. Agents may not change any `AGENTS.md` file or
-`STYLE_GUIDE.md` unless the user specifically requests changes to those files.
-
-## Coding Conventions
-
-Follow the shared [Engineering Guidelines](CONTRIBUTING.md#engineering-guidelines)
-for scope control, reuse-before-new-code, evidence-backed assumptions, and
-verification expectations.
-
-Agents must never commit credentials, API keys, secrets, or local environment
-files. Keep local secrets in the gitignored `.local_envrc` file and follow the
-[secret-scanning guidance](CONTRIBUTING.md#secret-scanning).
-
-Before modifying Rust, Go or protobuf code, read [`STYLE_GUIDE.md`](STYLE_GUIDE.md) and follow the sections
-relevant to the change. Where this file explicitly narrows a rule—such as test
-case selection—the rule in this file takes precedence. Where a user's global
-AGENTS.md instructions conflict with `STYLE_GUIDE.md`, follow `STYLE_GUIDE.md`;
-this repository's AGENTS.md overrides `STYLE_GUIDE.md` only where it explicitly
-narrows a repository rule, as above.
-
-Use the narrowest Rust visibility required by actual callers. Do not use `pub`
-to suppress dead-code warnings or widen production visibility solely for unit
-tests. Follow the [visibility guidance](STYLE_GUIDE.md#visibility).
+Published container artifacts must pin external base images by digest. Share one
+overridable base-image variable across architecture-specific targets that use
+the same image.
 
 ### Database migrations
 
-Core migrations live in `crates/api-db/migrations/` and use the fully populated
-`YYYYMMDDhhmmss_description.sql` format described in
-[`STYLE_GUIDE.md`](STYLE_GUIDE.md#database-migrations). The `migration-police`
-CI job checks only newly added migrations, so existing filenames remain
-accepted.
+Core migrations live in `crates/api-db/migrations/`. Follow
+[migration naming](STYLE_GUIDE.md#database-migrations), using a fully populated
+`YYYYMMDDhhmmss_description.sql` timestamp. Existing names remain accepted;
+merged migration contents are immutable. Assume every migration on `main` is
+already deployed; use a new forward migration for fixes.
+CI checks new filenames and modifications/deletions of existing migrations.
 
-Most of what makes a migration wrong here is not something CI can catch, because
-an over-built migration still applies cleanly. Write the smallest exact forward
-change from the schema on `main`: the median migration in this repository is two
-statements and eight lines, and most do exactly one thing.
+Write the smallest exact forward change from the schema on `main`. Assume an
+existing `nico-api` instance can still write while migrations run. Leave the schema
+the incoming binary requires, and verify the transition succeeds with that writer.
 
-- **Never edit a migration that has merged.** Its checksum is recorded by every
-  deployment that has applied it. Assume any migration on `main` is already
-  running somewhere, since this is a public repository and we cannot know where.
-  Correct it with a new forward migration instead.
+- Ordinary SQLx migrations are transactional and recorded once. Leave out
+  `BEGIN`/`COMMIT`, catalog probes, preflight exception blocks, `IF [NOT] EXISTS`,
+  and `ON CONFLICT DO NOTHING` added for rerunnability. Do not pair `NOT VALID`
+  with `VALIDATE CONSTRAINT` in the same file. Let schema drift fail visibly
+  instead of hiding it with redundant guards.
+- Operations such as concurrent index creation/removal require the existing
+  `-- no-transaction` mechanism. Use it only for a statement requiring it; reason
+  about interrupted application and recovery separately from the transactional
+  default. Do not assume such a file is atomic.
+- Keep domain logic in Rust; do not reimplement Rust helpers in PL/pgSQL. Add a
+  database view, function, or trigger only for a live consumer or an invariant
+  the database must enforce.
+- Use `NULL` for absence. A `NOT NULL` default must be true for every row it
+  reaches; do not invent sentinel strings, timestamps, or versions. JSON defaults
+  must deserialize into the current Rust type.
+- Remove in two steps: ship code that stops reading/writing an object, then drop
+  it in a later migration.
+- Comment intent briefly; put extended design/safety arguments in the PR.
+- Test data-semantic changes against a populated predecessor schema: backfills,
+  defaults, requiredness, constraints, and type conversions. Include the shipped
+  SQL with `include_str!`, following
+  [test_backfill.rs](crates/api-db/src/credential_rotation/test_backfill.rs).
+  A purely additive nullable column needs no extra migration-specific test.
 
-- **Do not hand-roll safety the runner already provides.** `sqlx` runs each file
-  in a transaction and records it once, so a migration cannot half-apply or run
-  twice. Leave out `IF EXISTS` and `IF NOT EXISTS`, `ON CONFLICT DO NOTHING`
-  added for rerunnability, `DO $$ ... RAISE EXCEPTION` preflight checks, system
-  catalog probes, `BEGIN` and `COMMIT`, and `NOT VALID` paired with
-  `VALIDATE CONSTRAINT` in the same file. These pass CI and read as caution, but
-  they convert a diagnosable failure into a silent skip.
+### Logs and metrics
 
-- **The migration has to apply while a `nico-api` instance is still running.**
-  Nothing stops the running instance first, so assume a live writer throughout.
-  A migration's contract is with the incoming binary, so leave the schema that
-  version expects rather than preserving the outgoing one, but it still has to
-  succeed against that writer.
+Follow [instrumentation](docs/observability/instrumentation.md) and
+[logging](STYLE_GUIDE.md#logging). Plain diagnostics use `tracing::` with structured
+fields. Occurrences that need a count/rate/duration use one declared
+`carbide_instrument::Event` and `emit()`, producing a metric and optional log.
+Use `log = off` for metric-only events and `metric = none` for typed logs.
+Point-in-time state keeps the observable-gauge/`SharedMetricsHolder` pattern.
 
-- **Keep domain logic in Rust.** Do not reimplement a Rust helper in PL/pgSQL,
-  and do not add a view, function, or trigger without a live consumer or an
-  invariant the database has to own.
+Keep metric labels bounded at the call site. Machine IDs, IPs, error text, and
+caller-supplied values belong in `#[context]`, not `#[label]`. A reviewed newtype
+may implement `LabelValue` for non-enum values only when bounded at the call site.
+Preserve existing metric contracts. Every Event declares a unique, flat
+`lower_snake_case` `event_name` for its category. Metric-backed Events also declare
+`metric_name`; both appear on their logs, correlated with the request by `span_id`.
+New metric names use `carbide_`, `_total` for counters, and unit suffixes for
+histograms. Checked names are exposed verbatim.
+New metrics need meaningful, non-empty descriptions, even where the derive permits
+omission. Plain tracing calls do not invent `event_name` or `metric_name` fields.
 
-- **Use `NULL` for genuine absence.** Add a column as nullable, or `NOT NULL`
-  with a default that is true for every row it reaches. Do not invent an empty
-  string, an epoch timestamp, a placeholder version, or `UNKNOWN` to satisfy
-  `NOT NULL`. A `jsonb` default has to deserialize into the current Rust type.
-
-- **Remove things in two steps.** Ship the code that stops reading and writing
-  it, then drop it in a later migration.
-
-- **Comment intent, briefly.** A sentence or two on why the change exists. A
-  safety argument or design rationale belongs in the pull request, not in the
-  migration.
-
-- **Test anything with data semantics** against a database at the predecessor
-  schema populated with realistic rows, including a backfill, a default, a new
-  requiredness, a constraint, or a type conversion. Reference the file with
-  `include_str!` so the test cannot drift from what ships, as
-  [`test_backfill.rs`](crates/api-db/src/credential_rotation/test_backfill.rs)
-  does. A purely additive nullable column is already covered by the suite.
-
-### Documentation
-
-Give every fenced code block a language identifier. Use `bash` or `sh` for
-shell commands and `text` for command output or other unformatted examples.
-
-### Operator documentation
-
-When documenting Helm-backed settings, identify chart values as defaults when
-the templates allow overrides. State actual precedence when Helm-provided flags
-override binary environment-variable fallbacks.
-
-### Instrumentation: logs and metrics
-
-The decision rule:
-
-- **Just logging words?** Use plain `tracing::` macros with structured fields
-  (`warn!(%machine_id, error = %e, "...")`). Most log sites are and stay this.
-- **Does the event deserve a count, rate, or duration** (a failure you'd alert
-  on, an outcome you'd trend, a hot-path rate)? Declare it once as a
-  `carbide_instrument::Event` and `emit()` it — that produces the metric and
-  (optionally) the log line together, correlated by `span_id`:
-
-  ```rust
-  #[derive(carbide_instrument::Event)]
-  #[event(event_name = "power_control_failed",
-          metric_name = "carbide_power_control_total", component = "component_manager",
-          log = warn, metric = counter, message = "power control failed",
-          describe = "Number of power control operations that failed")]
-  struct PowerControlFailed {
-      #[label]   backend: Backend,  // bounded via LabelValue — enums, usually
-      #[context] error: String,     // high-cardinality — log line only
-  }
-
-  carbide_instrument::emit(PowerControlFailed {
-      backend: Backend::Rms,
-      error: "deadline exceeded".to_string(),
-  });
-  ```
-
-  `log = off, metric = counter` counts a hot-path event with no log line at
-  all; `metric = none` is a typed log. Never put `machine_id`/IPs/error text
-  in a `#[label]` — that's what `#[context]` is for, and `String` doesn't
-  implement `LabelValue` precisely to stop it. A bounded-but-not-enum value
-  (a vendor, a SKU) can get a manual `LabelValue` impl on a newtype — the
-  reviewed escape hatch — but only when the value is bounded *at the call
-  site*; anything caller-supplied stays in `#[context]`.
-- **Point-in-time state** ("how many machines are in state X") stays on the
-  existing observable-gauge / `SharedMetricsHolder` pattern — the framework models
-  occurrences, not state.
-
-Every Event declares a unique, flat `lower_snake_case` `event_name`. It identifies
-the reusable event category, not one occurrence, and appears on Event-generated
-logs. A metric-backed Event also declares `metric_name`; when that Event logs,
-both names are present so operators can pivot directly between the metric and its
-diagnostic records. Plain `tracing::` calls do not invent an `event_name`.
-
-New metric names are checked at compile time (`carbide_` prefix, `_total`
-counters, unit-suffixed histograms), and a checked `metric_name` is exposed
-verbatim. Existing metric contracts never change. The full standard lives in
-[`docs/observability/instrumentation.md`](docs/observability/instrumentation.md).
+For checked-name framework counters/histograms, run `cargo make check-metric-docs`;
+use `cargo xtask check-metric-docs --fix` for missing source-derived catalogue rows.
+Exercise new API metrics in `test_integration` so its scrape generates their
+catalogue entries. Exercise metrics owned by other binaries at their owning
+integration layer. Treat HELP text and `docs/observability/core_metrics.md` as
+generated API documentation. Verify the observed event, exact entity and condition,
+direction/protocol, series type, units, and every label; do not hand-edit generated
+catalogue rows. HELP text, emitted series, and catalogue must agree. Legacy
+unchecked-name exemptions remain as documented.
 
 ## Documentation review
 
-These are documentation checks, not style guidance. Apply every relevant
-check before requesting review.
+These are documentation checks. Apply every relevant check before requesting
+review. Document the complete contract, including conditions and failure paths.
 
-- **Interface contracts:** Document the complete contract, not just the name or happy path.
+- Verify interface spelling/case, requiredness, defaults, formats/units/bounds,
+  accepted values, mutual exclusions/interactions, global/subcommand position,
+  required order, omission/fallback behavior, output, side effects, errors, and
+  unsupported paths against code, schema, or exercised output. For repeated/list
+  fields, verify membership, ordering, and omitted versus empty semantics.
+  Documentation alone is not proof of implementation behavior.
+- Exercise changed CLI examples at the reviewed revision on an authorized local
+  or test target and compare actual `--help`. Verify API, configuration,
+  environment-variable, and state contracts through schemas, handlers, or
+  exercised output. If any answer is unknown, stop and ask the owner.
+- Never edit a generated reference. Change interface sources, regenerate every
+  affected output, and prove they stay in sync. For admin CLI help, follow
+  [CLI generation](crates/admin-cli/AGENTS.md#documentation).
+  Inherited global options can affect multiple command pages; inspect the output.
+- For REST contracts, inspect `rest-api/openapi/spec.yaml` plus handlers/models.
+  Run `make rest-api/lint-openapi`, `make rest-api/generate-sdk`, and
+  `make openapi-breaking` when the spec changes. Do not hand-edit generated SDK
+  files; hand-written helpers in `rest-api/sdk/standard/` are separate.
+- Setup docs must match `helm-prereqs/setup.sh` phases, skip flags, environment
+  requirements, and component order. Run `bash -n helm-prereqs/setup.sh` and
+  cross-check `helm-prereqs/README.md` and `docs/getting-started/quick-start.md`.
+- State-machine narratives, diagrams, and transition tables must agree with the
+  relevant enums/handlers, including success, skip, retry, poll, restart, deletion,
+  maintenance, errors, and persisted resume state.
+- For Helm-backed settings, distinguish defaults from overrides and state actual
+  flag/environment/config precedence.
+- Search every changed literal or behavior with
+  `rg -n --fixed-strings '<literal>' README.md crates/ rest-api/ docs/ book/ helm/ helm-prereqs/`.
+  Reconcile every conflicting hit or link to one canonical explanation. Preserve
+  required implementation/issue links in the final document at the exact review head.
+- Register new/moved public pages in `docs/index.yml`; add redirects for moved or
+  removed public URLs in `fern/docs.yml`. Current releases belong in
+  `fern/changelog/`; do not modify legacy `rest-api/CHANGELOG.md` or its entry order.
+- Search changed prose for `currently`, `today`, `for now`, `temporarily`, and
+  `draft`. Tie each claim to a release, deliberate support boundary, or full
+  tracking URL; a bare issue number or review-history note is insufficient.
+  Pin prose versions only for a tested minimum, maximum, or compatibility boundary;
+  otherwise link to the authoritative release page.
+- Give fenced blocks a language (`bash`/`sh` for commands, `text` for output).
+  Run `rumdl check --config docs/.rumdl.toml AGENTS.md <other-changed-markdown-paths>`
+  and fail on every finding. Use the Fern CLI pinned in `fern/fern.config.json` for
+  `fern docs md check` and `fern check` from the repository root. Neither needs a
+  token; without one, `fern check` skips the published-state missing-redirects check.
+- Inspect each artifact in its readers' renderer, including navigation, anchors,
+  wide tables, Mermaid, and components: the CI Fern preview, GitHub for CLI pages, or
+  `make rest-api/preview-openapi` for REST. Local `fern docs dev` omits the NVIDIA
+  theme without a token. Lint is not rendered verification.
 
-  - For every documented command, flag, environment variable, config key, API field, mode, or state, verify the following from code, schema, or exercised output:
-    - exact spelling and case
-    - required or optional condition
-    - default
-    - accepted values, units, formats, and bounds
-    - mutual exclusions and interactions
-    - global versus subcommand position and required order
-    - omission or fallback behavior
-    - observable output, side effects, errors, and unsupported paths
-    - for repeated or list fields, membership, ordering, and whether omitted and
-      empty values have the same meaning
-  - Exercise each changed CLI example at the PR revision on an authorized local
-    or test target and compare it with real `--help` output. Verify changed API,
-    configuration, environment-variable, and state contracts through schemas,
-    handlers, or exercised output appropriate to that interface.
-  - If any answer is unknown, stop and ask the owner; another documentation page
-    is not evidence.
+If a hosted Fern preview must be created manually, create it and remove it after
+review:
 
-- **Generated interfaces:** Change the source, regenerate every output, and prove they stay in sync.
+```bash
+preview_id='nico-docs-review'
+fern generate --docs --preview --id "$preview_id"
+fern docs preview delete --id "$preview_id"
+```
 
-  - Never edit a generated reference.
-  - For `nico-admin-cli`, change the Clap declarations under
-    `crates/admin-cli/src/`, verify the affected command with
-    `cargo run -q -p nico-admin-cli -- <command-path> --help`, then run
-    `cargo make gen-cli-docs` and `cargo make check-cli-docs`. See
-    `crates/admin-cli/AGENTS.md` for the generated and hand-authored boundaries.
-  - For REST, use `rest-api/openapi/spec.yaml` for the contract and inspect the
-    handler or model for conditional behavior the schema cannot express. When
-    the spec changes, run `make rest-api/lint-openapi`,
-    `make rest-api/generate-sdk`, and `make openapi-breaking`; do not edit
-    `rest-api/sdk/standard/`.
-
-- **Workflow parity:** Make the documentation match the workflow that actually runs.
-
-  - For setup documentation, `helm-prereqs/setup.sh` is the source of truth for
-    phases, skip flags, environment requirements, and component order. Run
-    `bash -n helm-prereqs/setup.sh` and cross-check `helm-prereqs/README.md` and
-    `docs/getting-started/quick-start.md`.
-  - For state-machine documentation, trace every success, skip, retry, poll,
-    restart, deletion, maintenance, and error transition to its enum and
-    handler. Narrative, Mermaid, and transition tables must contain the same
-    states and edges, including persisted resume state.
-
-- **Metric catalogue:** A metric is not documented until its HELP text, emitted series, and generated catalogue agree.
-
-  - Treat metric HELP text and `docs/observability/core_metrics.md` as generated
-    API documentation.
-  - Verify what causes the observation, its counter/gauge/histogram type, the
-    exact entity and condition measured, direction or protocol, and every label
-    dimension.
-  - New metrics need non-empty `describe` text and must be exercised by
-    `test_integration` so catalogue generation includes their exposed name,
-    type, and description. Do not patch the generated table.
-
-- **Cross-surface drift:** Change a fact everywhere it appears or make one page canonical and link to the canonical page from the others.
-
-  - When a documentation objective names implementation or issue links, verify
-    that the final document retains those links at the exact review head.
-  - Search every changed literal or behavior with
-    `rg -n --fixed-strings '<literal>' README.md crates/ rest-api/ docs/ book/ helm/ helm-prereqs/ deploy/`;
-    reconcile every conflicting hit or establish one canonical explanation and
-    link the others to it.
-  - New or moved public pages must be present in `docs/index.yml`, and moved or
-    removed public paths need redirects in `fern/docs.yml`.
-  - Using the CLI version pinned in `fern/fern.config.json`, run
-    `fern docs md check` and `fern check` from the repository root. Neither
-    command needs a Fern token, but without one, `fern check` skips the
-    published-state `missing-redirects` check.
-  - `fern/changelog/` owns current unified releases;
-    do not modify `rest-api/CHANGELOG.md`, as it is legacy history whose
-    published entry order must be preserved.
-
-- **Temporary claims and versions:** Tie temporary claims and pinned versions to a real support boundary.
-
-  - Search changed prose for `currently`, `today`, `for now`, `temporarily`, and
-    `draft`. Each match must name a release, deliberate support boundary, or
-    full tracking URL; a bare issue number or review-history note is
-    insufficient.
-  - Hard-code a tool or dependency version only when it is a tested minimum,
-    maximum, or pinned compatibility boundary; otherwise link the authoritative
-    release page.
-
-- **Rendered output:** Review each artifact in the renderer its readers actually use.
-
-  - Run `rumdl check --config docs/.rumdl.toml AGENTS.md` for this file, and pass
-    every other changed Markdown path as an additional argument. Fail on every
-    finding.
-  - For Fern-published pages, inspect the CI-created PR preview. A local
-    `fern docs dev` preview works without a Fern token, but does not apply the
-    global `nvidia` theme without one.
-  - If a hosted preview must be created manually, run
-    `preview_id='nico-docs-review'; fern generate --docs --preview --id "$preview_id"`,
-    then delete it after review with
-    `fern docs preview delete --id "$preview_id"`.
-  - Inspect generated `nico-admin-cli` pages in GitHub's renderer and OpenAPI
-    output with `make rest-api/preview-openapi`. Check navigation, anchors, wide
-    tables, Mermaid layout, and component rendering in the actual target; lint
-    success is not rendered verification.
-
-## Further Reading
-
-- [`README.md`](README.md) — Project overview and getting started
-- [`STYLE_GUIDE.md`](STYLE_GUIDE.md) — Detailed Rust coding conventions
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — Contribution workflow and DCO process
-- [`docs/architecture/overview.md`](docs/architecture/overview.md) — Architecture overview
+See [README.md](README.md) for orientation and
+[CONTRIBUTING.md](CONTRIBUTING.md) for contribution/signing requirements.

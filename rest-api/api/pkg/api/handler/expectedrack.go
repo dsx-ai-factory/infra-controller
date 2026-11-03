@@ -160,6 +160,9 @@ func (cerh CreateExpectedRackHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackDAO(cerh.dbSession)
 	expectedRack, err := cdb.WithTxResult(ctx, cerh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedRack, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
 		defer cancel()
 		// Create the ExpectedRack in DB
@@ -452,7 +455,7 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 	site := expectedRack.Site
 	if site == nil {
 		siteDAO := cdbm.NewSiteDAO(gerh.dbSession)
-		site, err = siteDAO.GetByID(ctx, nil, expectedRack.SiteID, nil, false)
+		site, err = siteDAO.GetByID(ctx, nil, expectedRack.SiteID, nil, false, false)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Rack due to DB error", nil)
@@ -619,6 +622,9 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 	}
 
 	updatedExpectedRack, err := cdb.WithTxResult(ctx, uerh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedRack, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Update ExpectedRack in DB
 		er, err := erDAO.Update(ctx, tx, updateInput)
 		if err != nil {
@@ -747,6 +753,9 @@ func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
 	}
 
 	err = cdb.WithTx(ctx, derh.dbSession, func(tx *cdb.Tx) error {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return apiErr
+		}
 		// Delete ExpectedRack from DB
 		if err := erDAO.Delete(ctx, tx, expectedRack.ID); err != nil {
 			logger.Error().Err(err).Msg("unable to delete ExpectedRack record from DB")
@@ -902,6 +911,10 @@ func (raerh ReplaceAllExpectedRacksHandler) Handle(c echo.Context) error {
 	replacedRacks, err := cdb.WithTxResult(ctx, raerh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedRack, error) {
 		rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
 		defer cancel()
+		lockErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if lockErr != nil {
+			return nil, lockErr
+		}
 		// Replace the set scoped to this Site
 		racks, err := erDAO.ReplaceAll(ctx, tx,
 			cdbm.ExpectedRackFilterInput{SiteIDs: []uuid.UUID{site.ID}},
@@ -1063,6 +1076,10 @@ func (daerh DeleteAllExpectedRacksHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackDAO(daerh.dbSession)
 	err = cdb.WithTx(ctx, daerh.dbSession, func(tx *cdb.Tx) error {
+		lockErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if lockErr != nil {
+			return lockErr
+		}
 		// Delete all ExpectedRacks for the Site
 		if err := erDAO.DeleteAll(ctx, tx, cdbm.ExpectedRackFilterInput{SiteIDs: []uuid.UUID{site.ID}}); err != nil {
 			logger.Error().Err(err).Msg("error deleting ExpectedRack records from DB")

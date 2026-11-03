@@ -134,6 +134,34 @@ func TestInventory(t *testing.T) {
 	assert.Equal(t, 2, found)
 }
 
+func TestSyncPowerStates(t *testing.T) {
+	ctx, pool := mirrorTestPool(t)
+	machineID := "host-1"
+	on := nicoapi.PowerStateOn
+	component := model.Component{
+		ComponentID: &machineID, PowerState: &on,
+	}
+	require.NoError(t, component.Create(ctx, pool.DB))
+	client := nicoapi.NewMockClient()
+	components := map[string]*model.Component{machineID: &component}
+	for _, step := range []struct {
+		name  string
+		state nicoapi.PowerState
+	}{
+		{"disabled observation replaces stored on", nicoapi.PowerStateUnknown},
+		{"fresh observation replaces unknown", nicoapi.PowerStateOff},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			client.AddPowerState(machineID, step.state)
+			syncPowerStates(ctx, pool, client, []string{machineID}, components)
+			var persisted model.Component
+			require.NoError(t, pool.DB.NewSelect().Model(&persisted).Where("id = ?", component.ID).Scan(ctx))
+			require.NotNil(t, persisted.PowerState)
+			require.Equal(t, step.state, *persisted.PowerState)
+		})
+	}
+}
+
 // TestSyncFirmwareVersion verifies that syncMachines sources compute firmware
 // from component inventory while preserving the prior value when that
 // best-effort inventory is unavailable.

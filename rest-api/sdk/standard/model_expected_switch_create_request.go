@@ -38,7 +38,10 @@ type ExpectedSwitchCreateRequest struct {
 	NvOsUsername NullableString `json:"nvOsUsername,omitempty"`
 	// NvOS password for the Expected Switch
 	NvOsPassword NullableString `json:"nvOsPassword,omitempty"`
-	// MAC addresses of the Expected Switch's NvOS management interfaces
+	// Required NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+	NvosInterfaces []NvosInterface `json:"nvosInterfaces"`
+	// Deprecated and ignored. This field never configures NVOS ports or primary selection, regardless of its contents. Use `nvosInterfaces`, including in replace-all entries. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
+	// Deprecated
 	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
@@ -68,11 +71,12 @@ type _ExpectedSwitchCreateRequest ExpectedSwitchCreateRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedSwitchCreateRequest(siteId string, bmcMacAddress string, switchSerialNumber string) *ExpectedSwitchCreateRequest {
+func NewExpectedSwitchCreateRequest(siteId string, bmcMacAddress string, switchSerialNumber string, nvosInterfaces []NvosInterface) *ExpectedSwitchCreateRequest {
 	this := ExpectedSwitchCreateRequest{}
 	this.SiteId = siteId
 	this.BmcMacAddress = bmcMacAddress
 	this.SwitchSerialNumber = switchSerialNumber
+	this.NvosInterfaces = nvosInterfaces
 	return &this
 }
 
@@ -328,7 +332,32 @@ func (o *ExpectedSwitchCreateRequest) UnsetNvOsPassword() {
 	o.NvOsPassword.Unset()
 }
 
+// GetNvosInterfaces returns the NvosInterfaces field value
+func (o *ExpectedSwitchCreateRequest) GetNvosInterfaces() []NvosInterface {
+	if o == nil {
+		var ret []NvosInterface
+		return ret
+	}
+
+	return o.NvosInterfaces
+}
+
+// GetNvosInterfacesOk returns a tuple with the NvosInterfaces field value
+// and a boolean to check if the value has been set.
+func (o *ExpectedSwitchCreateRequest) GetNvosInterfacesOk() ([]NvosInterface, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.NvosInterfaces, true
+}
+
+// SetNvosInterfaces sets field value
+func (o *ExpectedSwitchCreateRequest) SetNvosInterfaces(v []NvosInterface) {
+	o.NvosInterfaces = v
+}
+
 // GetNvosMacAddresses returns the NvosMacAddresses field value if set, zero value otherwise.
+// Deprecated
 func (o *ExpectedSwitchCreateRequest) GetNvosMacAddresses() []string {
 	if o == nil || IsNil(o.NvosMacAddresses) {
 		var ret []string
@@ -339,6 +368,7 @@ func (o *ExpectedSwitchCreateRequest) GetNvosMacAddresses() []string {
 
 // GetNvosMacAddressesOk returns a tuple with the NvosMacAddresses field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// Deprecated
 func (o *ExpectedSwitchCreateRequest) GetNvosMacAddressesOk() ([]string, bool) {
 	if o == nil || IsNil(o.NvosMacAddresses) {
 		return nil, false
@@ -356,6 +386,7 @@ func (o *ExpectedSwitchCreateRequest) HasNvosMacAddresses() bool {
 }
 
 // SetNvosMacAddresses gets a reference to the given []string and assigns it to the NvosMacAddresses field.
+// Deprecated
 func (o *ExpectedSwitchCreateRequest) SetNvosMacAddresses(v []string) {
 	o.NvosMacAddresses = v
 }
@@ -804,6 +835,7 @@ func (o ExpectedSwitchCreateRequest) ToMap() (map[string]interface{}, error) {
 	if o.NvOsPassword.IsSet() {
 		toSerialize["nvOsPassword"] = o.NvOsPassword.Get()
 	}
+	toSerialize["nvosInterfaces"] = o.NvosInterfaces
 	if !IsNil(o.NvosMacAddresses) {
 		toSerialize["nvosMacAddresses"] = o.NvosMacAddresses
 	}
@@ -848,6 +880,7 @@ func (o *ExpectedSwitchCreateRequest) UnmarshalJSON(data []byte) (err error) {
 		"siteId",
 		"bmcMacAddress",
 		"switchSerialNumber",
+		"nvosInterfaces",
 	}
 
 	allProperties := make(map[string]interface{})

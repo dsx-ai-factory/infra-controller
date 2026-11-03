@@ -19,7 +19,8 @@ use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     ConfigureSwitchCertificateJobStatus, NvSwitchManager, SwitchCertificateEndpoint,
     SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFirmwareUpdateStatus,
-    SwitchPasswordRotationState, SwitchSlotAndTrayResult,
+    SwitchMtlsDisableJobStatus, SwitchMtlsDisableState, SwitchPasswordRotationState,
+    SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     PowerShelfComponentResult, PowerShelfEndpoint, PowerShelfFirmwareUpdateStatus,
@@ -39,7 +40,33 @@ pub struct MockNvSwitchManager {
     expected_password_rotation_password: Option<String>,
     factory_reset_job_status_responses: Option<Arc<Mutex<VecDeque<FactoryResetJobStatusResult>>>>,
     factory_reset_job_status_calls: Arc<Mutex<Vec<String>>>,
+    mtls_disable_submission: Option<MockMtlsDisableSubmission>,
+    mtls_disable_job_status_responses: Option<Arc<Mutex<VecDeque<MtlsDisableJobStatusResult>>>>,
+    mtls_calls: Arc<Mutex<Vec<MockSwitchMtlsCall>>>,
 }
+
+/// Switch mTLS backend call recorded by [`MockNvSwitchManager`], in call order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockSwitchMtlsCall {
+    /// mTLS removal was submitted for these services.
+    DisableSubmitted { services: Vec<i32> },
+
+    /// A disable job's status was read.
+    DisableStatusRead { job_id: String },
+
+    /// Certificate configuration was submitted for these services.
+    CertificateSubmitted { services: Vec<i32> },
+}
+
+/// Configured outcome of submitting mTLS removal.
+#[derive(Debug, Clone)]
+enum MockMtlsDisableSubmission {
+    Job(String),
+    OutcomeUnknown(String),
+}
+
+/// Result returned by one configured mTLS-disable job-status poll.
+pub type MtlsDisableJobStatusResult = Result<SwitchMtlsDisableJobStatus, ComponentManagerError>;
 
 impl MockNvSwitchManager {
     /// Rejects the first certificate batch before dispatch, then accepts retries.
@@ -130,6 +157,40 @@ impl MockNvSwitchManager {
             Some(Arc::new(Mutex::new(responses.into_iter().collect())));
 
         self
+    }
+
+    /// Enables mTLS removal and makes submission return `job_id`. Without this, the
+    /// mock reports the operation as unsupported, like a backend lacking it.
+    pub fn with_mtls_disable_job(mut self, job_id: impl Into<String>) -> Self {
+        self.mtls_disable_submission = Some(MockMtlsDisableSubmission::Job(job_id.into()));
+        self
+    }
+
+    /// Makes mTLS-removal submission report an ambiguous outcome.
+    pub fn with_mtls_disable_outcome_unknown(mut self, message: impl Into<String>) -> Self {
+        self.mtls_disable_submission =
+            Some(MockMtlsDisableSubmission::OutcomeUnknown(message.into()));
+        self
+    }
+
+    /// Queues mTLS-disable job-status results in polling order. Without a queue,
+    /// polls report completion.
+    pub fn with_mtls_disable_job_status_responses(
+        mut self,
+        responses: impl IntoIterator<Item = MtlsDisableJobStatusResult>,
+    ) -> Self {
+        self.mtls_disable_job_status_responses =
+            Some(Arc::new(Mutex::new(responses.into_iter().collect())));
+
+        self
+    }
+
+    /// Returns recorded mTLS submissions and status reads in call order.
+    pub fn mtls_calls(&self) -> Vec<MockSwitchMtlsCall> {
+        self.mtls_calls
+            .lock()
+            .expect("mTLS calls lock poisoned")
+            .clone()
     }
 
     /// Returns the factory-reset parent job IDs requested by callers.
@@ -256,6 +317,13 @@ impl NvSwitchManager for MockNvSwitchManager {
             .unwrap()
             .push(services.unwrap_or_default().to_vec());
 
+        self.mtls_calls
+            .lock()
+            .expect("mTLS calls lock poisoned")
+            .push(MockSwitchMtlsCall::CertificateSubmitted {
+                services: services.unwrap_or_default().to_vec(),
+            });
+
         Ok("mock-switch-cert-job".to_string())
     }
 
@@ -289,9 +357,65 @@ impl NvSwitchManager for MockNvSwitchManager {
             .certificate_job_status
             .clone()
             .unwrap_or(ConfigureSwitchCertificateJobStatus {
+                failure: None,
                 state: ConfigureSwitchCertificateState::Completed,
                 error: None,
             }))
+    }
+
+    async fn batch_disable_switch_mtls(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+        services: &[i32],
+    ) -> Result<String, ComponentManagerError> {
+        let Some(submission) = &self.mtls_disable_submission else {
+            return Err(ComponentManagerError::Unsupported(
+                "mock switch mTLS disable is disabled".to_string(),
+            ));
+        };
+
+        self.mtls_calls
+            .lock()
+            .expect("mTLS calls lock poisoned")
+            .push(MockSwitchMtlsCall::DisableSubmitted {
+                services: services.to_vec(),
+            });
+
+        match submission {
+            MockMtlsDisableSubmission::Job(job_id) => Ok(job_id.clone()),
+            MockMtlsDisableSubmission::OutcomeUnknown(message) => Err(
+                ComponentManagerError::OperationOutcomeUnknown(message.clone()),
+            ),
+        }
+    }
+
+    async fn get_disable_switch_mtls_job_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchMtlsDisableJobStatus, ComponentManagerError> {
+        self.mtls_calls
+            .lock()
+            .expect("mTLS calls lock poisoned")
+            .push(MockSwitchMtlsCall::DisableStatusRead {
+                job_id: job_id.to_string(),
+            });
+
+        let Some(responses) = &self.mtls_disable_job_status_responses else {
+            return Ok(SwitchMtlsDisableJobStatus {
+                state: SwitchMtlsDisableState::Completed,
+                error: None,
+            });
+        };
+
+        responses
+            .lock()
+            .expect("mTLS-disable job-status responses lock poisoned")
+            .pop_front()
+            .unwrap_or_else(|| {
+                Err(ComponentManagerError::Internal(
+                    "no mock switch mTLS-disable job-status response queued".to_string(),
+                ))
+            })
     }
 
     async fn get_switch_factory_reset_job_status(

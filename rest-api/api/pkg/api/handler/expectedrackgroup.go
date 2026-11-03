@@ -162,6 +162,9 @@ func (cerh CreateExpectedRackGroupHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackGroupDAO(cerh.dbSession)
 	expectedRackGroup, err := cdb.WithTxResult(ctx, cerh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedRackGroup, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Create the ExpectedRackGroup in DB
 		er, err := erDAO.Create(ctx, tx, createInput)
 		if err != nil {
@@ -441,7 +444,7 @@ func (gerh GetExpectedRackGroupHandler) Handle(c echo.Context) error {
 	site := expectedRackGroup.Site
 	if site == nil {
 		siteDAO := cdbm.NewSiteDAO(gerh.dbSession)
-		site, err = siteDAO.GetByID(ctx, nil, expectedRackGroup.SiteID, nil, false)
+		site, err = siteDAO.GetByID(ctx, nil, expectedRackGroup.SiteID, nil, false, false)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Rack Group due to DB error", nil)
@@ -617,6 +620,9 @@ func (uerh UpdateExpectedRackGroupHandler) Handle(c echo.Context) error {
 	}
 
 	updatedExpectedRackGroup, err := cdb.WithTxResult(ctx, uerh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedRackGroup, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Update ExpectedRackGroup in DB
 		er, err := erDAO.Update(ctx, tx, updateInput)
 		if err != nil {
@@ -739,6 +745,9 @@ func (derh DeleteExpectedRackGroupHandler) Handle(c echo.Context) error {
 	}
 
 	err = cdb.WithTx(ctx, derh.dbSession, func(tx *cdb.Tx) error {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return apiErr
+		}
 		// Delete ExpectedRackGroup from DB
 		if err := erDAO.Delete(ctx, tx, expectedRackGroup.ID); err != nil {
 			logger.Error().Err(err).Msg("unable to delete ExpectedRackGroup record from DB")
@@ -891,6 +900,10 @@ func (raerh ReplaceAllExpectedRackGroupsHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackGroupDAO(raerh.dbSession)
 	replacedRackGroups, err := cdb.WithTxResult(ctx, raerh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedRackGroup, error) {
+		lockErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if lockErr != nil {
+			return nil, lockErr
+		}
 		// Replace the set scoped to this Site
 		racks, err := erDAO.ReplaceAll(ctx, tx,
 			cdbm.ExpectedRackGroupFilterInput{SiteIDs: []uuid.UUID{site.ID}},
@@ -1017,6 +1030,10 @@ func (daerh DeleteAllExpectedRackGroupsHandler) Handle(c echo.Context) error {
 
 	erDAO := cdbm.NewExpectedRackGroupDAO(daerh.dbSession)
 	err = cdb.WithTx(ctx, daerh.dbSession, func(tx *cdb.Tx) error {
+		lockErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if lockErr != nil {
+			return lockErr
+		}
 		// Delete all ExpectedRackGroups for the Site
 		if err := erDAO.DeleteAll(ctx, tx, cdbm.ExpectedRackGroupFilterInput{SiteIDs: []uuid.UUID{site.ID}}); err != nil {
 			logger.Error().Err(err).Msg("error deleting ExpectedRackGroup records from DB")

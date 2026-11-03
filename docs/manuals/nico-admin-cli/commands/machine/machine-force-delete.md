@@ -77,19 +77,21 @@ shutdown; force-delete cleanup may forcibly restart the host.
 `--wait-for-instance-dpu`
 
 Wait for all attached DPUs to acknowledge the Admin network
-configuration before deleting a host that has an Instance when force
+configuration before deleting a host that has an instance when force
 deletion starts. Disabled by default; a fresh deletion without this flag
 does not wait for DPU acknowledgements. A fresh deletion without an
-Instance does not wait.
+instance does not wait.
 
 Once recorded, the wait survives retries; omitting this flag cannot
 cancel it. Only servers supporting this option enforce a recorded wait.
 An older server can complete deletion without acknowledgement, even if a
 newer server already recorded the wait.
 
-An unavailable DPU can prevent completion indefinitely. The CLI polls
-every 5 seconds for up to 20 minutes, then exits with deletion still
-pending. This flag does not replace --allow-delete-with-instance.
+An unavailable DPU can prevent completion indefinitely. The CLI waits 5
+seconds between polling calls, with a nominal 20-minute retry limit. It
+checks the limit after RPC calls, so slow calls can extend the total
+time. A timeout does not cancel deletion. This flag does not replace
+--allow-delete-with-instance.
 
 `--allow-delete-with-orphaned-dpf-crds`
 

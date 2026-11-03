@@ -26,11 +26,12 @@ type noCallsClient struct {
 type powerStatusClient struct {
 	nicoapi.Client
 	queriedIDs []string
+	powerState nicoapi.PowerState
 }
 
 func (c *powerStatusClient) GetPowerStates(_ context.Context, ids []string) ([]nicoapi.MachinePowerState, error) {
 	c.queriedIDs = ids
-	return []nicoapi.MachinePowerState{{MachineID: "machine-1", PowerState: nicoapi.PowerStateOn}}, nil
+	return []nicoapi.MachinePowerState{{MachineID: "machine-1", PowerState: c.powerState}}, nil
 }
 
 func TestManager_GetPowerStatus(t *testing.T) {
@@ -39,13 +40,17 @@ func TestManager_GetPowerStatus(t *testing.T) {
 		kind       common.IdentifierType
 		identifier string
 		wantError  bool
+		powerState nicoapi.PowerState
+		wantStatus operations.PowerStatus
 	}{
-		{"old payload retains machine ID path", common.IdentifierTypeLegacy, "machine-1", false},
-		{"explicit machine ID", common.IdentifierTypeManagerID, "machine-1", false},
-		{"MAC rejected before Core call", common.IdentifierTypeMACAddress, "aa:bb:cc:dd:ee:01", true},
+		{"old payload retains machine ID path", common.IdentifierTypeLegacy, "machine-1", false, nicoapi.PowerStateOn, operations.PowerStatusOn},
+		{"explicit machine ID", common.IdentifierTypeManagerID, "machine-1", false, nicoapi.PowerStateOff, operations.PowerStatusOff},
+		{"disabled is not off", common.IdentifierTypeManagerID, "machine-1", false, nicoapi.PowerStateDisabled, operations.PowerStatusUnknown},
+		{"unknown is not off", common.IdentifierTypeManagerID, "machine-1", false, nicoapi.PowerStateUnknown, operations.PowerStatusUnknown},
+		{"MAC rejected before Core call", common.IdentifierTypeMACAddress, "aa:bb:cc:dd:ee:01", true, nicoapi.PowerStateOn, operations.PowerStatusOn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &powerStatusClient{}
+			client := &powerStatusClient{powerState: tc.powerState}
 			target := common.Target{Type: devicetypes.ComponentTypeCompute, IdentifierType: tc.kind, Identifiers: []string{tc.identifier}}
 			got, err := New(client, 0, nil).GetPowerStatus(context.Background(), target)
 			if tc.wantError {
@@ -56,7 +61,7 @@ func TestManager_GetPowerStatus(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, target.Identifiers, client.queriedIDs)
-			require.Equal(t, map[string]operations.PowerStatus{"machine-1": operations.PowerStatusOn}, got)
+			require.Equal(t, map[string]operations.PowerStatus{"machine-1": tc.wantStatus}, got)
 		})
 	}
 }

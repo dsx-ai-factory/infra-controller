@@ -39,7 +39,6 @@ mod machine_utils;
 mod mock_ssh_server;
 mod power_shelf_fsm;
 mod power_shelf_simulator;
-mod power_state;
 mod rack;
 mod run_jitter;
 mod scout_stream;
@@ -47,10 +46,14 @@ mod simulator_registry;
 mod status;
 mod switch_fsm;
 mod switch_simulator;
+mod tenant_network;
 
 use std::time::{Duration, Instant};
 
 pub use bmc_mock_wrapper::BmcMockRegistry;
+
+#[cfg(test)]
+mod bmc_reset_actor_tests;
 pub use config::{
     DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronArgs, MachineATronConfig,
     MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,
@@ -65,7 +68,10 @@ pub use device_simulator::{
 };
 pub use dhcp_wrapper::{DhcpClient, UdpDhcpService};
 pub use dpu_machine::DpuMachineHandle;
-pub use expected_inventory::ExpectedInventorySummary;
+pub use expected_inventory::{
+    DeviceRecord, DpuKey, ExpectedInventorySummary, ExpectedRecordsResponse, MemberIntent,
+    NicIntent, RackGroupIntent, RackIntent, ServedRecords,
+};
 pub use machine_a_tron::MachineATron;
 pub use mock_ssh_server::{
     Credentials as MockSshCredentials, MockSshServerHandle, PromptBehavior,

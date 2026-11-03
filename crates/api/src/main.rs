@@ -24,8 +24,16 @@ use clap::CommandFactory;
 use sqlx::PgPool;
 use sqlx::postgres::PgSslMode;
 
-#[tokio::main]
-async fn main() -> eyre::Result<()> {
+fn main() -> eyre::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        // Our code needs pretty large stacks...
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> eyre::Result<()> {
     let options = Options::load();
     if options.version {
         println!("{}", carbide_version::version!());
@@ -60,7 +68,8 @@ async fn main() -> eyre::Result<()> {
 
             // production cancel_token is driven by SIGTERM/SIGINT
             let cancel_token = carbide_utils::shutdown_handler::start()?;
-            // production readiness is gated by a TCP check on the gRPC port: ready_tx is a no-op
+            // Production Kubernetes readiness uses the database-backed `/ready` endpoint.
+            // The startup channel is retained for in-process callers; this binary does not consume it.
             let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
 
             carbide::run(

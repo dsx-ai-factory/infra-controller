@@ -221,6 +221,9 @@ Error: API error 400: Tenant Account status is not Invited
 - Read a set of otherwise provider-only resources, including machines, machine health, SKUs, racks, trays, and expected machines, at the sites of a provider it holds a `Ready` tenant account with, wherever the capability is effective. A site override that disables it also removes these reads at that site.
 - Receive alternative VPC routing profiles from `tenant/current/routing-profile`.
 
+Attaching interfaces to another tenant's VPC is a separate capability. See
+[Granting Cross-Tenant Interface Creation](#granting-cross-tenant-interface-creation).
+
 A Provider Admin configures it per tenant account with the `siteCapabilities` field. This is
 the only supported way to grant it, and it applies to regular tenants as well as
 service-account orgs:
@@ -236,12 +239,15 @@ nicocli tenant-account update \
 - Exactly one entry must have an empty or omitted `siteIds`. That entry sets the account-level default.
 - Any further entry lists site IDs that override the default. Each site must already be associated with the tenant, which happens when the tenant's first allocation at that site is created.
 - No site ID may appear in more than one entry.
-- `targetedInstanceCreation` is required on every entry.
+- Every entry must set at least one capability: `targetedInstanceCreation`, `crossTenantInterfaceCreation`, or both.
+- A site entry may only set capabilities that the account-default entry also sets.
 - The request must not also carry `tenantContactId`, which is the invitation-acceptance field. Sending both returns HTTP 400.
 
-Updates use replace semantics. A per-site override whose site ID is omitted from a later
-payload is cleared. To leave the capability on everywhere except one site, send both
-entries together:
+Updates replace each capability on its own. For every capability set in the account-default
+entry, the default is replaced and any per-site override of that capability whose site ID is
+omitted from the payload is cleared. A capability left out of the account-default entry keeps
+its current default and site overrides. To leave the capability on everywhere except one
+site, send both entries together:
 
 ```json
 {
@@ -276,6 +282,58 @@ Do not read `capabilities.targetedInstanceCreation` from `nicocli tenant current
 
 Use `nicocli tenant-account list` instead.
 </Warning>
+
+### Granting Cross-Tenant Interface Creation
+
+`crossTenantInterfaceCreation` lets a tenant attach non-primary instance interfaces to
+another tenant's VPC or VPC prefix at the same site. The interface selects the VPC with
+`vpcId` or the VPC prefix with `vpcPrefixId` on instance create, batch create, or update. The
+caller must be a Tenant Admin, and the VPC must be a `Ready` FNN VPC. The VPC or VPC prefix ID
+comes from the owning tenant out of band, because the capability does not grant discovery of
+or CRUD access to VPCs or VPC prefixes owned by other Tenants.
+
+These rules still apply with the capability:
+
+- The primary VPC and the primary physical interface must belong to the instance's own tenant.
+- Subnets owned by another tenant are rejected.
+- Instance-level Network Security Group policy takes precedence on every interface, including cross-tenant ones.
+
+A Provider Admin sets it with the same `siteCapabilities` field, following the
+[payload rules](#payload-rules) and [resolution order](#how-the-effective-value-resolves)
+described for `targetedInstanceCreation`. The two capabilities are independent, so this
+request leaves `targetedInstanceCreation` unchanged:
+
+```bash
+nicocli tenant-account update \
+  --data '{"siteCapabilities":[{"siteIds":[],"crossTenantInterfaceCreation":true}]}' \
+  <account-id>
+```
+
+#### After revocation
+
+Revoking the capability does not detach existing cross-tenant interfaces. Only a new
+cross-tenant interface identity needs the capability. After revocation, these requests still
+succeed:
+
+- An instance update that does not include `interfaces`.
+- An `interfaces` replacement that keeps every existing cross-tenant interface unchanged.
+- An `interfaces` replacement that removes one or more cross-tenant interfaces, including removing one while keeping another.
+- Instance deletion.
+
+Adding a cross-tenant interface, or retargeting one to a different VPC or VPC prefix owned by
+another tenant, returns HTTP 403.
+
+#### Seeing cross-tenant interfaces
+
+[`GET /v2/org/{org}/nico/interface`](api:GET/v2/org/:org/nico/interface) lists the interfaces
+on the caller's instances, plus interfaces on other tenants' instances that select one of the
+caller's VPCs or VPC prefixes. Listing does not require either capability. Set
+`crossTenant=true` to return only interfaces whose instance and VPC have different owners. On
+those results, `instanceTenantId` and `vpcTenantId` name the two owners. Both are `null` when
+the owners match. Filter by either owner with the `instanceTenantId` or `vpcTenantId` query
+parameter. `includeRelation` expands the instance or VPC prefix, including another tenant's.
+
+A VPC cannot be deleted while another tenant's instance still has an interface on it.
 
 ## Instance Types
 
@@ -510,7 +568,7 @@ Prefixes or Subnets and instances.
 | `--site-id` | yes | The site this VPC belongs to |
 | `--routing-profile` | no | One of `external`, `internal`, `privileged-internal` (REST API mapping); see core docs for semantics |
 | `--network-virtualization-type` | no | `FNN` for VPC Prefixes, `ETHERNET_VIRTUALIZER` for IPv4 Subnets, or `FLAT` for zero-DPU and NIC-mode hosts |
-| `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200) |
+| `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200/GB300/VR) |
 | `--vni` | no | Pin a specific VXLAN Network Identifier |
 | `--description` | no | |
 
@@ -680,6 +738,10 @@ nicocli tui
    automatically and skip this prompt.
 6. **SSH key groups** -- optional, attaches SSH keys for serial-console access
 
+For key registration, Site synchronization, and the connection procedure, see
+[SSH Console Setup and Access](ssh-console.md). The guide also covers updating
+an existing Instance's key-group attachments.
+
 For an image-based operating system, review [Image-Based Operating Systems](image-based-operating-systems.md) before making the definition available to tenants. Its disk selector applies to every eligible target and the selected whole disk is overwritten during installation.
 
 ### Verifying an Instance Is Running
@@ -725,7 +787,9 @@ phone_home:
   url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
-The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator can override this endpoint for each deployment. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator controls this site-wide value; it is not a per-instance transport selection. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+
+For direct access to the embedded agent's default listener, set the URL to `http://169.254.169.254:7777/latest/meta-data/phone_home`, or `http://[fd00:76b9::254]:7777/latest/meta-data/phone_home` when IPv6 metadata is enabled. Standalone FMDS defaults to port 80; both modes support listener overrides. A site mixing deployment modes must provide one URL reachable by all affected instances, accounting for any deployment-specific proxy or port forwarding. NICo does not choose the URL's address family or port separately for each DPU.
 
 When you disable phone-home, the removal behavior depends on whether the request supplies `userData`. If it does, NICo removes only a `phone_home` block that reports to the site endpoint and leaves blocks that report elsewhere unchanged. If the request omits `userData`, NICo edits the stored blob. If NICo stored that blob with phone-home enabled, it removes every `phone_home` block. A stored block can contain a URL from before a change to `site.phoneHomeUrl`.
 
@@ -772,7 +836,7 @@ cloud-init runs the `phone_home` module in its final stage, after the rest of yo
 
 - Phone-home only gates *status reporting*. It does not change how the host is provisioned or booted -- the reboot into the provisioned OS happens identically whether or not phone-home is enabled.
 - If phone-home is enabled but the booted OS never runs cloud-init, or the guest cannot reach the metadata endpoint, the callback never arrives and the instance stays in its provisioning state, never reporting ready.
-- The metadata endpoint (by default, `169.254.169.254`) is not a tenant-facing API, and is reachable only from the provisioned host over its link-local metadata link.
+- The callback uses the operator-configured `site.phoneHomeUrl`, which defaults to the DPU-local IPv4 metadata endpoint. Enabling IPv6 metadata transport does not change this setting. Before changing the site-wide URL, the platform operator must confirm that every affected phone-home-enabled guest can reach the selected address and deployment-specific port. Refer to [IPv6 Metadata Transport](../dpu-management/dpu-lifecycle-management.md#ipv6-metadata-transport). Changing the site setting does not rewrite existing stored user data automatically.
 - Rebooting the instance with a one-time custom iPXE override (`instance update --reboot-with-custom-ipxe=true`) re-arms the gate when phone-home is enabled: NICo clears the recorded contact, so the OS must phone home again before the instance is reported ready.
 
 ### Batch Instance Creation
@@ -870,26 +934,17 @@ nicocli instance delete <instance-id>
 
 In TUI mode, `instance delete` prompts for confirmation before proceeding. Deletion triggers the full sanitization workflow: secure erase of NVMe storage, GPU and system memory wipe, TPM reset, re-attestation, and network isolation teardown. The machine returns to the available pool once sanitization completes.
 
-### Machine-Level Emergency Operations (gRPC Only)
+### Machine-Level Emergency Operations
 
-For stuck or unresponsive machines that cannot be managed through the instance API, nico-admin-cli provides direct BMC operations:
+If a machine is stuck or unresponsive, operators can use `nico-admin-cli` for
+recovery. Choose the operation that matches the problem:
 
-```bash
-# Force-reboot via BMC
-nico-admin-cli -a <core-api-url> machine reboot --machine-id="<machine-id>"
-
-# Force-delete a stuck machine (destructive -- wipes machine state)
-nico-admin-cli -a <core-api-url> machine force-delete --machine="<machine-id>"
-```
-
-The unflagged command requires a Machine with no assigned Instance Type or
-attached Instance. Add `--allow-delete-with-instance-type` to remove an
-Instance Type association. `--allow-delete-with-instance` implies that
-override and removes the attached Instance control-plane record without first
-requesting a graceful workload shutdown. Force-delete cleanup may forcibly
-restart the host.
-
-See the [Machine Reboot](../playbooks/machine_reboot.md) and [Force Delete](../playbooks/force_delete.md) playbooks in the core documentation for detailed procedures.
+- To restart the machine, refer to the
+  [`machine reboot` reference](../manuals/nico-admin-cli/commands/machine/machine-reboot.md).
+- To remove its NICo records and restart discovery, follow
+  [Force Deleting and Rebuilding NICo Hosts](../playbooks/force_delete.md).
+  Force deletion does not wipe the tenant operating system or its data. The
+  playbook explains deletion consent and the optional wait for DPU confirmation.
 
 ## Tenant Lifecycle Operations
 
@@ -935,15 +990,21 @@ NICo has no first-class "disable" operation. Options:
 
 ### Tenant Teardown Sequence
 
-There is no `DELETE /tenant` endpoint -- tenant records are permanent. To fully decommission:
+There is no `DELETE /tenant` endpoint -- tenant records are permanent. For peerings
+with another tenant, arrange deletion with the Site's Provider Admin.
+
+To fully decommission:
 
 1. **Terminate all instances** -- delete every instance; each must reach `Terminated` status.
 2. **Delete all tenant network resources** -- remove VPC Prefixes or Subnets
    from every VPC, according to its `networkVirtualizationType`.
-3. **Delete all VPCs** -- remove the tenant's VPCs.
-4. **Delete all allocations** -- provider admin removes compute and network allocations.
-5. **Delete the tenant account** -- provider admin severs the link.
-6. **Revoke identity provider access** -- remove roles and optionally org membership.
+3. **Delete all VPC peerings** -- follow the
+   [peering deletion guide](../manuals/vpc/vpc_peering_management.md#deleting-vpc-peering-connections)
+   and wait for each connection to disappear.
+4. **Delete all VPCs** -- remove the tenant's VPCs.
+5. **Delete all allocations** -- provider admin removes compute and network allocations.
+6. **Delete the tenant account** -- provider admin severs the link.
+7. **Revoke identity provider access** -- remove roles and optionally org membership.
 
 After this sequence, the tenant record still exists but is inert.
 
@@ -1134,7 +1195,7 @@ Flag-first ordering -- always put flags before positional args.
 - [Quick Start Guide](../getting-started/quick-start.md), NICo deployment and Day Zero walkthrough
 - [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md), profile configuration and behavior
 - [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md), full networking architecture
-- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs (gRPC only)
+- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs and waiting for peering deletion
 - [NVLink Partitioning](../manuals/nvlink_partitioning.md), NVLink logical partition management
 - [Machine Reboot Playbook](../playbooks/machine_reboot.md), emergency BMC reboot procedures
 - [Force Delete Playbook](../playbooks/force_delete.md), removing stuck machines

@@ -63,7 +63,7 @@ impl DeltaPowerShelf<'_> {
                     redfish::ethernet_interface::builder(
                         &redfish::ethernet_interface::manager_resource("SMC", "eth0"),
                     )
-                    .mac_address(self.bmc_mac_address)
+                    .mac_address((self.bmc_mac_address).to_string())
                     .interface_enabled(true)
                     .build(),
                 ]),
@@ -86,7 +86,7 @@ impl DeltaPowerShelf<'_> {
         redfish::chassis::ChassisConfig {
             chassis: vec![redfish::chassis::SingleChassisConfig {
                 id: CHASSIS_ID.into(),
-                chassis_type: "RackMount".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                 manufacturer: Some("DELTA".into()),
                 part_number: Some("ECD68000048".into()),
                 model: Some("810".into()),
@@ -99,15 +99,15 @@ impl DeltaPowerShelf<'_> {
                         .iter()
                         .enumerate()
                         .map(|(idx, &on)| {
-                            redfish::power_supply::builder(&redfish::power_supply::resource(
-                                CHASSIS_ID,
-                                &format!("PowerSupplyUnit {}", idx + 1),
-                            ))
-                            .oem_delta_power_state(on)
-                            .oem_delta_fan_speed_target(0)
-                            .power_capacity_watts(5500.0)
-                            .status(redfish::resource::Status::Ok)
-                            .build()
+                            redfish::power_supply::PowerSupply::delta(
+                                &redfish::power_supply::resource(
+                                    CHASSIS_ID,
+                                    &format!("PowerSupplyUnit {}", idx + 1),
+                                ),
+                                on,
+                                5500.0,
+                                0,
+                            )
                         })
                         .collect(),
                 ),

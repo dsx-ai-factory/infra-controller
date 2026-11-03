@@ -6,6 +6,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -299,7 +302,7 @@ func TestServiceBuilder_BuildService_BMCIPAsExternalIP(t *testing.T) {
 }
 
 // TestServiceBuilder_BuildNvosService checks the per-switch NVOS Service: its
-// name, externalIP, and port 9370 forwarded to the bmc-mock listener.
+// name, externalIP, and ports 9370 and 443 forwarded to the bmc-mock listener.
 func TestServiceBuilder_BuildNvosService(t *testing.T) {
 	builder := &ServiceBuilder{
 		Namespace: "test-ns",
@@ -334,13 +337,49 @@ func TestServiceBuilder_BuildNvosService(t *testing.T) {
 	assert.Equal(t, "10.100.1.20", svc.Annotations[AnnotationNvosIP])
 	assert.Equal(t, "nvidia_switch_nd5200_ld", svc.Annotations[AnnotationHardwareType])
 	assert.NotContains(t, svc.Annotations, AnnotationBMCIP)
+	assert.NotContains(t, svc.Annotations, AnnotationAPIState, "state annotations follow the same gate as BMC Services")
+	assert.NotContains(t, svc.Annotations, AnnotationPowerState)
 
-	require.Len(t, svc.Spec.Ports, 1)
-	port := svc.Spec.Ports[0]
-	assert.Equal(t, PortNameNmxc, port.Name)
-	assert.Equal(t, corev1.ProtocolTCP, port.Protocol)
-	assert.Equal(t, int32(NmxcPort), port.Port, "NICo expects NMX-C on 9370")
-	assert.Equal(t, intstr.FromInt32(8443), port.TargetPort, "forwarded to the bmc-mock listener")
+	require.Len(t, svc.Spec.Ports, 2)
+	nmxc := svc.Spec.Ports[0]
+	assert.Equal(t, PortNameNmxc, nmxc.Name)
+	assert.Equal(t, corev1.ProtocolTCP, nmxc.Protocol)
+	assert.Equal(t, int32(NmxcPort), nmxc.Port, "NICo expects NMX-C on 9370")
+	assert.Equal(t, intstr.FromInt32(8443), nmxc.TargetPort, "forwarded to the bmc-mock listener")
+	nvue := svc.Spec.Ports[1]
+	assert.Equal(t, PortNameNvue, nvue.Name)
+	assert.Equal(t, corev1.ProtocolTCP, nvue.Protocol)
+	assert.Equal(t, int32(NvuePort), nvue.Port, "NICo expects the NVUE REST API on 443")
+	assert.Equal(t, intstr.FromInt32(8443), nvue.TargetPort, "forwarded to the bmc-mock listener")
+
+	builder.EnableStateAnnotations = true
+	svc = builder.BuildNvosService(sw, "mat-0")
+	assert.Equal(t, "Unknown", svc.Annotations[AnnotationAPIState])
+	assert.Equal(t, "On", svc.Annotations[AnnotationPowerState])
+}
+
+// TestComputeServiceDiff_SwitchStateChangeWithoutStateAnnotations checks
+// that a switch power-state change updates no NVOS Service while the state
+// annotations are off, so switch state changes cost no Service UPDATE.
+func TestComputeServiceDiff_SwitchStateChangeWithoutStateAnnotations(t *testing.T) {
+	builder := &ServiceBuilder{Namespace: "test-ns", BaseSelector: map[string]string{"app": "machine-a-tron"}}
+	sw := func(powerState string) *matclient.MachineStatus {
+		return &matclient.MachineStatus{
+			MatID:      "switch-1",
+			DeviceKind: matclient.DeviceKindSwitch,
+			PowerState: powerState,
+			NvosIP:     ptr("10.100.1.20"),
+			BMC:        matclient.BMCStatus{IP: ptr("10.100.0.20"), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 1266}},
+		}
+	}
+	existing := withAllocatedClusterIP(builder.BuildNvosService(sw("Off"), "mat-0"), "10.96.0.10")
+
+	diff := computeServiceDiff([]*corev1.Service{builder.BuildNvosService(sw("On"), "mat-0")}, []*corev1.Service{existing}, zerolog.Nop())
+
+	assert.Empty(t, diff.Update)
+	assert.Empty(t, diff.Create)
+	assert.Empty(t, diff.Recreate)
+	assert.Empty(t, diff.Delete)
 }
 
 // TestServiceBuilder_BuildServicesFromStatus_SwitchNvosEndpoint checks that a
@@ -1553,4 +1592,264 @@ func TestProcessDeletesConcurrently_PropagatesErrors(t *testing.T) {
 	assert.Equal(t, 0, deleted, "should not count failed deletes as deleted")
 	require.Len(t, result.Errors, 1, "should propagate delete error to result")
 	assert.Contains(t, result.Errors[0].Error(), "deleting service svc-1")
+}
+
+// podStatus returns one pod's status: hosts and DPUs behind the shared
+// listener, a switch with both leases, and devices still waiting for a lease.
+func podStatus() *matclient.MachinesStatusResponse {
+	redfish := matclient.EndpointStatus{ReachablePort: 443, ListenPort: 1266}
+	return &matclient.MachinesStatusResponse{Machines: []matclient.MachineStatus{
+		{
+			MatID: "host-1",
+			BMC: matclient.BMCStatus{
+				IP:      ptr("10.100.0.20"),
+				Redfish: redfish,
+				SSH:     &matclient.EndpointStatus{ReachablePort: 32022, ListenPort: 32022},
+			},
+			DPUs: []matclient.MachineStatus{
+				{MatID: "dpu-1", BMC: matclient.BMCStatus{IP: ptr("10.100.0.3"), Redfish: redfish}},
+				{MatID: "dpu-2", BMC: matclient.BMCStatus{Redfish: redfish}},
+			},
+		},
+		{MatID: "switch-1", DeviceKind: matclient.DeviceKindSwitch, NvosIP: ptr("10.101.0.9"), BMC: matclient.BMCStatus{IP: ptr("10.100.0.10"), Redfish: redfish}},
+		{MatID: "switch-2", DeviceKind: matclient.DeviceKindSwitch, NvosIP: ptr("10.101.0.2"), BMC: matclient.BMCStatus{IP: ptr("10.100.0.10"), Redfish: redfish}},
+		{MatID: "switch-3", DeviceKind: matclient.DeviceKindSwitch, NvosIP: ptr(""), BMC: matclient.BMCStatus{Redfish: redfish}},
+	}}
+}
+
+// TestServiceBuilder_PodGranularity checks the two per-pod Services: every
+// leased BMC address on the Redfish port and every leased NVOS address on the
+// NMX-C and NVUE ports, sorted and deduplicated, carrying the pod's labels,
+// selector and owner and no per-device port.
+func TestServiceBuilder_PodGranularity(t *testing.T) {
+	owner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: "nico-machine-a-tron-mat-0", UID: "uid-mat-0"}
+	builder := &ServiceBuilder{
+		Namespace:    "test-ns",
+		BaseSelector: map[string]string{"app": "machine-a-tron"},
+		Granularity:  ServiceGranularityPod,
+		OwnerRefs:    map[string]metav1.OwnerReference{"mat-0": owner},
+	}
+
+	services := builder.BuildServicesFromStatus(podStatus(), "mat-0")
+	require.Len(t, services, 2)
+
+	for _, svc := range services {
+		assert.Equal(t, "test-ns", svc.Namespace)
+		assert.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
+		assert.Empty(t, svc.Spec.ClusterIP, "the clusterIP is left to the apiserver")
+		assert.Equal(t, LabelManagedByValue, svc.Labels[LabelManagedBy])
+		assert.Equal(t, "mat-0", svc.Labels[LabelPodName])
+		assert.NotContains(t, svc.Labels, LabelMatID)
+		assert.Equal(t, map[string]string{"app": "machine-a-tron", LabelPodName: "mat-0"}, svc.Spec.Selector)
+		assert.Equal(t, []metav1.OwnerReference{owner}, svc.OwnerReferences)
+		assert.Equal(t, "1266", svc.Annotations[AnnotationRedfishListenPort])
+		for _, port := range svc.Spec.Ports {
+			assert.Equal(t, corev1.ProtocolTCP, port.Protocol)
+			assert.Equal(t, intstr.FromInt32(1266), port.TargetPort, "%s: every port targets the shared listener", svc.Name)
+		}
+	}
+
+	bmc, nvos := services[0], services[1]
+	assert.Equal(t, "mat-bmc-pod-mat-0", bmc.Name)
+	assert.Equal(t, MachineTypePodBMC, bmc.Labels[LabelMachineType])
+	assert.Equal(t, []string{"10.100.0.10", "10.100.0.20", "10.100.0.3"}, bmc.Spec.ExternalIPs)
+	assert.Equal(t, "3", bmc.Annotations[AnnotationPublishedAddresses])
+	require.Len(t, bmc.Spec.Ports, 1, "only the shared Redfish port is published")
+	assert.Equal(t, PortNameRedfish, bmc.Spec.Ports[0].Name)
+	assert.Equal(t, int32(443), bmc.Spec.Ports[0].Port)
+
+	assert.Equal(t, "mat-nvos-pod-mat-0", nvos.Name)
+	assert.Equal(t, MachineTypePodNvos, nvos.Labels[LabelMachineType])
+	assert.Equal(t, []string{"10.101.0.2", "10.101.0.9"}, nvos.Spec.ExternalIPs)
+	assert.Equal(t, "2", nvos.Annotations[AnnotationPublishedAddresses])
+	require.Len(t, nvos.Spec.Ports, 2, "NMX-C and NVUE, like the per-device NVOS Service")
+	assert.Equal(t, PortNameNmxc, nvos.Spec.Ports[0].Name)
+	assert.Equal(t, int32(NmxcPort), nvos.Spec.Ports[0].Port)
+	assert.Equal(t, PortNameNvue, nvos.Spec.Ports[1].Name)
+	assert.Equal(t, int32(NvuePort), nvos.Spec.Ports[1].Port)
+}
+
+// TestServiceBuilder_PodGranularity_PortMismatchKeepsDeviceService checks
+// that a device reporting another port pair than its pod keeps today's
+// per-device Service next to the pod Service.
+func TestServiceBuilder_PodGranularity_PortMismatchKeepsDeviceService(t *testing.T) {
+	builder := &ServiceBuilder{
+		Namespace:    "test-ns",
+		BaseSelector: map[string]string{"app": "machine-a-tron"},
+		Granularity:  ServiceGranularityPod,
+	}
+	shared := matclient.EndpointStatus{ReachablePort: 443, ListenPort: 1266}
+	own := matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443}
+	status := &matclient.MachinesStatusResponse{Machines: []matclient.MachineStatus{
+		{MatID: "host-1", BMC: matclient.BMCStatus{IP: ptr("10.100.0.1"), Redfish: shared}},
+		{MatID: "host-2", BMC: matclient.BMCStatus{IP: ptr("10.100.0.2"), Redfish: own}},
+		{MatID: "host-3", BMC: matclient.BMCStatus{IP: ptr("10.100.0.3"), Redfish: shared}},
+		{MatID: "switch-1", DeviceKind: matclient.DeviceKindSwitch, NvosIP: ptr("10.101.0.1"), BMC: matclient.BMCStatus{IP: ptr("10.100.0.4"), Redfish: shared}},
+		{MatID: "switch-2", DeviceKind: matclient.DeviceKindSwitch, NvosIP: ptr("10.101.0.2"), BMC: matclient.BMCStatus{IP: ptr("10.100.0.5"), Redfish: own}},
+		{MatID: "switch-3", DeviceKind: matclient.DeviceKindSwitch, NvosIP: ptr("10.101.0.3"), BMC: matclient.BMCStatus{IP: ptr("10.100.0.6"), Redfish: shared}},
+	}}
+
+	byName := make(map[string]*corev1.Service)
+	for _, svc := range builder.BuildServicesFromStatus(status, "mat-0") {
+		byName[svc.Name] = svc
+	}
+	require.Len(t, byName, 5, "two pod Services, two device BMC Services and one device NVOS Service")
+
+	pod := byName["mat-bmc-pod-mat-0"]
+	require.NotNil(t, pod)
+	assert.Equal(t, []string{"10.100.0.1", "10.100.0.3", "10.100.0.4", "10.100.0.6"}, pod.Spec.ExternalIPs)
+	assert.Equal(t, intstr.FromInt32(1266), pod.Spec.Ports[0].TargetPort)
+	for matID, ip := range map[string]string{"host-2": "10.100.0.2", "switch-2": "10.100.0.5"} {
+		device := byName[BuildServiceName(MachineTypeHost, matID)]
+		require.NotNil(t, device, matID)
+		assert.Equal(t, []string{ip}, device.Spec.ExternalIPs)
+		assert.Equal(t, intstr.FromInt32(8443), device.Spec.Ports[0].TargetPort)
+	}
+
+	nvos := byName["mat-nvos-pod-mat-0"]
+	require.NotNil(t, nvos)
+	assert.Equal(t, []string{"10.101.0.1", "10.101.0.3"}, nvos.Spec.ExternalIPs)
+	deviceNvos := byName[BuildNvosServiceName("switch-2")]
+	require.NotNil(t, deviceNvos)
+	assert.Equal(t, []string{"10.101.0.2"}, deviceNvos.Spec.ExternalIPs)
+	assert.Equal(t, intstr.FromInt32(8443), deviceNvos.Spec.Ports[0].TargetPort)
+}
+
+func TestCommonPortPair(t *testing.T) {
+	tests := []struct {
+		name  string
+		pairs []portPair
+		want  portPair
+	}{
+		{
+			name:  "the majority pair wins",
+			pairs: []portPair{{443, 8443}, {443, 1266}, {443, 1266}},
+			want:  portPair{443, 1266},
+		},
+		{
+			name:  "a tie goes to the lower pair whatever the report order",
+			pairs: []portPair{{443, 8443}, {443, 1266}},
+			want:  portPair{443, 1266},
+		},
+		{
+			name:  "the port is compared before the target port",
+			pairs: []portPair{{9370, 1}, {443, 9}},
+			want:  portPair{443, 9},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, commonPortPair(tt.pairs))
+			slices.Reverse(tt.pairs)
+			assert.Equal(t, tt.want, commonPortPair(tt.pairs))
+		})
+	}
+}
+
+func TestPodServiceName(t *testing.T) {
+	long := strings.Repeat("rack-", 12) // 60 characters, a valid label value
+	tests := []struct {
+		podName string
+		want    string
+	}{
+		{podName: "", want: "mat-bmc-pod"},
+		{podName: "mat-0", want: "mat-bmc-pod-mat-0"},
+		{podName: "Rack_Sim.1", want: "mat-bmc-pod-rack-sim-1-" + shortHash("Rack_Sim.1")},
+		{podName: long, want: "mat-bmc-pod-rack-rack-ra-" + shortHash(long)},
+	}
+	label := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+	for _, tt := range tests {
+		t.Run(tt.podName, func(t *testing.T) {
+			got := podServiceName(podBMCServicePrefix, tt.podName)
+			assert.Equal(t, tt.want, got)
+			assert.LessOrEqual(t, len(got), 63)
+			assert.Regexp(t, label, got, "a Service name is a DNS-1035 label")
+		})
+	}
+}
+
+// TestComputeServiceDiff_PodServiceLeaseRampUpdatesInPlace checks that a pod
+// Service grows in place as DHCP assigns addresses, keeping its clusterIP.
+func TestComputeServiceDiff_PodServiceLeaseRampUpdatesInPlace(t *testing.T) {
+	builder := &ServiceBuilder{Namespace: "test-ns", BaseSelector: map[string]string{"app": "machine-a-tron"}, Granularity: ServiceGranularityPod}
+	status := podStatus()
+	before := builder.BuildServicesFromStatus(&matclient.MachinesStatusResponse{Machines: status.Machines[1:]}, "mat-0")
+	existing := withAllocatedClusterIP(before[0], "10.96.0.10")
+	existing.ResourceVersion = "7"
+	require.Equal(t, []string{"10.100.0.10"}, existing.Spec.ExternalIPs)
+
+	diff := computeServiceDiff(builder.BuildServicesFromStatus(status, "mat-0"), []*corev1.Service{existing}, zerolog.Nop())
+
+	assert.Len(t, diff.Create, 1, "the NVOS Service is new")
+	assert.Empty(t, diff.Recreate)
+	assert.Empty(t, diff.Delete)
+	assert.Empty(t, diff.Errors)
+	require.Len(t, diff.Update, 1)
+	updated := diff.Update[0]
+	assert.Equal(t, "mat-bmc-pod-mat-0", updated.Name)
+	assert.Equal(t, []string{"10.100.0.10", "10.100.0.20", "10.100.0.3"}, updated.Spec.ExternalIPs)
+	assert.Equal(t, "3", updated.Annotations[AnnotationPublishedAddresses])
+	assert.Equal(t, "10.96.0.10", updated.Spec.ClusterIP)
+	assert.Equal(t, "7", updated.ResourceVersion)
+}
+
+// TestComputeServiceDiff_DuplicateAddressAcrossPodsWithdrawsOnlyThatAddress
+// checks that an address two pods publish stays with the pod Service first by
+// name and is withdrawn from the other one's list alone, so the rest of that
+// pod stays reachable.
+func TestComputeServiceDiff_DuplicateAddressAcrossPodsWithdrawsOnlyThatAddress(t *testing.T) {
+	builder := &ServiceBuilder{Namespace: "test-ns", Granularity: ServiceGranularityPod}
+	redfish := matclient.EndpointStatus{ReachablePort: 443, ListenPort: 1266}
+	status := func(ips ...string) *matclient.MachinesStatusResponse {
+		resp := &matclient.MachinesStatusResponse{}
+		for i, ip := range ips {
+			resp.Machines = append(resp.Machines, matclient.MachineStatus{MatID: fmt.Sprintf("host-%d", i), BMC: matclient.BMCStatus{IP: ptr(ip), Redfish: redfish}})
+		}
+		return resp
+	}
+	// mat-1 is reported first; the Service name decides which pod keeps the address
+	desired := builder.BuildServicesFromStatus(status("10.100.0.2", "10.100.0.3"), "mat-1")
+	desired = append(desired, builder.BuildServicesFromStatus(status("10.100.0.1", "10.100.0.2"), "mat-0")...)
+
+	diff := computeServiceDiff(desired, nil, zerolog.Nop())
+
+	require.Len(t, diff.Errors, 1)
+	assert.EqualError(t, diff.Errors[0], "service mat-bmc-pod-mat-1 publishes address 10.100.0.2 already published by mat-bmc-pod-mat-0")
+	require.Len(t, diff.Create, 2)
+	assert.Equal(t, []string{"10.100.0.1", "10.100.0.2"}, diff.Create[0].Spec.ExternalIPs)
+	assert.Equal(t, "2", diff.Create[0].Annotations[AnnotationPublishedAddresses])
+	assert.Equal(t, []string{"10.100.0.3"}, diff.Create[1].Spec.ExternalIPs)
+	assert.Equal(t, "1", diff.Create[1].Annotations[AnnotationPublishedAddresses])
+}
+
+// TestReconciler_SwitchingToPodGranularityReplacesDeviceServices checks that
+// a controller restarted at pod granularity deletes the per-device Services
+// and publishes the same addresses through the per-pod ones in one pass.
+func TestReconciler_SwitchingToPodGranularityReplacesDeviceServices(t *testing.T) {
+	status := podStatus()
+	k8sClient := &trackingK8sClient{services: make(map[string]*corev1.Service)}
+	deviceBuilder := &ServiceBuilder{Namespace: "test-ns", BaseSelector: map[string]string{"app": "machine-a-tron"}}
+	for _, svc := range deviceBuilder.BuildServicesFromStatus(status, "mat-0") {
+		require.NoError(t, k8sClient.Create(context.Background(), svc))
+	}
+	require.Len(t, k8sClient.services, 6, "hosts, DPUs and switches with a lease, plus two NVOS Services")
+
+	podBuilder := &ServiceBuilder{Namespace: "test-ns", BaseSelector: map[string]string{"app": "machine-a-tron"}, Granularity: ServiceGranularityPod}
+	discovery := &mockDiscovery{instances: []DiscoveredInstance{{URL: "https://mat-0.ns.svc:8443", PodName: "mat-0", ServiceName: "nico-machine-a-tron-mat-0-bmc-mock"}}}
+	reconciler := NewReconciler(discovery, podBuilder, k8sClient, nil, nil, zerolog.Nop())
+	reconciler.statusFetcher = func(string) (StatusFetcher, error) { return &mockStatusFetcher{status: status}, nil }
+
+	result := reconciler.Reconcile(context.Background())
+	require.Empty(t, result.Errors)
+	assert.Equal(t, 6, result.Deleted)
+	assert.Equal(t, 2, result.Created)
+	assert.Equal(t, 0, result.Updated+result.Recreated)
+	require.Len(t, k8sClient.services, 2)
+	assert.Equal(t, []string{"10.100.0.10", "10.100.0.20", "10.100.0.3"}, k8sClient.services["mat-bmc-pod-mat-0"].Spec.ExternalIPs)
+	assert.Equal(t, []string{"10.101.0.2", "10.101.0.9"}, k8sClient.services["mat-nvos-pod-mat-0"].Spec.ExternalIPs)
+
+	// Converged
+	result = reconciler.Reconcile(context.Background())
+	require.Empty(t, result.Errors)
+	assert.Equal(t, 0, result.Created+result.Updated+result.Deleted+result.Recreated)
 }

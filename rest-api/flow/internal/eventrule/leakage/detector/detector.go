@@ -27,6 +27,7 @@ const SourceName = "nico_core_leakage"
 
 // Reader exposes the NICo leakage queries used by Detector.
 type Reader interface {
+	GetLeakingRackIds(context.Context) ([]string, error)
 	GetLeakingMachineIds(context.Context) ([]string, error)
 	GetLeakingSwitchIds(context.Context) ([]string, error)
 }
@@ -35,13 +36,13 @@ type Reader interface {
 type IngestFunc func(context.Context, eventrule.Envelope) error
 
 func newOccurrenceKey(
-	componentType flowtypes.ComponentType,
+	resourceType string,
 	externalID string,
 	suffix string,
 ) string {
 	return fmt.Sprintf(
 		"%s/%s/%s",
-		strings.ToLower(string(componentType)),
+		strings.ToLower(resourceType),
 		url.PathEscape(externalID),
 		suffix,
 	)
@@ -53,6 +54,7 @@ type occurrence struct {
 }
 
 func (o occurrence) envelope(
+	resourceKind eventrule.ResourceKind,
 	componentType flowtypes.ComponentType,
 	observedAt time.Time,
 ) eventrule.Envelope {
@@ -61,7 +63,7 @@ func (o occurrence) envelope(
 		Type:     leakage.TypeHardwareLeakDetected,
 		Severity: eventrule.SeverityCritical,
 		Resource: eventrule.Resource{
-			Kind:              eventrule.ResourceKindComponent,
+			Kind:              resourceKind,
 			ExternalID:        o.externalID,
 			ComponentTypeHint: componentType,
 		},
@@ -69,15 +71,15 @@ func (o occurrence) envelope(
 	}
 }
 
-// Detector polls NICo and retains one source key while a component remains in
-// the leaking result set. If a component clears and later leaks again, it gets
-// a new occurrence key. NICo currently exposes component identities but no
-// upstream leak-occurrence identity, so the detector generates and retains the
-// occurrence suffix locally.
+// Detector polls NICo and retains one source key while a resource remains in
+// the leaking result set. If a resource clears and later leaks again, it gets a
+// new occurrence key. NICo does not expose an upstream leak-occurrence
+// identity, so the detector generates and retains the occurrence suffix
+// locally.
 type Detector struct {
 	reader        Reader
 	mu            sync.Mutex
-	active        map[flowtypes.ComponentType]map[string]string
+	active        map[string]map[string]string
 	now           func() time.Time
 	newOccurrence func() string
 }
@@ -90,14 +92,14 @@ func New(reader Reader) (*Detector, error) {
 
 	return &Detector{
 		reader:        reader,
-		active:        make(map[flowtypes.ComponentType]map[string]string),
+		active:        make(map[string]map[string]string),
 		now:           time.Now,
 		newOccurrence: uuid.NewString,
 	}, nil
 }
 
-// Collect reads every currently leaking machine and switch and ingests their
-// events one at a time. Terminal per-event failures are accumulated while
+// Collect reads every currently leaking rack, machine, and switch and ingests
+// their events one at a time. Terminal per-event failures are accumulated while
 // collection continues. Successful source queries update occurrence state
 // independently, so an outage in one query does not clear or suppress results
 // from the other.
@@ -113,11 +115,32 @@ func (d *Detector) Collect(ctx context.Context, ingest IngestFunc) error {
 	var collectErr error
 
 	sources := []struct {
+		resourceType  string
+		description   string
+		resourceKind  eventrule.ResourceKind
 		componentType flowtypes.ComponentType
 		load          func(context.Context) ([]string, error)
 	}{
-		{componentType: flowtypes.ComponentTypeCompute, load: d.reader.GetLeakingMachineIds},
-		{componentType: flowtypes.ComponentTypeNVSwitch, load: d.reader.GetLeakingSwitchIds},
+		{
+			resourceType: "rack",
+			description:  "racks",
+			resourceKind: eventrule.ResourceKindRack,
+			load:         d.reader.GetLeakingRackIds,
+		},
+		{
+			resourceType:  string(flowtypes.ComponentTypeCompute),
+			description:   "compute components",
+			resourceKind:  eventrule.ResourceKindComponent,
+			componentType: flowtypes.ComponentTypeCompute,
+			load:          d.reader.GetLeakingMachineIds,
+		},
+		{
+			resourceType:  string(flowtypes.ComponentTypeNVSwitch),
+			description:   "NVSwitch components",
+			resourceKind:  eventrule.ResourceKindComponent,
+			componentType: flowtypes.ComponentTypeNVSwitch,
+			load:          d.reader.GetLeakingSwitchIds,
+		},
 	}
 
 	for _, source := range sources {
@@ -125,7 +148,7 @@ func (d *Detector) Collect(ctx context.Context, ingest IngestFunc) error {
 		if err != nil {
 			collectErr = errors.Join(
 				collectErr,
-				fmt.Errorf("collect leaking %s components: %w", source.componentType, err),
+				fmt.Errorf("collect leaking %s: %w", source.description, err),
 			)
 			continue
 		}
@@ -134,6 +157,8 @@ func (d *Detector) Collect(ctx context.Context, ingest IngestFunc) error {
 
 		err = d.ingestEvents(
 			ctx,
+			source.resourceType,
+			source.resourceKind,
 			source.componentType,
 			ids,
 			ingest,
@@ -154,17 +179,23 @@ func (d *Detector) Collect(ctx context.Context, ingest IngestFunc) error {
 
 func (d *Detector) ingestEvents(
 	ctx context.Context,
+	resourceType string,
+	resourceKind eventrule.ResourceKind,
 	componentType flowtypes.ComponentType,
 	externalIDs []string,
 	ingest IngestFunc,
 ) error {
 	var terminalErr error
 
-	occurrences := d.buildOccurrences(componentType, externalIDs)
+	occurrences := d.buildOccurrences(resourceType, externalIDs)
+	if len(occurrences) == 0 {
+		return nil
+	}
+
 	observedAt := d.now()
 
 	for _, occurrence := range occurrences {
-		envelope := occurrence.envelope(componentType, observedAt)
+		envelope := occurrence.envelope(resourceKind, componentType, observedAt)
 		err := ingest(ctx, envelope)
 		if err != nil {
 			// A dependency may return its own error after cancellation. Preserve the
@@ -178,8 +209,8 @@ func (d *Detector) ingestEvents(
 			}
 
 			err = fmt.Errorf(
-				"ingest leaking %s component %q: %w",
-				componentType,
+				"ingest leaking %s resource %q: %w",
+				resourceType,
 				occurrence.externalID,
 				err,
 			)
@@ -211,14 +242,14 @@ func normalizeExternalIDs(externalIDs []string) []string {
 	return ids
 }
 
-// buildOccurrences returns a stable source key for each component throughout
+// buildOccurrences returns a stable source key for each resource throughout
 // one continuous leakage occurrence. An identity remains active while it is
 // present in successive successful polls, so repeated events can be
 // deduplicated. A successful poll that omits the identity ends the occurrence;
 // if it appears again later, it receives a new source key. Load failures do not
 // call this method and therefore do not end active occurrences.
 func (d *Detector) buildOccurrences(
-	componentType flowtypes.ComponentType,
+	resourceType string,
 	externalIDs []string,
 ) []occurrence {
 	current := make(map[string]string, len(externalIDs))
@@ -227,12 +258,12 @@ func (d *Detector) buildOccurrences(
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	previous := d.active[componentType]
+	previous := d.active[resourceType]
 
 	for _, externalID := range externalIDs {
 		key, exists := previous[externalID]
 		if !exists {
-			key = newOccurrenceKey(componentType, externalID, d.newOccurrence())
+			key = newOccurrenceKey(resourceType, externalID, d.newOccurrence())
 		}
 
 		current[externalID] = key
@@ -242,7 +273,7 @@ func (d *Detector) buildOccurrences(
 		})
 	}
 
-	d.active[componentType] = current
+	d.active[resourceType] = current
 
 	return occurrences
 }

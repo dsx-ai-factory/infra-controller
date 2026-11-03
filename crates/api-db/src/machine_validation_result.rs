@@ -37,6 +37,10 @@ impl ColumnInfo<'_> for MachineValidationIdColumn {
     }
 }
 
+/// `find_by_machine_id` returns results for the discovery, cleanup, and on-demand
+/// validation runs referenced by the machine, or results from all its runs when
+/// `include_history` is set. Without history, a missing machine returns
+/// `NotFoundError`; other lookup errors propagate unchanged.
 pub async fn find_by_machine_id<DB>(
     txn: &mut DB,
     machine_id: &MachineId,
@@ -72,9 +76,7 @@ where
         {
             Err(err) => {
                 tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                return Err(DatabaseError::InvalidArgument(
-                    "err loading machine".to_string(),
-                ));
+                return Err(err);
             }
             Ok(None) => {
                 tracing::info!(%machine_id, "machine not found");

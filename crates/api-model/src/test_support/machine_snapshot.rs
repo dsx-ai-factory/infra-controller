@@ -368,6 +368,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
 
     MachineSnapshotPgJson {
         machine_maintenance_requested: None,
+        spx_multiplane: None,
         decommission_requested: false,
         bmc_credential_rotation_requested: false,
         uefi_credential_rotation_requested: false,
@@ -425,6 +426,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
         }),
         nvlink_status_observation: None,
         spx_status_observation: None,
+        spx_multiplane_status: None,
         mlx_device_observation: None,
         extension_service_status_observations: Default::default(),
         controller_state_version: config_version(5).version_string(),
@@ -459,6 +461,8 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
             last_updated: fixture_time(1600),
         }),
         firmware_autoupdate: Some(true),
+        nic_firmware_profile_id: None,
+        nic_firmware_card_selections: vec![],
         health_reports: Some(health_reports(if dpu_machine_id.is_some() {
             HealthReport::DPU_AGENT_SOURCE
         } else {

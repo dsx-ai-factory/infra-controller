@@ -14,16 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fmt::{Debug, Display};
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use regex::Regex;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
-use crate::site_explorer::EndpointExplorationReport;
+use crate::site_explorer::{EndpointExplorationReport, Service};
 
 /// Firmware versions this carbide instance wants to install onto hosts
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -130,6 +131,41 @@ impl Firmware {
         ordering
     }
 
+    /// Every installed inventory entry matching each configured component, as
+    /// the updater matches them. A configured component without a match gets
+    /// an empty group. Groups are sorted by component slug, then by drive
+    /// model, and entries by service, inventory and version. `None` when a
+    /// configured component is unknown.
+    pub fn installed_inventory(&self, services: &[Service]) -> Option<Vec<ComponentInventory>> {
+        let mut groups = self
+            .components
+            .keys()
+            .map(|&component| {
+                let mut entries: Vec<_> = services
+                    .iter()
+                    .flat_map(|service| {
+                        service
+                            .inventories
+                            .iter()
+                            .filter(move |inventory| {
+                                self.matching_version_id(&inventory.id, component)
+                            })
+                            .map(|inventory| InstalledFirmwareEntry {
+                                service_id: service.id.clone(),
+                                inventory_id: inventory.id.clone(),
+                                version: inventory.version.clone(),
+                            })
+                    })
+                    .collect();
+                entries.sort();
+                (component != FirmwareComponentType::Unknown)
+                    .then_some(ComponentInventory { component, entries })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        groups.sort_by_key(|group| (group.component.slug(), group.component));
+        Some(groups)
+    }
+
     /// find_version will locate a version number within an EndpointExplorationReport
     pub fn find_version(
         &self,
@@ -155,10 +191,14 @@ impl Firmware {
     }
 }
 
-#[derive(
-    Debug, Default, Deserialize, Serialize, Eq, PartialEq, Hash, Copy, Clone, Ord, PartialOrd,
-)]
-#[serde(rename_all = "lowercase")]
+/// A host firmware component.
+///
+/// Serialized as its lowercase [`slug`](Self::slug) (`bmc`, `cx7`,
+/// `combinedbmcuefi`, ...), or as `drive-<model>` for a drive model. These
+/// names are stored in firmware configuration, machine state and exploration
+/// reports, so they never change. A name that is not recognized, including a
+/// malformed drive name, reads as [`Unknown`](Self::Unknown).
+#[derive(Debug, Default, Eq, PartialEq, Hash, Copy, Clone, Ord, PartialOrd)]
 pub enum FirmwareComponentType {
     Bmc,
     Cec,
@@ -170,10 +210,65 @@ pub enum FirmwareComponentType {
     CombinedBmcUefi,
     Gpu,
     Cx7,
-    #[serde(other)]
+    /// The firmware of one drive model, named `drive-<model>`. `model` is the
+    /// drive's Redfish `Model` exactly as the BMC reports it, such as
+    /// `KCD8DPUG15T3` or `Dell Ent NVMe CM6 RI 1.92TB`: non-empty, without
+    /// leading or trailing whitespace.
+    Drive {
+        model: DriveModel,
+    },
     #[default]
     Unknown,
 }
+
+/// A drive's Redfish `Model`, interned so that [`FirmwareComponentType`] stays
+/// `Copy`.
+///
+/// Each distinct model is stored once and kept for the life of the process.
+/// Models come only from firmware configuration and the machine state and
+/// reports derived from it, so the set stays as small as the number of drive
+/// models configured.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DriveModel(&'static str);
+
+impl DriveModel {
+    /// Returns the interned model, storing it on first use, or `None` when
+    /// `model` is empty or has leading or trailing whitespace: such a model
+    /// would not read back from its `drive-<model>` name.
+    pub fn new(model: &str) -> Option<Self> {
+        if model.is_empty() || model != model.trim() {
+            return None;
+        }
+        static MODELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+        let mut models = MODELS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(&stored) = models.get(model) {
+            return Some(Self(stored));
+        }
+        let stored: &'static str = Box::leak(model.into());
+        models.insert(stored);
+        Some(Self(stored))
+    }
+
+    /// The model as the BMC reports it.
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl fmt::Display for DriveModel {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl fmt::Debug for DriveModel {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(self.0, f)
+    }
+}
+
+/// Prefix of a drive component's name: `drive-<model>`.
+const DRIVE_PREFIX: &str = "drive-";
 
 impl fmt::Display for FirmwareComponentType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -188,12 +283,68 @@ impl fmt::Display for FirmwareComponentType {
             FirmwareComponentType::Gpu => write!(f, "GPU"),
             FirmwareComponentType::HGXBmc => write!(f, "HGX BMC"),
             FirmwareComponentType::Cx7 => write!(f, "CX7"),
+            // Scout passes this to drive scripts as COMPONENT_TYPE.
+            FirmwareComponentType::Drive { model } => write!(f, "{DRIVE_PREFIX}{model}"),
             FirmwareComponentType::Unknown => write!(f, "Unknown"),
         }
     }
 }
 
+impl Serialize for FirmwareComponentType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // A drive's stored name is its Display text.
+            FirmwareComponentType::Drive { .. } => serializer.collect_str(self),
+            other => serializer.serialize_str(other.slug()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FirmwareComponentType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct NameVisitor;
+
+        impl de::Visitor<'_> for NameVisitor {
+            type Value = FirmwareComponentType;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a firmware component name")
+            }
+
+            fn visit_str<E: de::Error>(self, name: &str) -> Result<Self::Value, E> {
+                Ok(FirmwareComponentType::from_name(name))
+            }
+        }
+
+        deserializer.deserialize_str(NameVisitor)
+    }
+}
+
 impl FirmwareComponentType {
+    /// Parses a serialized component name; unrecognized names are `Unknown`.
+    fn from_name(name: &str) -> Self {
+        match name {
+            "bmc" => FirmwareComponentType::Bmc,
+            "cec" => FirmwareComponentType::Cec,
+            "uefi" => FirmwareComponentType::Uefi,
+            "nic" => FirmwareComponentType::Nic,
+            "cpldmb" => FirmwareComponentType::CpldMb,
+            "cpldpdb" => FirmwareComponentType::CpldPdb,
+            "hgxbmc" => FirmwareComponentType::HGXBmc,
+            "combinedbmcuefi" => FirmwareComponentType::CombinedBmcUefi,
+            "gpu" => FirmwareComponentType::Gpu,
+            "cx7" => FirmwareComponentType::Cx7,
+            _ => name
+                .strip_prefix(DRIVE_PREFIX)
+                .and_then(DriveModel::new)
+                .map_or(FirmwareComponentType::Unknown, |model| {
+                    FirmwareComponentType::Drive { model }
+                }),
+        }
+    }
+
+    /// The lowercase name of the component type. Every drive model shares
+    /// `drive`.
     pub fn slug(self) -> &'static str {
         match self {
             FirmwareComponentType::Bmc => "bmc",
@@ -206,6 +357,7 @@ impl FirmwareComponentType {
             FirmwareComponentType::CombinedBmcUefi => "combinedbmcuefi",
             FirmwareComponentType::Gpu => "gpu",
             FirmwareComponentType::Cx7 => "cx7",
+            FirmwareComponentType::Drive { .. } => "drive",
             FirmwareComponentType::Unknown => "unknown",
         }
     }
@@ -446,9 +598,230 @@ impl Display for AgentUpgradePolicyChoice {
     }
 }
 
+/// Installed inventory entries matched to one configured component.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentInventory {
+    pub component: FirmwareComponentType,
+    pub entries: Vec<InstalledFirmwareEntry>,
+}
+
+/// One installed firmware inventory entry of an explored report.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InstalledFirmwareEntry {
+    pub service_id: String,
+    pub inventory_id: String,
+    pub version: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
+
     use super::*;
+    use crate::site_explorer::Inventory;
+
+    #[test]
+    fn inventory_keeps_every_match() {
+        let firmware = |components: &[(FirmwareComponentType, &str)]| Firmware {
+            components: components
+                .iter()
+                .map(|&(component, regex)| {
+                    let reported_as = Some(Regex::new(regex).unwrap());
+                    (
+                        component,
+                        FirmwareComponent {
+                            current_version_reported_as: reported_as,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let services = |inventories: &[(&str, Option<&str>)]| {
+            let inventories = inventories.iter().map(|&(id, version)| Inventory {
+                id: id.to_string(),
+                version: version.map(str::to_string),
+                ..Default::default()
+            });
+            let id = "FirmwareInventory".to_string();
+            vec![Service {
+                id,
+                inventories: inventories.collect(),
+            }]
+        };
+        let entry = |inventory_id: &str, version: Option<&str>| InstalledFirmwareEntry {
+            service_id: "FirmwareInventory".to_string(),
+            inventory_id: inventory_id.to_string(),
+            version: version.map(str::to_string),
+        };
+        let cx7_and_bmc = firmware(&[
+            (FirmwareComponentType::Cx7, "^CX7_"),
+            (FirmwareComponentType::Bmc, "^BMC$"),
+        ]);
+        let both_cards = Some(vec![
+            ("bmc", vec![]),
+            (
+                "cx7",
+                vec![entry("CX7_0", Some("28.2")), entry("CX7_1", Some("28.1"))],
+            ),
+        ]);
+
+        value_scenarios!(
+            run = |(firmware, installed): (&Firmware, Vec<Service>)| {
+                let groups = firmware.installed_inventory(&installed)?;
+                Some(groups.into_iter().map(|group| (group.component.slug(), group.entries)).collect::<Vec<_>>())
+            };
+            "every match is kept in any report order, a component without one is empty" {
+                (&cx7_and_bmc, services(&[("CX7_0", Some("28.2")), ("NIC_0", Some("1")), ("CX7_1", Some("28.1"))])) => both_cards.clone(),
+                (&cx7_and_bmc, services(&[("CX7_1", Some("28.1")), ("CX7_0", Some("28.2"))])) => both_cards.clone(),
+            }
+            "an entry without a version is kept" {
+                (&cx7_and_bmc, services(&[("BMC", None)])) => Some(vec![("bmc", vec![entry("BMC", None)]), ("cx7", vec![])]),
+            }
+            "an unknown configured component fails closed" {
+                (&firmware(&[(FirmwareComponentType::Unknown, "^X$")]), services(&[("X", Some("1"))])) => None,
+            }
+        );
+    }
+
+    fn drive(model: &str) -> FirmwareComponentType {
+        FirmwareComponentType::Drive {
+            model: DriveModel::new(model).unwrap(),
+        }
+    }
+
+    /// The stored name, the parsed value and the `Display` text agree.
+    #[test]
+    fn component_type_names() {
+        let check = |name: &str| {
+            let parsed: FirmwareComponentType =
+                serde_json::from_value(serde_json::json!(name)).unwrap();
+            let stored = serde_json::to_value(parsed).unwrap();
+            (parsed, stored, parsed.to_string())
+        };
+        let unknown = || {
+            (
+                FirmwareComponentType::Unknown,
+                "unknown".into(),
+                "Unknown".to_string(),
+            )
+        };
+        value_scenarios!(run = check;
+            "existing names are unchanged" {
+                "bmc" => (FirmwareComponentType::Bmc, "bmc".into(), "BMC".to_string()),
+                "cec" => (FirmwareComponentType::Cec, "cec".into(), "CEC".to_string()),
+                "uefi" => (FirmwareComponentType::Uefi, "uefi".into(), "UEFI".to_string()),
+                "nic" => (FirmwareComponentType::Nic, "nic".into(), "NIC".to_string()),
+                "cpldmb" => (FirmwareComponentType::CpldMb, "cpldmb".into(), "CPLD MB".to_string()),
+                "cpldpdb" => (FirmwareComponentType::CpldPdb, "cpldpdb".into(), "CPLD PDB".to_string()),
+                "hgxbmc" => (FirmwareComponentType::HGXBmc, "hgxbmc".into(), "HGX BMC".to_string()),
+                "combinedbmcuefi" => (
+                    FirmwareComponentType::CombinedBmcUefi,
+                    "combinedbmcuefi".into(),
+                    "BMC+UEFI".to_string(),
+                ),
+                "gpu" => (FirmwareComponentType::Gpu, "gpu".into(), "GPU".to_string()),
+                "cx7" => (FirmwareComponentType::Cx7, "cx7".into(), "CX7".to_string()),
+                "unknown" => unknown(),
+            }
+
+            "drive names keep the Redfish model as reported" {
+                "drive-KCD8DPUG15T3" => (
+                    drive("KCD8DPUG15T3"),
+                    "drive-KCD8DPUG15T3".into(),
+                    "drive-KCD8DPUG15T3".to_string(),
+                ),
+                "drive-MZVL6960HFLB-01AW7" => (
+                    drive("MZVL6960HFLB-01AW7"),
+                    "drive-MZVL6960HFLB-01AW7".into(),
+                    "drive-MZVL6960HFLB-01AW7".to_string(),
+                ),
+                "drive-Dell Ent NVMe CM6 RI 1.92TB" => (
+                    drive("Dell Ent NVMe CM6 RI 1.92TB"),
+                    "drive-Dell Ent NVMe CM6 RI 1.92TB".into(),
+                    "drive-Dell Ent NVMe CM6 RI 1.92TB".to_string(),
+                ),
+            }
+
+            "unrecognized names read as Unknown" {
+                "drive-" => unknown(),
+                "drive- KCD8DPUG15T3" => unknown(),
+                "drive-KCD8DPUG15T3 " => unknown(),
+                "Drive-KCD8DPUG15T3" => unknown(),
+                "drive" => unknown(),
+                "BMC" => unknown(),
+            }
+        );
+    }
+
+    /// Parsing a model again reuses its stored copy, so repeated reads of the
+    /// same configuration and state do not grow memory.
+    #[test]
+    fn drive_model_is_stored_once() {
+        let first = DriveModel::new("Dell Ent NVMe CM7 FIPS E3.S MU 6.4TB").unwrap();
+        let again = DriveModel::new(&String::from("Dell Ent NVMe CM7 FIPS E3.S MU 6.4TB")).unwrap();
+        assert_eq!(first, again);
+        assert!(std::ptr::eq(first.as_str(), again.as_str()));
+        assert_ne!(
+            first,
+            DriveModel::new("Dell Ent NVMe CM7 FIPS E3.S MU 3.2TB").unwrap()
+        );
+    }
+
+    /// A model that would not read back from its `drive-<model>` name is
+    /// rejected.
+    #[test]
+    fn drive_model_must_be_trimmed_and_non_empty() {
+        let check = |model: &str| DriveModel::new(model).map(DriveModel::as_str);
+        value_scenarios!(run = check;
+            "accepted" {
+                "KCD8DPUG15T3" => Some("KCD8DPUG15T3"),
+                "Dell Ent NVMe CM6 RI 1.92TB" => Some("Dell Ent NVMe CM6 RI 1.92TB"),
+            }
+
+            "rejected" {
+                "" => None,
+                " " => None,
+                " KCD8DPUG15T3" => None,
+                "KCD8DPUG15T3 " => None,
+            }
+        );
+    }
+
+    /// Component types are map keys in firmware configuration (TOML) and in
+    /// stored `Versions` maps (JSON).
+    #[test]
+    fn drive_component_types_round_trip_as_map_keys() {
+        let versions = HashMap::from([
+            (FirmwareComponentType::Bmc, "1.0".to_string()),
+            (drive("Dell Ent NVMe CM6 RI 1.92TB"), "2.2.1".to_string()),
+        ]);
+        let json = serde_json::to_string(&versions).unwrap();
+        assert_eq!(
+            serde_json::from_str::<HashMap<FirmwareComponentType, String>>(&json).unwrap(),
+            versions
+        );
+
+        let config: HashMap<FirmwareComponentType, String> = toml::from_str(
+            r#"
+bmc = "a"
+drive-KCD8DPUG15T3 = "b"
+"drive-Dell Ent NVMe CM6 RI 1.92TB" = "c"
+"#,
+        )
+        .unwrap();
+        let mut keys = config.into_keys().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                FirmwareComponentType::Bmc,
+                drive("Dell Ent NVMe CM6 RI 1.92TB"),
+                drive("KCD8DPUG15T3"),
+            ]
+        );
+    }
 
     #[test]
     fn artifact_count_prefers_files_then_legacy_fields() {

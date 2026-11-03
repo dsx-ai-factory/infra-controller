@@ -35,10 +35,10 @@ use nv_redfish::bmc_http::reqwest::{
 };
 use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
 use nv_redfish::core::query::{ExpandQuery, FilterQuery};
-use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
+use nv_redfish::core::upload::{HttpPushUriUpdateRequest, MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
-    SessionCreateResponse,
+    Repair, RepairError, SessionCreateResponse,
 };
 use nv_redfish::oem::hpe::ilo_service_ext::ManagerType as HpeManagerType;
 use nv_redfish::{Error as NvError, ServiceRoot as NvServiceRoot};
@@ -100,6 +100,18 @@ impl RedfishBmc {
         result
     }
 
+    fn finish_repaired<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, RepairError<BmcError>>,
+    ) -> Result<T, RepairError<BmcError>> {
+        let result = redact_repair_error(result, &self.sensitive_values);
+        if let Err(RepairError::Transport(error)) = &result {
+            log_bmc_error(operation, error, &self.sensitive_values);
+        }
+        result
+    }
+
     /// Session creation can submit credentials that differ from the client's
     /// authentication credential. Include every non-empty string in that small
     /// request document when sanitizing the returned and logged HTTP error.
@@ -118,6 +130,21 @@ impl RedfishBmc {
 
         self.finish_with_sensitive_values(operation, result, &sensitive_values)
     }
+}
+
+fn redact_repair_error<T>(
+    result: Result<T, RepairError<BmcError>>,
+    sensitive_values: &[String],
+) -> Result<T, RepairError<BmcError>> {
+    result.map_err(|error| match error {
+        RepairError::Transport(error) => {
+            RepairError::Transport(match redact_bmc_error::<()>(Err(error), sensitive_values) {
+                Err(error) => error,
+                Ok(()) => unreachable!("an Err result stays an Err"),
+            })
+        }
+        error @ RepairError::Decode(_) => error,
+    })
 }
 
 fn redact_bmc_error<T>(
@@ -166,7 +193,7 @@ fn sensitive_values(credentials: &BmcCredentials) -> Arc<[String]> {
             // Session tokens are already sent verbatim in X-Auth-Token.
             vec![token.clone()]
         }
-        BmcCredentials::Token { .. } => Vec::new(),
+        BmcCredentials::Token { .. } | BmcCredentials::Anonymous => Vec::new(),
     };
     Arc::from(sensitive_values)
 }
@@ -194,6 +221,13 @@ fn collect_nonempty_json_strings(value: &serde_json::Value, strings: &mut Vec<St
 impl Bmc for RedfishBmc {
     type Error = BmcError;
 
+    // Time logical fetches here so cache waits and decoding remain in the
+    // application trace while HTTP connection drivers stay detached.
+    #[tracing::instrument(
+        name = "redfish_call",
+        skip_all,
+        fields(backend = NV_REDFISH_BACKEND, operation = "expand", resource_uri = %id)
+    )]
     async fn expand<T: Expandable>(
         &self,
         id: &ODataId,
@@ -203,6 +237,11 @@ impl Bmc for RedfishBmc {
         self.finish("expand", result)
     }
 
+    #[tracing::instrument(
+        name = "redfish_call",
+        skip_all,
+        fields(backend = NV_REDFISH_BACKEND, operation = "get", resource_uri = %id)
+    )]
     async fn get<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
         &self,
         id: &ODataId,
@@ -211,6 +250,55 @@ impl Bmc for RedfishBmc {
         self.finish("get", result)
     }
 
+    #[tracing::instrument(
+        name = "redfish_call",
+        skip_all,
+        fields(backend = NV_REDFISH_BACKEND, operation = "get_repaired", resource_uri = %id)
+    )]
+    async fn get_repaired<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self.inner.get_repaired(id, repair).await;
+        self.finish_repaired("get", result)
+    }
+
+    #[tracing::instrument(
+        name = "redfish_call",
+        skip_all,
+        fields(backend = NV_REDFISH_BACKEND, operation = "expand_repaired", resource_uri = %id)
+    )]
+    async fn expand_repaired<T: Expandable>(
+        &self,
+        id: &ODataId,
+        query: ExpandQuery,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self.inner.expand_repaired(id, query, repair).await;
+        self.finish_repaired("expand", result)
+    }
+
+    #[tracing::instrument(
+        name = "redfish_call",
+        skip_all,
+        fields(backend = NV_REDFISH_BACKEND, operation = "filter_repaired", resource_uri = %id)
+    )]
+    async fn filter_repaired<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
+        &self,
+        id: &ODataId,
+        query: FilterQuery,
+        repair: &impl Repair,
+    ) -> Result<Arc<T>, RepairError<Self::Error>> {
+        let result = self.inner.filter_repaired(id, query, repair).await;
+        self.finish_repaired("filter", result)
+    }
+
+    #[tracing::instrument(
+        name = "redfish_call",
+        skip_all,
+        fields(backend = NV_REDFISH_BACKEND, operation = "poll", resource_uri = %id)
+    )]
     async fn poll<R: Send + Sync + for<'de> Deserialize<'de>>(
         &self,
         id: &ODataId,
@@ -219,6 +307,11 @@ impl Bmc for RedfishBmc {
         self.finish("poll", result)
     }
 
+    #[tracing::instrument(
+        name = "redfish_call",
+        skip_all,
+        fields(backend = NV_REDFISH_BACKEND, operation = "filter", resource_uri = %id)
+    )]
     async fn filter<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
         &self,
         id: &ODataId,
@@ -294,6 +387,19 @@ impl Bmc for RedfishBmc {
     {
         let result = self.inner.multipart_update(uri, request).await;
         self.finish("multipart_update", result)
+    }
+
+    async fn http_push_uri_update<U, R>(
+        &self,
+        uri: &str,
+        request: HttpPushUriUpdateRequest<U>,
+    ) -> Result<ModificationResponse<R>, Self::Error>
+    where
+        U: UploadReader,
+        R: Send + Sync + for<'de> Deserialize<'de>,
+    {
+        let result = self.inner.http_push_uri_update(uri, request).await;
+        self.finish("http_push_uri_update", result)
     }
 
     async fn stream<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(
@@ -540,6 +646,11 @@ impl NvRedfishClientPool {
 
     /// Same as [`Self::service_root`], but a freshly fetched root is cached
     /// only when `should_cache` returns true for it.
+    #[tracing::instrument(
+        name = "nv_redfish_service_root",
+        skip_all,
+        fields(bmc_address = %bmc_address, cache_hit = tracing::field::Empty)
+    )]
     pub async fn service_root_with_cache_predicate(
         &self,
         bmc_address: SocketAddr,
@@ -551,8 +662,10 @@ impl NvRedfishClientPool {
         self.refresh_mutual_client().await?;
 
         if let Some(cached) = self.cached_root(bmc_address, bmc_credentials.clone()) {
+            tracing::Span::current().record("cache_hit", true);
             Ok(cached)
         } else {
+            tracing::Span::current().record("cache_hit", false);
             let bmc = self.create_bmc(bmc_address, bmc_credentials.clone(), false)?;
             let service_root = ServiceRoot::new(bmc).await?;
             let service_root = if service_root.vendor()

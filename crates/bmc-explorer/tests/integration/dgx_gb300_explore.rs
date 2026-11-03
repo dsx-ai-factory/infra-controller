@@ -80,3 +80,65 @@ async fn explore_dgx_gb300() {
         ]),
     );
 }
+
+#[test]
+async fn explore_dgx_gb300_skips_erot_bmc_chassis() {
+    let h = test_support::dgx_gb300_bmc().await;
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
+
+    let chassis_ids: Vec<&str> = report.chassis.iter().map(|c| c.id.as_str()).collect();
+    assert!(
+        !chassis_ids.contains(&"ERoT_BMC_0"),
+        "ERoT_BMC_0 chassis should be skipped, but found chassis: {chassis_ids:?}"
+    );
+    assert!(chassis_ids.contains(&"Chassis_0"), "{chassis_ids:?}");
+}
+
+#[test]
+async fn explore_dgx_gb300_succeeds_when_erot_bmc_hangs() {
+    let h = test_support::dgx_gb300_bmc().await;
+
+    h.state.injection.put(vec![bmc_mock::injection::Rule {
+        id: "erot_hang".into(),
+        selector: bmc_mock::injection::Selector::Path {
+            method: None,
+            glob: "/redfish/v1/Chassis/ERoT_BMC_0".into(),
+        },
+        action: bmc_mock::injection::Action::Latency {
+            mean: std::time::Duration::from_secs(30),
+            jitter: std::time::Duration::ZERO,
+        },
+        remaining: None,
+    }]);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        nv_generate_exploration_report(h.service_root, &common::explorer_config()),
+    )
+    .await;
+
+    result
+        .expect("exploration must not hang on ERoT timeout")
+        .expect("exploration must succeed");
+}
+
+#[test]
+async fn explore_dgx_gb300_succeeds_when_erot_bmc_returns_error() {
+    let h = test_support::dgx_gb300_bmc().await;
+
+    h.state.injection.put(vec![bmc_mock::injection::Rule {
+        id: "erot_500".into(),
+        selector: bmc_mock::injection::Selector::Path {
+            method: Some("GET".into()),
+            glob: "/redfish/v1/Chassis/ERoT_BMC_0".into(),
+        },
+        action: bmc_mock::injection::Action::Status(500),
+        remaining: Some(100),
+    }]);
+
+    nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .expect("exploration must succeed even when ERoT returns 500");
+}

@@ -102,10 +102,9 @@ func TestAPINetworkSecurityGroupRuleConversions(t *testing.T) {
 									((sps == nil) == (spe == nil)) &&
 									((dps == nil) == (dpe == nil)) &&
 									// Exclude rules that have invalid port + protocol combinations.
-									!((sps != nil || dps != nil) &&
-										(p == corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ANY ||
-											p == corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP ||
-											p == corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP6)) {
+									((sps == nil && dps == nil) || (p != corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ANY &&
+										p != corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP &&
+										p != corev1.NetworkSecurityGroupRuleProtocol_NSG_RULE_PROTO_ICMP6)) {
 
 									validRules = append(validRules, newRule)
 									continue

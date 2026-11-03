@@ -40,6 +40,17 @@ rules:
     # delete: a DPU whose immutable flavor no longer matches the deployment
     # selecting its node is deleted and recreated, as the DPF DPUSet controller does.
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    # Read only with --redfish-os-install: the BFB URL to hand the DPU BMC.
+    resources: ["bfbs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    # Read only with --redfish-os-install: the shared DPU BMC password NICo
+    # writes. One named Secret, so a custom --bmc-secret-name needs its name
+    # here too.
+    resources: ["secrets"]
+    resourceNames: ["bmc-shared-password"]
+    verbs: ["get"]
   - apiGroups: ["svc.dpu.nvidia.com"]
     resources: ["dpudeployments"]
     verbs: ["get", "list", "watch"]

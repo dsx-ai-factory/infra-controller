@@ -25,8 +25,8 @@ use uuid::Uuid;
 use super::ValueType;
 
 /// `INTEGRATED_AUTHORITY_ID` identifies the built-in allocator using the
-/// `nico-api` database. Replicas and named Integrated backends that use the same
-/// database share this value. `local-db` is not a globally unique site ID.
+/// `nico-api` database. All Integrated backends use `local-db`, including those
+/// using separate databases, so this is not a globally unique allocator ID.
 pub const INTEGRATED_AUTHORITY_ID: &str = "local-db";
 
 /// `ResourcePoolBackendKind` identifies the implementation serving a pool.
@@ -101,7 +101,8 @@ pub struct ResourcePoolSelection {
 /// later configuration cannot silently move that pool to another allocator.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct ResourcePoolBinding {
-    /// Stable UUID assigned when this pool's first backend selection is accepted.
+    /// Random UUID assigned when this pool's first backend selection is accepted.
+    /// It never changes for this saved binding.
     pub binding_id: Uuid,
     /// Pool name used by NICo, e.g. `vpc-vni`.
     pub pool_name: String,

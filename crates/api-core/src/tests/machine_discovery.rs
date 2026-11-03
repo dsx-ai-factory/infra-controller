@@ -18,12 +18,18 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use carbide_authn::middleware::ConnectionAttributes;
-use carbide_uuid::machine::{MachineInterfaceId, StableHostMachineId};
+use carbide_instrument::testing::MetricsCapture;
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
+};
 use carbide_uuid::network::NetworkSegmentId;
-use common::api_fixtures::dpu::create_dpu_machine;
-use common::api_fixtures::host::{host_discover_dhcp, host_discover_machine_with_reporter};
+use common::api_fixtures::dpu::{create_dpu_machine, dpu_discover_dhcp, dpu_discover_machine};
+use common::api_fixtures::host::{
+    host_discover_dhcp, host_discover_machine, host_discover_machine_with_reporter,
+};
 use common::api_fixtures::{
     FIXTURE_DHCP_RELAY_ADDRESS, create_managed_host, create_managed_host_with_config,
     create_test_env,
@@ -32,9 +38,9 @@ use config_version::ConfigVersion;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::hardware_info::{HardwareInfo, PciDeviceProperties, TpmEkCertificate};
-use model::machine::ManagedHostState;
 use model::machine::machine_id::from_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine::{HostPlatformConfigurationState, InstanceState, ManagedHostState, RetryInfo};
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::network_segment::NetworkSegmentType;
 use model::resource_pool::{ResourcePoolDef, ResourcePoolType};
@@ -46,7 +52,8 @@ use crate::test_support::builder::TestApiBuilder;
 use crate::test_support::fixture_config::{FixtureDefault, ManagedHostConfigExt as _};
 use crate::tests::common;
 use crate::tests::common::api_fixtures::instance::{
-    default_os_config, default_tenant_config, single_interface_network_config,
+    default_os_config, default_tenant_config, interface_network_config_with_devices,
+    single_interface_network_config,
 };
 use crate::tests::common::api_fixtures::tpm_attestation::{
     AK_NAME_SERIALIZED, AK_PUB_SERIALIZED, EK_PUB_SERIALIZED,
@@ -713,6 +720,913 @@ async fn test_discover_dpu_not_create_machine(
     Ok(())
 }
 
+/// The mode of the advisory lock `pid` is waiting for.
+async fn pending_advisory_lock_mode(pool: &sqlx::PgPool, pid: i32) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT mode FROM pg_locks WHERE pid = $1 AND locktype = 'advisory' AND NOT granted",
+    )
+    .bind(pid)
+    .fetch_one(pool)
+    .await
+}
+
+/// Whether the transaction on `pid` has neither written nor locked a row:
+/// Postgres assigns its transaction id on the first of either.
+async fn has_written_nothing(pool: &sqlx::PgPool, pid: i32) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT backend_xid IS NULL FROM pg_stat_activity WHERE pid = $1")
+        .bind(pid)
+        .fetch_one(pool)
+        .await
+}
+
+/// The OOB interface of `dpu`, which the DPU agent registers from.
+async fn dpu_oob_interface(
+    env: &common::api_fixtures::TestEnv,
+    dpu: &model::test_support::DpuConfig,
+    dpu_machine_id: MachineId,
+) -> Result<model::machine::MachineInterfaceSnapshot, Box<dyn std::error::Error>> {
+    Ok(
+        db::machine_interface::find_by_mac_address(&env.pool, dpu.oob_mac_address)
+            .await?
+            .into_iter()
+            .find(|interface| interface.machine_id == Some(dpu_machine_id))
+            .expect("the DPU OOB interface should belong to the DPU machine"),
+    )
+}
+
+/// The host link `dpu` backs: the admin interface row keyed on its factory
+/// MAC, attached to `dpu_machine_id`.
+async fn dpu_host_link(
+    env: &common::api_fixtures::TestEnv,
+    dpu: &model::test_support::DpuConfig,
+    dpu_machine_id: DpuMachineId,
+) -> Result<model::machine::MachineInterfaceSnapshot, Box<dyn std::error::Error>> {
+    Ok(
+        db::machine_interface::find_by_mac_address(&env.pool, dpu.host_mac_address)
+            .await?
+            .into_iter()
+            .find(|interface| interface.attached_dpu_machine_id == Some(dpu_machine_id))
+            .expect("the DPU should back a host link"),
+    )
+}
+
+/// The DPU machine `dpu_machine_id` as stored.
+async fn dpu_machine(
+    pool: &sqlx::PgPool,
+    dpu_machine_id: &MachineId,
+) -> Result<model::machine::AnyMachine, Box<dyn std::error::Error>> {
+    Ok(db::machine::find_one(
+        pool,
+        dpu_machine_id,
+        MachineSearchConfig {
+            include_dpus: true,
+            ..MachineSearchConfig::default()
+        },
+    )
+    .await?
+    .expect("the DPU machine should exist"))
+}
+
+/// Clears the loopback address of `dpu_machine_id`, so its next discovery
+/// allocates one and writes the machines rows of its group.
+async fn clear_dpu_loopback_ip(
+    pool: &sqlx::PgPool,
+    dpu_machine_id: &MachineId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE machines
+         SET network_config = jsonb_set(network_config, '{loopback_ip}', 'null'::jsonb)
+         WHERE id = $1",
+    )
+    .bind(dpu_machine_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Whether another transaction holds the machines row `machine_id` the way an
+/// `UPDATE` of its network config would. `FOR NO KEY UPDATE` leaves a foreign
+/// key check's `FOR KEY SHARE` lock out of the answer.
+async fn machines_row_is_held(
+    pool: &sqlx::PgPool,
+    machine_id: &MachineId,
+) -> Result<bool, sqlx::Error> {
+    let mut probe = pool.begin().await?;
+    let result = sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE NOWAIT")
+        .bind(machine_id)
+        .fetch_one(probe.as_mut())
+        .await;
+    probe.rollback().await?;
+    match result {
+        Ok(_) => Ok(false),
+        Err(error)
+            if error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref()
+                == Some("55P03") =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The primary and the dormant DPU-backed admin link of a two-DPU host.
+async fn primary_and_dormant_links(
+    env: &common::api_fixtures::TestEnv,
+    host_config: &ManagedHostConfig,
+) -> Result<
+    (
+        model::machine::MachineInterfaceSnapshot,
+        model::machine::MachineInterfaceSnapshot,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let mut links = Vec::new();
+    for dpu in &host_config.dpus {
+        links.push(
+            db::machine_interface::find_by_mac_address(&env.pool, dpu.host_mac_address)
+                .await?
+                .into_iter()
+                .find(|link| link.attached_dpu_machine_id.is_some())
+                .expect("each DPU should back a host link"),
+        );
+    }
+    let Ok([first, second]) = <[_; 2]>::try_from(links) else {
+        panic!("a two-DPU host has two host links")
+    };
+    assert_ne!(first.primary_interface, second.primary_interface);
+    Ok(if first.primary_interface {
+        (first, second)
+    } else {
+        (second, first)
+    })
+}
+
+/// Moves every address row of `from` to `to`: the state a host is left in
+/// when its admin address was leased through a link that is now dormant.
+async fn move_address_rows(
+    pool: &sqlx::PgPool,
+    from: MachineInterfaceId,
+    to: MachineInterfaceId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE machine_interface_addresses SET interface_id = $1 WHERE interface_id = $2")
+        .bind(to)
+        .bind(from)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The network config version of `machine_id` as stored.
+async fn network_config_version(
+    pool: &sqlx::PgPool,
+    machine_id: &MachineId,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(db::machine::get_network_config(pool, machine_id)
+        .await?
+        .version
+        .version_nr())
+}
+
+/// Asserts the admin address reconcile ran for the host under
+/// `stable_host_id`: the dormant link owns no address and no domain, the
+/// primary owns `admin_ip` again, and the host's network config version
+/// advanced once.
+async fn assert_admin_addresses_repaired_under(
+    env: &common::api_fixtures::TestEnv,
+    stable_host_id: MachineId,
+    primary_link_id: MachineInterfaceId,
+    dormant_link_id: MachineInterfaceId,
+    admin_ip: IpAddr,
+    version_before: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let primary_link = db::machine_interface::find_one(&env.pool, primary_link_id).await?;
+    let dormant_link = db::machine_interface::find_one(&env.pool, dormant_link_id).await?;
+    assert_eq!(dormant_link.machine_id, Some(stable_host_id));
+    assert!(dormant_link.addresses.is_empty(), "{dormant_link:?}");
+    assert_eq!(dormant_link.domain_id, None);
+    assert_eq!(primary_link.machine_id, Some(stable_host_id));
+    assert_eq!(primary_link.addresses, vec![admin_ip]);
+    assert_eq!(
+        network_config_version(&env.pool, &stable_host_id).await?,
+        version_before + 1
+    );
+    Ok(())
+}
+
+/// Re-registering a DPU of an ingested host must not wait on the admin
+/// segment locks: the discovery transaction no longer takes them, and the
+/// admin address reconcile that follows its commit finds nothing to repair.
+#[crate::sqlx_test]
+async fn test_dpu_rediscovery_does_not_wait_on_admin_segment_locks(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let mh = create_managed_host_with_config(&env, host_config.clone()).await;
+    let dpu = host_config.get_and_assert_single_dpu();
+    let dpu_machine_id = MachineId::from(mh.dpu_ids[0]);
+    let dpu_interface = dpu_oob_interface(&env, dpu, dpu_machine_id).await?;
+
+    // Nothing is pending on the host, so the reconcile after the rediscovery
+    // has no reason to wait on the gate either.
+    let mut txn = env.pool.begin().await?;
+    assert!(!db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id).await?);
+    txn.commit().await?;
+
+    let mut gate = env.pool.begin().await?;
+    db::machine_interface::lock_all_admin_segments(&mut gate).await?;
+
+    let rediscovered_machine_id = tokio::time::timeout(
+        Duration::from_secs(30),
+        dpu_discover_machine(&env, dpu, dpu_interface.id),
+    )
+    .await
+    .expect("DPU rediscovery must not wait on the admin segment locks");
+    assert_eq!(rediscovered_machine_id, dpu_machine_id);
+    gate.rollback().await?;
+
+    // The lock-free discovery still reattached the DPU's host link.
+    let host_link = dpu_host_link(&env, dpu, mh.dpu_ids[0]).await?;
+    assert_eq!(host_link.machine_id, Some(MachineId::from(mh.id)));
+
+    Ok(())
+}
+
+/// A repeat discovery of a host that already carries its stable machine id
+/// renames nothing, so it takes no admin segment lock and completes while an
+/// exclusive holder has them.
+#[crate::sqlx_test]
+async fn test_repeat_host_discovery_does_not_wait_on_admin_segment_locks(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let mh = create_managed_host_with_config(&env, host_config.clone()).await;
+    let mut txn = env.pool.begin().await?;
+    let host_interface = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id])
+        .await?
+        .remove(&mh.id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|interface| interface.primary_interface)
+        .expect("the ingested host should have a primary interface");
+    txn.commit().await?;
+
+    // Nothing is pending on the host, so the reconcile after the rediscovery
+    // has no reason to wait on the gate either.
+    let mut txn = env.pool.begin().await?;
+    assert!(!db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id).await?);
+    txn.commit().await?;
+
+    let mut gate = env.pool.begin().await?;
+    db::machine_interface::lock_all_admin_segments(&mut gate).await?;
+
+    let rediscovered_machine_id = tokio::time::timeout(
+        Duration::from_secs(30),
+        host_discover_machine(&env, &host_config, host_interface.id),
+    )
+    .await
+    .expect("a repeat host discovery must not wait on the admin segment locks");
+    assert_eq!(
+        MachineId::from(rediscovered_machine_id),
+        MachineId::from(mh.id)
+    );
+    gate.rollback().await?;
+
+    // The lock-free discovery left the primary interface on the stable host.
+    let host_interface = db::machine_interface::find_one(&env.pool, host_interface.id).await?;
+    assert_eq!(host_interface.machine_id, Some(MachineId::from(mh.id)));
+
+    Ok(())
+}
+
+/// A host's first discovery requests the admin segments shared, and before
+/// its row pre-lock, so an exclusive holder parks it with nothing locked or
+/// written.
+#[crate::sqlx_test]
+async fn test_first_host_discovery_requests_the_admin_segments_shared_before_its_row_locks(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
+    let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
+    let expected_machine_id = from_hardware_info(&HardwareInfo::from(&host_config))?;
+
+    let mut gate = env.pool.begin().await?;
+    db::machine_interface::lock_all_admin_segments(&mut gate).await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+
+    let discovery = host_discover_machine(&env, &host_config, host_interface_id);
+    tokio::pin!(discovery);
+    let discovery_pid = tokio::select! {
+        result = &mut discovery => {
+            panic!("a host's first discovery bypassed the admin segment locks: {result:?}")
+        }
+        blocked = wait_for_blocked_query(
+            &env.pool,
+            gate_pid,
+            "pg_advisory_xact_lock_shared(",
+        ) => blocked,
+    };
+    assert_eq!(
+        pending_advisory_lock_mode(&env.pool, discovery_pid).await?,
+        "ShareLock"
+    );
+    assert!(
+        has_written_nothing(&env.pool, discovery_pid).await?,
+        "the segment lock request must precede the row pre-lock"
+    );
+    gate.rollback().await?;
+
+    assert_eq!(MachineId::from(discovery.await), expected_machine_id);
+    let host_interface = db::machine_interface::find_one(&env.pool, host_interface_id).await?;
+    assert_eq!(host_interface.machine_id, Some(expected_machine_id));
+
+    Ok(())
+}
+
+/// A host's first discovery requests the host's interface rows, ascending,
+/// before it locks or writes anything else, holding the admin segments
+/// shared: an allocation-mode request for them is admitted beside it and an
+/// exclusive one waits.
+#[crate::sqlx_test]
+async fn test_first_host_discovery_locks_host_rows_first_under_shared_segment_locks(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
+    let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
+    let expected_machine_id = from_hardware_info(&HardwareInfo::from(&host_config))?;
+    let host_interface = db::machine_interface::find_one(&env.pool, host_interface_id).await?;
+    let predicted_host_id = host_interface
+        .machine_id
+        .expect("the DHCP-discovered host interface should belong to the predicted host");
+    let admin_segment_count = env.admin_segments.len();
+
+    // A second row of the predicted host whose id sorts below the caller
+    // interface's, so a holder of it parks the discovery on its first row lock.
+    let lowest_interface_id: MachineInterfaceId = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces
+             (id, machine_id, association_type, segment_id, mac_address,
+              primary_interface, hostname)
+         VALUES ('00000000-0000-0000-0000-000000000001', $1, 'Machine', $2, $3::macaddr,
+                 false, 'lowest-host-row')
+         RETURNING id",
+    )
+    .bind(predicted_host_id)
+    .bind(host_interface.segment_id)
+    .bind("02:00:00:00:00:01")
+    .fetch_one(&env.pool)
+    .await?;
+
+    let mut blocker = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+        .bind(lowest_interface_id)
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    let discovery = host_discover_machine(&env, &host_config, host_interface_id);
+    tokio::pin!(discovery);
+    let discovery_pid = tokio::select! {
+        result = &mut discovery => {
+            panic!("the discovery finished while a row of the host was held: {result:?}")
+        }
+        blocked = wait_for_blocked_query(
+            &env.pool,
+            blocker_pid,
+            "WHERE machine_id = $1 ORDER BY id FOR UPDATE",
+        ) => blocked,
+    };
+    assert!(
+        has_written_nothing(&env.pool, discovery_pid).await?,
+        "the row pre-lock must precede every other row lock and write"
+    );
+    let advisory_locks: Vec<String> = sqlx::query_scalar(
+        "SELECT mode FROM pg_locks
+         WHERE pid = $1 AND locktype = 'advisory' AND granted
+         ORDER BY mode",
+    )
+    .bind(discovery_pid)
+    .fetch_all(&env.pool)
+    .await?;
+    assert_eq!(
+        advisory_locks,
+        vec!["ShareLock".to_string(); admin_segment_count],
+        "a host's first discovery must hold every admin segment shared"
+    );
+
+    let mut probe = env.pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(&mut *probe)
+        .await?;
+    db::machine_interface::lock_all_admin_segments_for_allocation(&mut probe).await?;
+    probe.rollback().await?;
+
+    let mut probe = env.pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(&mut *probe)
+        .await?;
+    let error = db::machine_interface::lock_all_admin_segments(&mut probe)
+        .await
+        .expect_err("an exclusive request must wait for the discovery's shared locks");
+    let db::DatabaseError::Sqlx(error) = error else {
+        panic!("expected wrapped SQLx error, got {error:?}");
+    };
+    assert_eq!(
+        error
+            .source
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("55P03"),
+        "{error}"
+    );
+    probe.rollback().await?;
+
+    blocker.rollback().await?;
+    assert_eq!(MachineId::from(discovery.await), expected_machine_id);
+    for interface_id in [host_interface_id, lowest_interface_id] {
+        let interface = db::machine_interface::find_one(&env.pool, interface_id).await?;
+        assert_eq!(interface.machine_id, Some(expected_machine_id));
+    }
+
+    Ok(())
+}
+
+/// Where Site Explorer does not create machines, a DPU's first discovery may
+/// create the host machine row its sibling DPUs share, so it takes the admin
+/// segment locks exclusively, and before its first row write.
+#[crate::sqlx_test]
+async fn test_legacy_first_dpu_discovery_waits_on_admin_segment_locks_before_writing(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_legacy_first_dpu_discovery_waits_on_admin_segment_locks(pool, false).await
+}
+
+/// A host NIC that leased before its DPU registered leaves a link row with no
+/// machine. The DPU's first discovery still creates the host machine, so the
+/// unattached link does not let it skip the exclusive lock.
+#[crate::sqlx_test]
+async fn test_legacy_first_dpu_discovery_keeps_the_exclusive_lock_with_an_unattached_host_link(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_legacy_first_dpu_discovery_waits_on_admin_segment_locks(pool, true).await
+}
+
+async fn check_legacy_first_dpu_discovery_waits_on_admin_segment_locks(
+    pool: sqlx::PgPool,
+    host_nic_leases_first: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    assert!(
+        !env.config
+            .site_explorer
+            .create_machines
+            .load(Ordering::Relaxed),
+        "this test needs the DPU agent to create machines"
+    );
+    let host_config = env.managed_host_config();
+    let dpu = host_config.get_and_assert_single_dpu();
+    if host_nic_leases_first {
+        // The host NIC leases on the admin segment like any unknown MAC.
+        dpu_discover_dhcp(&env, &dpu.host_mac_address.to_string()).await;
+        let host_links =
+            db::machine_interface::find_by_mac_address(&env.pool, dpu.host_mac_address).await?;
+        assert_eq!(host_links.len(), 1);
+        assert!(host_links[0].machine_id.is_none());
+    }
+    let dpu_interface_id = dpu_discover_dhcp(&env, &dpu.oob_mac_address.to_string()).await;
+    let expected_dpu_machine_id = from_hardware_info(&HardwareInfo::from(dpu))?;
+
+    let mut gate = env.pool.begin().await?;
+    db::machine_interface::lock_all_admin_segments(&mut gate).await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+
+    let discovery = dpu_discover_machine(&env, dpu, dpu_interface_id);
+    tokio::pin!(discovery);
+    let discovery_pid = tokio::select! {
+        result = &mut discovery => {
+            panic!("a first DPU discovery bypassed the admin segment locks: {result:?}")
+        }
+        blocked = wait_for_blocked_query(&env.pool, gate_pid, "pg_advisory_xact_lock(") => blocked,
+    };
+    assert_eq!(
+        pending_advisory_lock_mode(&env.pool, discovery_pid).await?,
+        "ExclusiveLock"
+    );
+    assert!(
+        has_written_nothing(&env.pool, discovery_pid).await?,
+        "the lock request must precede the first row write"
+    );
+    gate.rollback().await?;
+
+    assert_eq!(discovery.await, expected_dpu_machine_id);
+    let host_links =
+        db::machine_interface::find_by_mac_address(&env.pool, dpu.host_mac_address).await?;
+    assert_eq!(host_links.len(), 1);
+    assert!(host_links[0].machine_id.is_some());
+
+    Ok(())
+}
+
+/// While a DPU rediscovery holds its row locks mid-transaction it holds no
+/// advisory lock, so a creation-mode request for the admin segments is
+/// admitted beside it instead of queueing behind the fleet.
+#[crate::sqlx_test]
+async fn test_creation_lock_request_is_admitted_while_dpu_rediscovery_is_in_flight(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let mh = create_managed_host_with_config(&env, host_config.clone()).await;
+    let dpu = host_config.get_and_assert_single_dpu();
+    let dpu_machine_id = MachineId::from(mh.dpu_ids[0]);
+    let dpu_interface = dpu_oob_interface(&env, dpu, dpu_machine_id).await?;
+
+    // Park the rediscovery on its first row write, the caller interface row.
+    let mut blocker = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+        .bind(dpu_interface.id)
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    let rediscovery = dpu_discover_machine(&env, dpu, dpu_interface.id);
+    tokio::pin!(rediscovery);
+    let rediscovery_pid = tokio::select! {
+        result = &mut rediscovery => {
+            panic!("the rediscovery finished while its caller interface row was held: {result:?}")
+        }
+        blocked = wait_for_blocked_query(
+            &env.pool,
+            blocker_pid,
+            "UPDATE machine_interfaces SET machine_id",
+        ) => blocked,
+    };
+    let advisory_locks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks WHERE pid = $1 AND locktype = 'advisory'",
+    )
+    .bind(rediscovery_pid)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(
+        advisory_locks, 0,
+        "a DPU rediscovery must hold no segment lock"
+    );
+
+    let mut probe = env.pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(&mut *probe)
+        .await?;
+    db::machine_interface::lock_all_admin_segments_for_allocation(&mut probe).await?;
+    probe.rollback().await?;
+
+    blocker.rollback().await?;
+    assert_eq!(rediscovery.await, dpu_machine_id);
+
+    Ok(())
+}
+
+/// A DPU rediscovery that fills a loopback address updates the host link row
+/// before it writes any machines row, the order the admin address repair and
+/// the host rename lock in, so a holder of the link row parks it with every
+/// machines row of the group still free.
+#[crate::sqlx_test]
+async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let mh = create_managed_host_with_config(&env, host_config.clone()).await;
+    let dpu = host_config.get_and_assert_single_dpu();
+    let dpu_machine_id = MachineId::from(mh.dpu_ids[0]);
+    let host_machine_id = MachineId::from(mh.id);
+    let dpu_interface = dpu_oob_interface(&env, dpu, dpu_machine_id).await?;
+    let host_link = dpu_host_link(&env, dpu, mh.dpu_ids[0]).await?;
+    clear_dpu_loopback_ip(&env.pool, &dpu_machine_id).await?;
+    let version_before = dpu_machine(&env.pool, &dpu_machine_id)
+        .await?
+        .network_config
+        .version;
+
+    let mut blocker = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+        .bind(host_link.id)
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    let rediscovery = dpu_discover_machine(&env, dpu, dpu_interface.id);
+    tokio::pin!(rediscovery);
+    tokio::select! {
+        result = &mut rediscovery => {
+            panic!("the rediscovery finished while its host link row was held: {result:?}")
+        }
+        _ = wait_for_blocked_query(
+            &env.pool,
+            blocker_pid,
+            "UPDATE machine_interfaces SET attached_dpu_machine_id",
+        ) => {}
+    }
+    for machine_id in [host_machine_id, dpu_machine_id] {
+        assert!(
+            !machines_row_is_held(&env.pool, &machine_id).await?,
+            "the machines row {machine_id} must stay free until the host link row is held"
+        );
+    }
+
+    blocker.rollback().await?;
+    assert_eq!(rediscovery.await, dpu_machine_id);
+    let dpu_machine = dpu_machine(&env.pool, &dpu_machine_id).await?;
+    assert!(dpu_machine.network_config.loopback_ip.is_some());
+    assert_eq!(
+        dpu_machine.network_config.version.version_nr(),
+        version_before.version_nr() + 1
+    );
+
+    Ok(())
+}
+
+/// A DPU rediscovery that fills a loopback address and the admin address
+/// repair of its host both take the host link row before the host machines
+/// row, so the one parked on the machines row holds the link row and the
+/// other waits behind it instead of deadlocking with it.
+#[crate::sqlx_test]
+async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocking(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let mh = create_managed_host_with_config(&env, host_config.clone()).await;
+    let dpu = host_config.get_and_assert_single_dpu();
+    let dpu_machine_id = MachineId::from(mh.dpu_ids[0]);
+    let host_machine_id = MachineId::from(mh.id);
+    let dpu_interface = dpu_oob_interface(&env, dpu, dpu_machine_id).await?;
+    let host_link = dpu_host_link(&env, dpu, mh.dpu_ids[0]).await?;
+    assert!(host_link.primary_interface);
+
+    // Leave the host needing an admin address repair and the DPU a loopback
+    // fill, so both flows write the host machines row.
+    sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id = $1")
+        .bind(host_link.id)
+        .execute(&env.pool)
+        .await?;
+    clear_dpu_loopback_ip(&env.pool, &dpu_machine_id).await?;
+
+    let mut blocker = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+        .bind(host_machine_id)
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    // The rediscovery holds the host link row while it waits on the host
+    // machines row.
+    let rediscovery = dpu_discover_machine(&env, dpu, dpu_interface.id);
+    tokio::pin!(rediscovery);
+    let rediscovery_pid = tokio::select! {
+        result = &mut rediscovery => {
+            panic!("the rediscovery finished while the host machines row was held: {result:?}")
+        }
+        blocked = wait_for_blocked_query(&env.pool, blocker_pid, "machine_group_member_ids") => {
+            blocked
+        }
+    };
+
+    // The repair queues on the host link row behind the rediscovery.
+    let repair =
+        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &host_machine_id);
+    tokio::pin!(repair);
+    tokio::select! {
+        result = &mut rediscovery => {
+            panic!("the rediscovery finished while the host machines row was held: {result:?}")
+        }
+        result = &mut repair => {
+            panic!("the repair finished while the rediscovery held the host link row: {result:?}")
+        }
+        _ = wait_for_blocked_query(&env.pool, rediscovery_pid, "FOR UPDATE OF mi") => {}
+    }
+
+    let metrics = MetricsCapture::start();
+    blocker.rollback().await?;
+    let (rediscovered_machine_id, repaired) =
+        tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(rediscovery, repair)
+        })
+        .await
+        .expect("both must finish once the host machines row is free");
+    assert_eq!(rediscovered_machine_id, dpu_machine_id);
+    // Either the queued repair or the rediscovery's own reconcile makes the
+    // repair, so only its success is asserted.
+    repaired?;
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_api_host_admin_address_reconcile_failures_total",
+            &[]
+        ),
+        0.0
+    );
+    let host_link = db::machine_interface::find_one(&env.pool, host_link.id).await?;
+    assert_eq!(host_link.addresses.len(), 1);
+    assert!(
+        dpu_machine(&env.pool, &dpu_machine_id)
+            .await?
+            .network_config
+            .loopback_ip
+            .is_some()
+    );
+
+    Ok(())
+}
+
+/// A host's first discovery with nothing to repair leaves the host's admin
+/// links and network config version as they were: the reconcile after the
+/// rename decides from an unlocked read that the host needs no repair and
+/// writes nothing.
+#[crate::sqlx_test]
+async fn test_first_host_discovery_with_nothing_to_repair_writes_no_admin_address(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config().with_dpu_count(2);
+    common::api_fixtures::site_explorer::new_mock_host_awaiting_discovery(
+        &env,
+        host_config.clone(),
+    )
+    .await
+    .expect("the host should ingest up to its first discovery");
+    let (primary_link, dormant_link) = primary_and_dormant_links(&env, &host_config).await?;
+    let predicted_host_id = primary_link
+        .machine_id
+        .expect("the host links should belong to the predicted host");
+    assert_eq!(primary_link.addresses.len(), 1, "{primary_link:?}");
+    assert!(dormant_link.addresses.is_empty(), "{dormant_link:?}");
+    let version_before = network_config_version(&env.pool, &predicted_host_id).await?;
+
+    let metrics = MetricsCapture::start();
+    let stable_host_id =
+        MachineId::from(host_discover_machine(&env, &host_config, primary_link.id).await);
+
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_api_host_admin_address_reconcile_failures_total",
+            &[]
+        ),
+        0.0
+    );
+    for link_before in [&primary_link, &dormant_link] {
+        let link = db::machine_interface::find_one(&env.pool, link_before.id).await?;
+        assert_eq!(link.machine_id, Some(stable_host_id));
+        assert_eq!(link.addresses, link_before.addresses, "{link:?}");
+        assert_eq!(link.hostname, link_before.hostname);
+        assert_eq!(link.domain_id, link_before.domain_id);
+    }
+    assert_eq!(
+        network_config_version(&env.pool, &stable_host_id).await?,
+        version_before
+    );
+
+    Ok(())
+}
+
+/// A DPU discovery that reads its host's predicted machine id and then waits
+/// on the host's first discovery for its link row reconciles under that id
+/// once both have committed, and finds no rows. The host's first discovery
+/// reconciles under the stable id after its own commit, so the repair is
+/// made anyway and neither reconcile counts as a failure.
+#[crate::sqlx_test]
+async fn test_first_host_discovery_repairs_what_an_overlapping_dpu_discovery_missed(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config().with_dpu_count(2);
+    common::api_fixtures::site_explorer::new_mock_host_awaiting_discovery(
+        &env,
+        host_config.clone(),
+    )
+    .await
+    .expect("the host should ingest up to its first discovery");
+    let (primary_link, dormant_link) = primary_and_dormant_links(&env, &host_config).await?;
+    let predicted_host_id = primary_link
+        .machine_id
+        .expect("the host links should belong to the predicted host");
+    let &[admin_ip] = primary_link.addresses.as_slice() else {
+        panic!("the primary link should hold the host's admin address: {primary_link:?}")
+    };
+    move_address_rows(&env.pool, primary_link.id, dormant_link.id).await?;
+    let version_before = network_config_version(&env.pool, &predicted_host_id).await?;
+    let dormant_dpu = host_config
+        .dpus
+        .iter()
+        .find(|dpu| dpu.host_mac_address == dormant_link.mac_address)
+        .expect("the dormant link should be keyed on a DPU's host MAC");
+    let dormant_dpu_machine_id = MachineId::from(
+        dormant_link
+            .attached_dpu_machine_id
+            .expect("the dormant link should be DPU-backed"),
+    );
+    let dpu_interface = dpu_oob_interface(&env, dormant_dpu, dormant_dpu_machine_id).await?;
+
+    // The host discovery parks on the host machines row with the host's
+    // interface rows already locked for the rename.
+    let mut blocker = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+        .bind(predicted_host_id)
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    let metrics = MetricsCapture::start();
+    let host_discovery = host_discover_machine(&env, &host_config, primary_link.id);
+    tokio::pin!(host_discovery);
+    let host_discovery_pid = tokio::select! {
+        result = &mut host_discovery => {
+            panic!("the host discovery finished while the host machines row was held: {result:?}")
+        }
+        blocked = wait_for_blocked_query(
+            &env.pool,
+            blocker_pid,
+            "SELECT id FROM machines WHERE id = $1 FOR UPDATE",
+        ) => blocked,
+    };
+
+    // The DPU discovery reads the predicted host id from its link row, then
+    // queues on that row behind the rename.
+    let dpu_discovery = dpu_discover_machine(&env, dormant_dpu, dpu_interface.id);
+    tokio::pin!(dpu_discovery);
+    tokio::select! {
+        result = &mut host_discovery => {
+            panic!("the host discovery finished while the host machines row was held: {result:?}")
+        }
+        result = &mut dpu_discovery => {
+            panic!("the DPU discovery finished while the host discovery held its link row: {result:?}")
+        }
+        _ = wait_for_blocked_query(
+            &env.pool,
+            host_discovery_pid,
+            "UPDATE machine_interfaces SET attached_dpu_machine_id",
+        ) => {}
+    }
+
+    blocker.rollback().await?;
+    let ((stable_host_id, rediscovered_dpu_machine_id), logs) =
+        carbide_instrument::testing::capture_logs_async(async {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::join!(host_discovery, dpu_discovery)
+            })
+            .await
+            .expect("both discoveries must finish once the host machines row is free")
+        })
+        .await;
+    assert_eq!(rediscovered_dpu_machine_id, dormant_dpu_machine_id);
+    // The DPU discovery's reconcile looked the host up under the predicted id
+    // and found no rows: a skip, not a failure.
+    let predicted_host = predicted_host_id.to_string();
+    assert!(
+        logs.iter().any(|log| {
+            log.message == "host has no admin interfaces to reconcile"
+                && log.field("host_machine_id") == Some(predicted_host.as_str())
+        }),
+        "the DPU discovery's reconcile should have found no rows under the predicted id"
+    );
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_api_host_admin_address_reconcile_failures_total",
+            &[]
+        ),
+        0.0
+    );
+    assert_admin_addresses_repaired_under(
+        &env,
+        MachineId::from(stable_host_id),
+        primary_link.id,
+        dormant_link.id,
+        admin_ip,
+        version_before,
+    )
+    .await
+}
+
 #[crate::sqlx_test]
 async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_machines(
     pool: sqlx::PgPool,
@@ -787,6 +1701,199 @@ async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_ma
         .is_none()
     );
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_released_instance_discovers_through_configured_secondary_dpu(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host_config = env.managed_host_config().with_dpu_count(2);
+    let hardware_info = HardwareInfo::from(&host_config);
+    let managed_host = create_managed_host_with_config(&env, host_config).await;
+
+    let mut txn = env.pool.begin().await?;
+    let host = managed_host.host().db_machine(&mut txn).await;
+    let primary = host
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| interface.primary_interface)
+        .expect("managed host must have a primary interface");
+    let secondary = host
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| {
+            !interface.primary_interface && interface.attached_dpu_machine_id.is_some()
+        })
+        .expect("two-DPU host must have a secondary interface");
+    let secondary_device =
+        host.get_device_locator_for_dpu_id(&secondary.attached_dpu_machine_id.unwrap())?;
+    txn.rollback().await?;
+
+    let instance = managed_host
+        .instance_builer(&env)
+        .network(interface_network_config_with_devices(
+            &[segment_id],
+            &[secondary_device],
+        ))
+        .build()
+        .await;
+    let mut txn = env.pool.begin().await?;
+    let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &instance.id,
+        &segment_id,
+    )
+    .await?;
+    let [address] = addresses.as_slice() else {
+        panic!("instance must have one tenant address")
+    };
+    let tenant_ip = address.address;
+    txn.rollback().await?;
+
+    // Release boots Scout over the tenant network before switching to the
+    // admin network. Stop there, while the secondary PF still owns this IP.
+    env.api
+        .release_instance(Request::new(rpc::InstanceReleaseRequest {
+            id: Some(instance.id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await?;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        8,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::CheckHostConfig,
+            },
+        },
+    )
+    .await;
+    managed_host.network_configured(&env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        2,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForDpusToUp,
+        },
+    )
+    .await;
+    managed_host.network_configured(&env).await;
+    let discovery_state = ManagedHostState::Assigned {
+        instance_state: InstanceState::BootingWithDiscoveryImage {
+            retry: RetryInfo { count: 0 },
+        },
+    };
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        1,
+        discovery_state.clone(),
+    )
+    .await;
+
+    let mut txn = env.pool.begin().await?;
+    let released_host = managed_host.host().db_machine(&mut txn).await;
+    assert_eq!(released_host.current_state(), &discovery_state);
+    assert_eq!(released_host.network_config.use_admin_network, Some(false));
+    let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &instance.id,
+        &segment_id,
+    )
+    .await?;
+    assert_eq!(retained_addresses.len(), 1);
+    assert_eq!(retained_addresses[0].address, tenant_ip);
+    let released_secondary = db::machine_interface::find_one(txn.as_mut(), secondary.id).await?;
+    assert_eq!(
+        released_secondary.machine_id,
+        Some(managed_host.host().id.into())
+    );
+    assert!(released_secondary.addresses.is_empty());
+    assert_eq!(released_secondary.domain_id, None);
+    assert!(!released_secondary.primary_interface);
+    txn.rollback().await?;
+
+    let pxe = env
+        .api
+        .get_pxe_instructions(Request::new(rpc::forge::PxeInstructionRequest {
+            arch: rpc::forge::MachineArchitecture::X86 as i32,
+            client_ip: Some(tenant_ip.to_string()),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+    assert!(
+        pxe.pxe_script
+            .contains(&format!("mac={} ", secondary.mac_address)),
+        "tenant PXE must select the configured secondary MAC: {}",
+        pxe.pxe_script
+    );
+    assert!(
+        pxe.pxe_script
+            .contains(&format!("machine_id={} ", secondary.id))
+    );
+    assert!(
+        !pxe.pxe_script
+            .contains(&format!("mac={} ", primary.mac_address))
+    );
+
+    let custom_user_data = "#cloud-config\nsecondary-interface-override";
+    let mut txn = env.pool.begin().await?;
+    db::machine_boot_override::create(
+        txn.as_mut(),
+        secondary.id,
+        None,
+        Some(custom_user_data.to_string()),
+    )
+    .await?
+    .expect("fixture must install the secondary cloud-init override");
+    txn.commit().await?;
+
+    let cloud_init = env
+        .api
+        .get_cloud_init_instructions(Request::new(rpc::forge::CloudInitInstructionsRequest {
+            ip: tenant_ip.to_string(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(
+        cloud_init.custom_cloud_init.as_deref(),
+        Some(custom_user_data)
+    );
+    assert_eq!(
+        cloud_init.metadata,
+        Some(rpc::forge::CloudInitMetaData {
+            instance_id: managed_host.host().id.to_string(),
+            cloud_name: "nvidia".to_string(),
+            platform: "forge".to_string(),
+            local_hostname: None,
+        })
+    );
+    let discovery = cloud_init.discovery_instructions.unwrap();
+    assert_eq!(discovery.domain, None);
+    let discovered_interface = discovery.machine_interface.unwrap();
+    assert_eq!(discovered_interface.id, Some(secondary.id));
+    assert_eq!(
+        discovered_interface.mac_address,
+        secondary.mac_address.to_string()
+    );
+
+    let response = secure_api_for(&env)
+        .discover_machine(discovery_request_from(
+            &hardware_info,
+            discovered_interface.id,
+            tenant_ip,
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(response.machine_id, Some(managed_host.host().id.into()));
+    assert_eq!(response.machine_interface_id, Some(secondary.id));
     Ok(())
 }
 
@@ -1150,23 +2257,48 @@ async fn test_secure_discovery_does_not_fall_back_to_interface_id(
     Ok(())
 }
 
+/// Verifies that discovery replaces the predicted machine ID in the database
+/// and that the machine controller reads the replacement ID and counts one machine.
 #[crate::sqlx_test]
 async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(
-        pool,
-        TestEnvOverrides::with_config(secure_discovery_config()),
-    )
-    .await;
+    const MACHINE_TOTAL_METRIC: &str = "test_discovery_promoted_machines_total{fresh=\"true\"}";
+
+    // Setup: opt this fixture into filtering machine metrics by IDs read from
+    // the database, isolate its aggregate metric, and create one predicted host.
+    let mut overrides = TestEnvOverrides::with_config(secure_discovery_config());
+    overrides.machine_filter_metrics_by_existing_object_ids_enabled = Some(true);
+    overrides.machine_metric_prefix = Some("test_discovery_promoted_machines");
+    let env = create_test_env_with_overrides(pool, overrides).await;
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
     let mut txn = env.pool.begin().await?;
     let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
     txn.commit().await?;
+    let predicted_machine_id = HostMachineId::try_from(
+        host_interface
+            .machine_id
+            .expect("DHCP discovery should create a predicted host"),
+    )?;
     let remote_ip = host_interface.addresses[0];
     let expected_machine_id = from_hardware_info(&HardwareInfo::from(&host_config))?;
+    let stable_machine_id = HostMachineId::try_from(expected_machine_id)?;
+
+    // Setup assertion: the database and isolated aggregate both contain only
+    // the predicted identity before discovery promotes the row.
+    let database_host_ids = db::managed_host::load_host_ids(&env.pool).await?;
+    assert_eq!(database_host_ids.len(), 1);
+    assert!(database_host_ids.contains(&predicted_machine_id));
+    env.run_machine_state_controller_iteration().await;
+    assert_eq!(
+        env.test_meter.formatted_metric(MACHINE_TOTAL_METRIC),
+        Some("1".to_string())
+    );
+
+    // Action: report stable hardware identity through the real secure
+    // discovery handler, promoting the existing predicted row.
     let mut request = Request::new(rpc::MachineDiscoveryInfo {
         machine_interface_id: Some(uuid::Uuid::new_v4().into()),
         discovery_data: Some(rpc::DiscoveryData::Info(
@@ -1185,8 +2317,39 @@ async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
 
     let response = env.api.discover_machine(request).await?.into_inner();
 
+    // Assertion: discovery returns the stable identity selected from hardware.
     assert_eq!(response.machine_id, Some(expected_machine_id));
     assert_eq!(response.machine_interface_id, Some(host_interface_id));
+
+    // Assertion: promotion replaced predicted A with stable B in the database
+    // before the controller reads the next complete database ID list.
+    let database_host_ids = db::managed_host::load_host_ids(&env.pool).await?;
+    assert_eq!(database_host_ids.len(), 1);
+    assert!(database_host_ids.contains(&stable_machine_id));
+    assert!(!database_host_ids.contains(&predicted_machine_id));
+
+    // Action: run the public manual controller helper so the promoted row is
+    // observed and aggregate metrics are emitted through production paths.
+    env.run_machine_state_controller_iteration().await;
+
+    // Assertion: the ID list published after commit contains stable B, excludes
+    // predicted A, and emits one machine. The helper clears retained metrics,
+    // so the generic processor regression separately proves A/B cache filtering.
+    assert_eq!(
+        env.machine_object_ids_from_database_contains(&stable_machine_id)
+            .await,
+        Some(true)
+    );
+    assert_eq!(
+        env.machine_object_ids_from_database_contains(&predicted_machine_id)
+            .await,
+        Some(false)
+    );
+    assert_eq!(
+        env.test_meter.formatted_metric(MACHINE_TOTAL_METRIC),
+        Some("1".to_string())
+    );
+
     Ok(())
 }
 

@@ -47,18 +47,26 @@ port 9370. NICo resolves that address from a switch of the rack that is
 controller mode, `mat-k8s-controller` publishes every simulated switch's NVOS
 lease as the `externalIPs` of a `mat-nvos-*` Service that forwards port 9370
 to the bmc-mock listener, and the mock selects the rack from the address each
-request was sent to. The NVOS network therefore has the same
+request was sent to. The same Service forwards port 443 to the switch's own
+NVUE REST API mock, which bmc-mock serves at that address. The NVOS network
+therefore has the same
 [requirements](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-machine-a-tron/README.md#requirements)
 as the BMC network. Override mode has no per-switch routing, so NICo cannot
-reach the mock there.
+reach either mock there.
 
-Because NICo dials by address, it verifies the mock's certificate against one
-name. The `nico-machine-a-tron` chart adds `mat-mock.nvidia.com` to every pod
-certificate as an extra SAN (`certificate.extraDnsNames`), and the chart's
-issuer is the same `global.certificate.issuerRef` that signs the `nico-api`
-certificate, so NICo needs only the CA and that name. The simulation profile
-`helm-prereqs/values/nico-core-simulation.yaml` and the Tilt values carry the
-block:
+Because NICo dials by address, it verifies the NMX-C mock's certificate
+against one name. The `nico-machine-a-tron` chart adds `mat-mock.nvidia.com`
+to every pod certificate as an extra SAN (`certificate.extraDnsNames`), and
+the chart's issuer is the same `global.certificate.issuerRef` that signs the
+`nico-api` certificate, so NICo needs only the CA and that name. The NVUE mock
+on port 443 is outside this setting: hardware health's NVUE REST collector
+accepts any server certificate unless its `[tls.switch]` profile is
+configured, and the BMC proxy accepts any upstream certificate unless its own
+[`[tls.switch]`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-proxy/README.md#tlsswitch)
+is set. With either set, the mock's certificate must chain to that profile's
+CA bundle and carry its `tls_server_name`, or else the address dialed. The simulation
+profile `helm-prereqs/values/nico-core-simulation.yaml` and the Tilt values
+carry the block:
 
 ```toml
 [nvlink_config]

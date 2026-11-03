@@ -33,6 +33,12 @@ then
   profile_arg="--release"
 fi
 pkg_args="${pkg_args} -p ${CARBIDE_CRATE}"
+if [ "${CARBIDE_CRATE}" = "carbide-scout" ]
+then
+  # Cargo does not build binaries from a library dependency. Scout needs the
+  # supervisor beside its executable for every NIC firmware tool invocation.
+  pkg_args="${pkg_args} -p carbide-libmlx --bin forge-scout --bin mlx-firmware-supervisor"
+fi
 
 cargo build ${profile_arg} --target=${CARBIDE_ARCH}-unknown-linux-gnu ${pkg_args}
 '''
@@ -64,6 +70,10 @@ case "${CARBIDE_ARCH}" in
 esac
 
 pkg_args="${pkg_args} -p ${CARBIDE_CRATE}"
+if [ "${CARBIDE_CRATE}" = "carbide-scout" ]
+then
+  pkg_args="${pkg_args} -p carbide-libmlx --bin forge-scout --bin mlx-firmware-supervisor"
+fi
 
 docker run \
     --rm \
@@ -73,16 +83,21 @@ docker run \
     --volume $REPO_ROOT:/carbide \
     --volume $CARGO_HOME:/cargo \
     $IMAGE_NAME \
-    cargo build ${profile_arg} --target=${CARBIDE_ARCH}-unknown-linux-gnu ${pkg_args}
+    cargo build ${profile_arg} --target=${CARBIDE_ARCH}-unknown-linux-gnu ${pkg_args} || exit $?
 
   if [ "${CARBIDE_PROFILE}" = "release" ] && [ "${CARBIDE_ARCH}" = "x86_64" ]
   then
+  strip_bins="/carbide/target/x86_64-unknown-linux-gnu/release/forge-scout"
+  if [ "${CARBIDE_CRATE}" = "carbide-scout" ]
+  then
+    strip_bins="${strip_bins} /carbide/target/x86_64-unknown-linux-gnu/release/mlx-firmware-supervisor"
+  fi
   docker run \
     --rm \
     --user $(id -u):$(id -g) \
     --volume $REPO_ROOT:/carbide \
     urm.nvidia.com/swngc-ngcc-docker-local/forge/carbide/x86-64/build-container:latest \
-    x86_64-linux-gnu-strip /carbide/target/x86_64-unknown-linux-gnu/release/forge-scout
+    x86_64-linux-gnu-strip ${strip_bins}
   else
     echo "Skipping strip of sysmbols in profile ${CARBIDE_PROFILE}"
   fi

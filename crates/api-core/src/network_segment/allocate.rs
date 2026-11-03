@@ -21,7 +21,7 @@ use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
-use model::network_prefix::NewNetworkPrefix;
+use model::network_prefix::{NetworkPrefix, NewNetworkPrefix};
 use model::network_segment::{AllocationStrategy, NewNetworkSegment};
 use model::vpc::vpc_prefix_can_allocate_interface_prefix;
 use sqlx::PgConnection;
@@ -147,6 +147,40 @@ impl PrefixAllocator {
         vpc_id: VpcId,
         prefix: IpNetwork,
     ) -> CarbideResult<(NetworkSegmentId, IpNetwork)> {
+        let (segment_id, _) = self
+            .allocate_network_segment_for_prefix_with_mtu(txn, vpc_id, prefix, 9000)
+            .await?;
+
+        Ok((segment_id, prefix))
+    }
+
+    /// Creates a service-VPC segment with its fixed dataplane MTU and returns the persisted
+    /// `NetworkPrefix` so the caller can store its ID on the service interface.
+    pub(crate) async fn allocate_service_network_segment_for_prefix(
+        &self,
+        txn: &mut PgConnection,
+        vpc_id: VpcId,
+        prefix: IpNetwork,
+    ) -> CarbideResult<(NetworkSegmentId, NetworkPrefix)> {
+        let mtu = i32::try_from(carbide_dpf::SERVICE_VPC_MTU).map_err(|error| {
+            CarbideError::internal(format!(
+                "service-VPC MTU {} cannot be stored on a network segment: {error}",
+                carbide_dpf::SERVICE_VPC_MTU
+            ))
+        })?;
+        self.allocate_network_segment_for_prefix_with_mtu(txn, vpc_id, prefix, mtu)
+            .await
+    }
+
+    /// Creates one generated segment and prefix with the caller's MTU to keep host and service
+    /// allocation consistent while allowing their dataplane MTU contracts to differ.
+    async fn allocate_network_segment_for_prefix_with_mtu(
+        &self,
+        txn: &mut PgConnection,
+        vpc_id: VpcId,
+        prefix: IpNetwork,
+        mtu: i32,
+    ) -> CarbideResult<(NetworkSegmentId, NetworkPrefix)> {
         let name = format!("vpc_prefix_{}", prefix.network());
         let segment_id = NetworkSegmentId::new();
 
@@ -155,7 +189,7 @@ impl PrefixAllocator {
             name,
             subdomain_id: None,
             vpc_id: Some(vpc_id),
-            mtu: 9000, // Default value.
+            mtu,
             prefixes: vec![],
             vlan_id: None,
             vni: None,
@@ -176,10 +210,11 @@ impl PrefixAllocator {
         )
         .await?;
 
-        self.allocate_linknet_for_segment_with_prefix(txn, segment.id, prefix)
+        let network_prefix = self
+            .create_linknet_for_segment_with_prefix(txn, segment.id, prefix)
             .await?;
 
-        Ok((segment.id, prefix))
+        Ok((segment.id, network_prefix))
     }
 
     /// Attaches a prefix already selected and validated by this allocator's
@@ -190,6 +225,20 @@ impl PrefixAllocator {
         segment_id: NetworkSegmentId,
         prefix: IpNetwork,
     ) -> CarbideResult<IpNetwork> {
+        self.create_linknet_for_segment_with_prefix(txn, segment_id, prefix)
+            .await?;
+
+        Ok(prefix)
+    }
+
+    /// Persists one generated prefix and returns its `NetworkPrefix` because service interfaces
+    /// retain `network_prefix_id` for exact retries and cleanup.
+    async fn create_linknet_for_segment_with_prefix(
+        &self,
+        txn: &mut PgConnection,
+        segment_id: NetworkSegmentId,
+        prefix: IpNetwork,
+    ) -> CarbideResult<NetworkPrefix> {
         // The `no_gateway_on_ipv6` database constraint requires IPv6 prefixes
         // to omit an explicit gateway.
         let gateway = if prefix.is_ipv4() {
@@ -198,7 +247,7 @@ impl PrefixAllocator {
             None
         };
 
-        db::network_prefix::create_for(
+        let mut prefixes = db::network_prefix::create_for(
             txn,
             &segment_id,
             &[NewNetworkPrefix {
@@ -211,7 +260,11 @@ impl PrefixAllocator {
         )
         .await?;
 
-        Ok(prefix)
+        prefixes.pop().ok_or_else(|| {
+            CarbideError::internal(format!(
+                "creating generated prefix {prefix} for segment {segment_id} returned no row"
+            ))
+        })
     }
 
     /// Returns the next unoccupied child prefix using the persisted next-fit cursor.

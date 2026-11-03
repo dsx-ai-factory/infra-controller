@@ -774,11 +774,9 @@ func TestGetAllInstanceNVLinkInterfaceHandler_Handle(t *testing.T) {
 	inst1 := testInstanceBuildInstance(t, dbSession, "test-instance-2", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mc1.ID), &os1.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, inst1)
 
-	ifcs := []*cdbm.Interface{}
 	for i := 0; i < 25; i++ {
 		instsub1 := testInstanceBuildInstanceInterface(t, dbSession, inst1.ID, &subnets[i].ID, nil, nil, cdbm.InterfaceStatusProvisioning)
 		assert.NotNil(t, instsub1)
-		ifcs = append(ifcs, instsub1)
 	}
 
 	ibps := []*cdbm.InfiniBandPartition{}
@@ -788,11 +786,9 @@ func TestGetAllInstanceNVLinkInterfaceHandler_Handle(t *testing.T) {
 		ibps = append(ibps, ibp1)
 	}
 
-	ibifs := []*cdbm.InfiniBandInterface{}
 	for i := 0; i < 25; i++ {
 		ibif1 := testInstanceBuildIBInterface(t, dbSession, inst1, st1, ibps[i], i%4, true, cutil.GetPtr(1), cutil.GetPtr(cdbm.InfiniBandInterfaceStatusProvisioning), false)
 		assert.NotNil(t, ibif1)
-		ibifs = append(ibifs, ibif1)
 	}
 
 	nvllps := []*cdbm.NVLinkLogicalPartition{}
@@ -802,12 +798,10 @@ func TestGetAllInstanceNVLinkInterfaceHandler_Handle(t *testing.T) {
 		nvllps = append(nvllps, nvlinklogicalpartition1)
 	}
 
-	nvlifcs := []*cdbm.NVLinkInterface{}
 	for i := 0; i < 25; i++ {
 		nvllp := nvllps[i%3]
 		nvlifc := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st1.ID, inst1.ID, nvllp.ID, cutil.GetPtr(uuid.New()), cutil.GetPtr("NVIDIA GB200"), i%4, cdbm.NVLinkInterfaceStatusProvisioning)
 		assert.NotNil(t, nvlifc)
-		nvlifcs = append(nvlifcs, nvlifc)
 	}
 
 	e := echo.New()

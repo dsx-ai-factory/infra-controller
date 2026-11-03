@@ -25,8 +25,14 @@ use sqlx::{FromRow, Row};
 
 use super::hardware_info::CpuInfo;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// `Sku` describes expected or observed hardware, with fields named for `machine_skus` columns.
+#[derive(Clone, Debug, Deserialize, Serialize, carbide_macros::DbTable)]
+#[db_table(name = "machine_skus")]
 pub struct Sku {
+    /// `schema_version` identifies the SKU format. Database reads preserve all
+    /// nonnegative stored versions, including historical ones; negative values
+    /// return [`sqlx::Error::ColumnDecode`]. Creation and replacement separately
+    /// require the current SKU version.
     pub schema_version: u32,
     pub id: String,
     pub description: String,
@@ -35,9 +41,31 @@ pub struct Sku {
     pub device_type: Option<String>,
 }
 
+/// `SkuComponentsReplacement` replaces a SKU's hardware definition while preserving
+/// omitted metadata. Supplied metadata, including empty strings, replaces the stored value.
+pub struct SkuComponentsReplacement {
+    /// `id` identifies the existing SKU to replace and must not be empty.
+    pub id: String,
+    /// `components` is the complete replacement hardware definition.
+    pub components: SkuComponents,
+    /// `schema_version` must be the current supported SKU format.
+    pub schema_version: u32,
+    /// `description` replaces the stored description when supplied.
+    pub description: Option<String>,
+    /// `device_type` replaces the stored device type when supplied; omission
+    /// preserves it, including a stored `NULL`.
+    pub device_type: Option<String>,
+}
+
 impl<'r> FromRow<'r, PgRow> for Sku {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        let schema_version: u32 = row.try_get::<i32, &str>("schema_version")? as u32;
+        let schema_version =
+            u32::try_from(row.try_get::<i32, _>("schema_version")?).map_err(|error| {
+                sqlx::Error::ColumnDecode {
+                    index: "schema_version".to_string(),
+                    source: Box::new(error),
+                }
+            })?;
         let id: String = row.try_get("id")?;
         let description: String = row.try_get("description")?;
         let created: DateTime<Utc> = row.try_get("created")?;
@@ -237,18 +265,20 @@ pub fn diff_skus(actual_sku: &Sku, expected_sku: &Sku) -> Vec<String> {
         ));
     }
 
+    // `u128` holds the sum of any in-memory list of `u32` counts on
+    // 32/64-bit targets.
     let expected_cpu_count = expected_sku
         .components
         .cpus
         .iter()
-        .map(|c| c.count)
-        .sum::<u32>();
+        .map(|c| u128::from(c.count))
+        .sum::<u128>();
     let actual_cpu_count = actual_sku
         .components
         .cpus
         .iter()
-        .map(|c| c.count)
-        .sum::<u32>();
+        .map(|c| u128::from(c.count))
+        .sum::<u128>();
 
     if expected_cpu_count != actual_cpu_count {
         diffs.push(format!(
@@ -260,14 +290,14 @@ pub fn diff_skus(actual_sku: &Sku, expected_sku: &Sku) -> Vec<String> {
         .components
         .cpus
         .iter()
-        .map(|c| c.thread_count)
-        .sum::<u32>();
+        .map(|c| u128::from(c.thread_count))
+        .sum::<u128>();
     let actual_thread_count = actual_sku
         .components
         .cpus
         .iter()
-        .map(|c| c.thread_count)
-        .sum::<u32>();
+        .map(|c| u128::from(c.thread_count))
+        .sum::<u128>();
 
     if expected_thread_count != actual_thread_count {
         diffs.push(format!(
@@ -353,20 +383,24 @@ pub fn diff_skus(actual_sku: &Sku, expected_sku: &Sku) -> Vec<String> {
         ));
     }
 
+    // Widen before multiplying. Each product is below `2^64`, and fewer
+    // than `2^64` entries keep the sum below `2^128` on 32/64-bit targets.
     let actual_total_memory = actual_sku
         .components
         .memory
         .iter()
-        .fold(0, |a, m| a + (m.capacity_mb * m.count));
+        .map(|m| u128::from(m.capacity_mb) * u128::from(m.count))
+        .sum::<u128>();
     let expected_total_memory = expected_sku
         .components
         .memory
         .iter()
-        .fold(0, |a, m| a + (m.capacity_mb * m.count));
+        .map(|m| u128::from(m.capacity_mb) * u128::from(m.count))
+        .sum::<u128>();
 
     if expected_total_memory != actual_total_memory {
         diffs.push(format!(
-            "Actual memory ({expected_total_memory}) differs from expected ({actual_total_memory})"
+            "Actual memory ({actual_total_memory}) differs from expected ({expected_total_memory})"
         ));
     }
 
@@ -664,6 +698,8 @@ fn diff_storage_by_location(actual_sku: &Sku, expected_sku: &Sku, diffs: &mut Ve
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
 
     fn sku(schema_version: u32, storage: Vec<SkuComponentStorage>) -> Sku {
@@ -683,6 +719,83 @@ mod tests {
             },
             device_type: None,
         }
+    }
+
+    #[test]
+    fn component_totals_remain_exact_above_u32_and_u64() {
+        let cpu = |count, thread_count| SkuComponentCpu {
+            vendor: String::new(),
+            model: String::new(),
+            count,
+            thread_count,
+        };
+        let memory = |capacity_mb, count| SkuComponentMemory {
+            memory_type: String::new(),
+            capacity_mb,
+            count,
+        };
+        let component_sku = |cpus, memory| {
+            let mut sku = sku(5, Vec::new());
+            sku.components.cpus = cpus;
+            sku.components.memory = memory;
+            sku
+        };
+        let extreme_sku = component_sku(
+            vec![cpu(u32::MAX, u32::MAX); 2],
+            vec![memory(u32::MAX, u32::MAX); 2],
+        );
+
+        // Check the reported totals: wrapping and saturation can change a
+        // value or make different totals compare equal.
+        check_values(
+            [
+                Check {
+                    scenario: "CPU counts exceed u32",
+                    input: (
+                        component_sku(vec![cpu(u32::MAX, 0), cpu(1, 0)], Vec::new()),
+                        component_sku(vec![cpu(u32::MAX, 0), cpu(2, 0)], Vec::new()),
+                    ),
+                    expect: vec![
+                        "Number of CPUs (4294967296) does not match expected (4294967297)"
+                            .to_string(),
+                    ],
+                },
+                Check {
+                    scenario: "CPU thread counts exceed u32",
+                    input: (
+                        component_sku(vec![cpu(2, u32::MAX), cpu(2, 1)], Vec::new()),
+                        component_sku(vec![cpu(2, u32::MAX), cpu(2, 2)], Vec::new()),
+                    ),
+                    expect: vec![
+                        "Number of CPU threads (4294967296) does not match expected (4294967297)"
+                            .to_string(),
+                    ],
+                },
+                Check {
+                    scenario: "distinct memory sums exceed u64",
+                    input: (
+                        component_sku(Vec::new(), vec![memory(u32::MAX, u32::MAX); 2]),
+                        component_sku(Vec::new(), vec![memory(u32::MAX, u32::MAX); 3]),
+                    ),
+                    expect: vec![
+                        "Actual memory (36893488130239234050) differs from expected (55340232195358851075)"
+                            .to_string(),
+                    ],
+                },
+                Check {
+                    scenario: "equal extreme totals with different groups still match",
+                    input: (
+                        extreme_sku,
+                        component_sku(
+                            vec![cpu(u32::MAX, u32::MAX), cpu(u32::MAX - 1, u32::MAX - 1), cpu(1, 1)],
+                            vec![memory(u32::MAX, u32::MAX), memory(u32::MAX, u32::MAX - 1), memory(u32::MAX, 1)],
+                        ),
+                    ),
+                    expect: Vec::new(),
+                },
+            ],
+            |(actual, expected)| diff_skus(&actual, &expected),
+        );
     }
 
     /// A discovered drive as an actual (generated) v5 storage entry.

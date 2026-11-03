@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"time"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -46,7 +47,7 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(ms.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -135,11 +136,18 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 			continue
 		}
 
-		// Update existing SKU data in DB
+		// A missing `Components` value clears existing components. Compare the
+		// same empty wrapper the DAO writes so an already empty row stays unchanged.
+		components := reported.Components
+		if cur.Components != nil && components == nil {
+			components = &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{}}
+		}
+		// The DAO treats nil `DeviceType` as omitted, so it preserves the stored type.
+		deviceTypeChanged := reported.DeviceType != nil && !reflect.DeepEqual(cur.DeviceType, reported.DeviceType)
 		createdChanged := !reported.Created.IsZero() && !cur.Created.Equal(reported.Created)
 		if createdChanged || cur.Description != reported.Description || cur.SchemaVersion != reported.SchemaVersion ||
-			!cur.Components.Equal(reported.Components) || cur.DeviceType != reported.DeviceType ||
-			!reflect.DeepEqual(cur.AssociatedMachineIds, reported.AssociatedMachineIds) {
+			!cur.Components.Equal(components) || deviceTypeChanged ||
+			!slices.Equal(cur.AssociatedMachineIds, reported.AssociatedMachineIds) {
 			// nil AssociatedMachineIds in nico can mean we need to clear out existing AssociatedMachineIds in DB
 			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
 			// will save a call to the DB.
@@ -147,18 +155,13 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 			if cur.AssociatedMachineIds != nil && associated == nil {
 				associated = []string{}
 			}
-			// Same nil-clear pattern for Components: a nil from NICo means "clear",
-			// but the DAO skips nil fields, so substitute a non-nil empty wrapper.
-			components := reported.Components
-			if cur.Components != nil && components == nil {
-				components = &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{}}
-			}
 			var created *time.Time
 			if createdChanged {
 				created = &reported.Created
 			}
 			sku := cdbm.SkuUpdateInput{
 				SkuID:                reported.ID,
+				ExpectedUpdated:      &cur.Updated,
 				Created:              created,
 				Description:          &reported.Description,
 				SchemaVersion:        &reported.SchemaVersion,
@@ -168,14 +171,18 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 			}
 			_, uerr := skuDAO.Update(ctx, nil, sku)
 			if uerr != nil {
+				if errors.Is(uerr, cdb.ErrDoesNotExist) {
+					// A concurrent write or deletion superseded the version we read.
+					continue
+				}
 				logger.Error().Err(uerr).Str("SkuID", reportedSku.Id).Msg("failed to update SKU in DB")
 			}
 		}
 	}
 
-	// Delete any SKU present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled).
-	// The source of truth for NICo is reportedIDs.
+	// Delete stale records missing from `reportedIDs` only after the final page
+	// (or when paging is disabled). Matching the saved `Updated` timestamp in
+	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(skuInventory.GetInventoryPage()) {
 		for _, sk := range existingSkus {
 			if _, keep := reportedIDs[sk.ID]; keep {
@@ -190,10 +197,13 @@ func (ms ManageSku) UpdateSkusInDB(ctx context.Context, siteID uuid.UUID, skuInv
 
 				continue
 			}
-			logger.Info().Str("SkuId", sk.ID).Msg("deleting SKU from DB since it was no longer reported in inventory from Site")
-			derr := skuDAO.Delete(ctx, nil, sk.ID)
+			deleted, derr := skuDAO.DeleteIfUnchanged(ctx, nil, sk.ID, sk.Updated)
 			if derr != nil {
 				logger.Error().Err(derr).Str("SkuID", sk.ID).Msg("failed to delete SKU from DB")
+				continue
+			}
+			if deleted {
+				logger.Info().Str("SkuId", sk.ID).Msg("deleted SKU no longer reported in inventory from Site")
 			}
 		}
 	}

@@ -98,11 +98,18 @@ availability as one minus the error rate from the `_count` series split by gRPC 
 
 ```text
 1 - (
-  sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m]))
+  (sum(rate(carbide_api_grpc_server_duration_milliseconds_count{grpc_status_code!="Ok"}[5m])) or vector(0))
   /
   sum(rate(carbide_api_grpc_server_duration_milliseconds_count[5m]))
 )
 ```
+
+When every request succeeds, there is no error series to match, so the query returns nothing.
+`or vector(0)` fills in a zero error rate, so you get `1`, meaning 100% availability.
+
+Two other results are easy to mix up. An empty result means the metric is missing, or the window
+is too short to compute a rate. A `NaN` result means the counters exist but have not moved, so
+no requests arrived.
 
 **API latency** uses the same histogram. Extract p95 or p99 percentiles and convert to
 seconds (metric is in milliseconds, SLO target is 1 second = 1000ms):
@@ -258,7 +265,8 @@ interval (60-120s recommended) to handle transient disagreements during transiti
 ## 6. Health alert classifications
 
 NICo's health system uses classifications to indicate alert severity and operational impact.
-These appear in `carbide_hosts_health_alerts_count` labels and affect threshold calculations.
+These appear in the `classification` label of `carbide_hosts_unhealthy_by_classification_count`
+and affect threshold calculations.
 
 | Classification | Impact |
 |---------------|--------|

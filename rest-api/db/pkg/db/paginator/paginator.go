@@ -6,6 +6,7 @@ package paginator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -119,8 +120,7 @@ func NewPaginatorMultiOrderBy(ctx context.Context, query *bun.SelectQuery, offse
 
 	total, err := query.Count(ctx)
 	if err != nil {
-		// Why do we not wrap err vs shadowing the original error?
-		return nil, ErrQueryTotalCount
+		return nil, fmt.Errorf("%w: %w", ErrQueryTotalCount, err)
 	}
 
 	paginator.Total = total

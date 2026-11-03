@@ -98,7 +98,7 @@ func (gafh GetAllFabricHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gafh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in query", nil)
@@ -116,9 +116,8 @@ func (gafh GetAllFabricHandler) Handle(c echo.Context) error {
 	if provider != nil {
 		isAssociated = provider.ID == st.InfrastructureProviderID
 	}
-	tsDAO := cdbm.NewTenantSiteDAO(gafh.dbSession)
 	if !isAssociated && tenant != nil {
-		_, serr := tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, stID, nil)
+		serr := common.ValidateTenantSiteAccess(ctx, nil, gafh.dbSession, tenant, stID)
 		if serr != nil {
 			if serr != cdb.ErrDoesNotExist {
 				logger.Error().Err(serr).Msg("error retrieving TenantSite from DB")
@@ -259,7 +258,7 @@ func (gfh GetFabricHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gfh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in query", nil)
@@ -285,9 +284,8 @@ func (gfh GetFabricHandler) Handle(c echo.Context) error {
 	if provider != nil {
 		isAssociated = provider.ID == st.InfrastructureProviderID
 	}
-	tsDAO := cdbm.NewTenantSiteDAO(gfh.dbSession)
 	if !isAssociated && tenant != nil {
-		_, serr := tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, stID, nil)
+		serr := common.ValidateTenantSiteAccess(ctx, nil, gfh.dbSession, tenant, stID)
 		if serr != nil {
 			if serr != cdb.ErrDoesNotExist {
 				logger.Error().Err(serr).Msg("error retrieving TenantSite from DB")

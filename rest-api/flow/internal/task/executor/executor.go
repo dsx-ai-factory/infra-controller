@@ -17,6 +17,9 @@ type Executor interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 	Type() common.ExecutorType
+	// Validate verifies that the request can be executed by the active backend
+	// without creating or dispatching a task.
+	Validate(req *task.ExecutionRequest) error
 	// Execute dispatches a task to the appropriate handler based on
 	// req.Info.OperationType. The operation payload must be pre-serialized
 	// into req.Info.OperationInfo before calling.

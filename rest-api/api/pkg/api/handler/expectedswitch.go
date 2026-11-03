@@ -145,9 +145,11 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 
 	// NVOS MACs identify the switch's management ports during discovery, so a
 	// MAC claimed by another Expected Switch on the Site is a conflict.
-	if len(apiRequest.NvosMacAddresses) > 0 {
+	nvosInterfaces := apiRequest.NvosInterfaces
+	nvosMacAddresses := nvosInterfaces.MacAddresses()
+	if len(nvosMacAddresses) > 0 {
 		conflicts, _, derr := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
-			NvosMacAddresses: apiRequest.NvosMacAddresses,
+			NvosMacAddresses: nvosMacAddresses,
 			SiteIDs:          []uuid.UUID{site.ID},
 		}, paginator.PageInput{
 			Limit: cutil.GetPtr(1),
@@ -159,7 +161,7 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 		}
 
 		if len(conflicts) > 0 {
-			logger.Warn().Strs("NvosMacAddresses", apiRequest.NvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
+			logger.Warn().Strs("NvosMacAddresses", nvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
 
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Switch with specified NVOS MAC address already exists on Site", validation.Errors{
 				"id": errors.New(conflicts[0].ID.String()),
@@ -168,27 +170,31 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 
 	expectedSwitch, err := cdb.WithTxResult(ctx, cesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Note: NvOsUsername and NvOsPassword are not stored in DB, only passed to workflow
 		es, err := esDAO.Create(
 			ctx,
 			tx,
 			cdbm.ExpectedSwitchCreateInput{
-				ExpectedSwitchID:   uuid.New(),
-				SiteID:             site.ID,
-				BmcMacAddress:      apiRequest.BmcMacAddress,
-				BmcIpAddress:       apiRequest.BmcIpAddress,
-				SwitchSerialNumber: apiRequest.SwitchSerialNumber,
-				NvosMacAddresses:   apiRequest.NvosMacAddresses,
-				RackID:             apiRequest.RackID,
-				Name:               apiRequest.Name,
-				Manufacturer:       apiRequest.Manufacturer,
-				Model:              apiRequest.Model,
-				Description:        apiRequest.Description,
-				SlotID:             apiRequest.SlotID,
-				TrayIdx:            apiRequest.TrayIdx,
-				HostID:             apiRequest.HostID,
-				Labels:             apiRequest.Labels,
-				CreatedBy:          dbUser.ID,
+				ExpectedSwitchID:      uuid.New(),
+				SiteID:                site.ID,
+				BmcMacAddress:         apiRequest.BmcMacAddress,
+				BmcIpAddress:          apiRequest.BmcIpAddress,
+				SwitchSerialNumber:    apiRequest.SwitchSerialNumber,
+				NvosMacAddresses:      nvosMacAddresses,
+				NvosPrimaryMacAddress: nvosInterfaces.PrimaryMacAddress(),
+				RackID:                apiRequest.RackID,
+				Name:                  apiRequest.Name,
+				Manufacturer:          apiRequest.Manufacturer,
+				Model:                 apiRequest.Model,
+				Description:           apiRequest.Description,
+				SlotID:                apiRequest.SlotID,
+				TrayIdx:               apiRequest.TrayIdx,
+				HostID:                apiRequest.HostID,
+				Labels:                apiRequest.Labels,
+				CreatedBy:             dbUser.ID,
 			},
 		)
 		if err != nil {
@@ -470,7 +476,7 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 	site := expectedSwitch.Site
 	if site == nil {
 		siteDAO := cdbm.NewSiteDAO(gesh.dbSession)
-		site, err = siteDAO.GetByID(ctx, nil, expectedSwitch.SiteID, nil, false)
+		site, err = siteDAO.GetByID(ctx, nil, expectedSwitch.SiteID, nil, false, false)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Switch due to DB error", nil)
@@ -617,9 +623,11 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	// NVOS MACs identify the switch's management ports during discovery, so a
 	// MAC claimed by another Expected Switch on the Site is a conflict. The
 	// switch being updated is excluded so re-asserting its own MACs stays valid.
-	if len(apiRequest.NvosMacAddresses) > 0 {
+	nvosInterfaces := apiRequest.NvosInterfaces
+	nvosMacAddresses := nvosInterfaces.MacAddresses()
+	if len(nvosMacAddresses) > 0 {
 		conflicts, _, derr := esDAO.GetAll(ctx, nil, cdbm.ExpectedSwitchFilterInput{
-			NvosMacAddresses:         apiRequest.NvosMacAddresses,
+			NvosMacAddresses:         nvosMacAddresses,
 			SiteIDs:                  []uuid.UUID{site.ID},
 			ExcludeExpectedSwitchIDs: []uuid.UUID{expectedSwitch.ID},
 		}, paginator.PageInput{
@@ -632,7 +640,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		}
 
 		if len(conflicts) > 0 {
-			logger.Warn().Strs("NvosMacAddresses", apiRequest.NvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
+			logger.Warn().Strs("NvosMacAddresses", nvosMacAddresses).Msg("Expected Switch with specified NVOS MAC address already exists on Site")
 
 			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Expected Switch with specified NVOS MAC address already exists on Site", validation.Errors{
 				"id": errors.New(conflicts[0].ID.String()),
@@ -646,25 +654,37 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 		bmcIPAddress = nil
 	}
 
+	// The structured field replaces the whole NVOS
+	// port set when present. An unflagged structured set clears the stored selector;
+	// the DB model then marks its first port primary on the Core wire. Omission
+	// preserves the stored ports and primary.
+	nvosPrimaryMacAddress := nvosInterfaces.PrimaryMacAddress()
+	nvosInterfacesPresent := apiRequest.NvosInterfaces != nil
+	clearNvosPrimaryMacAddress := nvosInterfacesPresent && nvosPrimaryMacAddress == nil
+
 	updatedExpectedSwitch, err := cdb.WithTxResult(ctx, uesh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedSwitch, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
 		// Note: NvOsUsername and NvOsPassword are not stored in DB, only passed to workflow
 		es, err := esDAO.Update(
 			ctx,
 			tx,
 			cdbm.ExpectedSwitchUpdateInput{
-				ExpectedSwitchID:   expectedSwitch.ID,
-				BmcIpAddress:       bmcIPAddress,
-				SwitchSerialNumber: apiRequest.SwitchSerialNumber,
-				NvosMacAddresses:   apiRequest.NvosMacAddresses,
-				RackID:             apiRequest.RackID,
-				Name:               apiRequest.Name,
-				Manufacturer:       apiRequest.Manufacturer,
-				Model:              apiRequest.Model,
-				Description:        apiRequest.Description,
-				SlotID:             apiRequest.SlotID,
-				TrayIdx:            apiRequest.TrayIdx,
-				HostID:             apiRequest.HostID,
-				Labels:             apiRequest.Labels,
+				ExpectedSwitchID:      expectedSwitch.ID,
+				BmcIpAddress:          bmcIPAddress,
+				SwitchSerialNumber:    apiRequest.SwitchSerialNumber,
+				NvosMacAddresses:      nvosMacAddresses,
+				NvosPrimaryMacAddress: nvosPrimaryMacAddress,
+				RackID:                apiRequest.RackID,
+				Name:                  apiRequest.Name,
+				Manufacturer:          apiRequest.Manufacturer,
+				Model:                 apiRequest.Model,
+				Description:           apiRequest.Description,
+				SlotID:                apiRequest.SlotID,
+				TrayIdx:               apiRequest.TrayIdx,
+				HostID:                apiRequest.HostID,
+				Labels:                apiRequest.Labels,
 			},
 		)
 		if err != nil {
@@ -672,13 +692,14 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
 		}
 
-		if clearBmcIPAddress {
+		if clearBmcIPAddress || clearNvosPrimaryMacAddress {
 			es, err = esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
-				ExpectedSwitchID: expectedSwitch.ID,
-				BmcIpAddress:     true,
+				ExpectedSwitchID:      expectedSwitch.ID,
+				BmcIpAddress:          clearBmcIPAddress,
+				NvosPrimaryMacAddress: clearNvosPrimaryMacAddress,
 			})
 			if err != nil {
-				logger.Error().Err(err).Msg("failed to clear ExpectedSwitch BMC IP address in DB")
+				logger.Error().Err(err).Msg("failed to clear ExpectedSwitch fields in DB")
 				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
 			}
 		}
@@ -797,6 +818,9 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 
 	err = cdb.WithTx(ctx, desh.dbSession, func(tx *cdb.Tx) error {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return apiErr
+		}
 		if err := esDAO.Delete(ctx, tx, expectedSwitch.ID); err != nil {
 			logger.Error().Err(err).Msg("unable to delete ExpectedSwitch record from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Expected Switch due to DB error", nil)
@@ -836,11 +860,11 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 }
 
 // ReplaceAllExpectedSwitchesHandler replaces the complete ExpectedSwitch set for one Site.
-type ReplaceAllExpectedSwitchesHandler struct{ expectedInventoryBulkBase }
+type ReplaceAllExpectedSwitchesHandler struct{ expectedInventoryBatchBase }
 
 // NewReplaceAllExpectedSwitchesHandler creates a full-Site ExpectedSwitch replacement handler.
 func NewReplaceAllExpectedSwitchesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedSwitchesHandler {
-	return ReplaceAllExpectedSwitchesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+	return ReplaceAllExpectedSwitchesHandler{newExpectedInventoryBatchBase(dbSession, scp, cfg)}
 }
 
 // Handle godoc
@@ -880,12 +904,14 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 	credentials := make(map[uuid.UUID]cdbm.ExpectedSwitchCredentials, len(request.ExpectedSwitches))
 	for _, expectedSwitch := range request.ExpectedSwitches {
 		id := uuid.New()
+		nvosInterfaces := expectedSwitch.NvosInterfaces
 		credentials[id] = cdbm.ExpectedSwitchCredentials{BmcUsername: expectedSwitch.DefaultBmcUsername, BmcPassword: expectedSwitch.DefaultBmcPassword, NvosUsername: expectedSwitch.NvOsUsername, NvosPassword: expectedSwitch.NvOsPassword}
 		inputs = append(inputs, cdbm.ExpectedSwitchCreateInput{
 			ExpectedSwitchID: id, SiteID: site.ID, BmcMacAddress: expectedSwitch.BmcMacAddress,
 			SwitchSerialNumber: expectedSwitch.SwitchSerialNumber, BmcIpAddress: expectedSwitch.BmcIpAddress,
-			NvosMacAddresses: expectedSwitch.NvosMacAddresses, RackID: expectedSwitch.RackID,
-			Name: expectedSwitch.Name, Manufacturer: expectedSwitch.Manufacturer, Model: expectedSwitch.Model,
+			NvosMacAddresses: nvosInterfaces.MacAddresses(), NvosPrimaryMacAddress: nvosInterfaces.PrimaryMacAddress(),
+			RackID: expectedSwitch.RackID,
+			Name:   expectedSwitch.Name, Manufacturer: expectedSwitch.Manufacturer, Model: expectedSwitch.Model,
 			Description: expectedSwitch.Description, SlotID: expectedSwitch.SlotID, TrayIdx: expectedSwitch.TrayIdx,
 			HostID: expectedSwitch.HostID, Labels: expectedSwitch.Labels, CreatedBy: dbUser.ID,
 		})
@@ -896,6 +922,10 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 	}
 	dao := cdbm.NewExpectedSwitchDAO(h.dbSession)
 	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedSwitch, error) {
+		apiErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
+			return nil, apiErr
+		}
 		switches, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error replacing ExpectedSwitch records in DB")
@@ -912,7 +942,7 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 		}) {
 			secretFields = []string{"expectedSwitches"}
 		}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
 		if apiErr != nil {
 			return nil, apiErr
 		}
@@ -929,11 +959,11 @@ func (h ReplaceAllExpectedSwitchesHandler) Handle(c echo.Context) error {
 }
 
 // DeleteAllExpectedSwitchesHandler deletes the complete ExpectedSwitch set for one Site.
-type DeleteAllExpectedSwitchesHandler struct{ expectedInventoryBulkBase }
+type DeleteAllExpectedSwitchesHandler struct{ expectedInventoryBatchBase }
 
 // NewDeleteAllExpectedSwitchesHandler creates a full-Site ExpectedSwitch deletion handler.
 func NewDeleteAllExpectedSwitchesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedSwitchesHandler {
-	return DeleteAllExpectedSwitchesHandler{newExpectedInventoryBulkBase(dbSession, scp, cfg)}
+	return DeleteAllExpectedSwitchesHandler{newExpectedInventoryBatchBase(dbSession, scp, cfg)}
 }
 
 // Handle godoc

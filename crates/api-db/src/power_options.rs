@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use config_version::ConfigVersion;
 use model::power_manager::{PowerOptions, PowerState};
@@ -29,17 +30,16 @@ pub async fn create(
     host_id: &MachineId,
     txn: &mut PgConnection,
 ) -> Result<PowerOptions, DatabaseError> {
-    let query = "INSERT INTO power_options ( host_id ) VALUES ($1) RETURNING
-            host_id, last_fetched_updated_at, last_fetched_next_try_at,
-            last_fetched_power_state, last_fetched_off_counter, desired_power_state_version,
-            desired_power_state, wait_until_time_before_performing_next_power_action,
-            tried_triggering_on_at, tried_triggering_on_counter";
+    let query = format!(
+        "INSERT INTO power_options ( host_id ) VALUES ($1) RETURNING {}",
+        PowerOptions::db_table_columns(),
+    );
 
-    let options = sqlx::query_as(query)
+    let options = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(host_id)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(options)
 }
@@ -50,40 +50,37 @@ pub async fn update_desired_state(
     current_version: &ConfigVersion,
     txn: &mut PgConnection,
 ) -> Result<PowerOptions, DatabaseError> {
-    let query = "UPDATE power_options
+    let query = format!(
+        "UPDATE power_options
         SET desired_power_state=$1, desired_power_state_version=$2
         WHERE host_id=$3
-        RETURNING
-            host_id, last_fetched_updated_at, last_fetched_next_try_at,
-            last_fetched_power_state, last_fetched_off_counter, desired_power_state_version,
-            desired_power_state, wait_until_time_before_performing_next_power_action,
-            tried_triggering_on_at, tried_triggering_on_counter";
+        RETURNING {}",
+        PowerOptions::db_table_columns(),
+    );
 
     let config_version = current_version.increment();
 
-    let updated_value = sqlx::query_as(query)
+    let updated_value = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(power_state)
         .bind(config_version)
         .bind(host_id)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(updated_value)
 }
 
 pub async fn get_all(txn: &mut PgConnection) -> Result<Vec<PowerOptions>, DatabaseError> {
-    let query = "SELECT
-            host_id, last_fetched_updated_at, last_fetched_next_try_at,
-            last_fetched_power_state, last_fetched_off_counter, desired_power_state_version,
-            desired_power_state, wait_until_time_before_performing_next_power_action,
-            tried_triggering_on_at, tried_triggering_on_counter
-        FROM power_options";
+    let query = format!(
+        "SELECT {} FROM power_options",
+        PowerOptions::db_table_columns(),
+    );
 
-    let all_options = sqlx::query_as(query)
+    let all_options = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(all_options)
 }
@@ -92,19 +89,16 @@ pub async fn get_by_ids(
     machine_ids: &[HostMachineId],
     txn: &mut PgConnection,
 ) -> Result<Vec<PowerOptions>, DatabaseError> {
-    let query = "SELECT
-            host_id, last_fetched_updated_at, last_fetched_next_try_at,
-            last_fetched_power_state, last_fetched_off_counter, desired_power_state_version,
-            desired_power_state, wait_until_time_before_performing_next_power_action,
-            tried_triggering_on_at, tried_triggering_on_counter
-        FROM power_options
-        WHERE host_id = ANY($1)";
+    let query = format!(
+        "SELECT {} FROM power_options WHERE host_id = ANY($1)",
+        PowerOptions::db_table_columns(),
+    );
 
-    let all_options = sqlx::query_as(query)
+    let all_options = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_ids)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(all_options)
 }

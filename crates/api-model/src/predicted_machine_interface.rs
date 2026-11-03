@@ -22,7 +22,8 @@ use uuid::Uuid;
 use crate::machine_boot_interface::MachineBootInterface;
 use crate::network_segment::NetworkSegmentType;
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "predicted_machine_interfaces")]
 pub struct PredictedMachineInterface {
     pub id: Uuid,
     pub machine_id: MachineId,

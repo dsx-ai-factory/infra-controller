@@ -20,6 +20,7 @@ use std::fmt::Display;
 use std::net::IpAddr;
 
 use carbide_uuid::machine::DpuMachineId;
+use carbide_uuid::{DbColumns, DbTable};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
 
@@ -101,6 +102,39 @@ impl Display for DpuLocalPorts {
     }
 }
 
+// `dpus` is populated separately, so the column list must exclude it.
+impl DbTable for NetworkDevice {
+    fn db_table_name() -> &'static str {
+        "network_devices"
+    }
+
+    fn db_table_columns() -> DbColumns {
+        DbColumns::new(&[
+            "id",
+            "name",
+            "description",
+            "ip_addresses",
+            "device_type",
+            "discovered_via",
+        ])
+    }
+
+    fn db_aliased_table() -> &'static str {
+        "network_devices AS l"
+    }
+
+    fn db_aliased_columns() -> DbColumns {
+        DbColumns::new(&[
+            "l.id",
+            "l.name",
+            "l.description",
+            "l.ip_addresses",
+            "l.device_type",
+            "l.discovered_via",
+        ])
+    }
+}
+
 impl<'r> FromRow<'r, PgRow> for NetworkDevice {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(NetworkDevice {
@@ -118,7 +152,8 @@ impl<'r> FromRow<'r, PgRow> for NetworkDevice {
 /// A entry represents connection between DPU and its port with a network device.
 // TODO: Add switch port name also. It will be easy to find connecting port at switch and use it for
 // debugging.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "port_to_network_device_map")]
 pub struct DpuToNetworkDeviceMap {
     pub dpu_id: DpuMachineId,
     pub local_port: DpuLocalPorts,

@@ -9,20 +9,26 @@
 	<thead>
 		<tr>
 			<th>Name</th>
+			<th>Backend</th>
+			<th>Remote Pool</th>
 			<th>Min</th>
 			<th>Max</th>
 			<th>Size</th>
 			<th>Used</th>
+			<th>Status</th>
 		</tr>
 	</thead>
 	<tbody>
 		{% for pool in pools %}
 		<tr>
 			<td>{{ pool.name }}</td>
+			<td>{{ pool.backend }}</td>
+			<td>{{ pool.remote_pool }}</td>
 			<td>{{ pool.min }}</td>
 			<td>{{ pool.max }}</td>
 			<td>{{ pool.total }}</td>
-			<td>{{ pool|resource_pool_allocated_fmt }}</td>
+			<td>{{ pool.used }}</td>
+			<td>{{ pool.status }}</td>
 		</tr>
 		{% endfor %}
 	</tbody>

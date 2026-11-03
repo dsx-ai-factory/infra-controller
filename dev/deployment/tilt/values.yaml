@@ -182,7 +182,10 @@ nico-bmc-proxy:
       additional_issuer_cns = []
 
       [auth.acls]
-      "trusted-certificate" = ["/**"]
+      "trusted-certificate" = [
+        "GET /redfish/v1/Registries/%23*",
+        "/**",
+      ]
 
       [carbide_api]
       api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
@@ -203,10 +206,10 @@ nico-ssh-console-rs:
   enabled: true
   configFiles:
     config: |
-      listen_address = "[::]:22"
-      api_listen_address = "[::]:1079"
+      listen_address = "*:22"
+      api_listen_address = "*:1079"
       api_allowed_client_spiffe_id = "spiffe://nico.local/nico-system/sa/nico-api"
-      metrics_address = "[::]:9009"
+      metrics_address = "*:9009"
       carbide_url = "https://nico-api.nico-system.svc.cluster.local:1079"
       forge_root_ca_path = "/var/run/secrets/spiffe.io/ca.crt"
       client_cert_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -337,9 +340,12 @@ tilt:
     crds:
       create: true
     monitoring:
+      # Tilt enables monitoring and the dashboard with the observability profile.
       podMonitorEnabled: false
       grafanaDashboard:
         create: false
+        annotations:
+          grafana_folder: PostgreSQL
     resources:
       requests:
         cpu: 100m
@@ -437,6 +443,23 @@ tilt:
             vault kv put secrets/machines/all_hosts/site_default/uefi-metadata-items/auth - >/dev/null
 
   observability:
+    # Values passed directly to the nico-postgres-exporter Helm subchart.
+    postgresExporter:
+      database:
+        credentialsSecret: nico-pg-cluster-app
+        # Local development only; external PostgreSQL can require verified TLS.
+        sslMode: disable
+      serviceMonitor:
+        enabled: true
+      grafanaDashboards:
+        enabled: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
     prometheus:
       fullnameOverride: prometheus-stack
       crds:
@@ -519,6 +542,31 @@ tilt:
           limits:
             cpu: 500m
             memory: 512Mi
+
+    tempo:
+      fullnameOverride: tempo
+      tempo:
+        reportingEnabled: false
+        retention: 24h
+        # Leave headroom for memory outside the Go runtime during compaction.
+        extraEnv:
+          - name: GOMEMLIMIT
+            value: 3GiB
+        receivers:
+          otlp:
+            protocols:
+              grpc:
+                endpoint: 0.0.0.0:4317
+        resources:
+          requests:
+            cpu: 100m
+            memory: 1Gi
+          limits:
+            cpu: "1"
+            memory: 4Gi
+      persistence:
+        enabled: true
+        size: 2Gi
 
     loki:
       deploymentMode: Monolithic
@@ -677,6 +725,13 @@ tilt:
               jsonData:
                 httpMethod: POST
                 timeInterval: 30s
+            - name: Tempo
+              uid: tempo
+              type: tempo
+              access: proxy
+              url: http://tempo.observability.svc.cluster.local:3200
+              isDefault: false
+              editable: false
             - name: Loki
               uid: loki
               type: loki

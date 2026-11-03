@@ -470,7 +470,7 @@ func buildFirmwareUpgradeRule() *OperationRule {
 						Name: ActionFirmwareControl,
 						Parameters: map[string]any{
 							ParamPollInterval: "2m",
-							ParamPollTimeout:  "45m",
+							ParamPollTimeout:  "60m",
 						},
 					},
 				},
@@ -489,7 +489,7 @@ func buildFirmwareUpgradeRule() *OperationRule {
 						Name: ActionFirmwareControl,
 						Parameters: map[string]any{
 							ParamPollInterval: "2m",
-							ParamPollTimeout:  "45m",
+							ParamPollTimeout:  "60m",
 						},
 					},
 				},
@@ -852,7 +852,7 @@ func buildBringUpRule() *OperationRule {
 						Name: ActionFirmwareControl,
 						Parameters: map[string]any{
 							ParamPollInterval: "2m",
-							ParamPollTimeout:  "45m",
+							ParamPollTimeout:  "60m",
 						},
 					},
 				},

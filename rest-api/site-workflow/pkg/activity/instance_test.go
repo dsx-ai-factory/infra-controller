@@ -683,16 +683,16 @@ func TestManageInstanceInventory_DiscoverInstanceInventory(t *testing.T) {
 			})
 
 			ctx := context.Background()
-			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockWantCount, tt.args.wantTotalItems)
 			if tt.args.padBytesPerItem > 0 {
-				ctx = context.WithValue(ctx, "instancePadBytes", tt.args.padBytesPerItem)
+				ctx = context.WithValue(ctx, cClient.MockInstancePadBytes, tt.args.padBytesPerItem)
 			}
 			if tt.args.maxRequestIDs > 0 {
-				ctx = context.WithValue(ctx, "maxRequestIDs", tt.args.maxRequestIDs)
+				ctx = context.WithValue(ctx, cClient.MockMaxRequestIDs, tt.args.maxRequestIDs)
 			}
 			if tt.args.rejectEveryFetch {
 				// A cap of zero rejects any request, however few IDs it carries.
-				ctx = context.WithValue(ctx, "maxRequestIDs", 0)
+				ctx = context.WithValue(ctx, cClient.MockMaxRequestIDs, 0)
 			}
 			if tt.args.cancelContext {
 				cancelledCtx, cancel := context.WithCancel(ctx)
@@ -700,7 +700,7 @@ func TestManageInstanceInventory_DiscoverInstanceInventory(t *testing.T) {
 				ctx = cancelledCtx
 			}
 			if tt.args.dropInstancesPerPage > 0 {
-				ctx = context.WithValue(ctx, "dropInstancesPerPage", tt.args.dropInstancesPerPage)
+				ctx = context.WithValue(ctx, cClient.MockDropInstancesPerPage, tt.args.dropInstancesPerPage)
 			}
 
 			err := manageInstance.DiscoverInstanceInventory(ctx)

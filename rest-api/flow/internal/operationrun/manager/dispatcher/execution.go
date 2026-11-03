@@ -12,10 +12,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	operationrun "github.com/NVIDIA/infra-controller/rest-api/flow/internal/operationrun"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 )
-
-const idempotencyKeyPrefix = "operation-run-target:"
 
 func (d *Dispatcher) execute(
 	prep *preparedDispatch,
@@ -246,45 +243,11 @@ func operationRequestForTarget(
 	op *operationrun.Operation,
 	target *operationrun.OperationRunTarget,
 ) (*operation.Request, error) {
-	info, err := op.Payload.Marshal()
-	if err != nil {
-		return nil, fmt.Errorf("marshal operation payload: %w", err)
-	}
-	ruleID, err := operations.ExtractRuleID(info)
-	if err != nil {
-		return nil, fmt.Errorf("extract operation rule ID: %w", err)
-	}
-
-	componentIDs := target.ComponentsByType.AllComponentUUIDs()
-	components := make([]operation.ComponentTarget, 0, len(componentIDs))
-	for _, id := range componentIDs {
-		components = append(components, operation.ComponentTarget{UUID: id})
-	}
-
-	description := op.Description
-	if description == "" {
-		description = op.Payload.Description()
-	}
-
-	return &operation.Request{
-		Operation: operation.Wrapper{
-			Type: op.Payload.Type(),
-			Code: op.Payload.CodeString(),
-			Info: info,
-		},
-		TargetSpec: operation.TargetSpec{
-			Components: components,
-		},
-		Description:      description,
-		ConflictStrategy: operation.ConflictStrategyReject,
-		RuleID:           ruleID,
-		RequiredRackID:   target.RackID,
-		IdempotencyKey:   targetIdempotencyKey(target.ID),
-	}, nil
+	return operationrun.TaskRequestForTarget(op, target)
 }
 
 func targetIdempotencyKey(targetID uuid.UUID) string {
-	return idempotencyKeyPrefix + targetID.String()
+	return operationrun.TargetIdempotencyKey(targetID)
 }
 
 // targetReadyForSubmission identifies targets that can be claimed now,

@@ -17,20 +17,19 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-func TestAPIMachineHealthPreservesDeprecatedObservedAt(t *testing.T) {
+// Machine health responses carry only observedAt; the snake_case observed_at
+// alias was removed on September 10th, 2026 and must not reappear.
+func TestAPIMachineHealthOmitsRemovedObservedAtAlias(t *testing.T) {
 	observedAt := "2026-09-28T12:00:00Z"
 	var health APIMachineHealth
 	health.FromDBModel(&cdbm.MachineHealth{ObservedAt: &observedAt})
 
 	encoded, err := json.Marshal(health)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{
-		"source":"",
-		"observedAt":"2026-09-28T12:00:00Z",
-		"observed_at":"2026-09-28T12:00:00Z",
-		"successes":[],
-		"alerts":[]
-	}`, string(encoded))
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+	assert.Equal(t, observedAt, fields["observedAt"])
+	assert.NotContains(t, fields, "observed_at")
 }
 
 func TestAPIMachineHealthReportEntryRequestValidateAndToProto(t *testing.T) {

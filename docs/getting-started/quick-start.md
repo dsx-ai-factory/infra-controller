@@ -98,6 +98,10 @@ export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plan
 # Otherwise configure it through the API after installation. DPU provisioning
 # waits for the credential; carbide-api startup does not in local_first mode.
 
+# Optional: KMIP KEK provider. setup creates the nico-kmip-client Secret from a
+# directory holding ca.pem, client.pem, and client.key.
+# export NICO_KMIP_CLIENT_DIR=/path/to/kmip-client
+
 # RMS (Rack Management Service) installs by default. Set the image tag (there
 # is no safe default), or pass --skip-rms to setup.sh to opt out:
 export NICO_RMS_IMAGE_TAG=v0.10.0-rc2             # your rms-api image tag (git describe of your build)
@@ -119,6 +123,7 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 | `NICO_DPF_DPU_INTERFACE`, `NICO_DPF_DPU_CLUSTER_VIP` | **Yes**, unless `--skip-dpf` | DPF DPU provisioning (default-on): the control-plane NIC facing the DPUs and a free DPU-routable VIP for the DPU cluster control plane. See [helm-prereqs → DPF](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf). |
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password. After a DPF-enabled Core deployment is accepted, setup stores it in `nico-system/nico-bmc-v0-credentials` and makes that watched Secret the authoritative local version-0 source. When omitted on such a deployment, setup reuses its marked Secret or leaves version 0 backend-managed. Declining deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. A rerun rejects a different value, and using the variable with `--skip-core` or `--skip-dpf` is an error. |
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
+| `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in [KMIP KEK provider](../configuration/kmip-kek-provider.md). Before Core deploys, setup creates the `nico-system/nico-kmip-client` Secret from them for `nico-api` to mount, and preflight checks that each of the provider's TLS paths lies under a chart-provided mount or under a mounted Secret that exists and has the key the path reads. An error with `--skip-core`. See [helm-prereqs → Opting in to the KMIP KEK provider](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#opting-in-to-the-kmip-kek-provider). |
 
 ### 3b. Set your Site Name
 
@@ -170,7 +175,7 @@ Open `helm-prereqs/values/nico-core.yaml` and update the following values:
   | `[pools.lo-ip]` ranges | Loopback IP range allocated to bare-metal hosts |
   | `[pools.vlan-id]` ranges | VLAN ID allocation range |
   | `[pools.vni]` ranges | VXLAN Network Identifier range |
-  | `[networks.admin]` | `type = "admin"`, an IPv4 `prefix` and `gateway` for DPU provisioning, `mtu`, and `reserve_first` |
+  | `[networks.admin]` | `type = "admin"`, `prefix`, `mtu`, and `reserve_first`; add `gateway` whenever an IPv4 prefix is present, including dual-stack definitions |
   | `[networks.<underlay>]` | Underlay data-plane network(s) — one block per L3 segment |
 
 All fields are documented with inline comments in the file.
@@ -178,9 +183,13 @@ All fields are documented with inline comments in the file.
 Define the site networks to create at startup using the
 [Initial Network Configuration](../provisioning/ip-and-network-configuration.md#initial-network-configuration)
 requirements. An IPv4 prefix requires a gateway; an IPv6-only definition can
-omit it. DPU provisioning requires an admin segment with an IPv4 prefix and
-gateway. Do not use empty strings for address fields. The `[pools.lo-ip]`,
-`[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
+omit it. IPv6-only admin networking requires a configured FNN site and compatible
+Core and DPU-agent builds as described in the linked guide. Retain IPv4 DPU
+loopback addresses and IPv4 VXLAN tunnel endpoints. These IPv4 requirements do
+not restrict the address families of physical underlay segments. Non-FNN admin
+networking requires an IPv4 prefix and gateway. Do not use empty strings for
+address fields. The `[pools.lo-ip]`, `[pools.vlan-id]`, and `[pools.vni]` ranges
+must be non-empty.
 
 <Tip>
 The following fields are safe to leave as empty arrays: `dhcp_servers` and `ntp_servers`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
@@ -385,6 +394,10 @@ All IPs must be within the `IPAddressPool` ranges you defined in `values/metallb
 - **nico-dns Note**: Use `perPodAnnotations` (a list) rather than `annotations` because each replica gets its own VIP.
 - **nico-api IP and DNS Note**: The nico-api VIP must resolve in external DNS to the `hostname` you set in Step 3c.
 
+For the SSH Console endpoint, DNS, host-key verification, and Tenant access,
+see [SSH Console Setup and Access](../configuration/ssh-console.md).
+The Site's REST console fields do not deploy or enable the service.
+
 ### 3i. (Optional) Pre-set the Site UUID
 
 On a fresh install, you normally leave `NICO_SITE_UUID` unset. `setup.sh` resolves the UUID in several ways: it tries to reuse the UUID from a prior install (site-agent ConfigMap); if that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself (see Step 5). You only need to set the UUID explicitly to bind the site-agent to a site that already exists:
@@ -411,7 +424,7 @@ The `preflight.sh` script checks the following:
 | Category | Checks |
 |----------|--------|
 | Environment variables | Conditional image variables are set; registry has no URL scheme; UUID is valid if set; KUBECONFIG path exists if set |
-| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH. Core VIP validation also requires Python 3 with PyYAML. |
+| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH. Core VIP validation also requires Python 3 with PyYAML. The KMIP KEK provider check needs Python 3.11 or later, or the `tomli` package, when the site config mentions KMIP; without either, preflight warns and skips that check, or fails when `NICO_KMIP_CLIENT_DIR` is set. |
 | `values/metallb-config.yaml` | File exists; YAML is valid; at least one IPAddressPool defined; exactly one advertisement mode active (BGP or L2, not both); example placeholder hostnames not still present |
 | Cluster reachability | `kubectl` can reach the API server. |
 | Node resources | At least three schedulable nodes |
@@ -442,6 +455,7 @@ You can combine common options as needed:
 |--------|--------|
 | `--core-values <file>` | Use site-specific NICo Core values for Phase 6. |
 | `--debug` | Enable shell tracing. This may print secrets, so protect the logs. |
+| `--flow-values <file>` | Use site-specific NICo Flow values for Phase 7h. Flow overrides made outside `setup.sh` are reset on every run unless they are in this file. |
 | `--install-contour` | Install the optional Contour/Envoy ingress controller in Phase 1d, for clusters that do not already provide one. Envoy's Service is `LoadBalancer` and takes its external IP from MetalLB. Same as `NICO_INSTALL_CONTOUR=true`; defaults to `false`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Phase 6. |
@@ -473,7 +487,7 @@ before continuing.
 | 5b | DPF stack for DPU provisioning (default; `--skip-dpf` to opt out) |
 | 5c | RMS (Rack Management Service) (default; `--skip-rms` to opt out) |
 | 6 | **NICo Core** (nico helm release) |
-| 7a-7g | **NICo REST** base stack (source and CA setup, PostgreSQL, Keycloak, Temporal, REST services) |
+| 7a-7g | **NICo REST** base stack (source and CA setup, Keycloak, Temporal, REST services) |
 | 7h | **NICo Flow** |
 | 7i | **NICo REST site-agent** |
 
@@ -499,9 +513,9 @@ nico-prereqs               (this Helm chart - nico-system namespace)
 NICo Core                  (../helm - nico-core.yaml values)
 NICo REST                  (../helm/rest/nico-rest)
   ├── nico-rest-ca-issuer   (ClusterIssuer - cert-manager.io)
-  ├── postgres StatefulSet  (temporal + keycloak databases)
-  ├── keycloak              (dev OIDC IdP, nico-dev realm)
-  ├── temporal              (temporal-helm/temporal, mTLS)
+  ├── postgres StatefulSet  (deprecated standalone DB, only while Temporal or Keycloak uses it)
+  ├── keycloak              (dev OIDC IdP, nico realm, DB on nico-pg-cluster unless useHaPostgres resolves to false)
+  ├── temporal              (temporal-helm/temporal, mTLS, DB on nico-pg-cluster unless useHaPostgres resolves to false)
   └── nico-rest             (API, cert-manager, workflow, site-manager)
 NICo Flow                  (../helm/nico-flow)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)

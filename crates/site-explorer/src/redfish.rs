@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_explorer::ProcessorExt;
-use carbide_network::deserialize_input_mac_to_address;
+use carbide_network::{deserialize_input_mac_to_address, is_locally_administered_mac};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::conv::{IntoModel, bmc_vendor};
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
@@ -48,6 +48,8 @@ use model::site_explorer::{
     UefiDevicePath, derive_hardware_class,
 };
 use regex::Regex;
+
+use crate::explored_endpoint_ext::{mac_to_u64, u64_to_mac};
 
 const NOT_FOUND: u16 = 404;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
@@ -297,6 +299,23 @@ impl RedfishClient {
             .map_err(map_redfish_client_creation_error)
     }
 
+    pub(super) async fn restore_bmc_root_ipmi_access(
+        &self,
+        bmc_ip_address: SocketAddr,
+        vendor: RedfishVendor,
+        credentials: Credentials,
+    ) -> Result<(), EndpointExplorationError> {
+        self.redfish_client_pool
+            .restore_bmc_root_ipmi_access(
+                &bmc_ip_address.ip().to_string(),
+                Some(bmc_ip_address.port()),
+                vendor,
+                credentials,
+            )
+            .await
+            .map_err(map_redfish_client_creation_error)
+    }
+
     pub(super) async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,
@@ -447,7 +466,8 @@ impl RedfishClient {
             .inspect_err(
                 |error| tracing::warn!(%error, "Failed to fetch forge secure boot status."),
             )
-            .ok();
+            .ok()
+            .flatten();
 
         let lockdown_status = fetch_lockdown_status(client.as_ref())
             .await
@@ -522,6 +542,7 @@ impl RedfishClient {
         bmc_ip_address: SocketAddr,
         access: BmcAccess,
         boot_interface: Option<&BootInterfaceTarget>,
+        explore_drive_firmware: bool,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
         let service_root = nv_pool
@@ -544,7 +565,7 @@ impl RedfishClient {
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
             service_root,
-            &nv_bmc_explore_config(boot_interface),
+            &nv_bmc_explore_config(boot_interface, explore_drive_firmware),
         )
         .await
         .map_err(map_nv_redfish_explore_error)?;
@@ -925,7 +946,7 @@ async fn fetch_manager(client: &dyn Redfish) -> Result<Manager, RedfishError> {
         e.id.as_deref()
             .is_some_and(|id| id.eq_ignore_ascii_case("eth0"))
     }) && let Some(mac) = eth0.mac_address
-        && crate::is_locally_administered_mac(mac)
+        && is_locally_administered_mac(mac)
     {
         tracing::warn!(
             manager_id = %manager.id,
@@ -1638,8 +1659,8 @@ async fn get_base_mac_from_bf4_ndf0(client: &dyn Redfish) -> Option<MacAddress> 
             .and_then(serde_json::Value::as_str)
             && let Ok(parsed) = deserialize_input_mac_to_address(mac)
         {
-            let derived = crate::mac_to_u64(parsed).checked_sub(BF4_NDF0_TO_BASE_MAC_OFFSET)?;
-            return Some(crate::u64_to_mac(derived));
+            let derived = mac_to_u64(parsed).checked_sub(BF4_NDF0_TO_BASE_MAC_OFFSET)?;
+            return Some(u64_to_mac(derived));
         }
     }
     None
@@ -1718,6 +1739,7 @@ async fn fetch_service(client: &dyn Redfish) -> Result<Vec<Service>, RedfishErro
             description: value.description,
             version: value.version,
             release_date: value.release_date,
+            drive: None,
         };
 
         inventories.push(inventory);
@@ -1760,8 +1782,21 @@ async fn fetch_machine_setup_status(
     })
 }
 
-async fn fetch_secure_boot_status(client: &dyn Redfish) -> Result<SecureBootStatus, RedfishError> {
-    let status = client.get_secure_boot().await?;
+async fn fetch_secure_boot_status(
+    client: &dyn Redfish,
+) -> Result<Option<SecureBootStatus>, RedfishError> {
+    let status = match client.get_secure_boot().await {
+        Ok(status) => status,
+        Err(RedfishError::NotSupported(_)) => return Ok(None),
+        // The standard client probes the optional resource directly, without a link check.
+        Err(RedfishError::HTTPErrorCode {
+            status_code, url, ..
+        }) if status_code == http::StatusCode::NOT_FOUND => {
+            tracing::debug!(%url, "SecureBoot resource returned 404; treating as absent");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
 
     let secure_boot_enable =
         status
@@ -1779,7 +1814,7 @@ async fn fetch_secure_boot_status(client: &dyn Redfish) -> Result<SecureBootStat
 
     let is_enabled = secure_boot_enable && secure_boot_current_boot.is_enabled();
 
-    Ok(SecureBootStatus { is_enabled })
+    Ok(Some(SecureBootStatus { is_enabled }))
 }
 
 /// What an exploration learned about the BMC's `ComponentIntegrity`
@@ -1895,7 +1930,10 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
             if source.is_connect() {
                 EndpointExplorationError::ConnectionRefused { details }
             } else if source.is_timeout() {
-                EndpointExplorationError::ConnectionTimeout { details }
+                EndpointExplorationError::ConnectionTimeout {
+                    details,
+                    consecutive_count: 1,
+                }
             } else {
                 EndpointExplorationError::Unreachable {
                     details: Some(details),
@@ -1971,6 +2009,7 @@ fn nv_error_classifier(
 
 fn nv_bmc_explore_config(
     boot_interface: Option<&BootInterfaceTarget>,
+    explore_drive_firmware: bool,
 ) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
@@ -1979,6 +2018,7 @@ fn nv_bmc_explore_config(
         // but not for too long relative to the total exploration
         // time.
         retry_timeout: Duration::from_millis(1000),
+        explore_drive_firmware,
     }
 }
 
@@ -2009,7 +2049,10 @@ fn map_nv_redfish_explore_error(
                     if err.is_connect() {
                         EndpointExplorationError::ConnectionRefused { details }
                     } else if err.is_timeout() {
-                        EndpointExplorationError::ConnectionTimeout { details }
+                        EndpointExplorationError::ConnectionTimeout {
+                            details,
+                            consecutive_count: 1,
+                        }
                     } else {
                         EndpointExplorationError::Unreachable {
                             details: Some(details),
@@ -2100,6 +2143,128 @@ mod tests {
         nv_bmc_explore_config, record_evaluated_boot_interface, should_fetch_network_adapter_ports,
         system_resource_to_model,
     };
+
+    #[tokio::test]
+    async fn secure_boot_absence_preserves_other_errors() {
+        use std::sync::Mutex;
+
+        use carbide_instrument::testing::capture_logs_async;
+        use libredfish::model::secure_boot::SecureBoot;
+        use libredfish::{EnabledDisabled, Redfish, RedfishError, RedfishFuture};
+
+        struct SecureBootClient(Mutex<Option<Result<SecureBoot, RedfishError>>>);
+
+        impl Redfish for SecureBootClient {
+            fn std_redfish(&self) -> &libredfish::standard::RedfishStandard {
+                panic!("this test only reads SecureBoot")
+            }
+
+            fn get_secure_boot(&self) -> RedfishFuture<'_, Result<SecureBoot, RedfishError>> {
+                Box::pin(async { self.0.lock().unwrap().take().unwrap() })
+            }
+        }
+
+        let status = |enabled, current_boot| {
+            Ok(SecureBoot {
+                secure_boot_enable: enabled,
+                secure_boot_current_boot: current_boot,
+                ..Default::default()
+            })
+        };
+        let http_error = |status_code| {
+            Err(RedfishError::HTTPErrorCode {
+                url: "https://bmc.example/redfish/v1/Systems/1/SecureBoot".into(),
+                status_code,
+                response_body: String::new(),
+            })
+        };
+        let cases = [
+            (
+                "absent",
+                http_error(http::StatusCode::NOT_FOUND),
+                Yields(None),
+            ),
+            (
+                "unsupported",
+                Err(RedfishError::NotSupported("SecureBoot".into())),
+                Yields(None),
+            ),
+            (
+                "enabled",
+                status(Some(true), Some(EnabledDisabled::Enabled)),
+                Yields(Some(true)),
+            ),
+            (
+                "disabled",
+                status(Some(false), Some(EnabledDisabled::Enabled)),
+                Yields(Some(false)),
+            ),
+            (
+                "current boot disabled",
+                status(Some(true), Some(EnabledDisabled::Disabled)),
+                Yields(Some(false)),
+            ),
+            (
+                "missing enable",
+                status(None, Some(EnabledDisabled::Enabled)),
+                Fails,
+            ),
+            ("missing current boot", status(Some(true), None), Fails),
+            (
+                "unauthorized",
+                http_error(http::StatusCode::UNAUTHORIZED),
+                Fails,
+            ),
+            ("forbidden", http_error(http::StatusCode::FORBIDDEN), Fails),
+            (
+                "server failure",
+                http_error(http::StatusCode::INTERNAL_SERVER_ERROR),
+                Fails,
+            ),
+            (
+                "invalid JSON",
+                Err(RedfishError::JsonDeserializeError {
+                    url: "https://bmc.example/redfish/v1/Systems/1/SecureBoot".into(),
+                    body: "{".into(),
+                    source: serde_json::from_str::<SecureBoot>("{").unwrap_err(),
+                }),
+                Fails,
+            ),
+        ];
+        check_cases_async(
+            cases.into_iter().map(|(scenario, input, expect)| Case {
+                scenario,
+                input,
+                expect,
+            }),
+            |response| async {
+                let client = SecureBootClient(Mutex::new(Some(response)));
+                super::fetch_secure_boot_status(&client)
+                    .await
+                    .map(|s| s.map(|s| s.is_enabled))
+                    .map_err(drop)
+            },
+        )
+        .await;
+
+        let client = SecureBootClient(Mutex::new(Some(http_error(http::StatusCode::NOT_FOUND))));
+        let (result, logs) = capture_logs_async(super::fetch_secure_boot_status(&client)).await;
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            logs.len(),
+            1,
+            "404 should emit only a debug diagnostic: {logs:?}"
+        );
+        assert_eq!(logs[0].level, tracing::Level::DEBUG);
+        assert_eq!(
+            logs[0].message,
+            "SecureBoot resource returned 404; treating as absent"
+        );
+        assert_eq!(
+            logs[0].field("url"),
+            Some("https://bmc.example/redfish/v1/Systems/1/SecureBoot"),
+        );
+    }
 
     #[test]
     fn resource_fields_are_normalized_without_linked_inventory() {
@@ -2301,6 +2466,7 @@ mod tests {
                 boot_interface_mac: None,
                 error_classifier: &|_| None,
                 retry_timeout: std::time::Duration::ZERO,
+                explore_drive_firmware: false,
             },
         )
         .await
@@ -2418,7 +2584,6 @@ mod tests {
         assert_eq!(adapter.port_mac_addresses, vec![mac_address]);
         assert_eq!(report.all_mac_addresses(), vec![mac_address]);
         assert_eq!(report.find_interface_id_for_mac(mac_address), None);
-        assert_eq!(report.complete_boot_interfaces().count(), 0);
     }
 
     #[tokio::test]
@@ -2578,7 +2743,7 @@ mod tests {
         };
 
         value_scenarios!(run = |target: Option<BootInterfaceTarget>| {
-            let config = nv_bmc_explore_config(target.as_ref());
+            let config = nv_bmc_explore_config(target.as_ref(), false);
             let mut status = MachineSetupStatus::default();
             record_evaluated_boot_interface(Some(&mut status), target.as_ref());
             (

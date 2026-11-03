@@ -40,6 +40,7 @@ use crate::model::RpcTryFrom;
 use crate::model::instance::snapshot::instance_snapshot_derive_status;
 
 pub mod capabilities;
+pub mod host_state;
 pub mod infiniband;
 pub mod machine_id;
 pub mod machine_search_config;
@@ -351,6 +352,17 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .map(|i| i.to_string()),
             dpf,
             hw_sku: machine.config.hw_sku.clone(),
+            nic_firmware_profile_id: machine
+                .config
+                .nic_firmware_profile_id
+                .as_ref()
+                .map(ToString::to_string),
+            nic_firmware_card_selections: machine
+                .config
+                .nic_firmware_card_selections
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         };
 
         // -- Build the new structured status sub-message --

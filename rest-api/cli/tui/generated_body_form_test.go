@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,7 +69,37 @@ func (p *queuedGeneratedBodyPrompter) Choice(
 	return value, nil
 }
 
-func TestGeneratedBodyFormResolvesResourcesScopeAndEnums(t *testing.T) {
+func TestAddGeneratedBodyFormWithPrompter(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "resources scope and enums", run: testGeneratedBodyFormResolvesResourcesScopeAndEnums},
+		{name: "optional fields", run: testGeneratedBodyFormDoesNotForceOptionalFields},
+		{name: "root arrays", run: testGeneratedBodyFormGuidesRootArrayItems},
+		{name: "prompted JSON", run: testGeneratedBodyFormKeepsWholeJSONEscapeHatch},
+		{name: "required body modes", run: testGeneratedBodyFormRequiredBodyDoesNotOfferNone},
+		{name: "supplied body", run: testGeneratedBodyFormPreservesSuppliedBody},
+	} {
+		t.Run(test.name, test.run)
+	}
+}
+
+func TestBuildGeneratedBodyFormObject(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "Site before VPC selectors", run: testGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors},
+		{name: "nested tray Site selection", run: testGeneratedBodyFormRealSchemaUnscopedTrayFlowUsesSelectedSite},
+		{name: "SKU fetch failure restores scope", run: testBuildGeneratedBodyFormObjectRestoresScopeAfterSKUFailure},
+	} {
+		t.Run(test.name, test.run)
+	}
+}
+
+func testGeneratedBodyFormResolvesResourcesScopeAndEnums(t *testing.T) {
+	t.Helper()
 	resolver := NewResolver(NewCache())
 	resolver.RegisterFetcher("instance-type", func(context.Context) ([]NamedItem, error) {
 		return []NamedItem{{Name: "gpu-large", ID: "instance-type-1"}}, nil
@@ -97,7 +128,7 @@ func TestGeneratedBodyFormResolvesResourcesScopeAndEnums(t *testing.T) {
 		confirms: []bool{false},
 	}
 
-	args, err := addGeneratedBodyFormWithPrompter(session, info, nil, prompter)
+	args, err := addGeneratedBodyFormWithPrompter(session, info, nil, nil, prompter)
 	require.NoError(t, err)
 	require.Len(t, args, 2)
 	assert.Equal(t, "--data", args[0])
@@ -111,7 +142,8 @@ func TestGeneratedBodyFormResolvesResourcesScopeAndEnums(t *testing.T) {
 	}, body)
 }
 
-func TestGeneratedBodyFormDoesNotForceOptionalFields(t *testing.T) {
+func testGeneratedBodyFormDoesNotForceOptionalFields(t *testing.T) {
+	t.Helper()
 	fetches := 0
 	resolver := NewResolver(NewCache())
 	resolver.RegisterFetcher("rack", func(context.Context) ([]NamedItem, error) {
@@ -137,6 +169,7 @@ func TestGeneratedBodyFormDoesNotForceOptionalFields(t *testing.T) {
 		&Session{Resolver: resolver},
 		info,
 		nil,
+		nil,
 		prompter,
 	)
 	require.NoError(t, err)
@@ -144,7 +177,8 @@ func TestGeneratedBodyFormDoesNotForceOptionalFields(t *testing.T) {
 	assert.Zero(t, fetches)
 }
 
-func TestGeneratedBodyFormGuidesRootArrayItems(t *testing.T) {
+func testGeneratedBodyFormGuidesRootArrayItems(t *testing.T) {
+	t.Helper()
 	resolver := NewResolver(NewCache())
 	resolver.RegisterFetcher("sku", func(context.Context) ([]NamedItem, error) {
 		return []NamedItem{{Name: "compute-sku", ID: "sku-1"}}, nil
@@ -167,6 +201,7 @@ func TestGeneratedBodyFormGuidesRootArrayItems(t *testing.T) {
 		&Session{Scope: Scope{SiteID: "site-1"}, Resolver: resolver},
 		info,
 		nil,
+		nil,
 		prompter,
 	)
 	require.NoError(t, err)
@@ -180,7 +215,8 @@ func TestGeneratedBodyFormGuidesRootArrayItems(t *testing.T) {
 	}}, body)
 }
 
-func TestGeneratedBodyFormKeepsWholeJSONEscapeHatch(t *testing.T) {
+func testGeneratedBodyFormKeepsWholeJSONEscapeHatch(t *testing.T) {
+	t.Helper()
 	info := appcli.GeneratedCommandInfo{
 		Name:           "example create",
 		HasRequestBody: true,
@@ -196,12 +232,13 @@ func TestGeneratedBodyFormKeepsWholeJSONEscapeHatch(t *testing.T) {
 		texts:   []string{`{"nested":{"custom":true}}`},
 	}
 
-	args, err := addGeneratedBodyFormWithPrompter(&Session{}, info, nil, prompter)
+	args, err := addGeneratedBodyFormWithPrompter(&Session{}, info, nil, map[string]string{"siteId": "site-1"}, prompter)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"--data", `{"nested":{"custom":true}}`}, args)
 }
 
-func TestGeneratedBodyFormRequiredBodyDoesNotOfferNone(t *testing.T) {
+func testGeneratedBodyFormRequiredBodyDoesNotOfferNone(t *testing.T) {
+	t.Helper()
 	info := generatedCommandInfoByName(t, "vpc-peering create")
 	require.True(t, info.RequestBodyRequired)
 	prompter := &queuedGeneratedBodyPrompter{
@@ -209,7 +246,7 @@ func TestGeneratedBodyFormRequiredBodyDoesNotOfferNone(t *testing.T) {
 		texts:   []string{`{"siteId":"site-1","vpc1Id":"vpc-1","vpc2Id":"vpc-2"}`},
 	}
 
-	args, err := addGeneratedBodyFormWithPrompter(&Session{}, info, nil, prompter)
+	args, err := addGeneratedBodyFormWithPrompter(&Session{}, info, nil, nil, prompter)
 	require.NoError(t, err)
 	require.Len(t, args, 2)
 	assert.Equal(t, []string{"guided", "json"}, prompter.choiceOptions[0])
@@ -243,7 +280,8 @@ func TestGeneratedCommandInfosExposeBodyFormSchema(t *testing.T) {
 	}, state.Enum)
 }
 
-func TestGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors(t *testing.T) {
+func testGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors(t *testing.T) {
+	t.Helper()
 	info := generatedCommandInfoByName(t, "vpc-peering create")
 	require.True(t, info.RequestBodyRequired)
 
@@ -251,7 +289,11 @@ func TestGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors(t *testing.T)
 	resolver := NewResolver(cache)
 	session := &Session{Cache: cache, Resolver: resolver}
 	resolver.RegisterFetcher("site", func(context.Context) ([]NamedItem, error) {
-		return []NamedItem{{Name: "site-one", ID: "site-1"}}, nil
+		return []NamedItem{{
+			Name:   "site-one",
+			ID:     "site-1",
+			Status: "Registered",
+		}}, nil
 	})
 	var siteScopeAtVPCFetch []string
 	resolver.RegisterFetcher("vpc", func(context.Context) ([]NamedItem, error) {
@@ -266,6 +308,7 @@ func TestGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors(t *testing.T)
 	body, err := buildGeneratedBodyFormObject(
 		session,
 		info,
+		nil,
 		&queuedGeneratedBodyPrompter{},
 	)
 	require.NoError(t, err)
@@ -281,7 +324,8 @@ func TestGeneratedBodyFormRealSchemaPersistsSiteBeforeVPCSelectors(t *testing.T)
 	assert.Empty(t, session.Scope.VpcName)
 }
 
-func TestGeneratedTUICommandGuidedBodyResolvesNamesToIDs(t *testing.T) {
+func testGeneratedTUICommandGuidedBodyResolvesNamesToIDs(t *testing.T) {
+	t.Helper()
 	type request struct {
 		path  string
 		query string
@@ -295,7 +339,7 @@ func TestGeneratedTUICommandGuidedBodyResolvesNamesToIDs(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/site":
-			_, _ = io.WriteString(w, `[{"id":"site-1","name":"site-one"}]`)
+			_, _ = io.WriteString(w, `[{"id":"site-1","name":"site-one","status":"Registered"}]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/vpc":
 			vpcFetches++
 			if vpcFetches == 1 {
@@ -595,7 +639,8 @@ func TestGeneratedBodyFormRuleSelectorIsSupported(t *testing.T) {
 	assert.Equal(t, "rule", descriptor.ResourceType)
 }
 
-func TestGeneratedBodyFormRealSchemaUnscopedTrayFlowUsesSelectedSite(t *testing.T) {
+func testGeneratedBodyFormRealSchemaUnscopedTrayFlowUsesSelectedSite(t *testing.T) {
+	t.Helper()
 	info := generatedCommandInfoByName(t, "tray power-control-trays power-control-trays")
 	cache := NewCache()
 	resolver := NewResolver(cache)
@@ -629,7 +674,7 @@ func TestGeneratedBodyFormRealSchemaUnscopedTrayFlowUsesSelectedSite(t *testing.
 		},
 	}
 
-	body, err := buildGeneratedBodyFormObject(session, info, prompter)
+	body, err := buildGeneratedBodyFormObject(session, info, nil, prompter)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]interface{}{
 		"filter": map[string]interface{}{
@@ -682,4 +727,69 @@ func generatedCommandInfoByName(t *testing.T, name string) appcli.GeneratedComma
 	}
 	require.FailNow(t, "generated command info not found", name)
 	return appcli.GeneratedCommandInfo{}
+}
+
+func testGeneratedBodyFormPreservesSuppliedBody(t *testing.T) {
+	t.Helper()
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "JSON", args: []string{"--data", `{"skuId":"authored-sku"}`}},
+		{name: "field flag", args: []string{"--sku-id", "authored-sku"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			info := generatedCommandInfoByName(t, "expected-machine update")
+			resolver := NewResolver(NewCache())
+			fetches := 0
+			resolver.RegisterFetcher("sku", func(context.Context) ([]NamedItem, error) {
+				fetches++
+				return nil, errors.New("unexpected SKU fetch")
+			})
+			prompter := &queuedGeneratedBodyPrompter{}
+			args, err := addGeneratedBodyFormWithPrompter(
+				&Session{Resolver: resolver}, info, test.args,
+				map[string]string{"siteId": "site-1"}, prompter,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, test.args, args)
+			assert.Zero(t, fetches)
+			assert.Empty(t, prompter.choiceOptions)
+		})
+	}
+}
+
+func testBuildGeneratedBodyFormObjectRestoresScopeAfterSKUFailure(t *testing.T) {
+	t.Helper()
+	originalScope := Scope{
+		SiteID: "original-site", SiteName: "Original Site",
+		VpcID: "original-vpc", VpcName: "Original VPC",
+		LabelFilters: map[string]string{"rack": "rack-1"},
+	}
+	resolver := NewResolver(NewCache())
+	session := &Session{Resolver: resolver, Scope: originalScope}
+	fetchErr := errors.New("SKU lookup unavailable")
+	var scopeAtFetch Scope
+	fetches := 0
+	resolver.RegisterFetcher("sku", func(context.Context) ([]NamedItem, error) {
+		fetches++
+		scopeAtFetch = session.Scope
+		return nil, fetchErr
+	})
+	info := appcli.GeneratedCommandInfo{
+		Name: "expected-machine update",
+		BodyFormFields: []appcli.GeneratedCommandBodyFormField{{
+			JSONName: "skuId", Type: "string", Required: true,
+		}},
+	}
+	body, err := buildGeneratedBodyFormObject(
+		session, info, map[string]string{"siteId": "machine-site"},
+		&queuedGeneratedBodyPrompter{},
+	)
+	require.ErrorIs(t, err, fetchErr)
+	assert.Nil(t, body)
+	assert.Equal(t, 1, fetches)
+	assert.Equal(t, "machine-site", scopeAtFetch.SiteID)
+	assert.Empty(t, scopeAtFetch.SiteName)
+	assert.Equal(t, originalScope, session.Scope)
 }

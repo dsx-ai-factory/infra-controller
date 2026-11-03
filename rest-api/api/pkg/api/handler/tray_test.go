@@ -159,7 +159,6 @@ func createMockComponent(id, name, manufacturer, modelStr, componentID string, c
 
 func TestGetTrayHandler_Handle(t *testing.T) {
 	// Setup
-	e := echo.New()
 	dbSession := testTrayInitDB(t)
 	defer dbSession.Close()
 
@@ -199,18 +198,30 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 	)
 
 	mockComponent.Bmcs = []*flowv1.BMCInfo{{MacAddress: "d8:ab:cd:ef:00:01"}}
+	trayMAC := model.NewAPITray(mockComponent).BMCs[0].MacAddress
 
 	ctx := context.Background()
 
+	percentLabelComponent := createMockComponent(
+		uuid.NewString(), "compute-tray-percent", "NVIDIA", "GB200", "unit%label",
+		flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, "rack-id-1",
+	)
+	encodedSlashComponent := createMockComponent(
+		uuid.NewString(), "compute-tray-encoded-slash", "NVIDIA", "GB200", "unit%2Flabel",
+		flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, "rack-id-1",
+	)
+
 	tests := []struct {
-		name           string
-		reqOrg         string
-		user           *cdbm.User
-		trayID         string
-		queryParams    map[string]string
-		mockComponent  *flowv1.Component
-		expectedStatus int
-		wantErr        bool
+		name               string
+		reqOrg             string
+		user               *cdbm.User
+		trayID             string
+		expectedTrayID     string
+		expectedResponseID string
+		queryParams        map[string]string
+		mockComponent      *flowv1.Component
+		expectedStatus     int
+		wantErr            bool
 	}{
 		{
 			name:   "success - get tray by ID",
@@ -228,10 +239,42 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			name:           "success - get tray by response MAC",
 			reqOrg:         org,
 			user:           providerUser,
-			trayID:         model.NewAPITray(mockComponent).BMCs[0].MacAddress,
+			trayID:         trayMAC,
 			queryParams:    map[string]string{"siteId": site.ID.String()},
 			mockComponent:  mockComponent,
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "success - get tray by percent-encoded response MAC",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         strings.ReplaceAll(trayMAC, ":", "%3A"),
+			expectedTrayID: trayMAC,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockComponent:  mockComponent,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:               "success - percent-encoded percent sign decoded once",
+			reqOrg:             org,
+			user:               providerUser,
+			trayID:             "unit%25label",
+			expectedTrayID:     "unit%label",
+			expectedResponseID: "unit%label",
+			queryParams:        map[string]string{"siteId": site.ID.String()},
+			mockComponent:      percentLabelComponent,
+			expectedStatus:     http.StatusOK,
+		},
+		{
+			name:               "success - percent-encoded slash sequence decoded once",
+			reqOrg:             org,
+			user:               providerUser,
+			trayID:             "unit%252Flabel",
+			expectedTrayID:     "unit%2Flabel",
+			expectedResponseID: "unit%2Flabel",
+			queryParams:        map[string]string{"siteId": site.ID.String()},
+			mockComponent:      encodedSlashComponent,
+			expectedStatus:     http.StatusOK,
 		},
 		{
 			name:   "failure - Flow not enabled on site",
@@ -301,7 +344,11 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			testFlowProxyMethodDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponentInfoByID_FullMethodName, func(args mock.Arguments) {
 				var request flowv1.GetComponentInfoByIDRequest
 				testFlowProxyRequest(t, args, &request)
-				assert.Equal(t, tt.trayID, request.GetId().GetId())
+				expectedTrayID := tt.trayID
+				if tt.expectedTrayID != "" {
+					expectedTrayID = tt.expectedTrayID
+				}
+				assert.Equal(t, expectedTrayID, request.GetId().GetId())
 			})
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
@@ -316,16 +363,17 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
-			ec := e.NewContext(req, rec)
-			ec.SetParamNames("orgName", "id")
-			ec.SetParamValues(tt.reqOrg, tt.trayID)
-			ec.Set("user", tt.user)
-
-			ec.SetRequest(ec.Request().WithContext(ctx))
-
-			err := handler.Handle(ec)
+			e := echo.New()
+			e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					c.Set("user", tt.user)
+					return next(c)
+				}
+			})
+			e.GET("/v2/org/:orgName/nico/tray/:id", handler.Handle)
+			e.ServeHTTP(rec, req.WithContext(ctx))
 			if tt.expectedStatus != rec.Code {
-				t.Errorf("GetTrayHandler.Handle() status = %v, want %v, response: %v, err: %v", rec.Code, tt.expectedStatus, rec.Body.String(), err)
+				t.Errorf("GetTrayHandler.Handle() status = %v, want %v, response: %v", rec.Code, tt.expectedStatus, rec.Body.String())
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
@@ -337,7 +385,14 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			var apiTray model.APITray
 			err = json.Unmarshal(rec.Body.Bytes(), &apiTray)
 			assert.NoError(t, err)
-			assert.Equal(t, trayID, apiTray.ID)
+			expectedResponseID := trayID
+			if tt.expectedResponseID != "" {
+				expectedResponseID = tt.expectedResponseID
+			}
+			assert.Equal(t, expectedResponseID, apiTray.ID)
+			if tt.expectedResponseID != "" {
+				return
+			}
 			assert.Equal(t, "Compute", apiTray.Type)
 			assert.Equal(t, "NVIDIA", apiTray.Manufacturer)
 			require.Len(t, apiTray.BMCs, 1)

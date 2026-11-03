@@ -44,26 +44,25 @@ impl fmt::Display for Guid {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
 
     use super::Guid;
 
     #[test]
     fn display_is_normalized_hexadecimal() {
-        check_values(
-            [
-                Check {
-                    scenario: "leading zeroes",
-                    input: Guid::from([0, 0, 0, 0, 0, 0, 0, 1]),
-                    expect: "0000000000000001".to_string(),
-                },
-                Check {
-                    scenario: "lowercase hexadecimal",
-                    input: Guid::from([0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10]),
-                    expect: "fedcba9876543210".to_string(),
-                },
-            ],
-            |guid| guid.to_string(),
-        );
+        for (scenario, guid, expected) in [
+            (
+                "leading zeroes",
+                Guid::from([0, 0, 0, 0, 0, 0, 0, 1]),
+                "0000000000000001".to_string(),
+            ),
+            (
+                "lowercase hexadecimal",
+                Guid::from([0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10]),
+                "fedcba9876543210".to_string(),
+            ),
+        ] {
+            let actual = guid.to_string();
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }

@@ -16,6 +16,7 @@
  */
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
+use carbide_extension_service_controller::interface_mac::ensure_interface_mac;
 use carbide_instrument::{Event, LabelValue, emit};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -24,9 +25,9 @@ use config_version::ConfigVersion;
 use db::{WithTransaction, extension_service, instance};
 use futures_util::FutureExt;
 use model::extension_service::{
-    DpfHelmChartServiceData, ExtensionService, ExtensionServiceLifecycleState,
-    ExtensionServiceObservability, ExtensionServiceType, ExtensionServiceVersionInfo,
-    ServiceVpcInterfaceRequirement,
+    DpfHelmChartServiceData, ExtensionService, ExtensionServiceDeploymentType,
+    ExtensionServiceLifecycleState, ExtensionServiceObservability, ExtensionServiceType,
+    ExtensionServiceVersionInfo, ServiceVpcInterfaceRequirement,
 };
 use model::tenant::TenantOrganizationId;
 use tonic::{Request, Response, Status};
@@ -129,7 +130,8 @@ fn service_vpc_interfaces_from_rpc(
     Ok(requirements)
 }
 
-/// Creates a new extension service with an initial version.
+/// Persists a new extension service, its initial version, and any required interface identity
+/// atomically so controllers cannot observe partial desired state.
 pub(crate) async fn create(
     api: &Api,
     request: Request<rpc::CreateDpuExtensionServiceRequest>,
@@ -164,30 +166,64 @@ pub(crate) async fn create(
         rpc::DpuExtensionServiceType::try_from(req.service_type)
             .map_err(|_| CarbideError::InvalidArgument("invalid service_type".to_string()))?
             .into();
+    let deployment_type: ExtensionServiceDeploymentType =
+        rpc::DpuExtensionServiceDeploymentType::try_from(req.deployment_type)
+            .map_err(|_| CarbideError::InvalidArgument("invalid deployment_type".to_string()))?
+            .into();
 
     let service_vpc_interfaces =
         service_vpc_interfaces_from_rpc(&service_type, &req.service_vpc_interfaces)?;
-    let dpu_target = match (&service_type, req.dpu_target) {
-        (ExtensionServiceType::KubernetesPod, None) => None,
-        (ExtensionServiceType::DpfHelmChart, Some(value)) => Some(
-            rpc::DpuExtensionServiceDpuTarget::try_from(value)
-                .map_err(|_| {
-                    CarbideError::InvalidArgument(
-                        "dpu_target must be PRIMARY, ALL_ACTIVE, or ALL for helm services".into(),
-                    )
-                })?
-                .into(),
-        ),
-        (ExtensionServiceType::DpfHelmChart, None) => {
-            return Err(CarbideError::MissingArgument("dpu_target").into());
-        }
-        (ExtensionServiceType::KubernetesPod, Some(_)) => {
+
+    let dpu_target = match (&service_type, deployment_type) {
+        (ExtensionServiceType::KubernetesPod, ExtensionServiceDeploymentType::Baseline) => {
             return Err(CarbideError::InvalidArgument(
-                "dpu_target is unsupported for kubernetes pod services".into(),
+                "baseline deployment_type is supported only for DPF helm chart services".into(),
             )
             .into());
         }
+        (ExtensionServiceType::KubernetesPod, ExtensionServiceDeploymentType::DemandDriven) => {
+            if req.dpu_target.is_some() {
+                return Err(CarbideError::InvalidArgument(
+                    "dpu_target is unsupported for kubernetes pod services".into(),
+                )
+                .into());
+            }
+            None
+        }
+        (ExtensionServiceType::DpfHelmChart, ExtensionServiceDeploymentType::Baseline) => {
+            if req.dpu_target.is_some() {
+                return Err(CarbideError::InvalidArgument(
+                    "dpu_target is unsupported for baseline helm services".into(),
+                )
+                .into());
+            }
+            None
+        }
+        (ExtensionServiceType::DpfHelmChart, ExtensionServiceDeploymentType::DemandDriven) => {
+            let value = req
+                .dpu_target
+                .ok_or(CarbideError::MissingArgument("dpu_target"))?;
+            Some(
+                rpc::DpuExtensionServiceDpuTarget::try_from(value)
+                    .map_err(|_| {
+                        CarbideError::InvalidArgument(
+                            "dpu_target must be PRIMARY, ALL_ACTIVE, or ALL for helm services"
+                                .into(),
+                        )
+                    })?
+                    .into(),
+            )
+        }
     };
+
+    if deployment_type == ExtensionServiceDeploymentType::Baseline
+        && !service_vpc_interfaces.is_empty()
+    {
+        return Err(CarbideError::InvalidArgument(
+            "service VPC interfaces are unsupported for baseline helm services".into(),
+        )
+        .into());
+    }
 
     let initial_version = ConfigVersion::initial();
 
@@ -237,9 +273,8 @@ pub(crate) async fn create(
         .map(ExtensionServiceObservability::try_from)
         .transpose()?;
 
-    // Store the new credential in Vault if provided. We have to do this before updating the data in
-    // the database, so that in case this fails, the database remains untouched. We can't use db
-    // transactions for this since it can cause issues if vault is unresponsive.
+    // Write any credential before publishing registration so readers can resolve it.
+    // Keep Vault calls outside the transaction to avoid holding locks during network waits.
     if let Some(credential) = &req.credential {
         validate_extension_service_credential(&service_type, credential)?;
         create_extension_service_credential(
@@ -251,15 +286,19 @@ pub(crate) async fn create(
         .await?;
     }
 
-    // Finally, create the extension in the database. If this fails, the vault credential will be removed.
+    // Commit the service, initial version, and optional MAC identity together; remove the Vault
+    // credential if the transaction fails.
     let (service, version) = match api
         .with_txn(|txn| {
             async {
-                extension_service::create(
+                // Persist the declaration before its FK-backed identity, but keep both writes
+                // atomic.
+                let created = extension_service::create(
                     txn,
                     initial_version,
                     &service_id,
                     &service_type,
+                    deployment_type,
                     dpu_target,
                     &req.service_name,
                     &tenant_organization_id,
@@ -270,7 +309,11 @@ pub(crate) async fn create(
                     observability,
                     req.credential.is_some(),
                 )
-                .await
+                .await?;
+                if !service_vpc_interfaces.is_empty() {
+                    ensure_interface_mac(txn, service_id, 0).await?;
+                }
+                Ok(created)
             }
             .boxed()
         })
@@ -307,6 +350,8 @@ pub(crate) async fn create(
     // Create response with service details
     let response = rpc::DpuExtensionService {
         service_id: service.id.to_string(),
+        deployment_type: rpc::DpuExtensionServiceDeploymentType::from(service.deployment_type)
+            as i32,
         dpu_target: service
             .dpu_target
             .map(|target| rpc::DpuExtensionServiceDpuTarget::from(target) as i32),
@@ -413,6 +458,14 @@ pub(crate) async fn update(
     };
     let service_vpc_interfaces_changed =
         service_vpc_interfaces != current_service.service_vpc_interfaces;
+    if current_service.deployment_type == ExtensionServiceDeploymentType::Baseline
+        && !service_vpc_interfaces.is_empty()
+    {
+        return Err(CarbideError::InvalidArgument(
+            "service VPC interfaces are unsupported for baseline helm services".into(),
+        )
+        .into());
+    }
 
     // Requirements describe every attachment of the service, including entries
     // still terminating on deleted instances. The service row lock serializes
@@ -462,6 +515,8 @@ pub(crate) async fn update(
                     &req,
                 )
                 .await?;
+                // Publish the definition, MAC identity, and Updating state atomically before
+                // returning success.
                 txn.commit().await?;
                 result
             }
@@ -471,14 +526,13 @@ pub(crate) async fn update(
         }
     };
 
+    // Reload active version IDs after the selected update path commits so the response reflects
+    // durable state.
     updated_extension_service_response(api, service_id, updated_service, latest_version_row).await
 }
 
-/// Updates the mutable V1 data of a DPF Helm chart service and requests
-/// asynchronous reconciliation of its stable DPUService.
-///
-/// Networked definitions remain immutable until issue #6123 adds the resource
-/// reconciliation needed to advance them safely out of `Updating`.
+/// Updates mutable V1 DPF Helm chart data, restores any required MAC identity, and requests
+/// asynchronous reconciliation of the stable DPUService.
 async fn update_dpf_helm_chart(
     txn: &mut db::Transaction<'_>,
     service_id: ExtensionServiceId,
@@ -538,15 +592,10 @@ async fn update_dpf_helm_chart(
         .into());
     }
 
-    // The controller cannot reconcile service network resources on update
-    // before issue #6123. Reject the transition instead of persisting an
-    // `Updating` registration with no recovery path other than deletion.
+    // Re-adding ordinal zero must recover its prior identity, while first-time networked updates
+    // allocate it now.
     if !service_vpc_interfaces.is_empty() {
-        return Err(CarbideError::FailedPrecondition(
-            "networked DPF helm chart extension-service definitions cannot be updated until network resource reconciliation is implemented"
-                .to_string(),
-        )
-        .into());
+        ensure_interface_mac(txn, service_id, 0).await?;
     }
 
     let desired_data = desired_data
@@ -559,6 +608,7 @@ async fn update_dpf_helm_chart(
         .version
         .incremental_change();
 
+    // Stage the new definition and Updating state only after any required MAC identity exists.
     Ok(extension_service::update_dpf_helm_chart_in_place(
         txn,
         service_id,
@@ -713,6 +763,9 @@ async fn updated_extension_service_response(
     );
 
     let response = rpc::DpuExtensionService {
+        deployment_type: rpc::DpuExtensionServiceDeploymentType::from(
+            updated_service.deployment_type,
+        ) as i32,
         dpu_target: updated_service
             .dpu_target
             .map(|target| rpc::DpuExtensionServiceDpuTarget::from(target) as i32),
@@ -801,6 +854,8 @@ pub(crate) async fn delete(
     match &current_service.service_type {
         ExtensionServiceType::DpfHelmChart => {
             delete_dpf_helm_chart(&mut txn, service_id, current_service, &versions).await?;
+            // Commit Deleting before returning so the controller observes durable intent before
+            // starting Kubernetes cleanup.
             txn.commit().await?;
         }
         ExtensionServiceType::KubernetesPod => {
@@ -1139,20 +1194,28 @@ pub(crate) async fn find_instances_by_extension_service(
     let mut instance_infos: Vec<rpc::InstanceDpuExtensionServiceInfo> = Vec::new();
 
     for instance in instances {
-        // Get the extension service config for this instance
+        // Prefer an active match independently of stored order. If only
+        // tombstones match, which retained attachment is returned is unspecified.
         if let Some(ext_service_config) = instance
             .config
             .extension_services
             .service_configs
             .iter()
-            .find(|config| config.service_id == service_id)
+            .filter(|config| {
+                config.service_id == service_id
+                    && version.is_none_or(|version| config.version == version)
+            })
+            .min_by_key(|config| config.removed.is_some())
         {
             let service_version = ext_service_config.version;
             instance_infos.push(rpc::InstanceDpuExtensionServiceInfo {
                 instance_id: instance.id.to_string(),
                 service_id: service_id.to_string(),
                 version: service_version.to_string(),
-                removed: ext_service_config.removed.map(|ts| ts.to_string()),
+                removed: ext_service_config
+                    .removed
+                    .or(instance.deleted)
+                    .map(|timestamp| timestamp.to_string()),
             });
         } else {
             return Err(CarbideError::Internal {

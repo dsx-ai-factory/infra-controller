@@ -17,29 +17,35 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
-use eyre::WrapErr;
-use quick_xml::events::{BytesEnd, BytesStart, Event};
-use quick_xml::{Reader, Writer};
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::sync::oneshot;
+use nv_redfish::schema::resource::PowerState;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
-use url::Url;
 
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
-use crate::{ActionError, BmcState, BootOptionKind, Callbacks, MockPowerState, ResourceResetType};
+use crate::{
+    ActionError, BmcEvent, BmcState, BootOptionKind, Callbacks, ResourceResetType,
+    VirtualMediaUpdate, validate_power_reset,
+};
 
+mod commands;
+mod device_xml;
+mod domain_xml;
+mod media_lifecycle;
 mod persistence;
+mod virsh;
+mod xml;
+use commands::{DomainConfiguration, VirshCommand};
+use media_lifecycle::MediaLifecycle;
 use persistence::StateFile;
+use virsh::Virsh;
 
 /// Maximum duration of one virsh attempt, including output collection.
 const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,16 +53,28 @@ const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Additional grace period for reaping after a kill request, independent of the command deadline.
 const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Per power request, allow one five-second poll delay, a 30-second virsh
+/// attempt and five seconds of cleanup to obtain the first recognized state.
+/// Expiry fails before enqueueing a power command. Backend polling continues.
+const INITIALIZATION_WAIT: Duration = Duration::from_secs(40);
+
 /// Delay after each periodic observation; the actor retains at most one polling alarm.
 const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Debug)]
+struct PowerObservation {
+    state: PowerState,
+    cycling: bool,
+}
 
 pub struct LibvirtActor {
     actor: Actor<LibvirtMessage>,
     mailbox: ActorMailbox<LibvirtMessage>,
     config: Config,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
+    initialized: watch::Sender<bool>,
 }
 
 impl LibvirtActor {
@@ -64,8 +82,12 @@ impl LibvirtActor {
     /// Call `run` to initialize the backend and spawn it in the owner's supervised task set.
     pub fn new(config: Config, guard: DropGuard) -> (Self, LibvirtCallbacks) {
         let refresh_pending = Arc::new(AtomicBool::new(false));
-        let power_state = Arc::new(RwLock::new(MockPowerState::Unknown));
+        let power_state = Arc::new(RwLock::new(PowerObservation {
+            state: PowerState::Off,
+            cycling: false,
+        }));
         let (actor, mailbox) = Actor::new();
+        let (initialized, initialization) = watch::channel(false);
         (
             LibvirtActor {
                 actor,
@@ -73,19 +95,24 @@ impl LibvirtActor {
                 config,
                 refresh_pending: refresh_pending.clone(),
                 power_state: power_state.clone(),
+                initialized,
             },
             LibvirtCallbacks {
                 mailbox,
                 refresh_pending,
                 power_state,
+                initialized: initialization,
                 _stop: guard,
             },
         )
     }
 
+    /// Loads saved state and runs the supervised backend. The owner retains the
+    /// state Arc for the serving lifetime. Lifecycle publication uses only Weak
+    /// access, so it cannot keep the callbacks and backend alive.
     pub async fn run(
         self,
-        bmc_state: &BmcState<LibvirtCallbacks>,
+        bmc_state: &Arc<BmcState<LibvirtCallbacks>>,
         tasks: &mut JoinSet<()>,
         stop: CancellationToken,
     ) -> eyre::Result<()> {
@@ -101,6 +128,10 @@ impl LibvirtActor {
             config: self.config,
             restore_boot_after_power_on: false,
             system_state: None,
+            bmc_state: Arc::downgrade(bmc_state),
+            last_observed_power: None,
+            boot_pending: None,
+            initialized: self.initialized,
             applied_state: AppliedState::default(),
             refresh_pending: self.refresh_pending,
             power_state: self.power_state,
@@ -134,25 +165,38 @@ pub struct Config {
 /// Backend handle that sends operations to one sequential libvirt actor.
 ///
 /// Commands use an unbounded mailbox. Refresh notifications coalesce into one pending signal.
-/// Power reads return the last completed observation, initially Unknown, updated at actor startup,
+/// Power observations are published to Redfish, initially Off, updated at actor startup,
 /// after power commands and refresh notifications, and by polling with a five-second
 /// delay after each attempt. Actor work can delay polling; each virsh attempt has a 30-second
-/// deadline and up to five seconds of cleanup. Failed or unrecognized observations return Unknown.
-/// Power commands return once enqueued; execution failures are logged by the actor.
+/// deadline and up to five seconds of cleanup. Failed or unrecognized observations retain the last state.
+/// Power commands wait up to 40 seconds for the first recognized domain observation
+/// before validation, then return once enqueued. Expiry returns an internal error
+/// without enqueueing. Backend exit closes the readiness channel, and the caller
+/// can cancel its wait. A later request can succeed after an observation recovers.
+/// Execution failures are logged by the actor.
+/// Virtual-media operations await execution and publish Redfish contents only on success.
+/// Resets are rejected while a power-cycle command is executing.
 /// Dropping the handle cancels the actor. Cancelling `LibvirtActor::run` during
 /// initialization interrupts it before the actor task is spawned.
 #[derive(Debug)]
 pub struct LibvirtCallbacks {
     mailbox: ActorMailbox<LibvirtMessage>,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
+    initialized: watch::Receiver<bool>,
     _stop: DropGuard,
 }
 
 #[derive(Debug)]
 enum LibvirtMessage {
     PollPower,
-    SendPowerCommand { reset_type: ResourceResetType },
+    SendPowerCommand {
+        reset_type: ResourceResetType,
+    },
+    SetVirtualMedia {
+        update: VirtualMediaUpdate,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
     Refresh,
     PersistState,
     Stop(oneshot::Sender<Result<(), PersistenceError>>),
@@ -164,16 +208,25 @@ struct LibvirtBackend {
     config: Config,
     restore_boot_after_power_on: bool,
     system_state: Option<Weak<SystemState<LibvirtCallbacks>>>,
+    bmc_state: Weak<BmcState<LibvirtCallbacks>>,
+    last_observed_power: Option<PowerState>,
+    boot_pending: Option<BootKind>,
+    initialized: watch::Sender<bool>,
     applied_state: AppliedState,
     refresh_pending: Arc<AtomicBool>,
-    power_state: Arc<RwLock<MockPowerState>>,
+    power_state: Arc<RwLock<PowerObservation>>,
+}
+
+#[derive(Clone, Copy)]
+enum BootKind {
+    Warm,
+    Cold,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct AppliedState {
     persistent_boot_selection: Option<BootOptionKind>,
     boot_source_override: serde_json::Value,
-    virtual_media: BTreeMap<String, serde_json::Value>,
 }
 
 impl LibvirtBackend {
@@ -206,96 +259,33 @@ impl LibvirtBackend {
             "libvirt backend has no controlled ComputerSystem"
         ))?;
         let applied = AppliedState::from(controlled_system);
-        self.set_persistent_boot_selection(applied.persistent_boot_selection)
+        self.apply_persistent_boot_selection(applied.persistent_boot_selection)
             .await?;
+        if let Some(media) = controlled_system.virtual_media() {
+            let lifecycle = MediaLifecycle::new(self.virsh(), &self.config.virtual_media_targets);
+            for device_id in media.device_ids() {
+                lifecycle.ensure_device(device_id).await?;
+            }
+        }
         self.system_state = Some(Arc::downgrade(&state));
         self.applied_state = applied;
+        self.publish_power_state(PowerState::Off);
         self.refresh_power_state().await;
         Ok(())
     }
 
-    async fn virsh_output(&self, arguments: &[&str]) -> eyre::Result<Output> {
-        let command = self.config.virsh_path.display().to_string();
-        let mut child = Command::new(&self.config.virsh_path)
-            .env("LC_ALL", "C")
-            .arg("--connect")
-            .arg(&self.config.uri)
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("could not execute {command}"))?;
-        let mut stdout = child.stdout.take().expect("stdout is piped");
-        let mut stderr = child.stderr.take().expect("stderr is piped");
-        let mut stdout_bytes = Vec::new();
-        let mut stderr_bytes = Vec::new();
-        // Drain both pipes while waiting: a full pipe must not deadlock the child.
-        // The deadline includes output collection as well as process execution.
-        let completion = tokio::time::timeout(VIRSH_COMMAND_TIMEOUT, async {
-            tokio::try_join!(
-                child.wait(),
-                stdout.read_to_end(&mut stdout_bytes),
-                stderr.read_to_end(&mut stderr_bytes),
-            )
-        })
-        .await;
-        match completion {
-            Ok(Ok((status, _, _))) => Ok(Output {
-                status,
-                stdout: stdout_bytes,
-                stderr: stderr_bytes,
-            }),
-            failed => {
-                child
-                    .start_kill()
-                    .with_context(|| format!("could not stop {command}"))?;
-                // On timeout, returning drops Child and leaves reaping to Tokio's
-                // best-effort cleanup so the actor can keep processing.
-                tokio::time::timeout(VIRSH_CLEANUP_TIMEOUT, child.wait())
-                    .await
-                    .with_context(|| {
-                        format!("could not reap {command} within {VIRSH_CLEANUP_TIMEOUT:?} after kill request")
-                    })?
-                    .with_context(|| format!("could not reap {command}"))?;
-                Err(match failed {
-                    Err(_) => eyre::eyre!("{command} timed out after {VIRSH_COMMAND_TIMEOUT:?}"),
-                    Ok(Err(error)) => {
-                        eyre::eyre!("could not collect {command} output: {error}")
-                    }
-                    Ok(Ok(_)) => unreachable!(),
-                })
-            }
+    fn virsh(&self) -> Virsh<'_> {
+        Virsh {
+            path: &self.config.virsh_path,
+            uri: &self.config.uri,
+            domain: &self.config.domain,
         }
     }
 
-    async fn virsh(&self, arguments: &[&str]) -> eyre::Result<Output> {
-        let output = self.virsh_output(arguments).await?;
-        if output.status.success() {
-            Ok(output)
-        } else {
-            Err(eyre::eyre!(
-                "{} exited with {}: {}",
-                self.config.virsh_path.display(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
-        }
-    }
-
-    async fn domain_command(&self, command: &str) -> eyre::Result<()> {
-        self.virsh(&[command, &self.config.domain]).await.map(drop)
-    }
-
-    async fn start(&mut self) -> eyre::Result<()> {
-        self.domain_command("start").await?;
-        let restore_boot = std::mem::take(&mut self.restore_boot_after_power_on);
-        if restore_boot {
-            if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
-                system_state.on_boot_completed();
-            }
+    async fn restore_boot_after_start(&mut self) -> eyre::Result<()> {
+        if self.restore_boot_after_power_on {
             self.restore_persistent_boot_order().await?;
+            self.restore_boot_after_power_on = false;
         }
         Ok(())
     }
@@ -310,7 +300,7 @@ impl LibvirtBackend {
                     .controlled_system()
                     .and_then(SingleSystemState::resolve_persistent_boot_selection)
             });
-        self.set_persistent_boot_selection(selection).await
+        self.apply_persistent_boot_selection(selection).await
     }
 
     async fn reapply_effective_boot_order(&mut self) -> Result<(), ActionError> {
@@ -326,78 +316,35 @@ impl LibvirtBackend {
         };
         let boot_source_override = system.boot_source_override();
         if boot_source_override_is_active(&boot_source_override) {
-            self.set_boot_source_override(&boot_source_override).await
+            self.apply_boot_source_override(&boot_source_override).await
         } else {
-            self.set_persistent_boot_selection(system.resolve_persistent_boot_selection())
+            self.apply_persistent_boot_selection(system.resolve_persistent_boot_selection())
                 .await
                 .map_err(ActionError::Internal)
         }
     }
 
-    async fn set_persistent_boot_selection(
+    async fn apply_persistent_boot_selection(
         &self,
         selection: Option<BootOptionKind>,
     ) -> eyre::Result<()> {
         match selection {
-            Some(BootOptionKind::Disk) => self.set_boot_devices(&["hd"]).await,
-            Some(BootOptionKind::Network) => self.set_boot_devices(&["network", "hd"]).await,
+            Some(BootOptionKind::Disk) => self.apply_boot_devices(&["hd"]).await,
+            Some(BootOptionKind::Network) => self.apply_boot_devices(&["network", "hd"]).await,
             None => Ok(()),
         }
     }
 
-    async fn set_boot_devices(&self, devices: &[&str]) -> eyre::Result<()> {
-        let output = self
-            .virsh(&["dumpxml", "--inactive", &self.config.domain])
+    async fn apply_boot_devices(&self, devices: &[&str]) -> eyre::Result<()> {
+        let domain = self
+            .virsh()
+            .dumpxml(DomainConfiguration::Persistent)
             .await?;
-        let xml =
-            String::from_utf8(output.stdout).context("virsh dumpxml returned invalid UTF-8")?;
-        let xml = set_boot_order_xml(&xml, devices)?;
-        let file =
-            tempfile::NamedTempFile::new().context("could not create temporary domain XML")?;
-        tokio::fs::write(file.path(), xml.as_bytes())
-            .await
-            .context("could not write temporary domain XML")?;
-        self.virsh(&["define", file.path().to_string_lossy().as_ref()])
-            .await
-            .map(drop)
+        let command = VirshCommand::boot_order(domain, devices)?;
+        self.virsh().execute(command).await.map(drop)
     }
 
-    fn target_for_device(&self, device_id: &str) -> Result<&str, ActionError> {
-        self.config
-            .virtual_media_targets
-            .get(device_id)
-            .map(String::as_str)
-            .ok_or_else(|| {
-                ActionError::BadRequest(eyre::eyre!(
-                    "virtual media device {} has no libvirt target",
-                    device_id
-                ))
-            })
-    }
-
-    async fn target_is_attached(&self, target: &str) -> eyre::Result<bool> {
-        let output = self
-            .virsh(&["domblklist", "--details", &self.config.domain])
-            .await?;
-        let output =
-            String::from_utf8(output.stdout).context("virsh domblklist returned invalid UTF-8")?;
-        Ok(output.lines().any(|line| {
-            line.split_whitespace()
-                .nth(2)
-                .is_some_and(|value| value == target)
-        }))
-    }
-
-    async fn detach_target(&self, target: &str) -> eyre::Result<()> {
-        if !self.target_is_attached(target).await? {
-            return Ok(());
-        }
-        self.virsh(&["detach-disk", &self.config.domain, target, "--persistent"])
-            .await
-            .map(drop)
-    }
-
-    async fn set_boot_source_override(
+    async fn apply_boot_source_override(
         &mut self,
         boot_source_override: &serde_json::Value,
     ) -> Result<(), ActionError> {
@@ -419,73 +366,11 @@ impl LibvirtBackend {
             }
             (_, None) => return Ok(()),
         };
-        self.set_boot_devices(devices)
+        self.apply_boot_devices(devices)
             .await
             .map_err(ActionError::Internal)?;
         self.restore_boot_after_power_on = enabled == Some("Once");
         Ok(())
-    }
-
-    async fn insert_virtual_media(
-        &self,
-        device_id: &str,
-        image: &str,
-        write_protected: bool,
-    ) -> eyre::Result<()> {
-        let target = self.target_for_device(device_id)?;
-        self.detach_target(target).await?;
-        let xml = virtual_media_xml(device_id, target, image, write_protected)?;
-        let file =
-            tempfile::NamedTempFile::new().context("could not create temporary device XML")?;
-        tokio::fs::write(file.path(), xml.as_bytes())
-            .await
-            .context("could not write temporary device XML")?;
-        self.virsh(&[
-            "attach-device",
-            &self.config.domain,
-            file.path().to_string_lossy().as_ref(),
-            "--persistent",
-        ])
-        .await
-        .map(drop)
-    }
-
-    async fn eject_virtual_media(&self, device_id: &str) -> eyre::Result<()> {
-        let target = self.target_for_device(device_id)?;
-        self.detach_target(target).await
-    }
-
-    async fn apply_virtual_media(&self, state: &serde_json::Value) -> Result<(), ActionError> {
-        let device_id = state
-            .get("Id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| ActionError::BadRequest(eyre::eyre!("virtual media state has no id")))?;
-        let inserted = state
-            .get("Inserted")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if !inserted {
-            return self
-                .eject_virtual_media(device_id)
-                .await
-                .map_err(ActionError::Internal);
-        }
-        let image = state
-            .get("Image")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                ActionError::BadRequest(eyre::eyre!(
-                    "inserted virtual media device {} has no image",
-                    device_id
-                ))
-            })?;
-        let write_protected = state
-            .get("WriteProtected")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        self.insert_virtual_media(device_id, image, write_protected)
-            .await
-            .map_err(ActionError::Internal)
     }
 
     async fn reconcile_state(&mut self, desired: AppliedState) -> Result<(), String> {
@@ -493,7 +378,7 @@ impl LibvirtBackend {
         if desired.boot_source_override != self.applied_state.boot_source_override
             && desired_override_active
         {
-            self.set_boot_source_override(&desired.boot_source_override)
+            self.apply_boot_source_override(&desired.boot_source_override)
                 .await
                 .map_err(|error| error.to_string())?;
         } else if !desired_override_active
@@ -501,45 +386,21 @@ impl LibvirtBackend {
                 || desired.persistent_boot_selection
                     != self.applied_state.persistent_boot_selection)
         {
-            self.set_persistent_boot_selection(desired.persistent_boot_selection)
+            self.apply_persistent_boot_selection(desired.persistent_boot_selection)
                 .await
                 .map_err(|error| error.to_string())?;
         }
         self.applied_state.boot_source_override = desired.boot_source_override;
         self.applied_state.persistent_boot_selection = desired.persistent_boot_selection;
-        for (device_id, desired_device) in desired.virtual_media {
-            if self.applied_state.virtual_media.get(&device_id) == Some(&desired_device) {
-                continue;
-            }
-            self.apply_virtual_media(&desired_device)
-                .await
-                .map_err(|error| error.to_string())?;
-            self.applied_state
-                .virtual_media
-                .insert(device_id, desired_device);
-        }
         Ok(())
     }
 }
 
 impl<C: Callbacks> From<&SingleSystemState<C>> for AppliedState {
     fn from(system: &SingleSystemState<C>) -> Self {
-        let virtual_media = system
-            .virtual_media()
-            .into_iter()
-            .flat_map(|virtual_media| virtual_media.desired_state())
-            .filter_map(|state| {
-                let device_id = state
-                    .get("Id")
-                    .and_then(serde_json::Value::as_str)?
-                    .to_string();
-                Some((device_id, state))
-            })
-            .collect();
         Self {
             persistent_boot_selection: system.resolve_persistent_boot_selection(),
             boot_source_override: system.boot_source_override(),
-            virtual_media,
         }
     }
 }
@@ -555,16 +416,16 @@ fn boot_source_override_is_active(boot_source_override: &serde_json::Value) -> b
 }
 
 impl LibvirtBackend {
-    async fn get_power_state(&self) -> MockPowerState {
-        match self.virsh(&["domstate", &self.config.domain]).await {
+    async fn observe_power_state(&self) -> Option<PowerState> {
+        match self.virsh().execute(VirshCommand::DomainState).await {
             Ok(output) => match String::from_utf8_lossy(&output.stdout).trim() {
                 "running" | "idle" | "blocked" | "paused" | "in shutdown" | "pmsuspended" => {
-                    MockPowerState::On
+                    Some(PowerState::On)
                 }
-                "shut off" | "crashed" => MockPowerState::Off,
+                "shut off" | "crashed" => Some(PowerState::Off),
                 state => {
                     tracing::warn!(domain = %self.config.domain, state, "unrecognized libvirt domain power state");
-                    MockPowerState::Unknown
+                    None
                 }
             },
             Err(error) => {
@@ -573,14 +434,52 @@ impl LibvirtBackend {
                     error = ?error,
                     "could not read libvirt domain power state",
                 );
-                MockPowerState::Unknown
+                None
             }
         }
     }
 
-    async fn refresh_power_state(&self) {
-        let observed = self.get_power_state().await;
-        *self.power_state.write().expect("power state lock poisoned") = observed;
+    fn publish_power_state(&self, state: PowerState) {
+        self.power_state
+            .write()
+            .expect("power state lock poisoned")
+            .state = state;
+        if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
+            system_state.set_power_state(state);
+        }
+    }
+
+    async fn refresh_power_state(&mut self) {
+        if let Some(observed) = self.observe_power_state().await {
+            // Synthetic Off during a cycle is not an observed edge. Initial On
+            // seeds state without inventing a boot for a restored BFB task.
+            let boot = if observed == PowerState::On {
+                self.boot_pending.take().or_else(|| {
+                    (self.last_observed_power == Some(PowerState::Off)).then_some(BootKind::Cold)
+                })
+            } else {
+                None
+            };
+            self.last_observed_power = Some(observed);
+            self.publish_power_state(observed);
+            self.initialized.send_replace(true);
+            if let Some(boot) = boot {
+                let used_saved_boot_configuration = matches!(boot, BootKind::Cold);
+                if let Some(state) = self.bmc_state.upgrade() {
+                    state.on_event(&BmcEvent::PowerOn);
+                    // Domain On is the standalone backend's boot-completion
+                    // inference, as for one-time boot-policy restoration.
+                    state.on_boot_completed(used_saved_boot_configuration);
+                }
+                // Publish this boot before yielding to XML cleanup. A later
+                // upload admitted during cleanup must wait for its own boot.
+                if used_saved_boot_configuration
+                    && let Err(error) = self.restore_boot_after_start().await
+                {
+                    tracing::error!(domain = %self.config.domain, %error, "could not restore persistent boot order");
+                }
+            }
+        }
     }
 
     async fn send_power_command(
@@ -590,51 +489,26 @@ impl LibvirtBackend {
         use ResourceResetType::*;
         // Only a cold start loads the saved domain XML. Reboot and reset keep
         // the running domain's boot configuration and their existing semantics.
-        if matches!(reset_type, On | ForceOn | PowerCycle) {
+        if matches!(reset_type, On | ForceOn | PowerCycle | FullPowerCycle) {
             self.reapply_effective_boot_order().await?;
         }
-        match reset_type {
-            On | ForceOn => self.start().await.map_err(ActionError::Internal),
-            GracefulShutdown => self
-                .domain_command("shutdown")
+        for command in VirshCommand::power(reset_type)? {
+            let boot = match command {
+                VirshCommand::Start => Some(BootKind::Cold),
+                VirshCommand::Reset | VirshCommand::Reboot => Some(BootKind::Warm),
+                _ => None,
+            };
+            self.virsh()
+                .execute(command)
                 .await
-                .map_err(ActionError::Internal),
-            ForceOff => self
-                .domain_command("destroy")
-                .await
-                .map_err(ActionError::Internal),
-            GracefulRestart => self
-                .domain_command("reboot")
-                .await
-                .map_err(ActionError::Internal),
-            ForceRestart => self
-                .domain_command("reset")
-                .await
-                .map_err(ActionError::Internal),
-            PowerCycle | FullPowerCycle => {
-                self.domain_command("destroy")
-                    .await
-                    .map_err(ActionError::Internal)?;
-                self.start().await.map_err(ActionError::Internal)
-            }
-            Pause => self
-                .domain_command("suspend")
-                .await
-                .map_err(ActionError::Internal),
-            Resume => self
-                .domain_command("resume")
-                .await
-                .map_err(ActionError::Internal),
-            Nmi => self
-                .domain_command("inject-nmi")
-                .await
-                .map_err(ActionError::Internal),
-            Sleep | Hibernate | PushPowerButton | Suspend | UnsupportedValue => {
-                Err(ActionError::BadRequest(eyre::eyre!(
-                    "libvirt backend does not support {reset_type:?}"
-                )))
+                .map_err(ActionError::Internal)?;
+            // The boot happened even if later boot-policy cleanup fails.
+            // Only confirmed On consumes this marker and publishes lifecycle.
+            if boot.is_some() {
+                self.boot_pending = boot;
             }
         }
+        Ok(())
     }
 
     async fn refresh(&mut self) {
@@ -672,6 +546,16 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
         message: LibvirtMessage,
     ) -> ActorResult {
         match message {
+            LibvirtMessage::SetVirtualMedia { update, reply } => {
+                let media = MediaLifecycle::new(self.virsh(), &self.config.virtual_media_targets);
+                let result = media.apply(&update.device_id, &update.contents).await;
+                if result.is_ok() {
+                    update.commit();
+                }
+                // Publication belongs to the actor even if the HTTP caller has gone away.
+                reply.send(result).ok();
+                ActorResult::Noop
+            }
             LibvirtMessage::Stop(reply) => {
                 reply.send(self.save_state()).ok();
                 ActorResult::Stop
@@ -694,15 +578,20 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
             }
             LibvirtMessage::SendPowerCommand { reset_type } => {
                 if matches!(reset_type, ResourceResetType::PowerCycle) {
-                    *self.power_state.write().expect("power state lock poisoned") =
-                        MockPowerState::PowerCycling {
-                            since: Instant::now(),
-                        };
+                    self.power_state
+                        .write()
+                        .expect("power state lock poisoned")
+                        .cycling = true;
+                    self.publish_power_state(PowerState::Off);
                 }
                 if let Err(error) = self.send_power_command(reset_type).await {
                     tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
                 }
                 self.refresh_power_state().await;
+                self.power_state
+                    .write()
+                    .expect("power state lock poisoned")
+                    .cycling = false;
                 ActorResult::Noop
             }
             LibvirtMessage::Refresh => {
@@ -729,15 +618,44 @@ impl LibvirtCallbacks {
 }
 
 impl Callbacks for LibvirtCallbacks {
-    fn get_power_state(&self) -> MockPowerState {
-        *self.power_state.read().expect("power state lock poisoned")
+    async fn set_virtual_media(&self, update: VirtualMediaUpdate) -> Result<(), ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::SetVirtualMedia { update, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
     }
 
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
     ) -> Result<(), ActionError> {
-        self.get_power_state().validate_reset_type(reset_type)?;
+        {
+            let mut initialized = self.initialized.clone();
+            drop(
+                tokio::time::timeout(INITIALIZATION_WAIT, initialized.wait_for(|ready| *ready))
+                    .await
+                    .map_err(|error| {
+                        ActionError::Internal(
+                            eyre::Report::new(error).wrap_err(
+                                "timed out waiting for the first libvirt power observation",
+                            ),
+                        )
+                    })?
+                    .map_err(|error| ActionError::Internal(error.into()))?,
+            );
+        }
+        {
+            let observation = self.power_state.read().expect("power state lock poisoned");
+            if observation.cycling {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "libvirt backend is in the middle of power cycling"
+                )));
+            }
+            validate_power_reset(observation.state, reset_type)?;
+        }
         self.mailbox
             .send(LibvirtMessage::SendPowerCommand { reset_type })
             .map_err(|err| ActionError::Internal(err.into()))
@@ -753,340 +671,8 @@ impl Callbacks for LibvirtCallbacks {
     }
 }
 
-fn set_boot_order_xml(xml: &str, devices: &[&str]) -> eyre::Result<String> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(false);
-    let mut writer = Writer::new(Vec::new());
-    let mut inside_os = false;
-    loop {
-        let event = reader
-            .read_event()
-            .context("could not parse libvirt domain XML")?;
-        match event {
-            Event::Start(start) if start.name().as_ref() == b"os" => {
-                inside_os = true;
-                writer.write_event(Event::Start(start.into_owned()))
-            }
-            Event::Empty(empty) if inside_os && empty.name().as_ref() == b"boot" => Ok(()),
-            Event::End(end) if end.name().as_ref() == b"os" => {
-                let result: std::io::Result<()> = (|| {
-                    for device in devices {
-                        let mut boot = BytesStart::new("boot");
-                        boot.push_attribute(("dev", *device));
-                        writer.write_event(Event::Empty(boot))?;
-                    }
-                    inside_os = false;
-                    writer.write_event(Event::End(BytesEnd::new("os")))
-                })();
-                result
-            }
-            Event::Eof => break,
-            event => writer.write_event(event.into_owned()),
-        }
-        .context("could not write libvirt domain XML")?;
-    }
-    String::from_utf8(writer.into_inner()).context("generated libvirt domain XML is invalid UTF-8")
-}
-
-enum MediaSource {
-    File(PathBuf),
-    Network {
-        protocol: String,
-        host: String,
-        port: u16,
-        path: String,
-    },
-}
-
-impl MediaSource {
-    fn parse(image: &str) -> Result<Self, ActionError> {
-        let Ok(url) = Url::parse(image) else {
-            return Ok(Self::File(PathBuf::from(image)));
-        };
-        match url.scheme() {
-            "file" => url
-                .to_file_path()
-                .map(Self::File)
-                .map_err(|()| ActionError::BadRequest(eyre::eyre!("invalid file URL: {}", image))),
-            "http" | "https" => {
-                if url.username() != "" || url.password().is_some() || url.query().is_some() {
-                    return Err(ActionError::BadRequest(eyre::eyre!(
-                        "virtual media URLs must not contain credentials or a query",
-                    )));
-                }
-                let host = url.host().ok_or_else(|| {
-                    ActionError::BadRequest(eyre::eyre!("virtual media URL has no host: {}", image))
-                })?;
-                // `Host::Display` brackets IPv6, but libvirt needs the bare address.
-                let host = match host {
-                    url::Host::Ipv6(address) => address.to_string(),
-                    host => host.to_string(),
-                };
-                Ok(Self::Network {
-                    protocol: url.scheme().to_string(),
-                    host,
-                    port: url
-                        .port_or_known_default()
-                        .expect("HTTP(S) has a default port"),
-                    path: url.path().to_string(),
-                })
-            }
-            scheme => Err(ActionError::BadRequest(eyre::eyre!(
-                "unsupported virtual media URL scheme: {}",
-                scheme
-            ))),
-        }
-    }
-}
-
-fn virtual_media_xml(
-    device_id: &str,
-    target: &str,
-    image: &str,
-    write_protected: bool,
-) -> eyre::Result<String> {
-    let mut writer = Writer::new(Vec::new());
-    let mut disk = BytesStart::new("disk");
-    let source = MediaSource::parse(image)?;
-    disk.push_attribute((
-        "type",
-        match &source {
-            MediaSource::File(_) => "file",
-            MediaSource::Network { .. } => "network",
-        },
-    ));
-    disk.push_attribute(("device", "cdrom"));
-    writer.write_event(Event::Start(disk)).unwrap();
-
-    let mut driver = BytesStart::new("driver");
-    driver.push_attribute(("name", "qemu"));
-    driver.push_attribute(("type", "raw"));
-    writer.write_event(Event::Empty(driver)).unwrap();
-
-    match source {
-        MediaSource::File(path) => {
-            let mut source = BytesStart::new("source");
-            let path = path.to_string_lossy();
-            source.push_attribute(("file", path.as_ref()));
-            writer.write_event(Event::Empty(source)).unwrap();
-        }
-        MediaSource::Network {
-            protocol,
-            host,
-            port,
-            path,
-        } => {
-            let mut source = BytesStart::new("source");
-            source.push_attribute(("protocol", protocol.as_str()));
-            source.push_attribute(("name", path.as_str()));
-            writer.write_event(Event::Start(source)).unwrap();
-            let mut host_element = BytesStart::new("host");
-            let port = port.to_string();
-            host_element.push_attribute(("name", host.as_str()));
-            host_element.push_attribute(("port", port.as_str()));
-            writer.write_event(Event::Empty(host_element)).unwrap();
-            writer
-                .write_event(Event::End(BytesEnd::new("source")))
-                .unwrap();
-        }
-    }
-
-    let mut target_element = BytesStart::new("target");
-    target_element.push_attribute(("dev", target));
-    target_element.push_attribute(("bus", "sata"));
-    writer.write_event(Event::Empty(target_element)).unwrap();
-    if write_protected {
-        writer
-            .write_event(Event::Empty(BytesStart::new("readonly")))
-            .unwrap();
-    }
-    let mut alias = BytesStart::new("alias");
-    let alias_name = format!("ua-bmc-mock-vmedia-{device_id}");
-    alias.push_attribute(("name", alias_name.as_str()));
-    writer.write_event(Event::Empty(alias)).unwrap();
-    writer
-        .write_event(Event::End(BytesEnd::new("disk")))
-        .unwrap();
-
-    String::from_utf8(writer.into_inner()).context("generated device XML is invalid UTF-8")
-}
-
+// Do not generate executable stub scripts in tests. A parallel test can fork while
+// another thread holds a script open for writing; inherited descriptors can race
+// with exec and cause ETXTBSY (Text file busy) or other unexpected failures.
 #[cfg(test)]
-mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
-    use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode};
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases};
-    use tower::ServiceExt;
-
-    use super::*;
-    use crate::test_support::host_info;
-    use crate::{HardwareType, MachineRouterOptions, machine_router};
-
-    #[tokio::test]
-    async fn observes_external_power_changes_and_recovers_from_unavailable_state() {
-        let directory = tempfile::tempdir().unwrap();
-        let virsh = directory.path().join("virsh");
-        std::fs::write(
-            &virsh,
-            r#"#!/bin/sh
-case "$3" in
-    domstate)
-        IFS= read -r state < "$0.state"
-        [ "$state" != error ] || exit 1
-        printf '%s\n' "$state"
-        ;;
-    dumpxml) printf '%s\n' '<domain><os><type>hvm</type></os><devices/></domain>' ;;
-    define) exit 0 ;;
-    *) exit 2 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let state_file = directory.path().join("virsh.state");
-        std::fs::write(&state_file, "running").unwrap();
-        let mut tasks = JoinSet::new();
-        let stop = CancellationToken::new();
-        let (actor, callbacks) = LibvirtActor::new(
-            Config {
-                state_file: None,
-                virsh_path: virsh,
-                uri: "test:///default".to_string(),
-                domain: "test-domain".to_string(),
-                virtual_media_targets: BTreeMap::new(),
-            },
-            stop.clone().drop_guard(),
-        );
-        let callbacks = Arc::new(callbacks);
-        assert!(matches!(
-            callbacks.get_power_state(),
-            MockPowerState::Unknown
-        ));
-        let (router, state) = machine_router(
-            &host_info(HardwareType::DellPowerEdgeR750),
-            callbacks.clone(),
-            "test-host".to_string(),
-            false,
-            MachineRouterOptions::default(),
-        );
-        actor.run(&state, &mut tasks, stop).await.unwrap();
-        // These changes happen outside the BMC: no reset or refresh is sent.
-        for (observation, expected) in [
-            ("running", serde_json::json!("On")),
-            ("shut off", serde_json::json!("Off")),
-            ("error", serde_json::Value::Null),
-            ("running", serde_json::json!("On")),
-            ("unrecognized", serde_json::Value::Null),
-        ] {
-            let replacement = directory.path().join("next-state");
-            std::fs::write(&replacement, observation).unwrap();
-            std::fs::rename(replacement, &state_file).unwrap();
-            tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let response = router
-                        .clone()
-                        .oneshot(
-                            Request::builder()
-                                .uri("/redfish/v1/Systems/System.Embedded.1")
-                                .body(Body::empty())
-                                .unwrap(),
-                        )
-                        .await
-                        .unwrap();
-                    assert_eq!(response.status(), StatusCode::OK);
-                    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    if body.get("PowerState") == Some(&expected) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            })
-            .await
-            .unwrap_or_else(|_| panic!("observation {observation:?} did not become {expected}"));
-            if expected.is_null() {
-                let response = router
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .method("POST")
-                            .uri("/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset")
-                            .header("content-type", "application/json")
-                            .body(Body::from(r#"{"ResetType":"ForceOff"}"#))
-                            .unwrap(),
-                    )
-                    .await;
-                assert_eq!(
-                    response.unwrap().status(),
-                    StatusCode::INTERNAL_SERVER_ERROR
-                );
-            }
-        }
-        drop(router);
-        drop(state);
-        drop(callbacks);
-        tokio::time::timeout(Duration::from_secs(1), tasks.join_all())
-            .await
-            .expect("dropping the backend must stop polling");
-    }
-
-    #[test]
-    fn replaces_domain_boot_order() {
-        let xml = "<domain><os><type>hvm</type><boot dev='hd'/></os><devices/></domain>";
-        let actual = set_boot_order_xml(xml, &["cdrom", "hd"]).unwrap();
-
-        assert!(actual.contains("<type>hvm</type>"));
-        assert!(actual.contains("<boot dev=\"cdrom\"/><boot dev=\"hd\"/>"));
-        assert!(!actual.contains("<boot dev='hd'/>"));
-    }
-
-    #[test]
-    fn builds_network_virtual_media_device() {
-        let device = |source| {
-            format!(
-                "<disk type=\"network\" device=\"cdrom\"><driver name=\"qemu\" type=\"raw\"/>\
-                {source}</source><target dev=\"sdb\" bus=\"sata\"/><readonly/>\
-                <alias name=\"ua-bmc-mock-vmedia-Cd\"/></disk>"
-            )
-        };
-        check_cases(
-            [
-                Case {
-                    scenario: "IPv4 with an explicit port",
-                    input: "http://127.0.0.1:8080/installer.iso",
-                    expect: Yields(device(
-                        "<source protocol=\"http\" name=\"/installer.iso\"><host name=\"127.0.0.1\" port=\"8080\"/>",
-                    )),
-                },
-                Case {
-                    scenario: "IPv6 with an explicit port",
-                    input: "http://[2001:db8::10]:8080/installer.iso",
-                    expect: Yields(device(
-                        "<source protocol=\"http\" name=\"/installer.iso\"><host name=\"2001:db8::10\" port=\"8080\"/>",
-                    )),
-                },
-                Case {
-                    scenario: "domain with the default HTTPS port",
-                    input: "https://images.example.com/installer.iso",
-                    expect: Yields(device(
-                        "<source protocol=\"https\" name=\"/installer.iso\"><host name=\"images.example.com\" port=\"443\"/>",
-                    )),
-                },
-            ],
-            |image| virtual_media_xml("Cd", "sdb", image, true).map_err(|error| error.to_string()),
-        );
-    }
-
-    #[test]
-    fn builds_file_virtual_media_device() {
-        let actual = virtual_media_xml("ConfigCd", "sdc", "/tmp/config.iso", false).unwrap();
-
-        assert!(actual.contains("<disk type=\"file\" device=\"cdrom\">"));
-        assert!(actual.contains("<source file=\"/tmp/config.iso\"/>"));
-        assert!(actual.contains("<target dev=\"sdc\" bus=\"sata\"/>"));
-        assert!(!actual.contains("<readonly/>"));
-    }
-}
+mod tests;

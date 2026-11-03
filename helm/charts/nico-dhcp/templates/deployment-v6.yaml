@@ -1,4 +1,8 @@
 {{- $dhcp := default (dict) .Values.dhcp -}}
+{{- $env := deepCopy .Values.env -}}
+{{- with .Values.otlpEndpoint -}}
+{{- $_ := set $env "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" . -}}
+{{- end -}}
 {{- if $dhcp.v6Enabled }}
 apiVersion: apps/v1
 kind: Deployment
@@ -47,7 +51,7 @@ spec:
               sed "s/__NICO_DHCPV6_ADDRESS__/$address/g" /tmp/kea_config6.json > /var/run/kea/kea_config6.json
               exec /sbin/kea-dhcp6 -c /var/run/kea/kea_config6.json
           env:
-            {{- range $key, $value := .Values.env }}
+            {{- range $key, $value := $env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}

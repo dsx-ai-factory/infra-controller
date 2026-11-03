@@ -109,6 +109,19 @@ spec:
               value: "postgres://$(DATASTORE_USER):$(DATASTORE_PASSWORD)@$(DATASTORE_HOST):$(DATASTORE_PORT)/$(DATASTORE_NAME)"
             - name: NICO_BMC_PROXY__REDIRECTS__MODE
               value: {{ include "nico-bmc-proxy.redirectMode" . | quote }}
+            {{- with .Values.switchTls }}
+            {{- if .enabled }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CA_CERT_PATH
+              value: {{ .caCertPath | quote }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CLIENT_CERT_PATH
+              value: {{ printf "%s/tls.crt" .mountPath | quote }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CLIENT_KEY_PATH
+              value: {{ printf "%s/tls.key" .mountPath | quote }}
+            # Set even when empty, which unsets a name the TOML may give.
+            - name: NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME
+              value: {{ .tlsServerName | default "" | quote }}
+            {{- end }}
+            {{- end }}
             - name: RUST_BACKTRACE
               value: {{ .Values.env.RUST_BACKTRACE | quote }}
             - name: RUST_LIB_BACKTRACE
@@ -132,6 +145,11 @@ spec:
             - name: spiffe
               mountPath: "/var/run/secrets/spiffe.io"
               readOnly: true
+            {{- if .Values.switchTls.enabled }}
+            - name: switch-client
+              mountPath: {{ .Values.switchTls.mountPath | quote }}
+              readOnly: true
+            {{- end }}
             - name: nico-roots
               mountPath: "/var/run/secrets/forge-roots"
               readOnly: true
@@ -147,6 +165,11 @@ spec:
         - name: spiffe
           secret:
             secretName: {{ include "nico-bmc-proxy.name" . }}-certificate
+        {{- if .Values.switchTls.enabled }}
+        - name: switch-client
+          secret:
+            secretName: {{ .Values.switchTls.secretName }}
+        {{- end }}
         - name: nico-roots
           secret:
             secretName: nico-roots

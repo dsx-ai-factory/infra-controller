@@ -54,7 +54,7 @@ func powerStateFromDAO(ps *nicoapi.PowerState) string {
 	case nicoapi.PowerStateOff:
 		return "off"
 	case nicoapi.PowerStateDisabled:
-		return "disabled"
+		return "unknown"
 	case nicoapi.PowerStateHibernating:
 		return "hibernating"
 	case nicoapi.PowerStateSleeping:

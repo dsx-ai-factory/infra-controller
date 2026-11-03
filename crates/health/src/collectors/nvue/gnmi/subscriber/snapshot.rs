@@ -28,6 +28,7 @@ use tokio_stream::{Stream, StreamExt};
 use super::super::on_change_processor::{EventSnapshot, GnmiOnChangeProcessor};
 use super::super::proto;
 use super::super::reconciliation::{MetricReconciler, MetricSnapshot};
+use super::super::sample_processor::GnmiSampleProcessor;
 use super::{
     GnmiClientProvider, GnmiStreamMetrics, SubscriptionResponses, subscribe_with_cached_credentials,
 };
@@ -38,15 +39,17 @@ enum ReconciliationSnapshot {
     Metrics(MetricSnapshot),
 }
 
-// Events retain whole rows; other streams retain individual metric source paths.
+// Events retain whole rows; metrics retain source paths. Samples also reconcile
+// the interface epochs used for cumulative counter metadata.
 pub(super) enum ReconciliationProcessor<'a> {
     Events(&'a GnmiOnChangeProcessor, &'a GnmiStreamMetrics),
     Metrics(&'a MetricReconciler),
+    Samples(&'a GnmiSampleProcessor),
 }
 
 /// Runs snapshot reconciliation only while its live subscription is synchronized.
 pub(super) struct Reconciliation<'a> {
-    /// Presence cache that owns the readings for the live stream.
+    /// Applies snapshot presence and the live stream's associated cleanup.
     pub(super) processor: ReconciliationProcessor<'a>,
 
     /// Snapshot cadence; zero disables reconciliation.
@@ -161,6 +164,9 @@ impl ReconciliationProcessor<'_> {
             Self::Metrics(processor) => processor
                 .begin(request)
                 .map(ReconciliationSnapshot::Metrics),
+            Self::Samples(processor) => processor
+                .begin_reconciliation(request)
+                .map(ReconciliationSnapshot::Metrics),
         }
     }
 
@@ -172,8 +178,12 @@ impl ReconciliationProcessor<'_> {
             (Self::Metrics(processor), Some(ReconciliationSnapshot::Metrics(snapshot))) => {
                 processor.finish(Some(snapshot))
             }
+            (Self::Samples(processor), Some(ReconciliationSnapshot::Metrics(snapshot))) => {
+                processor.finish_reconciliation(Some(snapshot))
+            }
             (Self::Events(processor, metrics), _) => processor.finish_reconciliation(None, metrics),
             (Self::Metrics(processor), _) => processor.finish(None),
+            (Self::Samples(processor), _) => processor.finish_reconciliation(None),
         }
     }
 }
@@ -292,15 +302,24 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::super::super::client::{build_sample_subscribe_request, build_snapshot_request};
+    use super::super::super::sample_processor::test_interface_update;
     use super::*;
     use crate::endpoint::BmcAddr;
     use crate::sink::{EventContext, MetricSample};
 
     #[tokio::test]
     async fn completed_snapshots_preserve_ready_live_updates_and_retry_after_backlogs() {
-        for (name, backlogged, expected_retained) in
-            [("ready update", false, 1), ("live backlog", true, 2)]
-        {
+        #[derive(Clone, Copy)]
+        enum Interruption {
+            None,
+            Backlog,
+            SnapshotError,
+        }
+        for (name, interruption, expected_retained) in [
+            ("ready update", Interruption::None, 1),
+            ("live backlog", Interruption::Backlog, 2),
+            ("failed snapshot", Interruption::SnapshotError, 1),
+        ] {
             let context = EventContext {
                 endpoint_key: "switch".into(),
                 addr: BmcAddr {
@@ -314,7 +333,12 @@ mod tests {
                 labels: Default::default(),
             };
 
-            let processor = MetricReconciler::new(None, context);
+            let processor = GnmiSampleProcessor::new(None, context, "switch".into(), None, true);
+            let sources = processor
+                .reconciliation
+                .as_ref()
+                .expect("reconciliation enabled");
+            let stream_metrics = super::super::test_gnmi_stream_metrics();
 
             let request = build_snapshot_request(build_sample_subscribe_request(
                 &[proto::Path::default()],
@@ -322,6 +346,7 @@ mod tests {
             ));
 
             let mut sample = MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "live".into(),
                 name: "nvue_gnmi".into(),
                 metric_type: "reading".into(),
@@ -331,23 +356,49 @@ mod tests {
                 context: None,
             };
 
-            let live_path = proto::PathElem {
-                name: "live".into(),
-                ..Default::default()
+            let path = |interface: &str| {
+                test_interface_update(
+                    interface,
+                    &["state", "counters", "in-errors"],
+                    proto::TypedValue::default(),
+                )
+                .path
+                .expect("interface path")
+                .elem
             };
-
-            let stale_path = proto::PathElem {
-                name: "stale".into(),
-                ..Default::default()
-            };
-
-            processor.record(&sample, &[&live_path]);
-
-            sample.key = "stale".into();
-            processor.record(&sample, &[&stale_path]);
+            let live_path = path("live");
+            let stale_path = path("stale");
+            for (interface, path) in [("live", &live_path), ("stale", &stale_path)] {
+                sample.key = interface.into();
+                sources.record(&sample, &path.iter().collect::<Vec<_>>());
+                let mut metadata_path = path.clone();
+                metadata_path.last_mut().unwrap().name = "last-clear".into();
+                processor.process_subscribe_response(
+                    &proto::SubscribeResponse {
+                        response: Some(proto::subscribe_response::Response::Update(
+                            proto::Notification {
+                                timestamp: 200,
+                                update: vec![proto::Update {
+                                    path: Some(proto::Path {
+                                        elem: metadata_path,
+                                        ..Default::default()
+                                    }),
+                                    val: Some(proto::TypedValue {
+                                        value: Some(proto::typed_value::Value::UintVal(100)),
+                                    }),
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            },
+                        )),
+                        ..Default::default()
+                    },
+                    &stream_metrics,
+                );
+            }
 
             let reconciliation = Reconciliation {
-                processor: ReconciliationProcessor::Metrics(&processor),
+                processor: ReconciliationProcessor::Samples(&processor),
                 interval: Duration::from_secs(1800),
                 request,
                 stream_name: "test",
@@ -363,13 +414,22 @@ mod tests {
             let snapshots = stream::once(async {
                 // Make a live response ready in the same poll as snapshot completion.
                 ready.store(true, Ordering::SeqCst);
-                Ok(snapshot)
+                if matches!(interruption, Interruption::SnapshotError) {
+                    Err(HealthError::GnmiError("injected snapshot failure".into()))
+                } else {
+                    Ok(snapshot)
+                }
             });
 
             let live = async {
                 poll_fn(|_| {
                     if ready.load(Ordering::SeqCst) {
-                        processor.touch(&[&live_path]);
+                        sources.touch(&live_path.iter().collect::<Vec<_>>());
+                        if matches!(interruption, Interruption::SnapshotError) {
+                            // Losing the final metric during a failed snapshot
+                            // must not invalidate its still-known epoch.
+                            sources.delete(&stale_path.iter().collect::<Vec<_>>());
+                        }
                         Poll::Ready(())
                     } else {
                         Poll::Pending
@@ -377,7 +437,7 @@ mod tests {
                 })
                 .await;
 
-                if backlogged {
+                if matches!(interruption, Interruption::Backlog) {
                     loop {
                         tokio::task::consume_budget().await;
                     }
@@ -394,6 +454,19 @@ mod tests {
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap();
 
+            let known = Some(std::time::UNIX_EPOCH + Duration::from_nanos(100));
+            assert_eq!(processor.counter_epoch_start("live", 200), known, "{name}");
+            let expected = if matches!(interruption, Interruption::None) {
+                None
+            } else {
+                known
+            };
+            assert_eq!(
+                processor.counter_epoch_start("stale", 200),
+                expected,
+                "{name}"
+            );
+
             // A later quiet snapshot can remove every reading retained by this attempt.
             let retry = reconciliation
                 .processor
@@ -405,6 +478,7 @@ mod tests {
                 expected_retained,
                 "{name}"
             );
+            assert_eq!(processor.counter_epoch_start("live", 200), None, "{name}");
         }
     }
 }

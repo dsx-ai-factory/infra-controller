@@ -22,142 +22,126 @@ import (
 
 func TestExpectedMachine_FromProto(t *testing.T) {
 	id := uuid.New()
+	incomingID := uuid.New()
 	siteID := uuid.New()
-	linkedMachineID := uuid.New().String()
-	skuID := "sku-1"
-	rackID := "rack-1"
-	name := "machine-1"
-	manufacturer := "ACME"
-	model := "M1"
-	description := "primary"
-	bmcIP := "10.0.0.1"
 	nicType := "CX9"
 	fixedIP := "192.0.2.9"
-	var slot, trayIdx, host int32 = 1, 2, 3
-
-	t.Run("nil proto leaves receiver unchanged", func(t *testing.T) {
-		em := &ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb"}
-		em.FromProto(nil, nil)
-
-		assert.Equal(t, id, em.ID)
-		assert.Equal(t, siteID, em.SiteID)
-		assert.Equal(t, "aa:bb", em.BmcMacAddress)
-	})
-
-	t.Run("invalid id leaves em.ID unchanged", func(t *testing.T) {
-		em := &ExpectedMachine{ID: id}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: "not-a-uuid"},
-			BmcMacAddress: "aa:bb",
-		}, nil)
-
-		assert.Equal(t, id, em.ID)
-		assert.Equal(t, "aa:bb", em.BmcMacAddress)
-	})
-
-	t.Run("populates all proto fields", func(t *testing.T) {
-		em := &ExpectedMachine{}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:                       &corev1.UUID{Value: id.String()},
-			BmcMacAddress:            "aa:bb:cc:dd:ee:ff",
-			ChassisSerialNumber:      "CSN-1",
-			SkuId:                    &skuID,
-			FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
-			BmcIpAddress:             &bmcIP,
-			RackId:                   &corev1.RackId{Id: rackID},
-			Name:                     &name,
-			Manufacturer:             &manufacturer,
-			Model:                    &model,
-			Description:              &description,
-			SlotId:                   &slot,
-			TrayIdx:                  &trayIdx,
-			HostId:                   &host,
-			Metadata: &corev1.Metadata{
-				Labels: []*corev1.Label{
-					{Key: "env", Value: cutil.GetPtr("prod")},
+	stored := ExpectedMachine{
+		ID:                       id,
+		SiteID:                   siteID,
+		BmcMacAddress:            "aa:bb",
+		ChassisSerialNumber:      "old-serial",
+		BmcIpAddress:             cutil.GetPtr("10.0.0.2"),
+		RackID:                   cutil.GetPtr("old-rack"),
+		Name:                     cutil.GetPtr("old-name"),
+		Description:              cutil.GetPtr("old-description"),
+		Manufacturer:             cutil.GetPtr("old-manufacturer"),
+		Model:                    cutil.GetPtr("old-model"),
+		SlotID:                   cutil.GetPtr(int32(9)),
+		TrayIdx:                  cutil.GetPtr(int32(9)),
+		HostID:                   cutil.GetPtr(int32(9)),
+		Labels:                   Labels{"old": "value"},
+		SkuID:                    cutil.GetPtr("old-sku"),
+		MachineID:                cutil.GetPtr("old-machine"),
+		FallbackDpuSerialNumbers: []string{"old-dpu"},
+		Interfaces:               []ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:08")}},
+		IsDpfEnabled:             cutil.GetPtr(true),
+		HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
+	}
+	tests := []struct {
+		name            string
+		proto           *corev1.ExpectedMachine
+		linkedMachineID *string
+		want            ExpectedMachine
+	}{
+		{
+			name: "nil proto leaves receiver unchanged",
+			want: stored,
+		},
+		{
+			name:            "reads metadata names and preserves raw labels",
+			linkedMachineID: cutil.GetPtr("machine-1"),
+			proto: &corev1.ExpectedMachine{
+				Id:                       &corev1.UUID{Value: incomingID.String()},
+				BmcMacAddress:            "aa:bb:cc:dd:ee:ff",
+				ChassisSerialNumber:      "serial-1",
+				BmcIpAddress:             cutil.GetPtr("10.0.0.1"),
+				RackId:                   &corev1.RackId{Id: "rack-1"},
+				SkuId:                    cutil.GetPtr("sku-1"),
+				ServerName:               cutil.GetPtr("server-1"),
+				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
+				HostNics:                 []*corev1.ExpectedHostNic{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalIfname: cutil.GetPtr("C1-1-L1"), LogicalIfname: cutil.GetPtr("rail0"), NicType: &nicType, FixedIp: &fixedIP}},
+				IsDpfEnabled:             cutil.GetPtr(false),
+				HostLifecycleProfile:     &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+				Name:                     cutil.GetPtr("obsolete-name"),
+				Description:              cutil.GetPtr("obsolete-description"),
+				Manufacturer:             cutil.GetPtr("ACME"),
+				Model:                    cutil.GetPtr("M1"),
+				SlotId:                   cutil.GetPtr(int32(4)),
+				TrayIdx:                  cutil.GetPtr(int32(5)),
+				HostId:                   cutil.GetPtr(int32(6)),
+				Metadata: &corev1.Metadata{
+					Name:        "component-1",
+					Description: "primary",
+					Labels: []*corev1.Label{
+						{Key: "manufacturer", Value: cutil.GetPtr("NVIDIA")},
+						{Key: "model", Value: cutil.GetPtr("model-1")},
+						{Key: "slot_id", Value: cutil.GetPtr("1")},
+						{Key: "tray_idx", Value: cutil.GetPtr("2")},
+						{Key: "host_id", Value: cutil.GetPtr("3")},
+						{Key: "env", Value: cutil.GetPtr("prod")},
+					},
 				},
 			},
-			HostNics: []*corev1.ExpectedHostNic{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIp: &fixedIP}},
-		}, &linkedMachineID)
-
-		assert.Equal(t, id, em.ID)
-		assert.Equal(t, "aa:bb:cc:dd:ee:ff", em.BmcMacAddress)
-		assert.Equal(t, "CSN-1", em.ChassisSerialNumber)
-		assert.Equal(t, &skuID, em.SkuID)
-		assert.Equal(t, &linkedMachineID, em.MachineID)
-		assert.Equal(t, []string{"dpu-1", "dpu-2"}, em.FallbackDpuSerialNumbers)
-		assert.Equal(t, &bmcIP, em.BmcIpAddress)
-		if assert.NotNil(t, em.RackID) {
-			assert.Equal(t, rackID, *em.RackID)
-		}
-		assert.Equal(t, &name, em.Name)
-		assert.Equal(t, &manufacturer, em.Manufacturer)
-		assert.Equal(t, &model, em.Model)
-		assert.Equal(t, &description, em.Description)
-		assert.Equal(t, &slot, em.SlotID)
-		assert.Equal(t, &trayIdx, em.TrayIdx)
-		assert.Equal(t, &host, em.HostID)
-		assert.Equal(t, Labels{"env": "prod"}, em.Labels)
-		assert.Equal(t, []ExpectedMachineInterface{{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP}}, em.Interfaces)
-	})
-
-	t.Run("populates dpfEnabled from is_dpf_enabled", func(t *testing.T) {
-		em := &ExpectedMachine{}
-		enabled := false
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: id.String()},
-			BmcMacAddress: "aa:bb",
-			IsDpfEnabled:  &enabled,
-		}, nil)
-
-		if assert.NotNil(t, em.IsDpfEnabled) {
-			assert.False(t, *em.IsDpfEnabled)
-		}
-	})
-
-	t.Run("nil linkedMachineID leaves MachineID nil", func(t *testing.T) {
-		em := &ExpectedMachine{}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: id.String()},
-			BmcMacAddress: "aa:bb",
-		}, nil)
-
-		assert.Nil(t, em.MachineID)
-	})
-
-	t.Run("nil RackId clears em.RackID", func(t *testing.T) {
-		stale := "stale-rack"
-		em := &ExpectedMachine{RackID: &stale}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: id.String()},
-			BmcMacAddress: "aa:bb",
-		}, nil)
-
-		assert.Nil(t, em.RackID)
-	})
-
-	t.Run("populates host_lifecycle_profile", func(t *testing.T) {
-		em := &ExpectedMachine{}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:                   &corev1.UUID{Value: id.String()},
-			BmcMacAddress:        "aa:bb",
-			HostLifecycleProfile: &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
-		}, nil)
-
-		if assert.NotNil(t, em.HostLifecycleProfile.DisableLockdown) {
-			assert.Equal(t, true, *em.HostLifecycleProfile.DisableLockdown)
-		}
-	})
-
-	t.Run("missing host_lifecycle_profile clears the field", func(t *testing.T) {
-		em := &ExpectedMachine{HostLifecycleProfile: HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)}}
-		em.FromProto(&corev1.ExpectedMachine{
-			Id:            &corev1.UUID{Value: id.String()},
-			BmcMacAddress: "aa:bb",
-		}, nil)
-
-		assert.Nil(t, em.HostLifecycleProfile.DisableLockdown)
-	})
+			want: ExpectedMachine{
+				ID:                       incomingID,
+				SiteID:                   siteID,
+				BmcMacAddress:            "aa:bb:cc:dd:ee:ff",
+				ChassisSerialNumber:      "serial-1",
+				BmcIpAddress:             cutil.GetPtr("10.0.0.1"),
+				RackID:                   cutil.GetPtr("rack-1"),
+				Name:                     cutil.GetPtr("component-1"),
+				Description:              cutil.GetPtr("primary"),
+				Manufacturer:             cutil.GetPtr("ACME"),
+				Model:                    cutil.GetPtr("M1"),
+				SlotID:                   cutil.GetPtr(int32(4)),
+				TrayIdx:                  cutil.GetPtr(int32(5)),
+				HostID:                   cutil.GetPtr(int32(6)),
+				Labels:                   Labels{"manufacturer": "NVIDIA", "model": "model-1", "slot_id": "1", "tray_idx": "2", "host_id": "3", "env": "prod"},
+				SkuID:                    cutil.GetPtr("sku-1"),
+				ServerName:               cutil.GetPtr("server-1"),
+				MachineID:                cutil.GetPtr("machine-1"),
+				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
+				Interfaces:               []ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalName: cutil.GetPtr("C1-1-L1"), LogicalName: cutil.GetPtr("rail0"), NicType: &nicType, FixedIP: &fixedIP}},
+				IsDpfEnabled:             cutil.GetPtr(false),
+				HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+			},
+		},
+		{
+			name: "invalid ID preserves identity and absent fields reset the receiver",
+			proto: &corev1.ExpectedMachine{
+				Id:            &corev1.UUID{Value: "not-a-uuid"},
+				BmcMacAddress: "aa:bb",
+			},
+			want: ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb", Interfaces: []ExpectedMachineInterface{}},
+		},
+		{
+			name: "empty metadata does not read obsolete names",
+			proto: &corev1.ExpectedMachine{
+				Name:        cutil.GetPtr("obsolete-name"),
+				Description: cutil.GetPtr("obsolete-description"),
+				Metadata:    &corev1.Metadata{},
+			},
+			want: ExpectedMachine{ID: id, SiteID: siteID, Interfaces: []ExpectedMachineInterface{}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stored
+			got.FromProto(tc.proto, tc.linkedMachineID)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestHostLifecycleProfile_ToProto(t *testing.T) {
@@ -271,16 +255,41 @@ func TestExpectedMachine_ToProto(t *testing.T) {
 			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
 			ChassisSerialNumber: "CSN-1",
 			Interfaces: []ExpectedMachineInterface{
-				{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP},
-				{MacAddress: "02:00:00:00:00:0a"},
+				{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalName: cutil.GetPtr("C1-1-L1"), LogicalName: cutil.GetPtr("rail0"), NicType: &nicType, FixedIP: &fixedIP},
+				{MacAddress: cutil.GetPtr("02:00:00:00:00:0a")},
 			},
 		}
 		got := em.ToProto(ExpectedMachineCredentials{}).GetHostNics()
 		require.Len(t, got, 2)
 		assert.Equal(t, "02:00:00:00:00:09", got[0].GetMacAddress())
+		assert.Equal(t, "C1-1-L1", got[0].GetPhysicalIfname())
+		assert.Equal(t, "rail0", got[0].GetLogicalIfname())
 		assert.Equal(t, "CX9", got[0].GetNicType())
 		assert.Equal(t, "192.0.2.9", got[0].GetFixedIp())
 		assert.Equal(t, "02:00:00:00:00:0a", got[1].GetMacAddress())
+		assert.Nil(t, got[1].PhysicalIfname)
+		assert.Nil(t, got[1].LogicalIfname)
+	})
+
+	t.Run("forwards server name when stored", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+			ServerName:          cutil.GetPtr("server-1"),
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		assert.Equal(t, "server-1", proto.GetServerName())
+	})
+
+	t.Run("omits server name when unset", func(t *testing.T) {
+		em := &ExpectedMachine{
+			ID:                  id,
+			BmcMacAddress:       "aa:bb:cc:dd:ee:ff",
+			ChassisSerialNumber: "CSN-1",
+		}
+		proto := em.ToProto(ExpectedMachineCredentials{})
+		assert.Nil(t, proto.ServerName)
 	})
 }
 
@@ -365,7 +374,7 @@ func TestExpectedMachineSQLDAO_Create(t *testing.T) {
 					ChassisSerialNumber:      "CHASSIS123",
 					FallbackDpuSerialNumbers: []string{"DPU001", "DPU002"},
 					Interfaces: []ExpectedMachineInterface{{
-						MacAddress: "02:00:00:00:00:09",
+						MacAddress: cutil.GetPtr("02:00:00:00:00:09"),
 						NicType:    cutil.GetPtr("CX9"),
 						FixedIP:    cutil.GetPtr("192.0.2.9"),
 					}},
@@ -1506,6 +1515,73 @@ func TestExpectedMachineSQLDAO_Delete(t *testing.T) {
 	}
 }
 
+func TestExpectedMachineSQLDAO_DeleteIfUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	existing := testExpectedMachineSQLDAOCreateExpectedMachines(ctx, t, dbSession)
+	dao := NewExpectedMachineDAO(dbSession)
+	unchanged, err := dao.Get(ctx, nil, existing[0].ID, nil, false)
+	require.NoError(t, err)
+	beforeUpdate, err := dao.Get(ctx, nil, existing[1].ID, nil, false)
+	require.NoError(t, err)
+	afterUpdate, err := dao.Update(ctx, nil, ExpectedMachineUpdateInput{
+		ExpectedMachineID: beforeUpdate.ID,
+		Name:              cutil.GetPtr("API-name"),
+	})
+	require.NoError(t, err)
+	require.True(t, afterUpdate.Updated.After(beforeUpdate.Updated))
+	other, err := dao.Get(ctx, nil, existing[2].ID, nil, false)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		id          uuid.UUID
+		updated     time.Time
+		wantDeleted bool
+		want        *ExpectedMachine
+	}{
+		{
+			name:        "matching version deletes the row",
+			id:          unchanged.ID,
+			updated:     unchanged.Updated,
+			wantDeleted: true,
+		},
+		{
+			name:    "changed version preserves the row",
+			id:      beforeUpdate.ID,
+			updated: beforeUpdate.Updated,
+			want:    afterUpdate,
+		},
+		{
+			name:    "absent row preserves another row with the same timestamp",
+			id:      uuid.New(),
+			updated: other.Updated,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDeleted, deleted)
+
+			stored, err := dao.Get(ctx, nil, tc.id, nil, false)
+			if tc.want == nil {
+				assert.ErrorIs(t, err, db.ErrDoesNotExist)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, stored)
+		})
+	}
+
+	stored, err := dao.Get(ctx, nil, other.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, other, stored)
+}
+
 func TestExpectedMachineSQLDAO_CreateMultiple(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
@@ -1904,6 +1980,7 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 		SiteID:              site.ID,
 		BmcMacAddress:       "00:1B:44:11:3A:D1",
 		ChassisSerialNumber: "CHASSIS-UPDATE-001",
+		ServerName:          cutil.GetPtr("original-server-1"),
 		CreatedBy:           user.ID,
 	})
 	assert.Nil(t, err)
@@ -1913,6 +1990,7 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 		SiteID:              site.ID,
 		BmcMacAddress:       "00:1B:44:11:3A:D2",
 		ChassisSerialNumber: "CHASSIS-UPDATE-002",
+		ServerName:          cutil.GetPtr("original-server-2"),
 		Labels: map[string]string{
 			"original": "label",
 		},
@@ -1929,6 +2007,9 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 		CreatedBy:                user.ID,
 	})
 	assert.Nil(t, err)
+
+	// Omitted server names must survive mixed batches and later unrelated updates.
+	serverNames := map[uuid.UUID]*string{em1.ID: em1.ServerName, em2.ID: em2.ServerName, em3.ID: em3.ServerName}
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
@@ -1947,6 +2028,7 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 					ExpectedMachineID:   em1.ID,
 					BmcMacAddress:       cutil.GetPtr("00:1B:44:11:3A:E1"),
 					ChassisSerialNumber: cutil.GetPtr("CHASSIS-MODIFIED-001"),
+					ServerName:          cutil.GetPtr("updated-server-1"),
 					SkuID:               &sku.ID,
 					Labels: map[string]string{
 						"updated": "true",
@@ -1977,6 +2059,22 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			verifyChildSpanner: false,
 		},
 		{
+			desc: "server name only update",
+			inputs: []ExpectedMachineUpdateInput{{
+				ExpectedMachineID: em1.ID,
+				ServerName:        cutil.GetPtr("server-name-only-update"),
+			}},
+			expectedCount: 1,
+		},
+		{
+			desc: "clear one server name and preserve another",
+			inputs: []ExpectedMachineUpdateInput{
+				{ExpectedMachineID: em1.ID, ServerName: cutil.GetPtr("")},
+				{ExpectedMachineID: em2.ID},
+			},
+			expectedCount: 2,
+		},
+		{
 			desc: "batch update single expected machine",
 			inputs: []ExpectedMachineUpdateInput{
 				{
@@ -1999,6 +2097,10 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 				// Verify updates and that results are returned in the same order as inputs
 				for i, em := range got {
 					assert.Equal(t, tc.inputs[i].ExpectedMachineID, em.ID, "result order should match input order")
+					if tc.inputs[i].ServerName != nil {
+						serverNames[em.ID] = cutil.GetPtrIfNotZero(*tc.inputs[i].ServerName)
+					}
+					assert.Equal(t, serverNames[em.ID], em.ServerName, "omitted server name must retain the persisted value")
 					if tc.inputs[i].BmcMacAddress != nil {
 						assert.Equal(t, *tc.inputs[i].BmcMacAddress, em.BmcMacAddress)
 					}

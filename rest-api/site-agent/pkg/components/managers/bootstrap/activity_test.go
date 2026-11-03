@@ -39,7 +39,7 @@ type MockBoostrap struct{}
 
 func (m *MockBoostrap) Init()  {}
 func (m *MockBoostrap) Start() {}
-func (m *MockBoostrap) DownloadAndStoreCreds(otpOverride []byte) error {
+func (m *MockBoostrap) DownloadAndStoreCreds(ctx context.Context, otpOverride []byte) error {
 	return nil
 }
 func (m *MockBoostrap) CheckRegistration() error {
@@ -61,6 +61,9 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 	siteID := "test-site-id"
 	registration := &bootstraptypes.Registration{}
 	registration.Load(siteID, "startupOtp")
+	bootstrap := bootstraptypes.NewBootstrapInstance()
+	bootstrap.ReplaceConfig(bootstraptypes.SecretConfig{UUID: siteID})
+	bootstrap.Registration = registration
 
 	ManagerAccess = &Manager.ManagerAccess{
 		API: &Manager.ManagerAPI{
@@ -78,12 +81,7 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 		Data: &Manager.ManagerData{
 			EB: &elektratypes.Elektra{
 				Managers: &managertypes.Managers{
-					Bootstrap: &bootstraptypes.Bootstrap{
-						Config: &bootstraptypes.SecretConfig{
-							UUID: siteID,
-						},
-						Registration: registration,
-					},
+					Bootstrap: bootstrap,
 					Workflow: &workflowtypes.Workflow{
 						Temporal: workflowtypes.Temporal{
 							Publisher: mtc,

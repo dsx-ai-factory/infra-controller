@@ -217,8 +217,8 @@ func TestSubnetHandler_Create(t *testing.T) {
 	parentPrefFG, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbFG.Prefix, ipbFG.PrefixLength, ipbFG.RoutingType, ipbFG.InfrastructureProviderID.String(), ipbFG.SiteID.String())
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPrefFG)
-	// This record belongs to the same tenant as the valid block. SitePrefixID is
-	// what makes it a SitePrefix rather than an Allocation IPBlock.
+	// This record belongs to the same tenant as the valid block, but is
+	// tenant-managed rather than allocated from a provider root.
 	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.171.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 	prefixLen := 24
 	okBody, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
@@ -701,6 +701,7 @@ func TestSubnetHandler_GetAll(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tenant1.ID, site.ID, tnu.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site, tenant1, "test-allocation-1", ipu)
 
 	vpc1 := testSubnetBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc2 := testSubnetBuildVpc(t, dbSession, ip, tenant2, site2, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))

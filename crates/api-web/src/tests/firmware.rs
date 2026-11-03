@@ -36,7 +36,12 @@ async fn response_body(response: Response) -> String {
     String::from_utf8(body_bytes.to_vec()).expect("invalid UTF-8 in response body")
 }
 
-async fn insert_desired_firmware(pool: &sqlx::PgPool) {
+async fn insert_desired_firmware(
+    pool: &sqlx::PgPool,
+    vendor: &str,
+    model: &str,
+    explicit_update_start_needed: bool,
+) {
     sqlx::query(
         r#"
             INSERT INTO desired_firmware (
@@ -48,15 +53,15 @@ async fn insert_desired_firmware(pool: &sqlx::PgPool) {
             VALUES ($1, $2, $3, $4)
         "#,
     )
-    .bind("Acme")
-    .bind("RackServer 9000")
+    .bind(vendor)
+    .bind(model)
     .bind(Json(serde_json::json!({
         "Versions": {
             "bmc": "1.2.3",
             "uefi": "4.5.6"
         }
     })))
-    .bind(true)
+    .bind(explicit_update_start_needed)
     .execute(pool)
     .await
     .expect("insert desired firmware row");
@@ -65,7 +70,7 @@ async fn insert_desired_firmware(pool: &sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn firmware_page_shows_desired_firmware_table(pool: sqlx::PgPool) {
     let env = TestEnv::new(pool.clone()).await;
-    insert_desired_firmware(&pool).await;
+    insert_desired_firmware(&pool, "Acme", "RackServer 9000", true).await;
     let app = make_test_app(&env.test_harness);
 
     let response = app
@@ -80,20 +85,26 @@ async fn firmware_page_shows_desired_firmware_table(pool: sqlx::PgPool) {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_body(response).await;
-    assert!(body.contains("Desired Firmware"));
+    assert!(body.contains("Desired Firmware (1)"));
     assert!(body.contains("Acme"));
     assert!(body.contains("RackServer 9000"));
-    assert!(body.contains("true"));
+    assert!(body.contains("<td>true</td>"));
     assert!(body.contains("<b>BMC</b>: 1.2.3"));
     assert!(body.contains("<b>UEFI</b>: 4.5.6"));
-    assert!(body.contains("1.2.3"));
-    assert!(body.contains("4.5.6"));
 }
 
 #[crate::sqlx_test]
-async fn firmware_json_preserves_versions_as_json(pool: sqlx::PgPool) {
+async fn firmware_json_returns_complete_records_in_vendor_model_order(pool: sqlx::PgPool) {
     let env = TestEnv::new(pool.clone()).await;
-    insert_desired_firmware(&pool).await;
+    let expected_records = [
+        ("Acme", "RackServer 1000", false),
+        ("Acme", "RackServer 9000", true),
+        ("Zeta", "RackServer 1000", false),
+    ];
+    // Reverse insertion distinguishes vendor/model ordering from insertion order.
+    for &(vendor, model, explicit_update_start_needed) in expected_records.iter().rev() {
+        insert_desired_firmware(&pool, vendor, model, explicit_update_start_needed).await;
+    }
     let app = make_test_app(&env.test_harness);
 
     let response = app
@@ -109,12 +120,18 @@ async fn firmware_json_preserves_versions_as_json(pool: sqlx::PgPool) {
     assert_eq!(response.status(), StatusCode::OK);
     let rows: Vec<serde_json::Value> =
         serde_json::from_str(&response_body(response).await).expect("valid JSON response");
-    let row = rows
-        .iter()
-        .find(|row| row["vendor"] == "Acme" && row["model"] == "RackServer 9000")
-        .expect("inserted desired firmware row");
-
-    assert_eq!(row["explicit_update_start_needed"], true);
-    assert_eq!(row["versions"]["Versions"]["bmc"], "1.2.3");
-    assert_eq!(row["versions"]["Versions"]["uefi"], "4.5.6");
+    let expected = expected_records.map(|(vendor, model, explicit_update_start_needed)| {
+        serde_json::json!({
+            "vendor": vendor,
+            "model": model,
+            "versions": {
+                "Versions": {
+                    "bmc": "1.2.3",
+                    "uefi": "4.5.6"
+                }
+            },
+            "explicit_update_start_needed": explicit_update_start_needed,
+        })
+    });
+    assert_eq!(rows, expected);
 }

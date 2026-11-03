@@ -484,6 +484,8 @@ fn plugin_runtime_args(
         PluginPrivilege::Privileged => args.push("--privileged".to_owned()),
         PluginPrivilege::FullHost => args.extend([
             "--privileged".to_owned(),
+            "--pid".to_owned(),
+            "host".to_owned(),
             "--mount".to_owned(),
             "type=bind,src=/,dst=/host".to_owned(),
         ]),
@@ -688,6 +690,7 @@ mod tests {
                 .any(|pair| pair == ["--env", "NICO_MV_CONTRACT_DIR=/opt/forge/mv"])
         );
         assert!(!args.iter().any(|arg| arg == "--privileged"));
+        assert!(!args.iter().any(|arg| arg == "--pid"));
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
     }
 
@@ -737,6 +740,7 @@ mod tests {
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
+        assert!(!args.iter().any(|arg| arg == "--pid"));
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
     }
 
@@ -751,6 +755,7 @@ mod tests {
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
+        assert!(args.windows(2).any(|pair| pair == ["--pid", "host"]));
         assert!(args.iter().any(|arg| arg == "type=bind,src=/,dst=/host"));
     }
 

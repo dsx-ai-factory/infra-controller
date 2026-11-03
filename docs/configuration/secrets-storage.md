@@ -4,15 +4,13 @@ NICo keeps the credentials it manages (BMC logins, switch and UFM accounts, fact
 
 This page covers the `[secrets]` section of the `nico-api` config, how to supply it and its key material through Helm, the setup of a new site, the Vault-to-Postgres migration walk for an existing site, and key rotation. If `[secrets]` is absent, nothing here applies: credentials flow through the classic environment, file, and Vault chain.
 
-Vault/OpenBao Transit is the available server-side KMS backend. The Integrated
-backend loads KEK material into the NICo process from an environment variable,
-file, or inline value. [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253)
-tracks qualification of a production non-Vault replacement and explicitly
-includes a hardened Integrated deployment backed by a CSI secrets-store or
-External-Secrets mount as a possible interim, alongside managed KMS, HSM, and
-KMIP providers. Inline Integrated keys remain for development and test; a
-mounted-key deployment is production-supported only if #3253 selects and
-qualifies that custody, availability, rotation, and recovery model.
+Two server-side KMS backends are available: Vault/OpenBao Transit, and a KMIP
+1.4 server such as a hardware security module or an enterprise key manager,
+described in [KMIP KEK Provider](kmip-kek-provider.md). The Integrated backend
+loads KEK material into the NICo process from an environment variable, file,
+or inline value. Inline Integrated keys are for development and test.
+Operators using mounted `env` or `file` key sources own key custody, startup
+availability, controlled-restart rotation, backup, and recovery.
 
 ## How It Works
 
@@ -22,7 +20,16 @@ The credentials store behaves as follows:
 - Writes go to exactly one backend: `writer`.
 - The Postgres store is an append-only journal. The newest entry for a path is the credential, and an empty password reads as "no credential". Each entry's value is encrypted with its own data encryption key (DEK), and the DEK is wrapped by a key encryption key (KEK) held outside the database by a key management service (KMS) provider.
 - Reads never consult the routing table. Every stored entry records which KEK wrapped it, so rotating a key redirects new writes without touching what is already readable.
-- Vault keeps serving public key infrastructure (PKI) certificates regardless of this chain. Retiring Vault from credential reads does not retire it from PKI, and `nico-api` still needs its Vault connection settings.
+- Certificate issuance is configured separately, in `[certificates]`, so retiring Vault from credential reads does not retire it from public key infrastructure (PKI) issuance.
+- The `nico-api` process needs its Vault connection settings only while one of these settings uses the shared Vault client:
+  - The `backends` list includes `vault`, or `writer` is `vault`.
+  - The `[secrets]` section sets `import_from = "vault"`, even after the import has completed.
+  - There is no `[secrets]` section, and `CARBIDE_CREDENTIAL_STORE` is unset or `vault`.
+  - A certificate type whose cert-manager flag (`use_cert_manager` or `use_cert_manager_ufm` in `[certificates]`) is false uses `[certificates] backend = "shared_vault"`, the default.
+
+  The required settings are the environment variables `VAULT_ADDR`, `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, and `VAULT_PKI_ROLE_NAME`, plus a token and the Vault CA file. The token is the Kubernetes service-account token when one is mounted, and `VAULT_TOKEN` otherwise. The CA file is the path in `VAULT_CACERT`, or `/var/run/secrets/forge-roots/ca.crt` by default. Setting `VAULT_NAMESPACE` is optional. A missing setting fails startup before `nico-api` connects to Postgres, and the error names the settings that need it.
+
+  A Transit KMS provider builds its own Vault client, even when none of the conditions above apply. It needs `VAULT_ADDR`, a static `VAULT_TOKEN`, and the Vault CA file. It starts after `nico-api` connects to Postgres, so a missing Transit setting fails startup later than the check above. Refer to [KMS Providers](#kms-providers).
 
 The secrets KEK is the secrets store's own key; it is unrelated to the machine-identity KEK (refer to [Machine Identity](machine_identity.md)).
 
@@ -61,10 +68,10 @@ nico-api:
           key: site-kek-1
 ```
 
-The chart has no value for mounting a file, so use the `env` form; the `{ file = "/path" }` key source needs a chart change.
+To mount the key as a file instead, add the Secret through the chart's `extraVolumes` and `extraVolumeMounts` values and point a `{ file = "/path" }` key source at the mount; the [KMIP KEK Provider](kmip-kek-provider.md) page shows the pattern.
 
 <Warning>
-Back up the KEK separately from the database. A database dump without every KEK its rows reference is unreadable, and losing an Integrated KEK loses every credential wrapped by it. Add the KEK Secret to the same pre-upgrade backup as the Vault unseal keys in [Upgrading NICo](../manuals/upgrade.md). With a Transit provider, the KEK lives in the Transit engine's storage, so back up Vault's storage, as well as its unseal keys.
+Back up the KEK separately from the database. A database dump without every KEK its rows reference is unreadable, and losing an Integrated KEK loses every credential wrapped by it. Add the KEK Secret to the same pre-upgrade backup as the Vault unseal keys in [Upgrading NICo](../manuals/upgrade.md). With a Transit provider, the KEK lives in the Transit engine's storage, so back up Vault's storage, as well as its unseal keys. With a KMIP provider, the KEK lives only in the KMIP server; back it up through that product's key backup procedure and never destroy a key that live rows or retained dumps still reference.
 </Warning>
 
 ## Configuration Reference
@@ -79,7 +86,7 @@ These are the `[secrets]` fields:
 | `routing` | Maps path prefixes to the `kek_id` that encrypts new writes under them, longest prefix winning. A `"/"` catch-all entry is required. | (required) |
 | `backends` | The backend read order, highest priority first. An empty list, or a backend named twice, fails the boot. | `["vault"]` |
 | `writer` | Where new credential writes go: `"vault"` or `"postgres"`. | `"vault"` |
-| `import_from` | A source backend to import from, once, at startup. Only `"vault"` is supported. Unset means nothing to import. | unset |
+| `import_from` | A source backend to import from, once, at startup. Only `"vault"` is supported. Unset means nothing to import. While it is set, `nico-api` requires its Vault connection settings, even after the import has completed. | unset |
 | `import_approach` | How the import treats paths that already exist in Postgres: `"missing_only"` skips them; `"all"` appends a fresh entry holding the Vault value, which then becomes the current value for that path. Use `"all"` only when replacing existing Postgres values is intended. Only the first import is affected; refer to the migration walk. | `"missing_only"` |
 
 The following development/test example reads Postgres first with Vault as the fallback, using a local Integrated KEK. It is not a production custody recommendation:
@@ -103,10 +110,11 @@ keys = { "site-kek-1" = { env = "NICO_SECRETS_KEK" } }
 
 ### KMS Providers
 
-Providers are named. The `active` provider wraps DEKs for new writes; every configured provider answers unwraps for the `kek_id`s it holds, which is what keeps old entries readable while keys move. Two provider types exist:
+Providers are named. The `active` provider wraps DEKs for new writes; every configured provider answers unwraps for the `kek_id`s it holds, which is what keeps old entries readable while keys move. Three provider types exist:
 
-- `integrated`: local key material. `keys` maps each `kek_id` to where its base64-encoded 256-bit key loads from: `{ env = "NAME" }`, `{ file = "/path" }`, or `{ value = "..." }`. With `env` or `file`, the config contains only the locator. Inline `value` is development/test-only because the config is debug-logged at startup and served on the web debug page. A mounted `env` or `file` source is production-supported only if [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) qualifies its custody, startup availability, controlled-restart rotation, and recovery model.
+- `integrated`: local key material. `keys` maps each `kek_id` to where its base64-encoded 256-bit key loads from: `{ env = "NAME" }`, `{ file = "/path" }`, or `{ value = "..." }`. With `env` or `file`, the config contains only the locator, and operators are responsible for custody, startup availability, controlled-restart rotation, backup, and recovery. Inline `value` is development/test-only because the config is debug-logged at startup and served on the web debug page.
 - `transit`: Vault or OpenBao Transit, which wraps and unwraps DEKs server-side, so KEK material never leaves the KMS. `keys` lists the Transit key names this provider answers for, and `transit_mount` overrides the secrets-engine mount (default `"transit"`). Transit requires a static Vault token; the Kubernetes service-account login flow is not supported for Transit yet.
+- `kmip`: a KMIP 1.4 server holding a non-exportable AES-256 key for each `kek_id`, which wraps and unwraps DEKs with the KMIP Encrypt and Decrypt operations so KEK material never leaves the server. `keys` maps each `kek_id` to the KMIP Unique Identifier of an existing, Active key with Encrypt and Decrypt usage; `endpoint`, `ca_bundle`, `client_cert`, and `client_key` configure mutually authenticated TLS; `server_name`, `connect_timeout` (default `5s`, at most `60s`), and `request_timeout` (default `10s`, at most `120s`) are optional. Setup, startup validation, and the qualification status of server products are described in [KMIP KEK Provider](kmip-kek-provider.md).
 
 Transit needs setup that `helm-prereqs` does not perform: its Vault policy covers only the KV and PKI paths. Before enabling a Transit provider, enable the engine at the mount, create each key named in `keys`, and grant the token `update` on the three paths NICo calls:
 
@@ -130,6 +138,7 @@ NICo validates all of the following at startup, before any writes or imports, an
 - Every routed `kek_id` exists in the active provider (new writes all wrap there), and a `kek_id` cannot appear in two providers.
 - `routing` has the `"/"` catch-all; prefixes and `kek_id`s are non-empty; no other prefix starts with `/`; and prefixes that differ only by a trailing slash are a collision. Prefixes match whole path segments, so `machines/bmc` does not cover `machines/bmc-archive`.
 - Each Integrated key decodes to exactly 32 bytes, its environment variable is set or its file is readable, and a key file readable by group or others logs a warning.
+- A KMIP provider connects to its server and verifies that the server lists KMIP 1.4 and the Encrypt and Decrypt operations, that every configured key is an Active AES-256 key permitted to encrypt and decrypt, and that a probe wrap and unwrap round-trips. An unreachable server or an unqualified key fails the boot.
 
 The boot log line `Postgres secrets backend configured` confirms the section was accepted and shows the active provider, backends, and writer.
 
@@ -168,7 +177,7 @@ keys = { "site-kek-1" = { env = "NICO_SECRETS_KEK" } }
 Two things differ from a Vault-backed site:
 
 - `helm-prereqs` seeds factory-default BMC credentials into Vault KV through its `vault.kvSeeds` value. With `backends = ["postgres"]` those seeds are invisible. Either set `vault.kvSeeds: []` and add the credentials with `nico-admin-cli credential add-*` once the API is up, as in [Set Site-wide Credentials](../getting-started/quick-start.md), or list `vault` after `postgres` in `backends` and set `import_from = "vault"` for the first boot, then remove both once the import has completed.
-- Vault stays installed for certificate issuance, so the Vault connection settings the chart already provides remain required.
+- Vault stays installed for certificate issuance. The chart issues `nico-api` certificates through the shared Vault client by default, so the Vault connection settings it already provides remain required; refer to [How It Works](#how-it-works).
 
 Confirm the store is in use with the `Postgres secrets backend configured` log line at boot and a rising `carbide_api_secrets_requests_total` counter, whose `operation` label distinguishes reads (`get`) from writes.
 
@@ -177,9 +186,9 @@ Confirm the store is in use with the `Postgres secrets backend configured` log l
 The migration is a config walk. Each step is a config change plus a restart, and each step reverses for reads by putting the previous config back: the journal is append-only and the import leaves Vault untouched. Writes are a different matter; see the rollback note after the steps.
 
 1. **Stage the section.** Add `[secrets]` with `kms` and `routing` filled in and everything else at defaults. Reads and writes flow exactly as before. Roll this release out to every `nico-api` replica before the next step: the import cannot fence a replica that is still running an older release.
-2. **Import once.** Set `import_from = "vault"`. At the next startup, one replica copies every Vault credential into Postgres; a journal marker and a lease in the `work_locks` table keep the import one-time and multi-replica safe. The default `missing_only` approach is idempotent, so a crash mid-import re-runs at the next boot and converges. If enumerating the source fails or returns nothing, the import aborts before writing anything. The log line `Vault secret import completed` reports how many credentials were imported and skipped. Once the marker exists, later boots log `Vault import already completed` and never contact Vault for the import, so `import_from` can stay set, and `import_approach = "all"` has no effect after the first import. Keep credential writers quiet between this step and step 3: leave rotation off and do not ingest hosts or add credentials, because anything written to Vault after the import exists only in Vault, the marker prevents a second import, and step 4 makes it unreadable.
+2. **Import once.** Set `import_from = "vault"`. At the next startup, one replica copies every Vault credential into Postgres; a journal marker and a lease in the `work_locks` table keep the import one-time and multi-replica safe. The default `missing_only` approach is idempotent, so a crash mid-import re-runs at the next boot and converges. If enumerating the source fails or returns nothing, the import aborts before writing anything. The log line `Vault secret import completed` reports how many credentials were imported and skipped. Once the marker exists, later boots log `Vault import already completed` and never contact Vault for the import, so `import_from` can stay set, although it keeps the Vault connection settings required, and `import_approach = "all"` has no effect after the first import. Keep credential writers quiet between this step and step 3: leave rotation off and do not ingest hosts or add credentials, because anything written to Vault after the import exists only in Vault, the marker prevents a second import, and step 4 makes it unreadable.
 3. **Read Postgres first.** Set `backends = ["postgres", "vault"]` and `writer = "postgres"`. Postgres serves reads, Vault stays behind it for anything Postgres misses, and new writes land in the journal. Reads served by Postgres increment `carbide_api_secrets_requests_total` with `operation="get"`.
-4. **Retire Vault reads.** Confirm that nothing was written to Vault after the import, then set `backends = ["postgres"]`. Vault remains configured for PKI.
+4. **Retire Vault reads.** Confirm that nothing was written to Vault after the import, then set `backends = ["postgres"]`. Certificate issuance is unaffected: it follows `[certificates]`, which uses Vault by default. While `import_from = "vault"` stays set, `nico-api` still requires its Vault connection settings. Removing it drops that requirement unless a certificate type still uses the shared Vault client (refer to [How It Works](#how-it-works)).
 
 You can also shadow-write before step 3: `writer = "postgres"` while `backends` is still `["vault"]` sends writes where reads cannot yet see them. NICo allows this and logs the warning `secrets writer's backend is not the highest-priority backend`; it is useful on purpose (confirm writes land before reads trust Postgres) and surprising by accident.
 
@@ -197,13 +206,13 @@ Rolling back writes is not symmetric. There is no export from Postgres to Vault.
 
 Rotation moves new writes immediately and existing entries on your schedule:
 
-1. **Route to the new key.** Add the new KEK to the active provider (every routed KEK must live there) and point the relevant `[secrets.routing]` entries at it. New writes wrap with it from the next boot; existing entries stay readable under the KEKs they recorded.
+1. **Add the new key, then route to it.** Add the new KEK to the active provider (every routed KEK must live there), restart, and wait for every old pod to terminate, so that each replica can unwrap under the new KEK before any replica writes with it: a pod from the previous rollout cannot read a row wrapped by a `kek_id` it does not know. Then point the relevant `[secrets.routing]` entries at the new KEK and restart again. New writes wrap with it from that boot; existing entries stay readable under the KEKs they recorded.
 2. **Re-wrap existing entries.** Run the walk after rotating:
 
    ```bash
    nico-admin-cli secrets re-wrap
    ```
 
-   The walk visits every journal row, including historical entries, and re-wraps each one whose KEK differs from the routed target. Only the DEK wrapping is redone (credential ciphertext is untouched), batches commit independently, and a lease-based work lock keeps it to one walk at a time, so the command is safe to re-run; each run starts from the beginning and skips rows already on the routed KEK without calling the KMS. `--batch-size` sets the rows scanned per batch, default 100 and clamped to the range 1 to 10000; a smaller batch lightens the load on an external KMS. The command prints the `re_wrapped` and `already_current` counts and a sentence about rows still wrapped by unrouted KEKs; the server logs `secrets re-wrap completed` with all three counts. It fails with a precondition error if the config has no `[secrets]` section or another re-wrap is running.
+   The walk visits every journal row, including historical entries, and re-wraps each one whose KEK differs from the routed target. Only the DEK wrapping is redone (credential ciphertext is untouched), and batches commit independently. A renewable work-lock lease rejects another start while keepalives retain it; if keepalives fail until the lease expires, another walk can start before the first exits. With routing converged across the fleet, overlapping updates and repeated commands are idempotent: each walk starts from the beginning and skips rows already on the routed KEK without calling the KMS. `--batch-size` sets the rows scanned per batch, default 100 and clamped to the range 1 to 10000; a smaller batch lightens the load on an external KMS. The command prints the `re_wrapped` and `already_current` counts and a sentence about rows still wrapped by unrouted KEKs; the server logs `secrets re-wrap completed` with all three counts. It fails with a precondition error if the config has no `[secrets]` section or another re-wrap owns the lease.
 
 3. **Retire the old key.** `stale_remaining` counts live entries wrapped by KEKs that no routing entry references; it does not inspect backups. Remove a KEK from every routing entry and run `secrets re-wrap` again. After `stale_remaining` reports 0, keep the old key and provider through the backup-retention and rollback windows: restoring a pre-re-wrap database backup still needs the old key. To roll the live site back to the old provider, keep both providers configured, set `[secrets.kms] active` back to the old provider, reverse routing to its KEK, restart, and run re-wrap again. Keep the new provider available to unwrap its rows until the reverse re-wrap reaches zero stale rows. Delete either key only after its backup-retention and rollback windows end.

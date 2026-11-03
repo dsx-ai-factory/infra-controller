@@ -8,8 +8,10 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/firmwareauth"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
@@ -120,6 +122,15 @@ func (a *Activities) FirmwareControl(
 	controller, err := requireFirmwareController(a.registry, target)
 	if err != nil {
 		return err
+	}
+	if validator, ok := controller.(componentmanager.FirmwareControlValidator); ok {
+		if err := validator.ValidateFirmwareControl(info); err != nil {
+			return temporal.NewNonRetryableApplicationError(
+				err.Error(),
+				"UnsupportedFirmwareControlOptions",
+				err,
+			)
+		}
 	}
 
 	info.AccessToken, err = firmwareauth.DecryptFor(

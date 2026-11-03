@@ -22,6 +22,8 @@ use forge_tls::default as tls_default;
 use libmlx::device::cmd::device::args::DeviceAction;
 use libmlx::lockdown::cmd::args::LockdownAction;
 
+use crate::nic_firmware_preflight::FirmwareAction;
+
 #[derive(ValueEnum, Clone, Debug, Copy, PartialEq)]
 pub(crate) enum Mode {
     Service,
@@ -183,6 +185,14 @@ pub(crate) enum MlxAction {
     Device(MlxDevice),
     #[clap(about = "Mellanox lockdown operations.")]
     Lockdown(MlxLockdown),
+    #[clap(about = "Read-only NIC firmware inspection.")]
+    Firmware(MlxFirmware),
+}
+
+#[derive(Parser, Clone)]
+pub(crate) struct MlxFirmware {
+    #[command(subcommand)]
+    pub(crate) action: FirmwareAction,
 }
 
 #[derive(Parser, Clone)]

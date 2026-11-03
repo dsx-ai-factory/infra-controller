@@ -8,7 +8,7 @@ use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 use model::component_manager::{FirmwareState, PowerAction, PowerShelfComponent};
 
-use crate::component_common::ComponentPowerStateResult;
+use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
 use crate::error::ComponentManagerError;
 use crate::types::FirmwareUpdateOptions;
 
@@ -82,6 +82,13 @@ pub struct PowerShelfFirmwareVersions {
 #[async_trait::async_trait]
 pub trait PowerShelfManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
+
+    /// Identifies the source when `get_power_state` supports fresh, passive reads.
+    /// `None` means callers must reject passive reads before fetching credentials
+    /// or invoking the getter; PSM registers devices and reads cached inventory.
+    fn power_state_source(&self) -> Option<PowerStateSource> {
+        None
+    }
 
     fn supports_firmware_object_json(&self) -> bool {
         false

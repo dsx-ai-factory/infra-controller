@@ -1158,7 +1158,6 @@ func TestAllocationSQLDAO_GetCount(t *testing.T) {
 	it2 := testAllocationConstraintBuildInstanceType(t, dbSession, ip.ID, site1.ID, user.ID, "instance-type-2")
 
 	// Create Allocations for Tenant1
-	asTenant1 := []Allocation{}
 	for i := 0; i < totalCount/2; i++ {
 		at, err := aDAO.Create(ctx, nil, AllocationCreateInput{
 			Name:                     fmt.Sprintf("test-%v", i),
@@ -1171,7 +1170,6 @@ func TestAllocationSQLDAO_GetCount(t *testing.T) {
 		})
 		assert.Nil(t, err)
 		assert.NotNil(t, at)
-		asTenant1 = append(asTenant1, *at)
 		if i%2 == 0 {
 			// Create AllocationConstraint for every other Allocation
 			_, serr := acDAO.Create(ctx, nil, AllocationConstraintCreateInput{

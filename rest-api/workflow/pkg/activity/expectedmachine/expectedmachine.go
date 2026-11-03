@@ -6,7 +6,10 @@ package expectedmachine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
@@ -33,11 +36,15 @@ type ManageExpectedMachine struct {
 
 // UpdateExpectedMachinesInDB is a Temporal activity that takes a collection of ExpectedMachine data pushed by Site Agent and updates the DB
 // Expected Machine records have two unique values (MAC and UUID). We ignore the MAC value and only rely on the UUID for uniqueness.
-// NICo is the source of truth: out of the race-condition window we make the DB match NICo exactly.
+// Core supplies inventory values; omitted names, descriptions, and rack IDs
+// preserve the existing Cloud values.
+// Only successful inventory is reconciled; failed or unsupported statuses are skipped.
+// New or changed SKU attachments must belong to this Site; an invalid attachment
+// skips that item. An unchanged legacy attachment does not block other fields.
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete record in DB
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
 func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context, siteID uuid.UUID, expectedMachineInventory *corev1.ExpectedMachineInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedMachinesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -53,9 +60,15 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		return nil
 	}
 
+	if expectedMachineInventory.InventoryStatus != corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS {
+		logger.Warn().Str("inventory_status", expectedMachineInventory.InventoryStatus.String()).
+			Msg("received unsupported inventory status, skipping inventory processing")
+		return nil
+	}
+
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mei.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -101,8 +114,8 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		}
 	}
 
-	// Collect the linked Machine IDs reported by Core so they can be checked
-	// against REST inventory before Expected Machine reconciliation.
+	// Only accept linked Machines recorded in REST for this Site. Unknown or
+	// foreign IDs cannot create a link or replace the stored `MachineID`.
 	linkedMachineCandidatesByBmcMac := map[string]string{}
 	linkedMachineIDs := []string{}
 	for _, lm := range expectedMachineInventory.GetLinkedMachines() {
@@ -123,6 +136,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		mDAO := cdbm.NewMachineDAO(mei.dbSession)
 		machines, _, merr := mDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{
 			MachineIDs:      linkedMachineIDs,
+			SiteIDs:         []uuid.UUID{siteID},
 			ExcludeMetadata: true,
 		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if merr != nil {
@@ -169,25 +183,43 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			}
 		}
 
+		// Reserved manufacturer, model, and placement labels stay in `Labels` so
+		// reconciliation preserves Cloud's dedicated metadata columns.
 		reported := &cdbm.ExpectedMachine{}
 		reported.FromProto(rem, linkedMachineID)
 
 		// Create a new Expected Machine if it doesn't already exist in DB
 		cur, found := existingByID[emID]
 		if !found {
-			_, cerr := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
-				ExpectedMachineID:        emID,
-				SiteID:                   siteID,
-				BmcMacAddress:            reported.BmcMacAddress,
-				ChassisSerialNumber:      reported.ChassisSerialNumber,
-				SkuID:                    reported.SkuID,
-				FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
-				Interfaces:               reported.Interfaces,
-				BmcIpAddress:             reported.BmcIpAddress,
-				Labels:                   reported.Labels,
-				MachineID:                reported.MachineID,
-				IsDpfEnabled:             reported.IsDpfEnabled,
-				CreatedBy:                siteID, /* This would normally be a user ID, but that isn't something NICo provides */
+			cerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				if reported.SkuID != nil {
+					skus, err := cdbm.NewSkuDAO(mei.dbSession).GetForAttachment(ctx, tx, siteID, []string{*reported.SkuID})
+					if err != nil {
+						return err
+					}
+					if len(skus) == 0 {
+						return fmt.Errorf("SKU %q does not exist on Site %s", *reported.SkuID, siteID)
+					}
+				}
+				_, err := emDAO.Create(ctx, tx, cdbm.ExpectedMachineCreateInput{
+					ExpectedMachineID:        emID,
+					SiteID:                   siteID,
+					BmcMacAddress:            reported.BmcMacAddress,
+					ChassisSerialNumber:      reported.ChassisSerialNumber,
+					Interfaces:               reported.Interfaces,
+					BmcIpAddress:             reported.BmcIpAddress,
+					RackID:                   reported.RackID,
+					Name:                     reported.Name,
+					Description:              reported.Description,
+					SkuID:                    reported.SkuID,
+					MachineID:                reported.MachineID,
+					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
+					IsDpfEnabled:             reported.IsDpfEnabled,
+					HostLifecycleProfile:     reported.HostLifecycleProfile,
+					Labels:                   reported.Labels,
+					CreatedBy:                siteID, /* This would normally be a user ID, but that isn't something NICo provides */
+				})
+				return err
 			})
 			if cerr != nil {
 				logger.Error().Err(cerr).Str("ID", emID.String()).Msg("failed to create ExpectedMachine in DB")
@@ -204,27 +236,57 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			continue
 		}
 
-		// update if any field differs
+		// Labels are replaced as a whole, including when Core reports none.
+		if reported.Labels == nil {
+			reported.Labels = cdbm.Labels{}
+		}
+
+		// Leave unchanged associations out of the write so legacy links do not
+		// block unrelated inventory changes. The locked timestamp check below
+		// still rejects any concurrent change to this snapshot.
+		skuID := reported.SkuID
+		if util.PtrsEqual(cur.SkuID, skuID) {
+			skuID = nil
+		}
+
+		// Omitted names, descriptions, and rack IDs preserve Cloud values that may
+		// predate their storage in Core. Compare only fields that `Update` or `Clear`
+		// will write.
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ChassisSerialNumber != reported.ChassisSerialNumber ||
-			!util.PtrsEqual(cur.SkuID, reported.SkuID) ||
-			!util.PtrsEqual(cur.MachineID, reported.MachineID) ||
-			!reflect.DeepEqual(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers) ||
 			!reflect.DeepEqual(cur.Interfaces, reported.Interfaces) ||
 			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) ||
-			!util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-
+			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
+			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
+			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
+			skuID != nil ||
+			(reported.MachineID != nil && !util.PtrsEqual(cur.MachineID, reported.MachineID)) ||
+			(reported.FallbackDpuSerialNumbers != nil && !slices.Equal(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers)) ||
+			(reported.IsDpfEnabled != nil && !util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled)) ||
+			(reported.HostLifecycleProfile.DisableLockdown != nil && !util.PtrsEqual(cur.HostLifecycleProfile.DisableLockdown, reported.HostLifecycleProfile.DisableLockdown)) ||
+			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
-				// Passing nil to Update leaves the existing value unchanged, so explicitly clear a
-				// BMC IP address that NICo no longer reports.
+				// Match the handlers: lock a new SKU before the Expected Machine.
+				if skuID != nil {
+					skus, err := cdbm.NewSkuDAO(mei.dbSession).GetForAttachment(ctx, tx, siteID, []string{*skuID})
+					if err != nil {
+						return err
+					}
+					if len(skus) == 0 {
+						return fmt.Errorf("SKU %q does not exist on Site %s", *skuID, siteID)
+					}
+				}
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := emDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				// BMC IP absence is an explicit clear in machine inventory.
 				if cur.BmcIpAddress != nil && reported.BmcIpAddress == nil {
 					_, cerr := emDAO.Clear(ctx, tx, cdbm.ExpectedMachineClearInput{
 						ExpectedMachineID: cur.ID,
@@ -235,17 +297,26 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					}
 				}
 
+				var hostLifecycleProfile *cdbm.HostLifecycleProfile
+				if reported.HostLifecycleProfile.HasSetFields() {
+					hostLifecycleProfile = &reported.HostLifecycleProfile
+				}
+
 				_, uerr := emDAO.Update(ctx, tx, cdbm.ExpectedMachineUpdateInput{
 					ExpectedMachineID:        cur.ID,
 					BmcMacAddress:            &reported.BmcMacAddress,
 					ChassisSerialNumber:      &reported.ChassisSerialNumber,
-					SkuID:                    reported.SkuID,
+					BmcIpAddress:             reported.BmcIpAddress,
+					RackID:                   reported.RackID,
+					Name:                     reported.Name,
+					Description:              reported.Description,
+					SkuID:                    skuID,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					Interfaces:               reported.Interfaces,
-					BmcIpAddress:             reported.BmcIpAddress,
-					Labels:                   labels,
 					IsDpfEnabled:             reported.IsDpfEnabled,
+					HostLifecycleProfile:     hostLifecycleProfile,
+					Labels:                   reported.Labels,
 				})
 				return uerr
 			})
@@ -256,9 +327,9 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		}
 	}
 
-	// Delete any Expected Machine present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
-	// The source of truth for NICo is reportedIDs.
+	// Delete stale records missing from `reportedIDs` only after the final page
+	// (or when paging is disabled). Matching the saved `Updated` timestamp in
+	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
 		for _, em := range existingExpectedMachines {
 			if _, keep := reportedIDs[em.ID]; keep {
@@ -268,11 +339,14 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			if site.IsTimeWithinStaleInventoryThreshold(em.Updated) {
 				continue
 			}
-			logger.Info().Str("ExpectedMachineID", em.ID.String()).Msg("deleting ExpectedMachine from DB since it was no longer reported in inventory from Site")
-			if derr := emDAO.Delete(ctx, nil, em.ID); derr != nil {
+			deleted, derr := emDAO.DeleteIfUnchanged(ctx, nil, em.ID, em.Updated)
+			if derr != nil {
 				logger.Error().Err(derr).Str("ExpectedMachineID", em.ID.String()).Msg("failed to delete ExpectedMachine from DB")
+				continue
 			}
-
+			if deleted {
+				logger.Info().Str("ExpectedMachineID", em.ID.String()).Msg("deleted ExpectedMachine no longer reported in inventory from Site")
+			}
 		}
 	}
 

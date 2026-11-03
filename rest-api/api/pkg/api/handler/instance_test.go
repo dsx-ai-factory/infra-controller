@@ -35,7 +35,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
@@ -67,13 +66,13 @@ const (
 )
 
 func phoneHomeLocationIn(userData map[string]interface{}) phoneHomeLocation {
-	_, atRoot := userData[util.SitePhoneHomeName]
+	_, atRoot := userData[cdmu.SitePhoneHomeName]
 	inAutoinstall := false
 	autoinstall, ok := userData["autoinstall"].(map[string]interface{})
 	if ok {
 		targetUserData, ok := autoinstall["user-data"].(map[string]interface{})
 		if ok {
-			_, inAutoinstall = targetUserData[util.SitePhoneHomeName]
+			_, inAutoinstall = targetUserData[cdmu.SitePhoneHomeName]
 		}
 	}
 
@@ -803,10 +802,53 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant", tnOrg, tnu1)
 	// Privilege is resolved site-scoped. TenantSite associations without an
 	// explicit override inherit tn1's Ready TenantAccount default.
-	_ = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
+	tenantAccount := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1, cdbm.TenantAccountConfig{
+		TargetedInstanceCreation:     true,
+		CrossTenantInterfaceCreation: true,
+	})
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
+
+	disableCrossTenantInterfaceCreation := func(t *testing.T) {
+		accountDAO := cdbm.NewTenantAccountDAO(dbSession)
+		disabledConfig := tenantAccount.Config
+		disabledConfig.CrossTenantInterfaceCreation = false
+		_, err := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+			TenantAccountID: tenantAccount.ID,
+			Config:          &disabledConfig,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			enabledConfig := tenantAccount.Config
+			enabledConfig.CrossTenantInterfaceCreation = true
+			_, cleanupErr := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+				TenantAccountID: tenantAccount.ID,
+				Config:          &enabledConfig,
+			})
+			assert.NoError(t, cleanupErr)
+		})
+	}
+
+	disableCrossTenantInterfaceCreationAtSite := func(t *testing.T) {
+		siteDAO := cdbm.NewTenantSiteDAO(dbSession)
+		_, err := siteDAO.Update(ctx, nil, cdbm.TenantSiteUpdateInput{
+			TenantSiteID: ts1.ID,
+			Config: &cdbm.TenantSiteConfig{
+				CrossTenantInterfaceCreation: cutil.GetPtr(false),
+			},
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, cleanupErr := siteDAO.Clear(ctx, nil, cdbm.TenantSiteClearInput{
+				TenantSiteID: ts1.ID,
+				Config: cdbm.TenantAccountConfig{
+					CrossTenantInterfaceCreation: true,
+				},
+			})
+			assert.NoError(t, cleanupErr)
+		})
+	}
 
 	al1 := testInstanceSiteBuildAllocation(t, dbSession, st1, tn1, "test-allocation-1", ipu)
 	assert.NotNil(t, al1)
@@ -885,6 +927,10 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	alc1 := testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, ist1.ID, cdbm.AllocationConstraintTypeReserved, 9, ipu)
 	assert.NotNil(t, alc1)
 
+	// Instance Type without a matching Allocation Constraint for tenant entitlement testing.
+	istWithoutAllocation := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-without-allocation", st1, cdbm.InstanceStatusReady)
+	assert.NotNil(t, istWithoutAllocation)
+
 	// Use dedicated allocation inventory for VPC-selection coverage so the
 	// request cannot consume capacity needed by unrelated table cases.
 	istVpcSelection := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-vpc-selection", st1, cdbm.InstanceStatusReady)
@@ -894,6 +940,14 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	mcVpcSelection := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(false), nil)
 	assert.NotNil(t, mcVpcSelection)
 	assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, mcVpcSelection, istVpcSelection))
+
+	istCrossTenantVpc := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-cross-tenant-vpc", st1, cdbm.InstanceStatusReady)
+	assert.NotNil(t, istCrossTenantVpc)
+	alcCrossTenantVpc := testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, istCrossTenantVpc.ID, cdbm.AllocationConstraintTypeReserved, 1, ipu)
+	assert.NotNil(t, alcCrossTenantVpc)
+	mcCrossTenantVpc := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(false), nil)
+	assert.NotNil(t, mcCrossTenantVpc)
+	assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, mcCrossTenantVpc, istCrossTenantVpc))
 
 	// Dedicated instance type for IP-exhaustion fixtures; must not consume ist1 allocation (limit 9).
 	istExhaustFixture := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-exhaust-fixture", st1, cdbm.InstanceStatusReady)
@@ -1127,11 +1181,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	}
 
 	// Create 25 test Instances
-	insts2 := []*cdbm.Instance{}
 	for i := 0; i < 25; i++ {
 		inst := testInstanceBuildInstance(t, dbSession, fmt.Sprintf("test-instance-%d", i), tn2.ID, ip.ID, st2.ID, &ist2.ID, vpc3.ID, cutil.GetPtr(ms2[i].ID), &os3.ID, nil, cdbm.InstanceStatusReady)
 		assert.NotNil(t, inst)
-		insts2 = append(insts2, inst)
 	}
 
 	// Tenant 3
@@ -1293,6 +1345,8 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, vpc9Secondary)
 	vpc9Site2 := testInstanceBuildVPC(t, dbSession, "test-vpc-9-site-2", ip, tn1, st2, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu1)
 	assert.NotNil(t, vpc9Site2)
+	crossTenantVpcSt1 := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-site-1", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
+	assert.NotNil(t, crossTenantVpcSt1)
 
 	// VPC prefix
 	ipb1 := common.TestBuildVpcPrefixIPBlock(t, dbSession, "testipb", st1, ip, &tn1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.0.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu1)
@@ -1307,6 +1361,12 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	vpcPrefix7 := common.TestBuildVPCPrefix(t, dbSession, "test-vpcprefix-7", st1, tn1, vpc9.ID, &ipb5.ID, cutil.GetPtr("192.168.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu1)
 	vpcPrefixSite2 := common.TestBuildVPCPrefix(t, dbSession, "test-vpcprefix-site2", st2, tn1, vpc9Site2.ID, &ipbSite2.ID, cutil.GetPtr("192.170.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu1)
 	assert.NotNil(t, vpcPrefixSite2)
+	crossTenantIPBlockSt1 := common.TestBuildVpcPrefixIPBlock(t, dbSession, "test-cross-tenant-ipb-site1", st1, ip, &tn2.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.171.0.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu2)
+	assert.NotNil(t, crossTenantIPBlockSt1)
+	crossTenantVpcPrefixSt1 := common.TestBuildVPCPrefix(t, dbSession, "test-cross-tenant-vpcprefix-site1", st1, tn2, crossTenantVpcSt1.ID, &crossTenantIPBlockSt1.ID, cutil.GetPtr("192.171.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu2)
+	crossTenantVpcPrefixProvisioningSt1 := common.TestBuildVPCPrefix(t, dbSession, "test-cross-tenant-vpcprefix-provisioning-site1", st1, tn2, crossTenantVpcSt1.ID, &crossTenantIPBlockSt1.ID, cutil.GetPtr("192.171.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusProvisioning, tnu2)
+	assert.NotNil(t, crossTenantVpcPrefixProvisioningSt1)
+	assert.NotNil(t, crossTenantVpcPrefixSt1)
 	ipbExhausted := common.TestBuildVpcPrefixIPBlock(t, dbSession, "testipb-exhausted", st1, ip, &tn1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "10.99.1.0", 28, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu1)
 	assert.NotNil(t, ipbExhausted)
 	vpcPrefixExhausted := common.TestBuildVPCPrefix(t, dbSession, "test-vpcprefix-exhausted", st1, tn1, vpc9.ID, &ipbExhausted.ID, cutil.GetPtr("10.99.1.0/28"), cutil.GetPtr(28), cdbm.VpcPrefixStatusReady, tnu1)
@@ -1468,6 +1528,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		wantErr                  bool
 		verifyChildSpanner       bool
 		check                    func(t *testing.T)
+		checkResponse            func(t *testing.T, response *model.APIInstance)
 	}
 	tests := []testCase{
 		{
@@ -1750,6 +1811,251 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "cross-Tenant direct VPC attachment is forbidden without crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:              "CrossTenantVpcDirectDenied",
+					TenantID:          tn1.ID.String(),
+					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
+					VpcID:             vpc9.ID.String(),
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
+					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpc9.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcSt1.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableCrossTenantInterfaceCreation(t) },
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusForbidden,
+				respMessage: "Tenant does not have crossTenantInterfaceCreation capability enabled",
+			},
+		},
+		{
+			name: "cross-Tenant VPC Prefix attachment is forbidden without crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:              "CrossTenantVpcPrefixDenied",
+					TenantID:          tn1.ID.String(),
+					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
+					VpcID:             vpc9.ID.String(),
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
+					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpc9.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcPrefixID: cutil.GetPtr(crossTenantVpcPrefixSt1.ID.String()),
+						},
+					},
+				},
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableCrossTenantInterfaceCreation(t) },
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusForbidden,
+				respMessage: "Tenant does not have crossTenantInterfaceCreation capability enabled",
+			},
+		},
+		{
+			name: "cross-Tenant VPC Prefix state is not revealed without crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:              "CrossTenantVpcPrefixStateHidden",
+					TenantID:          tn1.ID.String(),
+					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
+					VpcID:             vpc9.ID.String(),
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
+					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpc9.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcPrefixID: cutil.GetPtr(crossTenantVpcPrefixProvisioningSt1.ID.String()),
+						},
+					},
+				},
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableCrossTenantInterfaceCreation(t) },
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusForbidden,
+				respMessage: "Tenant does not have crossTenantInterfaceCreation capability enabled",
+			},
+		},
+		{
+			name: "primary physical Interface cannot use a cross-Tenant VPC",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:              "CrossTenantPrimaryVpcDenied",
+					TenantID:          tn1.ID.String(),
+					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
+					VpcID:             vpc9.ID.String(),
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
+					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcSt1.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(vpc9.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusBadRequest,
+				respMessage: "The primary physical Interface must use the VPC specified in `vpcId`",
+			},
+		},
+		{
+			name: "crossTenantInterfaceCreation permits cross-Tenant direct VPC and VPC Prefix attachments",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:              "CrossTenantVpcAttachmentAllowed",
+					TenantID:          tn1.ID.String(),
+					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
+					VpcID:             vpc9.ID.String(),
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
+					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpc9.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcSt1.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+						{
+							VpcPrefixID: cutil.GetPtr(crossTenantVpcPrefixSt1.ID.String()),
+						},
+					},
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusCreated,
+			},
+			checkResponse: func(t *testing.T, response *model.APIInstance) {
+				require.Len(t, response.Interfaces, 3)
+				for _, apiInterface := range response.Interfaces {
+					isCrossTenant := (apiInterface.VpcID != nil && *apiInterface.VpcID == crossTenantVpcSt1.ID.String()) ||
+						(apiInterface.VpcPrefixID != nil && *apiInterface.VpcPrefixID == crossTenantVpcPrefixSt1.ID.String())
+					if isCrossTenant {
+						assert.Equal(t, cutil.GetPtr(tn1.ID.String()), apiInterface.InstanceTenantID)
+						assert.Equal(t, cutil.GetPtr(tn2.ID.String()), apiInterface.VpcTenantID)
+					} else {
+						assert.Nil(t, apiInterface.InstanceTenantID)
+						assert.Nil(t, apiInterface.VpcTenantID)
+					}
+				}
+			},
+			expectedControllerVpcIDs: map[string]uuid.UUID{
+				vpc9.ID.String():              *vpc9.ControllerVpcID,
+				crossTenantVpcSt1.ID.String(): *crossTenantVpcSt1.ControllerVpcID,
+			},
+			check: func(t *testing.T) {
+				instances, _, err := cdbm.NewInstanceDAO(dbSession).GetAll(ctx, nil, cdbm.InstanceFilterInput{
+					Names:     []string{"CrossTenantVpcAttachmentAllowed"},
+					TenantIDs: []uuid.UUID{tn1.ID},
+				}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+				require.NoError(t, err)
+				require.Len(t, instances, 1)
+				interfaces, _, err := cdbm.NewInterfaceDAO(dbSession).GetAll(ctx, nil, cdbm.InterfaceFilterInput{
+					InstanceIDs: []uuid.UUID{instances[0].ID},
+				}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+				require.NoError(t, err)
+				require.Len(t, interfaces, 3)
+				foundCrossTenantVpc := false
+				foundCrossTenantVpcPrefix := false
+				for _, ifc := range interfaces {
+					if ifc.VpcID != nil && *ifc.VpcID == crossTenantVpcSt1.ID {
+						foundCrossTenantVpc = true
+					}
+					if ifc.VpcPrefixID != nil && *ifc.VpcPrefixID == crossTenantVpcPrefixSt1.ID {
+						foundCrossTenantVpcPrefix = true
+					}
+				}
+				assert.True(t, foundCrossTenantVpc)
+				assert.True(t, foundCrossTenantVpcPrefix)
+			},
+		},
+		{
+			name: "Site false override denies an account-level enabled capability",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:              "CrossTenantVpcSiteOverrideDenied",
+					TenantID:          tn1.ID.String(),
+					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
+					VpcID:             vpc9.ID.String(),
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
+					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpc9.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcSt1.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableCrossTenantInterfaceCreationAtSite(t) },
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusForbidden,
+				respMessage: "Tenant does not have crossTenantInterfaceCreation capability enabled",
+			},
 		},
 		{
 			name: "test Instance create API endpoint preserves IPv6-only and dual-stack VPC selection intent",
@@ -2071,7 +2377,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:              tnu1,
 				respCode:             http.StatusCreated,
 				respMessage:          "",
-				respUserDataContains: cutil.GetPtr(util.SiteCloudConfig),
+				respUserDataContains: cutil.GetPtr(cdmu.SiteCloudConfig),
 			},
 			wantErr: false,
 		},
@@ -2103,7 +2409,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:              tnu1,
 				respCode:             http.StatusCreated,
 				respMessage:          "",
-				respUserDataContains: cutil.GetPtr(util.SiteCloudConfig),
+				respUserDataContains: cutil.GetPtr(cdmu.SiteCloudConfig),
 			},
 			wantErr: false,
 		},
@@ -3284,6 +3590,35 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "test Instance create API endpoint rejects Instance Type without an Allocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:           "test-instance-without-allocation",
+					TenantID:       tn1.ID.String(),
+					InstanceTypeID: cutil.GetPtr(istWithoutAllocation.ID.String()),
+					VpcID:          vpc1.ID.String(),
+					UserData:       cutil.GetPtr(""),
+					IpxeScript:     cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							SubnetID: cutil.GetPtr(subnet1.ID.String()),
+						},
+					},
+					PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusForbidden,
+				respMessage: "No Allocations for specified Instance Type were found for current Tenant",
+			},
+			wantErr: false,
+		},
+		{
 			name: "test Instance create API endpoint failed, Number of Active Instance more than Allocation Constraint value",
 			fields: fields{
 				dbSession: dbSession,
@@ -4273,6 +4608,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			if serr != nil {
 				t.Fatal(serr)
 			}
+			if tt.checkResponse != nil {
+				tt.checkResponse(t, rst)
+			}
 
 			require.NotNil(t, rst.MachineID)
 			assignedMachine, getMachineErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, *rst.MachineID, nil, false)
@@ -4460,8 +4798,8 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					if tt.args.reqData.OperatingSystemID != nil {
 						lines := strings.Split(*rst.UserData, "\n")
 						// ensure first line is always #cloud-config
-						assert.Equal(t, util.SiteCloudConfig, lines[0])
-						assert.NotEqual(t, util.SiteCloudConfig, lines[1])
+						assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+						assert.NotEqual(t, cdmu.SiteCloudConfig, lines[1])
 					}
 				} else {
 					assert.Equal(t, phoneHomeAbsent, phoneHomeLocationIn(instUserData))
@@ -4528,6 +4866,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg1, tnOrgRoles1)
 	tn2 := testInstanceBuildTenant(t, dbSession, "test-tenant-3", tnOrg1, tnu2)
+	_ = common.TestBuildTenantAccount(t, dbSession, ip, &tn1.ID, tnOrg1, cdbm.TenantAccountStatusReady, tnu1)
 
 	al1 := testInstanceSiteBuildAllocation(t, dbSession, st1, tn1, "test-allocation-1", ipu)
 	assert.NotNil(t, al1)
@@ -4659,6 +4998,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, inst1)
 
 	sxp1 := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-1", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
+	sxpReplacement := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-replacement", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
 	sxpPending := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-pending", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusPending)
 	assert.NotNil(t, sxp1)
 
@@ -4746,6 +5086,55 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, mcVpcSelectionPreserve, ist4))
 	instVpcSelectionPreserve := testInstanceBuildInstance(t, dbSession, "test-instance-vpc-selection-preserve", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpcSelection.ID, cutil.GetPtr(mcVpcSelectionPreserve.ID), &os2.ID, os2.IpxeScript, cdbm.InstanceStatusReady)
 	assert.NotNil(t, instVpcSelectionPreserve)
+	crossTenantVpcUpdateA := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-update-a", ip, tn2, st3, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
+	assert.NotNil(t, crossTenantVpcUpdateA)
+	crossTenantVpcUpdateB := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-update-b", ip, tn2, st3, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
+	assert.NotNil(t, crossTenantVpcUpdateB)
+	crossTenantVpcUpdatePending := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-update-pending", ip, tn2, st3, nil, nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusPending, tnu2)
+	assert.NotNil(t, crossTenantVpcUpdatePending)
+
+	// buildCrossTenantVpcUpdateInstance returns the Instance and, when crossTenantVpc
+	// is set, the ID of its cross-Tenant VPC Interface.
+	buildCrossTenantVpcUpdateInstance := func(name string, crossTenantVpc *cdbm.Vpc) (*cdbm.Instance, uuid.UUID) {
+		machine := testInstanceBuildMachine(t, dbSession, ip.ID, st3.ID, cutil.GetPtr(false), nil)
+		assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, machine, ist4))
+		instance := testInstanceBuildInstance(t, dbSession, name, tn1.ID, ip.ID, st3.ID, &ist4.ID, vpcSelection.ID, cutil.GetPtr(machine.ID), &os2.ID, os2.IpxeScript, cdbm.InstanceStatusReady)
+		_, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+			InstanceID:      instance.ID,
+			VpcID:           &vpcSelection.ID,
+			VpcIPFamilyMode: cutil.GetPtr(cdbm.InterfaceVpcIPFamilyModeIPv4Only),
+			IsPhysical:      true,
+			Status:          cdbm.InterfaceStatusReady,
+			CreatedBy:       tnu1.ID,
+		})
+		require.NoError(t, err)
+		if crossTenantVpc == nil {
+			return instance, uuid.Nil
+		}
+		crossTenantIfc, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+			InstanceID:      instance.ID,
+			VpcID:           &crossTenantVpc.ID,
+			VpcIPFamilyMode: cutil.GetPtr(cdbm.InterfaceVpcIPFamilyModeIPv4Only),
+			Status:          cdbm.InterfaceStatusReady,
+			CreatedBy:       tnu1.ID,
+		})
+		require.NoError(t, err)
+		return instance, crossTenantIfc.ID
+	}
+	instCrossTenantUnchanged, crossTenantIfcUnchangedID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-unchanged", crossTenantVpcUpdateA)
+	instCrossTenantRemove, crossTenantIfcRemoveID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-remove", crossTenantVpcUpdateA)
+	instCrossTenantAdd, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-add", nil)
+	instCrossTenantRetarget, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-retarget", crossTenantVpcUpdateA)
+	instCrossTenantPartialRemove, crossTenantIfcKeptID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-partial-remove", crossTenantVpcUpdateA)
+	crossTenantIfcDropped, dropErr := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID:      instCrossTenantPartialRemove.ID,
+		VpcID:           &crossTenantVpcUpdateB.ID,
+		VpcIPFamilyMode: cutil.GetPtr(cdbm.InterfaceVpcIPFamilyModeIPv4Only),
+		Status:          cdbm.InterfaceStatusReady,
+		CreatedBy:       tnu1.ID,
+	})
+	require.NoError(t, dropErr)
+
 	vpcSelectionIPBlock := common.TestBuildVpcPrefixIPBlock(t, dbSession, "testipb-vpc-selection-update", st3, ip, &tn1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.181.0.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu1)
 	assert.NotNil(t, vpcSelectionIPBlock)
 	vpcSelectionPrefix := common.TestBuildVPCPrefix(t, dbSession, "test-vpcprefix-selection-update", st3, tn1, vpcSelection.ID, &vpcSelectionIPBlock.ID, cutil.GetPtr("192.181.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu1)
@@ -5238,10 +5627,16 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 	tst3.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
+	spectrumXRejectedSCP := sc.NewClientPool(tcfg)
+	spectrumXPartitionNotFound := fmt.Sprintf("SPX partition %s is not found", sxpReplacement.ID)
+
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	ifcDAO := cdbm.NewInterfaceDAO(dbSession)
+	deletingEthIfcForEmptyNVLinkUpdate := testInstanceBuildInstanceInterface(
+		t, dbSession, instNoIB.ID, nil, &vpcPrefixSite2.ID, nil, cdbm.InterfaceStatusDeleting,
+	)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -5251,15 +5646,16 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	}
 
 	type args struct {
-		reqData                  *model.APIInstanceUpdateRequest
-		reqOrg                   string
-		reqUser                  *cdbm.User
-		reqInstance              string
-		cleanInstanceToStatus    string
-		respNoOfInterfaces       *int
-		respNoOfNVLinkInterfaces *int
-		ethInterfacesToDelete    []cdbm.Interface
-		ibInterfaceToDelete      []cdbm.InfiniBandInterface
+		reqData                          *model.APIInstanceUpdateRequest
+		reqOrg                           string
+		reqUser                          *cdbm.User
+		reqInstance                      string
+		cleanInstanceToStatus            string
+		respNoOfInterfaces               *int
+		respNoOfNVLinkInterfaces         *int
+		expectedRespNVLinkInterfaceCount *int
+		ethInterfacesToDelete            []cdbm.Interface
+		ibInterfaceToDelete              []cdbm.InfiniBandInterface
 		// Expect these InfiniBand interface rows to stay Ready with no Pending rows created on the Instance
 		// when the request matches on (partition ID, device, device instance) — READY no-op IB update path.
 		expectInfiniBandInterfacesRemainReady []uuid.UUID
@@ -5278,7 +5674,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedRespSpectrumXAttachmentCount  *int
 		expectedSiteSpectrumXAttachmentType   *corev1.SpxAttachmentType
 		expectedSiteSpectrumXAttachmentBridge *string
-		expectSpectrumXValidationFailure      bool
+		expectSpectrumXUnchanged              bool
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -5290,6 +5686,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		// Optional hook after a successful Handle (e.g. assert persisted DB state).
 		afterHandle            func(t *testing.T)
 		ethernetReconciliation *ethernetReconciliationExpectation
+		// respSecondaryVpcIDs overrides the expected response when a dropped Interface is still Deleting.
+		respSecondaryVpcIDs []string
 	}
 
 	tests := []struct {
@@ -5346,11 +5744,11 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 					}},
 				},
-				reqInstance:                      inst1.ID.String(),
-				reqOrg:                           tnOrg1,
-				reqUser:                          tnu1,
-				respCode:                         http.StatusBadRequest,
-				expectSpectrumXValidationFailure: true,
+				reqInstance:              inst1.ID.String(),
+				reqOrg:                   tnOrg1,
+				reqUser:                  tnu1,
+				respCode:                 http.StatusBadRequest,
+				expectSpectrumXUnchanged: true,
 				beforeHandle: func(t *testing.T) {
 					association := testInstanceBuildSSHKeyGroupInstanceAssociation(t, dbSession, skg1.ID, st1.ID, inst1.ID)
 					attachment, err := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
@@ -5369,6 +5767,74 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						require.NoError(t, err)
 						_, err = dbSession.DB.NewDelete().Model(attachment).WherePK().Exec(ctx)
 						require.NoError(t, err)
+					})
+				},
+			},
+		},
+		{
+			name: "Core rejects a SpectrumX replacement without persisting the update",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       spectrumXRejectedSCP,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:           cutil.GetPtr("must-not-persist"),
+					IpxeScript:     os2.IpxeScript,
+					SSHKeyGroupIDs: []string{skg2.ID.String()},
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+						SpectrumXPartitionID: sxpReplacement.ID.String(),
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+					}},
+				},
+				reqInstance:              inst1.ID.String(),
+				reqOrg:                   tnOrg1,
+				reqUser:                  tnu1,
+				respCode:                 http.StatusBadRequest,
+				respMessage:              &spectrumXPartitionNotFound,
+				expectSpectrumXUnchanged: true,
+				beforeHandle: func(t *testing.T) {
+					association := testInstanceBuildSSHKeyGroupInstanceAssociation(t, dbSession, skg1.ID, st1.ID, inst1.ID)
+					attachment, err := cdbm.NewSpectrumXAttachmentDAO(dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
+						InstanceID:           inst1.ID,
+						SiteID:               st1.ID,
+						SpectrumXPartitionID: sxp1.ID,
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       0,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+						Status:               cdbm.SpectrumXAttachmentStatusReady,
+						CreatedBy:            tnu1.ID,
+					})
+					require.NoError(t, err)
+					t.Cleanup(func() {
+						_, err := dbSession.DB.NewDelete().Model(association).WherePK().Exec(ctx)
+						require.NoError(t, err)
+						_, err = dbSession.DB.NewDelete().Model(attachment).WherePK().Exec(ctx)
+						require.NoError(t, err)
+					})
+
+					run := &tmocks.WorkflowRun{}
+					run.On("GetID").Return("spectrumx-rejected-update").Once()
+					run.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError(
+						spectrumXPartitionNotFound, swe.ErrTypeNICoInvalidArgument, nil,
+					)).Once()
+					client := &tmocks.Client{}
+					client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+						"UpdateInstance", mock.MatchedBy(func(request *corev1.InstanceConfigUpdateRequest) bool {
+							attachments := request.GetConfig().GetSpxconfig().GetSpxAttachments()
+							keysetIDs := request.GetConfig().GetTenant().GetTenantKeysetIds()
+							return request.GetInstanceId().GetValue() == inst1.ID.String() &&
+								len(attachments) == 1 && attachments[0].GetSpxPartitionId().GetValue() == sxpReplacement.ID.String() &&
+								len(keysetIDs) == 1 && keysetIDs[0] == skg2.ID.String()
+						})).Return(run, nil).Once()
+					spectrumXRejectedSCP.IDClientMap[st1.ID.String()] = client
+					t.Cleanup(func() {
+						client.AssertExpectations(t)
+						run.AssertExpectations(t)
 					})
 				},
 			},
@@ -6924,6 +7390,211 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifySiteControllerRequest: true,
 		},
 		{
+			name: "unrelated update preserves a cross-Tenant VPC attachment after capability revocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name: cutil.GetPtr("test-instance-cross-tenant-unrelated-updated"),
+				},
+				reqInstance: instCrossTenantUnchanged.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusOK,
+			},
+		},
+		{
+			name: "unchanged cross-Tenant Interface replacement succeeds after capability revocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					SecondaryVpcIDs: []string{crossTenantVpcUpdateA.ID.String()},
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdateA.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqInstance: instCrossTenantUnchanged.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:     2,
+					readyIDs:     []uuid.UUID{crossTenantIfcUnchangedID},
+					pendingCount: 0,
+				},
+			},
+		},
+		{
+			name: "cross-Tenant Interface removal succeeds after capability revocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+					},
+				},
+				reqInstance: instCrossTenantRemove.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:    2,
+					deletingIDs: []uuid.UUID{crossTenantIfcRemoveID},
+				},
+			},
+		},
+		{
+			name: "dropping one of two cross-Tenant Interfaces succeeds after capability revocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					SecondaryVpcIDs: []string{crossTenantVpcUpdateA.ID.String()},
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdateA.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqInstance: instCrossTenantPartialRemove.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:    3,
+					readyIDs:    []uuid.UUID{crossTenantIfcKeptID},
+					deletingIDs: []uuid.UUID{crossTenantIfcDropped.ID},
+				},
+				respSecondaryVpcIDs: []string{crossTenantVpcUpdateA.ID.String(), crossTenantVpcUpdateB.ID.String()},
+			},
+		},
+		{
+			name: "adding a cross-Tenant Interface fails after capability revocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					SecondaryVpcIDs: []string{crossTenantVpcUpdateA.ID.String()},
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdateA.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqInstance: instCrossTenantAdd.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusForbidden,
+				respMessage: cutil.GetPtr("Tenant does not have crossTenantInterfaceCreation capability enabled"),
+			},
+		},
+		{
+			name: "new cross-Tenant VPC state is not revealed after capability revocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					SecondaryVpcIDs: []string{crossTenantVpcUpdatePending.ID.String()},
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdatePending.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqInstance: instCrossTenantAdd.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusForbidden,
+				respMessage: cutil.GetPtr("Tenant does not have crossTenantInterfaceCreation capability enabled"),
+			},
+		},
+		{
+			name: "retargeting a cross-Tenant Interface fails after capability revocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					SecondaryVpcIDs: []string{crossTenantVpcUpdateB.ID.String()},
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdateB.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqInstance: instCrossTenantRetarget.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusForbidden,
+				respMessage: cutil.GetPtr("Tenant does not have crossTenantInterfaceCreation capability enabled"),
+			},
+		},
+		{
 			name: "test Instance update API endpoint preserves existing VPC selection during unrelated update",
 			fields: fields{
 				dbSession: dbSession,
@@ -8006,6 +8677,43 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "test Instance update without interfaces skips unrelated Deleting Ethernet interface",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript:       os2.IpxeScript,
+					NVLinkInterfaces: []model.APINVLinkInterfaceCreateOrUpdateRequest{},
+				},
+				reqInstance:                      instNoIB.ID.String(),
+				cleanInstanceToStatus:            instNoIB.Status,
+				reqOrg:                           tnOrg1,
+				reqUser:                          tnu1,
+				respCode:                         http.StatusOK,
+				expectedRespNVLinkInterfaceCount: cutil.GetPtr(0),
+				beforeHandle: func(t *testing.T) {
+					originalClient := scp.IDClientMap[st2.ID.String()]
+					scp.IDClientMap[st2.ID.String()] = tsc
+					t.Cleanup(func() {
+						scp.IDClientMap[st2.ID.String()] = originalClient
+					})
+				},
+				afterHandle: func(t *testing.T) {
+					deletingInterface, err := ifcDAO.GetByID(ctx, nil, deletingEthIfcForEmptyNVLinkUpdate.ID, nil)
+					require.NoError(t, err)
+					require.NotNil(t, deletingInterface)
+					assert.Equal(t, cdbm.InterfaceStatusDeleting, deletingInterface.Status)
+				},
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -8039,7 +8747,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			var beforeSpectrumXAttachments []cdbm.SpectrumXAttachment
 			var beforeSpectrumXStatusDetails []cdbm.StatusDetail
 			var beforeSpectrumXSSHAssociations []cdbm.SSHKeyGroupInstanceAssociation
-			if len(tt.args.reqData.SpectrumXAttachments) > 0 && (tt.args.respCode == http.StatusOK || tt.args.expectSpectrumXValidationFailure) {
+			if len(tt.args.reqData.SpectrumXAttachments) > 0 && (tt.args.respCode == http.StatusOK || tt.args.expectSpectrumXUnchanged) {
 				var readErr error
 				beforeSpectrumXInstance, readErr = cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
 				require.NoError(t, readErr)
@@ -8052,7 +8760,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				})
 			}
 
-			if tt.args.expectSpectrumXValidationFailure {
+			if tt.args.expectSpectrumXUnchanged {
 				var readErr error
 				page := cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}
 				beforeSpectrumXAttachments, _, readErr = cdbm.NewSpectrumXAttachmentDAO(dbSession).GetAll(ctx, nil, cdbm.SpectrumXAttachmentFilterInput{InstanceIDs: []uuid.UUID{beforeSpectrumXInstance.ID}}, page, nil)
@@ -8068,7 +8776,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			if err := uih.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateInstanceHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if tt.args.expectSpectrumXValidationFailure {
+			if tt.args.expectSpectrumXUnchanged {
 				var response struct {
 					Source string `json:"source"`
 				}
@@ -8108,6 +8816,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				t.Fatal(serr)
 			}
 
+			if tt.args.expectedRespNVLinkInterfaceCount != nil {
+				require.Len(t, rst.NVLinkInterfaces, *tt.args.expectedRespNVLinkInterfaceCount)
+			}
+
 			if tt.args.afterHandle != nil {
 				tt.args.afterHandle(t)
 			}
@@ -8133,8 +8845,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 				if tt.args.reqData.PhoneHomeEnabled != nil && *tt.args.reqData.PhoneHomeEnabled && tt.args.reqData.OperatingSystemID != nil {
 					lines := strings.Split(*rst.UserData, "\n")
-					assert.Equal(t, util.SiteCloudConfig, lines[0])
-					assert.NotEqual(t, util.SiteCloudConfig, lines[1])
+					assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+					assert.NotEqual(t, cdmu.SiteCloudConfig, lines[1])
 				}
 			}
 
@@ -8259,7 +8971,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InterfaceOrderByCreated, Order: cdbp.OrderAscending}},
 					[]string{cdbm.SubnetRelationName})
 				assert.Equal(t, len(ifcs), len(tt.args.reqData.Interfaces))
-				for i, _ := range ifcs {
+				for i := range ifcs {
 					if ifcs[i].SubnetID != nil && tt.args.reqData.Interfaces[i].SubnetID != nil {
 						assert.Equal(t, ifcs[i].SubnetID.String(), *tt.args.reqData.Interfaces[i].SubnetID)
 					}
@@ -8295,7 +9007,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				}
 			}
 
-			if tt.args.reqData.SecondaryVpcIDs != nil {
+			if tt.args.respSecondaryVpcIDs != nil {
+				assert.ElementsMatch(t, tt.args.respSecondaryVpcIDs, rst.SecondaryVpcIDs)
+			} else if tt.args.reqData.SecondaryVpcIDs != nil {
 				assert.ElementsMatch(t, tt.args.reqData.SecondaryVpcIDs, rst.SecondaryVpcIDs)
 			}
 
@@ -8422,7 +9136,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InfiniBandInterfaceOrderByCreated, Order: cdbp.OrderAscending}},
 					[]string{cdbm.InfiniBandPartitionRelationName})
 				assert.Equal(t, len(ibifcs), len(tt.args.reqData.InfiniBandInterfaces))
-				for i, _ := range ibifcs {
+				for i := range ibifcs {
 					assert.Equal(t, tt.args.reqData.InfiniBandInterfaces[i].InfiniBandPartitionID, ibifcs[i].InfiniBandPartitionID.String())
 					assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, ibifcs[i].Status)
 				}
@@ -9618,6 +10332,18 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[0], []string{"192.168.1.100", "192.168.1.101", "2001:db8::1"})
 	testUpdateInterfaceWithIPs(t, dbSession, instsubarr[1], []string{"192.168.2.200"})
 
+	// Tenant with an Instance on a Site where it has no Tenant/Site association
+	tnOrg2 := "test-tenant-org-2"
+	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles1)
+	tn2 := common.TestBuildTenantWithDisplayName(t, dbSession, "test-tenant-2", tnOrg2, tnu2, "Test Tenant 2")
+	st4 := testInstanceBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, true, ipu)
+	ist5 := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-5", st4, cdbm.InstanceStatusReady)
+	vpc5 := testInstanceBuildVPC(t, dbSession, "test-vpc-5", ip, tn2, st4, nil, nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu2)
+	mc7 := testInstanceBuildMachineWithID(t, dbSession, ip.ID, st4.ID, cutil.GetPtr(false), nil, "machine-getall-7")
+	instNoTenantSite := testInstanceBuildInstance(t, dbSession, "test-instance-no-tenant-site", tn2.ID, ip.ID, st4.ID, &ist5.ID, vpc5.ID, cutil.GetPtr(mc7.ID), nil, nil, cdbm.InstanceStatusReady)
+	common.TestBuildStatusDetail(t, dbSession, instNoTenantSite.ID.String(), cdbm.InstanceStatusPending, cutil.GetPtr("request received, pending processing"))
+	common.TestBuildStatusDetail(t, dbSession, instNoTenantSite.ID.String(), cdbm.InstanceStatusProvisioning, cutil.GetPtr("Instance is being provisioned on Site"))
+
 	e := echo.New()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
@@ -9660,6 +10386,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 		expectedIBInterfaceID                       *string
 		expectedDpuExtensionServiceDeploymentID     *string
 		expectedMachineIDOverride                   *string
+		expectedSerialConsoleURL                    *string
 		expectedAnyNetworkSecurityGroupInherited    bool
 		expectedAnyNetworkSecurityGroupNotInherited bool
 		expectedNetworkSecurityGroupInheritedByName map[string]bool
@@ -10724,6 +11451,24 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			expectedFirstEntryName: instarr[0].Name,
 			wantErr:                false,
 		},
+		{
+			name: "test Instance getall API endpoint returns serial console URL for Site without Tenant/Site association",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqOrg:   tnOrg2,
+				reqUser:  tnu2,
+				respCode: http.StatusOK,
+			},
+			expectedCount:             1,
+			expectedTotal:             1,
+			expectedFirstEntryName:    instNoTenantSite.Name,
+			expectedMachineIDOverride: cutil.GetPtr(mc7.ID),
+			expectedSerialConsoleURL:  cutil.GetPtr(fmt.Sprintf("ssh://%s@%s", instNoTenantSite.ControllerInstanceID.String(), *st4.SerialConsoleHostname)),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -10861,6 +11606,11 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 
 				assert.Equal(t, *rst[0].MachineID, *expectedMachineID)
 				assert.Equal(t, rst[0].Status, cdbm.InstanceStatusReady)
+
+				if tt.expectedSerialConsoleURL != nil {
+					require.NotNil(t, rst[0].SerialConsoleURL)
+					assert.Equal(t, *tt.expectedSerialConsoleURL, *rst[0].SerialConsoleURL)
+				}
 
 				if tt.expectSubnet {
 					assert.Equal(t, *rst[0].Interfaces[0].SubnetID, instsub1.SubnetID.String())

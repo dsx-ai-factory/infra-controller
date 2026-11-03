@@ -112,6 +112,12 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub endpoint_discovery_interval: Duration,
 
+    /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
+    /// still running when it passes are abandoned. Defaults to 20 seconds and
+    /// must be greater than zero.
+    #[serde(with = "humantime_serde")]
+    pub shutdown_timeout: Duration,
+
     /// BMC proxy URL
     pub bmc_proxy_url: Option<Url>,
 }
@@ -132,6 +138,7 @@ impl Default for Config {
             cache_size: 100,
             bmc_request_concurrency: DEFAULT_BMC_REQUEST_CONCURRENCY,
             endpoint_discovery_interval: Duration::from_secs(300),
+            shutdown_timeout: Duration::from_secs(20),
             bmc_proxy_url: None,
         }
     }
@@ -167,6 +174,17 @@ pub struct EndpointSourcesConfig {
     #[serde(rename = "nico_api", alias = "carbide_api")]
     pub carbide_api: Configurable<CarbideApiConnectionConfig>,
 
+    /// JSON credentials file, required when either static endpoint list is nonempty.
+    /// Relative paths use the process working directory; no file is loaded by default.
+    /// Per-MAC overrides take precedence over the explicitly selected profile for each field.
+    /// Omitted/null fields inherit; empty strings do not. Usernames are required;
+    /// passwords are optional. Unknown profiles or missing usernames fail startup.
+    /// One cached reader reloads on file events, with polling every 60 seconds;
+    /// failed updates retain the last valid snapshot. Replace files atomically.
+    /// Consumers refresh after authentication failures. Target MACs must be unique.
+    /// File updates do not change the configured target inventory.
+    pub static_credentials_file: Option<PathBuf>,
+
     /// Static BMC endpoints, including switch host endpoints.
     pub static_bmc_endpoints: Vec<StaticBmcEndpoint>,
 
@@ -182,6 +200,7 @@ impl Default for EndpointSourcesConfig {
     fn default() -> Self {
         Self {
             carbide_api: Configurable::Enabled(CarbideApiConnectionConfig::default()),
+            static_credentials_file: None,
             static_bmc_endpoints: Vec::new(),
             static_switch_host_endpoints: Vec::new(),
             cluster: Configurable::Disabled,
@@ -282,8 +301,9 @@ pub struct StaticBmcEndpoint {
     #[serde(default)]
     pub port: Option<u16>,
     pub mac: String,
-    pub username: String,
-    pub password: Option<String>,
+    /// Optional named profile in `static_credentials_file`. No profile is selected
+    /// by default; unknown names fail lookup. Requires a configured credentials file.
+    pub credentials_profile: Option<String>,
     pub machine: Option<StaticMachineEndpoint>,
     pub power_shelf: Option<StaticPowerShelfEndpoint>,
     pub switch: Option<StaticSwitchEndpoint>,
@@ -446,6 +466,26 @@ impl EndpointSourcesConfig {
         const BMC_ENDPOINTS_PATH: &str = "endpoint_sources.static_bmc_endpoints";
         const SWITCH_HOST_ENDPOINTS_PATH: &str = "endpoint_sources.static_switch_host_endpoints";
 
+        if self
+            .static_credentials_file
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            return Err("endpoint_sources.static_credentials_file must not be empty".into());
+        }
+        for (path, endpoints) in [
+            (BMC_ENDPOINTS_PATH, &self.static_bmc_endpoints),
+            (
+                SWITCH_HOST_ENDPOINTS_PATH,
+                &self.static_switch_host_endpoints,
+            ),
+        ] {
+            if !endpoints.is_empty() && self.static_credentials_file.is_none() {
+                return Err(format!(
+                    "{path}[0] requires endpoint_sources.static_credentials_file"
+                ));
+            }
+        }
         let mut static_macs = HashMap::new();
 
         for (index, endpoint) in self.static_bmc_endpoints.iter().enumerate() {
@@ -455,6 +495,11 @@ impl EndpointSourcesConfig {
                 format!("{BMC_ENDPOINTS_PATH}[{index}].mac must be a valid MAC address")
             })?;
 
+            if let Some((existing_path, existing_index)) = static_macs.get(&mac) {
+                return Err(format!(
+                    "{BMC_ENDPOINTS_PATH}[{index}].mac duplicates {existing_path}[{existing_index}].mac"
+                ));
+            }
             static_macs
                 .entry(mac)
                 .or_insert((BMC_ENDPOINTS_PATH, index));
@@ -677,7 +722,7 @@ pub struct OtlpTargetConfig {
     ///
     /// A batch whose request would be larger is split and sent in parts, as is
     /// a batch the target rejects with `RESOURCE_EXHAUSTED`. A single log
-    /// record or metric point is always sent on its own, so the target still
+    /// record or metric sample is always sent on its own, so the target still
     /// decides whether to accept it. Defaults to 4 MiB, the default gRPC
     /// receive limit of the OpenTelemetry Collector, and must be greater than
     /// zero.
@@ -1015,6 +1060,7 @@ impl Default for PowerShelfHealthReportSinkConfig {
 #[serde(default)]
 pub struct RateLimitConfig {
     /// Burst value for explorations, optimal to set to max rate limit.
+    /// Must be greater than zero when rate limiting is enabled.
     pub bucket_burst: usize,
 
     /// Interval between bucket replenishment.
@@ -2800,6 +2846,10 @@ impl Config {
             return Err("endpoint_discovery_interval must be greater than 0".to_string());
         }
 
+        if self.shutdown_timeout.is_zero() {
+            return Err("shutdown_timeout must be greater than 0".to_string());
+        }
+
         if self.bmc_request_concurrency.get() > Semaphore::MAX_PERMITS {
             return Err(format!(
                 "bmc_request_concurrency must not exceed {}",
@@ -2814,6 +2864,14 @@ impl Config {
         {
             return Err(
                 "bucket_replenish must be greater than 0 when rate limiting is enabled".to_string(),
+            );
+        }
+
+        if let Configurable::Enabled(rate_limit) = &self.rate_limit
+            && rate_limit.bucket_burst == 0
+        {
+            return Err(
+                "bucket_burst must be greater than 0 when rate limiting is enabled".to_string(),
             );
         }
 
@@ -3082,6 +3140,7 @@ mod tests {
 
     fn config_with(configure: impl FnOnce(&mut Config)) -> Box<Config> {
         let mut config = Config::default();
+        config.endpoint_sources.static_credentials_file = Some("credentials.json".into());
         configure(&mut config);
         Box::new(config)
     }
@@ -3091,8 +3150,7 @@ mod tests {
             ip: "192.0.2.1".parse().unwrap(),
             port: None,
             mac: "00:11:22:33:44:55".to_string(),
-            username: "admin".to_string(),
-            password: None,
+            credentials_profile: None,
             machine: None,
             power_shelf: None,
             switch: None,
@@ -3374,11 +3432,12 @@ mod tests {
 endpoint_discovery_interval = "1m"
 bmc_request_concurrency = 2
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "192.168.1.100"
 mac = "00:11:22:33:44:55"
-username = "root"
-password = "pass"
 
 [endpoint_sources.nico_api]
 enabled = false
@@ -3449,10 +3508,12 @@ cache_size = 50
     #[test]
     fn test_static_endpoint_config_rejects_invalid_ip() {
         let toml_content = r#"
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "not-an-ip"
 mac = "00:11:22:33:44:55"
-username = "root"
 "#;
 
         let result = Figment::new()
@@ -3461,6 +3522,45 @@ username = "root"
             .extract::<Config>();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn static_credential_source_validation() {
+        scenarios!(run = |(global, target): (&str, &str)| -> Result<(), ()> {
+            let input = format!("[endpoint_sources]\n{global}\n[[endpoint_sources.static_bmc_endpoints]]\nip = \"192.0.2.1\"\nmac = \"00:11:22:33:44:55\"\n{target}");
+            let config: Config = Figment::new().merge(Toml::string(&input)).extract().map_err(|_| ())?;
+            config.endpoint_sources.validate().map_err(|_| ())
+        };
+            "file credentials" {
+                ("static_credentials_file = \"credentials.json\"", "") => Yields(()),
+                ("static_credentials_file = \"credentials.json\"", "credentials_profile = \"bmc\"") => Yields(()),
+            }
+            "invalid sources" {
+                ("", "") => Fails,
+                ("static_credentials_file = \"\"", "") => Fails,
+                ("static_credentials_file = \"credentials.json\"", "username = \"admin\"") => Fails,
+                ("static_credentials_file = \"credentials.json\"", "password = \"obsolete\"") => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn missing_static_credential_file_identifies_the_list() {
+        for list in ["static_bmc_endpoints", "static_switch_host_endpoints"] {
+            let input = format!(
+                "[[endpoint_sources.{list}]]\nip = \"192.0.2.1\"\nmac = \"00:11:22:33:44:55\""
+            );
+            let config: Config = Figment::new()
+                .merge(Toml::string(&input))
+                .extract()
+                .unwrap();
+            assert_eq!(
+                config.endpoint_sources.validate().unwrap_err(),
+                format!(
+                    "endpoint_sources.{list}[0] requires endpoint_sources.static_credentials_file"
+                )
+            );
+        }
     }
 
     #[test]
@@ -3582,6 +3682,13 @@ username = "root"
                 Box::new(Config::default()) => Yields(()),
 
                 config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 1,
+                        ..RateLimitConfig::default()
+                    });
+                }) => Yields(()),
+
+                config_with(|config| {
                     config.bmc_request_concurrency =
                         NonZeroUsize::new(Semaphore::MAX_PERMITS)
                             .expect("Tokio supports at least one semaphore permit");
@@ -3656,6 +3763,15 @@ username = "root"
                 }) => FailsWith(
                     "bucket_replenish must be greater than 0 when rate limiting is enabled"
                         .to_string()
+                ),
+
+                config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 0,
+                        ..RateLimitConfig::default()
+                    });
+                }) => FailsWith(
+                    "bucket_burst must be greater than 0 when rate limiting is enabled".to_string()
                 ),
 
                 config_with(|config| {
@@ -5885,31 +6001,26 @@ enabled = false
 [sinks.health_report]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.0.1"
 mac = "aa:bb:cc:dd:ee:ff"
-username = "admin"
-password = "pass"
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "cumulus"
-password = "pass"
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001" }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "cumulus"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", slot_number = 7, tray_index = 3 }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.2.1"
 mac = "22:33:44:55:66:77"
-username = "admin"
-password = "pass"
 power_shelf = { id = "fps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-PS-001" }
 "#;
 
@@ -6005,11 +6116,12 @@ enabled = false
 [sinks.health_report]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 machine = { serial = "MN-001" }
 "#;
 
@@ -6034,11 +6146,12 @@ machine = { serial = "MN-001" }
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "admin"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", endpoint_role = "host", is_primary = true }
 "#;
 
@@ -6065,11 +6178,12 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:77"
-username = "admin"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-002", endpoint_role = "host", is_primary = false, nmxc_enabled = true, nmxt_enabled = true, nvlink_domain_uuid = "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e" }
 "#;
 
@@ -6139,6 +6253,7 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                     config.endpoint_sources.static_bmc_endpoints =
                         vec![StaticBmcEndpoint {
                             mac: "not-a-mac".to_string(),
+            credentials_profile: None,
                             ..static_endpoint()
                         }];
                 }) => FailsWith(
@@ -6152,6 +6267,7 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                     config.endpoint_sources.static_switch_host_endpoints =
                         vec![StaticBmcEndpoint {
                             mac: "not-a-mac".to_string(),
+            credentials_profile: None,
                             switch: Some(static_switch()),
                             ..static_endpoint()
                         }];
@@ -6161,10 +6277,11 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                 ),
             }
 
-            "duplicate within BMC endpoint list is accepted" {
+            "duplicate within BMC endpoint list" {
                 config_with(|config| {
                     let endpoint = StaticBmcEndpoint {
                         mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            credentials_profile: None,
                         ..static_endpoint()
                     };
 
@@ -6172,10 +6289,13 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                         endpoint,
                         StaticBmcEndpoint {
                             mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            credentials_profile: None,
                             ..static_endpoint()
                         },
                     ];
-                }) => Yields(()),
+                }) => FailsWith(
+                    "endpoint_sources.static_bmc_endpoints[1].mac duplicates endpoint_sources.static_bmc_endpoints[0].mac".to_string()
+                ),
             }
 
             "duplicate within host list" {
@@ -6183,6 +6303,7 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                     let endpoint = StaticBmcEndpoint {
                         switch: Some(static_switch()),
                         mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            credentials_profile: None,
                         ..static_endpoint()
                     };
 
@@ -6199,12 +6320,14 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                     config.endpoint_sources.static_bmc_endpoints =
                         vec![StaticBmcEndpoint {
                             mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            credentials_profile: None,
                             ..static_endpoint()
                         }];
 
                     config.endpoint_sources.static_switch_host_endpoints =
                         vec![StaticBmcEndpoint {
                             mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            credentials_profile: None,
                             switch: Some(static_switch()),
                             ..static_endpoint()
                         }];
@@ -6222,11 +6345,12 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 labels = { site = "rno-dev7", environment = "development" }
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001", driver_version = "570.82", slot_number = 15, tray_index = 5, nvlink_domain_uuid = "00000000-0000-0000-0000-000000000000" }
 "#;
@@ -6272,11 +6396,12 @@ machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 labels = {{ {name} = "value" }}
 machine = {{ id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0" }}
 "#
@@ -6298,18 +6423,17 @@ machine = {{ id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0" 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", physical_slot_number = 15, compute_tray_index = 5 }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "cumulus"
-password = "pass"
 switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 3 }
 "#;
 

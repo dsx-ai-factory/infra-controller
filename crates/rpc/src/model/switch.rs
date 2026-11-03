@@ -145,6 +145,7 @@ impl TryFrom<Switch> for rpc::Switch {
                         fabric_manager_status,
                         fabric_manager_status_details,
                         nvos_ports: Vec::new(),
+                        serial_number: None,
                     }
                 }
                 (None, fabric_manager_status, fabric_manager_status_details) => rpc::SwitchStatus {
@@ -160,6 +161,7 @@ impl TryFrom<Switch> for rpc::Switch {
                     fabric_manager_status,
                     fabric_manager_status_details,
                     nvos_ports: Vec::new(),
+                    serial_number: None,
                 },
             },
         );

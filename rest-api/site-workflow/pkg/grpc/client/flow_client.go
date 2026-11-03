@@ -359,14 +359,14 @@ func (fgac *FlowGrpcAtomicClient) CheckAndReloadCerts(initialClientCertMD5, init
 			reloadStarted = time.Now()
 			reloadBackoff = FlowGrpcConnectionBackoffInitial
 		} else if time.Since(reloadStarted) >= FlowGrpcConnectionRetryTimeout {
-			panic(fmt.Errorf("Flow gRPC: failed to reinitialize gRPC client with new certificates within %s",
+			panic(fmt.Errorf("flow gRPC: failed to reinitialize gRPC client with new certificates within %s",
 				FlowGrpcConnectionRetryTimeout))
 		}
 
 		newClient, err := NewFlowGrpcClient(fgac.Config)
 		if err != nil {
 			if time.Since(reloadStarted) >= FlowGrpcConnectionRetryTimeout {
-				panic(fmt.Errorf("Flow gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
+				panic(fmt.Errorf("flow gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
 					FlowGrpcConnectionRetryTimeout, err))
 			}
 			logger.Error().Err(err).Dur("RetryIn", reloadBackoff).Msg("Failed to reinitialize gRPC client with new certificates, retrying")

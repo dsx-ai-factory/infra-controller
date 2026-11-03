@@ -191,7 +191,7 @@ func GetSiteFromIDString(ctx context.Context, tx *cdb.Tx, siteID string, dbSessi
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false)
+	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false, false)
 }
 
 // GetInstanceFromIDString gets the site DB model from the id string
@@ -1277,7 +1277,7 @@ func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclie
 
 // UnwrapWorkflowError removes Temporal wrappers and maps backend errors to HTTP status codes.
 func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
-	code, unwrappedError = http.StatusInternalServerError, err
+	code = http.StatusInternalServerError
 
 	// Attempt to unwrap our way through Temporal's WorkflowExecutionError
 	// and ActivityError layers to reach the underlying cause. These types
@@ -1572,23 +1572,13 @@ func IsTenant(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session
 }
 
 // TenantPrivilegeScope narrows where a Tenant's TargetedInstanceCreation
-// capability must be effective for a privilege check.
+// capability must be effective for a privilege check. See
+// cdbm.TenantPrivilegeScope for how its fields select the resolution.
 //
 // The scope pointer's presence is itself the "require privileged" signal for
 // the auth gates (IsTenant / IsProviderOrTenant): a nil *TenantPrivilegeScope
-// means no privilege is required. For TenantHasTargetedInstanceCreation a
-// non-nil scope is required and the fields select how the capability is
-// resolved:
-//
-//   - SiteID set: resolve the effective capability for that exact Site.
-//   - InfrastructureProviderID set: privileged if the Ready TenantAccount for
-//     that Provider has TargetedInstanceCreation enabled globally.
-//
-// SiteID and InfrastructureProviderID must not be set together.
-type TenantPrivilegeScope struct {
-	InfrastructureProviderID *uuid.UUID
-	SiteID                   *uuid.UUID
-}
+// means no privilege is required.
+type TenantPrivilegeScope = cdbm.TenantPrivilegeScope
 
 // TenantHasLegacyTargetedInstanceCreation reports whether the deprecated
 // Tenant.capabilities.targetedInstanceCreation compatibility field may be
@@ -1635,81 +1625,24 @@ func TenantHasLegacyTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, db
 }
 
 // TenantHasTargetedInstanceCreation reports whether the Tenant has the
-// TargetedInstanceCreation capability enabled within the given scope. It is
-// nil-safe so callers don't have to repeat the tenant nil check, and it
-// deliberately does not read the deprecated tenant-level flag
-// (tenant.Config.TargetedInstanceCreation), which is superseded by
-// TenantAccount.config with per-site TenantSite.config overrides. See
-// TenantPrivilegeScope for how scope selects the resolution strategy.
+// TargetedInstanceCreation capability enabled within the given scope. See
+// cdbm.TenantHasTargetedInstanceCreation.
 func TenantHasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, scope *TenantPrivilegeScope) (bool, error) {
-	if tenant == nil {
-		return false, nil
+	return cdbm.TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, scope)
+}
+
+// TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
+func TenantHasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
+	return cdbm.TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)
+}
+
+// ValidateTenantSiteAccess returns cdb.ErrDoesNotExist when TenantHasSiteAccess reports no access.
+func ValidateTenantSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) error {
+	ok, err := TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)
+	if err == nil && !ok {
+		err = cdb.ErrDoesNotExist
 	}
-
-	if scope == nil {
-		return false, errors.New("scope must be specified when evaluating Tenant's targeted Instance creation capability")
-	}
-
-	if scope.SiteID != nil && scope.InfrastructureProviderID != nil {
-		return false, errors.New("site ID and infrastructure provider ID cannot be specified together when evaluating Tenant's targeted Instance creation capability")
-	}
-
-	siteID := scope.SiteID
-	providerID := scope.InfrastructureProviderID
-	var siteOverride *bool
-
-	// Site-scoped: resolve the effective capability for the exact Site.
-	if siteID != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-		ts, err := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenant.ID, *siteID, []string{cdbm.SiteRelationName})
-		if err != nil {
-			if errors.Is(err, cdb.ErrDoesNotExist) {
-				siteDAO := cdbm.NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, tx, *siteID, nil, false)
-				if err != nil {
-					return false, err
-				}
-
-				// Site-scoped: resolve the effective capability for the exact Site.
-				providerID = &site.InfrastructureProviderID
-			} else {
-				return false, err
-			}
-		} else {
-			if ts.Site != nil {
-				providerID = &ts.Site.InfrastructureProviderID
-			} else {
-				return false, errors.New("failed to retrieve related Site for Tenant/Site association, DB error")
-			}
-			// This will ensure TenantAccount is ready for the Site.
-			siteOverride = ts.Config.TargetedInstanceCreation
-		}
-	}
-
-	if providerID != nil {
-		taDAO := cdbm.NewTenantAccountDAO(dbSession)
-		tas, _, err := taDAO.GetAll(ctx, tx, cdbm.TenantAccountFilterInput{
-			InfrastructureProviderID: providerID,
-			TenantIDs:                []uuid.UUID{tenant.ID},
-			Statuses:                 []string{cdbm.TenantAccountStatusReady},
-		}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
-		if err != nil {
-			return false, err
-		}
-
-		if len(tas) == 0 {
-			return false, nil
-		}
-
-		ta := tas[0]
-		if siteOverride != nil {
-			return *siteOverride, nil
-		}
-
-		return ta.Config.TargetedInstanceCreation, nil
-	}
-
-	return false, nil
+	return err
 }
 
 // GetPrivilegedAccessSiteIDsForTenant returns Site IDs where the Tenant has
@@ -2068,7 +2001,7 @@ var queryTagCache sync.Map // map[reflect.Type][]string
 // Results are cached per type.
 func QueryTagsFor(v any) []string {
 	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if cached, ok := queryTagCache.Load(t); ok {

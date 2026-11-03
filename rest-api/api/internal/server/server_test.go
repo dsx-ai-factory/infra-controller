@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,40 +235,155 @@ func Test_InitMetricsServer(t *testing.T) {
 	type args struct {
 		e *echo.Echo
 	}
+	type metricsRequest struct {
+		method string
+		host   string
+	}
 	tests := []struct {
-		name string
-		args args
+		name       string
+		args       args
+		requests   []metricsRequest
+		wantStatus int
+		wantMethod string
 	}{
 		{
-			name: "test initMetricsServer success",
+			name: "bounds caller-controlled Host labels",
 			args: args{
 				e: echo.New(),
 			},
+			requests: []metricsRequest{
+				{method: http.MethodGet, host: "nico-probe-a.invalid"},
+				{method: http.MethodGet, host: "nico-probe-b.invalid"},
+				{method: http.MethodGet, host: "nico-probe-a.invalid"},
+			},
+			wantStatus: http.StatusUnauthorized,
+			wantMethod: http.MethodGet,
+		},
+		{
+			name: "bounds non-standard HTTP method labels",
+			args: args{
+				e: echo.New(),
+			},
+			requests: []metricsRequest{
+				{method: "BREW", host: "nico-probe.invalid"},
+				{method: "FROB", host: "nico-probe.invalid"},
+				{method: "CUSTOM-METHOD", host: "nico-probe.invalid"},
+			},
+			wantStatus: http.StatusUnauthorized,
+			wantMethod: "unknown",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// A tracked route, since MetricsURLSkipper only records /v2/ and /metrics.
-			tt.args.e.GET("/v2/probe", func(c echo.Context) error {
-				return c.NoContent(http.StatusOK)
-			})
+			registry := useIsolatedPrometheusRegistry(t)
 
+			// A tracked route, since MetricsURLSkipper only records /v2/ and /metrics.
+			handler := func(c echo.Context) error {
+				return c.NoContent(http.StatusUnauthorized)
+			}
+			registeredMethods := make(map[string]bool)
+			for _, metricReq := range tt.requests {
+				if registeredMethods[metricReq.method] {
+					continue
+				}
+				tt.args.e.Add(metricReq.method, "/v2/probe", handler)
+				registeredMethods[metricReq.method] = true
+			}
 			InitMetricsServer(tt.args.e, config.DefaultMetricsNamespace)
 
-			tt.args.e.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v2/probe", nil))
-
-			// The prefix is the published contract. An empty Subsystem would
-			// silently produce echo_requests_total instead.
-			families, err := prometheus.DefaultGatherer.Gather()
-			assert.NoError(t, err)
-
-			names := make([]string, 0, len(families))
-			for _, family := range families {
-				names = append(names, family.GetName())
+			for _, metricReq := range tt.requests {
+				req := httptest.NewRequest(metricReq.method, "/v2/probe", nil)
+				req.Host = metricReq.host
+				rec := httptest.NewRecorder()
+				tt.args.e.ServeHTTP(rec, req)
+				if tt.wantStatus != 0 {
+					assert.Equal(t, tt.wantStatus, rec.Code)
+				}
 			}
-			assert.Contains(t, names, "nico_rest_api_requests_total")
-			assert.Contains(t, names, "nico_rest_api_request_duration_seconds")
+
+			assertBoundedMetricsLabels(t, registry, config.DefaultMetricsNamespace, tt.wantMethod)
 		})
+	}
+}
+
+func TestMetricsMethodLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		want   string
+	}{
+		{name: "GET", method: http.MethodGet, want: http.MethodGet},
+		{name: "HEAD", method: http.MethodHead, want: http.MethodHead},
+		{name: "POST", method: http.MethodPost, want: http.MethodPost},
+		{name: "PUT", method: http.MethodPut, want: http.MethodPut},
+		{name: "PATCH", method: http.MethodPatch, want: http.MethodPatch},
+		{name: "DELETE", method: http.MethodDelete, want: http.MethodDelete},
+		{name: "CONNECT", method: http.MethodConnect, want: http.MethodConnect},
+		{name: "OPTIONS", method: http.MethodOptions, want: http.MethodOptions},
+		{name: "TRACE", method: http.MethodTrace, want: http.MethodTrace},
+		{name: "non-standard", method: "BREW", want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/", nil)
+			ctx := echo.New().NewContext(req, httptest.NewRecorder())
+			assert.Equal(t, tt.want, metricsMethodLabel(ctx, nil))
+		})
+	}
+}
+
+func useIsolatedPrometheusRegistry(t *testing.T) *prometheus.Registry {
+	t.Helper()
+
+	registry := prometheus.NewRegistry()
+	previousRegisterer := prometheus.DefaultRegisterer
+	previousGatherer := prometheus.DefaultGatherer
+	prometheus.DefaultRegisterer = registry
+	prometheus.DefaultGatherer = registry
+
+	t.Cleanup(func() {
+		prometheus.DefaultRegisterer = previousRegisterer
+		prometheus.DefaultGatherer = previousGatherer
+	})
+
+	return registry
+}
+
+func assertBoundedMetricsLabels(t *testing.T, registry *prometheus.Registry, namespace, method string) {
+	t.Helper()
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+
+	prefix := namespace + "_"
+	expectedFamilies := map[string]bool{
+		prefix + "requests_total":           false,
+		prefix + "request_duration_seconds": false,
+		prefix + "request_size_bytes":       false,
+		prefix + "response_size_bytes":      false,
+	}
+
+	for _, family := range families {
+		name := family.GetName()
+		if _, ok := expectedFamilies[name]; !ok {
+			continue
+		}
+
+		expectedFamilies[name] = true
+		require.Len(t, family.GetMetric(), 1, "%s must not create a series per HTTP Host", name)
+
+		labels := make(map[string]string)
+
+		for _, label := range family.GetMetric()[0].GetLabel() {
+			labels[label.GetName()] = label.GetValue()
+		}
+
+		assert.Equal(t, namespace, labels["host"], "%s must retain one bounded host label", name)
+		assert.Equal(t, method, labels["method"], "%s must retain one bounded method label", name)
+	}
+
+	for name, found := range expectedFamilies {
+		assert.True(t, found, "expected metric family %s", name)
 	}
 }
 
@@ -295,18 +412,52 @@ func Test_Audit(t *testing.T) {
 
 	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/wdksahew1rqv/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), nil)
-	srv.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	// check if the audit log entry was created
-	aeDAO := cdbm.NewAuditEntryDAO(dbSession)
-	entries, count, err := aeDAO.GetAll(context.Background(), nil, cdbm.AuditEntryFilterInput{OrgName: cutil.GetPtr("wdksahew1rqv")}, paginator.PageInput{})
-	assert.NoError(t, err)
-	assert.Len(t, entries, 1)
-	assert.Equal(t, count, 1)
-	assert.Equal(t, entries[0].OrgName, "wdksahew1rqv")
-	assert.Equal(t, entries[0].StatusCode, 401)
+	// Larger than the 5 MiB Echo captures by default, within the API body limit.
+	largeName := strings.Repeat("a", 6<<20)
+
+	tests := []struct {
+		name    string
+		orgName string
+		body    []byte
+		check   func(t *testing.T, body map[string]interface{})
+	}{
+		{
+			name:    "records an unauthorized request without a body",
+			orgName: "wdksahew1rqv",
+			check: func(t *testing.T, body map[string]interface{}) {
+				assert.Empty(t, body)
+			},
+		},
+		{
+			name:    "records a valid body larger than the Echo default capture in full",
+			orgName: "auditlargebody",
+			body:    []byte(`{"name":"` + largeName + `"}`),
+			check: func(t *testing.T, body map[string]interface{}) {
+				assert.NotContains(t, body, "jsonParseFailed")
+				name, ok := body["name"].(string)
+				require.True(t, ok)
+				assert.Equal(t, len(largeName), len(name))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/%s/%s/site", cfg.GetAPIRouteVersion(), tt.orgName, cfg.GetAPIName()), bytes.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			srv.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+			aeDAO := cdbm.NewAuditEntryDAO(dbSession)
+			entries, count, err := aeDAO.GetAll(context.Background(), nil, cdbm.AuditEntryFilterInput{OrgName: cutil.GetPtr(tt.orgName)}, paginator.PageInput{})
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			assert.Equal(t, 1, count)
+			assert.Equal(t, tt.orgName, entries[0].OrgName)
+			assert.Equal(t, http.StatusUnauthorized, entries[0].StatusCode)
+			tt.check(t, entries[0].Body)
+		})
+	}
 }
 
 func Test_BodyLimit(t *testing.T) {
@@ -322,19 +473,43 @@ func Test_BodyLimit(t *testing.T) {
 
 	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 
-	oversizedBody := make([]byte, 11<<20) // 11 MiB, exceeds the 10 MiB limit
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), bytes.NewReader(oversizedBody))
-	req.Header.Set("Content-Type", "application/json")
-	srv.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
-
-	normalBody := []byte(`{"name":"test"}`)
-	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), bytes.NewReader(normalBody))
-	req2.Header.Set("Content-Type", "application/json")
-	srv.ServeHTTP(rec2, req2)
-	assert.NotEqual(t, http.StatusRequestEntityTooLarge, rec2.Code)
+	// io.MultiReader hides the body length, so httptest sends it without
+	// Content-Length, as a chunked request would arrive.
+	tests := []struct {
+		name       string
+		body       io.Reader
+		wantStatus int
+	}{
+		{
+			name:       "rejects a sized body over the limit",
+			body:       bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes+1)),
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:       "accepts a small sized body",
+			body:       bytes.NewReader([]byte(`{"name":"test"}`)),
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "rejects a chunked body over the limit",
+			body:       io.MultiReader(bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes+1))),
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:       "accepts a chunked body at the limit",
+			body:       io.MultiReader(bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes))),
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), tt.body)
+			req.Header.Set("Content-Type", "application/json")
+			srv.ServeHTTP(rec, req)
+			assert.Equal(t, tt.wantStatus, rec.Code)
+		})
+	}
 }
 
 func Test_NotFoundHandler(t *testing.T) {

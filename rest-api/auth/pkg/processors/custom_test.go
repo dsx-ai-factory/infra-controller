@@ -45,7 +45,7 @@ func setupTestEnvironment(t *testing.T, audiences []string, scopes []string) (*C
 				},
 			},
 		}
-		json.NewEncoder(w).Encode(jwks)
+		assert.NoError(t, json.NewEncoder(w).Encode(jwks))
 	}))
 
 	// Create JWKS config

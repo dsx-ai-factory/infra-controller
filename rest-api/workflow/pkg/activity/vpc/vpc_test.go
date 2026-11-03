@@ -4,6 +4,7 @@
 package vpc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
@@ -19,6 +20,8 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -484,6 +487,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 						},
 					},
 					Vpcs: []*corev1.Vpc{
+						// Pair a symbolic desired import with its concrete effective VNI so inventory exercises both stored forms.
 						{
 							Id:   &corev1.VpcId{Value: vpc1.ID.String()},
 							Name: vpc1.ID.String(),
@@ -492,6 +496,9 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 								SlaacEnabled:              cutil.GetPtr(true),
 								RoutingProfileType:        cutil.GetPtr("INTERNAL"),
 								RoutingProfileOverrides: &corev1.VpcRoutingProfileOverrides{
+									RouteTargetImports: &corev1.RouteTargets{
+										Values: []*corev1.RouteTarget{{Asn: 64_512, VniSelf: true}},
+									},
 									LeakDefaultRouteFromUnderlay: cutil.GetPtr(false),
 									AllowedAnycastPrefixes: &corev1.PrefixFilterPolicyEntries{
 										Values: []*corev1.PrefixFilterPolicyEntry{{Prefix: "192.0.2.1/24"}},
@@ -500,6 +507,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 							},
 							Status: &corev1.VpcStatus{
 								EffectiveRoutingProfile: &corev1.VpcEffectiveRoutingProfile{
+									RouteTargetImports:           []*corev1.RouteTarget{{Asn: 64_512, Vni: cutil.GetPtr(uint32(4_001))}},
 									LeakDefaultRouteFromUnderlay: true,
 									Internal:                     true,
 									AccessTier:                   8,
@@ -801,11 +809,18 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 				updatedProfileVPC, gerr := vpcDAO.GetByID(ctx, nil, tt.routingProfileStateUpdatedVpc.ID, nil)
 				require.NoError(t, gerr)
 				require.NotNil(t, updatedProfileVPC.RoutingProfileOverrides)
+				require.NotNil(t, updatedProfileVPC.RoutingProfileOverrides.RouteTargetImports)
+				require.Len(t, *updatedProfileVPC.RoutingProfileOverrides.RouteTargetImports, 1)
+				assert.True(t, (*updatedProfileVPC.RoutingProfileOverrides.RouteTargetImports)[0].VniSelf)
+				assert.Zero(t, (*updatedProfileVPC.RoutingProfileOverrides.RouteTargetImports)[0].VNI)
 				require.NotNil(t, updatedProfileVPC.RoutingProfileOverrides.LeakDefaultRouteFromUnderlay)
 				assert.False(t, *updatedProfileVPC.RoutingProfileOverrides.LeakDefaultRouteFromUnderlay)
 				require.NotNil(t, updatedProfileVPC.RoutingProfileOverrides.AllowedAnycastPrefixes)
 				assert.Equal(t, []string{"192.0.2.1/24"}, *updatedProfileVPC.RoutingProfileOverrides.AllowedAnycastPrefixes)
 				require.NotNil(t, updatedProfileVPC.EffectiveRoutingProfile)
+				require.Len(t, updatedProfileVPC.EffectiveRoutingProfile.RouteTargetImports, 1)
+				assert.Equal(t, uint32(4_001), updatedProfileVPC.EffectiveRoutingProfile.RouteTargetImports[0].VNI)
+				assert.False(t, updatedProfileVPC.EffectiveRoutingProfile.RouteTargetImports[0].VniSelf)
 				assert.True(t, updatedProfileVPC.EffectiveRoutingProfile.LeakDefaultRouteFromUnderlay)
 				assert.True(t, updatedProfileVPC.EffectiveRoutingProfile.Internal)
 				assert.Equal(t, uint32(8), updatedProfileVPC.EffectiveRoutingProfile.AccessTier)
@@ -1016,7 +1031,10 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 	networkVirtualizationType := corev1.VpcVirtualizationType_FNN
 	requestedVni := uint32(101)
 	activeVni := uint32(202)
+	resolvedRouteTargetVni := uint32(4_001)
 	routingProfile := "INTERNAL"
+
+	// Exercise symbolic desired state and concrete effective state; remaining fields provide recoverable inventory.
 	controllerVpc := &corev1.Vpc{
 		Id: &corev1.VpcId{Value: controllerVpcID.String()},
 		Config: &corev1.VpcConfig{
@@ -1024,9 +1042,22 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 			NetworkVirtualizationType: &networkVirtualizationType,
 			SlaacEnabled:              cutil.GetPtr(true),
 			RoutingProfileType:        &routingProfile,
-			Vni:                       &requestedVni,
+			RoutingProfileOverrides: &corev1.VpcRoutingProfileOverrides{
+				RouteTargetImports: &corev1.RouteTargets{
+					Values: []*corev1.RouteTarget{{Asn: 64_512, VniSelf: true}},
+				},
+			},
+			Vni: &requestedVni,
 		},
-		Status: &corev1.VpcStatus{Vni: &activeVni},
+		Status: &corev1.VpcStatus{
+			Vni: &activeVni,
+			EffectiveRoutingProfile: &corev1.VpcEffectiveRoutingProfile{
+				RouteTargetImports: []*corev1.RouteTarget{{
+					Asn: 64_512,
+					Vni: &resolvedRouteTargetVni,
+				}},
+			},
+		},
 		Metadata: &corev1.Metadata{
 			Name:        "site-created-vpc",
 			Description: "created directly on Site",
@@ -1041,6 +1072,33 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 
 	vpcDAO := cdbm.NewVpcDAO(dbSession)
 	statusDetailDAO := cdbm.NewStatusDetailDAO(dbSession)
+
+	if !t.Run("skips Core admin VPC without warning", func(t *testing.T) {
+		var logOutput bytes.Buffer
+		originalLogger := log.Logger
+		log.Logger = zerolog.New(&logOutput)
+		defer func() {
+			log.Logger = originalLogger
+		}()
+
+		adminVpcID := uuid.New()
+		adminInventory := &corev1.VPCInventory{
+			Vpcs: []*corev1.Vpc{{
+				Id:       &corev1.VpcId{Value: adminVpcID.String()},
+				Config:   &corev1.VpcConfig{TenantOrganizationId: systemTenantOrganizationID},
+				Metadata: &corev1.Metadata{Name: "admin"},
+			}},
+		}
+
+		_, err := manager.UpdateVpcsInDB(ctx, site.ID, adminInventory)
+		require.NoError(t, err)
+		assert.NotContains(t, logOutput.String(), "unable to create VPC found on Site")
+
+		_, err = vpcDAO.GetByID(ctx, nil, adminVpcID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	}) {
+		t.FailNow()
+	}
 
 	if !t.Run("auto creates VPC from inventory", func(t *testing.T) {
 		_, err := manager.UpdateVpcsInDB(ctx, site.ID, inventory)
@@ -1068,6 +1126,19 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 		require.NotNil(t, createdVpc.ActiveVni)
 		assert.Equal(t, 202, *createdVpc.ActiveVni)
 
+		// Recovery creation must persist symbolic desired state and concrete effective state independently.
+		require.NotNil(t, createdVpc.RoutingProfileOverrides)
+		require.NotNil(t, createdVpc.RoutingProfileOverrides.RouteTargetImports)
+		assert.Equal(t,
+			[]cdbm.VpcRouteTarget{{ASN: 64_512, VniSelf: true}},
+			*createdVpc.RoutingProfileOverrides.RouteTargetImports,
+		)
+		require.NotNil(t, createdVpc.EffectiveRoutingProfile)
+		assert.Equal(t,
+			[]cdbm.VpcRouteTarget{{ASN: 64_512, VNI: 4_001}},
+			createdVpc.EffectiveRoutingProfile.RouteTargetImports,
+		)
+
 		statusDetails, _, statusErr := statusDetailDAO.GetAll(
 			ctx,
 			nil,
@@ -1078,6 +1149,35 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 		require.Len(t, statusDetails, 1)
 		require.NotNil(t, statusDetails[0].Message)
 		assert.Equal(t, "VPC was found on Site, Ready for use", *statusDetails[0].Message)
+	}) {
+		t.FailNow()
+	}
+
+	if !t.Run("reconciles VniSelf-only profile drift", func(t *testing.T) {
+		// Clear only VniSelf in cached desired state so profile comparison is the sole update trigger.
+		driftedOverrides := &cdbm.VpcRoutingProfileOverrides{
+			RouteTargetImports: &[]cdbm.VpcRouteTarget{{ASN: 64_512}},
+		}
+		_, err := vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{
+			VpcID:                   controllerVpcID,
+			RoutingProfileOverrides: driftedOverrides,
+		})
+		require.NoError(t, err)
+		util.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil))
+
+		// Replay unchanged inventory so only the VniSelf difference requires reconciliation.
+		_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+
+		// Reload the VPC to prove the symbolic target was persisted.
+		reconciledVpc, err := vpcDAO.GetByID(ctx, nil, controllerVpcID, nil)
+		require.NoError(t, err)
+		require.NotNil(t, reconciledVpc.RoutingProfileOverrides)
+		require.NotNil(t, reconciledVpc.RoutingProfileOverrides.RouteTargetImports)
+		assert.Equal(t,
+			[]cdbm.VpcRouteTarget{{ASN: 64_512, VniSelf: true}},
+			*reconciledVpc.RoutingProfileOverrides.RouteTargetImports,
+		)
 	}) {
 		t.FailNow()
 	}
@@ -1110,6 +1210,13 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 			cdbm.NVLinkLogicalPartitionStatusPending,
 			false,
 		)
+		// Replace cached profiles with stale literals so undelete must refresh both values.
+		staleOverrides := &cdbm.VpcRoutingProfileOverrides{
+			RouteTargetImports: &[]cdbm.VpcRouteTarget{{ASN: 1, VNI: 1}},
+		}
+		staleEffectiveProfile := &cdbm.VpcEffectiveRoutingProfile{
+			RouteTargetImports: []cdbm.VpcRouteTarget{{ASN: 1, VNI: 1}},
+		}
 		_, err := vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{
 			VpcID:                    controllerVpcID,
 			NVLinkLogicalPartitionID: &nonReadyNVLink.ID,
@@ -1117,6 +1224,8 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 			IsMissingOnSite:          cutil.GetPtr(true),
 			ActiveVni:                cutil.GetPtr(1),
 			RoutingProfile:           cutil.GetPtr("EXTERNAL"),
+			RoutingProfileOverrides:  staleOverrides,
+			EffectiveRoutingProfile:  staleEffectiveProfile,
 		})
 		require.NoError(t, err)
 
@@ -1152,6 +1261,19 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 		assert.Equal(t, 202, *restoredVpc.ActiveVni)
 		require.NotNil(t, restoredVpc.RoutingProfile)
 		assert.Equal(t, "INTERNAL", *restoredVpc.RoutingProfile)
+
+		// The post-undelete inventory update must replace both stale profile forms.
+		require.NotNil(t, restoredVpc.RoutingProfileOverrides)
+		require.NotNil(t, restoredVpc.RoutingProfileOverrides.RouteTargetImports)
+		assert.Equal(t,
+			[]cdbm.VpcRouteTarget{{ASN: 64_512, VniSelf: true}},
+			*restoredVpc.RoutingProfileOverrides.RouteTargetImports,
+		)
+		require.NotNil(t, restoredVpc.EffectiveRoutingProfile)
+		assert.Equal(t,
+			[]cdbm.VpcRouteTarget{{ASN: 64_512, VNI: 4_001}},
+			restoredVpc.EffectiveRoutingProfile.RouteTargetImports,
+		)
 		// Soft-deleted NVLink is preserved; inventory does not overwrite it.
 		require.NotNil(t, restoredVpc.NVLinkLogicalPartitionID)
 		assert.Equal(t, nonReadyNVLink.ID, *restoredVpc.NVLinkLogicalPartitionID)

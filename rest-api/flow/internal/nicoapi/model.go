@@ -200,7 +200,7 @@ func powerStateFromPb(state corev1.PowerState) (ret PowerState) {
 	case corev1.PowerState_On:
 		ret = PowerStateOn
 	case corev1.PowerState_PowerManagerDisabled:
-		ret = PowerStateDisabled
+		ret = PowerStateUnknown
 	default:
 		ret = PowerStateUnknown
 	}

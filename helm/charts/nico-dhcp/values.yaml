@@ -49,7 +49,8 @@ dhcp:
   ## Comma-separated IPv6 literals; empty means omit the corresponding option.
   v6DnsServers: ""
   v6NtpServers: ""
-  ## Optional IPv6 literal, reserved for future boot options; accepted but unused.
+  ## Optional IPv6 literal for generated DHCPv6 HTTP boot URLs; empty disables generation.
+  ## Image/client requirements and reply options: docs/provisioning/dhcpv6-deployment.md#http-boot-options
   v6ProvisioningServer: ""
   ## Boolean: permit a single REPLY only when the client requests Rapid Commit.
   v6RapidCommit: false
@@ -73,6 +74,9 @@ certificate:
   uris: []
   extraDnsNames: []
   extraUris: []
+
+## OTLP/gRPC collector endpoint. Empty leaves tracing off unless set through env.
+otlpEndpoint: ""
 
 env:
   FORGE_ROOT_CAFILE_PATH: /var/run/secrets/spiffe.io/ca.crt
@@ -277,4 +281,10 @@ serviceMonitor:
 externalService:
   enabled: false
   type: LoadBalancer
+  # Empty keeps the Kubernetes default (Cluster). Set Local to preserve relay
+  # source IPs. MetalLB only lets Local Services share an IP with Services
+  # that select the same pods.
+  externalTrafficPolicy: ""
+  # Annotations are passed through unchanged. To share an IP with another
+  # Service, add your load-balancer controller's sharing annotation here.
   annotations: {}

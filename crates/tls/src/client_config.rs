@@ -23,6 +23,11 @@ use serde::Deserialize;
 use tonic::transport::Uri;
 
 use crate::default as tls_default;
+
+/// Exclusive upper bound, in seconds, for agent client-certificate renewal intervals.
+/// Issued client certificates must outlast this interval with room for polling and retries.
+pub const MAX_CERT_RENEWAL_TIME_SECS: u64 = 7 * 24 * 60 * 60;
+
 pub const CONFIG_FILE_LOCATION: &str = ".config/nico_api_cli.json";
 /// Previous name for [`CONFIG_FILE_LOCATION`]. Still read as a fallback (with a
 /// deprecation warning) so existing setups keep working after the rename.

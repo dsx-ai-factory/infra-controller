@@ -16,15 +16,15 @@
  */
 
 //! Packet-level counters for the Kea hook, plus the metrics endpoint, health
-//! plumbing, and the certificate-expiry gauge.
+//! plumbing, and the certificate-expiry gauge and its `_seconds` alias.
 //!
 //! The counters are `carbide-instrument` events declared with `log = off`:
 //! the Kea process installs no tracing subscriber, so the C++ `LOG_ERROR`
 //! lines in `callouts.cc` remain the log side and the events move only the
 //! metric. The DHCPv4 counters retain their existing exposed Prometheus names
 //! and `reason` label values, while DHCPv6 traffic uses explicit v6 metric
-//! names. The certificate-expiry gauge is point-in-time state, not an
-//! occurrence, and stays on the observable-gauge pattern. `metrics_server`
+//! names. The certificate-expiry gauge and its alias are point-in-time state,
+//! not occurrences, and stay on the observable-gauge pattern. `metrics_server`
 //! installs the metrics endpoint's Prometheus-only meter provider, so there is
 //! no separate OTLP instrument-name contract for these counters.
 
@@ -443,17 +443,37 @@ fn initialize_metrics(mconf: &MetricsSetup) -> CarbideDhcpMetrics {
     // Observable gauges don't need to be stored anywhere, they're
     // stored internally within the meter and the callback is run when metrics are
     // collected.
-    mconf
-        .meter
-        .i64_observable_gauge("carbide-dhcp.certificate_expiration_time")
-        .with_description("The certificate expiration time (epoch seconds)")
-        .with_callback(move |observer| {
-            let measurement = certificate_expiration_value.deref().load(Ordering::SeqCst);
-            observer.observe(measurement, &[]);
-        })
-        .build();
+    // The _seconds alias states the unit; retain the original name for compatible queries.
+    for name in [
+        "carbide-dhcp.certificate_expiration_time",
+        "carbide_dhcp_certificate_expiration_time_seconds",
+    ] {
+        let certificate_expiration_value = certificate_expiration_value.clone();
+        mconf
+            .meter
+            .i64_observable_gauge(name)
+            .with_description("The certificate expiration time (epoch seconds)")
+            .with_callback(move |observer| {
+                let measurement = certificate_expiration_value.deref().load(Ordering::SeqCst);
+                observer.observe(measurement, &[]);
+            })
+            .build();
+    }
 
     metrics
+}
+
+/// Registers the DHCP certificate-expiry gauge and its alias with a fixed Unix
+/// timestamp in seconds.
+/// Keep the returned setup alive while collecting metrics so its provider retains the callbacks.
+#[cfg(any(test, feature = "test-support"))]
+pub fn metrics_setup_with_certificate_expiry(expiry: i64) -> eyre::Result<MetricsSetup> {
+    let setup = new_metrics_setup("carbide-dhcp", "forge-system", false)?;
+    let metrics = initialize_metrics(&setup);
+    metrics
+        .certificate_expiration_value
+        .store(expiry, Ordering::SeqCst);
+    Ok(setup)
 }
 
 pub(super) fn metrics_server() {
@@ -642,8 +662,8 @@ mod tests {
     use super::*;
     use crate::discovery::{DiscoveryBuilderResult, discovery_builder_result_as_str};
 
-    /// The certificate-expiry gauge stays on the per-process meter; its
-    /// exposition is pinned verbatim.
+    /// The certificate-expiry gauge and its alias keep their exposition and observe
+    /// updated values on the fixture's meter.
     #[test]
     fn certificate_gauge_exposition_is_stable() {
         let mconf = new_metrics_setup("carbide-dhcp", "forge-system", false).unwrap();
@@ -659,6 +679,22 @@ mod tests {
 
         let prom_metrics = String::from_utf8(buffer).unwrap();
         assert_eq!(prom_metrics, include_str!("../tests/fixtures/metrics.txt"));
+
+        metrics
+            .certificate_expiration_value
+            .store(1750000000, Ordering::SeqCst);
+        let families = mconf.registry.gather();
+        for name in [
+            "carbide_dhcp_certificate_expiration_time",
+            "carbide_dhcp_certificate_expiration_time_seconds",
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == name)
+                .expect("certificate expiry gauge is exported");
+            assert_eq!(family.get_metric().len(), 1);
+            assert_eq!(family.get_metric()[0].get_gauge().value(), 1750000000.0);
+        }
     }
 
     #[test]

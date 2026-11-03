@@ -30,6 +30,13 @@ hostname = "abc.forge.com"
 [metadata-service]
 address = "0.0.0.0:7777"
 
+# To serve embedded metadata over both families, change address above to
+# "[::]:7777" and enable this address list. Retain your configured IPv4 CIDR.
+# Restart the agent after changing these startup settings. In DPF mode, the
+# list selects the HBN peer; configure the standalone FMDS listener separately.
+# [fmds-armos-networking.config]
+# addresses = ["169.254.169.254/30", "fd00:76b9::254/127"]
+
 [telemetry]
 metrics-address = "0.0.0.0:8888"
 # Set to false to stop serving /metrics and /ready (readiness is bound to this endpoint). Default: true.

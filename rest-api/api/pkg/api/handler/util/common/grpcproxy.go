@@ -271,7 +271,7 @@ func executeGRPCProxy(
 		}
 
 		code, werr := UnwrapWorkflowError(resultErr)
-		return cutil.NewAPIError(code, werr.Error(), nil)
+		return cutil.NewAPIError(code, werr.Error(), nil).WithCause(resultErr)
 	}
 
 	if resp != nil && len(out.ResponseJSON) > 0 {

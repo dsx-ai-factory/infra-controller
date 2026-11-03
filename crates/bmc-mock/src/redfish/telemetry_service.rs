@@ -154,11 +154,12 @@ async fn get_metric_report<C: Callbacks>(
             "MetricValues@odata.count": metric_values.len(),
             "MetricValues": metric_values,
             "Oem": {
-                "Nvidia": {
-                    "@odata.type": "#NvidiaMetricReport.v1_0_0.NvidiaMetricReport",
-                    "SensingIntervalMilliseconds": SENSING_INTERVAL_MS,
-                    "MetricValueStale": stale,
-                }
+                "Nvidia": redfish::oem::object(
+                    "#NvidiaMetricReport.v1_0_0.NvidiaMetricReport",
+                    redfish::schema::nvidia_metric_report::NvidiaMetricReport::new()
+                        .sensing_interval_milliseconds(i64::from(SENSING_INTERVAL_MS))
+                        .metric_value_stale(stale)
+                )
             }
         }))
         .into_ok_response()
@@ -249,6 +250,7 @@ mod tests {
 
     use axum::Router;
     use nv_redfish::bmc_http::{BmcCredentials, HttpClient};
+    use nv_redfish::core::NoRepair;
     use serde_json::json;
     use url::Url;
 
@@ -295,6 +297,7 @@ mod tests {
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
+                &NoRepair,
             )
             .await
     }

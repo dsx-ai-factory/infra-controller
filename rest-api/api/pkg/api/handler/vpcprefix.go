@@ -144,7 +144,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 
 	// Verify if site is ready
 	stDAO := cdbm.NewSiteDAO(csh.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, vpc.SiteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, vpc.SiteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find Site associated with VPC prefix", nil)
@@ -489,7 +489,6 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 	}
 
 	// Get site ID from query param
-	tsDAO := cdbm.NewTenantSiteDAO(gash.dbSession)
 	var siteIDs []uuid.UUID
 	siteIDStr := c.QueryParam("siteId")
 	if siteIDStr != "" {
@@ -501,7 +500,7 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 		siteIDs = append(siteIDs, site.ID)
 
 		// Check Site association with Tenant
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
+		err = common.ValidateTenantSiteAccess(ctx, nil, gash.dbSession, tenant, site.ID)
 		if err != nil {
 			if err == cdb.ErrDoesNotExist {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to this Site", nil)

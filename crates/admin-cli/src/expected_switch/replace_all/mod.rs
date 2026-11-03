@@ -56,6 +56,16 @@ impl Run for Args {
             )));
         }
 
+        for switch in &expected_switch_list.expected_switches {
+            crate::expected_switch::common::ensure_single_primary(&switch.nvos_interfaces)
+                .map_err(|message| {
+                    CarbideCliError::GenericError(format!(
+                        "switch {}: {message}",
+                        switch.bmc_mac_address
+                    ))
+                })?;
+        }
+
         ctx.api_client
             .replace_all_expected_switches(expected_switch_list.expected_switches)
             .await?;

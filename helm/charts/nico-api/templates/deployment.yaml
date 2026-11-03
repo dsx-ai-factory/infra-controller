@@ -10,7 +10,7 @@ metadata:
 spec:
   replicas: {{ .Values.replicas }}
   strategy:
-    type: RollingUpdate
+    {{- toYaml .Values.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "nico-api.selectorLabels" . | nindent 6 }}
@@ -22,6 +22,9 @@ spec:
         kubectl.kubernetes.io/default-container: {{ include "nico-api.name" . }}
         checksum/config: {{ include "nico-api.configChecksum" . }}
     spec:
+      # Prevent Kubernetes-generated CARBIDE_API_* service variables from
+      # being interpreted as API configuration.
+      enableServiceLinks: false
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       serviceAccountName: {{ include "nico-api.name" . }}
@@ -304,6 +307,9 @@ spec:
             - name: boot-artifacts
               mountPath: /forge-boot-artifacts/blobs/internal
             {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
@@ -339,4 +345,7 @@ spec:
         {{- if .Values.bootArtifactContainers }}
         - name: boot-artifacts
           emptyDir: {}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
