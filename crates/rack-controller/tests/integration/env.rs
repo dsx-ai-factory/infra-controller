@@ -362,13 +362,15 @@ pub(super) async fn new_host(
             )
             .await?;
     }
-    let (mut mh, _) = env
+    let builder = env
         .test_harness
         .managed_host_builder(&env.site_explorer, env.underlay_segment)
         .with_dpu_primary_interfaces(env.admin_segment)
-        .with_config(config)
-        .build()
-        .await;
+        .with_config(config);
+    // Box host ingestion so nested rack fixtures and the SQLx runner do not
+    // embed its large future. Inline storage can exhaust libtest's default
+    // thread stack during host setup.
+    let (mut mh, _) = Box::pin(builder.build()).await;
     for dpu in &mh.dpus {
         dpu.discover_oob_iface(env.admin_segment).await;
     }
