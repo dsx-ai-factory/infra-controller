@@ -141,7 +141,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash .github/ci/resolve-secret-scan-range.sh >> "$GITHUB_OUTPUT"
       - name: Run TruffleHog Scan
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@f435aa6bf125fe6f9e5ac438f8cef75f90e29a2b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@c546a5042c5727551b4dd244721623beeb21a8d7
         with:
           base: ${{ steps.scan-range.outputs.base }}
           head: ${{ steps.scan-range.outputs.head }}
