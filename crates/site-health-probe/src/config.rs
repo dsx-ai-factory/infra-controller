@@ -150,14 +150,15 @@ impl Default for Caps {
     }
 }
 
-/// How host details are read. Only `full` (FindMachinesByIds) exists until
-/// nico-api serves a compact host read.
+/// How host details are read: `full` with FindMachinesByIds, `compact` with
+/// FindHostStatesByIds, and `auto` compact while nico-api serves it, else
+/// full.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum HostReadMode {
-    #[default]
     Full,
     Compact,
+    #[default]
     Auto,
 }
 
@@ -179,7 +180,7 @@ impl Default for NicoApiStateConfig {
     fn default() -> Self {
         Self {
             target: "nico-api.nico-system.svc.cluster.local:1079".to_string(),
-            host_read: HostReadMode::Full,
+            host_read: HostReadMode::Auto,
             batch_size: 100,
             max_decoding_message_size: 64 << 20,
             tls: TlsConfig::default(),
@@ -520,12 +521,6 @@ impl StateConfig {
                 errs.push(
                     "state.nico_api.target must be host:port with an explicit port and nothing \
                      else"
-                        .to_string(),
-                );
-            }
-            if nico.host_read != HostReadMode::Full {
-                errs.push(
-                    "state.nico_api.host_read must be full: nico-api has no compact host read yet"
                         .to_string(),
                 );
             }
@@ -992,7 +987,7 @@ state:
             state.nico_api.target,
             "nico-api.nico-system.svc.cluster.local:1079"
         );
-        assert_eq!(state.nico_api.host_read, HostReadMode::Full);
+        assert_eq!(state.nico_api.host_read, HostReadMode::Auto);
         assert_eq!(state.nico_api.batch_size, 100);
         assert_eq!(state.nico_api.max_decoding_message_size, 67_108_864);
         let schedule = |r: &ReaderConfig| (r.enabled, r.interval.as_secs(), r.timeout.as_secs());
@@ -1163,11 +1158,6 @@ state:
                 "nico-api reader needs tls",
                 "state:\n  enabled: true\n",
                 "state.nico_api.tls requires ca, cert, and key paths",
-            ),
-            (
-                "compact host read not available",
-                "state:\n  enabled: true\n  nico_api: {host_read: auto}\n",
-                "state.nico_api.host_read must be full",
             ),
             (
                 "batch above max_find_by_ids",
@@ -1425,7 +1415,7 @@ state:
     max_backoff: "30s"
   nico_api:
     target: "nico-api.nico-system.svc.cluster.local:1079"
-    host_read: full
+    host_read: auto
     batch_size: 100
     max_decoding_message_size: 67108864
     tls:
@@ -1508,6 +1498,7 @@ state:
     #[test]
     fn chart_minimal_state_config_passes_validation() {
         let cfg = load_str(CHART_MINIMAL).expect("the minimal rendering passes validation");
+        assert_eq!(cfg.state.nico_api.host_read, HostReadMode::Auto);
         let readers = &cfg.state.readers;
         assert!(readers.devices.enabled);
         assert!(
@@ -1519,6 +1510,7 @@ state:
     #[test]
     fn chart_rendered_state_config_loads() {
         let cfg = load_str(CHART_RENDERED).expect("the chart's rendering loads");
+        assert_eq!(cfg.state.nico_api.host_read, HostReadMode::Full);
         assert!(cfg.state.enabled);
         assert_eq!(cfg.state.rest.provider.org, "provider-org");
         assert_eq!(cfg.api_listen_addr().expect("api").port(), 9010);

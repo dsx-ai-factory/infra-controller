@@ -87,13 +87,13 @@ pub(crate) fn instance_id(i: u32) -> InstanceId {
         .expect("instance id")
 }
 
-/// A host in `state`, with the given DPUs.
+/// A host in `state`, with the given DPUs, as the compact read sees it.
 pub(crate) fn host(i: u32, state: &str, dpus: &[u32]) -> HostDetail {
     HostDetail {
         id: host_id(i),
         state: state.to_string(),
         state_reason: None,
-        vendor: Some("NVIDIA".to_string()),
+        vendor: Some("nvidia".to_string()),
         model: Some("GB200 NVL".to_string()),
         instance_type: None,
         bmc_ip: Some(format!("10.0.1.{i}")),
@@ -104,11 +104,28 @@ pub(crate) fn host(i: u32, state: &str, dpus: &[u32]) -> HostDetail {
         firmware_autoupdate: None,
         bmc_version: Some("25.06-2".to_string()),
         uefi_version: Some("00000083".to_string()),
+        version_source: VersionSource::ExploredReport,
+        report_at: None,
+        report_error: None,
+        allocatable: Known::Value(if state == "Ready" {
+            Ok(())
+        } else {
+            Err("invalid_state".to_string())
+        }),
+        update_eligible: Known::Value(Err("firmware_current".to_string())),
+    }
+}
+
+/// What the full read sees of `host`: the machine record's versions, and
+/// none of the facts only the compact read has.
+fn full_read(host: HostDetail) -> HostDetail {
+    HostDetail {
         version_source: VersionSource::MachineRecord,
         report_at: None,
         report_error: None,
         allocatable: Known::Unknown(COMPACT_HOST_READ_MISSING),
         update_eligible: Known::Unknown(COMPACT_HOST_READ_MISSING),
+        ..host
     }
 }
 
@@ -311,7 +328,7 @@ pub(crate) struct FakeNico {
     pub site: Mutex<FakeSite>,
     delay: Mutex<Duration>,
     blocks: Mutex<BTreeMap<&'static str, Duration>>,
-    failures: Mutex<BTreeMap<&'static str, VecDeque<CallError>>>,
+    failures: Mutex<BTreeMap<&'static str, VecDeque<Option<CallError>>>>,
     hooks: Mutex<Vec<(&'static str, Hook)>>,
     starts: Mutex<Vec<(&'static str, Instant)>>,
     in_flight: AtomicUsize,
@@ -344,7 +361,18 @@ impl FakeNico {
             .unwrap()
             .entry(call)
             .or_default()
-            .push_back(err);
+            .push_back(Some(err));
+    }
+
+    /// The next call named `call` answers normally, ahead of the failures
+    /// queued after it.
+    pub(crate) fn pass_next(&self, call: &'static str) {
+        self.failures
+            .lock()
+            .unwrap()
+            .entry(call)
+            .or_default()
+            .push_back(None);
     }
 
     /// Runs `hook` on the site right after the next call named `call`
@@ -405,7 +433,8 @@ impl FakeNico {
             .lock()
             .unwrap()
             .get_mut(call)
-            .and_then(VecDeque::pop_front);
+            .and_then(VecDeque::pop_front)
+            .flatten();
         let result = match injected {
             Some(err) => Err(err),
             None => Ok(read(&self.site.lock().unwrap())),
@@ -452,6 +481,16 @@ impl NicoApi for FakeNico {
 
     async fn hosts_by_ids(&self, ids: &[MachineId]) -> Result<Vec<HostDetail>, CallError> {
         self.answer("find_machines_by_ids", |site| {
+            by_ids(site, &site.hosts, ids.iter().map(ToString::to_string))
+                .into_iter()
+                .map(full_read)
+                .collect()
+        })
+        .await
+    }
+
+    async fn host_states_by_ids(&self, ids: &[MachineId]) -> Result<Vec<HostDetail>, CallError> {
+        self.answer("find_host_states_by_ids", |site| {
             by_ids(site, &site.hosts, ids.iter().map(ToString::to_string))
         })
         .await
