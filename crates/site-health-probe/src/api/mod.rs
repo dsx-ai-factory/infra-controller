@@ -17,9 +17,9 @@
 
 //! The `/v1` HTTP API, on its own port. Counts, units and config are
 //! answered from the snapshot store in memory; nothing here calls a site
-//! API. Summaries and the store status read the metrics store. The wire
-//! types and their JSON are `carbide-site-health-probe-api`.
+//! API. The wire types and their JSON are `carbide-site-health-probe-api`.
 
+pub(crate) mod closable;
 pub(crate) mod spec;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,13 +34,15 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use carbide_site_health_probe_api::metrics::{CONTRACT_VERSION, FilterError, gauge_labels};
 use carbide_site_health_probe_api::{
     Component, ConfigResponse, CountResponse, ErrorBody, ErrorCode, ErrorDetail, Family, Filter,
-    ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo, Unit, UnitType, UnitsQuery,
-    UnitsResponse,
+    MetricsInfo, ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo, Unit, UnitType,
+    UnitsQuery, UnitsResponse,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::api::spec::{Capabilities, Need, SeriesSpec, series_spec, units_listing};
 use crate::config::{HostReadMode, StateConfig};
@@ -48,7 +50,7 @@ use crate::readers::devices::DEVICE_FAMILIES;
 use crate::readers::rest_inventory::{RestTotalsData, SiteMatchData};
 use crate::snapshot::AnySnapshot;
 use crate::state::store::SnapshotStore;
-use crate::state_metrics::{Series, data_of, family_series, gauge_labels, units_of};
+use crate::state_metrics::{Series, data_of, family_series, units_of, unix_seconds};
 
 /// Units per page unless the client asks for fewer.
 const DEFAULT_LIMIT: u32 = 100;
@@ -67,10 +69,18 @@ pub(crate) struct ApiState {
     /// Each family's reader interval.
     pub intervals: BTreeMap<Family, Duration>,
     pub caps: Capabilities,
+    /// `/v1/config`'s metrics block, when a metrics store is declared.
+    pub metrics: Option<MetricsInfo>,
 }
 
 impl ApiState {
-    pub(crate) fn new(store: Arc<SnapshotStore>, state: &StateConfig) -> Self {
+    /// `process_start` is the time the collector publishes as the process
+    /// start.
+    pub(crate) fn new(
+        store: Arc<SnapshotStore>,
+        state: &StateConfig,
+        process_start: SystemTime,
+    ) -> Self {
         let readers = &state.readers;
         let mut intervals: BTreeMap<Family, Duration> = DEVICE_FAMILIES
             .iter()
@@ -79,6 +89,25 @@ impl ApiState {
         for family in [Family::RestTotals, Family::RestSiteMatch] {
             intervals.insert(family, readers.rest_inventory.interval);
         }
+        let metrics = state.metrics.as_ref().map(|metrics| MetricsInfo {
+            contract_version: CONTRACT_VERSION,
+            selector: metrics.selector.clone(),
+            scrape_interval_seconds: metrics.scrape_interval_seconds,
+            // Only families a reader sweeps: a disabled reader's families
+            // have no series to read.
+            reader_intervals_seconds: intervals
+                .iter()
+                .filter(|(family, _)| {
+                    if DEVICE_FAMILIES.contains(family) {
+                        readers.devices.enabled
+                    } else {
+                        readers.rest_inventory.enabled
+                    }
+                })
+                .map(|(family, interval)| (*family, interval.as_secs_f64()))
+                .collect(),
+            process_start_seconds: unix_seconds(process_start),
+        });
         Self {
             store,
             rest_inventory: readers.rest_inventory.enabled,
@@ -86,6 +115,7 @@ impl ApiState {
             caps: Capabilities {
                 full_host_read: state.nico_api.host_read == HostReadMode::Full,
             },
+            metrics,
         }
     }
 
@@ -185,12 +215,6 @@ impl ApiError {
         )
     }
 
-    /// The reply status, for tests.
-    #[cfg(test)]
-    pub(crate) fn status(&self) -> StatusCode {
-        self.status
-    }
-
     fn snapshot_expired() -> Self {
         Self::new(
             StatusCode::CONFLICT,
@@ -223,6 +247,34 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/v1/config", get(config))
         .fallback(not_found)
         .with_state(Arc::new(state))
+}
+
+/// `router` with every request cut short once `cancel` fires, its body
+/// extraction included: a 503, and the connection closes after it.
+pub(crate) fn cancellable(router: Router, cancel: CancellationToken) -> Router {
+    router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    response = next.run(request) => response,
+                    () = cancel.cancelled() => {
+                        let mut response = ApiError::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            ErrorCode::Internal,
+                            None,
+                            "the probe is shutting down".to_string(),
+                        )
+                        .into_response();
+                        response
+                            .headers_mut()
+                            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                        response
+                    }
+                }
+            }
+        },
+    ))
 }
 
 async fn not_found() -> ApiError {
@@ -295,7 +347,8 @@ fn parse_query<T: serde::de::DeserializeOwned>(query: &str) -> Result<T, ApiErro
 }
 
 /// Whether the snapshot can answer the filter's needs: REST totals only
-/// where they exist.
+/// where they exist. No snapshot has allocatability or update eligibility
+/// until the probe reads the compact host read.
 fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
     for need in needs {
         match need {
@@ -316,6 +369,9 @@ fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
                         format!("the {} total is unavailable {why}", spec::wire(resource)),
                     ));
                 }
+            }
+            Need::CompactHostRead(field) => {
+                return Err(FilterError::compact_host_read(field).into());
             }
         }
     }
@@ -430,6 +486,7 @@ fn list_units(api: &ApiState, filter: &Filter, page: Page) -> Result<UnitsRespon
         }
         None => (api.current(spec.family)?, None),
     };
+    check_needs(&spec.needs, snap.as_ref())?;
     let all = units_of(snap.as_ref()).map_or(&[][..], |data| data.units.as_slice());
 
     let present: BTreeSet<&str> = all.iter().map(|u| u.id.as_str()).collect();
@@ -445,7 +502,11 @@ fn list_units(api: &ApiState, filter: &Filter, page: Page) -> Result<UnitsRespon
         .filter(|u| asked.is_empty() || asked.contains(u.id.as_str()))
         .filter(|u| spec.matches(u))
         .filter(|u| after.as_ref().is_none_or(|key| sort_key(u) > *key));
-    let units: Vec<Unit> = matching.by_ref().take(limit as usize).cloned().collect();
+    let units: Vec<Unit> = matching
+        .by_ref()
+        .take(limit as usize)
+        .map(|unit| Unit::clone(unit))
+        .collect();
     let next_cursor = match (matching.next(), units.last()) {
         (Some(_), Some(last)) => {
             // A first page registers its snapshot for retention, even one
@@ -557,6 +618,7 @@ async fn config(
         nico_api: None,
         rest: None,
         rest_site,
+        metrics: api.metrics.clone(),
     }))
 }
 

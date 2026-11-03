@@ -257,7 +257,7 @@ Device Type         :
 Model               : PowerEdge R750
 Architecture        : x86_64
 Created At          : 2025-02-27T13:57:19.435162Z
-Updated At          : 2025-02-27T13:57:19.435162Z
+Updated At          :
 TPM Version         : 2.0
 
 CPUs:

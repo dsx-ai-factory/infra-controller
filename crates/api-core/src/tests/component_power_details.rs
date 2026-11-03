@@ -642,11 +642,19 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
     let bmc_key = CredentialKey::BmcCredentials {
         credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
     };
-    let nvos_key = CredentialKey::SwitchNvosAdmin { bmc_mac_address };
-    let mut api = api_with_rms(&env, pool, power_profiles(0, 1, 0), PowerRole::Switch);
 
-    // A Vault miss starts expected-inventory I/O. The outer timeout then cancels
-    // that pending lookup and omits the source, as it does for other pending reads.
+    let nvos_key = CredentialKey::SwitchNvosAdmin { bmc_mac_address };
+    let limited_pool = single_connection_pool(&pool).await?;
+
+    let mut api = api_with_rms(
+        &env,
+        limited_pool.clone(),
+        power_profiles(0, 1, 0),
+        PowerRole::Switch,
+    );
+
+    // A Vault miss waits for the held pool connection until the outer timeout
+    // cancels the fallback and omits the source.
     for (scenario, blocked_key, blocked_result, expected_keys, expected_source) in [
         // The first guard must stop before even asking for NVOS credentials.
         (
@@ -716,6 +724,8 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
         .await
         .unwrap_or_else(|_| panic!("{scenario}: snapshot must finish before pausing the clock"));
 
+        let fallback_connection = limited_pool.acquire().await?;
+
         // Leave the request unpolled until the credential is ready after expiry.
         // `timeout_at` polls that ready inner future before checking its timer.
         tokio::time::pause();
@@ -727,7 +737,9 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
             .unwrap_or_else(|_| panic!("{scenario}: ready credential must finish"))
             .unwrap_or_else(|error| panic!("{scenario}: power details failed: {error}"))
             .into_inner();
+
         drop(request);
+        drop(fallback_connection);
 
         assert_eq!(response.entries.len(), 1, "{scenario}");
         let entry = &response.entries[0];
@@ -764,6 +776,8 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
             "{scenario}"
         );
     }
+
+    limited_pool.close().await;
 
     Ok(())
 }

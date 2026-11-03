@@ -57,7 +57,7 @@ fn harness() -> Harness {
         )))
         .expect("register");
     Harness {
-        router: router(ApiState::new(Arc::clone(&store), &cfg)),
+        router: router(ApiState::new(Arc::clone(&store), &cfg, SystemTime::now())),
         store,
         registry,
     }
@@ -284,7 +284,7 @@ const COUNT_FILTERS: [&str; 10] = [
 async fn count_equals_published_metric_sum() {
     let h = harness();
     small_fleet(&h);
-    let caps = ApiState::new(Arc::clone(&h.store), &state_config()).caps;
+    let caps = ApiState::new(Arc::clone(&h.store), &state_config(), SystemTime::now()).caps;
     for query in COUNT_FILTERS {
         let reply = h.get(&format!("/v1/count?{query}")).await;
         let filter: Filter = serde_urlencoded::from_str(query).unwrap();
@@ -820,7 +820,7 @@ fn rest_reader(enabled: bool) -> Harness {
     let mut h = harness();
     let mut cfg = state_config();
     cfg.readers.rest_inventory.enabled = enabled;
-    h.router = router(ApiState::new(Arc::clone(&h.store), &cfg));
+    h.router = router(ApiState::new(Arc::clone(&h.store), &cfg, SystemTime::now()));
     h
 }
 
@@ -840,6 +840,81 @@ async fn config_without_rest_reader_is_200_with_nulls() {
             "{uri}"
         );
     }
+}
+
+/// A harness whose API and collector share `process_start`, with a
+/// declared metrics store and the given readers on.
+fn metrics_harness(devices: bool, rest_inventory: bool, process_start: SystemTime) -> Harness {
+    let mut cfg = state_config();
+    cfg.readers.devices.enabled = devices;
+    cfg.readers.rest_inventory.enabled = rest_inventory;
+    cfg.readers.rest_inventory.interval = Duration::from_secs(60);
+    cfg.metrics = Some(crate::config::StateMetricsConfig {
+        selector: [("job", "probe-metrics"), ("namespace", "nico-system")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        scrape_interval_seconds: 5.0,
+    });
+    let store = Arc::new(SnapshotStore::new(&cfg.paging));
+    let registry = prometheus::Registry::new();
+    registry
+        .register(Box::new(StateCollector::new(
+            Arc::clone(&store),
+            process_start,
+            cfg.nico_api.host_read,
+        )))
+        .expect("register");
+    Harness {
+        router: router(ApiState::new(Arc::clone(&store), &cfg, process_start)),
+        store,
+        registry,
+    }
+}
+
+#[tokio::test]
+async fn config_metrics_block_names_enabled_readers_and_the_process() {
+    // A start time with a fraction, as a real process has.
+    let process_start = UNIX_EPOCH + Duration::from_nanos(1_761_818_400_123_456_789);
+    let h = metrics_harness(true, false, process_start);
+    let reply = h.get("/v1/config").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let device_intervals: serde_json::Map<String, Value> = DEVICE_FAMILIES
+        .iter()
+        .map(|family| (spec::wire(family), json!(120.0)))
+        .collect();
+    assert_eq!(
+        reply.body["metrics"],
+        json!({
+            "contractVersion": 1,
+            "selector": {"job": "probe-metrics", "namespace": "nico-system"},
+            "scrapeIntervalSeconds": 5.0,
+            "readerIntervalsSeconds": device_intervals,
+            "processStartSeconds": reply.body["metrics"]["processStartSeconds"],
+        })
+    );
+    let metrics = config_reply(reply).metrics.expect("metrics");
+    assert!(
+        !metrics
+            .reader_intervals_seconds
+            .contains_key(&Family::RestTotals)
+    );
+    // The very value the collector publishes, not a second conversion.
+    assert_eq!(
+        metrics.process_start_seconds,
+        h.metric_sum("process_start_timestamp_seconds", &[])
+    );
+    assert!(metrics.process_start_seconds.fract() > 0.0);
+
+    let h = metrics_harness(false, true, process_start);
+    site_match(&h, 1, SiteMatch::Match);
+    let metrics = config_reply(h.get("/v1/config").await)
+        .metrics
+        .expect("metrics");
+    assert_eq!(
+        metrics.reader_intervals_seconds,
+        BTreeMap::from([(Family::RestTotals, 60.0), (Family::RestSiteMatch, 60.0)])
+    );
 }
 
 #[tokio::test]
@@ -951,7 +1026,7 @@ async fn rest_site_from_the_inventory_reader_without_upstream_text() {
             provider_org: "provider-org".to_string(),
             site_id: "site-1".to_string(),
         },
-        Arc::clone(&h.store) as Arc<dyn crate::snapshot::CensusView>,
+        Some(Arc::clone(&h.store) as Arc<dyn crate::snapshot::CensusView>),
         Arc::clone(&h.store) as Arc<dyn SnapshotSink>,
         SystemTime::now(),
     );
@@ -1016,3 +1091,152 @@ impl CapturedLogs {
 }
 
 const SENTINEL: &str = "SENTINEL-c0ffee";
+
+/// Every filter rule, as the replies the probe sends. Each row: the request,
+/// then the reply status and count, or the error's code, field and message.
+/// The shared metric contract must keep each reply, its message included.
+const FILTER_REPLIES: &[&str] = &[
+    "/v1/count?type=host => 200 count=12",
+    "/v1/count?type=host&stage=ready => 200 count=4",
+    "/v1/count?type=host&stage=error => 200 count=4",
+    "/v1/count?type=host&stage=registered&state=Ready => 200 count=4",
+    "/v1/count?type=host&state=Failed&model=gb200 => 200 count=2",
+    "/v1/count?type=host&stage=ready&model=r750 => 200 count=2",
+    "/v1/count?type=host&stage=error&model=gb200 => 200 count=2",
+    "/v1/count?type=host&instanceType=none => 200 count=6",
+    "/v1/count?type=host&model=unknown => 200 count=0",
+    "/v1/count?type=host&updateComplete=false => 200 count=8",
+    "/v1/count?type=host&stage=expected => 200 count=3",
+    "/v1/count?type=host&stage=expected&state=Ready => 422 unsupported_filter \"state\" state is not a filter of type=host",
+    "/v1/count?type=host&allocatable=true => 422 field_unavailable \"allocatable\" allocatability is unknown until nico-api serves the compact host read",
+    "/v1/count?type=host&allocatable=true&stage=expected => 422 field_unavailable \"allocatable\" allocatability is unknown until nico-api serves the compact host read",
+    "/v1/count?type=host&updateEligible=true => 422 field_unavailable \"updateEligible\" update eligibility is unknown until nico-api serves the compact host read",
+    "/v1/count?type=host&updateEligible=true&model=gb200 => 422 field_unavailable \"updateEligible\" update eligibility is unknown until nico-api serves the compact host read",
+    "/v1/count?type=host&updateEligible=true&allocatable=false => 422 field_unavailable \"allocatable\" allocatability is unknown until nico-api serves the compact host read",
+    "/v1/count?type=host&bmcVersion=b1 => 422 field_unavailable \"bmcVersion\" exact host versions are not counted until the firmware tests (#8154)",
+    "/v1/count?type=host&uefiVersion=u1&allocatable=true => 422 field_unavailable \"uefiVersion\" exact host versions are not counted until the firmware tests (#8154)",
+    "/v1/count?type=host&done=true => 422 unsupported_filter \"done\" done is a /v1/units filter",
+    "/v1/count?type=host&source=nico-api => 200 count=12",
+    "/v1/count?type=host&source=rest => 422 unsupported_filter \"source\" type=host has no REST source",
+    "/v1/count?type=host&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=host",
+    "/v1/count?type=host&status=x => 422 unsupported_filter \"status\" status is not a filter of type=host",
+    "/v1/count?type=host&recordType=host => 422 unsupported_filter \"recordType\" recordType is not a filter of type=host",
+    "/v1/count?type=dpu => 200 count=8",
+    "/v1/count?type=dpu&stage=error&state=Failed => 200 count=3",
+    "/v1/count?type=dpu&stage=expected => 422 unsupported_filter \"stage\" type=dpu has no expected records",
+    "/v1/count?type=dpu&model=x => 422 unsupported_filter \"model\" model is not a filter of type=dpu",
+    "/v1/count?type=switch&stage=expected => 200 count=3",
+    "/v1/count?type=power_shelf&stage=expected => 200 count=0",
+    "/v1/count?type=rack&stage=expected => 200 count=3",
+    "/v1/count?type=rack => 200 count=0",
+    "/v1/count?type=instance => 200 count=0",
+    "/v1/count?type=instance&stage=expected => 422 unsupported_filter \"stage\" type=instance has no expected records",
+    "/v1/count?type=instance&source=rest => 422 field_unavailable \"source\" the tenant's REST instances are not read until the instance tests (#8152)",
+    "/v1/count?type=instance&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=instance",
+    "/v1/count?type=expected_record => 422 unsupported_filter \"recordType\" type=expected_record needs recordType",
+    "/v1/count?type=expected_record&recordType=host => 200 count=3",
+    "/v1/count?type=expected_record&recordType=switch&linked=false => 200 count=2",
+    "/v1/count?type=expected_record&recordType=rack&state=x => 422 unsupported_filter \"state\" state is not a filter of type=expected_record",
+    "/v1/count?type=identity_mismatch => 200 count=0",
+    "/v1/count?type=identity_mismatch&recordType=host => 200 count=0",
+    "/v1/count?type=identity_mismatch&recordType=rack_group => 422 unsupported_filter \"recordType\" identity mismatches exist for host, switch and power_shelf records",
+    "/v1/count?type=identity_mismatch&kind=no_expected_record => 200 count=0",
+    "/v1/count?type=host_firmware_request => 200 count=0",
+    "/v1/count?type=host_firmware_request&model=gb200&initiator=automatic => 200 count=0",
+    "/v1/count?type=host_firmware_request&stage=ready => 422 unsupported_filter \"stage\" stage is not a filter of type=host_firmware_request",
+    "/v1/count?type=rest_total => 422 unsupported_filter \"resource\" type=rest_total needs resource",
+    "/v1/count?type=rest_total&resource=machine => 200 count=10",
+    "/v1/count?type=rest_total&resource=instance => 422 field_unavailable \"resource\" the instance total is unavailable (the REST API has no provider-scoped instance count)",
+    "/v1/count?type=rest_total&resource=rack => 422 field_unavailable \"resource\" the rack total is unavailable on this site (no NICo Flow)",
+    "/v1/count?type=rest_total&resource=rack&model=x => 422 unsupported_filter \"model\" model is not a filter of type=rest_total",
+    "/v1/count?type=rest_total&source=rest => 422 unsupported_filter \"source\" type=rest_total has no REST source",
+    "/v1/count?type=switch&source=rest => 422 unsupported_filter \"source\" type=switch has no REST source",
+    "/v1/units?type=host => 200 units=12",
+    "/v1/units?type=host&done=true => 200 units=4",
+    "/v1/units?type=host&stage=ready&model=gb200 => 200 units=2",
+    "/v1/units?type=host&allocatable=true => 422 field_unavailable \"allocatable\" allocatability is unknown until nico-api serves the compact host read",
+    "/v1/units?type=host&updateEligible=false&model=gb200 => 422 field_unavailable \"updateEligible\" update eligibility is unknown until nico-api serves the compact host read",
+    "/v1/units?type=host&stage=expected => 422 unsupported_filter \"stage\" list expected records with type=expected_record",
+    "/v1/units?type=host&name=x => 422 unsupported_filter \"name\" name is a filter of type=instance",
+    "/v1/units?type=host&bmcVersion=x => 422 field_unavailable \"bmcVersion\" exact host versions are not counted until the firmware tests (#8154)",
+    "/v1/units?type=host&uefiVersion=x&stage=expected => 422 unsupported_filter \"stage\" list expected records with type=expected_record",
+    "/v1/units?type=host&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=host",
+    "/v1/units?type=instance&name=( => 400 invalid_param \"name\" name is not a regex: regex parse error:\n    (\n    ^\nerror: unclosed group",
+    "/v1/units?type=instance&name=(&source=rest => 400 invalid_param \"name\" name is not a regex: regex parse error:\n    (\n    ^\nerror: unclosed group",
+    "/v1/units?type=instance&name=a&source=rest => 422 field_unavailable \"source\" the tenant's REST instances are not read until the instance tests (#8152)",
+    "/v1/units?type=instance&name=.* => 200 units=0",
+    "/v1/units?type=rest_total&resource=rack => 422 unsupported_filter \"type\" type=rest_total is a count, not units",
+    "/v1/units?type=rest_total&name=x => 422 unsupported_filter \"name\" name is a filter of type=instance",
+    "/v1/units?type=expected_record => 422 unsupported_filter \"recordType\" type=expected_record needs recordType",
+    "/v1/units?type=expected_record&recordType=host&linked=true => 200 units=2",
+    "/v1/units?type=expected_record&recordType=host&done=false => 200 units=1",
+    "/v1/units?type=identity_mismatch&recordType=rack => 422 unsupported_filter \"recordType\" identity mismatches exist for host, switch and power_shelf records",
+    "/v1/units?type=identity_mismatch&kind=ambiguous_link => 200 units=0",
+    "/v1/units?type=host_firmware_request&initiator=manual => 200 units=0",
+    "/v1/units?type=host_firmware_request&stage=ready => 422 unsupported_filter \"stage\" stage is not a filter of type=host_firmware_request",
+    "/v1/units?type=dpu&model=x => 422 unsupported_filter \"model\" model is not a filter of type=dpu",
+    "/v1/units?type=dpu&stage=expected => 422 unsupported_filter \"stage\" list expected records with type=expected_record",
+    "/v1/units?type=switch&stage=ready => 200 units=0",
+    "/v1/units?type=power_shelf&source=rest => 422 unsupported_filter \"source\" type=power_shelf has no REST source",
+    "POST {\"type\": \"host\", \"allocatable\": true, \"ids\": [\"fm100h0000\"]} => 422 field_unavailable \"allocatable\" allocatability is unknown until nico-api serves the compact host read",
+    "POST {\"type\": \"host\", \"stage\": \"ready\", \"ids\": [\"fm100h0000\", \"gone\"]} => 200 units=1",
+    "POST {\"type\": \"dpu\", \"name\": \"x\"} => 422 unsupported_filter \"name\" name is a filter of type=instance",
+];
+
+#[tokio::test]
+async fn filter_replies_golden() {
+    let h = harness();
+    small_fleet(&h);
+    for family in [
+        Family::Switch,
+        Family::PowerShelf,
+        Family::Rack,
+        Family::Instance,
+        Family::HostFirmwareRequests,
+    ] {
+        h.publish_units(family, 1, vec![]);
+    }
+    h.publish(
+        Family::RestTotals,
+        1,
+        crate::readers::rest_inventory::RestTotalsData {
+            totals: [
+                (RestResource::Machine, Some(10)),
+                (RestResource::Instance, None),
+                (RestResource::Rack, None),
+                (RestResource::Tray, Some(8)),
+            ]
+            .into_iter()
+            .collect(),
+        },
+    );
+    let mut got = Vec::new();
+    let mut want = Vec::new();
+    for row in FILTER_REPLIES {
+        let (uri, line) = row.split_once(" => ").unwrap();
+        want.push((uri, line.to_string()));
+        let reply = match uri.strip_prefix("POST ") {
+            Some(body) => {
+                h.post("/v1/units/query", serde_json::from_str(body).unwrap())
+                    .await
+            }
+            None => h.get(uri).await,
+        };
+        let line = if reply.status == StatusCode::OK {
+            match reply.body.get("count") {
+                Some(count) => format!("200 count={count}"),
+                None => format!("200 units={}", reply.units().units.len()),
+            }
+        } else {
+            format!(
+                "{} {} {} {}",
+                reply.status.as_u16(),
+                reply.code(),
+                reply.body["error"]["field"],
+                reply.body["error"]["message"].as_str().unwrap_or_default()
+            )
+        };
+        got.push((uri, line));
+    }
+    assert_eq!(got, want);
+}

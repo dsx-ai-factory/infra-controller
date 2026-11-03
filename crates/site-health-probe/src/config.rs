@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
+use carbide_site_health_probe_api::metrics;
 use eyre::eyre;
 use serde::Deserialize;
 use url::Url;
@@ -266,36 +267,6 @@ impl Readers {
     }
 }
 
-/// The Prometheus-compatible store `/v1/summary` reads the probe's own
-/// series back from.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct MetricsStoreConfig {
-    pub url: String,
-    /// Label matchers that pick this site's probe series. Must name `job`
-    /// and `namespace`, so a shared store never mixes sites.
-    pub selector: BTreeMap<String, String>,
-    #[serde(deserialize_with = "duration_str::deserialize_duration")]
-    pub max_window: Duration,
-    #[serde(deserialize_with = "duration_str::deserialize_duration")]
-    pub summary_deadline: Duration,
-    /// The store's scrape interval of the probe (the ServiceMonitor's).
-    #[serde(deserialize_with = "duration_str::deserialize_duration")]
-    pub scrape_interval: Duration,
-}
-
-impl Default for MetricsStoreConfig {
-    fn default() -> Self {
-        Self {
-            url: String::new(),
-            selector: BTreeMap::new(),
-            max_window: Duration::from_secs(48 * 60 * 60),
-            summary_deadline: Duration::from_secs(90),
-            scrape_interval: Duration::from_secs(5),
-        }
-    }
-}
-
 /// How long a replaced snapshot that a cursor points into stays readable
 /// for its paging client.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -319,10 +290,25 @@ impl Paging {
     /// Replaced snapshots a paged family must hold to keep each one for
     /// `keep_seconds`: the publications that fit in that window, plus one
     /// because a slow sweep can be followed at once by an overdue tick.
-    pub(crate) fn needed_for(&self, interval: Duration) -> usize {
-        let per_window = (self.keep_seconds as f64 / interval.as_secs_f64()).ceil();
-        per_window as usize + 1
+    /// `None` when that many cannot be counted.
+    pub(crate) fn needed_for(&self, interval: Duration) -> Option<usize> {
+        let keep = u128::from(self.keep_seconds) * 1_000_000_000;
+        let per_window = keep.div_ceil(interval.as_nanos());
+        usize::try_from(per_window).ok()?.checked_add(1)
     }
+}
+
+/// The metrics store that scrapes this probe, as `/v1/config` names it to
+/// clients that read the probe's series back. The chart fills it from its
+/// ServiceMonitor. The probe never reads the store.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StateMetricsConfig {
+    /// Label equality matchers that select this probe's series and no
+    /// other's, like `{job: <metrics Service>, namespace: <namespace>}`.
+    pub selector: BTreeMap<String, String>,
+    /// How often the store scrapes the probe.
+    pub scrape_interval_seconds: f64,
 }
 
 /// Site state readers and the `/v1` API. Off by default; with it off the
@@ -336,8 +322,8 @@ pub(crate) struct StateConfig {
     pub nico_api: NicoApiStateConfig,
     pub rest: RestStateConfig,
     pub readers: Readers,
-    pub metrics_store: MetricsStoreConfig,
     pub paging: Paging,
+    pub metrics: Option<StateMetricsConfig>,
 }
 
 /// The root configuration.
@@ -431,6 +417,17 @@ impl Config {
         self.state.caps.validate(&mut errs);
         if self.state.enabled {
             self.state.validate(&mut errs);
+            // The /v1 API binds before the metrics endpoint, which would then
+            // fail at runtime on the shared port.
+            if let (Ok(metrics), Ok(api)) = (self.listen_addr(), self.api_listen_addr())
+                && metrics.port() != 0
+                && metrics.port() == api.port()
+                && (metrics.ip() == api.ip()
+                    || metrics.ip().is_unspecified()
+                    || api.ip().is_unspecified())
+            {
+                errs.push("api_listen must not share the metrics_listen port".to_string());
+            }
         }
 
         if errs.is_empty() {
@@ -450,7 +447,6 @@ impl Config {
 
     /// `api_listen_addr` resolves `api_listen` like [`Config::listen_addr`],
     /// defaulting to `:9010`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the /v1 API listens on it"))]
     pub(crate) fn api_listen_addr(&self) -> eyre::Result<SocketAddr> {
         resolve_listen("api_listen", &self.api_listen, ":9010")
     }
@@ -470,10 +466,19 @@ fn resolve_listen(key: &str, raw: &str, default: &str) -> eyre::Result<SocketAdd
         .ok_or_else(|| eyre!("invalid {key} {raw:?}"))
 }
 
+/// The slowest call rate a gate takes: one call an hour.
+const MIN_CALLS_PER_SECOND: f64 = 1.0 / 3600.0;
+
 impl Caps {
     fn validate(&self, errs: &mut Vec<String>) {
         if !(self.calls_per_second.is_finite() && self.calls_per_second > 0.0) {
             errs.push("state.caps.calls_per_second must be positive".to_string());
+        } else if self.calls_per_second < MIN_CALLS_PER_SECOND {
+            // The gates space calls 1 / calls_per_second apart, which must
+            // stay a representable time.
+            errs.push(
+                "state.caps.calls_per_second must allow at least one call an hour".to_string(),
+            );
         }
         if self.call_timeout.is_zero() {
             errs.push("state.caps.call_timeout must be positive".to_string());
@@ -546,38 +551,6 @@ impl StateConfig {
             validate_credentials("state.rest.provider.auth", &rest.provider.auth, errs);
         }
 
-        let store = &self.metrics_store;
-        if !Url::parse(&store.url).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
-            errs.push("state.metrics_store.url must be an http:// or https:// URL".to_string());
-        }
-        for key in ["job", "namespace"] {
-            if store.selector.get(key).is_none_or(String::is_empty) {
-                errs.push(format!("state.metrics_store.selector must set {key}"));
-            }
-        }
-        if store.max_window.is_zero() {
-            errs.push("state.metrics_store.max_window must be positive".to_string());
-        }
-        if store.summary_deadline.is_zero() {
-            errs.push("state.metrics_store.summary_deadline must be positive".to_string());
-        }
-        if store.scrape_interval.is_zero() {
-            errs.push("state.metrics_store.scrape_interval must be positive".to_string());
-        } else if let Some(fastest) = readers
-            .iter()
-            .filter(|(_, reader)| reader.enabled && !reader.interval.is_zero())
-            .map(|(_, reader)| reader.interval)
-            .min()
-            && store.scrape_interval * 2 > fastest
-        {
-            // Every sweep must land in at least two scrapes, or the store
-            // can miss sweep ends and summaries lose their timing evidence.
-            errs.push(format!(
-                "state.metrics_store.scrape_interval must be at most half the fastest reader \
-                 interval ({fastest:?})"
-            ));
-        }
-
         if self.paging.keep_seconds == 0 {
             errs.push("state.paging.keep_seconds must be positive".to_string());
         }
@@ -588,13 +561,48 @@ impl StateConfig {
             if !reader.enabled || reader.interval.is_zero() || self.paging.keep_seconds == 0 {
                 continue;
             }
-            let needed = self.paging.needed_for(reader.interval);
-            if self.paging.max_kept_snapshots < needed {
-                errs.push(format!(
+            match self.paging.needed_for(reader.interval) {
+                None => errs.push(format!(
+                    "state.paging.keep_seconds is too long for the {name} reader interval"
+                )),
+                Some(needed) if self.paging.max_kept_snapshots < needed => errs.push(format!(
                     "state.paging.max_kept_snapshots must be at least {needed} for the {name} \
                      reader interval"
-                ));
+                )),
+                Some(_) => {}
             }
+        }
+
+        if let Some(metrics) = &self.metrics {
+            metrics.validate(&self.readers, errs);
+        }
+    }
+}
+
+impl StateMetricsConfig {
+    fn validate(&self, readers: &Readers, errs: &mut Vec<String>) {
+        for problem in metrics::selector_problems(&self.selector) {
+            errs.push(format!("state.metrics.selector {problem}"));
+        }
+        let scrape = self.scrape_interval_seconds;
+        if !(scrape.is_finite() && scrape > 0.0) {
+            errs.push("state.metrics.scrape_interval_seconds must be positive".to_string());
+            return;
+        }
+        // Every sweep must land in at least two scrapes.
+        if let Some(fastest) = readers
+            .all()
+            .iter()
+            .filter(|(_, reader)| reader.enabled && !reader.interval.is_zero())
+            .map(|(_, reader)| reader.interval.as_secs_f64())
+            .min_by(f64::total_cmp)
+            && scrape * 2.0 > fastest
+        {
+            errs.push(
+                "state.metrics.scrape_interval_seconds must be at most half the fastest reader \
+                 interval"
+                    .to_string(),
+            );
         }
     }
 }
@@ -959,9 +967,6 @@ state:
     provider:
       org: provider-org
       auth: {token_url: https://k/token, client_id: probe, client_secret_path: /s/provider}
-  metrics_store:
-    url: http://prometheus.monitoring.svc:9090
-    selector: {job: nico-site-health-probe-metrics, namespace: nico-system}
 "#;
 
     fn state_with(extra: &str) -> eyre::Result<Config> {
@@ -994,34 +999,11 @@ state:
         let readers = &state.readers;
         assert_eq!(schedule(&readers.devices), (true, 120, 600));
         assert_eq!(schedule(&readers.rest_inventory), (true, 120, 600));
-        let store = &state.metrics_store;
-        assert_eq!(store.max_window, Duration::from_secs(48 * 3600));
-        assert_eq!(store.summary_deadline, Duration::from_secs(90));
-        assert_eq!(store.scrape_interval, Duration::from_secs(5));
         assert_eq!(state.paging, Paging::default());
         assert_eq!(
             (state.paging.keep_seconds, state.paging.max_kept_snapshots),
             (300, 6)
         );
-    }
-
-    #[test]
-    fn state_config_rejects_slow_scrape() {
-        // Every sweep of the fastest reader (devices, 20 s here) must land
-        // in two scrapes.
-        let fast = "  readers:\n    devices: {enabled: true, interval: 20s, timeout: 600s}\n  \
-                    paging: {max_kept_snapshots: 16}\n";
-        let err = state_with(&format!("    scrape_interval: 11s\n{fast}"))
-            .expect_err("11 s scrapes miss 20 s sweeps")
-            .to_string();
-        assert!(
-            err.contains("state.metrics_store.scrape_interval must be at most half"),
-            "{err}"
-        );
-        state_with(&format!("    scrape_interval: 10s\n{fast}")).expect("exactly half is enough");
-        let off = "  readers:\n    devices: {enabled: false, interval: 20s, timeout: 600s}\n";
-        state_with(&format!("    scrape_interval: 30s\n{off}"))
-            .expect("only enabled readers bound the scrape interval");
     }
 
     #[test]
@@ -1091,11 +1073,63 @@ state:
     }
 
     #[test]
+    fn state_config_rejects_a_shared_listen_port() {
+        for (listen, why) in [
+            (
+                "metrics_listen: \":9010\"\n",
+                "both default to the wildcard",
+            ),
+            (
+                "metrics_listen: \"127.0.0.1:9010\"\n",
+                "the wildcard API covers the loopback",
+            ),
+            (
+                "metrics_listen: \"127.0.0.1:9009\"\napi_listen: \"127.0.0.1:9009\"\n",
+                "the same address",
+            ),
+        ] {
+            let err = load_str(&format!("{listen}{STATE}"))
+                .expect_err(why)
+                .to_string();
+            assert!(
+                err.contains("api_listen must not share the metrics_listen port"),
+                "{why}: {err}"
+            );
+        }
+        load_str(&format!(
+            "metrics_listen: \"127.0.0.1:9009\"\napi_listen: \"127.0.0.2:9009\"\n{STATE}"
+        ))
+        .expect("distinct addresses may share a port");
+        load_str("metrics_listen: \":9010\"\n").expect("no /v1 API with state off");
+    }
+
+    /// A keep window that holds more snapshots than can be counted is
+    /// refused, not an overflow.
+    #[test]
+    fn state_config_rejects_uncountable_paging() {
+        let err = load_str(&format!(
+            "{STATE}  readers:\n    devices: {{enabled: true, interval: 1ns, timeout: 600s}}\n  \
+             paging: {{keep_seconds: {}}}\n",
+            u64::MAX
+        ))
+        .expect_err("uncountable snapshots")
+        .to_string();
+        assert!(
+            err.contains("state.paging.keep_seconds is too long for the devices reader interval"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn caps_validated_without_state_readers() {
         for (caps, want) in [
             (
                 "calls_per_second: 0",
                 "state.caps.calls_per_second must be positive",
+            ),
+            (
+                "calls_per_second: 1e-20",
+                "state.caps.calls_per_second must allow at least one call an hour",
             ),
             (
                 "call_timeout: 0s",
@@ -1126,11 +1160,6 @@ state:
                 "state.site_id is required",
             ),
             (
-                "selector needs job and namespace",
-                "state:\n  enabled: true\n  metrics_store: {url: http://p:9090, selector: {job: j}}\n",
-                "state.metrics_store.selector must set namespace",
-            ),
-            (
                 "nico-api reader needs tls",
                 "state:\n  enabled: true\n",
                 "state.nico_api.tls requires ca, cert, and key paths",
@@ -1159,6 +1188,343 @@ state:
             let err = load_str(yaml).expect_err(scenario).to_string();
             assert!(err.contains(want), "{scenario}: {err:?} lacks {want:?}");
         }
+    }
+
+    #[test]
+    fn state_metrics_config() {
+        let cfg = state_with("").expect("loads");
+        assert_eq!(cfg.state.metrics, None, "absent without a declared store");
+        let cfg = state_with(
+            "  metrics: {selector: {job: probe-metrics, namespace: nico-system}, \
+             scrape_interval_seconds: 0.5}\n",
+        )
+        .expect("loads");
+        let metrics = cfg.state.metrics.expect("metrics");
+        assert_eq!(
+            metrics.selector,
+            BTreeMap::from([
+                ("job".to_string(), "probe-metrics".to_string()),
+                ("namespace".to_string(), "nico-system".to_string()),
+            ])
+        );
+        assert_eq!(metrics.scrape_interval_seconds, 0.5);
+        // A scrape exactly half the fastest reader interval fits.
+        state_with("  metrics: {selector: {job: j}, scrape_interval_seconds: 60}\n")
+            .expect("exactly half");
+
+        for (scenario, metrics, want) in [
+            (
+                "empty selector",
+                "{selector: {}, scrape_interval_seconds: 5}",
+                "state.metrics.selector must name at least one label",
+            ),
+            (
+                "caller-set metric name",
+                "{selector: {__name__: x, job: j}, scrape_interval_seconds: 5}",
+                "state.metrics.selector must not set __name__",
+            ),
+            (
+                "reserved label",
+                "{selector: {__address__: x}, scrape_interval_seconds: 5}",
+                "state.metrics.selector must not set __address__",
+            ),
+            (
+                "invalid label name",
+                "{selector: {0job: j}, scrape_interval_seconds: 5}",
+                "state.metrics.selector label \"0job\" is not a label name",
+            ),
+            (
+                "label name with a dash",
+                "{selector: {app-name: j}, scrape_interval_seconds: 5}",
+                "state.metrics.selector label \"app-name\" is not a label name",
+            ),
+            (
+                "empty label value",
+                "{selector: {job: \"\"}, scrape_interval_seconds: 5}",
+                "state.metrics.selector value of job must not be blank",
+            ),
+            (
+                "intrinsic series label",
+                "{selector: {type: host, job: j}, scrape_interval_seconds: 5}",
+                "state.metrics.selector must not set type: the probe's series carry it",
+            ),
+            (
+                "control character in a value",
+                "{selector: {job: \"a\\nb\"}, scrape_interval_seconds: 5}",
+                "state.metrics.selector value of job must not hold control characters",
+            ),
+            (
+                "zero scrape interval",
+                "{selector: {job: j}, scrape_interval_seconds: 0}",
+                "state.metrics.scrape_interval_seconds must be positive",
+            ),
+            (
+                "NaN scrape interval",
+                "{selector: {job: j}, scrape_interval_seconds: .nan}",
+                "state.metrics.scrape_interval_seconds must be positive",
+            ),
+            (
+                "scrape over half a reader interval",
+                "{selector: {job: j}, scrape_interval_seconds: 61}",
+                "state.metrics.scrape_interval_seconds must be at most half the fastest reader",
+            ),
+            (
+                "no selector",
+                "{scrape_interval_seconds: 5}",
+                "parse config",
+            ),
+        ] {
+            let err = state_with(&format!("  metrics: {metrics}\n"))
+                .expect_err(scenario)
+                .to_string();
+            assert!(err.contains(want), "{scenario}: {err:?} lacks {want:?}");
+        }
+    }
+
+    /// The chart refuses the selector labels the probe refuses.
+    #[test]
+    fn chart_series_labels_match_the_contract() {
+        let helpers = include_str!(
+            "../../../helm/charts/nico-machine-a-tron/charts/nico-site-health-probe/templates/_helpers.tpl"
+        );
+        let body = helpers
+            .split_once("{{- define \"nico-site-health-probe.seriesLabels\" -}}")
+            .and_then(|(_, rest)| rest.split_once("{{- end }}"))
+            .map(|(body, _)| body)
+            .expect("the chart defines seriesLabels");
+        let chart: std::collections::BTreeSet<&str> = body.split_whitespace().collect();
+        assert_eq!(chart, metrics::series_labels());
+    }
+
+    /// The config.yaml the chart renders with the state section filled in
+    /// (helm template with every state input set and the ServiceMonitor on).
+    /// Keep it in step with templates/configmap.yaml.
+    const CHART_RENDERED: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+    ca: "/var/secrets/rest-ca/ca.crt"
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+    ca: "/var/secrets/rest-ca/ca.crt"
+state:
+  enabled: true
+  site_id: "site-1"
+  caps:
+    calls_per_second: 2
+    call_timeout: "5s"
+    max_backoff: "30s"
+  nico_api:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    host_read: full
+    batch_size: 100
+    max_decoding_message_size: 67108864
+    tls:
+      ca: /var/run/secrets/nico-admin/ca.crt
+      cert: /var/run/secrets/nico-admin/tls.crt
+      key: /var/run/secrets/nico-admin/tls.key
+  rest:
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    ca: "/var/secrets/rest-ca/ca.crt"
+    provider:
+      org: "provider-org"
+      auth:
+        token_url: "https://keycloak.example.com/realms/nico/protocol/openid-connect/token"
+        client_id: "probe"
+        client_secret_path: "/var/secrets/state-provider/client-secret"
+  readers:
+    devices:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+    rest_inventory:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+  metrics:
+    selector:
+      job: "nico-site-health-probe-metrics"
+      namespace: "nico-system"
+    scrape_interval_seconds: 5
+  paging:
+    keep_seconds: 300
+    max_kept_snapshots: 6
+"#;
+
+    /// The config.yaml the parent chart renders with only the required
+    /// state inputs (`state.enabled`, `siteId` and the admin certificate).
+    /// Keep it in step with templates/configmap.yaml.
+    const CHART_MINIMAL: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+state:
+  enabled: true
+  site_id: "s"
+  caps:
+    calls_per_second: 2
+    call_timeout: "5s"
+    max_backoff: "30s"
+  nico_api:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    host_read: full
+    batch_size: 100
+    max_decoding_message_size: 67108864
+    tls:
+      ca: /var/run/secrets/nico-admin/ca.crt
+      cert: /var/run/secrets/nico-admin/tls.crt
+      key: /var/run/secrets/nico-admin/tls.key
+  rest:
+    target: ""
+    provider:
+      org: ""
+      auth:
+        token_url: ""
+        client_id: ""
+  readers:
+    devices:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+    rest_inventory:
+      enabled: false
+      interval: "120s"
+      timeout: "600s"
+  paging:
+    keep_seconds: 300
+    max_kept_snapshots: 6
+"#;
+
+    /// The config.yaml the chart renders with state off and slower caps
+    /// (`state.caps.callsPerSecond: 0.1`). Keep it in step with
+    /// templates/configmap.yaml.
+    const CHART_STATE_OFF: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+state:
+  enabled: false
+  caps:
+    calls_per_second: 0.1
+    call_timeout: "5s"
+    max_backoff: "30s"
+"#;
+
+    #[test]
+    fn chart_state_off_keeps_its_caps() {
+        let cfg = load_str(CHART_STATE_OFF).expect("the state-off rendering loads");
+        assert!(!cfg.state.enabled);
+        assert_eq!(cfg.state.caps.calls_per_second, 0.1);
+    }
+
+    #[test]
+    fn chart_minimal_state_config_passes_validation() {
+        let cfg = load_str(CHART_MINIMAL).expect("the minimal rendering passes validation");
+        let readers = &cfg.state.readers;
+        assert!(readers.devices.enabled);
+        assert!(
+            !readers.rest_inventory.enabled,
+            "the REST reader stays off until its inputs exist"
+        );
+    }
+
+    #[test]
+    fn chart_rendered_state_config_loads() {
+        let cfg = load_str(CHART_RENDERED).expect("the chart's rendering loads");
+        assert!(cfg.state.enabled);
+        assert_eq!(cfg.state.rest.provider.org, "provider-org");
+        assert_eq!(cfg.api_listen_addr().expect("api").port(), 9010);
+        let metrics = cfg.state.metrics.expect("rendered with a ServiceMonitor");
+        assert_eq!(metrics.selector["job"], "nico-site-health-probe-metrics");
+        assert_eq!(metrics.scrape_interval_seconds, 5.0);
     }
 
     #[test]

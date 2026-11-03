@@ -254,6 +254,53 @@ pub async fn find_dpu_id(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// `DpuNetworkStatusInputs` contains the persisted inputs needed to apply a DPU status report.
+#[derive(Debug)]
+pub struct DpuNetworkStatusInputs {
+    /// Desired network configuration and its version, including a pending change to the admin network.
+    pub network_config: Versioned<ManagedHostNetworkConfig>,
+    /// Previous network observation, or `None` if no observation is stored.
+    pub network_status_observation: Option<MachineNetworkStatusObservation>,
+    /// Previous DPU agent merge report; replacement reports do not supply alert timestamps.
+    pub dpu_agent_health_report: Option<HealthReport>,
+}
+
+/// Reads the inputs for a DPU status report without snapshot enrichment or row locks.
+/// Returns `None` for an absent machine and an error if selected fields cannot be decoded.
+pub async fn find_dpu_network_status_inputs(
+    conn: impl DbReader<'_>,
+    dpu_machine_id: &DpuMachineId,
+) -> DatabaseResult<Option<DpuNetworkStatusInputs>> {
+    #[derive(FromRow)]
+    struct QueryResult {
+        network_config: sqlx::types::Json<ManagedHostNetworkConfig>,
+        network_config_version: ConfigVersion,
+        network_status_observation: sqlx::types::Json<Option<MachineNetworkStatusObservation>>,
+        health_reports: sqlx::types::Json<Option<model::health::HealthReportSources>>,
+    }
+
+    // SQL NULL and JSON null both mean no observation or health reports.
+    let query = "SELECT network_config, network_config_version,
+                        COALESCE(network_status_observation, 'null'::jsonb)
+                            AS network_status_observation,
+                        COALESCE(health_reports, 'null'::jsonb) AS health_reports
+                 FROM machines WHERE id = $1";
+    let row: Option<QueryResult> = sqlx::query_as(query)
+        .bind(dpu_machine_id)
+        .fetch_optional(conn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    Ok(row.map(|row| DpuNetworkStatusInputs {
+        network_config: Versioned::new(row.network_config.0, row.network_config_version),
+        network_status_observation: row.network_status_observation.0,
+        dpu_agent_health_report: row
+            .health_reports
+            .0
+            .and_then(|mut reports| reports.merges.remove(HealthReport::DPU_AGENT_SOURCE)),
+    }))
+}
+
 pub(crate) async fn find_by_nic_firmware_profile(
     db: impl DbReader<'_>,
     profile_id: &NicFirmwareProfileId,
@@ -1521,13 +1568,16 @@ pub async fn update_spx_multiplane_status(
 /// exists or the new timestamp is at least as recent. Comparisons use the
 /// database's timestamp precision. Returns `NotApplied` if the machine is
 /// missing or a newer observation is stored. Callers must validate report
-/// ownership and completeness.
+/// ownership and completeness. Accepted reports get `received_at` from the
+/// database clock; any value supplied by the caller is replaced.
 pub async fn update_mlx_device_observation(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     observation: &MlxDeviceObservation,
 ) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
-    let query = "UPDATE machines SET mlx_device_observation = $1::json WHERE id = $2 AND
+    let query = "UPDATE machines SET mlx_device_observation =
+                    jsonb_set($1::jsonb, '{received_at}', to_jsonb(clock_timestamp()))
+                WHERE id = $2 AND
                 (mlx_device_observation IS NULL
                     OR (mlx_device_observation->>'observed_at')::timestamptz
                         <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
@@ -4173,6 +4223,268 @@ mod test {
         MachineId::new(MachineIdSource::ProductBoardChassisSerial, [seed; 32], ty)
     }
 
+    // Raw stored JSON and independent expectations verify which health report is
+    // selected and which corrupt inputs are rejected.
+    #[crate::sqlx_test]
+    async fn dpu_network_status_inputs_preserve_typed_values_and_nulls(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use config_version::{ConfigVersion, Versioned};
+        use health_report::{HealthProbeAlert, HealthReport};
+        use model::instance::status::network::InstanceNetworkStatusObservation;
+        use model::machine::network::{MachineNetworkStatusObservation, ManagedHostNetworkConfig};
+        use serde_json::json;
+
+        use super::DpuNetworkStatusInputs;
+
+        struct Case<'a> {
+            scenario: &'static str,
+            network_config: serde_json::Value,
+            network_config_version: &'static str,
+            observation: Option<serde_json::Value>,
+            health_reports: Option<serde_json::Value>,
+            expect: Result<&'a DpuNetworkStatusInputs, &'static str>,
+        }
+
+        let dpu_id = DpuMachineId::try_from(machine_id(1, MachineType::Dpu))?;
+        let config_version_string = "V7-T1722000000000000";
+        let config_version: ConfigVersion = config_version_string.parse()?;
+        let observed_at = "2026-10-24T16:00:00Z".parse()?;
+        let populated = DpuNetworkStatusInputs {
+            network_config: Versioned::new(
+                ManagedHostNetworkConfig {
+                    loopback_ip: None,
+                    loopback_ip_v6: None,
+                    use_admin_network: Some(false),
+                    quarantine_state: None,
+                    use_admin_network_changed: Some(true),
+                },
+                config_version,
+            ),
+            network_status_observation: Some(MachineNetworkStatusObservation {
+                machine_id: dpu_id,
+                agent_version: Some("status-inputs-test".to_string()),
+                observed_at,
+                network_config_version: Some("V6-T1722000000000000".parse()?),
+                client_certificate_expiry: None,
+                agent_version_superseded_at: None,
+                instance_network_observation: Some(InstanceNetworkStatusObservation {
+                    config_version: "V4-T1722000000000000".parse()?,
+                    instance_config_version: Some("V3-T1722000000000000".parse()?),
+                    interfaces: Vec::new(),
+                    observed_at,
+                }),
+                fabric_interfaces: Vec::new(),
+            }),
+            dpu_agent_health_report: Some(HealthReport {
+                source: HealthReport::DPU_AGENT_SOURCE.to_string(),
+                triggered_by: None,
+                observed_at: Some(observed_at),
+                successes: Vec::new(),
+                alerts: vec![HealthProbeAlert {
+                    id: "NetworkConfig".parse()?,
+                    target: None,
+                    in_alert_since: Some("2026-10-24T15:00:00Z".parse()?),
+                    message: "network configuration failed".to_string(),
+                    tenant_message: None,
+                    classifications: Vec::new(),
+                }],
+            }),
+        };
+        let absent = DpuNetworkStatusInputs {
+            network_config: Versioned::new(
+                ManagedHostNetworkConfig {
+                    loopback_ip: None,
+                    loopback_ip_v6: None,
+                    use_admin_network: None,
+                    quarantine_state: None,
+                    use_admin_network_changed: None,
+                },
+                config_version,
+            ),
+            network_status_observation: None,
+            dpu_agent_health_report: None,
+        };
+        let observation = json!({
+            "machine_id": dpu_id,
+            "agent_version": "status-inputs-test",
+            "observed_at": "2026-10-24T16:00:00Z",
+            "network_config_version": "V6-T1722000000000000",
+            "instance_network_observation": {
+                "config_version": "V4-T1722000000000000",
+                "instance_config_version": "V3-T1722000000000000",
+                "observed_at": "2026-10-24T16:00:00Z"
+            }
+        });
+        let dpu_health = json!({
+            "source": "forge-dpu-agent",
+            "observed_at": "2026-10-24T16:00:00Z",
+            "successes": [],
+            "alerts": [{
+                "id": "NetworkConfig",
+                "in_alert_since": "2026-10-24T15:00:00Z",
+                "message": "network configuration failed",
+                "classifications": []
+            }]
+        });
+        let mut replacement = dpu_health.clone();
+        replacement["alerts"][0]["in_alert_since"] = json!("2026-10-24T14:00:00Z");
+        let mut other_source = dpu_health.clone();
+        other_source["source"] = json!("a-other-source");
+        other_source["alerts"][0]["in_alert_since"] = json!("2026-10-24T13:00:00Z");
+        let mut malformed_observation = observation.clone();
+        malformed_observation["network_config_version"] = json!("invalid-version");
+
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &dpu_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        for case in [
+            Case {
+                scenario: "typed inputs use only DPU merge health and selected machine fields",
+                network_config: json!({
+                    "use_admin_network": false,
+                    "use_admin_network_changed": true
+                }),
+                network_config_version: config_version_string,
+                observation: Some(observation),
+                health_reports: Some(json!({
+                    "replace": replacement,
+                    "merges": {"forge-dpu-agent": dpu_health, "a-other-source": other_source}
+                })),
+                expect: Ok(&populated),
+            },
+            Case {
+                scenario: "SQL-null observation and JSON-null health with omitted pending flag",
+                network_config: json!({}),
+                network_config_version: config_version_string,
+                observation: None,
+                health_reports: Some(json!(null)),
+                expect: Ok(&absent),
+            },
+            Case {
+                scenario: "JSON-null observation and SQL-null health with null pending flag",
+                network_config: json!({"use_admin_network_changed": null}),
+                network_config_version: config_version_string,
+                observation: Some(json!(null)),
+                health_reports: None,
+                expect: Ok(&absent),
+            },
+            Case {
+                scenario: "a pending flag string is not a JSON boolean",
+                network_config: json!({"use_admin_network_changed": "true"}),
+                network_config_version: config_version_string,
+                observation: None,
+                health_reports: None,
+                expect: Err("network_config"),
+            },
+            Case {
+                scenario: "a malformed desired config version is a decoding error",
+                network_config: json!({}),
+                network_config_version: "invalid-version",
+                observation: None,
+                health_reports: None,
+                expect: Err("network_config_version"),
+            },
+            Case {
+                scenario: "a malformed observation is not absent",
+                network_config: json!({}),
+                network_config_version: config_version_string,
+                observation: Some(malformed_observation),
+                health_reports: None,
+                expect: Err("network_status_observation"),
+            },
+            Case {
+                scenario: "a null merge report is not absent",
+                network_config: json!({}),
+                network_config_version: config_version_string,
+                observation: None,
+                health_reports: Some(json!({"merges": {"forge-dpu-agent": null}})),
+                expect: Err("health_reports"),
+            },
+            Case {
+                scenario: "a malformed unrelated merge report is still a decoding error",
+                network_config: json!({}),
+                network_config_version: config_version_string,
+                observation: None,
+                health_reports: Some(json!({
+                    "merges": {"forge-dpu-agent": dpu_health, "a-other-source": {}}
+                })),
+                expect: Err("health_reports"),
+            },
+            Case {
+                scenario: "replacement and other merge reports do not supply missing DPU health",
+                network_config: json!({}),
+                network_config_version: config_version_string,
+                observation: None,
+                health_reports: Some(json!({
+                    "replace": replacement,
+                    "merges": {"a-other-source": other_source}
+                })),
+                expect: Ok(&absent),
+            },
+        ] {
+            // The status read must not decode unrelated controller state.
+            sqlx::query(
+                "UPDATE machines SET network_config = $2, network_config_version = $3,
+                     network_status_observation = $4, health_reports = $5,
+                     controller_state = '{}'::jsonb WHERE id = $1",
+            )
+            .bind(dpu_id)
+            .bind(case.network_config)
+            .bind(case.network_config_version)
+            .bind(case.observation)
+            .bind(case.health_reports)
+            .execute(txn.as_mut())
+            .await?;
+
+            let result = super::find_dpu_network_status_inputs(txn.as_mut(), &dpu_id).await;
+            match case.expect {
+                Ok(expected) => {
+                    let actual = result.expect(case.scenario).expect(case.scenario);
+                    assert_eq!(
+                        actual.network_config.value, expected.network_config.value,
+                        "{}",
+                        case.scenario
+                    );
+                    assert_eq!(
+                        actual.network_config.version, expected.network_config.version,
+                        "{}",
+                        case.scenario
+                    );
+                    assert_eq!(
+                        actual.network_status_observation, expected.network_status_observation,
+                        "{}",
+                        case.scenario
+                    );
+                    assert_eq!(
+                        actual.dpu_agent_health_report, expected.dpu_agent_health_report,
+                        "{}",
+                        case.scenario
+                    );
+                }
+                Err(column) => {
+                    let error = result.expect_err(case.scenario);
+                    let crate::DatabaseError::Sqlx(annotated) = &error else {
+                        panic!("{}: expected Sqlx, got {error:?}", case.scenario);
+                    };
+                    let sqlx::Error::ColumnDecode { index, .. } = &annotated.source else {
+                        panic!("{}: expected ColumnDecode, got {error:?}", case.scenario);
+                    };
+                    assert_eq!(index, &format!("{column:?}"), "{}", case.scenario);
+                }
+            }
+        }
+        txn.rollback().await?;
+        Ok(())
+    }
+
     #[crate::sqlx_test]
     async fn host_state_lookup_preserves_association_and_decode_checks(
         pool: sqlx::PgPool,
@@ -4798,7 +5110,7 @@ mod test {
                 .execute(txn.as_mut())
                 .await?;
                 let observed_at = observed_at.parse()?;
-                let (result, incoming) = match column {
+                let (result, mut incoming) = match column {
                     "infiniband_status_observation" => {
                         let observation = MachineInfinibandStatusObservation {
                             observed_at,
@@ -4843,6 +5155,7 @@ mod test {
                     "mlx_device_observation" => {
                         let observation = MlxDeviceObservation {
                             observed_at,
+                            received_at: None,
                             devices: Vec::new(),
                         };
                         (
@@ -4868,6 +5181,13 @@ mod test {
                 .bind(machine_id)
                 .fetch_one(txn.as_mut())
                 .await?;
+                // An accepted MLX report also gains the database's receipt time,
+                // which the incoming report cannot know in advance.
+                if column == "mlx_device_observation" && applies {
+                    let _: chrono::DateTime<chrono::Utc> =
+                        serde_json::from_value(persisted["received_at"].clone())?;
+                    incoming["received_at"] = persisted["received_at"].clone();
+                }
                 assert_eq!(
                     persisted,
                     if applies { incoming } else { stored.unwrap() },
@@ -4963,7 +5283,7 @@ mod test {
 
         let machine_id: HostMachineId =
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
-        let observation: MlxDeviceObservation = serde_json::from_value(serde_json::json!({
+        let legacy_json = serde_json::json!({
             "observed_at": "2026-09-16T16:00:00.123456789Z",
             "devices": [
                 {
@@ -4979,7 +5299,9 @@ mod test {
                     "status": "Failed to open device"
                 }
             ]
-        }))?;
+        });
+        let mut observation: MlxDeviceObservation = serde_json::from_value(legacy_json.clone())?;
+        assert_eq!(observation.received_at, None);
         let mut txn = pool.begin().await?;
         assert_eq!(
             update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
@@ -4996,16 +5318,48 @@ mod test {
         )
         .await?;
         assert_eq!(machine.status.mlx_device_observation, None);
+
+        // Historical JSON has no receipt time. Loading it must not invent one
+        // that could satisfy a later controller activation boundary.
+        sqlx::query("UPDATE machines SET mlx_device_observation = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(legacy_json))
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        let legacy = super::find_one(txn.as_mut(), &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("legacy observation host");
+        assert_eq!(
+            legacy.status.mlx_device_observation,
+            Some(observation.clone())
+        );
+
+        // Only the persistence boundary assigns receipt time, independently of
+        // both the Scout timestamp and any value supplied by an internal caller.
+        observation.received_at = Some("2099-01-01T00:00:00Z".parse()?);
+        let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(txn.as_mut())
+            .await?;
         assert_eq!(
             update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
             Applied(())
         );
+        let after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(txn.as_mut())
+            .await?;
         txn.commit().await?;
 
         let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
             .await?
             .expect("fixture host");
-        assert_eq!(machine.status.mlx_device_observation, Some(observation));
+        let saved = machine
+            .status
+            .mlx_device_observation
+            .expect("stored report");
+        assert_eq!(saved.observed_at, observation.observed_at);
+        assert_eq!(saved.devices, observation.devices);
+        let received_at = saved.received_at.expect("database receipt time");
+        assert!(received_at >= before && received_at <= after);
         Ok(())
     }
 
@@ -5034,10 +5388,12 @@ mod test {
 
         let newer = MlxDeviceObservation {
             observed_at: "2026-09-16T16:00:01Z".parse()?,
+            received_at: None,
             devices: Vec::new(),
         };
         let older = MlxDeviceObservation {
             observed_at: "2026-09-16T16:00:00Z".parse()?,
+            received_at: None,
             devices: Vec::new(),
         };
         let mut newer_txn = pool.begin().await?;
@@ -5045,6 +5401,17 @@ mod test {
             update_mlx_device_observation(newer_txn.as_mut(), &machine_id, &newer).await?,
             Applied(())
         );
+        let accepted = super::find_one(
+            newer_txn.as_mut(),
+            &machine_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("newer observation host")
+        .status
+        .mlx_device_observation
+        .expect("accepted report");
+        assert!(accepted.received_at.is_some());
         let mut older_txn = pool.begin().await?;
         let release_newer = async {
             // The older write must reach the locked row before the newer
@@ -5068,7 +5435,7 @@ mod test {
         let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
             .await?
             .expect("fixture host");
-        assert_eq!(machine.status.mlx_device_observation, Some(newer));
+        assert_eq!(machine.status.mlx_device_observation, Some(accepted));
         Ok(())
     }
 

@@ -258,6 +258,8 @@ mod tests {
     use super::*;
 
     const TEST_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+    // Allow for PostgreSQL I/O and pool contention during parallel CI runs.
+    const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
     async fn start_test_work_lock_manager(pool: &PgPool) -> (WorkLockManagerHandle, JoinSet<()>) {
         let mut tasks = JoinSet::new();
@@ -306,7 +308,7 @@ mod tests {
     }
 
     async fn wait_for_contention(contention_signal: &Notify) {
-        tokio::time::timeout(Duration::from_secs(3), contention_signal.notified())
+        tokio::time::timeout(TEST_WAIT_TIMEOUT, contention_signal.notified())
             .await
             .expect("waiter did not observe lock contention");
     }
@@ -363,7 +365,7 @@ mod tests {
         wait_for_contention(&contention_signal).await;
         write_vault_import_marker(&pool).await;
 
-        let work_lock = tokio::time::timeout(Duration::from_secs(3), waiter)
+        let work_lock = tokio::time::timeout(TEST_WAIT_TIMEOUT, waiter)
             .await
             .expect("waiter did not observe the marker")
             .expect("waiter task panicked")
@@ -406,7 +408,7 @@ mod tests {
         wait_for_contention(&contention_signal).await;
 
         drop(owner);
-        let work_lock = tokio::time::timeout(Duration::from_secs(3), waiter)
+        let work_lock = tokio::time::timeout(TEST_WAIT_TIMEOUT, waiter)
             .await
             .expect("waiter did not retry")
             .expect("waiter task panicked")
@@ -437,7 +439,7 @@ mod tests {
         wait_for_contention(&contention_signal).await;
         cancel_token.cancel();
 
-        let error = tokio::time::timeout(Duration::from_secs(3), waiter)
+        let error = tokio::time::timeout(TEST_WAIT_TIMEOUT, waiter)
             .await
             .expect("waiter ignored cancellation")
             .expect("waiter task panicked")

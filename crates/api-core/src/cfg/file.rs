@@ -642,7 +642,8 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub machine_updater: MachineUpdater,
 
-    /// Maximum number of IDs accepted by `find_*_by_ids` APIs and
+    /// Maximum number of IDs accepted by `find_*_by_ids` APIs,
+    /// routing profile names accepted by `FindRoutingProfilesByNames`, and
     /// card selections accepted by `SetMachineNicFirmwareConfig`.
     /// Default is 100.
     #[serde(default = "default_max_find_by_ids")]
@@ -7297,6 +7298,7 @@ path = "credentials.yaml"
                 r#"{{ .Values.sshConsole.serviceName }}.{{ include "nico-api.namespace" . }}.svc.cluster.local:{{ .Values.sshConsole.port }}"#,
                 "ssh-console.nico-system.svc.cluster.local:1079",
             ),
+            ("{{ .Values.tracing.enabled }}", "false"),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);
@@ -7308,7 +7310,11 @@ path = "credentials.yaml"
             .join("\n");
         assert!(
             !config.contains("{{"),
-            "all Helm template expressions must be rendered for this test"
+            "all Helm template expressions must be rendered for this test:\n\t{}",
+            config
+                .lines()
+                .filter(|line| line.contains("{{"))
+                .join("\n\t"),
         );
         config
     }

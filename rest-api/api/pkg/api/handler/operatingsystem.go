@@ -1930,39 +1930,8 @@ func (dsh DeleteOperatingSystemHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Operating System does not belong to current org's Tenant or Infrastructure Provider", nil)
 	}
 
-	// Verify if tenant associated with Site in case of Image based OS
-	// Verify Tenant Site Association
-	// Verify if Site is in Registered state
 	ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(dsh.dbSession)
 	ossasToDelete := []cdbm.OperatingSystemSiteAssociation{}
-	// Image and Templated iPXE Operating Systems propagate deletes to their
-	// associated sites (Image via OsImage workflows, Templated iPXE via the Core
-	// gRPC proxy), so their associations must be loaded.
-	if os.Type == cdbm.OperatingSystemTypeImage || os.Type == cdbm.OperatingSystemTypeTemplatedIPXE {
-		ossasToDelete, _, err = ossaDAO.GetAll(
-			ctx,
-			nil,
-			cdbm.OperatingSystemSiteAssociationFilterInput{
-				OperatingSystemIDs: []uuid.UUID{os.ID},
-			},
-			cdbp.PageInput{},
-			[]string{cdbm.SiteRelationName},
-		)
-		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving Operating System Site associations from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Operating System Site associations from DB", nil)
-		}
-
-		// Verify if associated Site is not registered state (image-based only).
-		if os.Type == cdbm.OperatingSystemTypeImage {
-			for _, dbosa := range ossasToDelete {
-				if dbosa.Site.Status != cdbm.SiteStatusRegistered {
-					logger.Warn().Msg(fmt.Sprintf("unable to delete Operating System. Site: %s. is not in Registered state", dbosa.SiteID.String()))
-					return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to delete Operating System, Associated Site: %s is not in Registered state", dbosa.Site.Name), nil)
-				}
-			}
-		}
-	}
 
 	// verify no instances are using the os
 	isDAO := cdbm.NewInstanceDAO(dsh.dbSession)
@@ -1994,6 +1963,35 @@ func (dsh DeleteOperatingSystemHandler) Handle(c echo.Context) error {
 		if derr != nil {
 			logger.Error().Err(derr).Msg("Failed to acquire advisory lock on Operating System")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Operating System, could not acquire data store lock on Operating System", nil)
+		}
+
+		// Recovery takes the same OS lock before creating or restoring an association.
+		// Load deletion dependencies only after acquiring it so a concurrently recovered
+		// association cannot survive an OS deletion based on a stale pre-lock snapshot.
+		if os.Type == cdbm.OperatingSystemTypeImage || os.Type == cdbm.OperatingSystemTypeTemplatedIPXE {
+			ossasToDelete, _, derr = ossaDAO.GetAll(
+				ctx,
+				tx,
+				cdbm.OperatingSystemSiteAssociationFilterInput{
+					OperatingSystemIDs: []uuid.UUID{os.ID},
+				},
+				cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+				[]string{cdbm.SiteRelationName},
+			)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error retrieving Operating System Site associations from DB")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Operating System Site associations from DB", nil)
+			}
+
+			// Image deletion requires every associated Site to be Registered.
+			if os.Type == cdbm.OperatingSystemTypeImage {
+				for _, dbosa := range ossasToDelete {
+					if dbosa.Site.Status != cdbm.SiteStatusRegistered {
+						logger.Warn().Msg(fmt.Sprintf("unable to delete Operating System. Site: %s. is not in Registered state", dbosa.SiteID.String()))
+						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to delete Operating System, Associated Site: %s is not in Registered state", dbosa.Site.Name), nil)
+					}
+				}
+			}
 		}
 
 		// Verify if OS is image based

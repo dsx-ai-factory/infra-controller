@@ -972,17 +972,16 @@ pub(crate) async fn publish_mlx_observation_report(
     log_request_data(&request);
 
     if request.get_ref().report.as_ref().is_some_and(|report| {
-        report
-            .observations
-            .iter()
-            .any(|observation| observation.firmware_update_result.is_some())
+        report.observations.iter().any(|observation| {
+            observation.firmware_update_result.is_some() || observation.lockdown_result.is_some()
+        })
     }) {
         // Generic NIC results belong to machine-owned operation storage, not
         // DPA card state. Reject the entire batch before either the disabled-DPA
         // no-op or DPA writes can acknowledge a result that was not persisted.
         // https://github.com/dsx-ai-factory/infra-controller/issues/6677
         return Err(CarbideError::FailedPrecondition(
-            "NIC firmware update result ingestion is not enabled".into(),
+            "NIC firmware update and lockdown result ingestion is not enabled".into(),
         )
         .into());
     }
