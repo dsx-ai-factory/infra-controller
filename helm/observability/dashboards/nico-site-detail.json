@@ -6614,7 +6614,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Switch certificates expiring soon, and probe or apply errors.",
+      "description": "Switch certificates by rotation-window status (ok, expiring_soon, unknown), and total probe and apply errors.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -6693,8 +6693,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_nvlink_switch_cert_monitor_expiring_soon{job=~\"$job\"})",
-          "legendFormat": "expiring soon",
+          "expr": "max by (status) (${metric_prefix}_nvlink_switch_cert_monitor_expiring_soon{job=~\"$job\"})",
+          "legendFormat": "certificates {{status}}",
           "range": true,
           "instant": false,
           "refId": "A"
@@ -6705,7 +6705,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_nvlink_switch_cert_monitor_probe_error_count{job=~\"$job\"})",
+          "expr": "sum(max by (error_kind) (${metric_prefix}_nvlink_switch_cert_monitor_probe_error_count{job=~\"$job\"}))",
           "legendFormat": "probe errors",
           "range": true,
           "instant": false,
@@ -6717,7 +6717,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_nvlink_switch_cert_monitor_apply_error_count{job=~\"$job\"})",
+          "expr": "sum(max by (error_kind) (${metric_prefix}_nvlink_switch_cert_monitor_apply_error_count{job=~\"$job\"}))",
           "legendFormat": "apply errors",
           "range": true,
           "instant": false,
