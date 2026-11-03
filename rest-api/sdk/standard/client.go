@@ -103,6 +103,8 @@ type APIClient struct {
 
 	OperatingSystemAPI *OperatingSystemAPIService
 
+	PowerShelfAPI *PowerShelfAPIService
+
 	RackAPI *RackAPIService
 
 	RuleAPI *RuleAPIService
@@ -122,6 +124,8 @@ type APIClient struct {
 	SpectrumXPartitionAPI *SpectrumXPartitionAPIService
 
 	SubnetAPI *SubnetAPIService
+
+	SwitchAPI *SwitchAPIService
 
 	TaskAPI *TaskAPIService
 
@@ -188,6 +192,7 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.NVLinkLogicalPartitionAPI = (*NVLinkLogicalPartitionAPIService)(&c.common)
 	c.NetworkSecurityGroupAPI = (*NetworkSecurityGroupAPIService)(&c.common)
 	c.OperatingSystemAPI = (*OperatingSystemAPIService)(&c.common)
+	c.PowerShelfAPI = (*PowerShelfAPIService)(&c.common)
 	c.RackAPI = (*RackAPIService)(&c.common)
 	c.RuleAPI = (*RuleAPIService)(&c.common)
 	c.SKUAPI = (*SKUAPIService)(&c.common)
@@ -198,6 +203,7 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.SiteExplorerAPI = (*SiteExplorerAPIService)(&c.common)
 	c.SpectrumXPartitionAPI = (*SpectrumXPartitionAPIService)(&c.common)
 	c.SubnetAPI = (*SubnetAPIService)(&c.common)
+	c.SwitchAPI = (*SwitchAPIService)(&c.common)
 	c.TaskAPI = (*TaskAPIService)(&c.common)
 	c.TaskRunAPI = (*TaskRunAPIService)(&c.common)
 	c.TenantAPI = (*TenantAPIService)(&c.common)

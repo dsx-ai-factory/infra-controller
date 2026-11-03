@@ -61,6 +61,8 @@ func TestNewAPIRoutes(t *testing.T) {
 		"expected-switch":           7,
 		"instance-type":             5,
 		"machine":                   23,
+		"switch":                    1,
+		"power-shelf":               1,
 		"allocation":                6,
 		"subnet":                    5,
 		"machine-instance-type":     3,
@@ -113,6 +115,9 @@ func TestNewAPIRoutes(t *testing.T) {
 			got := NewAPIRoutes(tt.args.dbSession, tt.args.tc, tt.args.tnc, tt.args.scp, tt.args.cfg, nil)
 
 			assert.Equal(t, totalRouteCount, len(got))
+			for _, resource := range []string{"machine", "switch", "power-shelf"} {
+				assertRouteExists(t, got, http.MethodPost, "/org/:orgName/"+cfg.GetAPIName()+"/"+resource+"/:id/decommission")
+			}
 
 			for _, route := range got {
 				assert.Contains(t, route.Path, "/org/:orgName/"+cfg.GetAPIName())

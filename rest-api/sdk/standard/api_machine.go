@@ -205,7 +205,7 @@ func (r ApiDecommissionMachineRequest) Execute() (*MessageResponse, *http.Respon
 /*
 DecommissionMachine Decommission a Machine
 
-Start decommissioning a Machine. The Machine must be in Core's `Ready`
+Start decommissioning an unassigned Machine. The Machine must be in Core's `Ready`
 state, and every attached DPU must support BFB installation through
 Redfish. The operation is asynchronous; use the Machine status to
 observe workflow progress.
