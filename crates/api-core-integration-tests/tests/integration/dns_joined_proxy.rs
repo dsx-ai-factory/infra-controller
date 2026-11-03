@@ -15,8 +15,26 @@ use carbide_test_harness::prelude::*;
 use rpc::forge::forge_server::Forge;
 use tonic::{Request, Status};
 
-#[sqlx_test]
-async fn domain_rest_site_core_joined_cancellation(pool: PgPool) {
+#[test]
+fn domain_rest_site_core_joined_cancellation() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::domain_rest_site_core_joined_cancellation"
+    ));
+    // The unoptimized Forge dispatcher exceeds the default test stack. Match
+    // the dedicated stack used by the other real Forge router tests while
+    // retaining SQLx's ordinary isolated-database setup and cleanup.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            sqlx_testing::run_test_with_pool(args, domain_rest_site_core_joined_cancellation_body)
+        })
+        .expect("spawn joined Domain test thread")
+        .join()
+        .expect("joined Domain test thread panicked");
+}
+
+async fn domain_rest_site_core_joined_cancellation_body(pool: PgPool) {
     let env = TestHarness::builder(pool.clone()).build().await;
     let listener = TcpListener::bind("127.0.0.1:0").expect("fixture loopback bind");
     let addr = listener.local_addr().expect("fixture address");

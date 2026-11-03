@@ -72,7 +72,7 @@ func TestDomainManagerCRUD(t *testing.T) {
 	require.Nil(t, manager.Delete(ctx, "domain-1"))
 	assert.Equal(t, []string{
 		"POST /v2/org/test-org/nico/domain",
-		"GET /v2/org/test-org/nico/domain?pageNumber=1&siteId=site-1&tenantId=tenant-1",
+		"GET /v2/org/test-org/nico/domain?orderBy=CREATED_ASC&pageNumber=1&siteId=site-1&tenantId=tenant-1",
 		"GET /v2/org/test-org/nico/domain/domain-1",
 		"DELETE /v2/org/test-org/nico/domain/domain-1",
 	}, requests)
