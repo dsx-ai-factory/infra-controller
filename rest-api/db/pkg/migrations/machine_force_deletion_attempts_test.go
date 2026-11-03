@@ -84,5 +84,28 @@ func TestMachineForceDeletionAttemptsMigration(t *testing.T) {
 		assert.False(t, stored.IsForceDeletionRequested)
 		assert.True(t, stored.IsForceDeletionComplete, "callers must require the requested marker as well as completion")
 	})
+	t.Run("existing columns retain unresolved attempts and completion proof", func(t *testing.T) {
+		workflowID := "retained-attempt-" + uuid.NewString()
+		_, err := dao.Update(ctx, nil, model.MachineUpdateInput{
+			MachineID: retained.ID, IsForceDeletionRequested: cutil.GetPtr(true),
+			IsForceDeletionComplete: cutil.GetPtr(false), ForceDeletionWorkflowID: &workflowID,
+		})
+		require.NoError(t, err)
+		_, err = dao.Update(ctx, nil, model.MachineUpdateInput{
+			MachineID: ordinary.ID, IsForceDeletionRequested: cutil.GetPtr(true), IsForceDeletionComplete: cutil.GetPtr(true),
+		})
+		require.NoError(t, err)
 
+		require.NoError(t, target.Sorted()[0].Up(ctx, session.DB))
+		pending, err := dao.GetByID(ctx, nil, retained.ID, nil, false)
+		require.NoError(t, err)
+		assert.True(t, pending.IsForceDeletionRequested)
+		assert.False(t, pending.IsForceDeletionComplete)
+		assert.Equal(t, &workflowID, pending.ForceDeletionWorkflowID)
+		completed, err := dao.GetByID(ctx, nil, ordinary.ID, nil, false)
+		require.NoError(t, err)
+		assert.True(t, completed.IsForceDeletionRequested)
+		assert.True(t, completed.IsForceDeletionComplete)
+		assert.Nil(t, completed.ForceDeletionWorkflowID)
+	})
 }
