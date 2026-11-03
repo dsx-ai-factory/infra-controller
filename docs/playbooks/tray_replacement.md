@@ -42,20 +42,20 @@ export MACHINE_ID="<host-machine-id>"
 export TICKET="<ticket>"
 ```
 
-The commands below use `bash`, `jq`, and `grep`.
+The commands below use `bash`, `grep`, and `jq` 1.7 or later. GPU UIDs are
+64-bit integers; `jq` 1.7 keeps them exact, but earlier versions round them.
+Check the version first:
+
+```bash
+jq --version
+```
 
 ## 1. Collect the tray's NVLink identity
 
 ```bash
 nico-admin-cli -a "$API" machine show "$MACHINE_ID"
 nico-admin-cli -a "$API" machine nvlink-info show "$MACHINE_ID" > nvlink-info.json
-```
-
-Extract the tray's GPU UIDs. GPU UIDs are 64-bit integers, so extract them as
-text rather than as `jq` numbers, which can lose precision:
-
-```bash
-export GPU_UIDS="$(grep -oE '"guid": *[0-9]+' nvlink-info.json | grep -oE '[0-9]+$')"
+export GPU_UIDS="$(jq -r '.gpus[].guid' nvlink-info.json)"
 echo $GPU_UIDS | wc -w | tr -d " "
 ```
 
@@ -82,21 +82,14 @@ fi
 
 ## 3. Record current partition membership
 
-Define helpers that query NMX-C and report partition membership. They read
-only the `gpu_uid_list` entries of each partition, and keep each UID as text so
-that large values keep full precision. A failed query or an unexpected response
-is reported as `QUERY FAILED`, never as success:
+Define helpers that query NMX-C and report partition membership. A failed query
+or an unexpected response is reported as `QUERY FAILED`, never as success:
 
 ```bash
-# Prints "<partition name><TAB><GPU UID>" for each gpu_uid_list entry in a
-# saved partition-info-list response.
+# Prints "<partition name><TAB><GPU UID>" for each GPU in a saved
+# partition-info-list response.
 partition_members() {
-  awk '
-    /^ *"name": "/ { name = $0; sub(/^ *"name": "/, "", name); sub(/",?$/, "", name) }
-    /"gpu_uid_list": \[$/ { in_list = 1; next }
-    in_list && /^ *\]/ { in_list = 0; next }
-    in_list { uid = $0; gsub(/[ ,]/, "", uid); print name "\t" uid }
-  ' "$1"
+  jq -r '.body.partition_info_list[] | .name as $name | .gpu_uid_list[] | "\($name)\t\(.)"' "$1"
 }
 
 # Saves a partition-info-list response to the given file.
@@ -263,8 +256,8 @@ then wait for the next monitor pass before you check membership:
 
 ```bash
 nico-admin-cli -a "$API" machine nvlink-info show "$HOST_ID" > nvlink-info-host.json
-export HOST_UIDS="$(grep -oE '"guid": *[0-9]+' nvlink-info-host.json | grep -oE '[0-9]+$')"
-export SLOT="$(grep -oE '"slot_id": *[0-9]+' nvlink-info-host.json | head -1 | grep -oE '[0-9]+$')"
+export HOST_UIDS="$(jq -r '.gpus[].guid' nvlink-info-host.json)"
+export SLOT="$(jq -r '.gpus[0].slot_id // empty' nvlink-info-host.json)"
 
 if [ -z "$HOST_UIDS" ] || [ -z "$SLOT" ]; then
   echo "NO NVLINK GPUS OR SLOT YET: do not release the host"
