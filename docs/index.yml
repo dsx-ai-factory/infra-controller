@@ -327,7 +327,7 @@ navigation:
               path: playbooks/force_delete.md
             - page: Rebooting a Machine
               path: playbooks/machine_reboot.md
-            - page: Replacing a GB200 Compute Tray
+            - page: Replacing a Compute Tray in an NVLink Rack
               path: playbooks/tray_replacement.md
             - section: Stuck Objects
               contents:

@@ -103,9 +103,11 @@ pub(crate) fn get_health_report(
         }
         // Template applied before a compute tray is physically moved or replaced. Besides
         // holding the host out of allocation like `OutForRepair`, it tells the NVLink
-        // partition monitor to remove the host's GPUs from every NVLink partition.
+        // partition monitor to remove the host's GPUs from every NVLink partition. It uses
+        // its own source so that adding it does not replace an existing `manual-maintenance`
+        // hold, such as `OutForRepair` or a stop-reboot guard.
         HealthReportTemplates::ComputeTrayDueForSwap => {
-            report.source = "manual-maintenance".to_string();
+            report.source = "compute-tray-due-for-swap".to_string();
             report.alerts[0].target = Some("ComputeTrayDueForSwap".to_string());
             report.alerts[0].classifications.extend([
                 HealthAlertClassification::exclude_from_state_machine_sla(),
@@ -415,7 +417,7 @@ mod tests {
                     message: Some(message),
                 },
                 expect: expected_report(ExpectedReport {
-                    source: "manual-maintenance",
+                    source: "compute-tray-due-for-swap",
                     alert_id: "Maintenance",
                     target: Some("ComputeTrayDueForSwap"),
                     message,
