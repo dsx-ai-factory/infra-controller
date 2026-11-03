@@ -4,24 +4,30 @@
 
 ## NAME
 
-nico-admin-cli-domain-create - Create a forward DNS domain
+nico-admin-cli-domain-create - Create a Domain, optionally owned by a
+VPC
 
 ## SYNOPSIS
 
 ```text
-nico-admin-cli domain create [--default-ttl]
+nico-admin-cli domain create [--vpc-id] [--default-ttl]
 [--extended] [--sort-by] [-h|--help] <NAME>
 ```
 
 ## DESCRIPTION
 
-Create a forward DNS domain
+Create a Domain, optionally owned by a VPC
 
 ## OPTIONS
 
+`--vpc-id <VpcId>`
+
+VPC that owns the domain. A VPC owns at most one live domain
+
 `--default-ttl <SECONDS>`
 
-Default record TTL, 30 to 86400 seconds
+Default TTL for the zones records, 30 to 86400 seconds. Omit for the
+site default
 
 `--extended`
 
@@ -47,12 +53,14 @@ Print help (see a summary with -h)
 
 `<NAME>`
 
-Lowercase forward DNS domain name
+Domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live
+names are rejected
 
 ## Examples
 
 ```sh
-nico-admin-cli domain create example.com
+nico-admin-cli domain create mysite.example.com
+nico-admin-cli domain create compute.customer.example --vpc-id 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli domain create example.com --default-ttl 600
 ```
 

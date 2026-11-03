@@ -28,7 +28,7 @@ func (dcr APIDomainCreateRequest) Validate() error {
 		validation.Field(&dcr.Name, validation.Required.Error(validationErrorValueRequired), validation.By(func(value interface{}) error {
 			name := value.(string)
 			if strings.TrimRight(name, ".") == "" || strings.IndexFunc(name, unicode.IsSpace) >= 0 {
-				return errors.New("Domain name must not be empty or contain whitespace")
+				return errors.New("domain name must not be empty or contain whitespace")
 			}
 			return nil
 		})),

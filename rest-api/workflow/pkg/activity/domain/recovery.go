@@ -69,14 +69,14 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 	// Recheck authorization from the persisted row before initiating any new
 	// Core write. Revocation/deletion leaves an explicit unresolved record.
 	if _, err := cdbm.NewTenantSiteDAO(m.DB).GetByTenantIDAndSiteID(ctx, nil, *d.TenantID, *d.SiteID, nil); err != nil {
-		return fmt.Errorf("Domain owner lost Site access: %w", err)
+		return fmt.Errorf("domain owner lost Site access: %w", err)
 	}
 	site, err := cdbm.NewSiteDAO(m.DB).GetByID(ctx, nil, *d.SiteID, nil, false, false)
 	if err != nil {
 		return err
 	}
 	if site.Status != cdbm.SiteStatusRegistered {
-		return fmt.Errorf("Domain Site is not registered")
+		return fmt.Errorf("domain Site is not registered")
 	}
 	stc, err := m.Sites.GetClientByID(*d.SiteID)
 	if err != nil {
