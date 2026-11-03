@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Save Go caches
+description: >-
+  Saves GOCACHE and GOMODCACHE under the key go-cache-restore computed, only on
+  main and only when that exact key missed.
+
+inputs:
+  key:
+    description: The key output of go-cache-restore.
+    required: true
+  cache-hit:
+    description: The cache-hit output of go-cache-restore.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Only main saves. Other refs restore main's entry, but anything they save
+    # is a private copy no other ref can read.
+    - name: Locate Go caches
+      id: go
+      if: github.ref == 'refs/heads/main' && inputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        {
+          echo "gocache=$(go env GOCACHE)"
+          echo "gomodcache=$(go env GOMODCACHE)"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Save Go caches
+      if: github.ref == 'refs/heads/main' && inputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ steps.go.outputs.gocache }}
+          ${{ steps.go.outputs.gomodcache }}
+        key: ${{ inputs.key }}

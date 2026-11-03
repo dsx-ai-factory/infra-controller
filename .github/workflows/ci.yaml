@@ -61,7 +61,10 @@ env:
 jobs:
   changes:
     name: Detect Core CI Gate
-    runs-on: linux-amd64-cpu4
+    # Hosted ubuntu-slim, because every other job waits on this one and the
+    # cpu4 pool can queue for minutes.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
@@ -1207,11 +1210,25 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: dev/k8s/machine-a-tron-controller/go.mod
-          cache: true
-          cache-dependency-path: dev/k8s/machine-a-tron-controller/go.sum
+          cache: false
+
+      # setup-go's own cache saves on every ref, so this job restores and saves
+      # through go-cache-restore and go-cache-save instead.
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: mat-k8s-controller
+          dependency-path: dev/k8s/machine-a-tron-controller/go.sum
 
       - name: Run the mat-k8s-controller unit tests
         run: make -C dev/k8s/machine-a-tron-controller test
+
+      - name: Save Go caches
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
 
   # The scale-test runner is a standalone Go module. Its unit gates run here,
   # and `core-ci-pass` fails the merge when they fail. The cross-language
@@ -1301,7 +1318,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: sccache-test-release-x86_64-${{ hashFiles('Cargo.lock') }}
+          key: sccache-test-release-x86_64-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
             sccache-test-release-x86_64-
 
@@ -1314,6 +1331,9 @@ jobs:
           set -euo pipefail
           mkdir -p "${{ github.workspace }}/.sccache"
           docker pull "${BUILD_CONTAINER}"
+          # SCCACHE_IDLE_TIMEOUT=0 keeps the server that compiled alive through
+          # the test run. Otherwise it exits after 600s idle and the stats
+          # printed afterwards come from a fresh server and read all zeros.
           docker run --rm \
             --ulimit nofile=65536:65536 \
             -v "${{ github.workspace }}:/carbide" \
@@ -1326,6 +1346,7 @@ jobs:
             -e NICO_TEST_MAX_PG_CONNECTIONS=900 \
             -e SCCACHE_DIR=/sccache \
             -e SCCACHE_CACHE_SIZE=5G \
+            -e SCCACHE_IDLE_TIMEOUT=0 \
             -e RUSTC_WRAPPER=sccache \
             -e CI_COMMIT_SHORT_SHA="${CI_COMMIT_SHORT_SHA}" \
             -e VERSION="${VERSION}" \
@@ -1357,9 +1378,10 @@ jobs:
 
       # Worth saving even when the tests failed: the entry holds the dependency
       # compilation, which is no less valid after a red run and is most of the
-      # eight minutes spent before the first test starts. Cargo.lock keys it, so
-      # a run that changes no dependencies hits the primary key and skips the
-      # upload rather than rewriting an equivalent entry.
+      # eight minutes spent before the first test starts. Cargo.lock and
+      # rust-toolchain.toml key it, so a run that changes neither hits the
+      # primary key and skips the upload rather than rewriting an equivalent
+      # entry.
       #
       # Only main saves. A pull request whose Cargo.lock differs from main's
       # matches the restore-keys prefix rather than the exact key, so cache-hit
@@ -2094,8 +2116,14 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.3"
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-core-proto-sync
+          dependency-path: rest-api/go.sum
 
       - name: Download REST dependencies
         uses: ./.github/actions/go-mod-download
@@ -2107,6 +2135,12 @@ jobs:
         run: >-
           bash scripts/check-repo-clean.sh "REST Core protobuf sync"
           "make sync-protobuf (from the repository root)"
+
+      - name: Save Go caches
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
 
   lint-police:
     needs:
@@ -3156,7 +3190,10 @@ jobs:
   # Update `.github/ci/check_ci_gate.py` when a job gains an allowed skip.
   core-ci-pass:
     name: core-ci-pass
-    runs-on: linux-amd64-cpu4
+    # Hosted ubuntu-slim, because a superseded run keeps its concurrency slot
+    # until this always() job finishes and the cpu4 pool can queue for minutes.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
     if: always()
     needs:
       # Detection and preparation
