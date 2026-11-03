@@ -30,7 +30,9 @@ const UNRECOGNIZED_REDFISH_ERROR_RESPONSE: &str = "<unrecognized Redfish error r
 /// that an untrusted Redfish peer could echo directly from that wire value.
 ///
 /// The returned redaction context contains a non-empty plaintext password, the
-/// bare Base64 payload, and the complete `Basic` header. Keeping these values
+/// bare Base64 payload, and the complete `Basic` header. A password equal to
+/// the username is left out: the username appears in URIs and messages a
+/// caller still needs, and masking it would hide nothing. Keeping these values
 /// together prevents Redfish callers from defining different
 /// sanitization boundaries. The encoding intentionally matches
 /// `reqwest::RequestBuilder::basic_auth`.
@@ -46,7 +48,9 @@ pub fn redfish_basic_authorization_context(
     // Retain both components of the wire value. Matching the payload separately
     // also covers a case-normalized scheme or a peer that echoes only token68.
     let mut sensitive_values = Vec::with_capacity(3);
-    if let Some(password) = password.filter(|password| !password.is_empty()) {
+    if let Some(password) =
+        password.filter(|password| !password.is_empty() && *password != username)
+    {
         sensitive_values.push(password.to_string());
     }
     sensitive_values.push(encoded);
@@ -517,6 +521,20 @@ mod tests {
         );
         assert_eq!(without_password, "Basic YWRtaW46");
         assert_eq!(without_password_context, ["YWRtaW46", "Basic YWRtaW46"]);
+
+        // A factory `admin`/`admin` login: masking the password would also
+        // mask the account a password-change error names.
+        let (_, same_as_username_context) =
+            redfish_basic_authorization_context("admin", Some("admin"));
+        assert_eq!(
+            same_as_username_context,
+            ["YWRtaW46YWRtaW4=", "Basic YWRtaW46YWRtaW4="]
+        );
+        let body = r#"{"error":{"@Message.ExtendedInfo":[{"MessageArgs":["/redfish/v1/AccountService/Accounts/admin"]}]}}"#;
+        assert_eq!(
+            redact_redfish_response_body(body, same_as_username_context.iter().map(String::as_str)),
+            body
+        );
     }
 
     /// Verifies the shared JSON-aware masker removes the Basic payload even
