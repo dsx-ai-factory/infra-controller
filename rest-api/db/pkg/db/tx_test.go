@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,8 +54,10 @@ func testTxSetupSchema(t *testing.T, dbSession *Session) {
 	ctx := context.Background()
 	tx, err := BeginTx(context.Background(), dbSession, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	assert.Nil(t, err)
-	GetIDB(tx, dbSession).NewDropTable().Model(&TestTable{}).IfExists().Exec(ctx)
-	GetIDB(tx, dbSession).NewCreateTable().Model(&TestTable{}).IfNotExists().Exec(ctx)
+	_, err = GetIDB(tx, dbSession).NewDropTable().Model(&TestTable{}).IfExists().Exec(ctx)
+	require.NoError(t, err)
+	_, err = GetIDB(tx, dbSession).NewCreateTable().Model(&TestTable{}).IfNotExists().Exec(ctx)
+	require.NoError(t, err)
 	err = tx.Commit()
 	assert.Nil(t, err)
 }
@@ -251,7 +254,7 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 				assert.NotNil(t, tx3)
 				err = tx3.AcquireAdvisoryLock(ctx, uint64(123), false)
 				assert.Nil(t, err)
-				tx3.Rollback()
+				assert.NoError(t, tx3.Rollback())
 			case 5:
 				// reacquire lock success after rollback existing tx with lock
 				err = tx2.Rollback()
@@ -261,7 +264,7 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 				assert.NotNil(t, tx3)
 				err = tx3.AcquireAdvisoryLock(ctx, uint64(456), false)
 				assert.Nil(t, err)
-				tx3.Rollback()
+				assert.NoError(t, tx3.Rollback())
 			}
 		})
 	}
@@ -343,7 +346,7 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				err = tx1.TryAcquireAdvisoryLock(ctx, lockID, nil)
 				assert.Nil(t, err)
-				tx1.Rollback()
+				assert.NoError(t, tx1.Rollback())
 			case 2:
 				tx1, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
 				assert.Nil(t, err)
@@ -353,8 +356,8 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				err = tx2.TryAcquireAdvisoryLock(ctx, lockID, nil)
 				assert.NotNil(t, err)
-				tx1.Rollback()
-				tx2.Rollback()
+				assert.NoError(t, tx1.Rollback())
+				assert.NoError(t, tx2.Rollback())
 			case 3:
 				tx1, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
 				assert.Nil(t, err)
@@ -362,16 +365,66 @@ func TestTxTryAcquireAdvisoryLock(t *testing.T) {
 				assert.Nil(t, err)
 				tx2, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
 				assert.Nil(t, err)
+				rollbackDone := make(chan struct{})
+				defer func() { <-rollbackDone }()
 				go func() {
+					defer close(rollbackDone)
 					time.Sleep(150 * time.Millisecond)
-					tx1.Rollback()
+					assert.NoError(t, tx1.Rollback())
 				}()
 				err = tx2.TryAcquireAdvisoryLock(ctx, lockID, &LockRetryOptions{Retries: cutil.GetPtr(5)})
 				assert.Nil(t, err)
-				tx2.Rollback()
+				assert.NoError(t, tx2.Rollback())
 			}
 		})
 	}
+}
+
+func TestTxTryAcquireSharedAdvisoryLock(t *testing.T) {
+	dbSession := testTxGetTestSession(t)
+	defer dbSession.Close()
+	ctx := context.Background()
+	zero := time.Duration(0)
+	options := &LockRetryOptions{Retries: cutil.GetPtr(1), Delay: &zero, Jitter: &zero}
+
+	t.Run("shared holders coexist", func(t *testing.T) {
+		lockID := GetAdvisoryLockIDFromString(t.Name())
+		tx1, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, tx1.Rollback()) })
+		tx2, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, tx2.Rollback()) })
+
+		require.NoError(t, tx1.TryAcquireSharedAdvisoryLock(ctx, lockID, options))
+		require.NoError(t, tx2.TryAcquireSharedAdvisoryLock(ctx, lockID, options))
+	})
+
+	t.Run("shared holder excludes exclusive holder", func(t *testing.T) {
+		lockID := GetAdvisoryLockIDFromString(t.Name())
+		sharedTx, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, sharedTx.Rollback()) })
+		exclusiveTx, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, exclusiveTx.Rollback()) })
+
+		require.NoError(t, sharedTx.TryAcquireSharedAdvisoryLock(ctx, lockID, options))
+		require.ErrorIs(t, exclusiveTx.TryAcquireAdvisoryLock(ctx, lockID, options), ErrXactAdvisoryLockFailed)
+	})
+
+	t.Run("exclusive holder excludes shared holder", func(t *testing.T) {
+		lockID := GetAdvisoryLockIDFromString(t.Name())
+		exclusiveTx, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, exclusiveTx.Rollback()) })
+		sharedTx, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, sharedTx.Rollback()) })
+
+		require.NoError(t, exclusiveTx.TryAcquireAdvisoryLock(ctx, lockID, options))
+		require.ErrorIs(t, sharedTx.TryAcquireSharedAdvisoryLock(ctx, lockID, options), ErrXactAdvisoryLockFailed)
+	})
 }
 
 func TestWithTx_CommitsOnSuccess(t *testing.T) {
@@ -539,12 +592,165 @@ func TestWithTxResult_ReturnsZeroValueOnError(t *testing.T) {
 	assert.Equal(t, uuid.Nil, id)
 }
 
+// testTxFailReleaseHook cancels RELEASE SAVEPOINT statements while armed, so a
+// rollback to the savepoint can succeed and its release fail.
+type testTxFailReleaseHook struct {
+	armed bool
+}
+
+func (h *testTxFailReleaseHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !h.armed || !strings.HasPrefix(event.Query, "RELEASE SAVEPOINT") {
+		return ctx
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	return canceled
+}
+
+func (h *testTxFailReleaseHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+func TestTx_WithSavepoint(t *testing.T) {
+	dbSession := testTxGetTestSession(t)
+	defer dbSession.Close()
+	testTxSetupSchema(t, dbSession)
+	ctx := context.Background()
+	errRejected := errors.New("candidate rejected")
+	releaseHook := &testTxFailReleaseHook{}
+	dbSession.DB.AddQueryHook(releaseHook)
+
+	tests := []struct {
+		name string
+		// calls is how many times WithSavepoint runs in the same transaction, each fn taking the same write and lock
+		calls int
+		// endTx rolls back the outer transaction first, so the SAVEPOINT statement fails
+		endTx bool
+		// failStatement runs a failing statement in fn, which aborts the outer transaction unless it rolls back to the savepoint
+		failStatement bool
+		// cancelCtx cancels the context passed to WithSavepoint inside fn, so ROLLBACK TO SAVEPOINT fails
+		cancelCtx bool
+		// failRelease makes RELEASE SAVEPOINT fail after ROLLBACK TO SAVEPOINT succeeds
+		failRelease      bool
+		fnErr            error
+		wantFnCalled     bool
+		wantSavepointErr bool
+		// wantKept reports whether the write and advisory lock taken in fn outlive WithSavepoint
+		wantKept bool
+	}{
+		{
+			name:          "repeated fn errors roll back their writes and locks, leave no savepoint open",
+			calls:         3,
+			failStatement: true,
+			fnErr:         errRejected,
+			wantFnCalled:  true,
+		},
+		{
+			name:         "fn success keeps its write and lock",
+			wantFnCalled: true,
+			wantKept:     true,
+		},
+		{
+			name:             "savepoint creation failure is tagged, fn is skipped",
+			endTx:            true,
+			wantSavepointErr: true,
+		},
+		{
+			name:             "rollback failure is tagged alongside fn error",
+			cancelCtx:        true,
+			fnErr:            errRejected,
+			wantFnCalled:     true,
+			wantSavepointErr: true,
+		},
+		{
+			name:             "release failure after rollback is tagged alongside fn error",
+			failRelease:      true,
+			fnErr:            errRejected,
+			wantFnCalled:     true,
+			wantSavepointErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lockID := GetAdvisoryLockIDFromString(tc.name)
+			tx, err := BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
+			if tc.endTx {
+				require.NoError(t, tx.Rollback())
+			}
+			releaseHook.armed = tc.failRelease
+			defer func() { releaseHook.armed = false }()
+
+			spCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			fnCalled := false
+			for range max(tc.calls, 1) {
+				err = tx.WithSavepoint(spCtx, func(sp *Tx) error {
+					fnCalled = true
+					_, ierr := GetIDB(sp, dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: tc.name}).Exec(ctx)
+					require.NoError(t, ierr)
+					require.NoError(t, sp.AcquireAdvisoryLock(ctx, lockID, false))
+					if tc.failStatement {
+						_, serr := GetIDB(sp, dbSession).ExecContext(ctx, "SELECT 1/0")
+						require.Error(t, serr)
+					}
+					if tc.cancelCtx {
+						cancel()
+					}
+					return tc.fnErr
+				})
+
+				assert.Equal(t, tc.wantSavepointErr, errors.Is(err, ErrTransactionSavepoint))
+				if tc.fnErr != nil {
+					assert.ErrorIs(t, err, tc.fnErr)
+				}
+			}
+			assert.Equal(t, tc.wantFnCalled, fnCalled)
+			if tc.wantSavepointErr {
+				return
+			}
+			if tc.fnErr == nil {
+				require.NoError(t, err)
+			}
+
+			// This query fails if the failed statement in fn left the outer transaction aborted.
+			count, cerr := GetIDB(tx, dbSession).NewSelect().Model((*TestTable)(nil)).Where("name = ?", tc.name).Count(ctx)
+			require.NoError(t, cerr)
+			assert.Equal(t, tc.wantKept, count == 1)
+
+			other, oerr := BeginTx(ctx, dbSession, nil)
+			require.NoError(t, oerr)
+			defer func() { _ = other.Rollback() }()
+			lerr := other.AcquireAdvisoryLock(ctx, lockID, false)
+			if tc.wantKept {
+				assert.ErrorIs(t, lerr, ErrXactAdvisoryLockFailed)
+			} else {
+				assert.NoError(t, lerr)
+			}
+
+			if tc.fnErr != nil {
+				// Each savepoint left open after its rollback gets its own transaction ID once tx writes.
+				_, ierr := GetIDB(tx, dbSession).NewInsert().Model(&TestTable{ID: uuid.New(), Name: tc.name + "-outer"}).Exec(ctx)
+				require.NoError(t, ierr)
+				xids, xerr := GetIDB(tx, dbSession).NewSelect().TableExpr("pg_locks").
+					Where("locktype = 'transactionid'").Where("pid = pg_backend_pid()").Count(ctx)
+				require.NoError(t, xerr)
+				assert.Equal(t, 1, xids, "every rolled back savepoint must also be released")
+			}
+		})
+	}
+}
+
 func TestGetBunTx(t *testing.T) {
 	dbSession := testTxGetTestSession(t)
 	defer dbSession.Close()
 	ctx := context.Background()
 	tx1, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
-	defer tx1.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx1.Rollback)
 	assert.Nil(t, err)
 	buntxp := tx1.GetBunTx()
 	assert.NotNil(t, buntxp)

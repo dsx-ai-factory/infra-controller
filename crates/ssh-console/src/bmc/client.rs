@@ -39,6 +39,18 @@ use crate::shutdown_handle::ShutdownHandle;
 use crate::ssh_server::ServerMetrics;
 use crate::{console_logger, fork_cancel_token};
 
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_recovery_attempted",
+    metric_name = "carbide_ssh_console_bmc_recovery_attempts_total",
+    component = "ssh-console",
+    log = off,
+    metric = counter,
+    message = "BMC connection recovery attempted",
+    describe = "Number of BMC connection recovery iterations started during this service lifetime, excluding each client's initial connection"
+)]
+pub(super) struct BmcRecoveryAttempted;
+
 /// Spawn a connection to the given BMC in the background, returning a handle. Connections will
 /// be retried indefinitely, with exponential backoff, until a shutdown is signaled (ie. by dropping
 /// the ClientHandle.)
@@ -171,6 +183,7 @@ impl BmcClient {
             if retries == 0 {
                 self.connection_state.store(connection::State::Connecting);
             } else {
+                carbide_instrument::emit(BmcRecoveryAttempted);
                 self.connection_state
                     .store(connection::State::ConnectionError);
             }
@@ -675,10 +688,258 @@ async fn check_ipmi_reachable_racing(addr: SocketAddr, timeout: Duration) -> boo
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::os::unix::process::ExitStatusExt;
 
+    use bmc_mock::HostnameQuerying;
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use machine_a_tron::{MockSshCredentials, PromptBehavior, spawn_mock_ssh_server};
+    use prometheus::proto::MetricType;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+    use tokio::process::Command;
+
     use super::*;
-    use crate::bmc::connection_impl::ipmi;
+    use crate::bmc::connection_impl::{ipmi, ssh};
+    use crate::bmc::vendor::SshBmcVendor;
+    use crate::metrics::MetricsState;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_counter_survives_client_recreation() {
+        const CHILD_PROCESS_ENV: &str = "CARBIDE_SSH_RECOVERY_METRICS_TEST_CHILD";
+
+        if std::env::var_os(CHILD_PROCESS_ENV).is_none() {
+            // A fresh process prevents other tests from replacing the provider,
+            // initializing the cached Event first, or changing its shared total.
+            let output_dir = temp_dir::TempDir::with_prefix("ssh-recovery-metrics")
+                .expect("create recovery test output directory");
+            let stdout_path = output_dir.path().join("stdout");
+            let stderr_path = output_dir.path().join("stderr");
+            let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "bmc::client::tests::recovery_counter_survives_client_recreation",
+                    "--nocapture",
+                ])
+                .env(CHILD_PROCESS_ENV, "1")
+                .stdout(std::fs::File::create(&stdout_path).expect("create child stdout file"))
+                .stderr(std::fs::File::create(&stderr_path).expect("create child stderr file"))
+                .kill_on_drop(true)
+                .spawn()
+                .expect("run recovery metrics test child");
+            // Bound the whole child even if its runtime cannot poll the inner
+            // ten-second deadline. Files keep output from filling a pipe.
+            let wait_result = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+            let timed_out = wait_result.is_err();
+            let status = match wait_result {
+                Ok(status) => status.expect("wait for recovery metrics test child"),
+                Err(_) => {
+                    child
+                        .start_kill()
+                        .expect("terminate recovery metrics test child");
+                    child
+                        .wait()
+                        .await
+                        .expect("reap recovery metrics test child")
+                }
+            };
+            let stdout = std::fs::read(stdout_path).expect("read child stdout");
+            let stderr = std::fs::read(stderr_path).expect("read child stderr");
+            let stdout = String::from_utf8_lossy(&stdout);
+            let stderr = String::from_utf8_lossy(&stderr);
+            assert!(
+                !timed_out && status.success() && stdout.contains("1 passed; 0 failed"),
+                "recovery metrics child failed (timed out: {timed_out}, status: {status})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            );
+            return;
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), assert_recovery_metrics_lifecycle())
+            .await
+            .expect("recovery metrics lifecycle timed out");
+    }
+
+    async fn assert_recovery_metrics_lifecycle() {
+        let state = MetricsState::new();
+        let metrics = Arc::new(BmcPoolMetrics::for_test());
+        let machine_id = MachineId::new(MachineIdSource::Tpm, [0; 32], MachineType::Host);
+        assert_recovery_metrics(&state, machine_id, 0.0, None);
+        let config = Arc::new(Config {
+            console_logging_enabled: false,
+            reconnect_interval_base: Duration::ZERO,
+            reconnect_interval_max: Duration::ZERO,
+            ..Default::default()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind controlled BMC listener");
+        let connection_details = |addr| {
+            ConnectionDetails::Ssh(Arc::new(ssh::ConnectionDetails {
+                machine_id,
+                addr,
+                user: "test".to_string(),
+                password: "test".to_string(),
+                ssh_key_path: None,
+                bmc_vendor: SshBmcVendor::Dell,
+            }))
+        };
+        let cancel_token = CancellationToken::new();
+        let handle = spawn(
+            connection_details(listener.local_addr().expect("BMC listener address")),
+            config.clone(),
+            metrics.clone(),
+            cancel_token.clone(),
+        );
+
+        let mut connection = accept_connection_attempt(&listener).await;
+        assert_recovery_metrics(&state, machine_id, 0.0, Some(0.0));
+        for attempts in [1.0, 2.0] {
+            // Closing the held handshake injects a connection failure. The next
+            // handshake pauses the real retry loop after its metrics update.
+            drop(connection);
+            connection = accept_connection_attempt(&listener).await;
+            assert_recovery_metrics(&state, machine_id, attempts, Some(attempts));
+        }
+
+        handle.shutdown_and_wait().await;
+        drop(connection);
+        let bmc = spawn_mock_ssh_server(
+            None,
+            Arc::new(RecoveryTestHostname),
+            Some(MockSshCredentials {
+                user: "test".to_string(),
+                password: "test".to_string(),
+            }),
+            PromptBehavior::Dell,
+            None,
+        )
+        .await
+        .expect("start mock SSH BMC");
+        let addr = SocketAddr::from(([127, 0, 0, 1], bmc.port));
+        let handle = spawn(
+            connection_details(addr),
+            config.clone(),
+            metrics.clone(),
+            cancel_token.clone(),
+        );
+        let mut messages = handle.broadcast_to_frontend_tx.subscribe();
+        assert!(matches!(
+            next_connection_change(&mut messages).await,
+            ConnectionChangeMessage::Connected { .. }
+        ));
+        assert_eq!(handle.connection_state.load(), connection::State::Connected);
+        assert_recovery_metrics(&state, machine_id, 2.0, Some(0.0));
+
+        handle.shutdown_and_wait().await;
+        assert_recovery_metrics(&state, machine_id, 2.0, Some(0.0));
+
+        let handle = spawn(connection_details(addr), config, metrics, cancel_token);
+        let mut messages = handle.broadcast_to_frontend_tx.subscribe();
+        assert!(matches!(
+            next_connection_change(&mut messages).await,
+            ConnectionChangeMessage::Connected { .. }
+        ));
+
+        // The mock closes its established session and listener. On this
+        // current-thread runtime, the retry emits after Disconnected and before
+        // yielding to wait for reachability, so no later dial can explain it.
+        drop(bmc);
+        assert!(matches!(
+            next_connection_change(&mut messages).await,
+            ConnectionChangeMessage::Disconnected
+        ));
+        assert!(
+            TcpStream::connect(addr).await.is_err(),
+            "BMC port is closed"
+        );
+        assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
+        handle.shutdown_and_wait().await;
+        assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
+    }
+
+    #[derive(Debug)]
+    struct RecoveryTestHostname;
+
+    impl HostnameQuerying for RecoveryTestHostname {
+        fn get_hostname(&self) -> Cow<'_, str> {
+            Cow::Borrowed("recovery-test")
+        }
+    }
+
+    async fn next_connection_change(
+        messages: &mut broadcast::Receiver<ToFrontendMessage>,
+    ) -> ConnectionChangeMessage {
+        loop {
+            if let ToFrontendMessage::ConnectionChanged(change) =
+                messages.recv().await.expect("receive connection status")
+            {
+                return change;
+            }
+        }
+    }
+
+    async fn accept_connection_attempt(listener: &TcpListener) -> TcpStream {
+        // Reachability opens and closes a TCP connection before SSH connects.
+        let (mut probe, _) = listener.accept().await.expect("accept reachability probe");
+        assert_eq!(probe.read(&mut [0; 1]).await.expect("read probe EOF"), 0);
+
+        let (mut connection, _) = listener.accept().await.expect("accept SSH connection");
+        let mut prefix = [0; 4];
+        connection
+            .read_exact(&mut prefix)
+            .await
+            .expect("read SSH identification");
+        assert_eq!(&prefix, b"SSH-");
+        connection
+    }
+
+    fn assert_recovery_metrics(
+        state: &MetricsState,
+        machine_id: MachineId,
+        total_attempts: f64,
+        client_attempts: Option<f64>,
+    ) {
+        // Collect twice at each boundary: scraping must not count another retry.
+        for _ in 0..2 {
+            let families = state.registry.gather();
+            let counter = families
+                .iter()
+                .find(|family| family.name() == "carbide_ssh_console_bmc_recovery_attempts_total")
+                .expect("cumulative recovery counter");
+            assert_eq!(counter.get_field_type(), MetricType::COUNTER);
+            assert_eq!(
+                counter.help(),
+                "Number of BMC connection recovery iterations started during this service lifetime, excluding each client's initial connection",
+            );
+            assert_eq!(counter.get_metric().len(), 1);
+            let counter = &counter.get_metric()[0];
+            assert!(counter.get_label().is_empty());
+            assert_eq!(counter.get_counter().value(), total_attempts);
+
+            let gauge = families
+                .iter()
+                .find(|family| family.name() == "ssh_console_bmc_recovery_attempts");
+            let Some(client_attempts) = client_attempts else {
+                assert!(
+                    gauge.is_none(),
+                    "no per-client gauge before a client exists"
+                );
+                continue;
+            };
+            let gauge = gauge.expect("legacy recovery gauge");
+            assert_eq!(gauge.get_field_type(), MetricType::GAUGE);
+            assert_eq!(
+                gauge.help(),
+                "Recovery attempts made for connection or session errors",
+            );
+            assert_eq!(gauge.get_metric().len(), 1);
+            let gauge = &gauge.get_metric()[0];
+            assert_eq!(gauge.get_label().len(), 1);
+            assert_eq!(gauge.get_label()[0].name(), "machine_id");
+            assert_eq!(gauge.get_label()[0].value(), machine_id.to_string());
+            assert_eq!(gauge.get_gauge().value(), client_attempts);
+        }
+    }
 
     #[tokio::test]
     async fn asf_probe_reaches_both_address_families() {

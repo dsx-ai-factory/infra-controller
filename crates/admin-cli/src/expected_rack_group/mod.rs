@@ -36,11 +36,26 @@ pub(crate) enum Cmd {
     /// Add an expected rack group
     Add(add::Args),
     /// Delete an expected rack group
+    ///
+    /// Deletion fails while expected NVLink domain declarations reference the group.
+    /// Delete its declarations with expected-nvlink-domain delete first.
     Delete(delete::Args),
     /// Replace all fields of an existing expected rack group
+    ///
+    /// While the group has expected NVLink domain declarations, its racks field must remain
+    /// unchanged. Topology, protocol, and metadata updates are still allowed. Delete its
+    /// declarations with expected-nvlink-domain delete before changing racks.
     Update(update::Args),
     /// Replace all expected rack groups from a JSON file
+    ///
+    /// This operation clears all existing groups before inserting replacements. Any expected
+    /// NVLink domain declaration blocks it, even if the replacement preserves the referenced
+    /// group. Delete all declarations with expected-nvlink-domain delete first.
     ReplaceAll(replace_all::Args),
     /// Erase all expected rack groups
+    ///
+    /// Erase fails while any expected NVLink domain declaration references a group. Delete all
+    /// declarations with expected-nvlink-domain delete first; --confirm does not bypass this
+    /// restriction.
     Erase(erase::Args),
 }

@@ -28,6 +28,18 @@ attestation_enabled = true
 # its more specific config for anycast_site_prefixes.
 anycast_site_prefixes = ["0.0.0.0/0"]
 
+[certificates]
+use_cert_manager = {{ .Values.global.certificate.useCertManager }}
+use_cert_manager_ufm = {{ .Values.global.certificate.useCertManagerUfm }}
+{{- if or .Values.global.certificate.useCertManager .Values.global.certificate.useCertManagerUfm }}
+
+[certificates.cert_manager]
+namespace = {{ include "nico-api.namespace" . | quote }}
+issuer_name = {{ .Values.machineCertificates.issuerRef.name | quote }}
+issuer_kind = {{ .Values.machineCertificates.issuerRef.kind | quote }}
+request_timeout_secs = {{ .Values.machineCertificates.requestTimeoutSecs }}
+{{- end }}
+
 [dpu_config]
 # DPU NIC firmware settings.
 dpu_nic_firmware_initial_update_enabled = false
@@ -285,6 +297,9 @@ rack_capabilities.compute = { name = "GB200", vendor = "WIWYNN", count = 18 }
 rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
 rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
 
+[tracing]
+enabled = {{ .Values.tracing.enabled }}
+
 [observability.per_object_state_metrics]
 enabled = {{ .Values.service.perObjectStateMetrics.enabled }}
 listen_address = "[::]:{{ .Values.service.perObjectStateMetrics.port }}"
@@ -319,4 +334,11 @@ client_cert = {{ . | quote }}
 {{- with .Values.rms.clientKey }}
 client_key = {{ . | quote }}
 {{- end }}
+{{- end }}
+{{- $nvlinkEnabled := index (.Values.nvlink | default dict) "enabled" }}
+{{- if kindIs "bool" $nvlinkEnabled }}
+
+# NVLink partitioning; a site configuration value takes precedence.
+[nvlink_config]
+enabled = {{ $nvlinkEnabled }}
 {{- end }}

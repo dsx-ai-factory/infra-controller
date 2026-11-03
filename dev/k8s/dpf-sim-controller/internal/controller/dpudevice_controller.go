@@ -57,6 +57,21 @@ type DPUDeviceReconciler struct {
 	// scale a single worker serializes tens of thousands of phase writes
 	// (4500 hosts x 2 DPUs x ~12 phases) and dominates the walk's wall time.
 	Concurrency int
+
+	// OSInstall, when set, makes OS Installing install the managed BFB through
+	// the DPU BMC's Redfish and wait for the task, as the real operator does,
+	// instead of only dwelling. Nil keeps the dwell-only behavior, which needs
+	// no network path to the DPU BMCs.
+	OSInstall *OSInstallConfig
+	// SecretReader reads the BMC credential Secret. Required with OSInstall.
+	// Pass an uncached reader (mgr.GetAPIReader()) so the simulator needs only
+	// "get" on that one Secret.
+	SecretReader client.Reader
+	// DPUReader bypasses the cache when recovering a submitted install whose
+	// task annotation may not have reached the cache. Setup uses mgr.GetAPIReader().
+	DPUReader client.Reader
+
+	osInstaller *osInstaller
 }
 
 // RBAC - least privilege on exactly the DPF CRs the simulator touches. DPU
@@ -68,6 +83,8 @@ type DPUDeviceReconciler struct {
 //+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpunodemaintenances,verbs=get;list;watch;create
 //+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpus,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpus/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=bfbs,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=secrets,resourceNames=bmc-shared-password,verbs=get
 //+kubebuilder:rbac:groups=svc.dpu.nvidia.com,resources=dpudeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=svc.dpu.nvidia.com,resources=dpudeployments/status,verbs=get;update;patch
 
@@ -139,7 +156,17 @@ func (r *DPUDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	//    write, so reconciles fire much more often than PhaseDwell — dwell
 	//    phases are gated on the phase-entry timestamp, never on requeue
 	//    cadence.
-	switch simulator.Gate(dpu.Status.Phase) {
+	gate := simulator.Gate(dpu.Status.Phase)
+	if r.osInstaller != nil && dpu.Status.Phase == provisioningv1.DPUOSInstalling {
+		gate = simulator.GateInstall
+	}
+	switch gate {
+	case simulator.GateInstall:
+		advance, res, err := r.osInstallStep(ctx, &device, dpu)
+		if err != nil || !advance {
+			return res, err
+		}
+
 	case simulator.GateHold:
 		held, err := r.maintenanceHoldActive(ctx, nodeName)
 		if err != nil {
@@ -227,6 +254,11 @@ func (r *DPUDeviceReconciler) stampPhaseEntry(ctx context.Context, dpu *provisio
 		dpu.Annotations = map[string]string{}
 	}
 	dpu.Annotations[carbide.AnnSimPhaseEnteredAt] = time.Now().UTC().Format(time.RFC3339)
+	// Timestamp repair must preserve ownership of an in-flight install.
+	if dpu.Status.Phase != provisioningv1.DPUOSInstalling {
+		delete(dpu.Annotations, carbide.AnnSimBFBInstallTask)
+		delete(dpu.Annotations, carbide.AnnSimBFBInstallStarted)
+	}
 	return r.Patch(ctx, dpu, patch)
 }
 
@@ -755,6 +787,15 @@ func (r *DPUDeviceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.Concurrency <= 0 {
 		r.Concurrency = 16
+	}
+	if r.OSInstall != nil {
+		if r.SecretReader == nil {
+			return errors.New("OSInstall needs a SecretReader")
+		}
+		if r.DPUReader == nil {
+			r.DPUReader = mgr.GetAPIReader()
+		}
+		r.osInstaller = newOSInstaller(*r.OSInstall, r.SecretReader, r.Namespace)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&provisioningv1.DPUDevice{}).

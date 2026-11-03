@@ -66,6 +66,14 @@ mod metrics;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_api_server;
 mod tls;
+mod tracing_setup;
+
+/// Fixtures that register the DHCP certificate-expiry gauge and alias without
+/// starting the Kea hook.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use crate::metrics::metrics_setup_with_certificate_expiry;
+}
 
 static CONFIG: Lazy<RwLock<CarbideDhcpContext>> =
     Lazy::new(|| RwLock::new(CarbideDhcpContext::default()));
@@ -94,7 +102,7 @@ struct CarbideDhcpContext {
 
 // The request/drop/reply counters are `carbide-instrument` events declared in
 // `metrics.rs` and resolve from the global meter; this struct holds only the
-// state the certificate-expiry gauge reports.
+// state reported by the certificate-expiry gauge and its alias.
 #[derive(Debug, Clone)]
 struct CarbideDhcpMetrics {
     forge_client_config: ForgeClientConfig,
@@ -373,7 +381,7 @@ pub unsafe extern "C" fn hook_set_config_ntp_servers_ipv6(servers: *const c_char
     }
 }
 
-/// Take the optional IPv6 provisioning-server address reserved for future DHCPv6 boot options.
+/// Take the optional IPv6 provisioning-server address for DHCPv6 HTTP boot URLs.
 ///
 /// # Safety
 /// Function is unsafe as it dereferences a raw pointer given to it. Caller is responsible

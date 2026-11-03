@@ -64,7 +64,8 @@ class IPv6ScrapingTest(unittest.TestCase):
             ("Unbound DNS port", {**default, SERVICE_LABEL: "nico-unbound",
                                   SERVICE_NAME: "nico-unbound", PORT_NAME: "dns-tcp"}, "[2001:db8::5]:53", False),
             ("API metrics", api, "[2001:db8::4]:9009", True),
-            ("API profiler", {**api, SERVICE_NAME: "nico-api-profiler"}, "[2001:db8::4]:9009", False),
+            ("API non-primary Service", {**api, SERVICE_NAME: "nico-api-debug"},
+             "[2001:db8::4]:9009", False),
             ("API per-object metrics", {**api, SERVICE_LABEL: "nico-api-object-metrics",
                                         SERVICE_NAME: "nico-api-object-metrics"}, "[2001:db8::4]:9009", False),
         ]

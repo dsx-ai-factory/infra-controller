@@ -120,6 +120,7 @@ pub async fn handle_ready(
         );
         let txn = ctx.services.db_pool.begin().await?;
         return Ok(StateHandlerOutcome::transition(RackState::Error {
+            certificate_failure: None,
             cause,
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         })

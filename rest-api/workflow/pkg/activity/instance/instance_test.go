@@ -13,7 +13,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
@@ -754,23 +753,23 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil)
 	assert.ErrorIs(t, readErr, cdb.ErrDoesNotExist)
 
-	ibis, _, err := ibiDAO.GetAll(ctx, nil, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	ibis, _, err := ibiDAO.GetAll(ctx, nil, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	require.NoError(t, err)
 	require.Empty(t, ibis)
 
-	nvlis, _, err := nvliDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	nvlis, _, err := nvliDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	require.NoError(t, err)
 	require.Empty(t, nvlis)
 
 	skgiaDAO := cdbm.NewSSHKeyGroupInstanceAssociationDAO(dbSession)
 	skgias, _, err := skgiaDAO.GetAll(ctx, nil, cdbm.SSHKeyGroupInstanceAssociationFilterInput{
 		InstanceIDs: []uuid.UUID{instance.ID},
-	}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	require.NoError(t, err)
 	require.Empty(t, skgias)
 
 	desdDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(dbSession)
-	desds, _, err := desdDAO.GetAll(ctx, nil, cdbm.DpuExtensionServiceDeploymentFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	desds, _, err := desdDAO.GetAll(ctx, nil, cdbm.DpuExtensionServiceDeploymentFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	require.NoError(t, err)
 	require.Empty(t, desds)
 }
@@ -2648,7 +2647,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedInstance.Status)
 
 				// Instance Interfaces
-				_, totalIfcs, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedInstance.ID}}, paginator.PageInput{}, nil)
+				_, totalIfcs, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedInstance.ID}}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, 3, totalIfcs)
 
@@ -2684,7 +2683,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 					cdbm.InfiniBandInterfaceFilterInput{
 						InstanceIDs: []uuid.UUID{updatedInstance.ID},
 					},
-					paginator.PageInput{},
+					cdbp.PageInput{},
 					nil,
 				)
 				assert.Nil(t, err)
@@ -2713,7 +2712,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				}
 
 				// Instance NVLink Interfaces
-				_, totalNvIfcs, err := nvifcDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedInstance.ID}}, paginator.PageInput{}, nil)
+				_, totalNvIfcs, err := nvifcDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedInstance.ID}}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, 3, totalNvIfcs)
 
@@ -2734,7 +2733,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedVpInstance.Status)
 
-				_, totalIfcs, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedVpInstance.ID}}, paginator.PageInput{}, nil)
+				_, totalIfcs, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedVpInstance.ID}}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, len(tc.vpcPrefixInterfaces), totalIfcs)
 
@@ -2759,7 +2758,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedMultiDPUInstance.Status)
 
-				_, totalIfcs, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedMultiDPUInstance.ID}}, paginator.PageInput{}, nil)
+				_, totalIfcs, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{updatedMultiDPUInstance.ID}}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, len(tc.multiDPUInterfaces), totalIfcs)
 
@@ -2837,7 +2836,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				_, err = instanceDAO.GetByID(ctx, nil, instance.ID, nil)
 				require.Equal(t, cdb.ErrDoesNotExist, err, fmt.Sprintf("Instance %s was not deleted", instance.Name))
 				// Check Instance Subnets were deleted for Instance 2
-				_, ifcCnt, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, paginator.PageInput{}, nil)
+				_, ifcCnt, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, 0, ifcCnt)
 
@@ -2849,7 +2848,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				// Check that SSH Key Group Instance associations were deleted
 				_, skgiaCnt, err := skgiaDAO.GetAll(ctx, nil, cdbm.SSHKeyGroupInstanceAssociationFilterInput{
 					InstanceIDs: []uuid.UUID{instance.ID},
-				}, paginator.PageInput{}, nil)
+				}, cdbp.PageInput{}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, 0, skgiaCnt)
 			}
@@ -3505,7 +3504,7 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 
 		remaining, total, err := fx.sxaDAO.GetAll(context.Background(), nil, cdbm.SpectrumXAttachmentFilterInput{
 			InstanceIDs: []uuid.UUID{fx.instance.ID},
-		}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		require.NoError(t, err)
 		assert.Equal(t, 1, total)
 		require.Len(t, remaining, 1)

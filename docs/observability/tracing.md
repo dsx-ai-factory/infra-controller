@@ -40,7 +40,7 @@ How NICo component tracing works, what it covers, how to turn it on and off and 
   enable recording (see [W3C trace-context propagation](#w3c-trace-context-propagation)).
 - **NICo REST API services** share one OpenTelemetry bootstrap configured through standard `OTEL_*`
   variables. Unlike nico-api, they export over OTLP/HTTP by default and can use TLS. See
-  [REST service tracing](#7-rest-service-tracing).
+  [REST service tracing](#7-nico-rest-api-service-tracing).
 
 ---
 
@@ -58,17 +58,23 @@ The following binaries build an OTLP span exporter:
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
 - **nico-pxe** (`crates/pxe/src/main.rs`) - request spans, off by default unless an OTLP
   endpoint is configured (see [nico-pxe tracing](#nico-pxe-tracing)).
+- **nico-dhcp** (`crates/dhcp/src/tracing_setup.rs`) - the Kea hook library the `nico-dhcp` pods
+  load. One span per discovery or lease expiration, off by default unless an OTLP endpoint is
+  configured (see [nico-dhcp tracing](#nico-dhcp-tracing)).
+- **nico-dhcp-server** (`crates/dhcp-server/src/main.rs`) - the Rust DHCP server the BlueField
+  DaemonSet runs. One span per packet, configured the same way (see
+  [nico-dhcp tracing](#nico-dhcp-tracing)).
 - **NICo REST API services** (`rest-api/common/pkg/otel`), off by default until an OTLP endpoint
   variable is set, plus `tracing.enabled` on nico-rest-api and the workflow workers (see
-  [REST service tracing](#7-rest-service-tracing)).
+  [REST service tracing](#7-nico-rest-api-service-tracing)).
 
-The other binaries (nico-dhcp, nico-hardware-health, nico-ssh-console-rs, and
-nico-dsx-exchange-consumer) carry the OpenTelemetry crates in the workspace but do not build a span
-exporter, so they do not emit traces.
+The other binaries (nico-hardware-health, nico-ssh-console-rs, and nico-dsx-exchange-consumer)
+carry the OpenTelemetry crates in the workspace but do not build a span exporter, so they do not
+emit traces.
 
 Unless noted otherwise, the rest of this document describes **nico-api** tracing.
 nico-dns differs as described in [nico-dns tracing](#nico-dns-tracing-separate-opt-in).
-NICo REST API services are described separately in [REST service tracing](#7-rest-service-tracing).
+NICo REST API services are described separately in [REST service tracing](#7-nico-rest-api-service-tracing).
 
 ### What operations are covered
 
@@ -78,8 +84,9 @@ those crates. When tracing is enabled, the instrumented operations are:
 | Area | Crate | Operations (span sites) |
 |---|---|---|
 | **Hardware component management** | `component-manager` | `power_control`, `update_firmware` / `queue_firmware_updates`, `get_firmware_status`, `list_firmware(_bundles)` across three backends - **NSM**, **PSM** (power-shelf), **RMS** (rack). Each span carries `backend="nsm\|psm\|rms"`. |
-| **Reconcile controllers** | `machine-controller`, `switch-controller`, `power-shelf-controller` | `handle_object_state` (fields `object_id`, `state`). |
+| **Reconcile controllers** | `machine-controller`, `switch-controller`, `power-shelf-controller`, `rack-controller` | `handle_object_state` (fields `object_id`, `state`). |
 | **Discovery / infra** | `site-explorer`, `api-db` (migrations) | one span each. |
+| **RMS RPCs** | `rms-observability`, `librms` | every unary call through the configured V1/V2 API wrappers; includes component-manager, rack-controller, site-explorer, and nvlink-manager callers. |
 | **Database queries** | `sqlx-query-tracing` | wraps SQLx queries as spans. |
 
 There is also a metric, `carbide_api_tracing_spans_open`, that reports the number of currently
@@ -90,6 +97,70 @@ These cover the control-plane paths an operator most often needs to debug: machi
 provisioning/reconcile loops, power control and firmware updates against the BMC/power/rack
 backends, plus the database work underneath them - which maps directly to the EPIC's
 "time on a given state of the machine, nodes stuck" need.
+
+### RMS RPC auditing
+
+NICo configures `librms` with a caller-owned transport layer that injects W3C trace context
+before the V1 or V2 tonic client sends each request. The layer also applies to readiness
+probes and connections rebuilt after certificate rotation. The generated unary wrappers
+open an `rms_rpc` span and report decoded request/response bodies, the protobuf method and
+message type, numeric `grpc_status_code`, UTC RFC 3339 `request_timestamp` and
+`response_timestamp`, and monotonic `elapsed_milliseconds`. Request time is the start of
+the logical call, before lazy connection setup and its readiness retries; response time is
+when that call returns. `elapsed_milliseconds` spans that same interval, so it also includes
+NICo's own request-side redaction and span setup, but not response redaction. These are
+client-side call boundaries, not server receive times.
+
+The same fields appear in completion logs under the `rms_rpc_audit` target at DEBUG level.
+The `rms_rpc` span sets `logfmt.suppress`, so the logfmt output carries that DEBUG record and
+no `level=SPAN` close line repeating the bodies. The admin UI log stream, when enabled, is a
+separate layer and still lists the span with its fields. In nico-api, DEBUG audit logging is on
+when the current runtime log filter, including changes made through dynamic settings, allows
+`rms_rpc_audit` at DEBUG; another layer accepting DEBUG does not count. When that filter and
+the API runtime tracing flag are both off, payload encoding and redaction are skipped;
+transport propagation remains installed. The transport runs without the caller's span, so
+connections it opens do not keep the `rms_rpc` span open after the call returns, and the
+client's own events are not recorded.
+
+To turn on the audit log in nico-api, add the target to the server's runtime filter:
+
+```bash
+nico-admin-cli set log-filter --filter info,rms_rpc_audit=debug --expiry 30min
+```
+
+The required `--filter` replaces the whole filter, so include the base level (`info` here).
+The optional `--expiry` accepts a duration such as `30min` or `1h`, defaults to `1h`, and
+cannot exceed `60h`. After expiry, the server restores its startup filter on the next
+15-minute reset check. A filter with span directives cannot be evaluated by target alone,
+so nico-api enables payload encoding and redaction
+even if the filter ultimately suppresses the audit record. For `nico-admin-cli rms`, set
+`RUST_LOG=rms_rpc_audit=debug`; the records go to stderr.
+
+Bodies are redacted before being attached to a span or log: credentials, passwords, tokens,
+URLs, arbitrary attributes, config values, error text, embedded JSON, and binary fields are
+withheld. Only reviewed identifier, address, domain, and version string fields are retained;
+new string fields are withheld until reviewed. Numeric, boolean, and enum values remain.
+Unknown or malformed messages and bodies exceeding 65,536 bytes before or after JSON
+serialization produce a `[BODY OMITTED: <reason>]` marker, for example
+`[BODY OMITTED: exceeds 65536 bytes]`, `[BODY OMITTED: unknown message type]`, or
+`[BODY OMITTED: invalid protobuf]`, with no raw-payload fallback. Withheld field values appear
+as `[REDACTED]`. Status messages, status details, and request/response metadata are not
+recorded. Transport failures record `response_body` as the literal `null`;
+cancellation records gRPC `CANCELLED` (numeric code 1). This is diagnostic
+auditing in logs and sampled traces, not a durable audit database.
+
+The API's shared clients cover every caller listed in the **RMS RPCs** row of
+[What operations are covered](#what-operations-are-covered). Existing RED (rate, errors, and
+duration) metrics are unchanged. Readiness probes carry trace headers but do not produce
+their own body audit record. Raw tonic clients and streaming RPCs
+are outside the decoded observer; RMS's V1/V2 service definitions contain only unary RPCs.
+
+`nico-admin-cli rms` installs the same policy and emits DEBUG audit logs through its own
+subscriber, but does not export nico-api OTLP spans. Without a configured propagator and
+active OpenTelemetry context, transport injection is a no-op. API spans follow the existing
+endpoint and enabled flag. An RMS RPC without a local parent is an eligible trace root;
+child RPCs inherit their parent's sampling decision. Rack reconciliation adds
+a rack span under the state processor's existing trace root.
 
 ### How spans are selected (sampler)
 
@@ -168,8 +239,10 @@ DPS stays one trace across the proxy hop (issue
 - **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
 - **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
   the BMC's — a request the proxy rejects never reaches one), BMC target IP (span attribute, not
-  a Prometheus label), and, once the request passes its ACL, its request class
-  (`bmc_proxy.class`). Only a 5xx sets the span status to error; a 4xx is the caller's error.
+  a Prometheus label), the request class (`bmc_proxy.class`) after the request passes its ACL,
+  and the target type (`bmc_proxy.target`: `bmc`, or `switch_nvos` for a switch's NVOS
+  management interface) after its credentials resolve. Only a 5xx sets the span status to
+  error; a 4xx is the caller's error.
   A `429` the proxy answers for want of a slot at the BMC leaves the span ok as well;
   `carbide_bmc_proxy_admission_refused_total` counts those.
 
@@ -223,6 +296,36 @@ routes. It uses the shared setup in `carbide_instrument::otlp_tracing`, enabled 
 - **Shutdown.** On SIGTERM, `nico-pxe` stops accepting connections, lets in-flight requests finish, then
   sends the last batch of spans.
 
+### nico-dhcp tracing
+
+Two separate programs serve DHCP, and both use the shared setup in
+`carbide_instrument::otlp_tracing` with the same variables as nico-pxe.
+
+- **The Kea hook** (`crates/dhcp`, built as `libdhcp.so`) runs inside the `kea-dhcp4` and
+  `kea-dhcp6` processes that the `nico-dhcp` chart deploys. It opens a `dhcp_discovery`,
+  `dhcpv6_discovery` or `dhcp_lease_expiration` span around each callout that calls nico-api.
+  `service.name = nico-dhcp`.
+- **nico-dhcp-server** (`crates/dhcp-server`, the `forge-dhcp-server` binary) runs on BlueField
+  DPUs through `bluefield/charts/nico-dhcp-server`. It opens one span per DHCPv4 and DHCPv6
+  packet it processes. `service.name = nico-dhcp-server`.
+
+- **Off by default.** Both export spans only when an OTLP endpoint is configured.
+- **Endpoint.** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`, with the
+  traces-only variable taking precedence. The `otlpEndpoint` Helm value sets the first one in the
+  `nico-dhcp` chart, where it reaches both the DHCPv4 and the DHCPv6 deployment, and in the
+  BlueField chart.
+- **Span level.** `NICO_TRACES_SPAN_LEVEL` works as it does for nico-pxe, defaulting to `info`.
+- **Each packet starts a new trace.** A DHCP client sends no `traceparent`, so there is
+  no inbound context to continue. Spans opened inside that root span, including the outbound gRPC
+  call, join the same trace.
+- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which sends the trace
+  context on every request, so a DHCP trace continues into nico-api.
+- **Hook logging is unchanged.** The hook logs through Kea's logger, and installing span export
+  does not add log lines or route them through `RUST_LOG`.
+- **Shutdown.** The hook sends its last batch when Kea unloads it. nico-dhcp-server sends its last
+  batch only after its serving loop returns to `main`. It does not handle SIGTERM, so spans still buffered when
+  the pod is terminated are lost.
+
 ### W3C trace-context propagation
 
 nico-api accepts and produces **W3C Trace Context** headers (`traceparent` and `tracestate`) at its
@@ -239,6 +342,10 @@ through nico-api. The standard `TraceContextPropagator` is installed once at sta
   - **gRPC** - Forge and NMX-C (`crates/rpc`), the NSM and power-shelf (PSM) backends
     (`crates/component-manager`), and the NMX-C client pool (`crates/libnmxc`), through a shared tower
     layer applied to every request.
+  - **gRPC (RMS)** - the RMS clients use the same `trace_propagation::TraceInjectService`, but
+    `librms` owns the transport, so `rms_observability::configure()` (`crates/rms-observability`)
+    installs it as the caller-supplied transport layer on the `RmsClientConfig`. nico-api calls it
+    from `crates/api-core/src/setup.rs`. See [RMS RPC auditing](#rms-rpc-auditing).
   - **HTTP** - the BMC/Redfish handler, machine-identity token exchange, admin-UI OAuth2, NRAS,
     the MQTT OAuth2 token provider, and firmware downloads.
 - **Interaction with the enable flag.** `tracing-enabled` is the master switch for what nico-api

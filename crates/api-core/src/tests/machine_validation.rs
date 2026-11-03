@@ -24,8 +24,8 @@ use carbide_machine_controller::config::machine_validation::{
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_uuid::machine_validation::{MachineValidationId, MachineValidationRunItemId};
 use common::api_fixtures::{
-    TestEnvOverrides, create_host_with_machine_validation, create_test_env,
-    create_test_env_with_overrides, get_config, get_machine_validation_results,
+    TestEnv, TestEnvOverrides, TestManagedHost, create_host_with_machine_validation,
+    create_test_env, create_test_env_with_overrides, get_config, get_machine_validation_results,
     get_machine_validation_runs, on_demand_machine_validation,
 };
 use config_version::ConfigVersion;
@@ -42,6 +42,7 @@ use rpc::forge::{
 
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
+use crate::tests::common::postgres::wait_for_blocked_query;
 
 fn authenticated_machine_request<T>(
     message: T,
@@ -535,6 +536,144 @@ async fn test_create_update_external_config(
 }
 
 #[crate::sqlx_test]
+async fn test_get_external_configs_filters_by_requested_names(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let config = b"{}".to_vec();
+    // Add/update is disabled, so seed the stored configurations through the database.
+    let mut txn = env.pool.begin().await?;
+    for name in ["config-a", "config-b", "config-c"] {
+        db::machine_validation_config::save(txn.as_mut(), name, "validation parameters", &config)
+            .await?;
+    }
+    txn.commit().await?;
+
+    let api = &env.api;
+    check_cases_async(
+        [
+            Case {
+                scenario: "stored matches survive missing names and exclude unrelated configurations",
+                input: vec!["config-a", "missing", "config-c"],
+                expect: Yields(["config-a", "config-c"].map(String::from).to_vec()),
+            },
+            Case {
+                scenario: "names match exactly rather than by case or pattern",
+                input: vec!["CONFIG-A", "config-%"],
+                expect: Yields(vec![]),
+            },
+            Case {
+                scenario: "empty names list all stored configurations",
+                input: vec![],
+                expect: Yields(
+                    ["config-a", "config-b", "config-c"]
+                        .map(String::from)
+                        .to_vec(),
+                ),
+            },
+        ],
+        |requested_names| async move {
+            let response = api
+                .get_machine_validation_external_configs(tonic::Request::new(
+                    rpc::forge::GetMachineValidationExternalConfigsRequest {
+                        names: requested_names.into_iter().map(String::from).collect(),
+                    },
+                ))
+                .await
+                .map_err(|error| error.to_string())?
+                .into_inner();
+            let mut returned_names = response
+                .configs
+                .into_iter()
+                .map(|config| config.name)
+                .collect::<Vec<_>>();
+            returned_names.sort();
+            Ok::<_, String>(returned_names)
+        },
+    )
+    .await;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_remove_external_config_decode_failure_rolls_back(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let name = "invalid-version-config";
+    let description = "validation parameters";
+    let config = b"{\"iterations\":7}";
+    let version = "not-a-config-version";
+
+    sqlx::query(
+        "INSERT INTO machine_validation_external_config (name, description, config, version)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(name)
+    .bind(description)
+    .bind(config.as_slice())
+    .bind(version)
+    .execute(&env.pool)
+    .await?;
+
+    let status = env
+        .api
+        .remove_machine_validation_external_config(tonic::Request::new(
+            rpc::forge::RemoveMachineValidationExternalConfigRequest {
+                name: name.to_string(),
+            },
+        ))
+        .await
+        .expect_err("invalid persisted version must fail removal");
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert_eq!(status.message(), "internal database error");
+    let source = std::error::Error::source(&status)
+        .expect("database status source")
+        .source()
+        .expect("original database error")
+        .downcast_ref::<db::DatabaseError>()
+        .expect("typed database error");
+    let db::DatabaseError::Sqlx(annotated) = source else {
+        panic!("expected the original database error: {source:?}");
+    };
+    assert!(
+        annotated
+            .to_string()
+            .contains("DELETE FROM machine_validation_external_config"),
+        "{annotated}"
+    );
+    let sqlx::Error::ColumnDecode { index, .. } = &annotated.source else {
+        panic!("expected a column decoding error: {annotated:?}");
+    };
+    assert_eq!(index, "\"version\"");
+
+    // PostgreSQL deletes the row before SQLx decodes `RETURNING`, so the
+    // handler must return without committing even though the statement succeeded.
+    let retained = sqlx::query_as::<_, (String, Option<String>, Vec<u8>, String)>(
+        "SELECT name, description, config, version
+         FROM machine_validation_external_config WHERE name = $1",
+    )
+    .bind(name)
+    .fetch_one(&env.pool)
+    .await?;
+    assert_eq!(
+        retained,
+        (
+            name.to_string(),
+            Some(description.to_string()),
+            config.to_vec(),
+            version.to_string(),
+        )
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_machine_validation_test_on_demand_filter(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -582,6 +721,24 @@ async fn test_machine_validation_test_on_demand_filter(
             .alerts
             .is_empty()
     );
+
+    // An interrupted previous on-demand run can remain unfinished. It must
+    // not be selected when the machine's current on-demand run is created.
+    let older_validation_id = MachineValidationId::new();
+    const INSERT_UNFINISHED_ON_DEMAND_RUN: &str = "
+        INSERT INTO machine_validation (
+            id, name, machine_id, filter, context, end_time, description, state
+        )
+        VALUES ($1, $2, $3, $4, 'OnDemand', NULL, $5, 'Started')";
+    sqlx::query(INSERT_UNFINISHED_ON_DEMAND_RUN)
+        .bind(older_validation_id)
+        .bind("interrupted-on-demand-run")
+        .bind(mh.host().id)
+        .bind(sqlx::types::Json(MachineValidationFilter::default()))
+        .bind("test fixture for a previous unfinished on-demand run")
+        .execute(&env.pool)
+        .await?;
+
     let allowed_tests = vec!["test1".to_string(), "test2".to_string()];
     let on_demand_response = on_demand_machine_validation(
         &env,
@@ -635,6 +792,7 @@ async fn test_machine_validation_test_on_demand_filter(
     else {
         panic!("expected typed machine validation action");
     };
+    assert_eq!(machine_validation.validation_id, Some(validation_id));
     let typed_filter = machine_validation
         .filter
         .as_ref()
@@ -669,6 +827,89 @@ async fn test_machine_validation_test_on_demand_filter(
         },
     )
     .await;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn concurrent_on_demand_requests_create_only_one_run(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let mh = create_host_with_machine_validation(&env, None, None).await;
+    let machine_id = mh
+        .host()
+        .rpc_machine()
+        .await
+        .id
+        .expect("fixture host has an ID");
+
+    // Keep both requests behind this lock until they have begun their lookup.
+    // Without the handler's row lock, both requests can observe an unscheduled
+    // machine and each create a run before either updates the request flag.
+    let mut gate = env.pool.begin().await?;
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+        .bind(mh.host().id)
+        .execute(gate.as_mut())
+        .await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(gate.as_mut())
+        .await?;
+
+    let request = || {
+        tonic::Request::new(rpc::forge::MachineValidationOnDemandRequest {
+            machine_id: Some(machine_id),
+            action: rpc::forge::machine_validation_on_demand_request::Action::Start.into(),
+            tags: Vec::new(),
+            allowed_tests: Vec::new(),
+            run_unverfied_tests: false,
+            contexts: Vec::new(),
+        })
+    };
+    let first_api = env.api.clone();
+    let second_api = env.api.clone();
+    let first_request = request();
+    let second_request = request();
+    let mut first =
+        tokio::spawn(async move { first_api.on_demand_machine_validation(first_request).await });
+    const LOCK_QUERY: &str = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
+    let first_pid = tokio::select! {
+        result = &mut first => panic!("first request passed the machine lock: {result:?}"),
+        pid = wait_for_blocked_query(&env.pool, gate_pid, LOCK_QUERY) => pid,
+    };
+    let mut second = tokio::spawn(async move {
+        second_api
+            .on_demand_machine_validation(second_request)
+            .await
+    });
+    // PostgreSQL queues the second row-lock request behind the first waiter.
+    tokio::select! {
+        result = &mut first => panic!("first request passed the machine lock: {result:?}"),
+        result = &mut second => panic!("second request passed the machine lock: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, first_pid, LOCK_QUERY) => {},
+    }
+    gate.commit().await?;
+
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .expect("concurrent on-demand requests should finish");
+
+    let responses = [
+        first.expect("first request task should not panic"),
+        second.expect("second request task should not panic"),
+    ];
+    assert_eq!(
+        responses.iter().filter(|response| response.is_ok()).count(),
+        1,
+        "exactly one request should create an on-demand validation run"
+    );
+    let error = responses
+        .into_iter()
+        .find_map(Result::err)
+        .expect("the other request should be rejected as already scheduled");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
     Ok(())
 }
 
@@ -1478,6 +1719,235 @@ async fn test_machine_validation_get_unverified_tests(
     assert!(!test_list[4].verified);
     assert!(!test_list[5].verified);
 
+    Ok(())
+}
+
+/// A validation run of the fixture's `test_id`, started on demand in
+/// `context`, with its run plan materialized by `mh` itself: (its id, its run
+/// items' ids, the selected test).
+async fn on_demand_run(
+    env: &TestEnv,
+    mh: &TestManagedHost,
+    test_id: &str,
+    context: &str,
+) -> (
+    MachineValidationId,
+    Vec<rpc::common::Uuid>,
+    rpc::forge::MachineValidationTest,
+) {
+    let selected_test = env
+        .api
+        .get_machine_validation_tests(tonic::Request::new(
+            rpc::forge::MachineValidationTestsGetRequest {
+                test_id: Some(test_id.to_string()),
+                ..rpc::forge::MachineValidationTestsGetRequest::default()
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .tests
+        .into_iter()
+        .next()
+        .expect("the machine validation fixture should include the test");
+    let validation_id = on_demand_machine_validation(
+        env,
+        mh.host().id.into(),
+        Vec::new(),
+        vec![selected_test.test_id.clone()],
+        true,
+        vec![context.to_string()],
+    )
+    .await
+    .validation_id
+    .unwrap();
+    env.api
+        .update_machine_validation_run(authenticated_machine_request(
+            run_request(validation_id, &selected_test),
+            mh.host().id,
+        ))
+        .await
+        .unwrap();
+    let run_item_ids = env
+        .api
+        .find_machine_validation_run_item_ids(tonic::Request::new(
+            rpc::forge::MachineValidationRunItemSearchFilter {
+                validation_id: Some(validation_id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .run_item_ids;
+    (validation_id, run_item_ids, selected_test)
+}
+
+fn run_request(
+    validation_id: MachineValidationId,
+    selected_test: &rpc::forge::MachineValidationTest,
+) -> rpc::forge::MachineValidationRunRequest {
+    rpc::forge::MachineValidationRunRequest {
+        validation_id: Some(validation_id),
+        duration_to_complete: Some(rpc::Duration::from(std::time::Duration::from_secs(60))),
+        total: 1,
+        selected_tests: vec![selected_test.clone()],
+    }
+}
+
+fn denied<T>(result: &Result<tonic::Response<T>, tonic::Status>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|status| status.code() == tonic::Code::PermissionDenied)
+}
+
+/// The machine-validation calls scout makes for a run are allowed only to the
+/// run's own machine: another machine, here the host's own DPU, is denied
+/// each of them, and a lookup that names another host's run items too is
+/// denied to the host. The other host runs a test that sorts after the
+/// host's, so that lookup returns the host's own item first.
+#[crate::sqlx_test(fixtures("create_machine_validation_tests",))]
+async fn machine_validation_calls_are_scoped_to_the_runs_machine(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let mh = create_host_with_machine_validation(&env, None, None).await;
+    let other = create_host_with_machine_validation(&env, None, None).await;
+    let (validation_id, run_item_ids, selected_test) =
+        on_demand_run(&env, &mh, "forge_dcgm_long_test", "OnDemand").await;
+    let (_, others_run_item_ids, _) =
+        on_demand_run(&env, &other, "forge_shoreline_run_book", "Discovery").await;
+    let host = mh.host().id;
+    let dpu = mh.dpu().id;
+
+    let find_ids = || rpc::forge::MachineValidationRunItemSearchFilter {
+        validation_id: Some(validation_id),
+    };
+    let find_items = || rpc::forge::MachineValidationRunItemsByIdsRequest {
+        run_item_ids: run_item_ids.clone(),
+    };
+    let heartbeat = || rpc::forge::MachineValidationHeartbeatRequest {
+        validation_id: Some(validation_id),
+        target: Some(
+            rpc::forge::machine_validation_heartbeat_request::Target::TestId(
+                selected_test.test_id.clone(),
+            ),
+        ),
+    };
+    let result = || rpc::forge::MachineValidationResultPostRequest {
+        result: Some(rpc::forge::MachineValidationResult {
+            validation_id: Some(validation_id),
+            name: selected_test.name.clone(),
+            description: String::new(),
+            command: "echo".to_string(),
+            args: String::new(),
+            std_out: String::new(),
+            std_err: String::new(),
+            context: "OnDemand".to_string(),
+            exit_code: 0,
+            start_time: Some(Timestamp::from(SystemTime::now())),
+            end_time: Some(Timestamp::from(SystemTime::now())),
+            test_id: Some(selected_test.test_id.clone()),
+        }),
+    };
+    let completed = || rpc::forge::MachineValidationCompletedRequest {
+        machine_id: Some(host.into()),
+        validation_id: Some(validation_id),
+        machine_validation_error: None,
+    };
+
+    let api = &env.api;
+    let as_dpu = [
+        denied(
+            &api.find_machine_validation_run_item_ids(authenticated_machine_request(
+                find_ids(),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.find_machine_validation_run_items_by_ids(authenticated_machine_request(
+                find_items(),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.heartbeat_machine_validation_run(authenticated_machine_request(heartbeat(), dpu))
+                .await,
+        ),
+        denied(
+            &api.update_machine_validation_run(authenticated_machine_request(
+                run_request(validation_id, &selected_test),
+                dpu,
+            ))
+            .await,
+        ),
+        denied(
+            &api.persist_validation_result(authenticated_machine_request(result(), dpu))
+                .await,
+        ),
+        denied(
+            &api.machine_validation_completed(authenticated_machine_request(completed(), dpu))
+                .await,
+        ),
+    ];
+    assert_eq!(as_dpu, [true; 6], "every call is denied to another machine");
+
+    // The host's own calls pass the ownership check; whatever else they meet
+    // afterwards, they are not denied.
+    let as_host = [
+        denied(
+            &api.find_machine_validation_run_item_ids(authenticated_machine_request(
+                find_ids(),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.find_machine_validation_run_items_by_ids(authenticated_machine_request(
+                find_items(),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.heartbeat_machine_validation_run(authenticated_machine_request(heartbeat(), host))
+                .await,
+        ),
+        denied(
+            &api.update_machine_validation_run(authenticated_machine_request(
+                run_request(validation_id, &selected_test),
+                host,
+            ))
+            .await,
+        ),
+        denied(
+            &api.persist_validation_result(authenticated_machine_request(result(), host))
+                .await,
+        ),
+        denied(
+            &api.machine_validation_completed(authenticated_machine_request(completed(), host))
+                .await,
+        ),
+    ];
+    assert_eq!(
+        as_host, [false; 6],
+        "no call is denied to the run's own machine"
+    );
+
+    let mixed = api
+        .find_machine_validation_run_items_by_ids(authenticated_machine_request(
+            rpc::forge::MachineValidationRunItemsByIdsRequest {
+                run_item_ids: run_item_ids
+                    .iter()
+                    .chain(&others_run_item_ids)
+                    .cloned()
+                    .collect(),
+            },
+            host,
+        ))
+        .await;
+    assert!(denied(&mixed), "another host's run items are denied");
     Ok(())
 }
 

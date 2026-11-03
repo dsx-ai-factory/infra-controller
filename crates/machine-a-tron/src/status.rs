@@ -15,7 +15,8 @@
  * limitations under the License.
  */
 use bmc_mock::HardwareType;
-use serde::Serialize;
+use nv_redfish::schema::resource::PowerState;
+use serde::{Deserialize, Serialize};
 use ufm_mock::{EpochId, Generation, InventoryId};
 
 use crate::{Guid, InfinibandPortState};
@@ -26,7 +27,7 @@ pub struct InfinibandPortStatus {
     pub state: InfinibandPortState,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceKind {
     Machine,
@@ -92,7 +93,7 @@ pub struct DeviceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mat_state: Option<String>,
     pub api_state: String,
-    pub power_state: String,
+    pub power_state: PowerState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

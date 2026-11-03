@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineInterfaceId;
 use sqlx::{FromRow, PgConnection};
 
@@ -22,7 +23,8 @@ use super::DatabaseError;
 /// A machine dhcp response is a representation of some booting interface by Mac Address or DUID
 /// (not implemented) that returns the network information for that interface on that node, and
 /// contains everything necessary to return a DHCP response
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "dhcp_entries")]
 pub struct DhcpEntry {
     pub machine_interface_id: MachineInterfaceId,
     pub vendor_string: String,
@@ -44,9 +46,10 @@ pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = DhcpEntry>>(
     txn: &mut PgConnection,
     filter: super::ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<DhcpEntry>, DatabaseError> {
-    let mut query = super::FilterableQueryBuilder::new(
-        "SELECT machine_interface_id, vendor_string FROM dhcp_entries",
-    )
+    let mut query = super::FilterableQueryBuilder::new(format!(
+        "SELECT {} FROM dhcp_entries",
+        DhcpEntry::db_table_columns()
+    ))
     .filter(&filter);
 
     query

@@ -212,13 +212,14 @@ func TestRoundTrip_NameAndCode(t *testing.T) {
 			v2 := StringToVendor(v.Name)
 
 			// For supported vendors, code should round-trip. For unsupported names, StringToVendor maps to Unsupported.
-			if tc.code == VendorCodeLiteon {
+			switch tc.code {
+			case VendorCodeLiteon:
 				assert.Equal(t, VendorCodeLiteon, v2.Code)
 				assert.Equal(t, VendorLiteon, v2.Name)
-			} else if tc.code == VendorCodeDelta {
+			case VendorCodeDelta:
 				assert.Equal(t, VendorCodeDelta, v2.Code)
 				assert.Equal(t, VendorDelta, v2.Name)
-			} else {
+			default:
 				assert.Equal(t, VendorCodeUnsupported, v2.Code)
 				assert.Equal(t, v.Name, v2.Name)
 			}

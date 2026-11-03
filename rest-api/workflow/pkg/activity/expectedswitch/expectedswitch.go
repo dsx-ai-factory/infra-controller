@@ -6,7 +6,7 @@ package expectedswitch
 import (
 	"context"
 	"errors"
-	"reflect"
+	"maps"
 	"slices"
 
 	"github.com/google/uuid"
@@ -34,11 +34,13 @@ type ManageExpectedSwitch struct {
 
 // UpdateExpectedSwitchesInDB is a Temporal activity that takes a collection of ExpectedSwitch data pushed by Site Agent and updates the DB
 // Expected Switch records have two unique values (MAC and UUID). We ignore the MAC value and only rely on the UUID for uniqueness.
-// NICo is the source of truth: out of the race-condition window we make the DB match NICo exactly.
+// Core supplies inventory values; omitted names, descriptions, and rack IDs
+// preserve the existing Cloud values.
+// Only successful inventory is reconciled; failed or unsupported statuses are skipped.
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
-// - UUID existing in DB but not in NICo: delete record in DB
+// - UUID existing in DB but not in NICo: delete the stale record if it has not changed since the initial read
 func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, siteID uuid.UUID, expectedSwitchInventory *corev1.ExpectedSwitchInventory) error {
 	logger := log.With().Str("Activity", "UpdateExpectedSwitchesInDB").Str("Site ID", siteID.String()).Logger()
 
@@ -54,9 +56,15 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		return nil
 	}
 
+	if expectedSwitchInventory.InventoryStatus != corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS {
+		logger.Warn().Str("inventory_status", expectedSwitchInventory.InventoryStatus.String()).
+			Msg("received unsupported inventory status, skipping inventory processing")
+		return nil
+	}
+
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mei.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -122,6 +130,8 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		}
 		reportedIDs[esID] = true
 
+		// Keep reserved labels in `Labels` so they cannot overwrite Cloud's
+		// dedicated manufacturer, model, or placement columns.
 		reported := &cdbm.ExpectedSwitch{}
 		reported.FromProto(res)
 
@@ -129,13 +139,18 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		cur, found := existingByID[esID]
 		if !found {
 			_, cerr := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
-				ExpectedSwitchID:   esID,
-				SiteID:             siteID,
-				BmcMacAddress:      reported.BmcMacAddress,
-				SwitchSerialNumber: reported.SwitchSerialNumber,
-				NvosMacAddresses:   reported.NvosMacAddresses,
-				Labels:             reported.Labels,
-				CreatedBy:          siteID, /* This would normally be a user ID, but that isn't something NICo provides */
+				ExpectedSwitchID:      esID,
+				SiteID:                siteID,
+				BmcMacAddress:         reported.BmcMacAddress,
+				SwitchSerialNumber:    reported.SwitchSerialNumber,
+				BmcIpAddress:          reported.BmcIpAddress,
+				RackID:                reported.RackID,
+				Name:                  reported.Name,
+				Description:           reported.Description,
+				NvosMacAddresses:      reported.NvosMacAddresses,
+				NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+				Labels:                reported.Labels,
+				CreatedBy:             siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
 			if cerr != nil {
 				logger.Error().Err(cerr).Str("ID", esID.String()).Msg("failed to create ExpectedSwitch in DB")
@@ -152,30 +167,64 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			continue
 		}
 
-		// update if any field differs
+		// Labels are replaced as a whole, including when Core reports none.
+		if reported.Labels == nil {
+			reported.Labels = cdbm.Labels{}
+		}
+		if reported.NvosMacAddresses == nil {
+			reported.NvosMacAddresses = []string{}
+		}
+
+		// Omitted optional fields preserve Cloud values, which may predate their
+		// storage in Core. Compare only fields that Update will actually write.
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.SwitchSerialNumber != reported.SwitchSerialNumber ||
+			(reported.BmcIpAddress != nil && !util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress)) ||
+			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
+			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
+			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
 			!slices.Equal(cur.NvosMacAddresses, reported.NvosMacAddresses) ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
-			// nil labels in nico can mean we need to clear out existing labels in DB
-			// but a nil value will not trigger an update in the DAO layer. We could use `Clear` but an empty map
-			// will save a call to the DB.
-			labels := reported.Labels
-			if cur.Labels != nil && labels == nil {
-				labels = map[string]string{}
-			}
-			// nil NVOS MACs from nico follow the same rule as labels: swap in an
-			// empty slice so the DAO clears a previously-set list.
-			nvosMacAddresses := reported.NvosMacAddresses
-			if cur.NvosMacAddresses != nil && nvosMacAddresses == nil {
-				nvosMacAddresses = []string{}
-			}
-			_, uerr := esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
-				ExpectedSwitchID:   cur.ID,
-				BmcMacAddress:      &reported.BmcMacAddress,
-				SwitchSerialNumber: &reported.SwitchSerialNumber,
-				NvosMacAddresses:   nvosMacAddresses,
-				Labels:             labels,
+			!util.PtrsEqual(cur.NvosPrimaryMacAddress, reported.NvosPrimaryMacAddress) ||
+			!maps.Equal(cur.Labels, reported.Labels) {
+			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				// Lock and re-read before writing so an API change after the
+				// initial inventory lookup isn't overwritten by this snapshot.
+				locked, err := esDAO.Get(ctx, tx, cur.ID, nil, true)
+				if err != nil {
+					return err
+				}
+				if !locked.Updated.Equal(cur.Updated) {
+					return nil
+				}
+
+				if _, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
+					ExpectedSwitchID:      cur.ID,
+					BmcMacAddress:         &reported.BmcMacAddress,
+					SwitchSerialNumber:    &reported.SwitchSerialNumber,
+					BmcIpAddress:          reported.BmcIpAddress,
+					RackID:                reported.RackID,
+					Name:                  reported.Name,
+					Description:           reported.Description,
+					NvosMacAddresses:      reported.NvosMacAddresses,
+					NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+					Labels:                reported.Labels,
+				}); uerr != nil {
+					return uerr
+				}
+
+				// Update preserves the stored primary when the selector is nil,
+				// so a reconcile that reports no primary (a switch with no
+				// ports) must clear it explicitly instead of leaving the stale
+				// selector behind.
+				if reported.NvosPrimaryMacAddress == nil {
+					if _, cerr := esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
+						ExpectedSwitchID:      cur.ID,
+						NvosPrimaryMacAddress: true,
+					}); cerr != nil {
+						return cerr
+					}
+				}
+				return nil
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedSwitchID", cur.ID.String()).Msg("failed to update ExpectedSwitch in DB")
@@ -183,9 +232,9 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		}
 	}
 
-	// Delete any Expected Switch present in DB not present in NICo.
-	// We only act if this is the last page (or paging disabled) and outside race window.
-	// The source of truth for NICo is reportedIDs.
+	// Delete stale records missing from `reportedIDs` only after the final page
+	// (or when paging is disabled). Matching the saved `Updated` timestamp in
+	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
 		for _, es := range existingExpectedSwitches {
 			if _, keep := reportedIDs[es.ID]; keep {
@@ -195,11 +244,14 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			if site.IsTimeWithinStaleInventoryThreshold(es.Updated) {
 				continue
 			}
-			logger.Info().Str("ExpectedSwitchID", es.ID.String()).Msg("deleting ExpectedSwitch from DB since it was no longer reported in inventory from Site")
-			if derr := esDAO.Delete(ctx, nil, es.ID); derr != nil {
+			deleted, derr := esDAO.DeleteIfUnchanged(ctx, nil, es.ID, es.Updated)
+			if derr != nil {
 				logger.Error().Err(derr).Str("ExpectedSwitchID", es.ID.String()).Msg("failed to delete ExpectedSwitch from DB")
+				continue
 			}
-
+			if deleted {
+				logger.Info().Str("ExpectedSwitchID", es.ID.String()).Msg("deleted ExpectedSwitch no longer reported in inventory from Site")
+			}
 		}
 	}
 

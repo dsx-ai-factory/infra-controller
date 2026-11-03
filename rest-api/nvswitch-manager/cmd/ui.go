@@ -424,7 +424,7 @@ func (s *UIServer) handleSwitches(w http.ResponseWriter, r *http.Request) {
 		"SortBy":       sortBy,
 	}
 
-	s.templates.ExecuteTemplate(w, "layout.html", data)
+	s.renderPage(w, data)
 }
 
 // statusPriority returns a sort priority for update status (lower = higher priority)
@@ -602,7 +602,7 @@ func (s *UIServer) handleUpdates(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	s.templates.ExecuteTemplate(w, "layout.html", data)
+	s.renderPage(w, data)
 }
 
 // API handlers for AJAX calls
@@ -622,7 +622,7 @@ func (s *UIServer) handleAPISwitches(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp.Nvswitches)
+	writeJSONResponse(w, resp.Nvswitches)
 }
 
 func (s *UIServer) handleAPIUpdates(w http.ResponseWriter, r *http.Request) {
@@ -646,7 +646,7 @@ func (s *UIServer) handleAPIUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp.Updates)
+	writeJSONResponse(w, resp.Updates)
 }
 
 func (s *UIServer) handleAPIBundles(w http.ResponseWriter, r *http.Request) {
@@ -664,7 +664,7 @@ func (s *UIServer) handleAPIBundles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp.Bundles)
+	writeJSONResponse(w, resp.Bundles)
 }
 
 func (s *UIServer) handleAPIPowerControl(w http.ResponseWriter, r *http.Request) {
@@ -717,7 +717,7 @@ func (s *UIServer) handleAPIPowerControl(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSONResponse(w, resp)
 }
 
 // BulkQueueUpdateRequest wraps a bulk firmware update request
@@ -800,7 +800,7 @@ func (s *UIServer) handleAPIQueueUpdate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSONResponse(w, resp)
 }
 
 func (s *UIServer) handleAPICancelUpdate(w http.ResponseWriter, r *http.Request) {
@@ -829,7 +829,7 @@ func (s *UIServer) handleAPICancelUpdate(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSONResponse(w, resp)
 }
 
 // SwitchRegistrationRequest represents a single switch registration in JSON format
@@ -961,7 +961,7 @@ func (s *UIServer) handleAPIRegisterSwitch(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSONResponse(w, resp)
 }
 
 func parseInt32(s string) (int32, error) {
@@ -980,7 +980,7 @@ func (s *UIServer) handleAPIUpdateLog(w http.ResponseWriter, r *http.Request) {
 	// Sanitize the update ID to prevent path traversal
 	// UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 	for _, c := range updateID {
-		if !((c >= 'a' && c <= 'f') || (c >= '0' && c <= '9') || c == '-') {
+		if (c < 'a' || c > 'f') && (c < '0' || c > '9') && c != '-' {
 			http.Error(w, "invalid update ID format", http.StatusBadRequest)
 			return
 		}
@@ -992,7 +992,7 @@ func (s *UIServer) handleAPIUpdateLog(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			writeJSONResponse(w, map[string]interface{}{
 				"found": false,
 				"error": "Log file not found. This update may not use the script strategy or hasn't started yet.",
 			})
@@ -1003,7 +1003,7 @@ func (s *UIServer) handleAPIUpdateLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSONResponse(w, map[string]interface{}{
 		"found":   true,
 		"content": string(content),
 		"path":    logPath,
@@ -1016,5 +1016,19 @@ func (s *UIServer) renderError(w http.ResponseWriter, title, message string) {
 		"ErrorMessage": message,
 		"Page":         "error",
 	}
-	s.templates.ExecuteTemplate(w, "layout.html", data)
+	s.renderPage(w, data)
+}
+
+func writeJSONResponse(w http.ResponseWriter, value interface{}) {
+	err := json.NewEncoder(w).Encode(value)
+	if err != nil {
+		log.WithField(log.ErrorKey, err.Error()).Error("Failed to write JSON response")
+	}
+}
+
+func (s *UIServer) renderPage(w http.ResponseWriter, data interface{}) {
+	err := s.templates.ExecuteTemplate(w, "layout.html", data)
+	if err != nil {
+		log.WithField(log.ErrorKey, err.Error()).Error("Failed to render UI page")
+	}
 }

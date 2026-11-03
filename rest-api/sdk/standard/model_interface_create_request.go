@@ -20,13 +20,13 @@ import (
 // checks if the InterfaceCreateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &InterfaceCreateRequest{}
 
-// InterfaceCreateRequest Request data to create an Interface for an Instance by associating it with a Subnet, an explicit VPC Prefix, or a VPC from which the Controller selects a prefix. Exactly one of `subnetId`, `vpcPrefixId`, or `vpcId` must be specified.  If the VPC specified in the request has FNN virtualization type, all interfaces must specify either `vpcPrefixId` or `vpcId`.  If the VPC has Ethernet network virtualization type then all interfaces must specify Subnet.
+// InterfaceCreateRequest Request data to create an Interface for an Instance by associating it with a Subnet, an explicit VPC Prefix, or a VPC from which the Controller selects a prefix. Exactly one of `subnetId`, `vpcPrefixId`, or `vpcId` must be specified.  If the VPC specified in the request has FNN virtualization type, all interfaces must specify either `vpcPrefixId` or `vpcId`.  If the VPC has Ethernet network virtualization type then all interfaces must specify Subnet.  On Instance create, update, and batch create, a non-primary Interface may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant only when the consuming Tenant has effective `crossTenantInterfaceCreation`. Cross-Tenant Subnet selectors are unsupported. The primary physical Interface must select the consuming Tenant's primary VPC; with device metadata this is the PF whose `deviceInstance` is `0`, while legacy requests use the first PF.
 type InterfaceCreateRequest struct {
 	// ID of the Subnet to attach to the Interface
 	SubnetId *string
-	// ID of the VPC Prefix to attach to the Interface
+	// ID of the explicit VPC Prefix to attach to the Interface. A VPC Prefix ID owned by another Tenant must be obtained out of band and requires effective `crossTenantInterfaceCreation`.
 	VpcPrefixId *string
-	// ID of the VPC from which the Controller should select a prefix. `ipFamilies` must also be specified, and `ipAddress` cannot be specified.
+	// ID of the VPC from which the Controller should select a prefix. `ipFamilies` must also be specified, and `ipAddress` cannot be specified. A VPC ID owned by another Tenant must be obtained out of band and requires effective `crossTenantInterfaceCreation`.
 	VpcId *string
 	// Address families requested for Controller prefix selection. Required with `vpcId` and prohibited otherwise. Specify `IPv4`, `IPv6`, or both for dual-stack allocation. Duplicate values are accepted and normalized in `IPv4`, then `IPv6` order.
 	IpFamilies []string

@@ -254,6 +254,7 @@ enum RedirectSuppressionReason {
     InvalidHeaderValue,
     InvalidUriReference,
     UnsupportedScheme,
+    UrlCredentials,
     CrossOrigin,
     AmbiguousPath,
     InvalidRelativeReference,
@@ -268,6 +269,7 @@ impl RedirectSuppressionReason {
             Self::InvalidHeaderValue => "invalid_header_value",
             Self::InvalidUriReference => "invalid_uri_reference",
             Self::UnsupportedScheme => "unsupported_scheme",
+            Self::UrlCredentials => "url_credentials",
             Self::CrossOrigin => "cross_origin",
             Self::AmbiguousPath => "ambiguous_path",
             Self::InvalidRelativeReference => "invalid_relative_reference",
@@ -279,7 +281,7 @@ impl RedirectSuppressionReason {
 
 /// Resolves an upstream `Location` against the response URL. A target naming
 /// this BMC is rewritten as a relative reference so a client follow-up returns
-/// through the proxy. Cross-origin, non-HTTP(S), malformed, and ambiguous
+/// through the proxy. Cross-origin, non-HTTP(S), credential-bearing, malformed, and ambiguous
 /// targets are withheld. An explicit fragment is preserved; an absent fragment
 /// remains absent so HTTP's fragment-inheritance rule still applies.
 fn redirect_location(
@@ -302,10 +304,12 @@ fn redirect_location(
     let target = origins.classify(&location);
     match target {
         RedirectTarget::Invalid => {
-            return RedirectLocation::Suppressed(
-                RedirectSuppressionReason::UnsupportedScheme,
-                target,
-            );
+            let reason = if !location.username().is_empty() || location.password().is_some() {
+                RedirectSuppressionReason::UrlCredentials
+            } else {
+                RedirectSuppressionReason::UnsupportedScheme
+            };
+            return RedirectLocation::Suppressed(reason, target);
         }
         RedirectTarget::CrossOrigin => {
             return RedirectLocation::Suppressed(RedirectSuppressionReason::CrossOrigin, target);
@@ -461,6 +465,14 @@ mod tests {
                     ),
             }
 
+            "direct BMC userinfo behind a chained proxy is refused" {
+                ("https://proxy.local:8443/redfish/v1", "192.0.2.5", "https://user:password@192.0.2.5/redfish/v1/Systems")
+                    => RedirectLocation::Suppressed(
+                        RedirectSuppressionReason::UrlCredentials,
+                        RedirectTarget::Invalid,
+                    ),
+            }
+
             "a chained proxy port is not attributed to the BMC" {
                 ("https://proxy.local:8443/redfish/v1", "192.0.2.5", "https://192.0.2.5:8443/redfish/v1/Systems")
                     => RedirectLocation::Suppressed(
@@ -574,9 +586,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             reqwest::header::LOCATION,
-            HeaderValue::from_static(
-                "https://user:password@example.com/private?token=secret#fragment",
-            ),
+            HeaderValue::from_static("https://example.com/private?token=secret#fragment"),
         );
 
         let mut response = None;
@@ -598,7 +608,7 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].field("reason"), Some("cross_origin"));
         let rendered_logs = format!("{logs:?}");
-        for secret in ["user", "password", "private", "token", "secret", "fragment"] {
+        for secret in ["private", "token", "secret", "fragment"] {
             assert!(!rendered_logs.contains(secret), "Location leaked: {secret}");
         }
         assert_eq!(
@@ -617,56 +627,75 @@ mod tests {
 
     #[test]
     fn credential_bearing_locations_are_never_relayed() {
-        let metrics = MetricsCapture::start();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            reqwest::header::LOCATION,
-            HeaderValue::from_static("/redfish/v1/Systems?session=%2574oken-123"),
-        );
-        let sensitive_values = ["token-123".to_string()];
+        for (location, reason, target, mode, mode_name) in [
+            (
+                "/redfish/v1/Systems?session=%2574oken-123",
+                "sensitive_value",
+                "same_origin",
+                RedirectMode::ReturnToClient,
+                "return_to_client",
+            ),
+            (
+                "https://redirect-user:redirect-password@192.0.2.5/redfish/v1/Systems",
+                "url_credentials",
+                "invalid",
+                RedirectMode::FollowSameOrigin,
+                "follow_same_origin",
+            ),
+        ] {
+            let metrics = MetricsCapture::start();
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                reqwest::header::LOCATION,
+                HeaderValue::from_static(location),
+            );
+            let sensitive_values = ["token-123".to_string()];
 
-        let mut redirect = None;
-        let logs = capture_logs(|| {
-            redirect = Some(build_proxy_response(
-                reqwest::StatusCode::FOUND,
+            let mut redirect = None;
+            let logs = capture_logs(|| {
+                redirect = Some(build_proxy_response(
+                    reqwest::StatusCode::FOUND,
+                    &headers,
+                    PreparedResponseBody::Unchanged(Body::empty()),
+                    &origins("https://192.0.2.5/redfish/v1"),
+                    &Method::GET,
+                    mode,
+                    &sensitive_values,
+                ));
+            });
+            let redirect = redirect.expect("response built");
+            assert_eq!(redirect.status(), StatusCode::BAD_GATEWAY);
+            assert!(!redirect.headers().contains_key(reqwest::header::LOCATION));
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].field("reason"), Some(reason));
+            assert!(!format!("{logs:?}").contains("token-123"));
+            assert!(!format!("{logs:?}").contains("redirect-password"));
+            assert!(!format!("{logs:?}").contains("redirect-user"));
+            assert_eq!(
+                metrics.counter_delta(
+                    "carbide_bmc_proxy_redirects_total",
+                    &[
+                        ("mode", mode_name),
+                        ("status", "302"),
+                        ("target", target),
+                        ("disposition", "rejected"),
+                    ],
+                ),
+                1.0
+            );
+
+            let created = build_proxy_response(
+                reqwest::StatusCode::CREATED,
                 &headers,
                 PreparedResponseBody::Unchanged(Body::empty()),
                 &origins("https://192.0.2.5/redfish/v1"),
-                &Method::GET,
-                RedirectMode::ReturnToClient,
+                &Method::POST,
+                mode,
                 &sensitive_values,
-            ));
-        });
-        let redirect = redirect.expect("response built");
-        assert_eq!(redirect.status(), StatusCode::BAD_GATEWAY);
-        assert!(!redirect.headers().contains_key(reqwest::header::LOCATION));
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].field("reason"), Some("sensitive_value"));
-        assert!(!format!("{logs:?}").contains("token-123"));
-        assert_eq!(
-            metrics.counter_delta(
-                "carbide_bmc_proxy_redirects_total",
-                &[
-                    ("mode", "return_to_client"),
-                    ("status", "302"),
-                    ("target", "same_origin"),
-                    ("disposition", "rejected"),
-                ],
-            ),
-            1.0
-        );
-
-        let created = build_proxy_response(
-            reqwest::StatusCode::CREATED,
-            &headers,
-            PreparedResponseBody::Unchanged(Body::empty()),
-            &origins("https://192.0.2.5/redfish/v1"),
-            &Method::POST,
-            RedirectMode::ReturnToClient,
-            &sensitive_values,
-        );
-        assert_eq!(created.status(), StatusCode::CREATED);
-        assert!(!created.headers().contains_key(reqwest::header::LOCATION));
+            );
+            assert_eq!(created.status(), StatusCode::CREATED);
+            assert!(!created.headers().contains_key(reqwest::header::LOCATION));
+        }
     }
 
     #[test]

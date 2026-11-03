@@ -161,6 +161,8 @@ var reservedBodyFlagNames = map[string]bool{
 // generated paths remain available for compatibility.
 var commandPathAliases = map[string][]string{
 	"attach-vpc-to-subnet":                              {"subnet", "attach-vpc"},
+	"get-machine-spectrumx-multiplane":                  {"machine", "spectrumx-multiplane", "get"},
+	"update-machine-spectrumx-multiplane":               {"machine", "spectrumx-multiplane", "update"},
 	"bringup-rack":                                      {"rack", "bringup"},
 	"bringup-racks":                                     {"rack", "bringup-all"},
 	"cancel-task":                                       {"task", "cancel"},

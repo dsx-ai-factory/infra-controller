@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_uuid::DbTable;
 use config_version::ConfigVersion;
 use model::machine_validation::MachineValidationExternalConfig;
 use sqlx::PgConnection;
@@ -21,19 +22,27 @@ use sqlx::PgConnection;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+/// `find_config_by_name` loads a named external configuration. Only a missing
+/// row returns `NotFoundError`; other failures retain their SQLx source and query.
 pub async fn find_config_by_name(
     txn: impl DbReader<'_>,
     name: &str,
 ) -> DatabaseResult<MachineValidationExternalConfig> {
-    let query = "SELECT
-            name, description, config, version
-        FROM machine_validation_external_config WHERE name=$1";
-    match sqlx::query_as(query).bind(name).fetch_one(txn).await {
+    let query = format!(
+        "SELECT {} FROM machine_validation_external_config WHERE name=$1",
+        MachineValidationExternalConfig::db_table_columns(),
+    );
+    match sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(name)
+        .fetch_one(txn)
+        .await
+    {
         Ok(val) => Ok(val),
-        Err(_) => Err(DatabaseError::NotFoundError {
+        Err(sqlx::Error::RowNotFound) => Err(DatabaseError::NotFoundError {
             kind: "machine_validation_external_config",
             id: name.to_owned(),
         }),
+        Err(error) => Err(DatabaseError::query(&query, error)),
     }
 }
 
@@ -88,32 +97,49 @@ pub async fn create_or_update(
     Ok(())
 }
 
+/// `find_configs` loads configurations whose name appears in `names`. Missing
+/// names contribute no entries; empty `names` lists all configurations. The result
+/// order is unspecified. Query failures retain their SQLx source and query.
 pub async fn find_configs(
     txn: impl DbReader<'_>,
+    names: &[String],
 ) -> DatabaseResult<Vec<MachineValidationExternalConfig>> {
-    let query = "SELECT
-            name, description, config, version
-        FROM machine_validation_external_config";
+    let query = format!(
+        "SELECT {} FROM machine_validation_external_config
+         WHERE cardinality($1::text[]) = 0 OR name = ANY($1)",
+        MachineValidationExternalConfig::db_table_columns(),
+    );
 
-    let names = sqlx::query_as(query)
+    let configs = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(names)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(names)
+        .map_err(|e| DatabaseError::query(&query, e))?;
+    Ok(configs)
 }
 
+/// `remove_config` deletes and returns a named external configuration. Only a
+/// missing row returns `NotFoundError`; other failures retain their SQLx source
+/// and query. Run this in a transaction and roll it back on error: PostgreSQL
+/// deletes the row before SQLx decodes the returned configuration.
 pub async fn remove_config(
     txn: &mut PgConnection,
     name: &str,
 ) -> DatabaseResult<MachineValidationExternalConfig> {
-    let query = "DELETE FROM machine_validation_external_config WHERE name=$1
-        RETURNING
-            name, description, config, version";
-    match sqlx::query_as(query).bind(name).fetch_one(txn).await {
+    let query = format!(
+        "DELETE FROM machine_validation_external_config WHERE name=$1 RETURNING {}",
+        MachineValidationExternalConfig::db_table_columns(),
+    );
+    match sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(name)
+        .fetch_one(txn)
+        .await
+    {
         Ok(val) => Ok(val),
-        Err(_) => Err(DatabaseError::NotFoundError {
+        Err(sqlx::Error::RowNotFound) => Err(DatabaseError::NotFoundError {
             kind: "machine_validation_external_config",
             id: name.to_owned(),
         }),
+        Err(error) => Err(DatabaseError::query(&query, error)),
     }
 }

@@ -31,6 +31,10 @@ import (
 	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
+// systemTenantOrganizationID is the organization Core assigns to its own admin VPC
+// (crates/api-core/src/db_init.rs). That VPC is system-owned and never a REST tenant VPC.
+const systemTenantOrganizationID = "carbide_internal"
+
 // ManageVpc is an activity wrapper for managing VPC lifecycle that allows
 // injecting DB access
 type ManageVpc struct {
@@ -52,7 +56,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 
 	stDAO := cdbm.NewSiteDAO(mv.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received VPC inventory for unknown or deleted Site")
@@ -476,6 +480,9 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 
 	reportedVpc := new(cdbm.Vpc)
 	reportedVpc.FromProto(controllerVpc)
+	if reportedVpc.Org == systemTenantOrganizationID {
+		return nil
+	}
 	if reportedVpc.Name == "" {
 		reportedVpc.Name = fmt.Sprintf("recovered-%s", vpcID.String()[:8])
 	}
@@ -676,10 +683,11 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 		TaskQueue: queue.SiteTaskQueue,
 	}
 
-	// Prepare the config update request workflow object. NetworkSecurityGroupId is
-	// intentionally omitted: this activity only syncs metadata fields.
+	// Carry the persisted NSG association while syncing metadata because Core
+	// treats an omitted NetworkSecurityGroupId as detachment.
 	updateVpcRequest := &corev1.VpcUpdateRequest{
-		Id: &corev1.VpcId{Value: vpc.ID.String()},
+		Id:                     &corev1.VpcId{Value: vpc.ID.String()},
+		NetworkSecurityGroupId: vpc.NetworkSecurityGroupID,
 		Metadata: &corev1.Metadata{
 			Name:        vpc.Name,
 			Description: description,
@@ -689,7 +697,7 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 
 	we, err := tc.ExecuteWorkflow(ctx, workflowOptions, "UpdateVPC", updateVpcRequest)
 	if err != nil {
-		logger.Error().Err(err).Str("VPC ID", vpc.ID.String()).Msg("failed to trigger workflow to update VPC Metadata")
+		logger.Error().Err(err).Msg("failed to trigger workflow to update VPC Metadata")
 	} else {
 		logger.Info().Str("Workflow ID", we.GetID()).Msg("triggered workflow to update VPC Metadata")
 	}
@@ -723,7 +731,7 @@ func (mvlm ManageVpcLifecycleMetrics) RecordVpcStatusTransitionMetrics(ctx conte
 
 	siteName, err := mvlm.siteNames.Get(ctx, mvlm.dbSession, siteID)
 	if err != nil {
-		logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
+		logger.Error().Err(err).Msg("failed to retrieve Site from DB")
 		return err
 	}
 
@@ -787,7 +795,7 @@ func NewManageVpcLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb.Sess
 			prometheus.GaugeOpts{
 				Namespace: namespace,
 				Name:      "vpc_operation_latency_seconds",
-				Help:      "Current latency of vpc operations",
+				Help:      "Latency in seconds of the most recently recorded completed VPC operation for each label set on this worker replica",
 			},
 			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
 

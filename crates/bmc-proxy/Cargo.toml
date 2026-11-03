@@ -38,6 +38,7 @@ carbide-tls = { path = "../tls" }
 logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 carbide-utils = { path = "../utils" }
+carbide-uuid = { path = "../uuid" }
 trace-propagation = { path = "../trace-propagation" }
 libc = { workspace = true }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
@@ -112,10 +113,13 @@ serde = { features = ["derive"], workspace = true }
 carbide-version = { path = "../version" }
 
 [dev-dependencies]
+bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
 axum-server = { workspace = true, features = ["tls-rustls"] }
 rcgen = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tonic-prost = { workspace = true }
 

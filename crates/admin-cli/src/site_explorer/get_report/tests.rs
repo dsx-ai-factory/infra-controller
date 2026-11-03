@@ -131,6 +131,16 @@ async fn report_selectors_match_ip_addresses() {
 }
 
 async fn dispatch_report(command: Cmd, hosts: Vec<ExploredManagedHost>) -> serde_json::Value {
+    let output = dispatch_report_output(command, hosts, OutputFormat::Json, false).await;
+    serde_json::from_slice(&output).expect("command writes JSON")
+}
+
+async fn dispatch_report_output(
+    command: Cmd,
+    hosts: Vec<ExploredManagedHost>,
+    format: OutputFormat,
+    paused: bool,
+) -> Vec<u8> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let request_timeout = Duration::from_secs(5);
@@ -145,7 +155,7 @@ async fn dispatch_report(command: Cmd, hosts: Vec<ExploredManagedHost>) -> serde
             &client_config,
         ))),
         config: RuntimeConfig {
-            format: OutputFormat::Json,
+            format,
             request_timeout: client_config.request_timeout,
             page_size: 25,
             extended: false,
@@ -159,7 +169,7 @@ async fn dispatch_report(command: Cmd, hosts: Vec<ExploredManagedHost>) -> serde
         http2::Builder::new(TokioExecutor::new())
             .serve_connection(
                 TokioIo::new(connection),
-                service_fn(move |request| mock_report_request(request, hosts.clone())),
+                service_fn(move |request| mock_report_request(request, hosts.clone(), paused)),
             )
             .await
             .expect("mock serves the report connection");
@@ -176,15 +186,30 @@ async fn dispatch_report(command: Cmd, hosts: Vec<ExploredManagedHost>) -> serde
         .expect("report dispatch did not panic")
         .expect("report dispatch finishes within five seconds")
         .expect("report dispatch succeeds");
-    serde_json::from_slice(&captured.into_bytes().await).expect("command writes JSON")
+    captured.into_bytes().await
 }
 
 async fn mock_report_request(
     request: Request<Incoming>,
     hosts: Vec<ExploredManagedHost>,
+    paused: bool,
 ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
     Ok(match request.uri().path() {
         "/forge.Forge/Version" => grpc_response(BuildInfo::default()),
+        "/forge.Forge/GetSiteExplorerLastRun" => {
+            grpc_response(rpc::site_explorer::SiteExplorerLastRunResponse::default())
+        }
+        "/forge.Forge/FindExploredEndpointIds" => {
+            grpc_response(rpc::site_explorer::ExploredEndpointIdList {
+                endpoint_ids: hosts
+                    .into_iter()
+                    .flat_map(|host| {
+                        std::iter::once(host.host_bmc_ip)
+                            .chain(host.dpus.into_iter().map(|dpu| dpu.bmc_ip))
+                    })
+                    .collect(),
+            })
+        }
         "/forge.Forge/FindExploredManagedHostIds" => grpc_response(ExploredManagedHostIdList {
             host_ids: hosts.into_iter().map(|host| host.host_bmc_ip).collect(),
         }),
@@ -206,6 +231,8 @@ async fn mock_report_request(
                 endpoints: endpoints
                     .filter(|address| request.endpoint_ids.contains(address))
                     .map(|address| ExploredEndpoint {
+                        exploration_paused_for_dpf: paused && address == "192.0.2.10",
+                        report: paused.then(Default::default),
                         address,
                         ..Default::default()
                     })
@@ -238,4 +265,67 @@ fn grpc_response(message: impl Message) -> Response<UnsyncBoxBody<Bytes, Infalli
         .header(header::CONTENT_TYPE, "application/grpc+tonic")
         .body(body)
         .unwrap()
+}
+
+#[tokio::test]
+async fn endpoint_table_displays_provisioning_pause() {
+    let hosts = vec![
+        ExploredManagedHost {
+            host_bmc_ip: "192.0.2.10".to_string(),
+            ..Default::default()
+        },
+        ExploredManagedHost {
+            host_bmc_ip: "192.0.2.11".to_string(),
+            ..Default::default()
+        },
+    ];
+    let options =
+        CliOptions::try_parse_from(["nico-admin-cli", "site-explorer", "get-report", "endpoint"])
+            .unwrap();
+    let Some(CliCommand::SiteExplorer(command)) = options.commands else {
+        panic!("site explorer command");
+    };
+    let output = String::from_utf8(
+        dispatch_report_output(command, hosts.clone(), OutputFormat::AsciiTable, true).await,
+    )
+    .unwrap();
+    assert!(output.contains("Exploration Pause"));
+    let paused = output
+        .lines()
+        .find(|line| line.contains("192.0.2.10"))
+        .unwrap();
+    let active = output
+        .lines()
+        .find(|line| line.contains("192.0.2.11"))
+        .unwrap();
+    assert!(paused.contains("DPU provisioning; resumes after all suppressions clear"));
+    assert_eq!(active.split('|').nth_back(1).unwrap().trim(), "");
+
+    for (address, expected) in [
+        (
+            "192.0.2.10",
+            "DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared",
+        ),
+        ("192.0.2.11", ""),
+    ] {
+        let output = String::from_utf8(
+            dispatch_report_output(
+                parse("endpoint", address).unwrap(),
+                hosts.clone(),
+                OutputFormat::AsciiTable,
+                true,
+            )
+            .await,
+        )
+        .unwrap();
+        let row = output
+            .lines()
+            .find(|line| line.contains("Exploration Pause"))
+            .unwrap();
+        assert_eq!(
+            row.split('|').nth_back(1).unwrap().trim(),
+            expected,
+            "{address}"
+        );
+    }
 }

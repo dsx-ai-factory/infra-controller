@@ -14,6 +14,18 @@ carbide_db_pool_total_conns 1
 # TYPE carbide_resourcepool_free_count gauge
 carbide_resourcepool_free_count{pool="pool1"} 20
 carbide_resourcepool_free_count{pool="pool2"} 10
+# HELP carbide_resourcepool_stats_available Whether the last resource pool statistics poll returned known counts, regardless of age
+# TYPE carbide_resourcepool_stats_available gauge
+carbide_resourcepool_stats_available{pool="pool1"} 1
+carbide_resourcepool_stats_available{pool="pool2"} 1
+# HELP carbide_resourcepool_stats_fresh Whether the last successful resource pool statistics poll is less than 120 seconds old; zero before any success. Used/free count series are absent before success, after a failed poll, or when this gauge is zero
+# TYPE carbide_resourcepool_stats_fresh gauge
+carbide_resourcepool_stats_fresh{pool="pool1"} 1
+carbide_resourcepool_stats_fresh{pool="pool2"} 1
+# HELP carbide_resourcepool_stats_last_success_timestamp_seconds Unix timestamp of the last successful resource pool statistics poll, retained after failure and absent before any success
+# TYPE carbide_resourcepool_stats_last_success_timestamp_seconds gauge
+carbide_resourcepool_stats_last_success_timestamp_seconds{pool="pool1"} 1000
+carbide_resourcepool_stats_last_success_timestamp_seconds{pool="pool2"} 2000
 # HELP carbide_resourcepool_used_count Number of currently allocated values in the resource pool
 # TYPE carbide_resourcepool_used_count gauge
 carbide_resourcepool_used_count{pool="pool1"} 10

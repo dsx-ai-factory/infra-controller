@@ -100,6 +100,7 @@ impl From<&Method> for MethodLabel {
 enum AuthorizationLayer {
     PrincipalAllowList,
     RequestAcl,
+    RequestPath,
 }
 
 /// The one metric the Events below record.
@@ -114,6 +115,73 @@ pub(crate) struct BmcProxyAuthorizationDenied {
     authorization_layer: AuthorizationLayer,
     #[label(name = "method")]
     method_label: MethodLabel,
+}
+
+/// Why a path was rejected before ACL evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathRejectionReason {
+    /// The upstream URL parser cannot parse the path.
+    InvalidPath,
+    /// The upstream URL parser changes the path's spelling or structure.
+    RewrittenPath,
+    /// A percent escape does not contain two hexadecimal digits.
+    MalformedEscape,
+    /// An escape encodes a path separator.
+    EncodedSeparator,
+    /// An escape encodes another percent sign.
+    NestedEncoding,
+    /// An escape encodes an ASCII control character or DEL.
+    EncodedControl,
+}
+
+/// Preserve the diagnostic spellings operators already use.
+impl std::fmt::Display for PathRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidPath => "invalid_path",
+            Self::RewrittenPath => "rewritten_path",
+            Self::MalformedEscape => "malformed_escape",
+            Self::EncodedSeparator => "encoded_separator",
+            Self::NestedEncoding => "nested_encoding",
+            Self::EncodedControl => "encoded_control",
+        })
+    }
+}
+
+/// An ambiguous or structurally unsafe path rejected before ACL evaluation.
+/// Paths are log context; the counter uses only bounded layer and method labels.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_request_path_rejected",
+    metric_family = BmcProxyAuthorizationDenied,
+    log = info,
+    message = "Request refused: the path cannot be safely authorized"
+)]
+pub(crate) struct RequestPathRejected {
+    #[label]
+    authorization_layer: AuthorizationLayer,
+    #[label]
+    method_label: MethodLabel,
+    #[context]
+    path: String,
+    #[context]
+    reason: PathRejectionReason,
+    #[context]
+    method: String,
+}
+
+impl RequestPathRejected {
+    /// Creates a path rejection event with bounded method and layer labels.
+    /// The original method, path, and rejection reason are retained as log context.
+    pub(crate) fn new(method: &Method, path: String, reason: PathRejectionReason) -> Self {
+        Self {
+            authorization_layer: AuthorizationLayer::RequestPath,
+            method_label: method.into(),
+            path,
+            reason,
+            method: method.as_str().to_string(),
+        }
+    }
 }
 
 /// The request reached the per-principal ACL, but no configured rule allowed
@@ -280,6 +348,49 @@ pub(crate) struct UpstreamAuthRetried {
     pub(crate) method: MethodLabel,
     #[context]
     pub(crate) bmc_ip_address: String,
+}
+
+/// The target's certificate failed verification, so the proxy sent it no
+/// request: `[tls.switch]` does not cover the switch's certificate, or the
+/// address no longer belongs to the switch it is cached as.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_upstream_certificate_rejected",
+    metric_name = "carbide_bmc_proxy_upstream_certificate_rejected_total",
+    component = "nico-bmc-proxy",
+    log = warn,
+    metric = counter,
+    message = "upstream certificate failed verification; the request was not sent",
+    describe = "Number of attempts the proxy did not send because the target's certificate failed verification against tls.switch"
+)]
+pub(crate) struct UpstreamCertificateRejected {
+    #[context]
+    pub(crate) bmc_ip_address: String,
+    #[context]
+    pub(crate) error: String,
+}
+
+/// nico-api denied the proxy's probe for the switch at a proxied address, so
+/// the proxy took the address for a BMC's. Expected only while nico-api
+/// predates the proxy's switch support; from a current nico-api it means its
+/// RBAC lost the proxy's grant for `FindSwitchIds`. The proxy then takes
+/// every address for a BMC's until it probes again, so one denial is counted
+/// per retry interval, not per address.
+#[derive(Event)]
+#[event(
+    event_name = "bmc_proxy_switch_probe_denied",
+    metric_name = "carbide_bmc_proxy_switch_probe_denied_total",
+    component = "nico-bmc-proxy",
+    log = warn,
+    metric = counter,
+    message = "nico-api denied the switch lookup; taking addresses for BMCs' until the next probe",
+    describe = "Number of times nico-api denied the proxy's FindSwitchIds probe for the switch at a proxied address, after which the proxy resolves every address as a BMC's until it probes again"
+)]
+pub(crate) struct SwitchProbeDenied {
+    #[context]
+    pub(crate) bmc_ip_address: String,
+    #[context]
+    pub(crate) error: String,
 }
 
 /// The redirect response status, kept to the five statuses HTTP clients

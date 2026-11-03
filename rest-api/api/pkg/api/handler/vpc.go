@@ -16,7 +16,6 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 
@@ -144,23 +143,21 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
 	}
 
-	// Ensure that Tenant has an Allocation with specified Site
-	aDAO := cdbm.NewAllocationDAO(cvh.dbSession)
-	allocationFilter := cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{site.ID}}
-	aCount, err := aDAO.GetCount(ctx, nil, allocationFilter)
+	// Ensure that Tenant has access to specified Site
+	hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, cvh.dbSession, tenant, site.ID)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(err).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
 
-	if aCount == 0 {
+	if !hasSiteAccess {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
-			"Tenant does not have any Allocations with Site specified in request data", nil)
+			"Tenant does not have access to Site specified in request data", nil)
 	}
 
 	vpcDAO := cdbm.NewVpcDAO(cvh.dbSession)
 	if apiRequest.ID != nil {
-		_, total, err := vpcDAO.GetAll(ctx, nil, cdbm.VpcFilterInput{VpcIDs: []uuid.UUID{*apiRequest.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(paginator.DefaultLimit)}, nil)
+		_, total, err := vpcDAO.GetAll(ctx, nil, cdbm.VpcFilterInput{VpcIDs: []uuid.UUID{*apiRequest.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.DefaultLimit)}, nil)
 		if err != nil {
 			logger.Error().Err(err).Msg("db error checking for ID uniqueness of tenant vpc")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Vpc due to DB error", nil)
@@ -339,6 +336,13 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	var labels map[string]string
 	if apiRequest.Labels != nil {
 		labels = apiRequest.Labels
+	}
+
+	// Core rejects an FNN VPC until the Tenant exists on the Site.
+	err = ensurePrivilegedTenantSites(ctx, cvh.dbSession, cvh.scp, logger, tenant, dbUser.ID, site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("error provisioning Tenant on Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to provision Tenant on Site", nil)
 	}
 
 	dpsGroupCreated := false
@@ -705,18 +709,16 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have sufficient privileges to set `routingProfileOverrides`", nil)
 	}
 
-	// Ensure that Tenant has an Allocation with specified Site
-	aDAO := cdbm.NewAllocationDAO(uvh.dbSession)
-	allocationFilter := cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, SiteIDs: []uuid.UUID{vpc.SiteID}}
-	aCount, err := aDAO.GetCount(ctx, nil, allocationFilter)
+	// Ensure that Tenant has access to specified Site
+	hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, uvh.dbSession, tenant, vpc.SiteID)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Allocations count from DB for Tenant and Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site Allocations count for Tenant", nil)
+		logger.Error().Err(err).Msg("error checking Tenant access to Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
 	}
 
-	if aCount == 0 {
+	if !hasSiteAccess {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
-			"Tenant does not have any Allocations with Site specified in request data", nil)
+			"Tenant does not have access to Site specified in request data", nil)
 	}
 
 	vpcDAO := cdbm.NewVpcDAO(uvh.dbSession)
@@ -878,7 +880,12 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 			}
 			dpsNewGroup = *apiRequest.PowerResourceGroup
 			if strings.TrimSpace(dpsOldGroup) != strings.TrimSpace(dpsNewGroup) {
-				instances, _, derr := cdbm.NewInstanceDAO(uvh.dbSession).GetAll(ctx, tx, cdbm.InstanceFilterInput{VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+				// Another Tenant's Instance can attach a secondary Interface to this
+				// VPC, but its Machine remains in its own VPC's power resource group.
+				instances, _, derr := cdbm.NewInstanceDAO(uvh.dbSession).GetAll(ctx, tx, cdbm.InstanceFilterInput{
+					TenantIDs: []uuid.UUID{vpc.TenantID},
+					VpcIDs:    []uuid.UUID{vpc.ID},
+				}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 				if derr != nil {
 					logger.Error().Err(derr).Str("vpcID", vpc.ID.String()).Msg("failed to retrieve VPC instances for DPS migration")
 					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve VPC instances for DPS migration", nil)
@@ -1196,8 +1203,7 @@ func (uvvh UpdateVPCVirtualizationHandler) Handle(c echo.Context) error {
 	}
 
 	// Ensure that Tenant has access to Site
-	tsDAO := cdbm.NewTenantSiteDAO(uvvh.dbSession)
-	_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, vpc.SiteID, nil)
+	err = common.ValidateTenantSiteAccess(ctx, nil, uvvh.dbSession, tenant, vpc.SiteID)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to Site, VPC cannot be updated", nil)
@@ -1921,9 +1927,10 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Cannot delete VPC, one or more VPC prefixes exist for this VPC", nil)
 	}
 
-	// Check if VPC has instance
+	// Check if VPC has instance. The VpcIDs filter also matches other Tenants' Instances
+	// whose Interfaces select this VPC or one of its VPC Prefixes.
 	insDAO := cdbm.NewInstanceDAO(dvh.dbSession)
-	instances, _, err := insDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{TenantIDs: []uuid.UUID{vpc.TenantID}, VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, []string{})
+	instances, _, err := insDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, []string{})
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving instances for this VPC")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve instances for this VPC", nil)
@@ -1953,7 +1960,7 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
 			}
 			vpc = lockedVPC
-			lockedInstances, _, lockErr := insDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{TenantIDs: []uuid.UUID{vpc.TenantID}, VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, nil)
+			lockedInstances, _, lockErr := insDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, nil)
 			if lockErr != nil {
 				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to retrieve instances for VPC deletion")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve instances for this VPC", nil)

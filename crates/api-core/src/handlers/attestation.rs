@@ -304,7 +304,7 @@ pub(crate) async fn attest_quote(
             Some(entry) => entry.ak_pub,
             None => {
                 return Err(CarbideError::AttestQuoteError(
-                    "could not form SQL query to fetch AK pub".into(),
+                    "no attestation key found for the provided credential".into(),
                 )
                 .into());
             }

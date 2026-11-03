@@ -1,4 +1,4 @@
-# Operation Rule Execution
+# Operation Rule Execution <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Operator guide: [Operation Rules](../../operations/flow/operation-rules.md).
 

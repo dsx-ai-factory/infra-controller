@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use http::Response;
-use http::header::CONTENT_TYPE;
+use http::header::{ALLOW, CONTENT_TYPE};
+use http::{Method, Response};
 use hyper::Request;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -36,6 +36,7 @@ use prometheus::{
 use serde::{Deserialize, Serialize};
 
 use crate::HealthError;
+use crate::sink::MetricSemantics;
 
 pub type MetricLabel = (Cow<'static, str>, String);
 type BoxedErr = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -441,6 +442,7 @@ pub struct GaugeReading {
     pub metric_type: String,
     pub unit: String,
     pub value: f64,
+    semantics: MetricSemantics,
     pub labels: Vec<MetricLabel>,
 }
 
@@ -458,12 +460,18 @@ impl GaugeReading {
             metric_type: metric_type.into(),
             unit: unit.into(),
             value,
+            semantics: MetricSemantics::Gauge,
             labels: Vec::new(),
         }
     }
 
     pub fn with_labels(mut self, labels: Vec<MetricLabel>) -> Self {
         self.labels.extend(labels);
+        self
+    }
+
+    pub(crate) fn with_semantics(mut self, semantics: MetricSemantics) -> Self {
+        self.semantics = semantics;
         self
     }
 }
@@ -473,6 +481,7 @@ struct GaugeData {
     metric_type: String,
     unit: String,
     value: f64,
+    semantics: MetricSemantics,
     labels: Vec<MetricLabel>,
     generation: u64,
 }
@@ -491,6 +500,8 @@ pub struct GaugeMetrics {
 impl GaugeMetrics {
     /// Registers gauge readings with an ID unique to the registry. The registration
     /// identity does not add labels or change the names returned by `collect()`.
+    /// `metric_help` supplies gauge `HELP`; counter aliases use the description
+    /// in their sample's `MetricSemantics::CumulativeCounter`.
     pub fn new(
         id: String,
         registry: &Registry,
@@ -552,6 +563,7 @@ impl GaugeMetrics {
                 metric_type: reading.metric_type,
                 unit: reading.unit,
                 value: reading.value,
+                semantics: reading.semantics,
                 labels: reading.labels,
                 generation,
             },
@@ -603,30 +615,12 @@ impl Collector for GaugeMetrics {
     }
 
     fn collect(&self) -> Vec<proto::MetricFamily> {
-        let mut families: HashMap<(String, String, String), proto::MetricFamily> = HashMap::new();
+        let mut families = HashMap::new();
 
         for gauge_ref in self.gauges.iter() {
             let data = gauge_ref.value();
-            let family_key = (
-                data.name.clone(),
-                data.metric_type.clone(),
-                data.unit.clone(),
-            );
-
-            let family = families.entry(family_key.clone()).or_insert_with(|| {
-                let metric_name = format!(
-                    "{}_{}_{}_{}",
-                    self.metric_name_prefix, family_key.0, family_key.1, family_key.2
-                );
-                let mut mf = proto::MetricFamily::default();
-                mf.set_name(metric_name);
-                mf.set_help(self.metric_help.clone());
-                mf.set_field_type(proto::MetricType::GAUGE);
-                mf
-            });
-
-            let mut labels: Vec<proto::LabelPair> = self.static_labels.clone();
-
+            let mut labels = Vec::with_capacity(self.static_labels.len() + data.labels.len());
+            labels.extend_from_slice(&self.static_labels);
             for (name, value) in &data.labels {
                 let mut label = proto::LabelPair::new();
                 label.set_name(name.as_ref().to_owned());
@@ -634,14 +628,54 @@ impl Collector for GaugeMetrics {
                 labels.push(label);
             }
 
-            let mut gauge = proto::Gauge::new();
-            gauge.set_value(data.value);
+            // Both series share one retained reading, so pruning removes both.
+            // Replacement uses the latest value; invalid totals omit only the alias.
+            let counter = match data.semantics {
+                MetricSemantics::CumulativeCounter { description, .. }
+                    if data.semantics.exports_counter(data.value) =>
+                {
+                    Some((proto::MetricType::COUNTER, labels.clone(), description))
+                }
+                _ => None,
+            };
+            for (kind, labels, help) in
+                std::iter::once((proto::MetricType::GAUGE, labels, self.metric_help.as_str()))
+                    .chain(counter)
+            {
+                let family_key = (
+                    data.name.clone(),
+                    data.metric_type.clone(),
+                    data.unit.clone(),
+                    kind,
+                );
+                let family = families.entry(family_key).or_insert_with(|| {
+                    let mut name = format!(
+                        "{}_{}_{}_{}",
+                        self.metric_name_prefix, data.name, data.metric_type, data.unit
+                    );
+                    if kind == proto::MetricType::COUNTER {
+                        name.push_str("_total");
+                    }
+                    let mut family = proto::MetricFamily::default();
+                    family.set_name(name);
+                    family.set_help(help.to_string());
+                    family.set_field_type(kind);
+                    family
+                });
 
-            let mut metric = proto::Metric::new();
-            metric.set_label(labels);
-            metric.set_gauge(gauge);
-
-            family.mut_metric().push(metric);
+                let mut metric = proto::Metric::new();
+                metric.set_label(labels);
+                if kind == proto::MetricType::COUNTER {
+                    let mut counter = proto::Counter::new();
+                    counter.set_value(data.value);
+                    metric.set_counter(counter);
+                } else {
+                    let mut gauge = proto::Gauge::new();
+                    gauge.set_value(data.value);
+                    metric.set_gauge(gauge);
+                }
+                family.mut_metric().push(metric);
+            }
         }
 
         families.into_values().collect()
@@ -687,14 +721,24 @@ fn serve_request<B>(
     req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
-    match req.uri().path() {
-        "/livez" => Ok(Response::builder()
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/livez") => Ok(Response::builder()
             .status(http::StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("ok".to_string())
             .expect("BUG: Response::builder error")),
-        "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
-        "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
+        (&Method::GET, "/metrics") => {
+            serve_prometheus(metrics_manager.export_metrics(), "service metrics")
+        }
+        (&Method::GET, "/telemetry") => {
+            serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics")
+        }
+        (_, "/livez" | "/metrics" | "/telemetry") => Ok(Response::builder()
+            .status(http::StatusCode::METHOD_NOT_ALLOWED)
+            .header(ALLOW, "GET")
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body("method not allowed; use GET".to_string())
+            .expect("BUG: Response::builder error")),
         _ => Ok(Response::builder()
             .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -751,6 +795,7 @@ pub fn sanitize_unit(unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use http::HeaderValue;
 
     use super::*;
 
@@ -778,6 +823,73 @@ mod tests {
         assert_eq!(
             response.body(),
             "not found; use /metrics, /telemetry, or /livez",
+        );
+    }
+
+    #[test]
+    fn metrics_routes_serve_only_get() {
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
+
+        check_values(
+            [
+                Check {
+                    scenario: "liveness probe serves GET",
+                    input: (Method::GET, "/livez"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "service metrics serve GET",
+                    input: (Method::GET, "/metrics"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "telemetry metrics serve GET",
+                    input: (Method::GET, "/telemetry"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "liveness probe rejects POST",
+                    input: (Method::POST, "/livez"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "service metrics reject POST",
+                    input: (Method::POST, "/metrics"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "telemetry metrics reject POST",
+                    input: (Method::POST, "/telemetry"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "unknown route stays not found for POST",
+                    input: (Method::POST, "/definitely-not-a-route"),
+                    expect: (http::StatusCode::NOT_FOUND, None),
+                },
+            ],
+            |(method, path)| {
+                let request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(())
+                    .expect("test request should be valid");
+
+                let response = serve_request(request, metrics_manager.clone())
+                    .expect("request should produce a response");
+                (response.status(), response.headers().get(ALLOW).cloned())
+            },
         );
     }
 
@@ -886,6 +998,134 @@ mod tests {
         collector
             .create_gauge_metrics("endpoint_a".to_string(), "Sensor readings", Vec::new())
             .expect("removed gauge identity must register again");
+    }
+
+    #[test]
+    fn cumulative_readings_preserve_gauges_and_counter_aliases() {
+        let exported_families = |replacement| {
+            let registry = Registry::new();
+            let readings = GaugeMetrics::new(
+                "device".to_string(),
+                &registry,
+                "custom",
+                "Device readings",
+                vec![("endpoint", "device")],
+            )
+            .expect("reading collector");
+            let reading = |value| {
+                GaugeReading::new("device", "hardware", "errors", "count", value)
+                    .with_labels(vec![("component".into(), "pcie".to_string())])
+                    .with_semantics(MetricSemantics::CumulativeCounter {
+                        description: "Number of PCIe errors reported by the device",
+                        start_time: Some(std::time::UNIX_EPOCH),
+                    })
+            };
+            readings.record(
+                GaugeReading::new("replays", "hardware", "replays", "count", 20.0)
+                    .with_labels(vec![("component".into(), "pcie".to_string())])
+                    .with_semantics(MetricSemantics::CumulativeCounter {
+                        description: "Number of PCIe replays reported by the device",
+                        start_time: None,
+                    }),
+            );
+            [10.0, replacement].map(|value| {
+                readings.record(reading(value));
+                registry
+                    .gather()
+                    .into_iter()
+                    .map(|family| {
+                        let points = family
+                            .get_metric()
+                            .iter()
+                            .map(|metric| {
+                                let value = if family.get_field_type() == proto::MetricType::GAUGE {
+                                    metric.get_gauge().value()
+                                } else {
+                                    metric.get_counter().value()
+                                };
+                                let labels = metric
+                                    .get_label()
+                                    .iter()
+                                    .map(|label| {
+                                        (label.name().to_string(), label.value().to_string())
+                                    })
+                                    .collect::<Vec<_>>();
+                                // Bits preserve NaN so the unchanged gauge remains comparable.
+                                (value.to_bits(), labels)
+                            })
+                            .collect::<Vec<_>>();
+                        (
+                            family.name().to_string(),
+                            family.get_field_type(),
+                            family.help().to_string(),
+                            points,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        check_values(
+            [
+                ("positive absolute total", 10.0, 2),
+                ("replacement with zero", 0.0, 2),
+                ("negative total", -1.0, 1),
+                ("NaN total", f64::NAN, 1),
+                ("positive infinity", f64::INFINITY, 1),
+            ]
+            .map(|(scenario, value, family_count)| Check {
+                scenario,
+                input: value,
+                expect: [(10.0, 2), (value, family_count)].map(|(value, family_count)| {
+                    [
+                        (
+                            "custom_hardware_errors_count",
+                            proto::MetricType::GAUGE,
+                            "Device readings",
+                            value,
+                        ),
+                        (
+                            "custom_hardware_errors_count_total",
+                            proto::MetricType::COUNTER,
+                            "Number of PCIe errors reported by the device",
+                            value,
+                        ),
+                    ]
+                    .into_iter()
+                    .take(family_count)
+                    .chain([
+                        (
+                            "custom_hardware_replays_count",
+                            proto::MetricType::GAUGE,
+                            "Device readings",
+                            20.0,
+                        ),
+                        (
+                            "custom_hardware_replays_count_total",
+                            proto::MetricType::COUNTER,
+                            "Number of PCIe replays reported by the device",
+                            20.0,
+                        ),
+                    ])
+                    .map(|(name, kind, help, value)| {
+                        (
+                            name.to_string(),
+                            kind,
+                            help.to_string(),
+                            vec![(
+                                value.to_bits(),
+                                vec![
+                                    ("endpoint".to_string(), "device".to_string()),
+                                    ("component".to_string(), "pcie".to_string()),
+                                ],
+                            )],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                }),
+            }),
+            exported_families,
+        );
     }
 
     #[test]

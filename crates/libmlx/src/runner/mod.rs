@@ -16,6 +16,8 @@
  */
 
 pub mod applier;
+pub(crate) mod attempt;
+pub use attempt::FirmwareToolExecutor;
 pub mod command_builder;
 pub mod error;
 pub mod exec_options;
@@ -24,4 +26,28 @@ pub mod json_parser;
 pub mod result_types;
 #[allow(clippy::module_inception)]
 pub mod runner;
+#[cfg(target_os = "linux")]
+mod supervisor_protocol;
 pub mod traits;
+
+// Recording firmware fixtures use the real framing without exposing the worker
+// protocol to production callers outside the runner.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use supervisor_protocol::{HELLO, Request, Response};
+
+/// Unit-test binaries live in `deps`, while Cargo places the helper beside it.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_firmware_executor() -> FirmwareToolExecutor {
+    let executable = std::env::current_exe().unwrap();
+    let helper = executable
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("mlx-firmware-supervisor");
+    assert!(
+        helper.is_file(),
+        "build the firmware supervisor before unit tests"
+    );
+    FirmwareToolExecutor::with_supervisor_path(helper)
+}

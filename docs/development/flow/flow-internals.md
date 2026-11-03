@@ -1,4 +1,4 @@
-# Flow Implementation
+# Flow Implementation <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 For service responsibilities and dependencies, see [NICo Flow](../../architecture/flow.md). Operator contracts live in [Flow Operations](../../operations/flow/overview.md).
 

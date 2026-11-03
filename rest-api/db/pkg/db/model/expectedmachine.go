@@ -16,6 +16,7 @@ import (
 	otrace "go.opentelemetry.io/otel/trace"
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -46,7 +47,10 @@ var (
 	}
 )
 
-// ExpectedMachine is a record for each bare-metal host expected to be processed by NICo
+// ExpectedMachine is a record for each bare-metal host expected to be processed by NICo.
+//
+// The SKU and Machine foreign keys check only the ID. Their relations also
+// match `SiteID` so stored associations cannot expose another Site's details.
 type ExpectedMachine struct {
 	bun.BaseModel `bun:"table:expected_machine,alias:em"`
 
@@ -56,9 +60,9 @@ type ExpectedMachine struct {
 	BmcMacAddress            string                     `bun:"bmc_mac_address,notnull"`
 	ChassisSerialNumber      string                     `bun:"chassis_serial_number,notnull"`
 	SkuID                    *string                    `bun:"sku_id"`
-	Sku                      *SKU                       `bun:"rel:belongs-to,join:sku_id=id"`
+	Sku                      *SKU                       `bun:"rel:belongs-to,join:sku_id=id,join:site_id=site_id"`
 	MachineID                *string                    `bun:"machine_id"`
-	Machine                  *Machine                   `bun:"rel:belongs-to,join:machine_id=id"`
+	Machine                  *Machine                   `bun:"rel:belongs-to,join:machine_id=id,join:site_id=site_id"`
 	FallbackDpuSerialNumbers []string                   `bun:"fallback_dpu_serial_numbers,array"`
 	Interfaces               []ExpectedMachineInterface `bun:"interfaces,type:jsonb,notnull,default:'[]'::jsonb"`
 	BmcIpAddress             *string                    `bun:"bmc_ip_address"`
@@ -67,6 +71,7 @@ type ExpectedMachine struct {
 	Manufacturer             *string                    `bun:"manufacturer"`
 	Model                    *string                    `bun:"model"`
 	Description              *string                    `bun:"description"`
+	ServerName               *string                    `bun:"server_name"`
 	SlotID                   *int32                     `bun:"slot_id"`
 	TrayIdx                  *int32                     `bun:"tray_idx"`
 	HostID                   *int32                     `bun:"host_id"`
@@ -81,7 +86,9 @@ type ExpectedMachine struct {
 // ExpectedMachineInterface is host NIC intent persisted by REST and forwarded
 // to Core's ExpectedMachine.host_nics field.
 type ExpectedMachineInterface struct {
-	MacAddress         string                               `json:"mac_address"`
+	MacAddress         *string                              `json:"mac_address,omitempty"`
+	PhysicalName       *string                              `json:"physical_name,omitempty"`
+	LogicalName        *string                              `json:"logical_name,omitempty"`
 	NicType            *string                              `json:"nic_type,omitempty"`
 	FixedIP            *string                              `json:"fixed_ip,omitempty"`
 	FixedMask          *string                              `json:"fixed_mask,omitempty"`
@@ -95,12 +102,14 @@ type ExpectedMachineInterface struct {
 // ToProto converts persisted REST interface intent to Core's wire shape.
 func (i ExpectedMachineInterface) ToProto() *corev1.ExpectedHostNic {
 	result := &corev1.ExpectedHostNic{
-		MacAddress:   i.MacAddress,
-		NicType:      i.NicType,
-		FixedIp:      i.FixedIP,
-		FixedMask:    i.FixedMask,
-		FixedGateway: i.FixedGateway,
-		Primary:      i.Primary,
+		MacAddress:     i.MacAddress,
+		PhysicalIfname: i.PhysicalName,
+		LogicalIfname:  i.LogicalName,
+		NicType:        i.NicType,
+		FixedIp:        i.FixedIP,
+		FixedMask:      i.FixedMask,
+		FixedGateway:   i.FixedGateway,
+		Primary:        i.Primary,
 	}
 	if i.NetworkSegmentType != nil {
 		result.NetworkSegmentType = i.NetworkSegmentType.ToProto().Enum()
@@ -121,6 +130,8 @@ func (i *ExpectedMachineInterface) FromProto(proto *corev1.ExpectedHostNic) {
 		return
 	}
 	i.MacAddress = proto.MacAddress
+	i.PhysicalName = proto.PhysicalIfname
+	i.LogicalName = proto.LogicalIfname
 	i.NicType = proto.NicType
 	i.FixedIP = proto.FixedIp
 	i.FixedMask = proto.FixedMask
@@ -221,6 +232,9 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	if em.Description != nil {
 		proto.Description = em.Description
 	}
+	if em.ServerName != nil {
+		proto.ServerName = em.ServerName
+	}
 	if em.SlotID != nil {
 		proto.SlotId = em.SlotID
 	}
@@ -269,6 +283,7 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 // table). A nil proto is a no-op. An invalid or missing proto.Id leaves
 // em.ID unchanged so the caller can validate the proto's UUID before
 // calling.
+// Name and description come from `Metadata`; empty strings become nil.
 func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachineID *string) {
 	if proto == nil {
 		return
@@ -296,10 +311,11 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	} else {
 		em.RackID = nil
 	}
-	em.Name = proto.Name
+	em.Name = cutil.GetPtrIfNotZero(proto.Metadata.GetName())
 	em.Manufacturer = proto.Manufacturer
 	em.Model = proto.Model
-	em.Description = proto.Description
+	em.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
+	em.ServerName = proto.ServerName
 	em.SlotID = proto.SlotId
 	em.TrayIdx = proto.TrayIdx
 	em.HostID = proto.HostId
@@ -324,6 +340,7 @@ type ExpectedMachineCreateInput struct {
 	Manufacturer             *string
 	Model                    *string
 	Description              *string
+	ServerName               *string
 	SlotID                   *int32
 	TrayIdx                  *int32
 	HostID                   *int32
@@ -348,6 +365,7 @@ type ExpectedMachineUpdateInput struct {
 	Manufacturer             *string
 	Model                    *string
 	Description              *string
+	ServerName               *string
 	SlotID                   *int32
 	TrayIdx                  *int32
 	HostID                   *int32
@@ -368,6 +386,7 @@ type ExpectedMachineClearInput struct {
 	Manufacturer             bool
 	Model                    bool
 	Description              bool
+	ServerName               bool
 	SlotID                   bool
 	TrayIdx                  bool
 	HostID                   bool
@@ -422,6 +441,9 @@ type ExpectedMachineDAO interface {
 	UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) ([]ExpectedMachine, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, updated time.Time) (bool, error)
 	// DeleteAll deletes all rows matching a required filter
 	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) error
 	// ReplaceAll replaces all rows matching a required filter
@@ -496,6 +518,7 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 			Manufacturer:             input.Manufacturer,
 			Model:                    input.Model,
 			Description:              input.Description,
+			ServerName:               input.ServerName,
 			SlotID:                   input.SlotID,
 			TrayIdx:                  input.TrayIdx,
 			HostID:                   input.HostID,
@@ -841,6 +864,8 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 	// `bmc_ip_address` is applied only to rows that provide it. The shared
 	// column list would otherwise clear rows whose PATCH input omitted it.
 	bmcIPUpdates := make([]*ExpectedMachine, 0, len(inputs))
+	// Server names have the same omission semantics: update only supplied rows.
+	serverNameUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// host_lifecycle_profile is applied in its own bulk update scoped to only the
 	// rows that set it (see below), so rows that omit it keep their existing value.
 	hlpUpdates := make([]*ExpectedMachine, 0, len(inputs))
@@ -904,6 +929,12 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			em.Description = input.Description
 			columnsSet["description"] = true
 		}
+		if input.ServerName != nil {
+			serverNameUpdates = append(serverNameUpdates, &ExpectedMachine{
+				ID:         input.ExpectedMachineID,
+				ServerName: cutil.GetPtrIfNotZero(*input.ServerName),
+			})
+		}
 		if input.SlotID != nil {
 			em.SlotID = input.SlotID
 			columnsSet["slot_id"] = true
@@ -952,6 +983,9 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		if len(bmcIPUpdates) > 0 {
 			traceColumns = append(traceColumns, "bmc_ip_address")
 		}
+		if len(serverNameUpdates) > 0 {
+			traceColumns = append(traceColumns, "server_name")
+		}
 		if len(hlpUpdates) > 0 {
 			traceColumns = append(traceColumns, "host_lifecycle_profile")
 		}
@@ -976,6 +1010,17 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
 			Model(&bmcIPUpdates).
 			Column("bmc_ip_address").
+			Bulk().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(serverNameUpdates) > 0 {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model(&serverNameUpdates).
+			Column("server_name").
 			Bulk().
 			Exec(ctx)
 		if err != nil {
@@ -1069,6 +1114,10 @@ func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Ex
 		em.Description = nil
 		updatedFields = append(updatedFields, "description")
 	}
+	if input.ServerName {
+		em.ServerName = nil
+		updatedFields = append(updatedFields, "server_name")
+	}
 	if input.SlotID {
 		em.SlotID = nil
 		updatedFields = append(updatedFields, "slot_id")
@@ -1122,6 +1171,22 @@ func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expecte
 	}
 
 	return nil
+}
+
+// DeleteIfUnchanged deletes a row only if its Updated timestamp matches updated.
+// It returns false if the row changed or no longer exists.
+func (emsd ExpectedMachineSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedMachineDAOSpan, attribute.String("id", expectedMachineID.String()))
+
+	result, err := db.GetIDB(tx, emsd.dbSession).NewDelete().Model((*ExpectedMachine)(nil)).
+		Where("id = ?", expectedMachineID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
 }
 
 // DeleteAll deletes all ExpectedMachines matching the supplied filter. An

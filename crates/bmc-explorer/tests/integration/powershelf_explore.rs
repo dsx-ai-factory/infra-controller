@@ -24,10 +24,9 @@ use crate::common;
 #[test]
 async fn explore_liteon_power_shelf() {
     let h = test_support::liteon_powershelf_bmc().await;
-    let report =
-        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
-            .await
-            .unwrap();
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Liteon));
@@ -59,10 +58,9 @@ async fn explore_liteon_power_shelf() {
 #[test]
 async fn explore_delta_power_shelf() {
     let h = test_support::delta_powershelf_bmc().await;
-    let report =
-        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
-            .await
-            .unwrap();
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
 
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Delta));
@@ -104,10 +102,9 @@ async fn explore_delta_power_shelf() {
 #[test]
 async fn explore_delta_power_shelf_all_off() {
     let h = test_support::delta_powershelf_bmc_with_psu_power(vec![false; 6]).await;
-    let report =
-        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
-            .await
-            .unwrap();
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
 
     assert!(!report.systems.is_empty(), "a system must be synthesized");
     assert!(
@@ -127,10 +124,9 @@ async fn explore_delta_power_shelf_mixed() {
         true, false, true, false, true, false,
     ])
     .await;
-    let report =
-        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
-            .await
-            .unwrap();
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
 
     assert!(!report.systems.is_empty(), "a system must be synthesized");
     assert!(

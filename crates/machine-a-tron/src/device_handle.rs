@@ -19,8 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
-use bmc_mock::{ActionError, HostMachineInfo, MockPowerState, ResourceResetType};
+use bmc_mock::{ActionError, HostMachineInfo, ResourceResetType};
 use carbide_uuid::machine::MachineId;
+use nv_redfish::schema::resource::PowerState;
 use uuid::Uuid;
 
 use crate::api_client::ApiClient;
@@ -79,7 +80,7 @@ impl DeviceHandle {
         }
     }
 
-    pub(crate) fn power_state(&self) -> MockPowerState {
+    pub(crate) fn power_state(&self) -> PowerState {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.power_state(),
             DeviceHandleInner::Switch(handle) => handle.power_state(),
@@ -173,6 +174,16 @@ impl DeviceHandle {
         }
     }
 
+    /// Observes live BMC effects without contacting its leased address.
+    /// Returns None when the live BMC resource state is unavailable.
+    pub fn bmc_effect_snapshot(&self) -> Option<bmc_mock::persistence::BmcEffectSnapshot> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.bmc_effect_snapshot(),
+            DeviceHandleInner::Switch(handle) => handle.bmc_effect_snapshot(),
+            DeviceHandleInner::PowerShelf(handle) => handle.bmc_effect_snapshot(),
+        }
+    }
+
     pub fn persisted(&self) -> PersistedDevice {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.persisted(),
@@ -185,6 +196,24 @@ impl DeviceHandle {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.dpus(),
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => &[],
+        }
+    }
+
+    /// Applied tray AC power drops in this actor's lifetime. Switches and power
+    /// shelves have no tray AC-reset effect and return `None`.
+    pub fn aux_power_cycle_generation(&self) -> Option<u64> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => Some(handle.aux_power_cycle_generation()),
+            DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => None,
+        }
+    }
+
+    /// Switch power drops caused by restart requests in this actor's lifetime.
+    /// Other device kinds return `None`.
+    pub fn switch_reboot_generation(&self) -> Option<u64> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => Some(handle.reboot_generation()),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => None,
         }
     }
 
@@ -247,6 +276,27 @@ impl DeviceHandle {
         }
     }
 
+    /// Gives a switch's NVOS user `username` the password a completed RMS
+    /// rotation set. Only a switch has an NVOS.
+    pub(crate) fn set_nvos_password(&self, username: &str, password: &str) -> eyre::Result<()> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.set_nvos_password(username, password),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
+                eyre::bail!("only a switch has an NVOS password")
+            }
+        }
+    }
+
+    /// Restores a switch's NVOS factory credentials without resetting its BMC.
+    pub(crate) fn reset_nvos(&self) -> eyre::Result<()> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.reset_nvos(),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
+                eyre::bail!("only a switch has an NVOS to reset")
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_control_test(dpus: Vec<DpuMachineHandle>, ipmi_port: Option<u16>) -> Self {
         Self::machine(MachineHandle::for_control_test(dpus, ipmi_port))
@@ -281,5 +331,43 @@ impl DeviceHandle {
             None,
             machine_config_section,
         ))
+    }
+
+    /// A host handle for control-router tests, backed by `host_info`.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_host(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+    ) -> Self {
+        Self::machine(MachineHandle::for_control_test_host(
+            host_info,
+            Vec::new(),
+            machine_config_section,
+        ))
+    }
+
+    /// A switch handle for control-router tests with an optional NVOS lease.
+    #[cfg(test)]
+    pub(crate) fn for_control_test_switch(
+        host_info: HostMachineInfo,
+        machine_config_section: &str,
+        nvos_ip: Option<Ipv4Addr>,
+    ) -> Self {
+        Self::switch(SwitchHandle::for_control_test(
+            host_info,
+            machine_config_section,
+            nvos_ip,
+        ))
+    }
+
+    /// Sets the simulated NVOS lease of a switch handle; other devices have none.
+    #[cfg(test)]
+    pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.set_control_test_nvos_ip(ip),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
+                unreachable!("control-test NVOS addresses are only set on switches")
+            }
+        }
     }
 }

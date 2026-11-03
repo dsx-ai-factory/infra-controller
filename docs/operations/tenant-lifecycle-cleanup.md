@@ -156,22 +156,25 @@ copy of the VPC VRF. The DPU also removes the host-to-DPU BGP session in the
 tenant VRF, per-interface routing policy, and any routes previously leaked to
 the underlay.
 
-**Prevent unknown or released hosts from using network resources.** The
-release flow is convergence-gated. The state machine blocks until either the
-DPU confirms that all tenant interfaces have moved onto the admin overlay or
-the machine carries a health alert that prevents reuse. This gate prevents a
-released instance from lingering as a "ghost instance." NICo returns tenant IP,
-VNI, and DPU-loopback allocations to their pools and deletes the instance
-record. Force-delete tears down the same fabric state through the same APIs.
+**Prevent unknown or released hosts from using network resources.** An accepted
+release request marks the instance for deletion; cleanup continues in the
+background. Before releasing network allocations and deleting the instance
+record, the controller waits for the DPUs to confirm the switch to the admin
+network. A health alert does not replace that confirmation.
 
-**Prevent cross-tenant leakage of IPs, connectivity, or metadata.** NICo does
-not report the instance as deleted until every fabric—Ethernet, InfiniBand, and
-NVLink—reports that the host has been removed from all tenant partitions.
-Addresses and VNIs return to their pools only after teardown. The released
-instance's DNS records are also removed. These actions prevent the next tenant
-from inheriting a live address or reaching the prior tenant. The DPU metadata
-service is reconfigured for the post-tenant phase so that a later occupant
-cannot read the prior tenant's metadata or identity.
+Force deletion is different. It requests external fabric cleanup, but a new
+deletion does not wait for DPU acknowledgement by default. Deleting the records
+does not prove that the DPU has stopped forwarding tenant traffic. Refer to the
+[optional DPU acknowledgement wait](../playbooks/force_delete.md#optional-dpu-acknowledgement-wait)
+for when to use the wait and what it confirms.
+
+**Understand what release confirms.** Release does not wait for confirmation
+from every fabric. If InfiniBand state cannot be observed, cleanup can finish
+with an `IbCleanupPending` alert that prevents new allocations until the IB
+monitor confirms cleanup. This path does not wait for NVLink removal.
+
+NICo also removes the instance's DNS records and reconfigures the DPU metadata
+service so the next tenant cannot read the prior tenant's metadata or identity.
 
 Verify network cleanup from the per-host cleanup state and DPU/machine network
 status:
@@ -259,7 +262,7 @@ Useful metrics for fleet-level monitoring include:
 | `carbide_reboot_attempts_in_booting_with_discovery_image` | Detect hosts that require repeated discovery-image reboots. |
 | `carbide_measured_boot_machines_per_machine_state_total` | Review measured boot machine state coverage. |
 | `carbide_pending_host_firmware_update_count` | Count hosts that need host firmware updates. |
-| `carbide_pending_dpu_nic_firmware_update_count` | Count DPUs that need NIC firmware updates. |
+| `carbide_pending_dpu_nic_firmware_update_count` | Count classic and DPF drift candidates under the filters in [DPU Firmware Updates](firmware-updates/dpu-firmware.md#monitor-an-update). |
 | `carbide_active_host_firmware_update_count` | Count hosts actively updating firmware. |
 | `carbide_running_dpu_updates_count` | Count DPUs actively updating firmware. |
 
@@ -325,7 +328,7 @@ storage cleanup:
 1. Wait for the Redfish job to complete.
 1. Run Scout host cleanup.
 1. Recreate the BOSS virtual disk as `VD_0`.
-1. Re-enable host lockdown.
+1. Re-enable host lockdown, unless the host lifecycle profile sets `disable_lockdown`.
 1. Continue to post-cleanup validation.
 
 If the Redfish job fails, NICo retries the job path and, if required, power-cycles the host as part of the recovery loop.

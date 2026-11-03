@@ -85,7 +85,7 @@ func (ms ManageSubnet) reconcileAttachment(ctx context.Context, dao cdbm.SubnetD
 	if _, err := cdbm.NewTenantSiteDAO(ms.dbSession).GetByTenantIDAndSiteID(ctx, nil, s.TenantID, s.SiteID, nil); err != nil {
 		return fmt.Errorf("tenant-Site association not current: %w", err)
 	}
-	site, err := cdbm.NewSiteDAO(ms.dbSession).GetByID(ctx, nil, s.SiteID, nil, false)
+	site, err := cdbm.NewSiteDAO(ms.dbSession).GetByID(ctx, nil, s.SiteID, nil, false, false)
 	if err != nil || site.Status != cdbm.SiteStatusRegistered {
 		return fmt.Errorf("Site is unavailable for Subnet recovery: %v", err)
 	}

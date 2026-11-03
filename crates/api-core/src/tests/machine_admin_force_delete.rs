@@ -37,13 +37,13 @@ use carbide_uuid::vpc::VpcPrefixId;
 use common::api_fixtures::dpu::create_dpu_machine;
 use common::api_fixtures::host::host_discover_dhcp;
 use common::api_fixtures::ib_partition::{DEFAULT_TENANT, create_ib_partition};
-use common::api_fixtures::instance::create_instance_with_ib_config;
+use common::api_fixtures::instance::{create_instance_with_ib_config, seed_service_vpc_endpoint};
 use common::api_fixtures::tpm_attestation::EK_CERT_SERIALIZED;
 use common::api_fixtures::vpc::create_vpc;
 use common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_multi_dpu,
     create_managed_host_with_dpf, create_test_env, create_test_env_with_overrides, get_config,
-    get_instance_type_fixture_id,
+    get_instance_type_fixture_id, network_configured_with_health,
 };
 use config_version::ConfigVersion;
 use model::address_selection_strategy::AddressSelectionStrategy;
@@ -74,6 +74,7 @@ use tonic::Request;
 use crate::api::Api;
 use crate::attestation as attest;
 use crate::tests::common;
+use crate::tests::dpf::phase_observation;
 
 async fn get_partition_status(api: &Api, ib_partition_id: IBPartitionId) -> IbPartitionStatus {
     let segment = api
@@ -481,6 +482,7 @@ async fn test_admin_force_delete_orders_locks_against_exploration(pool: sqlx::Pg
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
             release_preserved_addresses: false,
+            wait_for_instance_dpu: false,
         }))
         .await
     });
@@ -567,6 +569,7 @@ async fn force_delete_marked_host_address(
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
             release_preserved_addresses,
+            wait_for_instance_dpu: false,
         }))
         .await
         .unwrap()
@@ -682,6 +685,7 @@ async fn test_admin_force_delete_orders_endpoint_locks_by_address(pool: sqlx::Pg
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
             release_preserved_addresses: false,
+            wait_for_instance_dpu: false,
         }))
         .await
     });
@@ -760,6 +764,7 @@ async fn test_admin_force_delete_orders_topology_before_endpoint(pool: sqlx::PgP
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
             release_preserved_addresses: false,
+            wait_for_instance_dpu: false,
         }))
         .await
     });
@@ -1089,10 +1094,40 @@ async fn force_delete(
     machine_id: &MachineId,
 ) -> rpc::forge::AdminForceDeleteMachineResponse {
     env.api
-        .admin_force_delete_machine(tonic::Request::new(force_delete_request(machine_id)))
+        .admin_force_delete_machine(Request::new(force_delete_request(machine_id)))
         .await
         .unwrap()
         .into_inner()
+}
+
+async fn force_delete_with_network_ack(
+    env: &TestEnv,
+    machine_id: &MachineId,
+) -> Result<tonic::Response<rpc::forge::AdminForceDeleteMachineResponse>, tonic::Status> {
+    let response = env
+        .api
+        .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
+            wait_for_instance_dpu: true,
+            ..force_delete_request(machine_id)
+        }))
+        .await?;
+    if response.get_ref().all_done {
+        return Ok(response);
+    }
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let snapshot = db::managed_host::load_snapshot(txn.as_mut(), machine_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let dpu_ids = snapshot.host_snapshot.associated_dpu_machine_ids();
+    txn.commit().await.unwrap();
+    for dpu_id in dpu_ids {
+        network_configured_with_health(env, &dpu_id, None).await;
+    }
+    env.api
+        .admin_force_delete_machine(Request::new(force_delete_request(machine_id)))
+        .await
 }
 
 fn force_delete_request(machine_id: &impl std::fmt::Display) -> AdminForceDeleteMachineRequest {
@@ -1105,7 +1140,462 @@ fn force_delete_request(machine_id: &impl std::fmt::Display) -> AdminForceDelete
         delete_bmc_suppressions: false,
         delete_retained_boot_interfaces: false,
         release_preserved_addresses: false,
+        wait_for_instance_dpu: false,
     }
+}
+
+/// Builds a DPF-enabled environment whose caller controls host-deletion outcomes so retry and
+/// orphan policies share identical managed-host setup.
+async fn dpf_force_delete_test_env(pool: sqlx::PgPool, mut mock: MockDpfOperations) -> TestEnv {
+    // Supply DPF ingestion responses while leaving host-deletion behavior under caller control.
+    mock.expect_get_service_versions_for_dpu().returning(|_| {
+        Ok(vec![carbide_dpf::DpuServiceVersion {
+            name: "test-service".to_string(),
+            version: "test-version".to_string(),
+            url: "https://example.com/test-service".to_string(),
+        }])
+    });
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
+    mock.expect_register_dpu_node().returning(|_| Ok(()));
+    mock.expect_release_maintenance_hold().returning(|_| Ok(()));
+    mock.expect_is_reboot_required().returning(|_| Ok(false));
+    mock.expect_deployment_type_for_dpu()
+        .returning(|__, _| Ok(DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(carbide_dpf::DpuPhase::Ready)));
+
+    // Enable the BF3 deployment required for the managed host to use DPF ingestion.
+    let mut config = get_config();
+    config.dpf = crate::cfg::file::DpfConfig {
+        enabled: true,
+        deployments: crate::cfg::file::DpfDeploymentsConfig {
+            bf3: crate::cfg::file::DpfDeploymentConfig {
+                bfb_url: Some("http://example.com/test.bfb".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
+    create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_dpf_sdk(dpf_sdk),
+    )
+    .await
+}
+
+/// Verifies force-delete rejects persisted service endpoints before its
+/// irreversible Machine transition, so retries leave the normal cleanup owner
+/// and the tenant instance intact.
+#[crate::sqlx_test]
+async fn force_delete_rejects_service_vpc_endpoints_before_state_transition(pool: sqlx::PgPool) {
+    // Create an assigned host whose instance has durable endpoint ownership.
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let endpoint =
+        seed_service_vpc_endpoint(&env, instance.id, managed_host.dpu_ids[0], segment_id).await;
+
+    // Both the first request and its retry must fail without exposing ForceDeletion.
+    for attempt in [
+        // The initial request proves the endpoint guard prevents entering ForceDeletion.
+        "initial request",
+        // The retry proves rollback leaves the same guard and ownership state intact.
+        "retry",
+    ] {
+        let error = env
+            .api
+            .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id)))
+            .await
+            .expect_err(attempt);
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{attempt}");
+        assert_eq!(
+            error.message(),
+            format!(
+                "instance {} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
+                instance.id
+            ),
+            "{attempt}"
+        );
+
+        // Reload after each rollback to catch a committed state or deletion marker.
+        let mut txn = env.db_txn().await;
+        let snapshot = managed_host.snapshot(&mut txn).await;
+        assert_eq!(
+            snapshot.managed_state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::Ready,
+            },
+            "{attempt}"
+        );
+        let persisted = snapshot.instance.expect("instance remains assigned");
+        assert!(persisted.deleted.is_none(), "{attempt}");
+        assert_eq!(
+            persisted.config.network.service_interfaces,
+            vec![endpoint.clone()],
+            "{attempt}"
+        );
+        txn.commit().await.unwrap();
+    }
+}
+
+/// Verifies explicit orphan consent remains request-scoped through Admin acknowledgement,
+/// preserving every Core-owned service-network record when a polling retry omits consent and
+/// removing them without a tenant configuration update only after consent is repeated.
+#[crate::sqlx_test]
+async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_ack(
+    pool: sqlx::PgPool,
+) {
+    // Use distinct host and service segments so only service-endpoint cleanup can retire the latter.
+    let env = create_test_env(pool).await;
+    let (host_segment_id, service_segment_id) = env.create_vpc_and_dual_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(host_segment_id)
+        .build()
+        .await;
+    let endpoint = seed_service_vpc_endpoint(
+        &env,
+        instance.id,
+        managed_host.dpu_ids[0],
+        service_segment_id,
+    )
+    .await;
+
+    // Persist the normalized address and exact DPU/VPC loopback so the override must release them
+    // and mark the service segment instead of only deleting the Instance JSON.
+    let service_address: IpAddr = "192.0.2.1".parse().unwrap();
+    let mut txn = env.db_txn().await;
+    sqlx::query(
+        "INSERT INTO instance_addresses \
+            (instance_id, address, prefix, segment_id, vpc_id) \
+         VALUES ($1, $2, '192.0.2.0/31'::cidr, $3, $4)",
+    )
+    .bind(instance.id)
+    .bind(service_address)
+    .bind(service_segment_id)
+    .bind(endpoint.vpc_id)
+    .execute(txn.as_mut())
+    .await
+    .unwrap();
+    let service_loopback = db::vpc_dpu_loopback::get_or_allocate_loopback_ip_for_vpc(
+        &env.common_pools,
+        &mut txn,
+        &endpoint.dpu_id,
+        &endpoint.vpc_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance.id,
+            &service_segment_id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|address| address.address)
+        .collect::<Vec<_>>(),
+        vec![service_address],
+    );
+    txn.commit().await.unwrap();
+
+    let orphan_request = || AdminForceDeleteMachineRequest {
+        allow_delete_with_orphaned_dpf_crds: true,
+        wait_for_instance_dpu: true,
+        ..force_delete_request(&managed_host.id)
+    };
+
+    // The first request publishes Admin but retains all ownership until the DPU acknowledges it.
+    let waiting = env
+        .api
+        .admin_force_delete_machine(Request::new(orphan_request()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!waiting.all_done);
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
+    assert!(snapshot.use_admin_network());
+    assert!(!snapshot.managed_host_network_config_version_synced());
+    let retained = snapshot
+        .instance
+        .expect("Admin wait must retain the Instance");
+    assert_eq!(
+        retained.config.network.service_interfaces,
+        vec![endpoint.clone()],
+    );
+    assert_eq!(
+        db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance.id,
+            &service_segment_id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|address| address.address)
+        .collect::<Vec<_>>(),
+        vec![service_address],
+    );
+    assert!(
+        db::vpc_dpu_loopback::find(&mut txn, &endpoint.dpu_id, &endpoint.vpc_id)
+            .await
+            .unwrap()
+            .is_some(),
+    );
+    txn.commit().await.unwrap();
+
+    // Acknowledging Admin satisfies the independently persisted wait requirement.
+    network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
+
+    // Omitting orphan consent after acknowledgement must reject this polling request without
+    // releasing the endpoint, normalized address, or exact DPU/VPC loopback allocation.
+    let error = env
+        .api
+        .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
+            wait_for_instance_dpu: true,
+            ..force_delete_request(&managed_host.id)
+        }))
+        .await
+        .expect_err("orphan consent must be repeated on every polling request");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        format!(
+            "instance {} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
+            instance.id
+        ),
+    );
+
+    // Reload every ownership record to prove the rejected request remained fail-closed.
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
+    assert!(snapshot.use_admin_network());
+    assert!(snapshot.managed_host_network_config_version_synced());
+    assert_eq!(
+        snapshot
+            .instance
+            .expect("rejected polling request must retain the Instance")
+            .config
+            .network
+            .service_interfaces,
+        vec![endpoint.clone()],
+    );
+    assert_eq!(
+        db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance.id,
+            &service_segment_id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|address| address.address)
+        .collect::<Vec<_>>(),
+        vec![service_address],
+    );
+    let retained_loopback =
+        db::vpc_dpu_loopback::find(&mut txn, &endpoint.dpu_id, &endpoint.vpc_id)
+            .await
+            .unwrap()
+            .expect("rejected polling request must retain the DPU/VPC loopback");
+    assert_eq!(retained_loopback.loopback_ip, service_loopback);
+    txn.commit().await.unwrap();
+    let loopback_allocation =
+        db::resource_pool::find_value(&env.pool, &service_loopback.to_string())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.pool_name == VPC_DPU_LOOPBACK)
+            .expect("service loopback remains represented in its pool");
+    assert_eq!(
+        loopback_allocation.state.0,
+        ResourcePoolEntryState::Allocated {
+            owner: endpoint.dpu_id.to_string(),
+            owner_type: OwnerType::Machine.to_string(),
+        },
+    );
+
+    // Repeating orphan consent allows the acknowledged force deletion to complete.
+    let completed = env
+        .api
+        .admin_force_delete_machine(Request::new(orphan_request()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(completed.all_done);
+    assert!(
+        db::instance::find_by_id(&env.pool, instance.id)
+            .await
+            .unwrap()
+            .is_none(),
+    );
+    let mut txn = env.db_txn().await;
+    assert!(
+        db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance.id,
+            &service_segment_id,
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+    );
+    assert!(
+        db::vpc_dpu_loopback::find(&mut txn, &endpoint.dpu_id, &endpoint.vpc_id)
+            .await
+            .unwrap()
+            .is_none(),
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT deleted IS NOT NULL FROM network_segments WHERE id = $1",
+        )
+        .bind(service_segment_id)
+        .fetch_one(txn.as_mut())
+        .await
+        .unwrap(),
+    );
+    txn.commit().await.unwrap();
+    let service_loopback_value = service_loopback.to_string();
+    let loopback_allocation = db::resource_pool::find_value(&env.pool, &service_loopback_value)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.pool_name == VPC_DPU_LOOPBACK)
+        .expect("service loopback remains represented in its pool");
+    assert_eq!(loopback_allocation.state.0, ResourcePoolEntryState::Free);
+    for machine_id in [managed_host.id.into(), managed_host.dpu_ids[0].into()] {
+        validate_machine_deletion(&env, &machine_id, None).await;
+    }
+}
+
+/// Verifies the post-ForceDeletion reread rejects an endpoint committed by a
+/// pre-existing Instance writer, because observed service-network cleanup must
+/// retain a live Instance even after the Machine transition commits.
+#[crate::sqlx_test]
+async fn force_delete_rejects_endpoint_committed_after_state_transition(pool: sqlx::PgPool) {
+    // Create a coherent attachment and endpoint, then retain only the attachment
+    // so the early Machine-level guard observes no committed membership.
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let endpoint =
+        seed_service_vpc_endpoint(&env, instance.id, managed_host.dpu_ids[0], segment_id).await;
+    let mut baseline_txn = env.db_txn().await;
+    let seeded = db::instance::find_by_id(baseline_txn.as_mut(), instance.id)
+        .await
+        .unwrap()
+        .expect("seeded Instance remains stored");
+    let mut network_without_endpoint = seeded.config.network.clone();
+    network_without_endpoint.service_interfaces.clear();
+    db::instance::update_network_config(
+        baseline_txn.as_mut(),
+        instance.id,
+        seeded.network_config_version,
+        &network_without_endpoint,
+        false,
+    )
+    .await
+    .unwrap();
+    baseline_txn.commit().await.unwrap();
+
+    // Lock the Instance and stage the endpoint without committing it. Force-delete
+    // can pass its unlocked early read but must wait at the post-transition reread.
+    let mut writer_txn = env.db_txn().await;
+    db::instance::find_by_id_for_update(writer_txn.as_mut(), instance.id)
+        .await
+        .unwrap()
+        .expect("fixture Instance must exist to be locked");
+    let current = db::instance::find_by_id(writer_txn.as_mut(), instance.id)
+        .await
+        .unwrap()
+        .expect("locked Instance remains stored");
+    assert!(
+        current.config.network.service_interfaces.is_empty(),
+        "the committed baseline must not trip the early endpoint guard",
+    );
+    let mut network_with_endpoint = current.config.network.clone();
+    network_with_endpoint
+        .service_interfaces
+        .push(endpoint.clone());
+    db::instance::update_network_config(
+        writer_txn.as_mut(),
+        instance.id,
+        current.network_config_version,
+        &network_with_endpoint,
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Start through the public RPC and wait until ForceDeletion has committed and
+    // the late guard is blocked acquiring the writer-owned Instance row.
+    let api = managed_host.api.clone();
+    let host_id = managed_host.id;
+    let force_delete_task = tokio::spawn(async move {
+        api.admin_force_delete_machine(Request::new(force_delete_request(&host_id)))
+            .await
+    });
+    wait_until_blocked_on(&env.pool, "FOR UPDATE OF i").await;
+
+    // Publish the endpoint into the late reread, which must stop before marking
+    // the Instance deleted or starting ownership cleanup.
+    writer_txn.commit().await.unwrap();
+    let error = force_delete_task
+        .await
+        .expect("force-delete task must complete")
+        .expect_err("the post-transition endpoint guard must reject force-delete");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        format!(
+            "instance {} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
+            instance.id,
+        ),
+    );
+
+    // Reload persisted state. ForceDeletion proves the early guard passed, while
+    // a live Instance proves the late guard ran before the deletion marker.
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(
+        snapshot.managed_state,
+        ManagedHostState::ForceDeletion,
+        "the Machine transition must commit before the guarded Instance reread",
+    );
+    let persisted = snapshot
+        .instance
+        .expect("the late guard must retain the Instance");
+    assert!(
+        persisted.deleted.is_none(),
+        "the late guard must stop before marking the Instance deleted",
+    );
+    assert_eq!(
+        persisted.config.network.service_interfaces,
+        vec![endpoint],
+        "the concurrent endpoint must remain owned by the live Instance",
+    );
+    txn.commit().await.unwrap();
 }
 
 /// Test-only function that locks one address so force-delete pauses after
@@ -1291,6 +1781,7 @@ async fn test_admin_force_delete_reads_instance_after_machine_lock(pool: sqlx::P
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
             release_preserved_addresses: false,
+            wait_for_instance_dpu: false,
         }))
         .await
     });
@@ -1381,47 +1872,46 @@ async fn test_admin_force_delete_rereads_config_committed_before_marker(pool: sq
         .await;
 
     let mut writer_txn = env.pool.begin().await.unwrap();
+    db::instance::find_by_id_for_update(writer_txn.as_mut(), instance.id)
+        .await
+        .unwrap()
+        .expect("fixture Instance must exist to be locked");
     let initial = db::instance::find_by_id(writer_txn.as_mut(), instance.id)
         .await
         .unwrap()
         .unwrap();
     let mut updated_metadata = initial.metadata.clone();
     updated_metadata.description = "committed before force-delete".to_string();
-    // Model the final writes of a config transaction after its generated
-    // segment exists. The transaction keeps the Instance lock until it commits.
+    // Hold the Instance lock while force-delete captures its initial config.
+    // Commit the final config writes only once deletion reaches the marker lock.
     let mut requested_network = initial.config.network.clone();
     let interface = &mut requested_network.interfaces[0];
     interface.network_details = Some(NetworkDetails::VpcPrefixId(VpcPrefixId::new()));
     interface.network_segment_id = Some(generated_segment_id);
-    db::instance::trigger_update_network_config_request(
-        &instance.id,
-        &initial.config.network,
-        &requested_network,
-        &mut writer_txn,
-    )
-    .await
-    .unwrap();
-    db::instance::update_config(
-        writer_txn.as_mut(),
-        instance.id,
-        initial.config_version,
-        initial.config.clone(),
-        updated_metadata.clone(),
-    )
-    .await
-    .unwrap();
-
     let mut address_guard = env.pool.begin().await.unwrap();
     lock_instance_address(address_guard.as_mut(), instance.id).await;
 
-    let api = env.api.clone();
-    let machine_id = managed_host.id;
-    let force_delete = async move {
-        api.admin_force_delete_machine(Request::new(force_delete_request(&machine_id)))
-            .await
-    };
+    let machine_id = managed_host.id.into();
+    let force_delete = force_delete_with_network_ack(&env, &machine_id);
     let orchestrate = async {
         wait_until_blocked_on(&env.pool, "FOR UPDATE OF i").await;
+        db::instance::trigger_update_network_config_request(
+            &instance.id,
+            &initial.config.network,
+            &requested_network,
+            &mut writer_txn,
+        )
+        .await
+        .unwrap();
+        db::instance::update_config(
+            writer_txn.as_mut(),
+            instance.id,
+            initial.config_version,
+            initial.config.clone(),
+            updated_metadata.clone(),
+        )
+        .await
+        .unwrap();
         writer_txn.commit().await.unwrap();
 
         wait_until_blocked_on(&env.pool, "SELECT id FROM instance_addresses").await;
@@ -1488,12 +1978,8 @@ async fn test_admin_force_delete_marker_rejects_started_config_update(pool: sqlx
     let mut address_guard = env.pool.begin().await.unwrap();
     lock_instance_address(address_guard.as_mut(), instance.id).await;
 
-    let api = env.api.clone();
-    let machine_id = managed_host.id;
-    let force_delete = async move {
-        api.admin_force_delete_machine(Request::new(force_delete_request(&machine_id)))
-            .await
-    };
+    let machine_id = managed_host.id.into();
+    let force_delete = force_delete_with_network_ack(&env, &machine_id);
     let orchestrate = async {
         wait_until_blocked_on(&env.pool, "SELECT id FROM instance_addresses").await;
 
@@ -1735,6 +2221,122 @@ async fn test_admin_force_delete_host_with_ib_instance(pool: sqlx::PgPool) {
 
     mock_fabric.set_unbind_failure(false);
 
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let mut instance_guard = env.pool.begin().await.unwrap();
+        db::instance::find_by_id_for_update(instance_guard.as_mut(), tinstance.id)
+            .await
+            .unwrap()
+            .expect("the failed cleanup must retain the Instance");
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<bool>>(
+                "SELECT force_delete_requires_admin_ack FROM machines WHERE id = $1",
+            )
+            .bind(mh.id)
+            .fetch_one(instance_guard.as_mut())
+            .await
+            .unwrap(),
+            Some(false),
+        );
+        let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+            instance_guard.as_mut(),
+            &tinstance.id,
+            &segment_id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|address| (address.address, address.prefix, address.vpc_id))
+        .collect::<HashSet<_>>();
+        assert!(!addresses.is_empty());
+
+        // Pause the default request after it commits admission. A later
+        // opt-in must still prevent this request from deleting the Instance.
+        let deleting = env
+            .api
+            .admin_force_delete_machine(Request::new(force_delete_request(&mh.id)));
+        tokio::pin!(deleting);
+        tokio::select! {
+            result = &mut deleting => panic!("default request passed the Instance lock: {result:?}"),
+            _ = wait_until_blocked_on(&env.pool, "FOR UPDATE OF i") => {},
+        }
+
+        // The first routing lock has been released. Queue the opt-in ahead
+        // of the default request's final cleanup transaction.
+        let mut routing_guard = env.pool.begin().await.unwrap();
+        db::tenant_prefix_overlap::lock_checks(&mut routing_guard)
+            .await
+            .unwrap();
+        let routing_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(routing_guard.as_mut())
+            .await
+            .unwrap();
+        let opting_in = env.api.admin_force_delete_machine(Request::new(
+            AdminForceDeleteMachineRequest {
+                wait_for_instance_dpu: true,
+                ..force_delete_request(&mh.id)
+            },
+        ));
+        tokio::pin!(opting_in);
+        let opt_in_pid = tokio::select! {
+            result = &mut deleting => panic!("default request passed the Instance lock: {result:?}"),
+            result = &mut opting_in => panic!("opt-in request passed the routing lock: {result:?}"),
+            pid = wait_for_advisory_waiter(&env.pool, routing_pid, None) => pid,
+        };
+
+        // Let UFM cleanup finish, then verify its final transaction waits
+        // behind the opt-in before releasing the routing lock.
+        instance_guard.commit().await.unwrap();
+        tokio::select! {
+            result = &mut deleting => panic!("default cleanup passed the queued opt-in: {result:?}"),
+            result = &mut opting_in => panic!("opt-in request passed the routing lock: {result:?}"),
+            _ = wait_for_advisory_waiter(&env.pool, opt_in_pid, None) => {},
+        }
+        routing_guard.commit().await.unwrap();
+        let (deleting, opting_in) = tokio::join!(deleting, opting_in);
+        for (request, response) in [("default", deleting), ("opt-in", opting_in)] {
+            assert!(
+                !response.unwrap().into_inner().all_done,
+                "{request} request must wait for the Admin acknowledgement",
+            );
+        }
+
+        let mut txn = env.pool.begin().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<bool>>(
+                "SELECT force_delete_requires_admin_ack FROM machines WHERE id = $1",
+            )
+            .bind(mh.id)
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap(),
+            Some(true),
+        );
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
+        assert!(snapshot.use_admin_network());
+        assert!(!snapshot.managed_host_network_config_version_synced());
+        assert_eq!(snapshot.dpu_snapshots.len(), mh.dpu_ids.len());
+        let retained = snapshot.instance.as_ref().unwrap();
+        assert_eq!(retained.id, tinstance.id);
+        assert_eq!(retained.deleted.as_ref(), Some(&deleted_at));
+        let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &tinstance.id,
+            &segment_id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|address| (address.address, address.prefix, address.vpc_id))
+        .collect::<HashSet<_>>();
+        assert_eq!(retained_addresses, addresses);
+        txn.commit().await.unwrap();
+
+        mh.network_configured(&env).await;
+    })
+    .await
+    .expect("concurrent force-delete requests must retain the Instance until Admin is acknowledged");
+
     let response = force_delete(&env, &mh.id).await;
     validate_delete_response(&response, Some(&mh.id), &mh.dpu().id);
 
@@ -1819,6 +2421,442 @@ async fn test_admin_force_delete_managed_host_multi_dpu(pool: sqlx::PgPool) {
     }
 }
 
+/// Default cleanup and a fresh request without an Instance do not require an
+/// acknowledgement, even when the DPU is offline with tenant networking requested.
+#[crate::sqlx_test]
+async fn force_delete_without_an_instance_wait_requirement_cleans_up_offline(pool: sqlx::PgPool) {
+    struct CleanupCase {
+        delete_instance_first: bool,
+        wait_for_instance_dpu: bool,
+    }
+
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let cases = [
+        Case {
+            scenario: "an assigned host does not wait unless requested",
+            input: CleanupCase {
+                delete_instance_first: false,
+                wait_for_instance_dpu: false,
+            },
+            expect: Yields(true),
+        },
+        Case {
+            scenario: "an opted-in request without an Instance ignores leftover tenant intent",
+            input: CleanupCase {
+                delete_instance_first: true,
+                wait_for_instance_dpu: true,
+            },
+            expect: Yields(true),
+        },
+    ];
+
+    check_cases_async(cases, |case| {
+        let env = &env;
+        async move {
+            let managed_host = create_managed_host(env).await;
+            let instance = managed_host
+                .instance_builer(env)
+                .single_interface_network_config(segment_id)
+                .build()
+                .await;
+            let mut txn = env.pool.begin().await.unwrap();
+            if case.delete_instance_first {
+                db::instance::delete(instance.id, txn.as_mut())
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("UPDATE machines SET network_status_observation = NULL WHERE id = $1")
+                .bind(managed_host.dpu_ids[0])
+                .execute(txn.as_mut())
+                .await
+                .unwrap();
+            let snapshot = managed_host.snapshot(&mut txn).await;
+            assert_eq!(snapshot.instance.is_none(), case.delete_instance_first);
+            assert!(!snapshot.use_admin_network());
+            assert!(!snapshot.managed_host_network_config_version_synced());
+            txn.commit().await.unwrap();
+
+            let response = env
+                .api
+                .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
+                    wait_for_instance_dpu: case.wait_for_instance_dpu,
+                    ..force_delete_request(&managed_host.id)
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(
+                db::instance::find_by_id(&env.pool, instance.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            for machine_id in [managed_host.id.into(), managed_host.dpu_ids[0].into()] {
+                validate_machine_deletion(env, &machine_id, None).await;
+            }
+            Ok::<_, ()>(response.all_done)
+        }
+    })
+    .await;
+}
+
+/// An opted-in deletion retains every receiver until Admin is acknowledged and
+/// rechecks that acknowledgement under the routing lock before releasing resources.
+#[crate::sqlx_test]
+async fn force_delete_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.dpu_config.restart_ovs_on_use_admin_network_change = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let managed_host = create_managed_host_multi_dpu(&env, 2).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let mut txn = env.pool.begin().await.unwrap();
+    let tenant_snapshot = managed_host.snapshot(&mut txn).await;
+    assert!(!tenant_snapshot.use_admin_network());
+    assert!(tenant_snapshot.managed_host_network_config_version_synced());
+    let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &instance.id,
+        &segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|address| (address.address, address.prefix, address.vpc_id))
+    .collect::<Vec<_>>();
+    assert!(!addresses.is_empty());
+    txn.commit().await.unwrap();
+
+    // A request naming one DPU still protects the host's entire topology.
+    let waiting = env
+        .api
+        .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
+            wait_for_instance_dpu: true,
+            ..force_delete_request(&managed_host.dpu_ids[0])
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!waiting.all_done);
+    assert_eq!(waiting.instance_id, instance.id.to_string());
+    let mut txn = env.pool.begin().await.unwrap();
+    let admin_snapshot = managed_host.snapshot(&mut txn).await;
+    let admin_version = admin_snapshot.host_snapshot.network_config.version;
+    assert!(admin_snapshot.use_admin_network());
+    assert_ne!(
+        admin_version,
+        tenant_snapshot.host_snapshot.network_config.version
+    );
+    let primary_dpu = admin_snapshot
+        .host_snapshot
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| interface.primary_interface)
+        .unwrap()
+        .attached_dpu_machine_id
+        .unwrap();
+    for dpu in &admin_snapshot.dpu_snapshots {
+        assert_eq!(
+            dpu.network_config
+                .use_admin_network_changed
+                .unwrap_or(false),
+            dpu.id == primary_dpu,
+        );
+    }
+    txn.commit().await.unwrap();
+
+    // Only the first request opts in. Retries cannot cancel its recorded wait.
+    for acknowledged_dpus in [0, 1] {
+        if acknowledged_dpus == 1 {
+            network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
+            sqlx::query("UPDATE machines SET network_status_observation = NULL WHERE id = $1")
+                .bind(managed_host.dpu_ids[1])
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+        let waiting = env
+            .api
+            .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!waiting.all_done);
+        let mut txn = env.pool.begin().await.unwrap();
+        let snapshot = managed_host.snapshot(&mut txn).await;
+        assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
+        assert_eq!(snapshot.host_snapshot.network_config.version, admin_version);
+        assert!(!snapshot.managed_host_network_config_version_synced());
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<bool>>(
+                "SELECT force_delete_requires_admin_ack FROM machines WHERE id = $1",
+            )
+            .bind(managed_host.id)
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap(),
+            Some(true),
+        );
+        assert_eq!(snapshot.dpu_snapshots.len(), 2);
+        let retained = snapshot.instance.as_ref().unwrap();
+        assert_eq!(retained.id, instance.id);
+        assert!(retained.deleted.is_none());
+        let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance.id,
+            &segment_id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|address| (address.address, address.prefix, address.vpc_id))
+        .collect::<Vec<_>>();
+        assert_eq!(retained_addresses, addresses);
+        for machine_id in managed_host
+            .dpu_ids
+            .iter()
+            .copied()
+            .map(MachineId::from)
+            .chain([managed_host.id.into()])
+        {
+            let history = db::state_history::for_object(
+                txn.as_mut(),
+                db::state_history::StateHistoryTableId::Machine,
+                &machine_id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                history
+                    .iter()
+                    .filter(|record| {
+                        serde_json::from_str::<ManagedHostState>(&record.state).unwrap()
+                            == ManagedHostState::ForceDeletion
+                    })
+                    .count(),
+                1,
+                "polling must not duplicate ForceDeletion history for {machine_id}",
+            );
+        }
+        txn.commit().await.unwrap();
+        for dpu_id in &managed_host.dpu_ids {
+            let config = env
+                .api
+                .get_managed_host_network_config(Request::new(
+                    rpc::forge::ManagedHostNetworkConfigRequest {
+                        dpu_machine_id: Some(*dpu_id),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(config.use_admin_network);
+            assert!(config.tenant_interfaces.is_empty());
+            assert_eq!(
+                config.managed_host_config_version,
+                admin_version.to_string()
+            );
+        }
+    }
+
+    network_configured_with_health(&env, &managed_host.dpu_ids[1], None).await;
+    let mut address_guard = env.pool.begin().await.unwrap();
+    lock_instance_address(address_guard.as_mut(), instance.id).await;
+    let deletion = env
+        .api
+        .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id)));
+    let change_network = async {
+        wait_until_blocked_on(&env.pool, "SELECT id FROM instance_addresses").await;
+        // The final transaction already owns the routing lock while it waits
+        // for the addresses; another routing writer must wait behind it.
+        let competing_writer = async {
+            let mut txn = env.pool.begin().await.unwrap();
+            db::tenant_prefix_overlap::lock_checks(&mut txn)
+                .await
+                .expect("routing writer acquires the lock after deletion finishes");
+            txn.commit().await.unwrap();
+        };
+        let invalidate_ack = async {
+            wait_until_blocked_on(&env.pool, "pg_advisory_xact_lock").await;
+            // Machine-side writers can change the version without the routing
+            // lock. The final acknowledgement check must catch that change.
+            let mut txn = env.pool.begin().await.unwrap();
+            assert!(matches!(
+                db::machine::try_update_network_config(
+                    txn.as_mut(),
+                    &managed_host.id,
+                    admin_version,
+                    &admin_snapshot.host_snapshot.network_config.value,
+                )
+                .await
+                .unwrap(),
+                db::ConditionalWrite::Applied(()),
+            ));
+            address_guard.commit().await.unwrap();
+            // Keep the version update open so cleanup must lock the host
+            // before checking its acknowledgement and committing removal.
+            let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(txn.as_mut())
+                .await
+                .unwrap();
+            common::postgres::wait_for_blocked_query(&env.pool, writer_pid, "SELECT row_to_json")
+                .await;
+            txn.commit().await.unwrap();
+        };
+        tokio::join!(competing_writer, invalidate_ack);
+    };
+    let (result, ()) = tokio::join!(deletion, change_network);
+    assert!(!result.unwrap().into_inner().all_done);
+    let retained = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.deleted.is_some());
+    let mut txn = env.pool.begin().await.unwrap();
+    let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &instance.id,
+        &segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|address| (address.address, address.prefix, address.vpc_id))
+    .collect::<Vec<_>>();
+    assert_eq!(retained_addresses, addresses);
+    txn.commit().await.unwrap();
+    managed_host.network_configured(&env).await;
+
+    let response = env
+        .api
+        .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.all_done);
+    assert_eq!(response.instance_id, instance.id.to_string());
+    assert!(
+        db::instance::find_by_id(&env.pool, instance.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for machine_id in managed_host
+        .dpu_ids
+        .iter()
+        .copied()
+        .map(MachineId::from)
+        .chain([managed_host.id.into()])
+    {
+        validate_machine_deletion(&env, &machine_id, None).await;
+    }
+}
+
+/// Once requested, the Admin wait survives a missing Instance and an existing
+/// failure between retries and machine-controller iterations.
+#[crate::sqlx_test]
+async fn force_delete_keeps_requested_wait_after_the_instance_disappears(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let managed_host = create_managed_host(&env).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let mut txn = env.pool.begin().await.unwrap();
+    let failure = model::machine::FailureDetails {
+        cause: model::machine::FailureCause::NVMECleanFailed {
+            err: "failed before force deletion".to_string(),
+        },
+        source: model::machine::FailureSource::Scout,
+        failed_at: chrono::Utc::now(),
+    };
+    let host = managed_host.host().db_machine(&mut txn).await;
+    db::machine::update_failure_details(&host, &mut txn, failure.clone())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let waiting = env
+        .api
+        .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
+            wait_for_instance_dpu: true,
+            ..force_delete_request(&managed_host.id)
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!waiting.all_done);
+    assert_eq!(waiting.instance_id, instance.id.to_string());
+    let mut txn = env.pool.begin().await.unwrap();
+    db::instance::delete(instance.id, txn.as_mut())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let mut requested_version = None;
+    let mut state_version = None;
+    for _ in 0..2 {
+        let waiting = env
+            .api
+            .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!waiting.all_done);
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.pool.begin().await.unwrap();
+        let snapshot = managed_host.snapshot(&mut txn).await;
+        assert!(snapshot.instance.is_none());
+        assert!(snapshot.use_admin_network());
+        assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
+        assert_eq!(snapshot.dpu_snapshots.len(), 1);
+        assert!(!snapshot.managed_host_network_config_version_synced());
+        let version = snapshot.host_snapshot.network_config.version;
+        assert_eq!(*requested_version.get_or_insert(version), version);
+        let version = snapshot.host_snapshot.state.version;
+        assert_eq!(*state_version.get_or_insert(version), version);
+        assert_eq!(snapshot.host_snapshot.status.failure_details, failure);
+        let history = db::state_history::for_object(
+            txn.as_mut(),
+            db::state_history::StateHistoryTableId::Machine,
+            &MachineId::from(managed_host.id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|record| {
+                    serde_json::from_str::<ManagedHostState>(&record.state).unwrap()
+                        == ManagedHostState::ForceDeletion
+                })
+                .count(),
+            1,
+            "the controller and retries must preserve the first ForceDeletion transition",
+        );
+        txn.commit().await.unwrap();
+    }
+    managed_host.network_configured(&env).await;
+    let response = env
+        .api
+        .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.all_done);
+    for machine_id in [managed_host.id.into(), managed_host.dpu_ids[0].into()] {
+        validate_machine_deletion(&env, &machine_id, None).await;
+    }
+}
+
 #[crate::sqlx_test]
 async fn test_admin_force_delete_dpu_from_managed_host_multi_dpu(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
@@ -1879,9 +2917,9 @@ async fn test_admin_force_delete_tenant_state(pool: sqlx::PgPool) {
 
     // 2) mock force-delete
 
-    // If we use the RPC API to try to force delete this instance, everything is probably going to be cleaned up and we will likely not be able to retrieve the host's machine.
-    // The simplest solution to test how we map ManagedHostState::ForceDeletion -->  TenantState::Terminating is to manually set the machine's
-    // ManagedHostState to ForceDeletion in the DB.
+    // Set `ManagedHostState::ForceDeletion` directly so this test isolates its
+    // mapping to `TenantState::Terminating` from the RPC's network
+    // acknowledgement workflow.
 
     let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.pool.begin().await.unwrap();
 
@@ -1959,6 +2997,7 @@ async fn test_admin_force_delete_with_instance_type(pool: sqlx::PgPool) {
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
             release_preserved_addresses: false,
+            wait_for_instance_dpu: false,
         }))
         .await
         .unwrap_err();
@@ -1983,63 +3022,33 @@ async fn test_admin_force_delete_with_instance_type(pool: sqlx::PgPool) {
     assert!(env.find_machine(&tmp_machine_id).await.is_empty());
 }
 
-/// Force delete with DPF: the node_id and dpu_device_names passed to
-/// force_delete_host must be BMC MAC-derived ids, not 64-char MachineIds,
-/// so that the resulting K8s resource names stay within the 48-char limit
-/// after the SDK adds the `node-` / `device-` CR prefixes.
+/// An interrupted DPF cleanup of an Admin-only host remains retryable without
+/// its offline DPU. Both calls use BMC MAC-derived CR names within the SDK limit.
 #[crate::sqlx_test]
-async fn test_admin_force_delete_with_dpf_uses_bmc_mac(pool: sqlx::PgPool) {
+async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sqlx::PgPool) {
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
+
     type DpfCallLog = Vec<(String, Vec<String>)>;
     let captured_calls: Arc<std::sync::Mutex<DpfCallLog>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let mut mock = MockDpfOperations::new();
-    mock.expect_get_service_versions_for_dpu().returning(|_| {
-        Ok(vec![carbide_dpf::DpuServiceVersion {
-            name: "test-service".to_string(),
-            version: "test-version".to_string(),
-            url: "https://example.com/test-service".to_string(),
-        }])
-    });
-
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
-    mock.expect_register_dpu_node().returning(|_| Ok(()));
-    mock.expect_release_maintenance_hold().returning(|_| Ok(()));
-    mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_deployment_type_for_dpu()
-        .returning(|__, _| Ok(DpuDeploymentType::Bf3));
-    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(carbide_dpf::DpuPhase::Ready));
-
     let cap = captured_calls.clone();
     mock.expect_force_delete_host()
         .returning(move |node_name, device_names| {
-            cap.lock()
-                .unwrap()
-                .push((node_name.to_string(), device_names.to_vec()));
-            Ok(())
+            let mut calls = cap.lock().unwrap();
+            calls.push((node_name.to_string(), device_names.to_vec()));
+            if calls.len() == 1 {
+                Err(carbide_dpf::DpfError::InvalidState(
+                    "injected cleanup failure".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
         });
-
-    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
-    let mut config = get_config();
-    config.dpf = crate::cfg::file::DpfConfig {
-        enabled: true,
-        deployments: crate::cfg::file::DpfDeploymentsConfig {
-            bf3: crate::cfg::file::DpfDeploymentConfig {
-                bfb_url: Some("http://example.com/test.bfb".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let env = create_test_env_with_overrides(
-        pool,
-        TestEnvOverrides::with_config(config).with_dpf_sdk(dpf_sdk),
-    )
-    .await;
+    let env = dpf_force_delete_test_env(pool, mock).await;
 
     let mh = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -2049,19 +3058,89 @@ async fn test_admin_force_delete_with_dpf_uses_bmc_mac(pool: sqlx::PgPool) {
     .expect("timed out during initial provisioning");
     let host_id = mh.id;
 
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        force_delete(&env, &host_id),
-    )
-    .await
-    .expect("timed out during force_delete");
+    // Remove the DPU receipt before either request so both exercise offline Admin cleanup without
+    // a later network acknowledgement.
+    sqlx::query("UPDATE machines SET network_status_observation = NULL WHERE id = $1")
+        .bind(mh.dpu_ids[0])
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let mut txn = env.pool.begin().await.unwrap();
+    let snapshot = mh.snapshot(&mut txn).await;
+    assert!(snapshot.instance.is_none());
+    assert!(snapshot.use_admin_network());
+    assert!(!snapshot.managed_host_network_config_version_synced());
+    let bmc_macs = [
+        snapshot.host_snapshot.status.bmc_info.mac.unwrap(),
+        snapshot.dpu_snapshots[0].status.bmc_info.mac.unwrap(),
+    ];
+    for bmc_mac_address in bmc_macs {
+        for source in [
+            BmcSuppressionSource::DpfProvisioning,
+            BmcSuppressionSource::Decommissioning,
+        ] {
+            db::bmc_suppression::upsert(
+                txn.as_mut(),
+                &NewBmcSuppression {
+                    bmc_mac_address,
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source,
+                    reason: "test".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+    txn.commit().await.unwrap();
+
+    // Trigger DPF cleanup after confirming Admin remains unsynchronized; the first failure must
+    // leave the committed ForceDeletion transition retryable.
+    let error = env
+        .api
+        .admin_force_delete_machine(Request::new(force_delete_request(&host_id)))
+        .await
+        .expect_err("the first DPF cleanup fails after ForceDeletion commits");
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert!(error.message().contains("injected cleanup failure"));
+
+    // Reload after the external cleanup failure to prove ForceDeletion committed without
+    // restoring the missing DPU receipt.
+    let mut txn = env.pool.begin().await.unwrap();
+    let snapshot = mh.snapshot(&mut txn).await;
+    assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
+    assert!(!snapshot.managed_host_network_config_version_synced());
+    txn.commit().await.unwrap();
+
+    for mac in bmc_macs {
+        assert_eq!(
+            db::bmc_suppression::find_for_bmc(
+                &env.pool,
+                mac,
+                BmcSuppressionSubsystem::SiteExplorer
+            )
+            .await
+            .unwrap(),
+            vec![BmcSuppressionSource::Decommissioning],
+            "only the provisioning suppression must clear for {mac}, even when DPF cleanup fails",
+        );
+    }
+
+    // Retry with the same missing observation that preceded the first call.
+    let response = env
+        .api
+        .admin_force_delete_machine(Request::new(force_delete_request(&host_id)))
+        .await
+        .expect("retry must preserve offline Admin cleanup")
+        .into_inner();
+    assert!(response.all_done);
+    for machine_id in [host_id.into(), mh.dpu_ids[0].into()] {
+        validate_machine_deletion(&env, &machine_id, None).await;
+    }
 
     let calls = captured_calls.lock().unwrap().clone();
-    assert_eq!(
-        calls.len(),
-        1,
-        "force_delete_host should have been called exactly once, got: {calls:?}"
-    );
+    assert_eq!(calls.len(), 2, "the second request must retry DPF cleanup");
+    assert_eq!(calls[0], calls[1]);
 
     let (node_id, device_ids) = &calls[0];
 
@@ -2089,6 +3168,43 @@ async fn test_admin_force_delete_with_dpf_uses_bmc_mac(pool: sqlx::PgPool) {
             "device CR name must be <= 48 chars, got {} chars",
             format!("device-{id}").len(),
         );
+    }
+}
+
+/// Verifies explicit orphan consent completes Machine deletion after DPF cleanup fails, preserving
+/// a remediation path when retrying the external operation cannot recover the host.
+#[crate::sqlx_test]
+async fn force_delete_orphan_override_continues_after_dpf_cleanup_failure(pool: sqlx::PgPool) {
+    // Inject a persistent DPF deletion failure that only explicit orphan consent may bypass.
+    let mut mock = MockDpfOperations::new();
+    mock.expect_force_delete_host().times(1).returning(|_, _| {
+        Err(carbide_dpf::DpfError::InvalidState(
+            "injected persistent cleanup failure".to_string(),
+        ))
+    });
+    let env = dpf_force_delete_test_env(pool, mock).await;
+
+    // Provision a DPF-ingested host so force-delete reaches the injected external cleanup failure.
+    let managed_host = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        create_managed_host_with_dpf(&env),
+    )
+    .await
+    .expect("timed out during initial provisioning");
+
+    // The override acknowledges the failed DPF removal and completes Core cleanup in one request.
+    let response = env
+        .api
+        .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
+            allow_delete_with_orphaned_dpf_crds: true,
+            ..force_delete_request(&managed_host.id)
+        }))
+        .await
+        .expect("orphan consent must bypass the DPF cleanup failure")
+        .into_inner();
+    assert!(response.all_done);
+    for machine_id in [managed_host.id.into(), managed_host.dpu_ids[0].into()] {
+        validate_machine_deletion(&env, &machine_id, None).await;
     }
 }
 
@@ -2131,6 +3247,7 @@ async fn test_admin_force_delete_retains_boot_interface_ids(pool: sqlx::PgPool) 
             delete_bmc_suppressions: false,
             delete_retained_boot_interfaces: false,
             release_preserved_addresses: false,
+            wait_for_instance_dpu: false,
         }))
         .await
         .unwrap()
@@ -2219,6 +3336,7 @@ async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sql
             delete_bmc_suppressions: true,
             delete_retained_boot_interfaces: true,
             release_preserved_addresses: false,
+            wait_for_instance_dpu: false,
         }))
         .await
         .unwrap()

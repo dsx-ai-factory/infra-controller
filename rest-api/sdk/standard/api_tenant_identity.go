@@ -56,6 +56,11 @@ call, `200 OK` on subsequent updates. See the Tenant Identity tag
 description for upsert semantics and the `enabled` vs DELETE
 distinction.
 
+Concurrent creation can return `409 Conflict`, leaving the stored
+configuration and tenant version unchanged. Read it before retrying,
+since a retry can update it. An explicit `rotateKey: true` request can
+instead rotate a concurrently created configuration found during the write.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@param siteID ID of the Site
@@ -161,6 +166,17 @@ func (a *TenantIdentityAPIService) CreateOrUpdateTenantIdentityConfigExecute(r A
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

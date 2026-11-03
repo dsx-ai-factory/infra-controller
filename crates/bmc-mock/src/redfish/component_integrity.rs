@@ -21,11 +21,11 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::get;
-use serde_json::json;
 
+use super::schema::component_integrity::ComponentIntegrityType;
 use crate::bmc_state::BmcState;
-use crate::json::{JsonExt, JsonPatch};
-use crate::redfish::Builder;
+use crate::json::JsonExt;
+use crate::redfish::ModelExt;
 use crate::{Callbacks, http, redfish};
 
 pub(crate) fn collection() -> redfish::Collection<'static> {
@@ -40,7 +40,9 @@ pub(crate) fn resource<'a>(component_integrity_id: &'a str) -> redfish::Resource
     let odata_id = format!("{}/{component_integrity_id}", collection().odata_id);
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#ComponentIntegrity.v1_2_0.ComponentIntegrity"),
+        odata_type: Cow::Borrowed(
+            redfish::schema::component_integrity::ComponentIntegrity::ODATA_TYPE,
+        ),
         id: Cow::Borrowed(component_integrity_id),
         name: Cow::Borrowed("Component Integrity"),
     }
@@ -59,8 +61,9 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
 #[derive(Debug, Clone)]
 pub(crate) struct ComponentIntegrity {
     pub(crate) id: Cow<'static, str>,
-    /// The attestation protocol, `SPDM` or `TPM`.
-    pub(crate) integrity_type: Cow<'static, str>,
+    pub(crate) target_component_uri: Cow<'static, str>,
+    /// The attestation protocol.
+    pub(crate) integrity_type: ComponentIntegrityType,
     /// Read-write on real hardware, so a configured device can be present and
     /// switched off.
     pub(crate) enabled: bool,
@@ -68,47 +71,19 @@ pub(crate) struct ComponentIntegrity {
 
 impl ComponentIntegrity {
     fn to_json(&self) -> serde_json::Value {
-        builder(&resource(&self.id))
-            .component_integrity_type(&self.integrity_type)
-            .component_integrity_enabled(self.enabled)
-            .build()
-    }
-}
-
-fn builder(resource: &redfish::Resource) -> ComponentIntegrityBuilder {
-    ComponentIntegrityBuilder {
-        value: resource.json_patch().patch(json!({
-            "Status": redfish::resource::Status::Ok.into_json(),
-            // Required of the resource and read by no NICo code. Clients
-            // deserialize it as non-optional, so it has to be served.
-            "ComponentIntegrityTypeVersion": "1.1.0",
-        })),
-    }
-}
-
-struct ComponentIntegrityBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for ComponentIntegrityBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl ComponentIntegrityBuilder {
-    fn component_integrity_type(self, value: &str) -> Self {
-        self.add_str_field("ComponentIntegrityType", value)
-    }
-
-    fn component_integrity_enabled(self, value: bool) -> Self {
-        self.apply_patch(json!({"ComponentIntegrityEnabled": value}))
-    }
-
-    fn build(self) -> serde_json::Value {
-        self.value
+        use super::schema::component_integrity::{ComponentIntegrity, ComponentIntegrityRequired};
+        let resource = resource(&self.id);
+        ComponentIntegrity::new(ComponentIntegrityRequired {
+            odata_id: resource.odata_id.into_owned(),
+            id: resource.id.into_owned(),
+            name: resource.name.into_owned(),
+            component_integrity_type: self.integrity_type,
+            component_integrity_type_version: "1.1.0".to_string(),
+            target_component_uri: self.target_component_uri.to_string(),
+        })
+        .component_integrity_enabled(self.enabled)
+        .status(redfish::resource::Status::Ok.into())
+        .into_json()
     }
 }
 

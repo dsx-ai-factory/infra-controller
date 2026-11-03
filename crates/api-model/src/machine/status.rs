@@ -14,8 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::BTreeSet;
+
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
+use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 
 use crate::bmc_info::BmcInfo;
@@ -24,6 +28,7 @@ use crate::instance::status::extension_service::InstanceExtensionServiceStatusOb
 use crate::machine::infiniband::MachineInfinibandStatusObservation;
 use crate::machine::nvlink::MachineNvLinkStatusObservation;
 use crate::machine::spx::MachineSpxStatusObservation;
+use crate::machine::spx_multiplane::MachineSpxMultiplaneStatus;
 use crate::machine::{FailureDetails, MachineInterfaceSnapshot, MachineLastRebootRequested};
 use crate::machine_boot_interface::BootInterfaceStatusObservation;
 use crate::power_manager::PowerOptions;
@@ -54,6 +59,8 @@ pub struct MachineStatus {
     pub infiniband_status_observation: Option<MachineInfinibandStatusObservation>,
     pub nvlink_status_observation: Option<MachineNvLinkStatusObservation>,
     pub spx_status_observation: Option<MachineSpxStatusObservation>,
+    /// Latest per-interface maintenance readback for each DPU machine.
+    pub spx_multiplane_status: Option<MachineSpxMultiplaneStatus>,
     /// Latest successful unfiltered Scout MLX report, or `None` before one is stored.
     pub mlx_device_observation: Option<MlxDeviceObservation>,
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,
@@ -70,6 +77,40 @@ pub struct MachineStatus {
 pub struct MlxDeviceObservation {
     /// Time Scout generated the report, not the time Core received it.
     pub observed_at: DateTime<Utc>,
+    /// Database time taken while the write that accepted this report ran,
+    /// somewhere between that write's start and its commit. Writers leave it
+    /// `None`; `update_mlx_device_observation` sets it, including when Scout
+    /// re-sends a report with the same `observed_at`. Older stored reports omit
+    /// it. Reception after an action does not prove collection after it.
+    #[serde(default)]
+    pub received_at: Option<DateTime<Utc>>,
     /// All reported devices, including entries with unavailable optional facts.
     pub devices: Vec<MlxDeviceInfo>,
+}
+
+/// `managed_dpu_machine_ids` returns the DPUs associated with a device's base MAC.
+/// Empty means unknown ownership, not a SuperNIC. Matches are distinct and
+/// ordered by machine ID.
+/// Callers supply this host's non-BMC interfaces. Missing, zero, and multicast
+/// base MACs do not match any interface.
+pub fn managed_dpu_machine_ids(
+    base_mac: Option<MacAddress>,
+    interfaces: &[MachineInterfaceSnapshot],
+) -> Vec<DpuMachineId> {
+    let mac = base_mac.filter(valid_mac);
+    // Site exploration records the host PF MAC, normally from Redfish's
+    // `base_mac`. A fallback MAC may differ. Preserve conflicting associations;
+    // neither an association nor an old report proves what is installed now.
+    interfaces
+        .iter()
+        .filter(|interface| Some(interface.mac_address) == mac)
+        .filter_map(|interface| interface.attached_dpu_machine_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn valid_mac(mac: &MacAddress) -> bool {
+    let bytes = mac.bytes();
+    bytes != [0; 6] && bytes[0] & 1 == 0
 }

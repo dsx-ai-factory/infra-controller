@@ -7,6 +7,8 @@
 -- being produced. Theoretically we should be able to have an ON condition in each JOIN LATERAL that
 -- links in only the data we need, but postgres seems to want to read (and build JSON for) the whole
 -- table(s) when we do that. This is one thing that CTE's won't allow.
+-- The host snapshot subquery also requires its OFFSET 0 fence to prevent PostgreSQL from
+-- flattening it and building snapshots for unrequested machines.
 
 SELECT m.* FROM (
     -- Put the whole thing in a subselect so that we can pack the GROUP BY in here and allow callers
@@ -14,7 +16,11 @@ SELECT m.* FROM (
     -- themselves.)
     SELECT
     m.id,
-    json_agg(host_snapshot.*)->0 AS host_snapshot,
+    -- Select one host record before JSON conversion to avoid repeating
+    -- the conversion for every joined DPU row. This is here because it
+    -- reduced mean FindMachinesByIds RPC latency by roughly 11-15% in a
+    -- MaT benchmark with 33-35k successful calls per leg.
+    row_to_json((array_agg(host_snapshot))[1]) AS host_snapshot,
     COALESCE(json_agg(dpu_snapshots.*), '[]') AS dpu_snapshots,
     COALESCE(json_agg(rack_health_overrides.*), '[]') AS rack_health_overrides
     FROM machines m
@@ -23,6 +29,7 @@ SELECT m.* FROM (
     INNER JOIN LATERAL (
         SELECT
         m2.*,
+        COALESCE(nic_firmware.json, '[]') AS nic_firmware_card_selections,
         boot_interface.desired_mac_address AS desired_boot_interface_mac,
         boot_interface.desired_interface_id AS desired_boot_interface_id,
         boot_interface.desired_version AS desired_boot_interface_version,
@@ -38,6 +45,15 @@ SELECT m.* FROM (
         COALESCE(p.json, '[]') AS power_options
         __HISTORY_SELECT__
         FROM machines m2
+        -- Card selections share the host's configuration and edit version.
+        LEFT JOIN LATERAL (
+            SELECT json_agg(json_build_object(
+                'selector', card.selector,
+                'profile_id', card.profile_id
+            ) ORDER BY card.selector) AS json
+            FROM machine_nic_firmware_overrides card
+            WHERE card.machine_id = m2.id
+        ) AS nic_firmware ON true
         LEFT JOIN machine_boot_interfaces boot_interface
         ON boot_interface.machine_id = m2.id
         LEFT JOIN machine_skus sku on m2.hw_sku = sku.id
@@ -89,7 +105,7 @@ SELECT m.* FROM (
             LIMIT 1
         ) AS t ON true
 
-        -- (1.3) Join in the linked BMC interface
+        -- (1.3) Join in the BMC interface selected by topology
         LEFT JOIN LATERAL (
             SELECT jsonb_strip_nulls(
                 COALESCE(t.bmc_info, '{}'::jsonb) ||
@@ -109,6 +125,10 @@ SELECT m.* FROM (
             ) AS bmc_addr ON true
             WHERE bmc_i.machine_id = m2.id
               AND bmc_i.interface_type = 'Bmc'
+              AND (
+                  t.bmc_info->>'machine_interface_id' IS NULL
+                  OR bmc_i.id::text = t.bmc_info->>'machine_interface_id'
+              )
             ORDER BY bmc_i.created ASC
             LIMIT 1
         ) AS bmc ON true
@@ -126,6 +146,9 @@ SELECT m.* FROM (
             ) x
         ) AS p ON true
         WHERE m2.id = m.id
+        -- Prevent PostgreSQL from flattening this subquery and enriching
+        -- unrequested machines before applying the outer ID filter.
+        OFFSET 0
     ) AS host_snapshot ON true
 
     -- (2) Join in all DPU snapshots
@@ -198,7 +221,7 @@ SELECT m.* FROM (
             LIMIT 1
         ) AS t ON true
 
-        -- (2.3) Join in the linked BMC interface
+        -- (2.3) Join in the BMC interface selected by topology
         LEFT JOIN LATERAL (
             SELECT jsonb_strip_nulls(
                 COALESCE(t.bmc_info, '{}'::jsonb) ||
@@ -218,6 +241,10 @@ SELECT m.* FROM (
             ) AS bmc_addr ON true
             WHERE bmc_i.machine_id = m2.id
               AND bmc_i.interface_type = 'Bmc'
+              AND (
+                  t.bmc_info->>'machine_interface_id' IS NULL
+                  OR bmc_i.id::text = t.bmc_info->>'machine_interface_id'
+              )
             ORDER BY bmc_i.created ASC
             LIMIT 1
         ) AS bmc ON true

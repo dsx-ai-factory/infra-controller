@@ -179,7 +179,8 @@ func (bcih BatchCreateInstanceHandler) buildBatchInstanceCreateRequestOsConfig(c
 	// Options below should all have been set by the
 	// earlier call to ValidateAndSetOperatingSystemData
 
-	if os.Type == cdbm.OperatingSystemTypeIPXE {
+	switch os.Type {
+	case cdbm.OperatingSystemTypeIPXE:
 		return &corev1.InstanceOperatingSystemConfig{
 			RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe,
 			PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,
@@ -190,7 +191,7 @@ func (bcih BatchCreateInstanceHandler) buildBatchInstanceCreateRequestOsConfig(c
 			},
 			UserData: apiRequest.UserData,
 		}, osID, nil
-	} else if os.Type == cdbm.OperatingSystemTypeTemplatedIPXE {
+	case cdbm.OperatingSystemTypeTemplatedIPXE:
 		if apiErr := validateTemplatedIpxeOsForSite(ctx, bcih.dbSession, logger, os, site.ID); apiErr != nil {
 			return nil, nil, apiErr
 		}
@@ -204,7 +205,7 @@ func (bcih BatchCreateInstanceHandler) buildBatchInstanceCreateRequestOsConfig(c
 			},
 			UserData: apiRequest.UserData,
 		}, osID, nil
-	} else {
+	default:
 		return &corev1.InstanceOperatingSystemConfig{
 			PhoneHomeEnabled: *apiRequest.PhoneHomeEnabled,
 			Variant: &corev1.InstanceOperatingSystemConfig_OsImageId{
@@ -442,7 +443,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	siteDAO := cdbm.NewSiteDAO(bcih.dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, vpc.SiteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, vpc.SiteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where Instances are being created could not be found", nil)
@@ -538,10 +539,29 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Load VPCs only for interfaces using Core-managed prefix selection.
-	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, bcih.dbSession, apiRequest.Interfaces, tenant.ID, site.ID)
+	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, bcih.dbSession, apiRequest.Interfaces)
 	if interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by batch Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
+	}
+
+	// Attaching an Interface to another Tenant's VPC or VPC Prefix needs
+	// crossTenantInterfaceCreation
+	// at the Site. Check it before validating the selectors, so the errors can't reveal another
+	// Tenant's VPC state.
+	if model.HasCrossTenantInterface(apiRequest.Interfaces, tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
+		hasCrossTenantInterfaceCreation, capErr := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, bcih.dbSession, tenant, site.ID)
+		if capErr != nil {
+			logger.Error().Err(capErr).Msg("failed to resolve crossTenantInterfaceCreation capability")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantInterfaceCreation capability, DB error", nil)
+		}
+		if !hasCrossTenantInterfaceCreation {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have crossTenantInterfaceCreation capability enabled", nil)
+		}
+	}
+	if apiErr := model.ValidateInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); apiErr != nil {
+		logger.Warn().Err(apiErr).Msg("failed to validate VPCs specified by batch Instance interfaces")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
 	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
@@ -661,11 +681,6 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			vpcPrefix, ok := vpcPrefixIDMap[vpcPrefixUUID]
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find VPC Prefix with ID specified in request data", nil)
-			}
-
-			if vpcPrefix.TenantID != tenant.ID {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixUUID))
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixUUID), nil)
 			}
 
 			if vpcPrefix.Status != cdbm.VpcPrefixStatusReady {
@@ -1339,7 +1354,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
 			}
 			vpc = lockedVPC
-			lockedSite, lockErr := siteDAO.GetByID(ctx, tx, vpc.SiteID, nil, false)
+			lockedSite, lockErr := siteDAO.GetByID(ctx, tx, vpc.SiteID, nil, false, false)
 			if lockErr != nil {
 				logger.Error().Err(lockErr).Str("siteID", vpc.SiteID.String()).Msg("failed to reload Site after acquiring the VPC power lock")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload Site power configuration", nil)
@@ -1380,7 +1395,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		alconstraints, acerr := common.GetAllocationConstraintsForInstanceType(ctx, tx, bcih.dbSession, tenant.ID, instancetype, tnas)
 		if acerr != nil {
 			if acerr == common.ErrAllocationConstraintNotFound {
-				return cutil.NewAPIError(http.StatusInternalServerError, "No Allocations for specified Instance Type were found for current Tenant", nil)
+				return cutil.NewAPIError(http.StatusForbidden, "No Allocations for specified Instance Type were found for current Tenant", nil)
 			}
 			logger.Error().Err(acerr).Msg("error retrieving Allocation Constraints from DB for InstanceType and Allocation")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Allocations for specified Instance Type, DB error", nil)
@@ -2143,27 +2158,41 @@ func allocateMachinesForBatch(
 			break
 		}
 
-		// Acquire an advisory lock on the MachineID
-		err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+		// Verify the Machine inside a savepoint, so a rejected Machine is unlocked right away
+		// instead of staying locked until the batch create transaction ends.
+		var umc *cdbm.Machine
+		err = tx.WithSavepoint(ctx, func(sp *cdb.Tx) error {
+			// Acquire an advisory lock on the MachineID
+			lerr := sp.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+			if lerr != nil {
+				return lerr
+			}
+
+			// Re-obtain the Machine record to ensure it is still available
+			var gerr error
+			umc, gerr = mcDAO.GetByID(ctx, sp, mc.ID, nil, true)
+			if gerr != nil {
+				return gerr
+			}
+
+			if umc.Status != cdbm.MachineStatusReady {
+				return common.ErrMachineUnavailable
+			}
+
+			if umc.IsAssigned {
+				return common.ErrMachineUnavailable
+			}
+
+			if !umc.MatchesLabelSelector(machineLabelSelector) {
+				return common.ErrMachineUnavailable
+			}
+			return nil
+		})
+		if errors.Is(err, cdb.ErrTransactionSavepoint) {
+			logger.Error().Err(err).Str("machineID", mc.ID).Msg("failed to verify Machine for batch allocation, DB savepoint error")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to verify Machines for allocation, DB error", nil)
+		}
 		if err != nil {
-			continue
-		}
-
-		// Re-obtain the Machine record to ensure it is still available
-		umc, err := mcDAO.GetByID(ctx, tx, mc.ID, nil, true)
-		if err != nil {
-			continue
-		}
-
-		if umc.Status != cdbm.MachineStatusReady {
-			continue
-		}
-
-		if umc.IsAssigned {
-			continue
-		}
-
-		if !umc.MatchesLabelSelector(machineLabelSelector) {
 			continue
 		}
 

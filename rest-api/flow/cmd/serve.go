@@ -194,7 +194,8 @@ func doServe() {
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	}
 
-	otelShutdown, otelErr := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-flow")
+	flowConfig := config.ReadConfig()
+	otelShutdown, otelErr := cotel.Bootstrap(context.Background(), flowConfig.Tracing.Enabled, "nico-flow")
 	if otelErr != nil {
 		log.Error().Err(otelErr).Msg("failed to initialize tracing")
 	} else {
@@ -218,8 +219,6 @@ func doServe() {
 	}
 
 	log.Info().Str(svc.EnvVarName, flowEnv).Msg("Deployment environment")
-
-	flowConfig := config.ReadConfig()
 
 	authorization, err := loadAuthorizationConfig()
 	if err != nil {

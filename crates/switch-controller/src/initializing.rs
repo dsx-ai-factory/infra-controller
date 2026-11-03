@@ -20,7 +20,7 @@
 use carbide_uuid::switch::SwitchId;
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::switch::{
-    ConfigureCertificateState, ConfiguringState, InitializingState, Switch, SwitchControllerState,
+    ConfiguringState, DisableMtlsState, InitializingState, Switch, SwitchControllerState,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -80,7 +80,7 @@ async fn handle_wait_for_os_machine_interface(
         }
     };
 
-    let nvos_mac_addresses = &expected_switch.nvos_mac_addresses;
+    let nvos_mac_addresses = expected_switch.nvos_mac_addresses();
     if nvos_mac_addresses.is_empty() {
         tracing::warn!(
             switch_id = %switch_id,
@@ -98,10 +98,31 @@ async fn handle_wait_for_os_machine_interface(
         ));
     }
 
+    // Endpoint selection and configuration target the operator-declared primary
+    // NVOS port, so associating only a non-primary port is not enough to
+    // advance. A set with ports but no resolvable primary cannot be configured.
+    let Some(primary_mac_address) = expected_switch.primary_nvos_mac_address() else {
+        tracing::warn!(
+            switch_id = %switch_id,
+            bmc_mac_address = %bmc_mac_address,
+            expected_bmc_mac_address = %expected_switch.bmc_mac_address,
+            "Switch has NVOS ports but none resolves as primary",
+        );
+        return Ok(StateHandlerOutcome::transition(
+            SwitchControllerState::Error {
+                cause: format!(
+                    "No primary NVOS port on expected switch for BMC MAC {}",
+                    expected_switch.bmc_mac_address
+                ),
+            },
+        ));
+    };
+
     let mut associated_count = 0usize;
+    let mut primary_associated = false;
     let total = nvos_mac_addresses.len();
 
-    for mac_address in nvos_mac_addresses {
+    for mac_address in &nvos_mac_addresses {
         let mi = db::machine_interface::find_by_mac_address(&mut *txn, *mac_address).await?;
         let interface = match mi.first() {
             Some(iface) => iface,
@@ -126,6 +147,9 @@ async fn handle_wait_for_os_machine_interface(
                 ));
             }
             associated_count += 1;
+            if *mac_address == primary_mac_address {
+                primary_associated = true;
+            }
             continue;
         }
 
@@ -142,6 +166,9 @@ async fn handle_wait_for_os_machine_interface(
             "Switch associated NVOS interface",
         );
         associated_count += 1;
+        if *mac_address == primary_mac_address {
+            primary_associated = true;
+        }
     }
 
     txn.commit().await?;
@@ -152,17 +179,18 @@ async fn handle_wait_for_os_machine_interface(
         bmc_mac_address = %bmc_mac_address,
         "Switch associated NVOS interfaces",
     );
-    if associated_count >= 1 {
+    if primary_associated {
         tracing::info!(
             switch_id = %switch_id,
             associated_nvos_interface_count = associated_count,
             total_nvos_interface_count = total,
-            "Switch has at least one NVOS interface associated, transitioning to Configuring",
+            primary_nvos_mac_address = %primary_mac_address,
+            "Switch primary NVOS interface associated, transitioning to Configuring",
         );
         Ok(StateHandlerOutcome::transition(
             SwitchControllerState::Configuring {
-                config_state: ConfiguringState::ConfigureCertificate {
-                    configure_certificate: ConfigureCertificateState::Start,
+                config_state: ConfiguringState::DisableMtls {
+                    disable_mtls: DisableMtlsState::Start,
                 },
             },
         ))
@@ -171,10 +199,11 @@ async fn handle_wait_for_os_machine_interface(
             switch_id = %switch_id,
             associated_nvos_interface_count = associated_count,
             total_nvos_interface_count = total,
-            "Switch has no NVOS interfaces associated, waiting",
+            primary_nvos_mac_address = %primary_mac_address,
+            "Switch primary NVOS interface not yet associated, waiting",
         );
         Ok(StateHandlerOutcome::wait(format!(
-            "{}/{} NVOS interfaces associated, waiting",
+            "primary NVOS interface not yet associated ({}/{} ports associated), waiting",
             associated_count, total
         )))
     }

@@ -144,7 +144,7 @@ func (csh CreateVpcPrefixHandler) Handle(c echo.Context) error {
 
 	// Verify if site is ready
 	stDAO := cdbm.NewSiteDAO(csh.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, vpc.SiteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, vpc.SiteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find Site associated with VPC prefix", nil)
@@ -489,7 +489,6 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 	}
 
 	// Get site ID from query param
-	tsDAO := cdbm.NewTenantSiteDAO(gash.dbSession)
 	var siteIDs []uuid.UUID
 	siteIDStr := c.QueryParam("siteId")
 	if siteIDStr != "" {
@@ -501,7 +500,7 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 		siteIDs = append(siteIDs, site.ID)
 
 		// Check Site association with Tenant
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
+		err = common.ValidateTenantSiteAccess(ctx, nil, gash.dbSession, tenant, site.ID)
 		if err != nil {
 			if err == cdb.ErrDoesNotExist {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to this Site", nil)
@@ -726,10 +725,11 @@ func (gsh GetVpcPrefixHandler) Handle(c echo.Context) error {
 	// Check that VPC prefix exists
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, queryIncludeRelations)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve VPC prefix to update", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Could not retrieve VPC prefix to update", nil)
 	}
 
@@ -871,10 +871,11 @@ func (ush UpdateVpcPrefixHandler) Handle(c echo.Context) error {
 	// Check that VPC prefix exists
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, nil)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve VPC prefix to update", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Could not retrieve VPC prefix to update", nil)
 	}
 
@@ -1066,10 +1067,11 @@ func (dsh DeleteVpcPrefixHandler) Handle(c echo.Context) error {
 	vpDAO := cdbm.NewVpcPrefixDAO(dsh.dbSession)
 	vpcPrefix, err := vpDAO.GetByID(ctx, nil, sID, []string{cdbm.IPBlockRelationName, cdbm.TenantRelationName, cdbm.SiteRelationName})
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		if err == cdb.ErrDoesNotExist {
+			logger.Warn().Err(err).Msg("VPC prefix not found")
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find VPC prefix to delete", nil)
 		}
+		logger.Error().Err(err).Msg("error retrieving VPC prefix DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed not retrieve VPC prefix for deletion, DB error", nil)
 	}
 

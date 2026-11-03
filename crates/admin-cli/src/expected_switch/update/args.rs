@@ -24,11 +24,14 @@ use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::expected_switch::common::NvosInterfaceArg;
+
 /// Update an expected switch.
 ///
 /// Select the switch by either BMC MAC address or ID. Supply at least one update field.
 /// Omitted fields and empty metadata names or descriptions remain unchanged. Supplied labels
-/// replace the whole label collection. Supplied NVOS MAC addresses replace the stored list.
+/// replace the whole label collection. Supplied NVOS ports (--nvos-interface) replace the stored
+/// set as a whole, so move the primary by resending every port with the new ',primary' marker.
 ///
 /// Supply a username, password, or both for BMC or NVOS. Each omitted credential field keeps its
 /// stored value. NVOS credentials must contain both values after the update, so configuring them
@@ -65,12 +68,16 @@ Configure both NVOS credential fields:
     $ nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 \
     --nvos-username admin --nvos-password mynewpassword
 
+Change which NVOS port is primary (eth0) by resending the full NVOS port set:
+    $ nico-admin-cli expected-switch update --bmc-mac-address 00:11:22:33:44:55 \
+    --nvos-interface aa:bb:cc:dd:ee:ff,primary --nvos-interface aa:bb:cc:dd:ee:00
+
 ")]
 #[clap(group(ArgGroup::new("group").required(true).multiple(true).args(&[
 "bmc_username",
 "bmc_password",
 "switch_serial_number",
-"nvos_mac_addresses",
+"nvos_interfaces",
 "nvos_username",
 "nvos_password",
 "meta_name",
@@ -111,12 +118,13 @@ pub(crate) struct Args {
     switch_serial_number: Option<String>,
 
     #[clap(
-        long = "nvos-mac-address",
+        long = "nvos-interface",
         group = "group",
-        help = "NVOS MAC address(es) of the expected switch",
+        value_name = "MAC[,primary]",
+        help = "An NVOS ethernet port of the expected switch. Repeat for each port to replace the stored set. Append ',primary' to mark the primary port (eth0); when none is marked the first is primary and a single port is always primary",
         action = clap::ArgAction::Append
     )]
-    nvos_mac_addresses: Vec<MacAddress>,
+    nvos_interfaces: Vec<NvosInterfaceArg>,
     #[clap(long, group = "group", help = "NVOS username of the expected switch")]
     nvos_username: Option<String>,
     #[clap(long, group = "group", help = "NVOS password of the expected switch")]
@@ -162,8 +170,8 @@ pub(crate) struct Args {
     #[clap(
         long = "nvos-ip-address",
         value_name = "NVOS_IP_ADDRESS",
-        help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS MAC address",
-        long_help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS MAC address. When Core supports PATCH or masked updates, omit --nvos-mac-address only if the stored list already contains exactly one MAC; otherwise, supply exactly one --nvos-mac-address to replace the list. Older servers that support NVOS IPs but replace the full record require exactly one --nvos-mac-address in this command; omitted fields can be cleared. Servers without NVOS IP support ignore this field"
+        help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS interface",
+        long_help = "Static IP for the single wired NVOS port. The updated switch must have exactly one NVOS port. When Core supports PATCH or masked updates, omit --nvos-interface only if the stored set already contains exactly one port; otherwise, supply exactly one --nvos-interface to replace the set. Servers without NVOS IP support ignore this field"
     )]
     nvos_ip_address: Option<IpAddr>,
 
@@ -183,16 +191,30 @@ impl Args {
                 .error(kind, message)
         };
         match (&self.bmc_mac_address, &self.id) {
-            (Some(_), Some(_)) => Err(error(
-                ErrorKind::ArgumentConflict,
-                "cannot specify both --bmc-mac-address and --id; provide only one",
-            )),
-            (None, None) => Err(error(
-                ErrorKind::MissingRequiredArgument,
-                "must specify either --bmc-mac-address or --id",
-            )),
-            _ => Ok(()),
+            (Some(_), Some(_)) => {
+                return Err(error(
+                    ErrorKind::ArgumentConflict,
+                    "cannot specify both --bmc-mac-address and --id; provide only one",
+                ));
+            }
+            (None, None) => {
+                return Err(error(
+                    ErrorKind::MissingRequiredArgument,
+                    "must specify either --bmc-mac-address or --id",
+                ));
+            }
+            _ => {}
         }
+
+        // The NVOS port set is replaced as a whole and exactly one port is the
+        // primary, so reject a request that marks more than one ',primary'.
+        if let Err(message) =
+            crate::expected_switch::common::ensure_single_primary(&self.nvos_interfaces)
+        {
+            return Err(error(ErrorKind::ValueValidation, &message));
+        }
+
+        Ok(())
     }
 }
 
@@ -217,11 +239,9 @@ impl From<Args> for rpc::forge::ExpectedSwitch {
                 labels: crate::metadata::parse_rpc_labels(args.labels.unwrap_or_default()),
             }),
             rack_id: args.rack_id,
-            nvos_mac_addresses: args
-                .nvos_mac_addresses
-                .iter()
-                .map(|m| m.to_string())
-                .collect(),
+            nvos_interfaces: crate::expected_switch::common::nvos_interfaces_wire(
+                &args.nvos_interfaces,
+            ),
             bmc_ip_address: args
                 .bmc_ip_address
                 .map(|ip| ip.to_string())
@@ -280,5 +300,26 @@ mod tests {
                 [].as_slice() => FailsWith(ErrorKind::MissingRequiredArgument),
             }
         );
+    }
+
+    #[test]
+    fn rejects_more_than_one_primary_nvos_interface() {
+        let options = CliOptions::try_parse_from([
+            "nico-admin-cli",
+            "expected-switch",
+            "update",
+            "--id",
+            "12345678-1234-5678-90ab-cdef01234567",
+            "--nvos-interface",
+            "aa:bb:cc:dd:ee:ff,primary",
+            "--nvos-interface",
+            "aa:bb:cc:dd:ee:00,primary",
+        ])
+        .expect("args parse; the primary conflict is caught by validate");
+        let Some(CliCommand::ExpectedSwitch(Cmd::Update(args))) = options.commands else {
+            panic!("expected switch update command");
+        };
+        let error = args.validate().expect_err("two primaries must be rejected");
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
     }
 }

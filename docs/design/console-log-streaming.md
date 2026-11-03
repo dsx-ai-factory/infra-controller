@@ -94,7 +94,8 @@ message ConsoleLogLine {
 complete line, including its newline. `bytes` preserves console output that is not valid UTF-8. There is no pagination
 beyond the initial tail.
 
-The ssh-console service adds a configurable TLS gRPC listener, `api_listen_address`, defaulting to `[::]:1079`. It uses
+The ssh-console service adds a configurable TLS gRPC listener, `api_listen_address`, defaulting to `*:1079`. The `*` address tries IPv6 unspecified first and falls back to IPv4 unspecified if binding fails.
+Explicit IP socket addresses bind only the requested address and family. It uses
 `client_cert_path`, `client_key_path`, and `forge_root_ca_path`, which deployments point at the existing cert-manager
 identity and CA mounted under `/var/run/secrets/spiffe.io`. TLS client-certificate validation and `carbide-authn`
 principal extraction admit only `api_allowed_client_spiffe_id`; deployments render the exact `nico-api` SPIFFE service

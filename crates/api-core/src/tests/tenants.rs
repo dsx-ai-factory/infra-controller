@@ -14,15 +14,396 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_test_support::Outcome::FailsWith;
+use carbide_test_support::{Case, check_cases_async};
 use common::api_fixtures::{TestEnv, create_test_env};
 use rpc::forge::forge_server::Forge;
-use rpc::forge::{CreateTenantKeysetResponse, TenantKeysetIdentifier};
-use tonic::Code;
+use rpc::forge::set_tenant_nic_firmware_config_request::Action;
+use rpc::forge::{
+    CreateNicFirmwareProfileRequest, CreateTenantKeysetResponse, DeleteNicFirmwareProfileRequest,
+    GetTenantNicFirmwareConfigRequest, NicFirmwareApproach, NicFirmwareArtifact,
+    NicFirmwareProfileConfig, NicFirmwareProfileEntry, SetTenantNicFirmwareConfigRequest,
+    TenantKeysetIdentifier, TenantNicFirmwareConfig,
+};
+use rpc::protos::mlx_device::FirmwareSpec;
+use tonic::{Code, Request};
 
 use crate::tests::common;
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host, create_test_env_with_overrides,
 };
+
+/// The ordinary tenant API and operator firmware API share one token even though
+/// they expose different fields. Public rereads must retain the other API's data.
+#[crate::sqlx_test]
+async fn tenant_nic_firmware_selection_shares_version_and_preserves_tenant_updates(
+    pool: sqlx::PgPool,
+) {
+    let env = create_test_env(pool).await;
+    let api = &env.api;
+    let tenant = create_fixture_tenant(&env, "firmware-tenant")
+        .await
+        .unwrap();
+    let get_request = GetTenantNicFirmwareConfigRequest {
+        tenant_organization_id: tenant.organization_id.clone(),
+    };
+    let initial = api
+        .get_tenant_nic_firmware_config(Request::new(get_request.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .firmware_config
+        .expect("get response must include the unset firmware config");
+    assert_eq!(
+        initial,
+        TenantNicFirmwareConfig {
+            tenant_organization_id: tenant.organization_id.clone(),
+            profile_id: None,
+            config_version: tenant.version.clone(),
+        }
+    );
+
+    // Place the raw Debug cutoff inside a three-byte character so the request
+    // must survive logging before tenant ID validation can reject it.
+    let invalid_unicode_tenant = (0..3)
+        .map(|padding| GetTenantNicFirmwareConfigRequest {
+            tenant_organization_id: format!(
+                "{}{}",
+                "a".repeat(padding),
+                "界".repeat(rpc::MAX_ERR_MSG_SIZE as usize)
+            ),
+        })
+        .find(|request| !format!("{request:?}").is_char_boundary(rpc::MAX_ERR_MSG_SIZE as usize))
+        .expect("ASCII padding places the cutoff inside a three-byte character");
+    check_cases_async(
+        [
+            // Wire-level ID validation must remain an InvalidArgument response.
+            Case {
+                scenario: "invalid tenant organization ID",
+                input: GetTenantNicFirmwareConfigRequest {
+                    tenant_organization_id: "invalid organization".into(),
+                },
+                expect: FailsWith(Code::InvalidArgument),
+            },
+            // Non-ASCII tenant IDs must reach validation without a logging panic.
+            Case {
+                scenario: "invalid tenant ID crosses the UTF-8 log cutoff",
+                input: invalid_unicode_tenant,
+                expect: FailsWith(Code::InvalidArgument),
+            },
+            // A nonexistent tenant must not look like the unset configuration above.
+            Case {
+                scenario: "missing tenant differs from unset selection",
+                input: GetTenantNicFirmwareConfigRequest {
+                    tenant_organization_id: "missing-tenant".into(),
+                },
+                expect: FailsWith(Code::NotFound),
+            },
+        ],
+        |request| async move {
+            api.get_tenant_nic_firmware_config(Request::new(request))
+                .await
+                .map(drop)
+                .map_err(|error| error.code())
+        },
+    )
+    .await;
+    assert_eq!(
+        api.get_tenant_nic_firmware_config(Request::new(get_request.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .firmware_config
+            .expect("get response must include the unset firmware config"),
+        initial
+    );
+
+    let profile = api
+        .create_nic_firmware_profile(Request::new(CreateNicFirmwareProfileRequest {
+            id: "tenant-profile".into(),
+            config: Some(NicFirmwareProfileConfig {
+                entries: vec![NicFirmwareProfileEntry {
+                    firmware: Some(FirmwareSpec {
+                        part_number: "MCX75310AAS-NEAT".into(),
+                        psid: "MT_0000000838".into(),
+                        version: "28.43.1014".into(),
+                    }),
+                    image: Some(NicFirmwareArtifact {
+                        url: "https://firmware.invalid/image.bin".into(),
+                        sha256: "ab".repeat(32),
+                    }),
+                    device_config: None,
+                    approach: NicFirmwareApproach::Scout.into(),
+                }],
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .profile
+        .unwrap();
+    let selected = api
+        .set_tenant_nic_firmware_config(Request::new(SetTenantNicFirmwareConfigRequest {
+            tenant_organization_id: tenant.organization_id.clone(),
+            if_version_match: tenant.version.clone(),
+            action: Some(Action::ProfileId(profile.id.clone())),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .firmware_config
+        .expect("set response must include the selected firmware config");
+    assert_eq!(selected.tenant_organization_id, tenant.organization_id);
+    assert_eq!(selected.profile_id.as_deref(), Some(profile.id.as_str()));
+    assert_ne!(selected.config_version, tenant.version);
+    assert_eq!(
+        api.get_tenant_nic_firmware_config(Request::new(get_request.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .firmware_config
+            .expect("get response must include the selected firmware config"),
+        selected
+    );
+
+    // A firmware write invalidates a previously read ordinary tenant token.
+    let update = rpc::forge::UpdateTenantRequest {
+        organization_id: tenant.organization_id.clone(),
+        metadata: Some(rpc::forge::Metadata {
+            name: "Updated firmware tenant".into(),
+            ..Default::default()
+        }),
+        if_version_match: Some(tenant.version),
+        routing_profile_type: tenant.routing_profile_type,
+    };
+    let error = api
+        .update_tenant(Request::new(update.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(
+        api.get_tenant_nic_firmware_config(Request::new(get_request.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .firmware_config
+            .expect("get response must include the selected firmware config"),
+        selected
+    );
+
+    let rejected_tenant = api
+        .find_tenant(Request::new(rpc::forge::FindTenantRequest {
+            tenant_organization_id: tenant.organization_id.clone(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .unwrap();
+    assert_eq!(rejected_tenant.metadata, tenant.metadata);
+    assert_eq!(rejected_tenant.version, selected.config_version);
+
+    let updated_tenant = api
+        .update_tenant(Request::new(rpc::forge::UpdateTenantRequest {
+            if_version_match: Some(selected.config_version.clone()),
+            ..update.clone()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .unwrap();
+    assert_eq!(updated_tenant.metadata, update.metadata);
+    let preserved = api
+        .get_tenant_nic_firmware_config(Request::new(get_request.clone()))
+        .await
+        .unwrap()
+        .into_inner()
+        .firmware_config
+        .expect("get response must include the selected firmware config");
+    assert_eq!(preserved.profile_id, selected.profile_id);
+    assert_eq!(preserved.config_version, updated_tenant.version);
+    assert_ne!(preserved.config_version, selected.config_version);
+
+    // The dependency also runs in the other direction: an ordinary tenant edit
+    // preserves the selected profile but invalidates the operator's old token.
+    let clear_request = SetTenantNicFirmwareConfigRequest {
+        tenant_organization_id: tenant.organization_id.clone(),
+        if_version_match: preserved.config_version.clone(),
+        action: Some(Action::Clear(())),
+    };
+    // Unicode profile names are valid. Split a character at the raw Debug cutoff
+    // to prove logging lets this request reach the missing-profile check.
+    let missing_unicode_profile = (0..3)
+        .map(|padding| SetTenantNicFirmwareConfigRequest {
+            action: Some(Action::ProfileId(format!(
+                "{}{}",
+                "a".repeat(padding),
+                "界".repeat(rpc::MAX_ERR_MSG_SIZE as usize)
+            ))),
+            ..clear_request.clone()
+        })
+        .find(|request| !format!("{request:?}").is_char_boundary(rpc::MAX_ERR_MSG_SIZE as usize))
+        .expect("ASCII padding places the cutoff inside a three-byte character");
+    check_cases_async(
+        [
+            // The ordinary API's write must participate in the operator API's CAS.
+            Case {
+                scenario: "ordinary update invalidates the operator token",
+                input: SetTenantNicFirmwareConfigRequest {
+                    if_version_match: selected.config_version,
+                    ..clear_request.clone()
+                },
+                expect: FailsWith(Code::FailedPrecondition),
+            },
+            // A protobuf default string must not become an unconditional write.
+            Case {
+                scenario: "missing version is invalid",
+                input: SetTenantNicFirmwareConfigRequest {
+                    if_version_match: String::new(),
+                    ..clear_request.clone()
+                },
+                expect: FailsWith(Code::InvalidArgument),
+            },
+            // Accepting only the numeric prefix would weaken the full-token contract.
+            Case {
+                scenario: "version requires its timestamp",
+                input: SetTenantNicFirmwareConfigRequest {
+                    if_version_match: "V1".into(),
+                    ..clear_request.clone()
+                },
+                expect: FailsWith(Code::InvalidArgument),
+            },
+            // Omitting the oneof must not be interpreted as an explicit clear.
+            Case {
+                scenario: "action is required",
+                input: SetTenantNicFirmwareConfigRequest {
+                    action: None,
+                    ..clear_request.clone()
+                },
+                expect: FailsWith(Code::InvalidArgument),
+            },
+            // Set must validate its tenant field independently of the GET path.
+            Case {
+                scenario: "tenant organization ID is required",
+                input: SetTenantNicFirmwareConfigRequest {
+                    tenant_organization_id: String::new(),
+                    ..clear_request.clone()
+                },
+                expect: FailsWith(Code::InvalidArgument),
+            },
+            // An empty profile action is invalid, not an alias for clear.
+            Case {
+                scenario: "profile ID must be valid",
+                input: SetTenantNicFirmwareConfigRequest {
+                    action: Some(Action::ProfileId(String::new())),
+                    ..clear_request.clone()
+                },
+                expect: FailsWith(Code::InvalidArgument),
+            },
+            // A valid but absent catalog ID must retain the database NotFound mapping.
+            Case {
+                scenario: "profile must exist",
+                input: SetTenantNicFirmwareConfigRequest {
+                    action: Some(Action::ProfileId("missing-profile".into())),
+                    ..clear_request.clone()
+                },
+                expect: FailsWith(Code::NotFound),
+            },
+            // Legal Unicode must retain the profile lookup's NotFound response.
+            Case {
+                scenario: "missing profile crosses the UTF-8 log cutoff",
+                input: missing_unicode_profile,
+                expect: FailsWith(Code::NotFound),
+            },
+            // Clear must report absence instead of registering a tenant implicitly.
+            Case {
+                scenario: "tenant must exist",
+                input: SetTenantNicFirmwareConfigRequest {
+                    tenant_organization_id: "missing-tenant".into(),
+                    ..clear_request.clone()
+                },
+                expect: FailsWith(Code::NotFound),
+            },
+        ],
+        |request| {
+            let get_request = &get_request;
+            let preserved = &preserved;
+            async move {
+                let result = api
+                    .set_tenant_nic_firmware_config(Request::new(request))
+                    .await;
+                assert_eq!(
+                    &api.get_tenant_nic_firmware_config(Request::new(get_request.clone()))
+                        .await
+                        .unwrap()
+                        .into_inner()
+                        .firmware_config
+                        .expect("get response must include the selected firmware config"),
+                    preserved
+                );
+                result.map(drop).map_err(|error| error.code())
+            }
+        },
+    )
+    .await;
+
+    // Selection is a live reference, not copied profile contents. Clearing it
+    // releases the deletion constraint without removing the tenant.
+    let delete_request = DeleteNicFirmwareProfileRequest {
+        id: profile.id,
+        if_version_match: Some(profile.version),
+    };
+    let error = api
+        .delete_nic_firmware_profile(Request::new(delete_request.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(
+        api.get_tenant_nic_firmware_config(Request::new(get_request.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .firmware_config
+            .expect("get response must include the selected firmware config"),
+        preserved
+    );
+
+    let cleared = api
+        .set_tenant_nic_firmware_config(Request::new(clear_request))
+        .await
+        .unwrap()
+        .into_inner()
+        .firmware_config
+        .expect("set response must include the cleared firmware config");
+    assert_eq!(cleared.tenant_organization_id, tenant.organization_id);
+    assert_eq!(cleared.profile_id, None);
+    assert_ne!(cleared.config_version, preserved.config_version);
+    assert_eq!(
+        api.get_tenant_nic_firmware_config(Request::new(get_request))
+            .await
+            .unwrap()
+            .into_inner()
+            .firmware_config
+            .expect("get response must include the cleared firmware config"),
+        cleared
+    );
+    let remaining_tenant = api
+        .find_tenant(Request::new(rpc::forge::FindTenantRequest {
+            tenant_organization_id: tenant.organization_id,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .unwrap();
+    assert_eq!(remaining_tenant.version, cleared.config_version);
+    assert_eq!(remaining_tenant.metadata, updated_tenant.metadata);
+    api.delete_nic_firmware_profile(Request::new(delete_request))
+        .await
+        .unwrap();
+}
 
 #[crate::sqlx_test]
 async fn test_tenant(pool: sqlx::PgPool) {
@@ -708,6 +1089,27 @@ async fn test_tenant_create_keyset(pool: sqlx::PgPool) {
     );
 
     assert!(keyset.keyset_content.unwrap().public_keys.is_empty());
+
+    let status = env
+        .api
+        .create_tenant_keyset(tonic::Request::new(rpc::forge::CreateTenantKeysetRequest {
+            keyset_identifier: keyset.keyset_identifier,
+            keyset_content: Some(rpc::forge::TenantKeysetContent {
+                public_keys: vec![],
+            }),
+            version: "V2-T1691517639501025".to_string(),
+        }))
+        .await
+        .unwrap_err();
+    let response = status.into_http::<tonic::body::Body>();
+    let status = tonic::Status::from_header_map(response.headers()).unwrap();
+
+    // REST uses this fixed phrase to retry an existing keyset with Update instead of Create.
+    assert_eq!(status.code(), Code::Internal);
+    assert_eq!(
+        status.message(),
+        "internal database error: duplicate key value violates unique constraint"
+    );
 }
 
 #[crate::sqlx_test]

@@ -124,6 +124,8 @@ pub(super) fn controller_config_with_lifetimes(
 pub(super) fn base_dhcp_config(api_url: Option<String>) -> DhcpConfig {
     DhcpConfig {
         carbide_api_url: api_url,
+        carbide_dhcp_server: Some(std::net::Ipv4Addr::LOCALHOST),
+        carbide_provisioning_server_ipv4: Some(std::net::Ipv4Addr::LOCALHOST),
         carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
         carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
         dhcpv6_preferred_lifetime_secs: 3600,

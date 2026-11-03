@@ -480,12 +480,14 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tn1.ID, site1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site1, tn1, "test-allocation-1", tnu1)
 
 	tn2 := testFabricBuildTenant(t, dbSession, tnOrg4, "testTenant2")
 	assert.NotNil(t, tn2)
 
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg4, tn2.ID, site2.ID, tnu4.ID)
 	assert.NotNil(t, ts2)
+	common.TestBuildAllocation(t, dbSession, site2, tn2, "test-allocation-2", tnu4)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}

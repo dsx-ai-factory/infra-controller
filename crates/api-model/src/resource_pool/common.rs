@@ -16,11 +16,9 @@
  */
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use tokio::sync::oneshot;
-
-use crate::resource_pool::{ResourcePool, ResourcePoolStats};
+use crate::resource_pool::ResourcePool;
 
 /// IPv4 DPU loopback IP pool.
 pub const LOOPBACK_IP: &str = "lo-ip";
@@ -57,10 +55,6 @@ pub fn ib_pkey_pool_name(fabric: &str) -> String {
 pub struct CommonPools {
     pub ethernet: EthernetPools,
     pub infiniband: IbPools,
-    pub pool_stats: Arc<Mutex<HashMap<String, ResourcePoolStats>>>,
-    /// Instructs the metric task to stop.
-    /// We rely on `CommonPools` being dropped to instruct the metric task to stop
-    pub _stop_sender: oneshot::Sender<()>,
 }
 
 /// ResourcePools that are used for ethernet virtualization

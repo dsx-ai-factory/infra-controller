@@ -387,7 +387,8 @@ fn build_ipv6_interface_config(
     }
 }
 
-// This writer keeps the deprecated fields populated for older agents during the rollout.
+// This writer keeps the deprecated IPv4 fields populated when IPv4 is configured so older
+// agents can consume IPv4-only and dual-stack payloads during the rollout.
 #[allow(deprecated)]
 pub(crate) async fn admin_network(
     txn: &mut PgConnection,
@@ -463,18 +464,16 @@ pub(crate) async fn admin_network(
     };
 
     let prefixes = PrefixPair::from_segment_prefixes(&admin_segment.prefixes);
-    let prefix = match prefixes.v4() {
-        Some(p) => p,
-        None => {
-            return Err(CarbideError::Internal {
-                message: format!(
-                    "admin network segment '{}' has no IPv4 network prefix",
-                    admin_segment.id,
-                ),
-            }
-            .into());
+    let prefix = prefixes.v4();
+    if prefix.is_none() && !fnn_enabled_on_admin {
+        return Err(CarbideError::Internal {
+            message: format!(
+                "admin network segment '{}' has no IPv4 network prefix",
+                admin_segment.id,
+            ),
         }
-    };
+        .into());
+    }
 
     let domain = match admin_segment.config.subdomain_id {
         Some(domain_id) => {
@@ -490,29 +489,37 @@ pub(crate) async fn admin_network(
         None => "unknowndomain".to_string(),
     };
 
-    let address = active_interface
-        .addresses
-        .iter()
-        .copied()
-        .find(|address| address.is_ipv4())
-        .ok_or_else(|| {
-            CarbideError::InvalidArgument(format!(
-                "no IPv4 address found on primary host admin interface {}",
-                active_interface.id
-            ))
-        })?;
+    let address = prefix
+        .map(|_| {
+            active_interface
+                .addresses
+                .iter()
+                .copied()
+                .find(|address| address.is_ipv4())
+                .ok_or_else(|| {
+                    CarbideError::InvalidArgument(format!(
+                        "no IPv4 address found on primary host admin interface {}",
+                        active_interface.id
+                    ))
+                })
+        })
+        .transpose()?;
     let ipv6_address = active_interface
         .addresses
         .iter()
         .copied()
         .find(IpAddr::is_ipv6);
 
-    // On the admin network, the interface_prefix is always
-    // just going to be a /32 derived from the machine interface
-    // address.
-    let address_prefix = IpNetwork::new(address, 32).map_err(|e| CarbideError::Internal {
-        message: format!("failed to build default admin address prefix for {address}/32: {e}"),
-    })?;
+    // Admin host routes advertise one machine, not the containing segment.
+    let address_prefix = address
+        .map(|address| {
+            IpNetwork::new(address, 32).map_err(|e| CarbideError::Internal {
+                message: format!(
+                    "failed to build default admin address prefix for {address}/32: {e}"
+                ),
+            })
+        })
+        .transpose()?;
 
     let svi_ip = if !fnn_enabled_on_admin {
         None
@@ -524,8 +531,8 @@ pub(crate) async fn admin_network(
     let ipv6_svi_address = ipv6_prefix.and_then(|prefix| prefix.svi_ip);
 
     // The agent installs the segment network address as the IPv6 VRR. Host, SVI, and VRR
-    // therefore have distinct in-prefix roles; incomplete or stale IPv6 is omitted so the valid
-    // IPv4 admin response remains usable.
+    // therefore have distinct in-prefix roles. Incomplete or stale IPv6 can be omitted only
+    // when a valid IPv4 admin response remains usable.
     let (ipv6_interface_config, ipv6_segment_prefix) = match (
         fnn_enabled_on_admin,
         ipv6_prefix,
@@ -562,6 +569,13 @@ pub(crate) async fn admin_network(
         }
         _ => (None, None),
     };
+    if address.is_none() && ipv6_interface_config.is_none() {
+        return Err(CarbideError::internal(format!(
+            "no complete IPv6 configuration found on primary host admin interface {} in segment {}",
+            active_interface.id, admin_segment.id,
+        ))
+        .into());
+    }
 
     let (vpc_vni, tenant_vrf_loopback_ip) = if !fnn_enabled_on_admin {
         (0, None)
@@ -577,6 +591,11 @@ pub(crate) async fn admin_network(
                 let vpc = vpcs.remove(0);
                 match vpc.status.vni {
                     Some(vpc_vni) => {
+                        let vpc_vni = u32::try_from(vpc_vni).map_err(|_| {
+                            CarbideError::internal(format!(
+                                "admin VPC {vpc_id} has a negative allocated VNI"
+                            ))
+                        })?;
                         let tenant_loopback_ip = if use_vpc_vrf_loopback {
                             Some(
                                 db::vpc_dpu_loopback::get_or_allocate_loopback_ip_for_vpc(
@@ -591,7 +610,7 @@ pub(crate) async fn admin_network(
                             None
                         };
 
-                        (vpc_vni as u32, tenant_loopback_ip)
+                        (vpc_vni, tenant_loopback_ip)
                     }
                     None => {
                         // if FNN is enabled, VPC must be created and updated in admin_segment.
@@ -622,15 +641,15 @@ pub(crate) async fn admin_network(
             0
         },
         vpc_vni,
-        gateway: prefix.gateway_cidr(),
-        ip: Some(address.to_string()),
-        interface_prefix: Some(address_prefix.to_string()),
+        gateway: prefix.and_then(NetworkPrefix::gateway_cidr),
+        ip: address.map(|address| address.to_string()),
+        interface_prefix: address_prefix.map(|prefix| prefix.to_string()),
         vpc_prefixes: if fnn_enabled_on_admin {
-            vec![format!("{address}/32")]
+            address_prefix.iter().map(ToString::to_string).collect()
         } else {
             vec![]
         },
-        prefix: Some(prefix.prefix.to_string()),
+        prefix: prefix.map(|prefix| prefix.prefix.to_string()),
         fqdn: format!("{}.{}", active_interface.hostname, domain),
         booturl: booturl.clone(),
         svi_ip,
@@ -642,7 +661,13 @@ pub(crate) async fn admin_network(
         internal_uuid: None,
         mtu: u32::try_from(admin_segment.config.mtu).ok(),
         ipv6_interface_config,
-        vpc_routing_profile: admin_vpc_routing_profile.map(rpc::RoutingProfile::from),
+        vpc_routing_profile: admin_vpc_routing_profile
+            .map(|profile| {
+                profile
+                    .to_rpc(Some(vpc_vni))
+                    .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))
+            })
+            .transpose()?,
         interface_routing_profile: None,
         addresses: vec![],
     };
@@ -794,7 +819,14 @@ pub(crate) async fn tenant_network(
         None => None,
     };
 
-    let vpc_vni = vpc.as_ref().and_then(|v| v.status.vni).unwrap_or_default() as u32;
+    let vpc_vni = vpc
+        .as_ref()
+        .and_then(|vpc| vpc.status.vni)
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| CarbideError::Internal {
+            message: format!("VPC attached to segment {} has a negative VNI", segment.id),
+        })?;
     let slaac_enabled = vpc.as_ref().is_some_and(|vpc| vpc.config.slaac_enabled);
 
     // Resolve the routing profile from the VPC attached to this interface.
@@ -805,7 +837,11 @@ pub(crate) async fn tenant_network(
             let profile = fnn.resolve_vpc_routing_profile(&vpc.config)?;
 
             (
-                Some(rpc::RoutingProfile::from(profile.as_ref())),
+                Some(
+                    profile
+                        .to_rpc(vpc_vni)
+                        .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?,
+                ),
                 iface
                     .routing_profile
                     .as_ref()
@@ -888,7 +924,7 @@ pub(crate) async fn tenant_network(
         },
         vlan_id: segment.status.vlan_id.unwrap_or_default() as u32,
         vni: segment.status.vni.unwrap_or_default() as u32,
-        vpc_vni,
+        vpc_vni: vpc_vni.unwrap_or_default(),
         gateway: ds.v4().and_then(NetworkPrefix::gateway_cidr),
         ip: address.map(|address| address.to_string()),
         interface_prefix: interface_prefix.map(|prefix| prefix.to_string()),
@@ -1272,7 +1308,7 @@ mod test {
         let interface_profile = interface_routing_profile(&["192.0.2.64/26", "2001:db8:1::/64"]);
 
         validate_interface_routing_profile(&vpc_profile, &interface_profile).unwrap();
-        let vpc_routing_profile = rpc::RoutingProfile::from(&vpc_profile);
+        let vpc_routing_profile = vpc_profile.to_rpc(None).unwrap();
         let interface_routing_profile = rpc::FlatInterfaceRoutingProfile::from(&interface_profile);
 
         assert!(vpc_routing_profile.leak_default_route_from_underlay);

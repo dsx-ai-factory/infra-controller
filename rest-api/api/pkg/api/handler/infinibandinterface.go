@@ -5,6 +5,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -201,34 +202,15 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 		// De-duplicate Site IDs
 		siteIDs = goset.NewSet(siteIDs...).ToSlice()
 
-		// Get all TenantSites for the Tenant and Sites specified in query
-		tsDAO := cdbm.NewTenantSiteDAO(gaibih.dbSession)
-		tenantSites, _, err := tsDAO.GetAll(
-			ctx,
-			nil,
-			cdbm.TenantSiteFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-				SiteIDs:   siteIDs,
-			},
-			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-			[]string{cdbm.SiteRelationName},
-		)
-
-		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Sites specified in query, DB error", nil)
-		}
-
-		// Check if Tenant has access to each Site
-		tenantSiteIDMap := map[uuid.UUID]*cdbm.TenantSite{}
-		for i := range tenantSites {
-			tenantSiteIDMap[tenantSites[i].SiteID] = &tenantSites[i]
-		}
-
 		for _, siteID := range siteIDs {
 			// Check if Tenant has access to Site
-			if _, ok := tenantSiteIDMap[siteID]; !ok {
+			err := common.ValidateTenantSiteAccess(ctx, nil, gaibih.dbSession, &tenant, siteID)
+			if errors.Is(err, cdb.ErrDoesNotExist) {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Site: %s specified in query doesn't exist or Tenant doesn't have access to it", siteID.String()), nil)
+			}
+			if err != nil {
+				logger.Error().Err(err).Msg("error checking Tenant access to Site")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Sites specified in query, DB error", nil)
 			}
 		}
 	}

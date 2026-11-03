@@ -155,8 +155,7 @@ func testIPBlockBuildIPBlock(t *testing.T, dbSession *cdb.Session, name string, 
 }
 
 // testIPBlockBuildTenantSitePrefix creates a private Tenant SitePrefix. The
-// combination of TenantID and SitePrefixID keeps it out of generic IPBlock
-// handlers.
+// unmanaged classification keeps it out of generic IPBlock handlers.
 func testIPBlockBuildTenantSitePrefix(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, ip *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, prefix string, prefixLength int, status string, user *cdbm.User) *cdbm.IPBlock {
 	t.Helper()
 	sitePrefixID := uuid.New()
@@ -166,6 +165,7 @@ func testIPBlockBuildTenantSitePrefix(t *testing.T, dbSession *cdb.Session, name
 		InfrastructureProviderID: ip.ID,
 		TenantID:                 &tenant.ID,
 		SitePrefixID:             &sitePrefixID,
+		Managed:                  cutil.GetPtr(false),
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		Prefix:                   prefix,
 		PrefixLength:             prefixLength,
@@ -1344,6 +1344,7 @@ func TestIPBlockHandler_Get(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedID, rsp.ID)
+				assert.True(t, rsp.Managed, "visible IP Blocks remain provider-managed independently of tenant assignment")
 				assert.Equal(t, tc.expectedStatusDetailsCnt, len(rsp.StatusHistory))
 				if tc.queryIncludeProviderRelation != nil || tc.queryIncludeTenantRelation != nil || tc.queryIncludeSiteRelation != nil {
 					if tc.expectedInfrastructureProviderOrg != nil {
@@ -1824,6 +1825,9 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			err = json.Unmarshal(rec.Body.Bytes(), &resp)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedCnt, len(resp))
+			for _, block := range resp {
+				assert.True(t, block.Managed)
+			}
 
 			ph := rec.Header().Get(pagination.ResponseHeaderName)
 			assert.NotEmpty(t, ph)

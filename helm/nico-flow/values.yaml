@@ -152,9 +152,8 @@ dataEncryption:
     value: ""
 
 ## Runtime settings rendered into the flow-config-files ConfigMap and mounted
-## at /etc/flow/flowconfig.yaml. Defaults match the built-in defaults in
-## rest-api/flow/internal/config/config.go, so an unchanged block behaves the
-## same as running without a config file.
+## at /etc/flow/flowconfig.yaml. Defaults match the application except tracing,
+## which the chart enables; export still requires an OTEL_* endpoint.
 ##
 ## Intervals are Go duration strings such as "30s", "1m", or "1h30m" and must
 ## be greater than zero; the toggles must be YAML booleans. The chart rejects
@@ -168,6 +167,10 @@ flowConfig:
   leakDetectionInterval: 1m
   ## Skip the periodic leak detection job. Boolean, default false.
   disableLeakDetection: false
+
+  ## Export requires enabled=true and an OTEL_* endpoint in extraEnv.flow.
+  tracing:
+    enabled: true
 
 ## Additional environment variables. Use the standard OTEL_* variables to
 ## configure Flow's existing OpenTelemetry exporter.

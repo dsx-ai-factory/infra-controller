@@ -849,7 +849,8 @@ func (mcd MachineCapabilitySQLDAO) GetAllDistinct(
 
 	mcs := []MachineCapability{}
 
-	query := db.GetIDB(tx, mcd.dbSession).NewSelect().Model(&mcs).ColumnExpr("DISTINCT ON (mc.type, mc.name, mc.frequency, mc.capacity, mc.vendor, mc.count, mc.device_type, mc.inactive_devices) mc.*")
+	// Bun's distinct state lets the paginator count the same rows that Scan returns.
+	query := db.GetIDB(tx, mcd.dbSession).NewSelect().Model(&mcs).DistinctOn("mc.type, mc.name, mc.frequency, mc.capacity, mc.vendor, mc.count, mc.device_type, mc.inactive_devices")
 	if machineIDs != nil {
 		if len(machineIDs) == 1 {
 			query = query.Where("mc.machine_id = ?", machineIDs[0])

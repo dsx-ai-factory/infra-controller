@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::MacAddressPool;
 use bmc_mock::{
-    ActionError, DpuMachineInfo, DpuSettings, HardwareType, MachineInfo, ResourceResetType,
+    ActionError, DeviceEffect, DpuMachineInfo, DpuSettings, HardwareType, MachineInfo,
+    ResourceResetType,
 };
 use carbide_uuid::machine::MachineId;
 use eyre::Context;
@@ -248,6 +249,25 @@ impl DpuMachine {
                             _ = reply.send(response)
                         }
                     }
+                    BmcCommand::DeviceEffect { effect, reply } => {
+                        let effect_debug = format!("{effect:?}");
+                        let response = match effect {
+                            // The DPU's own power drops with the tray's.
+                            DeviceEffect::AuxPowerCycle => self.state_machine.apply_aux_power_cycle(),
+                            DeviceEffect::ResetBmcToDefaults(update) => {
+                                self.state_machine.reset_bmc(update).await
+                            },
+                        };
+                        if let Some(reply) = reply {
+                            _ = reply.send(response);
+                        } else if let Err(error) = response {
+                            tracing::error!(
+                                effect = %effect_debug,
+                                %error,
+                                "Could not apply device effect",
+                            );
+                        }
+                    }
                     BmcCommand::StateRefreshIndication => {
                         self.state_machine.update_live_state();
                     }
@@ -278,6 +298,15 @@ impl DpuMachine {
                 if let Some(reply) = reply {
                     _ = reply.send(response);
                 }
+                HandleMessageResult::ProcessStateNow
+            }
+            DpuMachineMessage::AuxPowerCycle => {
+                _ = self
+                    .state_machine
+                    .apply_aux_power_cycle()
+                    .inspect_err(|error| {
+                        tracing::error!(%error, "Could not apply DPU AC power cycle");
+                    });
                 HandleMessageResult::ProcessStateNow
             }
             DpuMachineMessage::SetPaused(is_paused) => {
@@ -324,6 +353,7 @@ impl DpuMachine {
 }
 
 enum DpuMachineMessage {
+    AuxPowerCycle,
     SetSystemPower {
         request: ResourceResetType,
         reply: Option<oneshot::Sender<Result<(), ActionError>>>,
@@ -356,6 +386,17 @@ struct DpuMachineActor {
 pub struct DpuMachineHandle(Arc<DpuMachineActor>);
 
 impl DpuMachineHandle {
+    /// Observes live BMC effects without contacting its leased address.
+    /// Returns None when the live BMC resource state is unavailable.
+    pub fn bmc_effect_snapshot(&self) -> Option<bmc_mock::persistence::BmcEffectSnapshot> {
+        self.0
+            .live_state
+            .read()
+            .unwrap()
+            .bmc_persistence
+            .effect_snapshot()
+    }
+
     pub fn mat_id(&self) -> Uuid {
         self.0.mat_id
     }
@@ -366,6 +407,25 @@ impl DpuMachineHandle {
 
     pub fn machine_ip(&self) -> Option<Ipv4Addr> {
         self.0.live_state.read().unwrap().machine_ip
+    }
+
+    pub(super) fn tenant_network_config(
+        &self,
+    ) -> Option<crate::tenant_network::TenantNetworkConfig> {
+        self.0
+            .live_state
+            .read()
+            .unwrap()
+            .tenant_network_config
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_control_test_tenant_network(
+        &self,
+        config: Option<crate::tenant_network::TenantNetworkConfig>,
+    ) {
+        self.0.live_state.write().unwrap().tenant_network_config = config;
     }
 
     pub fn observed_machine_id(&self) -> Option<MachineId> {
@@ -415,6 +475,20 @@ impl DpuMachineHandle {
         })?)
     }
 
+    pub(super) fn aux_power_cycle(&self) -> eyre::Result<()> {
+        Ok(self.0.message_tx.send(DpuMachineMessage::AuxPowerCycle)?)
+    }
+
+    /// AC power drops applied by this actor, independent of ordinary ForceOff.
+    pub fn aux_power_cycle_generation(&self) -> u64 {
+        self.0.live_state.read().unwrap().aux_power_cycle_generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn power_state(&self) -> nv_redfish::schema::resource::PowerState {
+        self.0.live_state.read().unwrap().power_state
+    }
+
     pub fn is_ready(&self) -> bool {
         let live_state = self.0.live_state.read().unwrap();
         // Whether we are up and booted to the agent OS (or if we're nic mode, we don't have to be
@@ -429,6 +503,12 @@ impl DpuMachineHandle {
     /// DPU DHCP relay -- once a managed DPU becomes a plain NIC.
     pub fn flipped_to_nic_mode(&self) -> bool {
         self.0.live_state.read().unwrap().dpu_flipped_to_nic_mode
+    }
+
+    /// The DPU's disk image and BFB install generation as its BMC reports
+    /// them, or `None` before the BMC starts. Read-only.
+    pub fn dpu_os_status(&self) -> Option<bmc_mock::DpuOsStatus> {
+        self.0.live_state.read().unwrap().dpu_os_status()
     }
 
     pub async fn wait_until_machine_up_with_api_state(
@@ -467,7 +547,7 @@ impl DpuMachineHandle {
             hardware_type: None,
             mat_state: live_state.state_string.map(ToOwned::to_owned),
             api_state: live_state.api_state.clone(),
-            power_state: live_state.power_state.to_string(),
+            power_state: live_state.power_state,
             machine_ip: live_state.machine_ip.map(|ip| ip.to_string()),
             nvos_ip: None,
             infiniband_ports: None,
@@ -496,7 +576,7 @@ impl DpuMachineHandle {
     pub fn persisted(&self) -> PersistedDpuMachine {
         let live_state = self.0.live_state.read().unwrap();
         let installed_os = live_state.installed_os;
-        let bmc_accounts = live_state.bmc_accounts_for_snapshot();
+        let bmc_state = live_state.bmc_persistence.persisted();
         drop(live_state);
         PersistedDpuMachine {
             mat_id: self.0.mat_id,
@@ -508,7 +588,7 @@ impl DpuMachineHandle {
             settings: self.0.dpu_info.settings.clone(),
             installed_os,
             dpu_index: self.0.dpu_index,
-            bmc_accounts,
+            bmc_state,
         }
     }
 

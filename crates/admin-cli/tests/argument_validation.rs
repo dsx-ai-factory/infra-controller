@@ -230,6 +230,23 @@ async fn rejected_arguments_exit_before_contacting_core() {
             usage: "Usage: nico-admin-cli expected-switch update",
         },
         Case {
+            scenario: "switch add requires an NVOS port",
+            args: &[
+                "expected-switch",
+                "add",
+                "--bmc-mac-address",
+                "00:11:22:33:44:55",
+                "--bmc-username",
+                "admin",
+                "--bmc-password",
+                "test-password",
+                "--switch-serial-number",
+                "SWITCH-004",
+            ],
+            diagnostic: "--nvos-interface <MAC[,primary]>",
+            usage: "Usage: nico-admin-cli expected-switch add",
+        },
+        Case {
             scenario: "switch update rejects conflicting selectors",
             args: &[
                 "expected-switch",

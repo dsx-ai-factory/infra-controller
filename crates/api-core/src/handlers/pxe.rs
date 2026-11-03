@@ -58,11 +58,11 @@ pub(crate) async fn get_pxe_instructions(
     // alternate hostname or IP they can resolve and/or connect
     // to for carbide-pxe and carbide-api.
     let (api_url_override, pxe_url_override, static_pxe_url_override) = {
-        let is_external = iface.segment_id
-            == db::network_segment::static_assignments(txn.as_pgconn())
-                .await
-                .map(|s| s.id)
-                .unwrap_or_default();
+        let is_external = match db::network_segment::static_assignments(txn.as_pgconn()).await {
+            Ok(segment) => iface.segment_id == segment.id,
+            Err(error) if error.is_not_found() => false,
+            Err(error) => return Err(CarbideError::from(error).into()),
+        };
 
         if is_external {
             (

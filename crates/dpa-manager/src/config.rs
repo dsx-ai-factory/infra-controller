@@ -237,6 +237,17 @@ impl Default for AstraConfig {
     }
 }
 
+/// Site-wide availability of partial-multiplane maintenance, including provisioning initialization.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PartialMultiplane {
+    /// Initialize planes in maintenance mode during provisioning.
+    #[default]
+    Enabled,
+    /// Skip maintenance initialization during provisioning. Runtime maintenance is unaffected.
+    Disabled,
+}
+
 /// DPA (aka Cluster Interconnect Network) related configuration.
 /// Enables DPA, and specifies basic network settings.
 /// The VNI to be used by DPA will be the same as the parent VPC.
@@ -256,6 +267,11 @@ pub struct EwEthersConfig {
     /// with [`Self::svpc_enabled`].
     #[serde(default)]
     pub astra_enabled: bool,
+
+    /// Initialize newly provisioned Astra planes in maintenance mode when `enabled` (default).
+    /// `disabled` skips initialization without restricting runtime requests or observations.
+    #[serde(default, rename = "partial-multiplane")]
+    pub partial_multiplane: PartialMultiplane,
 
     /// Base IPv4 address of the DPA/Cluster Interconnect overlay network.
     #[serde(default = "EwEthersConfig::default_subnet_ip")]
@@ -302,6 +318,7 @@ impl Default for EwEthersConfig {
             enabled: false,
             svpc_enabled: false,
             astra_enabled: false,
+            partial_multiplane: PartialMultiplane::default(),
             subnet_ip: Self::default_subnet_ip(),
             subnet_mask: Self::default_subnet_mask(),
             astra: AstraConfig::default(),

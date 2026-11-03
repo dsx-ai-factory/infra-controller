@@ -46,6 +46,8 @@ pub struct CommonObjectHandlerMetrics<IO: StateControllerIO> {
     /// A prerequisite or final state write rejected this iteration. No transition
     /// committed, and the object should be reprocessed promptly with fresh state.
     pub iteration_invalidated: bool,
+    /// The handler committed a Wait that requests another iteration without a state transition.
+    pub requeue_immediately: bool,
     /// The time the object was in `initial_state` at the start of the iteration
     pub time_in_state: Duration,
     /// Whether the object was in `initial_state` for longer than allowed by the SLA
@@ -68,6 +70,7 @@ impl<IO: StateControllerIO> Default for CommonObjectHandlerMetrics<IO> {
             initial_state: None,
             next_state: None,
             iteration_invalidated: false,
+            requeue_immediately: false,
             handler_latency: Duration::from_secs(0),
             time_in_state: Duration::from_secs(0),
             time_in_state_above_sla: false,
@@ -304,11 +307,15 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
         meter: &Meter,
         shared_metrics_holder: SharedMetricsHolder<Self::IterationMetrics>,
     ) -> Self {
-        {
-            // The code below is what creates counters like forge_network_segments_total
+        // Preserve legacy *_total gauges (for example, carbide_machines_total)
+        // for existing queries; *_count describes the current object count.
+        for name in [
+            format!("{object_type}_total"),
+            format!("{object_type}_count"),
+        ] {
             let metrics = shared_metrics_holder.clone();
             meter
-                .u64_observable_gauge(format!("{object_type}_total"))
+                .u64_observable_gauge(name)
                 .with_description(format!("Number of {object_type} in the system"))
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
@@ -321,8 +328,8 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
                         observer.observe(num_objects as u64, attrs);
                     });
                 })
-                .build()
-        };
+                .build();
+        }
         {
             let metrics = shared_metrics_holder.clone();
             meter
@@ -385,7 +392,7 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
                     "{object_type}_with_state_handling_errors_per_state"
                 ))
                 .with_description(format!(
-                    "Number of state-handling errors for {object_type} in a given state"
+                    "Number of {object_type} whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error"
                 ))
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
@@ -597,6 +604,80 @@ impl<IO: StateControllerIO> MetricHolder<IO> {
             emitter,
             last_iteration_common_metrics,
             last_iteration_specific_metrics,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_utils::test_support::test_meter::TestMeter;
+
+    use super::*;
+    use crate::tests::TestStateControllerIO;
+
+    #[test]
+    fn object_count_aliases_preserve_labels_and_values() {
+        let meter = TestMeter::default();
+        let metrics = SharedMetricsHolder::with_fresh_period(Duration::MAX);
+        let names = ["carbide_machines_total", "carbide_machines_count"];
+        CommonMetricsEmitter::<TestStateControllerIO>::new(
+            "carbide_machines",
+            &meter.meter(),
+            metrics.clone(),
+        );
+        let exported = meter.export_metrics();
+        for name in names {
+            assert!(!exported.contains(name));
+        }
+
+        let state_metrics = HashMap::from([
+            (
+                FullState {
+                    state: "Ready",
+                    substate: "",
+                },
+                StateMetrics {
+                    num_objects: 3,
+                    ..Default::default()
+                },
+            ),
+            (
+                FullState {
+                    state: "Created",
+                    substate: "",
+                },
+                StateMetrics {
+                    num_objects: 2,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        metrics.update(CommonIterationMetrics {
+            state_metrics: state_metrics.clone(),
+        });
+        let exported = meter.export_metrics();
+        for name in names {
+            assert!(exported.contains(&format!("# TYPE {name} gauge\n")));
+            assert!(exported.contains(&format!("\n{name}{{fresh=\"true\"}} 5\n")));
+        }
+
+        metrics.update(CommonIterationMetrics::default());
+        let exported = meter.export_metrics();
+        for name in names {
+            assert!(exported.contains(&format!("\n{name}{{fresh=\"true\"}} 0\n")));
+        }
+
+        let stale_meter = TestMeter::default();
+        let stale_metrics = SharedMetricsHolder::with_fresh_period(Duration::ZERO);
+        CommonMetricsEmitter::<TestStateControllerIO>::new(
+            "carbide_machines",
+            &stale_meter.meter(),
+            stale_metrics.clone(),
+        );
+        stale_metrics.update(CommonIterationMetrics { state_metrics });
+        let exported = stale_meter.export_metrics();
+        for name in names {
+            assert!(exported.contains(&format!("\n{name}{{fresh=\"false\"}} 5\n")));
         }
     }
 }

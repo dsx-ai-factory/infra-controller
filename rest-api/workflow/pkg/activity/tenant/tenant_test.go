@@ -72,6 +72,8 @@ func testTenantSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
 	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil))
+	assert.Nil(t, err)
 }
 
 func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
@@ -131,6 +133,7 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 	}
 
 	tenantsToCreate := pagedTenants[34:38]
+	cwu.TestBuildTenantSiteAssociation(t, dbSession, pagedTenants[0].Org, pagedTenants[0].ID, st2.ID, ipu.ID)
 
 	tSiteClientPool := testTemporalSiteClientPool(t)
 	assert.NotNil(t, tSiteClientPool)
@@ -188,7 +191,8 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "test paged Tenant inventory processing, empty inventory",
+			name:            "test paged Tenant inventory processing, empty inventory",
+			tenantsToCreate: []*cdbm.Tenant{pagedTenants[0]},
 			fields: fields{
 				dbSession:        dbSession,
 				siteClientPool:   tSiteClientPool,

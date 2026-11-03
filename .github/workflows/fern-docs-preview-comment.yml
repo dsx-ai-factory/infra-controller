@@ -94,18 +94,23 @@ jobs:
           PREVIEW_ID=$(echo "${HEAD_REF:-preview}" | sed 's/[^a-zA-Z0-9._-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')
           PREVIEW_ID="${PREVIEW_ID:-preview}"
 
-          # Actions bash uses -e; fern often exits non-zero on doc/link errors even when it logs a URL.
-          # Disable -e for the generate invocation so we always print output and can parse or fail clearly.
+          # Fern can print a URL and still fail. Capture its diagnostics before
+          # checking the exit status.
           set +e
           OUTPUT=$(fern generate --docs --preview --force --id "$PREVIEW_ID" 2>&1)
           FERN_EXIT=$?
           set -e
           echo "$OUTPUT"
 
+          if [ "$FERN_EXIT" -ne 0 ]; then
+            echo "::error::Fern preview generation failed (exit ${FERN_EXIT}). See Fern output above."
+            exit "$FERN_EXIT"
+          fi
+
           # Fern prints "[docs]: Published docs to <url>" (older CLIs sometimes added " (…)" after the URL).
           URL=$(echo "$OUTPUT" | grep -oE 'Published docs to https?://[^[:space:]()]+' | head -1 | sed 's/^Published docs to //') || true
           if [ -z "$URL" ]; then
-            echo "::error::Failed to generate preview URL (fern exit ${FERN_EXIT}). See Fern output above."
+            echo "::error::Fern exited successfully without a preview URL. See Fern output above."
             exit 1
           fi
           echo "preview_url=$URL" >> "$GITHUB_OUTPUT"

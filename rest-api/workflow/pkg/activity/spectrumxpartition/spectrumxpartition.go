@@ -42,7 +42,7 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 
 	stDAO := cdbm.NewSiteDAO(msxp.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received SpectrumX Partition inventory for unknown or deleted Site")
@@ -115,7 +115,7 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 
 			// Keep the in-memory map in sync so later inventory entries see this Partition.
 			existingSxpIDMap[sxp.ID.String()] = sxp
-			slogger.Info().Str("SpectrumX Partition ID", sxp.ID.String()).Msg("created or undeleted SpectrumX Partition from Site inventory")
+			slogger.Info().Msg("created or undeleted SpectrumX Partition from Site inventory")
 		}
 
 		reportedSxpIDMap[sxp.ID] = true

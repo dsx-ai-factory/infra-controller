@@ -115,6 +115,7 @@ fn build_exploration_report(
             boot_order: None,
             bios_version: None,
             serial_console_ssh_port: None,
+            processors: None,
         }],
         chassis: vec![Chassis {
             model: Some(model.to_string()),
@@ -136,12 +137,14 @@ fn build_exploration_report(
                     description: None,
                     version: Some(bmc_version.to_string()),
                     release_date: None,
+                    drive: None,
                 },
                 Inventory {
                     id: "Current-159-1.13.2__BIOS.Setup.1-1".to_string(),
                     description: None,
                     version: Some(uefi_version.to_string()),
                     release_date: None,
+                    drive: None,
                 },
             ],
         }],
@@ -153,11 +156,8 @@ fn build_exploration_report(
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        compute_tray_index: None,
-        physical_slot_number: None,
-        revision_id: None,
-        topology_id: None,
         remediation_error: None,
+        ..Default::default()
     };
     report.model = report.model();
     report

@@ -5,10 +5,15 @@ package pki
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/types"
 )
@@ -95,18 +100,56 @@ func TestNativeCertificateIssuer_RawCertificate(t *testing.T) {
 		t.Fatalf("NewNativeCertificateIssuer failed: %v", err)
 	}
 
+	tests := []struct {
+		name    string
+		sans    []string
+		wantErr bool
+	}{
+		{
+			name: "single SAN",
+			sans: []string{"raw.test.local"},
+		},
+		{
+			name: "every SAN is honoured",
+			sans: []string{"raw.test.local", "raw.test.local.svc", "localhost"},
+		},
+		{
+			name:    "no SAN is rejected rather than issuing an unverifiable certificate",
+			sans:    nil,
+			wantErr: true,
+		},
+		{
+			// A length check alone passes here, and deduplication then leaves
+			// nothing behind, so the certificate would carry no SAN at all.
+			name:    "blank SANs are rejected once discarded",
+			sans:    []string{"", ""},
+			wantErr: true,
+		},
+	}
+
 	ctx := context.Background()
-	cert, key, err := issuer.RawCertificate(ctx, "raw.test.local", 48)
-	if err != nil {
-		t.Fatalf("RawCertificate failed: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cert, key, err := issuer.RawCertificate(ctx, tt.sans, 48)
+			if tt.wantErr {
+				require.Error(t, err, "RawCertificate should reject a SAN list with no usable name")
+				return
+			}
+			require.NoError(t, err, "RawCertificate")
 
-	if !strings.HasPrefix(cert, "-----BEGIN CERTIFICATE-----") {
-		t.Error("Certificate should be PEM encoded")
-	}
+			assert.True(t, strings.HasPrefix(cert, "-----BEGIN CERTIFICATE-----"), "certificate should be PEM encoded")
+			assert.True(t, strings.HasPrefix(key, "-----BEGIN RSA PRIVATE KEY-----"), "key should be PEM encoded")
 
-	if !strings.HasPrefix(key, "-----BEGIN RSA PRIVATE KEY-----") {
-		t.Error("Key should be PEM encoded")
+			block, _ := pem.Decode([]byte(cert))
+			require.NotNil(t, block, "certificate should decode as PEM")
+
+			parsed, err := x509.ParseCertificate(block.Bytes)
+			require.NoError(t, err, "ParseCertificate")
+
+			for _, host := range tt.sans {
+				assert.NoError(t, parsed.VerifyHostname(host), "VerifyHostname(%q)", host)
+			}
+		})
 	}
 }
 

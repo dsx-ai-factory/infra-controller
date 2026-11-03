@@ -34,6 +34,7 @@ impl Run for Args {
                     &ctx.api_client,
                     ctx.config.page_size,
                     ctx.config.extended,
+                    &mut ctx.output_file,
                 )
                 .await
             }

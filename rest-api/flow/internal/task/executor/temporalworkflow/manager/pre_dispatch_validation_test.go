@@ -68,6 +68,19 @@ func TestExecuteValidatesCapabilitiesBeforeDispatch(t *testing.T) {
 	require.True(t, errors.Is(err, componentmanager.ErrUnsupportedCapability))
 }
 
+func TestValidateRejectsUnsupportedFirmwareOptionsBeforeDispatch(t *testing.T) {
+	validationErr := errors.New("firmware version-check override is not supported")
+	registry := newPreflightFirmwareRegistry(t, validationErr)
+	manager := &Manager{conf: Config{ComponentManagerRegistry: registry}}
+
+	err := manager.Validate(&task.ExecutionRequest{
+		Info:  firmwareControlExecutionInfo(t),
+		Async: true,
+	})
+
+	require.ErrorIs(t, err, validationErr)
+}
+
 func TestExecutionComponentTypesDeduplicatesAndSorts(t *testing.T) {
 	got := executionComponentTypes([]task.WorkflowComponent{
 		{Type: devicetypes.ComponentTypePowerShelf},
@@ -117,11 +130,80 @@ func powerControlExecutionInfo(t *testing.T) task.ExecutionInfo {
 }
 
 type preflightCapabilityManager struct {
-	descriptor cmcatalog.Descriptor
+	descriptor            cmcatalog.Descriptor
+	firmwareValidationErr error
 }
 
 func (m preflightCapabilityManager) Descriptor() cmcatalog.Descriptor {
 	return m.descriptor
+}
+
+func (m preflightCapabilityManager) ValidateFirmwareControl(
+	operations.FirmwareControlTaskInfo,
+) error {
+	return m.firmwareValidationErr
+}
+
+func firmwareControlExecutionInfo(t *testing.T) task.ExecutionInfo {
+	t.Helper()
+
+	data, err := json.Marshal(operations.FirmwareControlTaskInfo{
+		Operation:            operations.FirmwareOperationUpgrade,
+		OverrideVersionCheck: true,
+	})
+	require.NoError(t, err)
+
+	return task.ExecutionInfo{
+		TaskID: uuid.New(),
+		Components: []task.WorkflowComponent{
+			{Type: devicetypes.ComponentTypeCompute, ComponentID: "machine-1"},
+		},
+		RuleDefinition: &operationrules.RuleDefinition{
+			Steps: []operationrules.SequenceStep{{
+				ComponentType: devicetypes.ComponentTypeCompute,
+				MainOperation: operationrules.ActionConfig{
+					Name: operationrules.ActionFirmwareControl,
+				},
+			}},
+		},
+		OperationType: taskcommon.TaskTypeFirmwareControl,
+		OperationInfo: data,
+	}
+}
+
+func newPreflightFirmwareRegistry(
+	t *testing.T,
+	validationErr error,
+) *componentmanager.Registry {
+	t.Helper()
+
+	descriptor := cmcatalog.Descriptor{
+		DescriptorIdentity: cmcatalog.DescriptorIdentity{
+			Type:           devicetypes.ComponentTypeCompute,
+			Implementation: "limited-firmware",
+		},
+		Capabilities: capability.CapabilitySet{
+			capability.CapabilityFirmwareControl,
+			capability.CapabilityFirmwareStatus,
+		},
+	}
+	registry, err := componentmanager.NewRegistry(
+		[]componentmanager.FactorySpec{{
+			Descriptor: descriptor,
+			Factory: func(*providerapi.ProviderRegistry) (componentmanager.ComponentManager, error) {
+				return preflightCapabilityManager{
+					descriptor:            descriptor,
+					firmwareValidationErr: validationErr,
+				}, nil
+			},
+		}},
+		cmconfig.Config{ComponentManagers: map[devicetypes.ComponentType]string{
+			devicetypes.ComponentTypeCompute: "limited-firmware",
+		}},
+		providerapi.NewProviderRegistry(),
+	)
+	require.NoError(t, err)
+	return registry
 }
 
 func newPreflightCapabilityRegistry(

@@ -67,6 +67,12 @@ config:
   ## Disable (default) to reduce cluster load in large-scale deployments.
   enableStateAnnotations: false
 
+  ## "device" (default) publishes one Service per BMC and per switch NVOS
+  ## endpoint; "pod" publishes every BMC address of a pod in one Service and
+  ## every NVOS address in another, without the IPMI and SSH ports. Use "pod"
+  ## when the fleet's BMC count approaches the ServiceCIDR size.
+  serviceGranularity: device
+
 serviceAccount:
   create: true
   name: ""
@@ -76,9 +82,15 @@ rbac:
   create: true
 
 ## Protocol gateway: optional second container in the controller pod, run from
-## the controller image (dev/k8s/machine-a-tron-controller/Dockerfile)
+## the controller image unless gateway.image overrides it.
 gateway:
   enabled: false
+
+  ## Each empty field falls back to the corresponding controller image field.
+  ## pullPolicy is shared with image.pullPolicy.
+  image:
+    repository: ""
+    tag: ""
 
   ## Bare IP address to bind. Set to "::" for IPv6; keep the IPv4 default
   ## on hosts where IPv6 sockets are disabled.

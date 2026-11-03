@@ -143,6 +143,23 @@ pub(super) async fn show(
     Ok(())
 }
 
+/// Render the NVOS ports one per line, tagging the primary port (eth0) NICo
+/// talks to. A lone port is implicitly primary and is tagged too.
+fn format_nvos_interfaces(interfaces: &[::rpc::forge::ExpectedNvosInterface]) -> String {
+    let lone = interfaces.len() == 1;
+    interfaces
+        .iter()
+        .map(|interface| {
+            if interface.is_primary || lone {
+                format!("{} (primary)", interface.mac_address)
+            } else {
+                interface.mac_address.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn format_interface_ip(
     machine_interface: Option<&::rpc::forge::MachineInterface>,
     linked: Option<&LinkedExpectedSwitch>,
@@ -201,7 +218,7 @@ async fn convert_and_print_into_nice_table(
         table.add_row(row![
             expected_switch.switch_serial_number,
             expected_switch.bmc_mac_address,
-            expected_switch.nvos_mac_addresses.join(", "),
+            format_nvos_interfaces(&expected_switch.nvos_interfaces),
             format_interface_ip(machine_interface, linked),
             associated_switch,
             expected_switch
@@ -431,5 +448,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn table_renders_empty_and_multi_port_nvos_cells() {
+        let no_ports = expected_switch();
+        let mut two_ports = expected_switch();
+        two_ports.bmc_mac_address = "00:11:22:33:44:66".to_string();
+        two_ports.nvos_interfaces = vec![
+            rpc::forge::ExpectedNvosInterface {
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                is_primary: false,
+            },
+            rpc::forge::ExpectedNvosInterface {
+                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                is_primary: true,
+            },
+        ];
+        let records = ExpectedSwitchList {
+            expected_switches: vec![no_ports, two_ports],
+        };
+        let mut captured = CapturedOutput::new();
+
+        convert_and_print_into_nice_table(
+            captured.writer(),
+            &records,
+            &HashMap::new(),
+            &HashMap::new(),
+            OutputFormat::Csv,
+        )
+        .await
+        .unwrap();
+
+        let output = captured.into_bytes().await;
+        let mut reader = csv::Reader::from_reader(output.as_slice());
+        let headers = reader.headers().unwrap().clone();
+        let nvos_column = headers
+            .iter()
+            .position(|header| header == "MAC addresses")
+            .expect("NVOS column header");
+        let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows[0].get(nvos_column), Some(""));
+        assert_eq!(
+            rows[1].get(nvos_column),
+            Some("aa:bb:cc:dd:ee:01\naa:bb:cc:dd:ee:02 (primary)")
+        );
     }
 }

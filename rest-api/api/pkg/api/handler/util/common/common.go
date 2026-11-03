@@ -71,6 +71,8 @@ var (
 	ErrInstanceTypeMachineNotFound = errors.New("Instance Type does not have a Machine available for allocation")
 	// ErrSpectrumXMachineSelection distinguishes incompatible selectors from an empty allocation pool.
 	ErrSpectrumXMachineSelection = errors.New("no Machines with the requested SpectrumX capabilities are available for specified Instance Type")
+	// ErrMachineUnavailable is returned when a candidate Machine, re-read under its lock, is no longer Ready, unassigned, or matching the label selector
+	ErrMachineUnavailable = errors.New("machine is no longer available for allocation")
 	// ErrInvalidFunctionParams
 	ErrInvalidFunctionParams = errors.New("invalid function parameters")
 
@@ -188,7 +190,7 @@ func GetSiteFromIDString(ctx context.Context, tx *cdb.Tx, siteID string, dbSessi
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false)
+	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false, false)
 }
 
 // GetInstanceFromIDString gets the site DB model from the id string
@@ -388,35 +390,8 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 
 	if len(machines) > 0 {
 		for _, mc := range machines {
-			// Acquire an advisory lock on the MachineID, other provider will be look for other is this is being locked
-			// this lock is released when the transaction commits or rollback
-			err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
-			if err != nil {
-				continue
-			}
-
-			// Re-obtain the Machine record, to ensure that it is still available
-			umc, err := mcDAO.GetByID(ctx, tx, mc.ID, nil, true)
-			if err != nil {
-				continue
-			}
-
-			if umc.Status != cdbm.MachineStatusReady {
-				continue
-			}
-
-			if umc.IsAssigned {
-				continue
-			}
-
-			// Labels can change after the initial candidate query. Recheck the
-			// locked Machine before assigning it so the placement constraint is
-			// enforced against the latest record we observed.
-			if !umc.MatchesLabelSelector(machineLabelSelector) {
-				continue
-			}
-
-			// If InfiniBand Interfaces are specified in the request, verify that the Machine has matching InfiniBand Interfaces
+			// If InfiniBand Interfaces are specified in the request, verify that the Machine has matching InfiniBand Interfaces.
+			// The Capabilities were loaded before the loop, so this check doesn't need the Machine lock.
 			if requireInfiniBandMatch {
 				// Get the Machine InfiniBand Capabilities for the Machine
 				machineIbCaps := machineIbCapsByMachineID[mc.ID]
@@ -440,19 +415,54 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 				}
 			}
 
-			// We should now be able to proceed with the allocation
-			// Update the machine status to assigned
-			updateInput := cdbm.MachineUpdateInput{
-				MachineID:  mc.ID,
-				IsAssigned: cutil.GetPtr(true),
-				Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
-			}
+			// Lock and assign the Machine inside a savepoint, so a rejected Machine is unlocked
+			// right away instead of staying locked until the Instance create transaction ends.
+			var mcu *cdbm.Machine
+			err = tx.WithSavepoint(ctx, func(sp *cdb.Tx) error {
+				// Acquire an advisory lock on the MachineID, so concurrent requests skip this Machine
+				lerr := sp.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+				if lerr != nil {
+					return lerr
+				}
 
-			// return the updated machine
-			mcu, err := mcDAO.Update(ctx, tx, updateInput)
+				// Re-obtain the Machine record, to ensure that it is still available
+				umc, gerr := mcDAO.GetByID(ctx, sp, mc.ID, nil, true)
+				if gerr != nil {
+					return gerr
+				}
+
+				if umc.Status != cdbm.MachineStatusReady {
+					return ErrMachineUnavailable
+				}
+
+				if umc.IsAssigned {
+					return ErrMachineUnavailable
+				}
+
+				// Labels can change after the initial candidate query. Recheck the
+				// locked Machine before assigning it so the placement constraint is
+				// enforced against the latest record we observed.
+				if !umc.MatchesLabelSelector(machineLabelSelector) {
+					return ErrMachineUnavailable
+				}
+
+				// We should now be able to proceed with the allocation
+				// Update the machine status to assigned
+				var uerr error
+				mcu, uerr = mcDAO.Update(ctx, sp, cdbm.MachineUpdateInput{
+					MachineID:  mc.ID,
+					IsAssigned: cutil.GetPtr(true),
+					Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
+				})
+				return uerr
+			})
+			if errors.Is(err, cdb.ErrTransactionSavepoint) {
+				return nil, err
+			}
 			if err != nil {
 				continue
 			}
+
 			_, err = cdbm.NewStatusDetailDAO(dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
 				EntityID: mc.ID,
 				Status:   cdbm.MachineStatusInUse,
@@ -1479,23 +1489,13 @@ func IsTenant(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session
 }
 
 // TenantPrivilegeScope narrows where a Tenant's TargetedInstanceCreation
-// capability must be effective for a privilege check.
+// capability must be effective for a privilege check. See
+// cdbm.TenantPrivilegeScope for how its fields select the resolution.
 //
 // The scope pointer's presence is itself the "require privileged" signal for
 // the auth gates (IsTenant / IsProviderOrTenant): a nil *TenantPrivilegeScope
-// means no privilege is required. For TenantHasTargetedInstanceCreation a
-// non-nil scope is required and the fields select how the capability is
-// resolved:
-//
-//   - SiteID set: resolve the effective capability for that exact Site.
-//   - InfrastructureProviderID set: privileged if the Ready TenantAccount for
-//     that Provider has TargetedInstanceCreation enabled globally.
-//
-// SiteID and InfrastructureProviderID must not be set together.
-type TenantPrivilegeScope struct {
-	InfrastructureProviderID *uuid.UUID
-	SiteID                   *uuid.UUID
-}
+// means no privilege is required.
+type TenantPrivilegeScope = cdbm.TenantPrivilegeScope
 
 // TenantHasLegacyTargetedInstanceCreation reports whether the deprecated
 // Tenant.capabilities.targetedInstanceCreation compatibility field may be
@@ -1542,81 +1542,24 @@ func TenantHasLegacyTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, db
 }
 
 // TenantHasTargetedInstanceCreation reports whether the Tenant has the
-// TargetedInstanceCreation capability enabled within the given scope. It is
-// nil-safe so callers don't have to repeat the tenant nil check, and it
-// deliberately does not read the deprecated tenant-level flag
-// (tenant.Config.TargetedInstanceCreation), which is superseded by
-// TenantAccount.config with per-site TenantSite.config overrides. See
-// TenantPrivilegeScope for how scope selects the resolution strategy.
+// TargetedInstanceCreation capability enabled within the given scope. See
+// cdbm.TenantHasTargetedInstanceCreation.
 func TenantHasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, scope *TenantPrivilegeScope) (bool, error) {
-	if tenant == nil {
-		return false, nil
+	return cdbm.TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, scope)
+}
+
+// TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
+func TenantHasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
+	return cdbm.TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)
+}
+
+// ValidateTenantSiteAccess returns cdb.ErrDoesNotExist when TenantHasSiteAccess reports no access.
+func ValidateTenantSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) error {
+	ok, err := TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)
+	if err == nil && !ok {
+		err = cdb.ErrDoesNotExist
 	}
-
-	if scope == nil {
-		return false, errors.New("scope must be specified when evaluating Tenant's targeted Instance creation capability")
-	}
-
-	if scope.SiteID != nil && scope.InfrastructureProviderID != nil {
-		return false, errors.New("site ID and infrastructure provider ID cannot be specified together when evaluating Tenant's targeted Instance creation capability")
-	}
-
-	siteID := scope.SiteID
-	providerID := scope.InfrastructureProviderID
-	var siteOverride *bool
-
-	// Site-scoped: resolve the effective capability for the exact Site.
-	if siteID != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-		ts, err := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenant.ID, *siteID, []string{cdbm.SiteRelationName})
-		if err != nil {
-			if errors.Is(err, cdb.ErrDoesNotExist) {
-				siteDAO := cdbm.NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, tx, *siteID, nil, false)
-				if err != nil {
-					return false, err
-				}
-
-				// Site-scoped: resolve the effective capability for the exact Site.
-				providerID = &site.InfrastructureProviderID
-			} else {
-				return false, err
-			}
-		} else {
-			if ts.Site != nil {
-				providerID = &ts.Site.InfrastructureProviderID
-			} else {
-				return false, errors.New("failed to retrieve related Site for Tenant/Site association, DB error")
-			}
-			// This will ensure TenantAccount is ready for the Site.
-			siteOverride = ts.Config.TargetedInstanceCreation
-		}
-	}
-
-	if providerID != nil {
-		taDAO := cdbm.NewTenantAccountDAO(dbSession)
-		tas, _, err := taDAO.GetAll(ctx, tx, cdbm.TenantAccountFilterInput{
-			InfrastructureProviderID: providerID,
-			TenantIDs:                []uuid.UUID{tenant.ID},
-			Statuses:                 []string{cdbm.TenantAccountStatusReady},
-		}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
-		if err != nil {
-			return false, err
-		}
-
-		if len(tas) == 0 {
-			return false, nil
-		}
-
-		ta := tas[0]
-		if siteOverride != nil {
-			return *siteOverride, nil
-		}
-
-		return ta.Config.TargetedInstanceCreation, nil
-	}
-
-	return false, nil
+	return err
 }
 
 // GetPrivilegedAccessSiteIDsForTenant returns Site IDs where the Tenant has
@@ -1975,7 +1918,7 @@ var queryTagCache sync.Map // map[reflect.Type][]string
 // Results are cached per type.
 func QueryTagsFor(v any) []string {
 	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if cached, ok := queryTagCache.Load(t); ok {

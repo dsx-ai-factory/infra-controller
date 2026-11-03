@@ -51,7 +51,9 @@ pub enum MachinePendingActionActor {
 /// is still owed. `requested_at` is the first time the action was requested and
 /// survives re-requests, so it measures how long the machine waited rather than
 /// when the request was last observed.
-#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+/// The table's internal `id` is used for history ordering, not returned in this record.
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow, carbide_macros::DbTable)]
+#[db_table(name = "machine_pending_actions")]
 pub struct MachinePendingAction {
     pub machine_id: MachineId,
     pub kind: MachinePendingActionKind,

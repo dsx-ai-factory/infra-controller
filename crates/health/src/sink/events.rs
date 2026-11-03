@@ -18,6 +18,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::nvlink::NvLinkDomainId;
@@ -69,6 +70,64 @@ pub struct EventContext {
 }
 
 impl EventContext {
+    /// The labels identifying where a series comes from, as every metric
+    /// export puts them on each series: the endpoint, the collector, and the
+    /// machine, switch, or power shelf and its placement when known.
+    pub(crate) fn series_labels(&self) -> Vec<(Cow<'static, str>, String)> {
+        let mut labels = vec![
+            (
+                Cow::Borrowed("endpoint_key"),
+                self.endpoint_key().to_string(),
+            ),
+            // An empty value means this inventory endpoint has no MAC address.
+            (
+                Cow::Borrowed("endpoint_mac"),
+                self.addr.mac.map(|mac| mac.to_string()).unwrap_or_default(),
+            ),
+            (Cow::Borrowed("endpoint_ip"), self.addr.ip.to_string()),
+            (
+                Cow::Borrowed("collector_type"),
+                self.collector_type.to_string(),
+            ),
+        ];
+
+        if let Some(machine_id) = self.machine_id() {
+            labels.push((Cow::Borrowed("machine_id"), machine_id.to_string()));
+        }
+        if let Some(system_uuid) = self.system_uuid() {
+            labels.push((Cow::Borrowed("system_uuid"), system_uuid.to_string()));
+        }
+        if let Some(switch_id) = self.switch_id() {
+            labels.push((Cow::Borrowed("switch_id"), switch_id.to_string()));
+        }
+        if let Some(power_shelf_id) = self.power_shelf_id() {
+            labels.push((Cow::Borrowed("power_shelf_id"), power_shelf_id.to_string()));
+        }
+        if let Some(serial) = self.serial_number() {
+            labels.push((Cow::Borrowed("serial_number"), serial.to_string()));
+        }
+        if let Some(rack_id) = self.rack_id() {
+            labels.push((Cow::Borrowed("rack_id"), rack_id.to_string()));
+        }
+        if let Some(slot) = self.slot_number() {
+            labels.push((Cow::Borrowed("machine_slot_number"), slot.to_string()));
+        }
+        if let Some(tray) = self.tray_index() {
+            labels.push((Cow::Borrowed("machine_tray_index"), tray.to_string()));
+        }
+        if let Some(domain) = self.nvlink_domain_uuid() {
+            labels.push((Cow::Borrowed("nvlink_domain_uuid"), domain.to_string()));
+        }
+        if let Some(slot) = self.switch_slot_number() {
+            labels.push((Cow::Borrowed("switch_slot_number"), slot.to_string()));
+        }
+        if let Some(tray) = self.switch_tray_index() {
+            labels.push((Cow::Borrowed("switch_tray_index"), tray.to_string()));
+        }
+
+        labels
+    }
+
     pub fn from_endpoint(endpoint: &BmcEndpoint, collector_type: &'static str) -> Self {
         Self {
             endpoint_key: endpoint.key(),
@@ -157,7 +216,7 @@ impl EventContext {
 
     pub fn switch_serial(&self) -> Option<&str> {
         match &self.metadata {
-            Some(EndpointMetadata::Switch(switch)) => Some(switch.serial.as_str()),
+            Some(EndpointMetadata::Switch(switch)) => switch.serial.as_deref(),
             _ => None,
         }
     }
@@ -232,6 +291,40 @@ pub struct SensorThresholdContext {
     pub bmc_health: BmcHealth,
 }
 
+/// `MetricSemantics` distinguishes current readings from device accumulation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetricSemantics {
+    /// A current value that may increase or decrease.
+    Gauge,
+    /// An absolute device total, which may decrease when the device resets.
+    /// Finite, nonnegative values also produce a `_total` alias: a counter in
+    /// Prometheus and a monotonic cumulative `Sum` in OTLP. Negative and non-finite
+    /// values retain only the legacy gauge. Callers must keep the alias name
+    /// distinct from other metric names in both Prometheus and OTLP exports.
+    CumulativeCounter {
+        /// Prometheus `HELP` and OTLP description for the counter alias.
+        /// Callers must supply nonempty text and use the same text for every
+        /// observation with the same exported name, including across endpoints.
+        /// Each export uses the first description encountered for a family.
+        /// The gauge uses the collector's Prometheus `HELP` and an empty OTLP
+        /// description.
+        description: &'static str,
+        /// When the device began accumulating this value, if the source reports it.
+        /// After a reset, report the new accumulation start, or `None` if unknown.
+        /// A connection or exporter start time does not establish this epoch.
+        /// Used by OTLP; Prometheus text export does not expose this epoch.
+        start_time: Option<SystemTime>,
+    },
+}
+
+impl MetricSemantics {
+    /// Whether this value is a finite, nonnegative cumulative total.
+    pub(crate) fn exports_counter(self, value: f64) -> bool {
+        matches!(self, Self::CumulativeCounter { .. }) && value.is_finite() && value >= 0.0
+    }
+}
+
+/// `MetricSample` is one metric observation shared by the configured sinks.
 #[derive(Clone, Debug)]
 pub struct MetricSample {
     pub key: String,
@@ -239,6 +332,8 @@ pub struct MetricSample {
     pub metric_type: String,
     pub unit: String,
     pub value: f64,
+    /// Whether the value is current state or an accumulated device total.
+    pub semantics: MetricSemantics,
     pub labels: Vec<MetricLabel>,
     pub context: Option<SensorThresholdContext>,
 }
@@ -543,6 +638,10 @@ pub enum Classification {
     PreventAllocations,
     Leak,
     LeakDetector,
+    /// Identifies a derived active tray-level leak.
+    TrayLeak,
+    /// Identifies a derived active rack-level leak.
+    RackLeak,
 }
 
 impl Classification {
@@ -556,6 +655,8 @@ impl Classification {
             Self::PreventAllocations => "PreventAllocations",
             Self::Leak => "Leak",
             Self::LeakDetector => "LeakDetector",
+            Self::TrayLeak => "TrayLeak",
+            Self::RackLeak => "RackLeak",
         }
     }
 }
@@ -698,6 +799,8 @@ mod tests {
     enum AlertCase {
         WithTarget,
         Intrusion,
+        TrayLeak,
+        RackLeak,
         WithoutClassifications,
     }
 
@@ -767,8 +870,9 @@ mod tests {
                 driver_version: Some("570.82".to_string()),
             })),
             ContextKind::Switch => Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id()),
-                serial: "SW-001".to_string(),
+                serial: Some("SW-001".to_string()),
                 slot_number: Some(9),
                 tray_index: Some(4),
                 nvlink_domain_uuid: Some(nvlink_domain_id()),
@@ -866,6 +970,28 @@ mod tests {
                 target: Some("HostBMC".to_string()),
                 message: "Physical Chassis Intrusion Alert".to_string(),
                 classifications: vec![
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
+            },
+            AlertCase::TrayLeak => HealthReportAlert {
+                attribution: None,
+                probe_id: Probe::LeakDetection,
+                target: None,
+                message: "tray leak".to_string(),
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
+            },
+            AlertCase::RackLeak => HealthReportAlert {
+                attribution: None,
+                probe_id: Probe::LeakDetection,
+                target: None,
+                message: "rack leak".to_string(),
+                classifications: vec![
+                    Classification::RackLeak,
                     Classification::SensorCritical,
                     Classification::PreventAllocations,
                 ],
@@ -1128,6 +1254,20 @@ mod tests {
                 },
             }
 
+            "tray leak" {
+                Classification::TrayLeak => ClassificationSummary {
+                    as_str: "TrayLeak",
+                    health_report_classification: "TrayLeak".to_string(),
+                },
+            }
+
+            "rack leak" {
+                Classification::RackLeak => ClassificationSummary {
+                    as_str: "RackLeak",
+                    health_report_classification: "RackLeak".to_string(),
+                },
+            }
+
         );
     }
 
@@ -1229,6 +1369,38 @@ mod tests {
                     tenant_message: None,
                     in_alert_since: false,
                     classifications: vec![
+                        "SensorCritical".to_string(),
+                        "PreventAllocations".to_string(),
+                        "Hardware".to_string(),
+                    ],
+                },
+            }
+
+            "tray leak alert" {
+                AlertCase::TrayLeak => AlertSummary {
+                    id: "BmcLeakDetection".to_string(),
+                    target: None,
+                    message: "tray leak".to_string(),
+                    tenant_message: None,
+                    in_alert_since: false,
+                    classifications: vec![
+                        "TrayLeak".to_string(),
+                        "SensorCritical".to_string(),
+                        "PreventAllocations".to_string(),
+                        "Hardware".to_string(),
+                    ],
+                },
+            }
+
+            "rack leak alert" {
+                AlertCase::RackLeak => AlertSummary {
+                    id: "BmcLeakDetection".to_string(),
+                    target: None,
+                    message: "rack leak".to_string(),
+                    tenant_message: None,
+                    in_alert_since: false,
+                    classifications: vec![
+                        "RackLeak".to_string(),
                         "SensorCritical".to_string(),
                         "PreventAllocations".to_string(),
                         "Hardware".to_string(),

@@ -113,6 +113,7 @@ async fn test_lldp_topology_force_delete(
                 delete_bmc_suppressions: false,
                 delete_retained_boot_interfaces: false,
                 release_preserved_addresses: false,
+                wait_for_instance_dpu: false,
             },
         ))
         .await
@@ -631,6 +632,7 @@ async fn test_lldp_neighbors_force_delete(pool: sqlx::PgPool) {
                 delete_bmc_suppressions: false,
                 delete_retained_boot_interfaces: false,
                 release_preserved_addresses: false,
+                wait_for_instance_dpu: false,
             },
         ))
         .await

@@ -76,7 +76,7 @@ func (c testProviderConfig) Name() string {
 }
 
 func (c testProviderConfig) NewProvider(context.Context) (Provider, error) {
-	return testProvider{name: c.name}, nil
+	return testProvider(c), nil
 }
 
 type testProviderConfigDecoder struct {
@@ -88,7 +88,7 @@ func (d testProviderConfigDecoder) Name() string {
 }
 
 func (d testProviderConfigDecoder) DefaultConfig() ProviderConfig {
-	return testProviderConfig{name: d.name}
+	return testProviderConfig(d)
 }
 
 func (d testProviderConfigDecoder) DecodeYAML(raw yaml.Node) (ProviderConfig, error) {

@@ -15,6 +15,10 @@ async fn expected_rack_group_migration_requires_empty_table(
     use sqlx::Acquire;
 
     let mut txn = pool.begin().await?;
+    // Reconstruct the predecessor schema before tables depending on rack groups existed.
+    sqlx::raw_sql("DROP TABLE expected_nvlink_domain_members; DROP TABLE expected_nvlink_domains;")
+        .execute(&mut *txn)
+        .await?;
     sqlx::query("DROP TABLE expected_rack_groups")
         .execute(&mut *txn)
         .await?;
@@ -208,6 +212,10 @@ async fn expected_rack_group_persistence(
     assert_eq!(
         find_by_rack_group_id(&mut txn, &expected.rack_group_id).await?,
         Some(expected.clone())
+    );
+    assert_eq!(
+        find_by_rack_id(&mut txn, &expected.racks[0].rack_id).await?,
+        vec![expected.clone()]
     );
     // Declaration is independent of device discovery and rack ingestion.
     create(&mut txn, &group("group-a")).await?;

@@ -114,7 +114,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/service-account/current",
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetCurrentServiceAccountHandler(dbSession),
+			Handler: apiHandler.NewGetCurrentServiceAccountHandler(dbSession, scp),
 		},
 		// Infrastructure Provider endpoints
 		{
@@ -146,7 +146,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/tenant/current",
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetCurrentTenantHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewGetCurrentTenantHandler(dbSession, scp, tc, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/tenant/current",
@@ -188,7 +188,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/tenant/account/:id",
 			Method:  http.MethodPatch,
-			Handler: apiHandler.NewUpdateTenantAccountHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewUpdateTenantAccountHandler(dbSession, scp, tc, cfg),
 		},
 		{
 			Path:    apiPathPrefix + "/tenant/account/:id",
@@ -417,9 +417,14 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		},
 		// Interface endpoints
 		{
+			Path:    apiPathPrefix + "/interface",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllInterfaceHandler(dbSession, tc, cfg, nil),
+		},
+		{
 			Path:    apiPathPrefix + "/instance/:instanceId/interface",
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetAllInterfaceHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewGetAllInstanceInterfaceHandler(dbSession, tc, cfg),
 		},
 		// Instance InfiniBandInterface endpoints
 		{
@@ -797,6 +802,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/machine/:id/chassis/:chassisId/reset",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewResetMachineChassisHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/spectrumx-multiplane",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetMachineSpectrumXMultiplaneHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/spectrumx-multiplane",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateMachineSpectrumXMultiplaneHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/machine/:id/health-report",
@@ -1450,6 +1465,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/tray/:id/health-report/:source",
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteTrayHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/power",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetTrayPowerStateHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/tray/:id/power",

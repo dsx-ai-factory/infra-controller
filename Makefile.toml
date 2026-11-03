@@ -385,7 +385,7 @@ docker run --rm \
 
 [tasks.build-cli-cross-aarch64]
 category = "Build"
-description = "Cross compile forge-scout and nico-admin-cli for aarch64, intended only for local artifact builds."
+description = "Cross compile Scout, its firmware supervisor, and nico-admin-cli for aarch64, intended only for local artifact builds."
 workspace = false
 script = '''
 docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) \
@@ -399,10 +399,19 @@ docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) \
     "-p" \
     "nico-admin-cli" \
     "-p" \
-    "carbide-scout"
+    "carbide-scout" \
+    "-p" \
+    "carbide-libmlx" \
+    "--bin" \
+    "nico-admin-cli" \
+    "--bin" \
+    "forge-scout" \
+    "--bin" \
+    "mlx-firmware-supervisor"
 docker run --rm -v $REPO_ROOT:/carbide --user $(id -u):$(id -g) build-artifacts-container-cross-aarch64:latest "aarch64-linux-gnu-strip" \
     "/carbide/target/aarch64-unknown-linux-gnu/release/nico-admin-cli" \
-    "/carbide/target/aarch64-unknown-linux-gnu/release/forge-scout"   
+    "/carbide/target/aarch64-unknown-linux-gnu/release/forge-scout" \
+    "/carbide/target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor"
 '''
 dependencies = ["check-cargo-home-set", "build-cross-docker-image"]
 
@@ -413,7 +422,7 @@ workspace = false
 script = '''
 #!/usr/bin/env bash
 
-docker build ${REPO_ROOT}/dev/docker -f ${REPO_ROOT}/dev/docker/Dockerfile.build-artifacts-container-cross-aarch64 -t build-artifacts-container-cross-aarch64
+docker build --load ${REPO_ROOT}/dev/docker -f ${REPO_ROOT}/dev/docker/Dockerfile.build-artifacts-container-cross-aarch64 -t build-artifacts-container-cross-aarch64
 '''
 
 [tasks.build-x86-build-container]
@@ -430,6 +439,7 @@ workspace = false
 command = "docker"
 args = [
   "build",
+  "--load",
   "--build-arg",
   "KEA_VERSION=${KEA_VERSION}",
   "-t",
@@ -670,7 +680,14 @@ dependencies = ["install-clippy"]
 command = "cargo"
 args = ["clippy", "--locked", "--all-targets", "--all-features", "--release"]
 
+[tasks.build-nic-firmware-test-helper]
+workspace = false
+description = "Build the Linux process supervisor used by NIC firmware tests"
+command = "cargo"
+args = ["build", "-p", "carbide-libmlx", "--bin", "mlx-firmware-supervisor"]
+
 [tasks.build-debug-test-prerequisites]
+dependencies = ["build-nic-firmware-test-helper"]
 script = '''
 cargo build -p carbide-agent -p nico-admin-cli -p carbide-api
 '''
@@ -765,8 +782,13 @@ dependencies = [
 
 [tasks.test-release-container-services]
 workspace = false
-command = "cargo"
-args = ["test", "--profile=ci-tests"]
+script = '''
+set -eu
+export NICO_TEST_TEMPLATE_DB="${NICO_TEST_TEMPLATE_DB-sqlx_ci_template_db}"
+cargo test --profile=ci-tests --no-run
+"${CARGO_TARGET_DIR:-target}/ci-tests/prepare-test-template"
+cargo test --profile=ci-tests
+'''
 
 [tasks.build-and-test-release-container-services]
 workspace = false

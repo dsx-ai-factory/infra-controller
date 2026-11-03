@@ -1,0 +1,42 @@
+suite: Extra volumes and volume mounts
+templates:
+  - deployment.yaml
+tests:
+  - it: adds no extra volume or mount by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: kmip-client
+          any: true
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: kmip-client
+          any: true
+
+  - it: renders the configured volumes and mounts verbatim
+    set:
+      extraVolumes:
+        - name: kmip-client
+          secret:
+            secretName: nico-kmip-client
+            defaultMode: 0400
+      extraVolumeMounts:
+        - name: kmip-client
+          mountPath: /etc/nico/kmip
+          readOnly: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: kmip-client
+            mountPath: /etc/nico/kmip
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: kmip-client
+            secret:
+              secretName: nico-kmip-client
+              defaultMode: 0400

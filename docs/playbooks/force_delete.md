@@ -1,52 +1,58 @@
-# Force deleting and rebuilding NICo hosts
+# Force Deleting and Rebuilding NICo Hosts
 
-In various cases, it might be necessary to force-delete knowledge about hosts from
-the database and to restart the discovery process for those hosts. The following are
-use-cases where force-delete can be helpful:
+Use force deletion to remove NVIDIA Infra Controller (NICo) records for a host
+and restart discovery. This can help when a host cannot recover from an error
+or a software update requires rediscovery.
 
-- If a host managed by NVIDIA Infra Controller (NICo) has entered an erroneous state from which it can not
-automatically recover.
-- If a non backward compatible software update requires the host to go through the discovery phase again.
+## Important Note
 
-## Important note
+Force deletion is for operator recovery, not normal tenant or site-provider
+instance release. It skips normal instance cleanup. It does not wipe the tenant
+operating system or its data, and it does not ensure that tenant workloads stop.
+BIOS cleanup can force-restart the host. Before reuse, verify that no tenant
+workload is running, including after any recovery reboot.
 
-*This is not a site-provider facing workflow, since force-deleting a machine
-does skip any cleanup on the machine and leaves it in an undefined state where the tenants OS could be still running.
-force-deleting machines is purely an operational tool. The operator which executed the
-command needs to make sure that either no tenant image is running anymore, or take additional steps
-(like rebooting the machine) to interrupt the image.
-Site providers would get a safe version of this workflow later on that moves the machine through all necessary cleanup steps*
-
-To leave the host in a clean pre-ingestion state before you remove its
-control-plane records, [decommission the host](../decommissioning/hosts.md)
-first, then use the appropriate flags to [force-delete it](../decommissioning/index.md#force-delete-after-decommissioning) afterward. The steps below do not apply to decommissioning.
+To clean the host before removing its records,
+[decommission the host](../decommissioning/hosts.md) first. Then follow
+[Force Delete After Decommissioning](../decommissioning/index.md#force-delete-after-decommissioning)
+for the required flags. The recovery steps below do not apply to decommissioning.
 
 ## Force-Deletion Steps
 
-The following steps can be used to force-delete knowledge about a NICo host:
+Use these steps to delete the host's records and restart discovery.
 
 ### 1. Obtain access to `nico-admin-cli`
 
-See nico-admin-cli access on a NICo deployment.
+Access `nico-admin-cli` on your NICo deployment.
 
 ### 2. Execute the `nico-admin-cli machine force-delete` command
 
-Executing `nico-admin-cli machine force-delete` will wipe most knowledge about
-machines and instances running on top of them from the database, and clean up associated CRDs.
-It accepts the machine-id, hostname, MAC or IP of either the managed host or DPU as input,
-and will delete information about both of them (since they are heavily coupled).
+The command removes most machine and instance records from the database and
+cleans up associated CRDs. You can identify the host or DPU by machine ID,
+hostname, MAC address, or IP address. NICo deletes the host and its DPUs together.
+If it cannot find a host for the specified DPU, it deletes only that DPU. The
+response lists the affected machine and instance IDs and, when available, the
+host's BMC IP.
 
-It returns all machine-ids and instance-ids it acted on, as well as the BMC
-IP for the managed host.
+Before deleting the host by any identifier, remove its instance type association.
+If it still has one, the API returns `FailedPrecondition`. Neither
+`--allow-delete-with-instance` nor `--wait-for-instance-dpu` bypasses this check.
+The API checks the machine that your query identifies; a query identifying a
+DPU does not check the host's association.
 
-Example:
+By default, a new deletion does not wait for a DPU response, even if the DPU is
+offline. To wait for confirmation that tenant networking has stopped, refer to
+[Optional DPU Acknowledgement Wait](#optional-dpu-acknowledgement-wait) before
+running the command.
+
+This example assumes that the host has no instance type association:
 
 ```bash
 /opt/nico/nico-admin-cli -a https://127.0.0.1:1079 machine force-delete --machine="60cef902-9779-4666-8362-c9bb4b37184f"
 ```
 
-For a full rediscovery wipe (interfaces, BMC interfaces, BMC suppressions, and
-retained boot targets), add:
+To also remove interfaces, BMC interfaces, BMC suppressions, and retained boot
+targets for a full rediscovery, use these flags:
 
 ```bash
 /opt/nico/nico-admin-cli -a https://127.0.0.1:1079 machine force-delete \
@@ -56,6 +62,8 @@ retained boot targets), add:
 ```
 
 ### 3. Power-cycle the host through its BMC
+
+Wait for the force-delete CLI to finish successfully before continuing.
 
 Use [`nico-admin-cli redfish ac-power-cycle`](../manuals/nico-admin-cli/commands/redfish/redfish-ac-power-cycle.md)
 with the returned BMC IP and current BMC credentials. This command connects
@@ -68,10 +76,77 @@ retain and the site controller cannot access the BMC through Vault. The
 optional `--delete-bmc-credentials` flag deletes configured credentials; do
 not use it until any required device recovery is complete.
 
-Once a reboot is triggered, the DPU of the Machine should boot into the
-NICo discovery image again. This should initiate DPU discovery. A second
-reboot is required to initiate host discovery. After those steps, the host
-should be fully rebuilt and available.
+After the first reboot, the DPU should boot into the NICo discovery image and
+start discovery. Reboot a second time to start host discovery. After both steps,
+the host should be rebuilt and available.
+
+## Optional DPU Acknowledgement Wait
+
+Deleting records does not prove that a DPU has stopped forwarding tenant traffic.
+Add `--wait-for-instance-dpu` to request that confirmation. The flag defaults to
+false.
+
+If an instance exists when you start deletion with this flag, the API requests
+the Admin network configuration. It keeps the instance and machine records until
+every attached DPU confirms that configuration. While waiting, the API returns
+`all_done=false`. A new deletion without an instance does not wait, even with
+the flag.
+
+Returning to Admin stops tenant networking through the DPUs. It does not shut
+down the tenant operating system or wipe its data.
+
+**Before you use the wait.** Check the build on every API server that can receive
+the command or its retries. Run this read-only command against each server
+directly, replacing the example address with that server's endpoint:
+
+```bash
+nico-admin-cli --api-url https://api-server.example.com:1079 version
+```
+
+Read `git_sha` in the `carbide-api` result. Use your deployment's build records
+or source history to confirm that revision includes commit
+`47b8097a8252bd866c1fb02942bfe1945cb9be0e` from
+[Add an Optional DPU Wait to Machine Force Deletion](https://github.com/dsx-ai-factory/infra-controller/pull/7147).
+Checking the CLI's help or one load-balanced request does not confirm support
+on every API server. If you cannot verify a server's build, do not rely on the wait.
+
+Older servers ignore both the flag and a wait saved by a newer server. During a
+rolling upgrade or after a downgrade, an older server can delete records without
+DPU acknowledgement.
+
+Deletion consent and the DPU wait are separate choices:
+
+- `--allow-delete-with-instance` acknowledges deleting an allocated instance.
+  It does not enable the wait.
+- `--wait-for-instance-dpu` enables the wait. It does not grant deletion consent.
+
+The CLI checks for an allocated instance only when `--machine` is a machine
+ID. Hostname, MAC address, and IP address queries skip that check. The API does
+not enforce this consent flag.
+
+To request both, use the following command:
+
+```bash
+/opt/nico/nico-admin-cli -a https://127.0.0.1:1079 machine force-delete \
+  --machine="60cef902-9779-4666-8362-c9bb4b37184f" \
+  --allow-delete-with-instance --wait-for-instance-dpu
+```
+
+**Completion and recovery.** Wait for the CLI to finish successfully before
+continuing to the power cycle. It waits 5 seconds between polling calls, with a
+nominal 20-minute retry limit.
+The CLI checks that limit after each RPC call, so a slow call can extend the
+total time. An RPC error also makes the CLI exit and can leave the result unknown.
+
+Stopping the CLI or reaching its time limit does not cancel deletion. After the
+API saves the wait, it remains in effect across retries, API restarts, and later
+removal of the instance. Omitting the flag on a retry does not cancel it. An
+unavailable DPU can leave the machine in `ForceDeletion` indefinitely. You cannot
+cancel the deletion.
+
+If the command stops before completion, resolve the reported error or restore
+DPU communication. Then rerun the same command to resume or confirm completion.
+The machine controller does not finish force deletion in the background.
 
 ## Reinstall OS Steps
 

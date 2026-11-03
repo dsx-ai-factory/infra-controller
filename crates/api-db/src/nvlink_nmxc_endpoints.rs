@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::DbTable;
 use model::nmxc::NvlinkNmxcEndpoint;
 use sqlx::PgConnection;
 
@@ -25,35 +26,41 @@ pub async fn find_by_chassis_serial(
     txn: impl DbReader<'_>,
     chassis_serial: &str,
 ) -> DatabaseResult<Option<NvlinkNmxcEndpoint>> {
-    const Q: &str =
-        "SELECT chassis_serial, endpoint FROM nvlink_nmxc_endpoints WHERE chassis_serial = $1";
-    sqlx::query_as(Q)
+    let query = format!(
+        "SELECT {} FROM nvlink_nmxc_endpoints WHERE chassis_serial = $1",
+        NvlinkNmxcEndpoint::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(chassis_serial)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::new(Q, e))
+        .map_err(|e| DatabaseError::new(&query, e))
 }
 
 pub async fn find_by_chassis_serials(
     txn: impl DbReader<'_>,
     chassis_serials: &[&str],
 ) -> DatabaseResult<Vec<NvlinkNmxcEndpoint>> {
-    const Q: &str =
-        "SELECT chassis_serial, endpoint FROM nvlink_nmxc_endpoints WHERE chassis_serial = ANY($1)";
-    sqlx::query_as(Q)
+    let query = format!(
+        "SELECT {} FROM nvlink_nmxc_endpoints WHERE chassis_serial = ANY($1)",
+        NvlinkNmxcEndpoint::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(chassis_serials)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::new(Q, e))
+        .map_err(|e| DatabaseError::new(&query, e))
 }
 
 pub async fn find_all(txn: impl DbReader<'_>) -> DatabaseResult<Vec<NvlinkNmxcEndpoint>> {
-    const Q: &str =
-        "SELECT chassis_serial, endpoint FROM nvlink_nmxc_endpoints ORDER BY chassis_serial";
-    sqlx::query_as(Q)
+    let query = format!(
+        "SELECT {} FROM nvlink_nmxc_endpoints ORDER BY chassis_serial",
+        NvlinkNmxcEndpoint::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::new(Q, e))
+        .map_err(|e| DatabaseError::new(&query, e))
 }
 
 pub async fn create(
@@ -61,8 +68,11 @@ pub async fn create(
     chassis_serial: &str,
     endpoint: &str,
 ) -> DatabaseResult<NvlinkNmxcEndpoint> {
-    const Q: &str = "INSERT INTO nvlink_nmxc_endpoints (chassis_serial, endpoint) VALUES ($1, $2) RETURNING chassis_serial, endpoint";
-    sqlx::query_as(Q)
+    let query = format!(
+        "INSERT INTO nvlink_nmxc_endpoints (chassis_serial, endpoint) VALUES ($1, $2) RETURNING {}",
+        NvlinkNmxcEndpoint::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(chassis_serial)
         .bind(endpoint)
         .fetch_one(txn)
@@ -76,7 +86,7 @@ pub async fn create(
                     id: chassis_serial.to_string(),
                 }
             } else {
-                DatabaseError::new(Q, e)
+                DatabaseError::new(&query, e)
             }
         })
 }
@@ -98,18 +108,88 @@ pub async fn update(
     chassis_serial: &str,
     endpoint: &str,
 ) -> DatabaseResult<Option<NvlinkNmxcEndpoint>> {
-    const Q: &str = "UPDATE nvlink_nmxc_endpoints SET endpoint = $1 WHERE chassis_serial = $2 RETURNING chassis_serial, endpoint";
-    sqlx::query_as(Q)
+    let query = format!(
+        "UPDATE nvlink_nmxc_endpoints SET endpoint = $1 WHERE chassis_serial = $2 RETURNING {}",
+        NvlinkNmxcEndpoint::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(endpoint)
         .bind(chassis_serial)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::new(Q, e))
+        .map_err(|e| DatabaseError::new(&query, e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn endpoint_queries_return_complete_records(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let serial_b = NvlinkNmxcEndpoint {
+            chassis_serial: "SN-B".to_string(),
+            endpoint: "https://b.example:9370".to_string(),
+        };
+        let serial_a = NvlinkNmxcEndpoint {
+            chassis_serial: "SN-A".to_string(),
+            endpoint: "https://a.example:9370".to_string(),
+        };
+        // Insert in reverse order so the listing must sort by chassis serial.
+        for expected in [&serial_b, &serial_a] {
+            let created =
+                create(txn.as_mut(), &expected.chassis_serial, &expected.endpoint).await?;
+            assert_eq!(&created, expected);
+        }
+
+        let found = find_by_chassis_serial(txn.as_mut(), &serial_a.chassis_serial)
+            .await?
+            .expect("find the inserted endpoint");
+        assert_eq!(found, serial_a);
+
+        let updated = NvlinkNmxcEndpoint {
+            endpoint: "https://updated.example:9370".to_string(),
+            ..serial_a
+        };
+        let returned = update(txn.as_mut(), &updated.chassis_serial, &updated.endpoint)
+            .await?
+            .expect("update the inserted endpoint");
+        assert_eq!(returned, updated);
+
+        assert!(
+            find_by_chassis_serial(txn.as_mut(), "missing-serial")
+                .await?
+                .is_none()
+        );
+        assert!(
+            update(
+                txn.as_mut(),
+                "missing-serial",
+                "https://missing.example:9370"
+            )
+            .await?
+            .is_none()
+        );
+
+        let rows = find_all(txn.as_mut()).await?;
+        assert_eq!(rows, vec![updated, serial_b]);
+
+        let duplicate = create(txn.as_mut(), "SN-A", "https://duplicate.example:9370")
+            .await
+            .expect_err("duplicate chassis serial is rejected");
+        assert!(matches!(
+            duplicate,
+            DatabaseError::AlreadyFoundError {
+                kind: "nvlink_nmxc_endpoints",
+                id,
+            } if id == "SN-A"
+        ));
+
+        txn.rollback().await?;
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn find_by_chassis_serials_returns_matching_rows(pool: sqlx::PgPool) {

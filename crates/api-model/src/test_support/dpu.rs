@@ -120,6 +120,7 @@ impl From<DpuConfig> for EndpointExplorationReport {
                 boot_order: None,
                 bios_version: None,
                 serial_console_ssh_port: None,
+                processors: None,
             }],
             chassis: vec![Chassis {
                 id: "Card1".to_string(),
@@ -141,30 +142,35 @@ impl From<DpuConfig> for EndpointExplorationReport {
                         description: Some("Host image".to_string()),
                         version: Some("32.42.1000".to_string()),
                         release_date: None,
+                        drive: None,
                     },
                     Inventory {
                         id: "DPU_BSP".to_string(),
                         description: Some("Host image".to_string()),
                         version: Some("4.5.0.12984".to_string()),
                         release_date: None,
+                        drive: None,
                     },
                     Inventory {
                         id: "BMC_Firmware".to_string(),
                         description: Some("Host image".to_string()),
                         version: Some(value.bmc_firmware_version),
                         release_date: None,
+                        drive: None,
                     },
                     Inventory {
                         id: "DPU_OFED".to_string(),
                         description: Some("Host image".to_string()),
                         version: Some("MLNX_OFED_LINUX-23.10-1.1.8".to_string()),
                         release_date: None,
+                        drive: None,
                     },
                     Inventory {
                         id: "Bluefield_FW_ERoT".to_string(),
                         description: Some("Host image".to_string()),
                         version: Some("00.02.0182.0000_n02".to_string()),
                         release_date: None,
+                        drive: None,
                     },
                     Inventory {
                         id: "DPU_OS".to_string(),
@@ -173,12 +179,14 @@ impl From<DpuConfig> for EndpointExplorationReport {
                             "DOCA_2.5.0_BSP_4.5.0_Ubuntu_22.04-1.20231129.prod".to_string(),
                         ),
                         release_date: None,
+                        drive: None,
                     },
                     Inventory {
                         id: "DPU_SYS_IMAGE".to_string(),
                         description: Some("Host image".to_string()),
                         version: Some("b83f:d203:0090:97a4".to_string()),
                         release_date: None,
+                        drive: None,
                     },
                 ],
             }],
@@ -189,11 +197,8 @@ impl From<DpuConfig> for EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            compute_tray_index: None,
-            physical_slot_number: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         }
     }
 }

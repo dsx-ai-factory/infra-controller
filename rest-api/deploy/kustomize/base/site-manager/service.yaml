@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# carbide-rest-site-manager Service
+# nico-rest-site-manager Service
 apiVersion: v1
 kind: Service
 metadata:
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   labels:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 spec:
   type: ClusterIP
   ports:
@@ -15,5 +15,5 @@ spec:
       targetPort: 8100
       name: https
   selector:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 

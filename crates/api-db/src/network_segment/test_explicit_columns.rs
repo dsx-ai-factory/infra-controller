@@ -109,8 +109,6 @@ async fn network_segment_queries_survive_added_columns(
             assert_eq!(segment.config.vpc_id, Some(vpc_id));
             assert_eq!(segment.config.mtu, 9000);
             assert_eq!(segment.config.segment_type, NetworkSegmentType::Tenant);
-            // These fields have decoder fallbacks, so non-default values
-            // catch an omitted column that would otherwise decode silently.
             assert_eq!(
                 segment.config.allocation_strategy,
                 AllocationStrategy::Reserved
@@ -162,4 +160,36 @@ async fn network_segment_queries_survive_added_columns(
         }
     }
     Ok(())
+}
+
+#[crate::sqlx_test]
+async fn network_segment_reads_reject_invalid_allocation_strategy(pool: PgPool) {
+    let mut txn = pool.begin().await.expect("begin segment decode test");
+    let id = NetworkSegmentId::new();
+    // Segment writers bind `AllocationStrategy`, but the `allocation_strategy`
+    // TEXT column can contain a token that the enum cannot decode.
+    sqlx::query(
+        "INSERT INTO network_segments (id, name, version, allocation_strategy)
+         VALUES ($1, 'invalid-allocation-strategy', 'V1-T0', 'unsupported')",
+    )
+    .bind(id)
+    .execute(&mut *txn)
+    .await
+    .expect("store an invalid allocation strategy");
+
+    let error = find_by(
+        &mut *txn,
+        ObjectColumnFilter::One(IdColumn, &id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .expect_err("an invalid strategy must fail the segment read");
+    let DatabaseError::Sqlx(annotated) = &error else {
+        panic!("expected Sqlx, got {error:?}");
+    };
+    let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+        panic!("expected ColumnDecode, got {error:?}");
+    };
+    assert_eq!(index, "\"allocation_strategy\"");
+    assert!(source.to_string().contains("unsupported"), "{source:?}");
 }

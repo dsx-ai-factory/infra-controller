@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 400" width="1600" height="400" role="img" aria-labelledby="t">
+<title id="t">Where NICo fits: below ISV control planes and Kubernetes or BMaaS layers, above the DPUs, hosts, and fabrics.</title>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <path d="M0 0L10 5L0 10z" fill="#9da7b3"/>
+  </marker>
+  <marker id="arrowg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <path d="M0 0L10 5L0 10z" fill="#76B900"/>
+  </marker>
+</defs>
+<rect width="1600" height="400" rx="16" fill="#0d1117"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="70" y="36" width="1460" height="74" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+<text x="98" y="82" font-size="24" font-weight="bold" fill="#e6edf3" text-anchor="start" >ISV or NCP control plane</text>
+<text x="510" y="82" font-size="19" font-weight="normal" fill="#9da7b3" text-anchor="start" >Scheduling, tenancy policy, and workloads live here</text>
+<rect x="70" y="122" width="1460" height="74" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+<text x="98" y="168" font-size="24" font-weight="bold" fill="#e6edf3" text-anchor="start" >Kubernetes, BMaaS, or VMaaS</text>
+<text x="510" y="168" font-size="19" font-weight="normal" fill="#9da7b3" text-anchor="start" >Consume bare-metal instances through the NICo APIs</text>
+<rect x="70" y="208" width="1460" height="74" rx="12" fill="#76B900" stroke="#76B900" stroke-width="2"/>
+<text x="98" y="254" font-size="24" font-weight="bold" fill="#ffffff" text-anchor="start" >NICo</text>
+<text x="510" y="254" font-size="19" font-weight="normal" fill="#ffffff" text-anchor="start" >Site Controller, REST API, and Flow make the hardware predictable, repeatable, and safe</text>
+<text x="1502" y="254" font-size="17" font-weight="bold" fill="#ffffff" text-anchor="end" >you are here</text>
+<rect x="70" y="294" width="1460" height="74" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+<text x="98" y="340" font-size="24" font-weight="bold" fill="#e6edf3" text-anchor="start" >Hardware</text>
+<text x="510" y="340" font-size="19" font-weight="normal" fill="#9da7b3" text-anchor="start" >BlueField DPUs, host servers, BMCs, and the Ethernet, InfiniBand, and NVLink fabrics</text>
+<path d="M1540 225.0L1540 46" stroke="#9da7b3" stroke-width="0" fill="none"/>
+</g>
+</svg>

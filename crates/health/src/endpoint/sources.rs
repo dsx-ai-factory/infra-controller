@@ -28,12 +28,12 @@ use url::Url;
 
 use crate::HealthError;
 use crate::bmc::{
-    BmcClient, BmcLatencyInstrumentation, FixedCredentialProvider, bmc_latency_endpoint_labels,
+    BmcClient, BmcLatencyInstrumentation, CredentialProvider, bmc_latency_endpoint_labels,
 };
 use crate::config::{StaticBmcEndpoint, StaticSwitchEndpointRole};
 use crate::endpoint::{
-    BmcAddr, BmcCredentials, BmcEndpoint, BoxFuture, EndpointMetadata, EndpointSnapshot,
-    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
+    BmcAddr, BmcEndpoint, BoxFuture, EndpointMetadata, EndpointSnapshot, EndpointSource,
+    InventorySnapshot, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
     SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
@@ -69,12 +69,14 @@ impl StaticEndpointSource {
         }
     }
 
+    /// Builds static endpoints using the supplied shared credential provider.
     pub fn from_config(
         configs: &[StaticBmcEndpoint],
         reqwest: &ReqwestClient,
         proxy_url: Option<&Url>,
         cache_size: usize,
         bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        credential_provider: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self::from_config_with_request_concurrency(
             configs,
@@ -83,6 +85,7 @@ impl StaticEndpointSource {
             cache_size,
             NonZeroUsize::MIN,
             bmc_latency_metrics,
+            credential_provider,
         )
     }
 
@@ -93,9 +96,9 @@ impl StaticEndpointSource {
         cache_size: usize,
         bmc_request_concurrency: NonZeroUsize,
         bmc_latency_metrics: Option<Arc<BmcLatencyMetrics>>,
+        credential_provider: Arc<dyn CredentialProvider>,
     ) -> Self {
         let mut endpoints = Vec::with_capacity(configs.len());
-
         for cfg in configs {
             let mac = match MacAddress::from_str(&cfg.mac) {
                 Ok(mac) => mac,
@@ -171,8 +174,9 @@ impl StaticEndpointSource {
                 let nmxt_enabled = switch.nmxt_enabled.unwrap_or(switch.is_primary);
 
                 Some(EndpointMetadata::Switch(SwitchData {
+                    log_checkpoint_identity: None,
                     id,
-                    serial,
+                    serial: Some(serial),
                     slot_number: switch.slot_number,
                     tray_index: switch.tray_index,
                     nvlink_domain_uuid,
@@ -227,11 +231,6 @@ impl StaticEndpointSource {
                 port: cfg.port,
                 mac: Some(mac),
             };
-            let credentials = BmcCredentials::UsernamePassword {
-                username: cfg.username.clone(),
-                password: cfg.password.clone(),
-            };
-            let provider = Arc::new(FixedCredentialProvider::new(credentials));
             let rack_id = cfg.rack_id.as_ref().map(|id| RackId::new(id.as_str()));
             let bmc_latency_instrumentation = bmc_latency_metrics.clone().map(|metrics| {
                 BmcLatencyInstrumentation::new(
@@ -242,7 +241,7 @@ impl StaticEndpointSource {
             let bmc = match BmcClient::new(
                 reqwest.clone(),
                 addr.clone(),
-                provider,
+                credential_provider.clone(),
                 proxy_url.cloned(),
                 cache_size,
                 bmc_request_concurrency,
@@ -386,6 +385,15 @@ mod tests {
         )
     }
 
+    fn test_credentials() -> Arc<dyn CredentialProvider> {
+        Arc::new(crate::bmc::FixedCredentialProvider::new(
+            crate::endpoint::BmcCredentials::UsernamePassword {
+                username: "admin".into(),
+                password: Some("pass".into()),
+            },
+        ))
+    }
+
     fn ip(addr: &str) -> std::net::IpAddr {
         addr.parse().unwrap()
     }
@@ -397,8 +405,7 @@ mod tests {
                 ip: ip("10.0.0.1"),
                 port: Some(443),
                 mac: "00:11:22:33:44:55".to_string(),
-                username: "admin".to_string(),
-                password: Some("pass".to_string()),
+                credentials_profile: None,
                 machine: None,
                 power_shelf: None,
                 switch: None,
@@ -409,8 +416,7 @@ mod tests {
                 ip: ip("10.0.0.2"),
                 port: Some(443),
                 mac: "not-a-mac".to_string(),
-                username: "admin".to_string(),
-                password: Some("pass".to_string()),
+                credentials_profile: None,
                 machine: None,
                 power_shelf: None,
                 switch: None,
@@ -419,7 +425,14 @@ mod tests {
             },
         ];
 
-        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let source = StaticEndpointSource::from_config(
+            &configs,
+            &reqwest(),
+            None,
+            10,
+            None,
+            test_credentials(),
+        );
         let endpoints = source.fetch_bmc_hosts().await.expect("fetch should work");
 
         assert_eq!(endpoints.len(), 1);
@@ -438,8 +451,7 @@ mod tests {
             ip: ip("10.0.1.1"),
             port: Some(443),
             mac: "11:22:33:44:55:66".to_string(),
-            username: "cumulus".to_string(),
-            password: Some("pass".to_string()),
+            credentials_profile: None,
             machine: None,
             power_shelf: None,
             switch: Some(StaticSwitchEndpoint {
@@ -457,14 +469,21 @@ mod tests {
             labels: Default::default(),
         }];
 
-        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let source = StaticEndpointSource::from_config(
+            &configs,
+            &reqwest(),
+            None,
+            10,
+            None,
+            test_credentials(),
+        );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
 
         assert_eq!(endpoints.len(), 1);
         match &endpoints[0].metadata {
             Some(EndpointMetadata::Switch(s)) => {
                 assert_eq!(s.id, Some(switch_id));
-                assert_eq!(s.serial, "SN-001");
+                assert_eq!(s.serial.as_deref(), Some("SN-001"));
                 assert_eq!(s.slot_number, Some(7));
                 assert_eq!(s.tray_index, Some(3));
                 assert_eq!(s.nvlink_domain_uuid, Some(nvlink_domain_uuid));
@@ -493,8 +512,7 @@ mod tests {
                 ip: ip(ip_address),
                 port: Some(443),
                 mac: mac_address.to_string(),
-                username: "cumulus".to_string(),
-                password: Some("pass".to_string()),
+                credentials_profile: None,
                 machine: None,
                 power_shelf: None,
                 switch: Some(StaticSwitchEndpoint {
@@ -513,7 +531,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let source = StaticEndpointSource::from_config(
+            &configs,
+            &reqwest(),
+            None,
+            10,
+            None,
+            test_credentials(),
+        );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
 
         assert_eq!(endpoints.len(), cases.len());
@@ -533,8 +558,7 @@ mod tests {
             ip: ip("10.0.2.1"),
             port: Some(443),
             mac: "22:33:44:55:66:77".to_string(),
-            username: "admin".to_string(),
-            password: Some("pass".to_string()),
+            credentials_profile: None,
             machine: None,
             power_shelf: Some(StaticPowerShelfEndpoint {
                 id: Some(power_shelf_id.to_string()),
@@ -546,7 +570,14 @@ mod tests {
             labels: Default::default(),
         }];
 
-        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let source = StaticEndpointSource::from_config(
+            &configs,
+            &reqwest(),
+            None,
+            10,
+            None,
+            test_credentials(),
+        );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
 
         assert_eq!(endpoints.len(), 1);
@@ -567,8 +598,7 @@ mod tests {
             ip: ip("10.0.2.2"),
             port: Some(443),
             mac: "22:33:44:55:66:88".to_string(),
-            username: "admin".to_string(),
-            password: Some("pass".to_string()),
+            credentials_profile: None,
             machine: None,
             power_shelf: Some(StaticPowerShelfEndpoint {
                 id: Some(power_shelf_id.to_string()),
@@ -580,7 +610,14 @@ mod tests {
             labels: Default::default(),
         }];
 
-        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let source = StaticEndpointSource::from_config(
+            &configs,
+            &reqwest(),
+            None,
+            10,
+            None,
+            test_credentials(),
+        );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
 
         assert_eq!(endpoints.len(), 1);
@@ -606,8 +643,7 @@ mod tests {
             ip: ip("10.0.1.2"),
             port: Some(443),
             mac: "11:22:33:44:55:11".to_string(),
-            username: "admin".to_string(),
-            password: Some("pass".to_string()),
+            credentials_profile: None,
             machine: Some(StaticMachineEndpoint {
                 id: Some("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0".to_string()),
                 serial: Some("MN-001".to_string()),
@@ -622,7 +658,14 @@ mod tests {
             labels: std::collections::BTreeMap::from([("site".to_string(), "dev".to_string())]),
         }];
 
-        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let source = StaticEndpointSource::from_config(
+            &configs,
+            &reqwest(),
+            None,
+            10,
+            None,
+            test_credentials(),
+        );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
 
         assert_eq!(endpoints.len(), 1);
@@ -656,8 +699,7 @@ mod tests {
             ip: ip("10.0.1.3"),
             port: Some(443),
             mac: "11:22:33:44:55:12".to_string(),
-            username: "admin".to_string(),
-            password: Some("pass".to_string()),
+            credentials_profile: None,
             machine: Some(StaticMachineEndpoint {
                 id: Some("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0".to_string()),
                 serial: None,
@@ -672,7 +714,14 @@ mod tests {
             labels: Default::default(),
         }];
 
-        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let source = StaticEndpointSource::from_config(
+            &configs,
+            &reqwest(),
+            None,
+            10,
+            None,
+            test_credentials(),
+        );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
 
         assert_eq!(endpoints.len(), 1);
@@ -690,8 +739,7 @@ mod tests {
             ip: ip("10.0.0.1"),
             port: Some(443),
             mac: "aa:bb:cc:dd:ee:ff".to_string(),
-            username: "admin".to_string(),
-            password: Some("pass".to_string()),
+            credentials_profile: None,
             machine: None,
             power_shelf: None,
             switch: None,
@@ -699,7 +747,14 @@ mod tests {
             labels: Default::default(),
         }];
 
-        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let source = StaticEndpointSource::from_config(
+            &configs,
+            &reqwest(),
+            None,
+            10,
+            None,
+            test_credentials(),
+        );
         let endpoints = source.fetch_bmc_hosts().await.unwrap();
 
         assert_eq!(endpoints.len(), 1);

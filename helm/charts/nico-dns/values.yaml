@@ -114,6 +114,17 @@ externalService:
   # Service's primary family (the first entry) cannot be changed in place.
   ipFamilyPolicy: ""
   ipFamilies: []
+  # Empty keeps the Kubernetes default (Cluster). Set Local to preserve client
+  # source IPs. MetalLB only lets Local Services share an IP with Services
+  # that select the same pods.
+  externalTrafficPolicy: ""
+  # Annotation key that lets the UDP and TCP Services of one replica share an
+  # IP. Its value is <name>-instance-<ordinal>. Change the key for a
+  # load-balancer controller that does not use MetalLB annotations, or set it
+  # to "" to omit the annotation. A perPodAnnotations entry under either
+  # MetalLB spelling replaces the built-in annotation, for example to share
+  # the IP with another Service; one with the same key overrides its value.
+  sharedIpAnnotation: metallb.universe.tf/allow-shared-ip
   ## Per-pod annotations (index matches pod ordinal)
   ## Each entry is a map of annotations for that pod's external services
   perPodAnnotations: []

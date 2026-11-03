@@ -43,8 +43,9 @@ tokio-socks = { workspace = true }
 tryhard = { workspace = true }
 
 [dev-dependencies]
+carbide-test-support = { path = "../test-support" }
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
 
 [lints]
 workspace = true

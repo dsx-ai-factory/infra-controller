@@ -32,14 +32,16 @@ use librms::protos::rack_manager::{
 use librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use mat_protocol_gateway::{ExitReason, RMS_VERSION};
+use rms_mock::RmsMockConfig;
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
 use tonic::transport::Channel;
 
 use crate::common::{
     FakeController, FakeMachineATron, GUID_A, GUID_B, SWITCH_A, SWITCH_B, TRAY_A, WAIT, counts,
-    devices_a, devices_b, finished, free_loopback_address, gateway_config, node, nodes, probe,
-    rms_client, spawn_run, wait_until, wait_until_ready,
+    devices_a, devices_b, finished, gateway_config, node, nodes, probe, rms_client, spawn_run,
+    wait_until, wait_until_ready,
 };
 
 /// Status and body of `/readyz`; `None` while nothing answers.
@@ -107,12 +109,16 @@ async fn rms_requests_are_routed_by_rack_and_batches_split_across_instances_are_
         FakeMachineATron::start_with_racks("mat-a", &[GUID_A], &["rack-001"], devices_a()).await;
     let mat_b =
         FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
+
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
+
     wait_until_ready(&http, listen).await;
     let mut rms = rms_client(listen).await;
 
@@ -401,22 +407,15 @@ async fn rms_requests_are_routed_by_rack_and_batches_split_across_instances_are_
         );
     }
 
-    // An id from before a restart is unknown to this process and reported complete by both
-    // status RPCs, as the mock does; a blank id names no job.
-    let states = rms
+    // An id from before a restart is unknown, never proof of completion.
+    let status = rms
         .get_job_status(GetJobStatusRequest {
             job_id: "gw-0-999".to_string(),
             include_child_job_states: true,
         })
         .await
-        .unwrap()
-        .into_inner()
-        .job_states;
-    assert_eq!(job_tree(&states), vec![("gw-0-999", None, Vec::new())]);
-    assert_eq!(
-        states[0].execution_state,
-        JobExecutionState::Completed as i32
-    );
+        .unwrap_err();
+    assert_eq!(status.code(), Code::NotFound);
     let response = rms
         .get_configure_switch_certificate_job_status(
             GetConfigureSwitchCertificateJobStatusRequest {
@@ -426,14 +425,10 @@ async fn rms_requests_are_routed_by_rack_and_batches_split_across_instances_are_
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(
-        (
-            response.status,
-            response.job_id.as_str(),
-            response.state.as_str()
-        ),
-        (ReturnCode::Success as i32, "gw-0-999", "completed")
-    );
+    assert_eq!(response.status, ReturnCode::Failure as i32);
+    assert_eq!(response.job_id, "gw-0-999");
+    assert!(response.state.is_empty());
+    assert_eq!(response.error_message, "job gw-0-999 not found");
     let status = rms
         .get_job_status(GetJobStatusRequest {
             job_id: " ".to_string(),
@@ -469,6 +464,81 @@ async fn rms_requests_are_routed_by_rack_and_batches_split_across_instances_are_
     assert_eq!(finished(running).await, ExitReason::Shutdown);
 }
 
+/// A known gateway id cannot turn a backend's missing job into completion,
+/// whether it names one backend or an aggregate whose other part still exists.
+#[tokio::test]
+async fn known_gateway_jobs_preserve_backend_not_found() {
+    let mat_a = FakeMachineATron::start_with_rms(
+        "mat-a",
+        &[GUID_A],
+        &["rack-001"],
+        devices_a(),
+        RmsMockConfig {
+            max_terminal_jobs: 0,
+            min_terminal_retention_secs: 0,
+            ..RmsMockConfig::default()
+        },
+    )
+    .await;
+    let mat_b =
+        FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
+    let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let running = spawn_run(
+        gateway_config(controller.serve().await, listen),
+        shutdown.clone(),
+        listener,
+    );
+    wait_until_ready(&reqwest::Client::new(), listen).await;
+    let mut rms = rms_client(listen).await;
+    let mut jobs = Vec::new();
+    for switches in [
+        vec![node("s1", "rack-001", SWITCH_A)],
+        vec![
+            node("s1", "rack-001", SWITCH_A),
+            node("s2", "rack-002", SWITCH_B),
+        ],
+    ] {
+        let batch = rms
+            .configure_switch_certificate(certificate_batch(switches))
+            .await
+            .unwrap()
+            .into_inner();
+        let job_id = batch.response.unwrap().job_id;
+        assert!(job_id.starts_with("gw-"));
+        for expected in [JobExecutionState::Running, JobExecutionState::Completed] {
+            let response = rms
+                .get_job_status(GetJobStatusRequest {
+                    job_id: job_id.clone(),
+                    include_child_job_states: true,
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(response.job_states[0].execution_state, expected as i32);
+        }
+        jobs.push(job_id);
+    }
+    // mat-a immediately evicts terminal records, but gateway mappings remain
+    // present and mat-b still retains the aggregate's other completed part.
+    for job_id in jobs {
+        let status = rms
+            .get_job_status(GetJobStatusRequest {
+                job_id,
+                include_child_job_states: true,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::NotFound);
+        assert!(status.message().contains("mat-a"), "{status}");
+        assert!(status.message().contains("not found"), "{status}");
+    }
+    shutdown.cancel();
+    assert_eq!(finished(running).await, ExitReason::Shutdown);
+}
+
 /// Two instances reporting one rack is a conflict: `/readyz` names it, routed RPCs are refused
 /// rather than sent to either instance, and both clear once one instance stops reporting it.
 #[tokio::test]
@@ -487,12 +557,15 @@ async fn a_rack_reported_by_two_instances_blocks_readiness_and_routing_until_one
         devices_b(),
     )
     .await;
+
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
 
     wait_until("the gateway explains the conflict", || async {
         readyz(&http, listen)
@@ -540,15 +613,19 @@ async fn a_source_that_stops_answering_keeps_its_racks_until_stale_after_then_an
         FakeMachineATron::start_with_racks("mat-a", &[GUID_A], &["rack-001"], devices_a()).await;
     let mat_b =
         FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
+
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let mut config = gateway_config(controller.serve().await, listen);
     // The stale state is asserted before it expires, so give the assertion room on a loaded host.
     config.ownership.stale_after = Duration::from_secs(2);
     config.validate().unwrap();
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
+
     wait_until_ready(&http, listen).await;
     let mut rms = rms_client(listen).await;
 
@@ -624,14 +701,15 @@ async fn a_source_down_at_startup_blocks_readiness_and_routing_until_it_answers(
         FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
     mat_b.set_available(false);
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let mut config = gateway_config(controller.serve().await, listen);
     // Expiry must outlast the bounded assertion phase. Its transition is tested separately.
     config.ownership.stale_after = WAIT * 10;
     config.validate().unwrap();
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
 
     tokio::time::timeout(WAIT, async {
         wait_until("the gateway names the pending source", || async {
@@ -683,11 +761,12 @@ async fn a_source_down_at_startup_stops_blocking_after_stale_after_and_can_recov
         FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
     mat_b.set_available(false);
     let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
-    let listen = free_loopback_address().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
     let config = gateway_config(controller.serve().await, listen);
     let http = reqwest::Client::new();
     let shutdown = CancellationToken::new();
-    let running = spawn_run(config, shutdown.clone());
+    let running = spawn_run(config, shutdown.clone(), listener);
 
     wait_until_ready(&http, listen).await;
 

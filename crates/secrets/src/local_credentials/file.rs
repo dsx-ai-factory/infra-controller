@@ -22,6 +22,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use carbide_instrument::{Event, LabelValue, emit};
 use notify::{PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -183,15 +184,28 @@ fn start_primary_watcher(path: &Path, tx: WatchEventSender) -> notify::Result<Re
     Ok(primary)
 }
 
-pub struct FileCredentialsWatcher {
-    credentials: Arc<ArcSwap<CredentialSnapshot>>,
+/// File reader for the core API's existing credential schema.
+pub type FileCredentialsWatcher = StructuredCredentialReader<CredentialSnapshot>;
+
+/// Watches one credential file and publishes complete, cached snapshots.
+/// Initial load failures prevent construction; failed reloads retain the last
+/// valid snapshot. Values and parser details are redacted from parse errors.
+pub struct StructuredCredentialReader<T> {
+    credentials: Arc<ArcSwap<T>>,
     /// `None` when the kernel-backed watcher could not be armed at startup;
     /// the poll watcher then detects every change on its own.
     _primary_watcher: Option<RecommendedWatcher>,
     _secondary_watcher: PollWatcher,
 }
 
-impl FileCredentialsWatcher {
+impl<T: DeserializeOwned + Send + Sync + 'static> StructuredCredentialReader<T> {
+    /// Returns one complete cached snapshot. Existing references remain valid
+    /// across reloads; a later call observes the latest published snapshot.
+    pub fn snapshot(&self) -> Arc<T> {
+        self.credentials.load_full()
+    }
+
+    /// Loads JSON or YAML; reloads when the existing watchers report changes.
     pub async fn new(config: FileCredentialsConfig) -> Result<Self, SecretsError> {
         Self::new_with_primary_watcher(config, start_primary_watcher).await
     }
@@ -214,6 +228,15 @@ impl FileCredentialsWatcher {
                 "credentials.file.poll_interval must be greater than zero"
             )));
         }
+        // Fail on a missing file before arming any watcher. `PollWatcher::watch`
+        // registers nothing for a missing path yet returns `Ok`, and the kernel
+        // watch failure for it would otherwise read as an inotify shortage.
+        tokio::fs::metadata(&path).await.map_err(|err| {
+            SecretsError::GenericError(eyre::Report::new(err).wrap_err(format!(
+                "credentials file {} is not accessible",
+                path.display()
+            )))
+        })?;
         let (tx, mut rx) = mpsc::channel(4);
 
         let primary = start_primary(&path, tx.clone());
@@ -291,16 +314,16 @@ impl FileCredentialsWatcher {
         })
     }
 
-    async fn load_file(path: &Path) -> Result<CredentialSnapshot, SecretsError> {
+    async fn load_file(path: &Path) -> Result<T, SecretsError> {
         let content = tokio::fs::read(path)
             .await
             .map_err(|err| SecretsError::GenericError(err.into()))?;
 
-        if let Ok(parsed) = serde_json::from_slice::<CredentialSnapshot>(&content) {
+        if let Ok(parsed) = serde_json::from_slice::<T>(&content) {
             return Ok(parsed);
         }
 
-        let parsed = serde_yaml::from_slice::<CredentialSnapshot>(&content).map_err(|err| {
+        let parsed = serde_yaml::from_slice::<T>(&content).map_err(|err| {
             let message = match err.location() {
                 Some(location) => format!(
                     "failed to parse static credential file as JSON or YAML at line {}, column {}; parse details redacted",
@@ -334,6 +357,44 @@ mod tests {
 
     use super::*;
     use crate::credentials::{CredentialKey, CredentialType, Credentials};
+
+    #[tokio::test]
+    async fn custom_snapshot_references_survive_reload() {
+        use std::collections::HashMap;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        tokio::fs::write(&path, r#"{"version":1}"#).await.unwrap();
+        let reader =
+            StructuredCredentialReader::<HashMap<String, u64>>::new(FileCredentialsConfig {
+                path: Some(path.clone()),
+                poll_interval: Some(Duration::from_millis(25)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let previous = reader.snapshot();
+        let replacement = dir.path().join("next.json");
+        tokio::fs::write(&replacement, "version: 2\n")
+            .await
+            .unwrap();
+        tokio::fs::rename(&replacement, &path).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if reader.snapshot().get("version") == Some(&2) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("new snapshot becomes visible");
+        assert_eq!(
+            previous.get("version"),
+            Some(&1),
+            "held snapshot stays consistent"
+        );
+    }
 
     #[tokio::test]
     async fn loads_json_file_and_reloads_on_change() {
@@ -603,10 +664,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_file_returns_error() {
-        // The poll watcher reports the missing path, so hold the metrics
-        // window to keep that count out of the metric-asserting tests.
-        let _metrics = MetricsCapture::start();
+    async fn missing_file_fails_startup_without_watcher_diagnostics() {
+        let metrics = MetricsCapture::start();
         let dir = tempdir().expect("create temp dir");
         let file_path = dir.path().join("does-not-exist.yaml");
         let result = FileCredentialsWatcher::new(FileCredentialsConfig {
@@ -614,7 +673,12 @@ mod tests {
             ..Default::default()
         })
         .await;
-        assert!(result.is_err());
+        assert!(result.is_err(), "a missing file must fail startup");
+        assert_eq!(
+            watcher_failure_delta(&metrics),
+            0.0,
+            "a missing file is a startup error, not a watcher failure"
+        );
     }
 
     #[tokio::test]

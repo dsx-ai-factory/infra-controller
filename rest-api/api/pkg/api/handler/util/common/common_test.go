@@ -1019,7 +1019,12 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"
@@ -1063,6 +1068,20 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 
 		mit := testCommonBuildMachineInstanceType(t, dbSession, mc.ID, inst1.ID)
 		assert.NotNil(t, mit)
+	}
+
+	// machineLockedElsewhere reports whether another transaction is holding the Machine's advisory lock
+	machineLockedElsewhere := func(t *testing.T, machineID string) bool {
+		t.Helper()
+		other, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		defer func() { _ = other.Rollback() }()
+		lockErr := other.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machineID), false)
+		if errors.Is(lockErr, cdb.ErrXactAdvisoryLockFailed) {
+			return true
+		}
+		require.NoError(t, lockErr)
+		return false
 	}
 
 	tests := []struct {
@@ -1137,6 +1156,7 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 				require.NoError(t, getErr)
 				assert.True(t, persisted.IsAssigned)
 				assert.Equal(t, cdbm.MachineStatusInUse, persisted.Status)
+				assert.True(t, machineLockedElsewhere(t, s.ID), "selected Machine must stay locked until the transaction ends")
 				details, _, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{s.ID}}, cdbp.PageInput{})
 				require.NoError(t, historyErr)
 				require.Len(t, details, 1)
@@ -1149,7 +1169,7 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		})
 	}
 
-	t.Run("rechecks labels after a concurrent update", func(t *testing.T) {
+	t.Run("rechecks labels after a concurrent update, unlocks the rejected Machine", func(t *testing.T) {
 		concurrentInstanceType := testCommonBuildInstanceType(t, dbSession, "concurrent-label-update", site1, ip, tnuser)
 		machine := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(concurrentInstanceType.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
 		_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
@@ -1213,6 +1233,8 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		case result := <-resultCh:
 			require.Nil(t, result.machine)
 			require.Error(t, result.err)
+			// allocationTx is still open, so a lock held through it would block this attempt
+			assert.False(t, machineLockedElsewhere(t, machine.ID), "rejected Machine must be unlocked before the transaction ends")
 		case <-time.After(5 * time.Second):
 			t.Fatal("Machine selection did not resume after the concurrent label update committed")
 		}
@@ -1228,7 +1250,12 @@ func TestGetSiteMachineCountStats(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"
@@ -2376,7 +2403,12 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"
@@ -3467,6 +3499,49 @@ func TestTenantHasTargetedInstanceCreation(t *testing.T) {
 	})
 }
 
+func TestTenantHasSiteAccess(t *testing.T) {
+	ctx := context.Background()
+	dbSession := TestInitDB(t)
+	defer dbSession.Close()
+	TestSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, uuid.NewString(), "site-access-org", []string{authz.ProviderAdminRole})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "provider", "site-access-org", user)
+	site := TestBuildSite(t, dbSession, ip, "site", user)
+	buildTenant := func(name string, privileged bool) *cdbm.Tenant {
+		tn := TestBuildTenant(t, dbSession, name, name+"-org", user)
+		if privileged {
+			TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn.ID, tn.Org, cdbm.TenantAccountStatusReady, user)
+		} else {
+			TestBuildTenantAccount(t, dbSession, ip, &tn.ID, tn.Org, cdbm.TenantAccountStatusReady, user)
+		}
+		return tn
+	}
+
+	allocated := buildTenant("allocated", false)
+	TestBuildAllocation(t, dbSession, site, allocated, "allocation", user)
+	blocked := buildTenant("blocked", true)
+	cdbm.TestBuildTenantSite(t, dbSession, blocked, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, user)
+
+	tests := []struct {
+		name   string
+		tenant *cdbm.Tenant
+		want   bool
+	}{
+		{name: "allocation grants access", tenant: allocated, want: true},
+		{name: "privilege grants access", tenant: buildTenant("privileged", true), want: true},
+		{name: "site denial without allocation denies access", tenant: blocked, want: false},
+		{name: "no allocation or privilege denies access", tenant: buildTenant("unprivileged", false), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := TenantHasSiteAccess(ctx, nil, dbSession, tc.tenant, site.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testCommonInitDB(t)
@@ -3541,6 +3616,81 @@ func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := TenantHasLegacyTargetedInstanceCreation(ctx, nil, dbSession, tc.tenant)
 			require.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestTenantHasCrossTenantInterfaceCreation(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testCommonInitDB(t)
+	defer dbSession.Close()
+	testCommonSetupSchema(t, dbSession)
+
+	user := testCommonBuildUser(t, dbSession, uuid.NewString(), []string{"cross-interface-provider"}, []string{authz.ProviderAdminRole})
+	provider := testCommonBuildInfrastructureProvider(t, dbSession, "Cross Interface Provider", "cross-interface-provider", user)
+	otherProvider := testCommonBuildInfrastructureProvider(t, dbSession, "Other Provider", "cross-interface-other-provider", user)
+	defaultSite := testCommonBuildSite(t, dbSession, provider, "Default Site", user)
+	overrideSite := testCommonBuildSite(t, dbSession, provider, "Override Site", user)
+	otherProviderSite := testCommonBuildSite(t, dbSession, otherProvider, "Other Provider Site", user)
+
+	buildTenant := func(name, status string, accountDefault bool) *cdbm.Tenant {
+		tenant := cdbm.TestBuildTenant(t, dbSession, name, name+"-org", user)
+		_, err := cdbm.NewTenantAccountDAO(dbSession).Create(ctx, nil, cdbm.TenantAccountCreateInput{
+			AccountNumber:             uuid.NewString(),
+			TenantID:                  &tenant.ID,
+			TenantOrg:                 tenant.Org,
+			InfrastructureProviderID:  provider.ID,
+			InfrastructureProviderOrg: provider.Org,
+			Status:                    status,
+			Config: &cdbm.TenantAccountConfig{
+				CrossTenantInterfaceCreation: accountDefault,
+			},
+			CreatedBy: user.ID,
+		})
+		require.NoError(t, err)
+		return tenant
+	}
+
+	enabledTenant := buildTenant("cross-interface-enabled", cdbm.TenantAccountStatusReady, true)
+	disabledTenant := buildTenant("cross-interface-disabled", cdbm.TenantAccountStatusReady, false)
+	pendingTenant := buildTenant("cross-interface-pending", cdbm.TenantAccountStatusPending, true)
+
+	cdbm.TestBuildTenantSite(t, dbSession, enabledTenant, overrideSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(false),
+	}, user)
+	cdbm.TestBuildTenantSite(t, dbSession, disabledTenant, overrideSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(true),
+	}, user)
+	cdbm.TestBuildTenantSite(t, dbSession, enabledTenant, otherProviderSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(true),
+	}, user)
+
+	tests := []struct {
+		name     string
+		tenant   *cdbm.Tenant
+		siteID   uuid.UUID
+		expected bool
+		wantErr  bool
+	}{
+		{name: "nil Tenant is disabled", siteID: defaultSite.ID},
+		{name: "enabled account default", tenant: enabledTenant, siteID: defaultSite.ID, expected: true},
+		{name: "disabled account default", tenant: disabledTenant, siteID: defaultSite.ID},
+		{name: "false Site override disables true default", tenant: enabledTenant, siteID: overrideSite.ID},
+		{name: "true Site override enables false default", tenant: disabledTenant, siteID: overrideSite.ID, expected: true},
+		{name: "non-Ready account does not authorize", tenant: pendingTenant, siteID: defaultSite.ID},
+		{name: "override without Ready account at Site Provider fails closed", tenant: enabledTenant, siteID: otherProviderSite.ID},
+		{name: "missing Site returns an error", tenant: enabledTenant, siteID: uuid.New(), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tc.tenant, tc.siteID)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 			assert.Equal(t, tc.expected, got)
 		})
 	}

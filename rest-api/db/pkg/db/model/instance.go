@@ -208,7 +208,6 @@ func (i *Instance) GetAggregatedStatus(status string, powerStatus *string) strin
 // InstanceCountByStatus holds instance row counts grouped by aggregated API status.
 // Counts reflect the same status values returned on individual Instance objects
 // (lifecycle status with Ready+power overrides applied via instanceAggregatedStatusQuery).
-
 type InstanceCountByStatus struct {
 	Total        int `json:"total"`
 	Pending      int `json:"pending"`
@@ -651,7 +650,7 @@ func (isd InstanceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Instance
 
 	var instances []Instance
 
-	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model(&instances).ColumnExpr("i.*")
+	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model(&instances).ColumnExpr("?TableColumns")
 
 	query, err := isd.setQueryWithFilter(filter, query, instanceDAOSpan)
 	if err != nil {

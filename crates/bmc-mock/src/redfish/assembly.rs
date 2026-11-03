@@ -15,95 +15,38 @@
  * limitations under the License.
  */
 
-use std::borrow::Cow;
-
 use serde_json::json;
 
-use crate::json::{JsonExt, JsonPatch};
+use crate::json::JsonExt;
 use crate::redfish;
-use crate::redfish::Builder;
+use crate::redfish::ModelExt;
 
 pub(crate) fn chassis_resource(chassis_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!("/redfish/v1/Chassis/{chassis_id}/Assembly");
     redfish::Resource {
         odata_id: odata_id.into(),
-        odata_type: "#Assembly.v1_3_0.Assembly".into(),
+        odata_type: redfish::schema::assembly::Assembly::ODATA_TYPE.into(),
         id: "Assembly".into(),
         name: format!("Assembly data for {chassis_id}").into(),
     }
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> AssemblyBuilder {
-    AssemblyBuilder {
-        odata_id: resource.odata_id.to_string(),
-        assemblies: vec![],
-        value: resource.json_patch(),
-    }
-}
-
-pub(crate) fn data_builder(member_id: Cow<'static, str>) -> AssemblyData {
-    AssemblyData {
-        member_id,
-        value: json!({}),
-    }
-}
-
-pub(crate) struct AssemblyBuilder {
-    odata_id: String,
-    assemblies: Vec<AssemblyData>,
-    value: serde_json::Value,
-}
-
-impl Builder for AssemblyBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            odata_id: self.odata_id,
-            assemblies: self.assemblies,
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl AssemblyBuilder {
-    pub(crate) fn add_data(mut self, data: AssemblyData) -> Self {
-        self.assemblies.push(data);
-        self
-    }
-
-    pub(crate) fn build(self) -> serde_json::Value {
-        json!({
-            "Assemblies":
-            self.assemblies.into_iter().map(|assembly| {
-                json!({
-                    "@odata.id": format!("{}#/Assemblies/{}", self.odata_id, assembly.member_id),
-                    "MemberId": assembly.member_id,
-                }).patch(assembly.value)
-            }).collect::<Vec<_>>()
-        })
-        .patch(self.value)
-    }
-}
-
-pub(crate) struct AssemblyData {
-    member_id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-impl Builder for AssemblyData {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            member_id: self.member_id,
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl AssemblyData {
-    pub(crate) fn serial_number(self, v: &str) -> Self {
-        self.add_str_field("SerialNumber", v)
-    }
-
-    pub(crate) fn build(self) -> Self {
-        self
-    }
+pub(crate) fn response(
+    chassis_id: &str,
+    member_id: &str,
+    serial_number: &str,
+) -> serde_json::Value {
+    use super::schema::assembly::{Assembly, AssemblyData};
+    let resource = chassis_resource(chassis_id);
+    let member_uri = format!("{}#/Assemblies/{member_id}", resource.odata_id);
+    let model = Assembly::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
+    .assemblies([member_uri.as_str()]);
+    let assembly = AssemblyData::new(member_uri, member_id).serial_number(serial_number);
+    // The generator represents navigation properties as links; assembly data
+    // is embedded in the containing resource by Redfish.
+    model.into_json().patch(json!({"Assemblies": [assembly]}))
 }

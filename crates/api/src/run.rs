@@ -23,9 +23,11 @@ use carbide_api_core::start_runtime;
 use carbide_secrets::CredentialConfig;
 use eyre::WrapErr;
 use ipnetwork::IpNetwork;
+use opentelemetry::metrics::Meter;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::Sender;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::subscriber::NoSubscriber;
 
@@ -42,10 +44,20 @@ pub struct ApiServerAddresses {
     pub metrics_address: Option<SocketAddr>,
 }
 
+/// Listener addresses and metric registration handle owned by a running API server.
+#[derive(Clone, Debug)]
+pub struct ApiServerReady {
+    /// Effective listener addresses after startup.
+    pub addresses: ApiServerAddresses,
+    /// Registers instruments exported by this server's metrics listener.
+    pub meter: Meter,
+}
+
 /// Run the carbide-api server until `cancel_token` is cancelled.
 ///
 /// Once startup completes, `ready_channel` receives the effective API and metrics listener
-/// addresses. This includes OS-selected ports when either endpoint is configured with port zero.
+/// addresses and the server's metric registration handle. This includes OS-selected ports when
+/// either endpoint is configured with port zero.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     debug: u8,
@@ -54,12 +66,13 @@ pub async fn run(
     credential_config: CredentialConfig,
     skip_logging_setup: bool,
     cancel_token: CancellationToken,
-    ready_channel: Sender<ApiServerAddresses>,
+    ready_channel: Sender<ApiServerReady>,
 ) -> eyre::Result<()> {
-    let carbide_config = carbide_api_core::cfg::load::parse_carbide_config(
-        &config_path,
-        site_config_path.as_deref(),
-    )?;
+    let (mut carbide_config, config_diagnostics) =
+        carbide_api_core::cfg::load::parse_carbide_config_with_deferred_diagnostics(
+            &config_path,
+            site_config_path.as_deref(),
+        )?;
 
     // The server has two separate route trees on one listener: the gRPC API
     // (always served, lives in `carbide-api-core`) and the admin web UI — the
@@ -73,22 +86,6 @@ pub async fn run(
     // the core runtime. (We can't read config here: it's parsed inside `carbide::run`.)
     // See the docs on `carbide::AdminUiRoutesBuilder` for the full story.
     let admin_ui_routes_builder = Box::new(carbide_api_web::routes);
-
-    // If `CarbideConfig.initial_objects_file` is set, load it into an
-    // `InitialObjectsConfig` so that the core runtime can reconcile its contents
-    // against the database on first startup.
-    let initial_objects = if let Some(path) = carbide_config.initial_objects_file.as_deref() {
-        Some(
-            carbide_api_core::cfg::load::parse_initial_objects_config_with_policy(
-                path,
-                carbide_config.deny_unknown_fields,
-            )?,
-        )
-    } else {
-        None
-    };
-
-    validate_network_prefixes(&carbide_config)?;
 
     let log_history_max_bytes = carbide_config
         .log_history
@@ -108,7 +105,26 @@ pub async fn run(
         .wrap_err("setup_telemetry")?
     };
 
+    config_diagnostics.emit();
     carbide_api_core::cfg::load::log_vpc_peering_policy_deprecations(&carbide_config);
+    carbide_api_core::cfg::load::apply_nmx_c_tls_defaults(std::sync::Arc::make_mut(
+        &mut carbide_config,
+    ));
+    validate_network_prefixes(&carbide_config)?;
+
+    // Load initial objects after logging setup so warn-mode unknown-field
+    // diagnostics from this second configuration file are observable too.
+    let initial_objects = if let Some(path) = carbide_config.initial_objects_file.as_deref() {
+        Some(
+            carbide_api_core::cfg::load::parse_initial_objects_config_with_policy(
+                path,
+                carbide_config.deny_unknown_fields,
+            )?,
+        )
+    } else {
+        None
+    };
+    carbide_api_core::validate_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
 
     let Metrics {
         registry,
@@ -121,8 +137,7 @@ pub async fn run(
     // while propagating any panics to the current task.
     let mut join_set = JoinSet::new();
 
-    // Not ready until the readiness probe below confirms PostgreSQL is
-    // reachable, so `/ready` never reports success before that is known.
+    // Keep readiness false until the API listener and a fresh PostgreSQL check are ready.
     let health_controller = metrics_endpoint::HealthController::new();
     health_controller.set_ready(false);
 
@@ -154,38 +169,41 @@ pub async fn run(
     )
     .await?;
 
-    // `setup_resources` already verified PostgreSQL connectivity while
-    // building `db_pool`, so it is known good now; the periodic probe takes
-    // over from here and flips `health_controller` if that ever changes.
-    health_controller.set_ready(true);
-    crate::readiness::spawn_database_readiness_probe(
-        &mut join_set,
-        &db_pool,
-        health_controller,
-        cancel_token.clone(),
-    )?;
+    let shutdown_timeout = carbide_config.shutdown_timeout;
+    let panic_on_early_task_return = carbide_config.panic_on_early_task_return;
 
-    let listen_address = start_runtime(RuntimeInputs {
-        carbide_config,
-        initial_objects,
-        meter,
-        per_object_metrics,
-        join_set: &mut join_set,
-        runtime_prelude,
-        credential_manager,
-        certificate_provider,
-        db_pool,
-        work_lock_manager_handle,
-        secrets_context,
-        admin_ui_routes_builder,
-        cancel_token,
-    })
+    let database_readiness_probe = crate::readiness::DatabaseReadinessProbe::new(&db_pool);
+    let listen_address = await_api_runtime_and_database_before_marking_ready(
+        &health_controller,
+        start_runtime(RuntimeInputs {
+            carbide_config,
+            initial_objects,
+            meter: meter.clone(),
+            per_object_metrics,
+            join_set: &mut join_set,
+            runtime_prelude,
+            credential_manager,
+            certificate_provider,
+            db_pool,
+            work_lock_manager_handle,
+            secrets_context,
+            admin_ui_routes_builder,
+            cancel_token: cancel_token.clone(),
+        }),
+        database_readiness_probe.check(),
+    )
     .await?;
 
+    // The fresh check established initial readiness; the same pool now monitors it periodically.
+    database_readiness_probe.spawn(&mut join_set, health_controller, cancel_token.clone())?;
+
     if ready_channel
-        .send(ApiServerAddresses {
-            listen_address,
-            metrics_address,
+        .send(ApiServerReady {
+            addresses: ApiServerAddresses {
+                listen_address,
+                metrics_address,
+            },
+            meter,
         })
         .is_err()
     {
@@ -194,10 +212,83 @@ pub async fn run(
         );
     }
 
-    // Block forever until all spawned tasks complete. Any panics in spawned tasks will be
-    // propagated here.
-    join_set.join_all().await;
-    Ok(())
+    let task_count = join_set.len();
+
+    // Block forever until we get a cancel signal or if the tasks finish early
+    while let Some(Some(result)) = cancel_token
+        .run_until_cancelled(join_set.join_next_with_id())
+        .await
+    {
+        // A result has trickled in before we're cancelled. Propagate any panics.
+        let (task_id, ()) = result.expect("background task panicked");
+
+        if !cancel_token.is_cancelled() {
+            // Background tasks are supposed to run forever, log a warning if they don't. If we've
+            // made it to this line, the task didn't panic, but just returned early, gracefully,
+            // without a shutdown signal.
+            let msg = "background task finished but we're not shutting down";
+            tracing::error!(%task_id, "{msg}");
+            if panic_on_early_task_return {
+                panic!("{msg}");
+            }
+        }
+    }
+
+    // We must now be cancelled (or, extremely unlikely, all tasks finished early, gracefully), wait
+    // for all tasks to complete, with a timeout.
+    let shutdown_deadline = Instant::now() + shutdown_timeout;
+    let mut log_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+    tracing::info!("shutdown signal received, waiting for tasks to complete gracefully");
+
+    loop {
+        tokio::select! {
+            // Report completed tasks as they finish
+            res = join_set.join_next_with_id() => match res {
+                Some(result) => {
+                    // Propagate any panics
+                    let (task_id, ()) = result.expect("background task panicked");
+                    tracing::info!(%task_id, "background task completed");
+                }
+                None => {
+                    // All tasks complete
+                    tracing::info!("server shutdown complete");
+                    break Ok(());
+                }
+            },
+            // Report how many tasks we're waiting on, once a second
+            _ = log_interval.tick() => tracing::info!(
+                "waiting {}s for {} of {} tasks to complete",
+                shutdown_deadline.duration_since(Instant::now()).as_secs(),
+                join_set.len(),
+                task_count,
+            ),
+            // Time out after the deadline
+            _ = tokio::time::sleep_until(shutdown_deadline) => {
+                let count = join_set.len();
+                join_set.shutdown().await; // forcefully aborts all tasks
+                return Err(eyre::eyre!("timed out waiting for {count} tasks to complete"));
+            }
+        }
+    }
+}
+
+/// Awaits API runtime startup and a fresh database check before exposing readiness.
+///
+/// Keeping both prerequisites together prevents listener availability from exposing stale
+/// database readiness.
+async fn await_api_runtime_and_database_before_marking_ready(
+    health_controller: &metrics_endpoint::HealthController,
+    runtime_start: impl std::future::Future<Output = eyre::Result<SocketAddr>>,
+    database_check: impl std::future::Future<Output = bool>,
+) -> eyre::Result<SocketAddr> {
+    // Runtime startup returns only after the API listener is bound and its accept loop is spawned.
+    let listen_address = runtime_start.await?;
+
+    // Recheck PostgreSQL after startup because the earlier resource check may now be stale.
+    health_controller.set_ready(database_check.await);
+
+    Ok(listen_address)
 }
 
 async fn start_metrics_endpoint(
@@ -340,6 +431,139 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    /// Verifies runtime completion alone leaves readiness false until a fresh database result
+    /// succeeds, because listener availability must not expose stale database readiness.
+    #[tokio::test]
+    async fn readiness_waits_for_api_runtime_and_fresh_database_check() {
+        // Hold both prerequisites separately so either premature readiness transition is visible.
+        let health_controller = metrics_endpoint::HealthController::new();
+        health_controller.set_ready(false);
+        let (startup_entered_tx, startup_entered_rx) = tokio::sync::oneshot::channel();
+        let (startup_release_tx, startup_release_rx) = tokio::sync::oneshot::channel();
+        let (database_check_entered_tx, database_check_entered_rx) =
+            tokio::sync::oneshot::channel();
+        let (database_result_tx, database_result_rx) = tokio::sync::oneshot::channel();
+        let expected_address: SocketAddr = "127.0.0.1:1079"
+            .parse()
+            .expect("test listener address must be valid");
+        let startup_task = tokio::spawn({
+            let health_controller = health_controller.clone();
+            async move {
+                await_api_runtime_and_database_before_marking_ready(
+                    &health_controller,
+                    async move {
+                        startup_entered_tx
+                            .send(())
+                            .expect("test must observe runtime startup");
+                        startup_release_rx
+                            .await
+                            .expect("test must release runtime startup");
+                        Ok::<SocketAddr, eyre::Report>(expected_address)
+                    },
+                    async move {
+                        database_check_entered_tx
+                            .send(())
+                            .expect("test must observe the fresh database check");
+                        database_result_rx
+                            .await
+                            .expect("test must release the fresh database check")
+                    },
+                )
+                .await
+            }
+        });
+
+        // Observe runtime startup while the listener is still unavailable.
+        startup_entered_rx
+            .await
+            .expect("runtime startup must reach the test gate");
+        assert!(
+            !health_controller.is_ready(),
+            "readiness must remain false while API runtime startup is pending"
+        );
+
+        // Complete runtime startup, then hold the fresh database result after its check begins.
+        startup_release_tx
+            .send(())
+            .expect("runtime startup must still be waiting");
+        database_check_entered_rx
+            .await
+            .expect("fresh database check must reach the test gate");
+        assert!(
+            !health_controller.is_ready(),
+            "runtime completion must not mark readiness before the fresh database result"
+        );
+
+        // Supply database success and verify both prerequisites now complete readiness.
+        database_result_tx
+            .send(true)
+            .expect("fresh database check must still be waiting");
+        assert_eq!(
+            startup_task
+                .await
+                .expect("startup task must not panic")
+                .expect("runtime startup must succeed"),
+            expected_address
+        );
+        assert!(
+            health_controller.is_ready(),
+            "fresh database success must complete readiness"
+        );
+    }
+
+    /// Verifies a failed fresh database check leaves readiness false because the bound API
+    /// listener cannot safely serve database-backed traffic without a writable database.
+    #[tokio::test]
+    async fn readiness_stays_false_when_fresh_database_check_fails() {
+        // Mirror startup's not-ready state, then supply a bound listener and a failed fresh check.
+        let health_controller = metrics_endpoint::HealthController::new();
+        health_controller.set_ready(false);
+        let expected_address: SocketAddr = "127.0.0.1:1079"
+            .parse()
+            .expect("test listener address must be valid");
+
+        let listen_address = await_api_runtime_and_database_before_marking_ready(
+            &health_controller,
+            std::future::ready(Ok::<SocketAddr, eyre::Report>(expected_address)),
+            std::future::ready(false),
+        )
+        .await
+        .expect("runtime startup must succeed");
+
+        // The listener can start, but database failure must prevent readiness from being exposed.
+        assert_eq!(listen_address, expected_address);
+        assert!(
+            !health_controller.is_ready(),
+            "fresh database failure must leave readiness false"
+        );
+    }
+
+    /// Verifies API runtime startup errors are returned while readiness stays false because a
+    /// process without a bound API listener cannot be advertised as ready.
+    #[tokio::test]
+    async fn readiness_propagates_api_runtime_startup_failure() {
+        // Mirror startup's not-ready state and inject an error before the database check.
+        let health_controller = metrics_endpoint::HealthController::new();
+        health_controller.set_ready(false);
+
+        let error = await_api_runtime_and_database_before_marking_ready(
+            &health_controller,
+            std::future::ready(Err::<SocketAddr, eyre::Report>(eyre::eyre!(
+                "test runtime startup failed"
+            ))),
+            std::future::ready(true),
+        )
+        .await
+        .expect_err("runtime startup failure must be returned");
+
+        // Preserve the runtime failure without changing the unavailable readiness state.
+        assert_eq!(error.to_string(), "test runtime startup failed");
+        assert!(
+            !health_controller.is_ready(),
+            "runtime startup failure must leave readiness false"
+        );
+    }
 
     struct PrefixPair {
         deny: &'static str,

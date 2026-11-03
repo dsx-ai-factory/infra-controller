@@ -36,8 +36,8 @@ type SkuComponents struct {
 	EthernetDevices []SkuEthernetDevice `json:"ethernetDevices,omitempty"`
 	// Infiniband device components
 	InfinibandDevices []SkuInfinibandDevice `json:"infinibandDevices,omitempty"`
-	// TPM components
-	Tpm []SkuTpm `json:"tpm,omitempty"`
+	// TPM component, null when the SKU has none
+	Tpm NullableSkuTpm `json:"tpm,omitempty"`
 }
 
 // NewSkuComponents instantiates a new SkuComponents object
@@ -281,36 +281,47 @@ func (o *SkuComponents) SetInfinibandDevices(v []SkuInfinibandDevice) {
 	o.InfinibandDevices = v
 }
 
-// GetTpm returns the Tpm field value if set, zero value otherwise.
-func (o *SkuComponents) GetTpm() []SkuTpm {
-	if o == nil || IsNil(o.Tpm) {
-		var ret []SkuTpm
+// GetTpm returns the Tpm field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *SkuComponents) GetTpm() SkuTpm {
+	if o == nil || IsNil(o.Tpm.Get()) {
+		var ret SkuTpm
 		return ret
 	}
-	return o.Tpm
+	return *o.Tpm.Get()
 }
 
 // GetTpmOk returns a tuple with the Tpm field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *SkuComponents) GetTpmOk() ([]SkuTpm, bool) {
-	if o == nil || IsNil(o.Tpm) {
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *SkuComponents) GetTpmOk() (*SkuTpm, bool) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Tpm, true
+	return o.Tpm.Get(), o.Tpm.IsSet()
 }
 
 // HasTpm returns a boolean if a field has been set.
 func (o *SkuComponents) HasTpm() bool {
-	if o != nil && !IsNil(o.Tpm) {
+	if o != nil && o.Tpm.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetTpm gets a reference to the given []SkuTpm and assigns it to the Tpm field.
-func (o *SkuComponents) SetTpm(v []SkuTpm) {
-	o.Tpm = v
+// SetTpm gets a reference to the given NullableSkuTpm and assigns it to the Tpm field.
+func (o *SkuComponents) SetTpm(v SkuTpm) {
+	o.Tpm.Set(&v)
+}
+
+// SetTpmNil sets the value for Tpm to be an explicit nil
+func (o *SkuComponents) SetTpmNil() {
+	o.Tpm.Set(nil)
+}
+
+// UnsetTpm ensures that no value is present for Tpm, not even an explicit nil
+func (o *SkuComponents) UnsetTpm() {
+	o.Tpm.Unset()
 }
 
 func (o SkuComponents) MarshalJSON() ([]byte, error) {
@@ -344,8 +355,8 @@ func (o SkuComponents) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.InfinibandDevices) {
 		toSerialize["infinibandDevices"] = o.InfinibandDevices
 	}
-	if !IsNil(o.Tpm) {
-		toSerialize["tpm"] = o.Tpm
+	if o.Tpm.IsSet() {
+		toSerialize["tpm"] = o.Tpm.Get()
 	}
 	return toSerialize, nil
 }

@@ -78,7 +78,7 @@ impl Drop for CombinedServer {
 impl CombinedServer {
     pub fn run(
         name: &str,
-        routers_by_ip_address: Arc<RwLock<HashMap<String, Router>>>,
+        routers_by_ip_address: impl Into<Arc<RwLock<HashMap<String, Router>>>>,
         listener_or_address: Option<ListenerOrAddress>,
         server_config: rustls::ServerConfig,
     ) -> Self {
@@ -166,8 +166,10 @@ impl CombinedServer {
     }
 
     pub async fn wait(&mut self) -> std::io::Result<()> {
-        if let Some(join_handle) = self.join_handle.take() {
-            join_handle.await.expect("join error")
+        if let Some(join_handle) = self.join_handle.as_mut() {
+            let result = join_handle.await.expect("join error");
+            self.join_handle.take();
+            result
         } else {
             Ok(())
         }

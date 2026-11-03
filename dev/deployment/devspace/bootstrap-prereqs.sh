@@ -158,6 +158,20 @@ metadata:
   name: forge-system
 ---
 apiVersion: v1
+kind: Service
+metadata:
+  name: nico-ntp-client
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app.kubernetes.io/name: nico-ntp
+  ports:
+    - name: ntp
+      port: 123
+      targetPort: 123
+      protocol: UDP
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: nico-system.nico.nico-pg-cluster.credentials
@@ -687,11 +701,17 @@ install_keycloak() {
 
 write_generated_values() {
   local disable_tls_enforcement=""
+  local core_extra_env
   local automount="true"
 
   if [[ "${POSTGRES_SSL_MODE}" == "disable" ]]; then
     disable_tls_enforcement=$'  extraEnv:\n    - name: DISABLE_TLS_ENFORCEMENT\n      value: "1"'
   fi
+
+  # Generated Helm values replace extraEnv lists from values.base.yaml.
+  # Unoptimized ARM64 Core builds need a larger Tokio worker-thread stack.
+  core_extra_env="${disable_tls_enforcement:-  extraEnv:}"
+  core_extra_env+=$'\n    - name: RUST_MIN_STACK\n      value: "8388608"'
 
   if [[ "${VAULT_AUTH_MODE}" == "root-token" ]]; then
     automount="false"
@@ -725,7 +745,7 @@ EOF
     NICO_VAULT_MOUNT: ${VAULT_KV_MOUNT}
     NICO_VAULT_PKI_MOUNT: ${VAULT_PKI_MOUNT}
   databaseConfig: {}
-${disable_tls_enforcement}
+${core_extra_env}
 
 nico-bmc-proxy:
   automountServiceAccountToken: ${automount}
@@ -740,6 +760,10 @@ EOF
 }
 
 print_summary() {
+  local profile="full"
+  if [[ "${INSTALL_REST_PREREQS}" == "0" ]]; then
+    profile="core-only"
+  fi
   cat <<EOF
 
 Bootstrap complete.
@@ -752,8 +776,9 @@ Cert issuer: ${CERT_ISSUER_KIND}/${CERT_ISSUER_NAME}
 REST prerequisites: ${INSTALL_REST_PREREQS}
 
 Next step:
-  cd ${REPO_ROOT} && devspace deploy -n ${NAMESPACE}
 EOF
+  printf '  cd %q && devspace deploy -n %q --profile %q\n' \
+    "${REPO_ROOT}" "${NAMESPACE}" "${profile}"
 }
 
 main() {
@@ -763,6 +788,7 @@ main() {
 
   install_cert_manager
   apply_core_objects
+  bash "${REPO_ROOT}/helm-prereqs/bootstrap_ssh_host_key.sh" "${NAMESPACE}"
   apply_local_postgres
   apply_local_vault
   load_admin_root_cert_pem

@@ -15,13 +15,10 @@
  * limitations under the License.
  */
 
-use std::collections::BTreeSet;
-
 use carbide_uuid::machine::HostMachineId;
-use mac_address::MacAddress;
 use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine::status::MlxDeviceObservation;
+use model::machine::status::{MlxDeviceObservation, managed_dpu_machine_ids};
 use rpc::protos::mlx_device::{
     MlxAdminDeviceIdentitiesRequest, MlxAdminDeviceIdentitiesResponse, MlxDeviceIdentity,
     MlxDeviceIdentityReport,
@@ -70,19 +67,7 @@ fn identity_report(
         .devices
         .iter()
         .map(|device| {
-            let mac = device.base_mac.filter(valid_mac);
-
-            // Site exploration records the DPU's host PF MAC on its host
-            // interface, normally from Redfish's `base_mac`. If a fallback
-            // derives a different MAC, ownership stays unknown here.
-            // These are current database associations, not proof that an old
-            // observation still describes the installed hardware. Preserve
-            // conflicts instead of choosing the first matching DPU.
-            let managed_dpu_machine_ids = interfaces
-                .iter()
-                .filter(|interface| Some(interface.mac_address) == mac)
-                .filter_map(|interface| interface.attached_dpu_machine_id)
-                .collect::<BTreeSet<_>>()
+            let managed_dpu_machine_ids = managed_dpu_machine_ids(device.base_mac, interfaces)
                 .into_iter()
                 .map(Into::into)
                 .collect();
@@ -100,11 +85,6 @@ fn identity_report(
     }
 }
 
-fn valid_mac(mac: &MacAddress) -> bool {
-    let bytes = mac.bytes();
-    bytes != [0; 6] && bytes[0] & 1 == 0
-}
-
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
@@ -116,6 +96,7 @@ mod tests {
     fn observation(devices: Vec<MlxDeviceInfo>) -> MlxDeviceObservation {
         MlxDeviceObservation {
             observed_at: chrono::DateTime::from_timestamp(42, 0).unwrap(),
+            received_at: None,
             devices: devices
                 .into_iter()
                 .map(|device| device.try_into().unwrap())

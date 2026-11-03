@@ -19,5 +19,9 @@ pub mod config;
 pub mod credentials;
 pub mod error;
 pub mod flasher;
+/// Restartable Linux firmware operations with a private local control socket.
+#[cfg(target_os = "linux")]
+pub mod operation;
+pub mod preflight;
 pub mod reset;
 pub mod source;

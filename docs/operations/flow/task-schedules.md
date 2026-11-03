@@ -1,4 +1,4 @@
-# Task Schedules
+# Task Schedules <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 User-defined task schedules let operators automate recurring or one-shot
 operations (power control, firmware upgrade, bring-up, ingest) against a

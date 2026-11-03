@@ -49,6 +49,37 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 				},
 			},
 			Status: &corev1.MachineStatus{
+				LldpNeighbors: []*corev1.InterfaceLldp{
+					{
+						MacAddress: "02:00:00:00:01:b0",
+						Lldp: &corev1.LldpSwitchData{
+							Name:            "leaf-switch-01",
+							Description:     "Cumulus Linux",
+							LocalPort:       "enp1s0np0",
+							IpAddress:       []string{"10.0.2.194", "fe80::ff:fe00:1d4"},
+							IdType:          "mac",
+							IdValue:         "02:00:00:00:01:d4",
+							RemotePortType:  "ifname",
+							RemotePortValue: "swp1",
+							MedInventory: &corev1.LldpMedInventory{
+								Serial:       cutil.GetPtr("SN0000000002"),
+								Manufacturer: cutil.GetPtr("https://www.mellanox.com"),
+								Model:        cutil.GetPtr("BlueField-3 DPU"),
+							},
+						},
+					},
+					{
+						MacAddress: "02:00:00:00:01:b1",
+						Lldp: &corev1.LldpSwitchData{
+							Name:            "leaf-switch-02",
+							LocalPort:       "enp1s0np1",
+							IdType:          "mac",
+							IdValue:         "02:00:00:00:01:d5",
+							RemotePortType:  "ifname",
+							RemotePortValue: "swp2",
+						},
+					},
+				},
 				DiscoveryInfo: &corev1.DiscoveryInfo{
 					NetworkInterfaces: []*corev1.NetworkInterface{
 						{
@@ -470,6 +501,26 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 		assert.Equal(t, machineInfo1.Machine.StateSla.Sla.GetSeconds(), apimi.Metadata.LifecycleState.SLASeconds)
 		require.NotNil(t, apimi.Metadata.LifecycleState.Updated)
 		assert.True(t, stateSetAt.Equal(*apimi.Metadata.LifecycleState.Updated))
+
+		protoNeighbors := machineInfo1.Machine.Status.LldpNeighbors
+		require.Len(t, apimi.Metadata.LldpNeighbors, len(protoNeighbors))
+		first := apimi.Metadata.LldpNeighbors[0]
+		assert.Equal(t, protoNeighbors[0].MacAddress, first.MacAddress)
+		assert.Equal(t, protoNeighbors[0].Lldp.Name, first.Name)
+		assert.Equal(t, protoNeighbors[0].Lldp.Description, first.Description)
+		assert.Equal(t, protoNeighbors[0].Lldp.LocalPort, first.LocalPort)
+		assert.Equal(t, protoNeighbors[0].Lldp.IpAddress, first.IpAddresses)
+		assert.Equal(t, protoNeighbors[0].Lldp.IdType, first.ChassisIdType)
+		assert.Equal(t, protoNeighbors[0].Lldp.IdValue, first.ChassisIdValue)
+		assert.Equal(t, protoNeighbors[0].Lldp.RemotePortType, first.RemotePortType)
+		assert.Equal(t, protoNeighbors[0].Lldp.RemotePortValue, first.RemotePortValue)
+		require.NotNil(t, first.MedInventory)
+		assert.Equal(t, protoNeighbors[0].Lldp.MedInventory.Serial, first.MedInventory.Serial)
+		assert.Equal(t, protoNeighbors[0].Lldp.MedInventory.Manufacturer, first.MedInventory.Manufacturer)
+		assert.Equal(t, protoNeighbors[0].Lldp.MedInventory.Model, first.MedInventory.Model)
+		second := apimi.Metadata.LldpNeighbors[1]
+		assert.Equal(t, []string{}, second.IpAddresses)
+		assert.Nil(t, second.MedInventory)
 	}
 
 	if apimi.Health != nil {
@@ -505,6 +556,115 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 		assert.Equal(t, instance.ID.String(), *response.InstanceID)
 		assert.Equal(t, cdbm.MachineStatusReady, ready.Status)
 	})
+	t.Run("empty metadata inventories serialize as arrays", func(t *testing.T) {
+		machine := *dbm
+		machine.Metadata = &cdbm.SiteControllerMachine{
+			Machine: &corev1.Machine{
+				Status: &corev1.MachineStatus{
+					DiscoveryInfo: &corev1.DiscoveryInfo{},
+				},
+			},
+		}
+
+		response := NewAPIMachine(&machine, nil, nil, nil, nil, true, true)
+		require.NotNil(t, response.Metadata)
+
+		payload, err := json.Marshal(response.Metadata)
+		require.NoError(t, err)
+
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(payload, &fields))
+		for _, field := range []string{"gpus", "networkInterfaces", "infinibandInterfaces"} {
+			value, found := fields[field]
+			require.True(t, found, "%s must be present", field)
+			assert.JSONEq(t, `[]`, string(value))
+		}
+	})
+}
+
+func TestAPIMachineMetadata_FromProto(t *testing.T) {
+	metadata := APIMachineMetadata{
+		DMIData:              &APIDMIData{},
+		BMCInfo:              &APIBMCInfo{},
+		GPUs:                 []APIMachineGPUInfo{{}},
+		NetworkInterfaces:    []APIMachineNetworkInterface{{}},
+		InfiniBandInterfaces: []APIMachineInfiniBandInterface{{}},
+		LifecycleState:       &APIMachineLifecycleState{},
+		LldpNeighbors:        []APIMachineLldpNeighbor{{}},
+	}
+
+	metadata.FromProto(nil)
+
+	assert.Nil(t, metadata.DMIData)
+	assert.Nil(t, metadata.BMCInfo)
+	assert.NotNil(t, metadata.GPUs)
+	assert.Empty(t, metadata.GPUs)
+	assert.NotNil(t, metadata.NetworkInterfaces)
+	assert.Empty(t, metadata.NetworkInterfaces)
+	assert.NotNil(t, metadata.InfiniBandInterfaces)
+	assert.Empty(t, metadata.InfiniBandInterfaces)
+	assert.Nil(t, metadata.LifecycleState)
+	assert.NotNil(t, metadata.LldpNeighbors)
+	assert.Empty(t, metadata.LldpNeighbors)
+
+	payload, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"dmiData": null,
+		"bmcInfo": null,
+		"gpus": [],
+		"networkInterfaces": [],
+		"infinibandInterfaces": [],
+		"lifecycleState": null,
+		"lldpNeighbors": []
+	}`, string(payload))
+}
+
+// TestMachine_NewAPIMachineLldpNeighborsJSON proves the wire contract of
+// metadata.lldpNeighbors: present as [] when the machine has reported no
+// neighbors, and absent only when metadata itself is not rendered.
+func TestMachine_NewAPIMachineLldpNeighborsJSON(t *testing.T) {
+	tests := []struct {
+		name            string
+		includeMetadata bool
+		wantMetadata    bool
+	}{
+		{name: "renders [] with metadata", includeMetadata: true, wantMetadata: true},
+		{name: "omits metadata entirely without includeMetadata", includeMetadata: false, wantMetadata: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiMachine := NewAPIMachine(
+				&cdbm.Machine{Metadata: &cdbm.SiteControllerMachine{Machine: &corev1.Machine{
+					Status: &corev1.MachineStatus{},
+				}}},
+				nil,
+				nil,
+				nil,
+				nil,
+				tt.includeMetadata,
+				true,
+			)
+
+			response, err := json.Marshal(apiMachine)
+			require.NoError(t, err)
+
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(response, &fields))
+			metadata, found := fields["metadata"]
+			require.Equal(t, tt.wantMetadata, found)
+			if !tt.wantMetadata {
+				return
+			}
+
+			var metadataFields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(metadata, &metadataFields))
+			lldpNeighbors, found := metadataFields["lldpNeighbors"]
+			require.True(t, found)
+			assert.JSONEq(t, `[]`, string(lldpNeighbors))
+		})
+	}
 }
 
 func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
@@ -766,6 +926,28 @@ func TestAPIMachineUpdateRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "test valid enter online repair request with Software issue",
+			fields: fields{
+				OnlineRepair: &APIMachineOnlineRepair{
+					Enabled: cutil.GetPtr(true),
+					Policy: &APIMachineOnlineRepairPolicy{
+						AllowAutoInstanceDeletionOnFailure: cutil.GetPtr(false),
+					},
+					Acknowledgments: &APIMachineOnlineRepairAcknowledgments{
+						AcceptDataCorruptionRisk:   cutil.GetPtr(true),
+						AcceptRepairTeamAccess:     cutil.GetPtr(true),
+						AcceptInstanceDeletionRisk: cutil.GetPtr(true),
+					},
+				},
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueSoftware,
+					Summary:  cutil.GetPtr("Software issue"),
+					Details:  cutil.GetPtr("driver service failed"),
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "test invalid enter online repair without HealthIssue (APIMachineOnlineRepair.Enabled true requires non-nil HealthIssue)",
 			fields: fields{
 				OnlineRepair: &APIMachineOnlineRepair{
@@ -812,7 +994,7 @@ func TestAPIMachineUpdateRequest_Validate(t *testing.T) {
 			name: "test invalid HealthIssue without onlineRepair",
 			fields: fields{
 				HealthIssue: &APIMachineHealthIssue{
-					Category: HealthIssueStorage,
+					Category: HealthIssueHardware,
 					Summary:  cutil.GetPtr("x"),
 					Details:  cutil.GetPtr("y"),
 				},
@@ -842,22 +1024,24 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 		HealthIssue *APIMachineHealthIssue
 	}
 	tests := []struct {
-		name      string
-		machineID string
-		fields    fields
-		wantErr   bool
+		name         string
+		machineID    string
+		fields       fields
+		wantCategory string
+		wantErr      bool
 	}{
 		{
-			name:      "maps Storage health issue to proto payload with STORAGE issue_category",
+			name:      "maps Performance health issue to proto payload with PERFORMANCE issue_category",
 			machineID: "161c4de4-afb3-4839-a5bd-305f9dea8744",
 			fields: fields{
 				HealthIssue: &APIMachineHealthIssue{
-					Category: HealthIssueStorage,
-					Summary:  cutil.GetPtr("storage subsystem degraded"),
-					Details:  cutil.GetPtr("disk SMART errors in slot 2"),
+					Category: HealthIssuePerformance,
+					Summary:  cutil.GetPtr("sustained GPU throttling"),
+					Details:  cutil.GetPtr("dcgmi diag logs attached"),
 				},
 			},
-			wantErr: false,
+			wantCategory: "PERFORMANCE",
+			wantErr:      false,
 		},
 		{
 			name:      "maps Hardware health issue to proto payload with HARDWARE issue_category",
@@ -869,7 +1053,34 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 					Details:  cutil.GetPtr("port 1 logs attached"),
 				},
 			},
-			wantErr: false,
+			wantCategory: "HARDWARE",
+			wantErr:      false,
+		},
+		{
+			name:      "maps Storage health issue to alert payload with STORAGE issue_category",
+			machineID: "361c4de4-afb3-4839-a5bd-305f9dea8744",
+			fields: fields{
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueStorage,
+					Summary:  cutil.GetPtr("storage subsystem degraded"),
+					Details:  cutil.GetPtr("disk SMART errors in slot 2"),
+				},
+			},
+			wantCategory: "STORAGE",
+			wantErr:      false,
+		},
+		{
+			name:      "maps Software health issue to alert payload with SOFTWARE issue_category",
+			machineID: "461c4de4-afb3-4839-a5bd-305f9dea8744",
+			fields: fields{
+				HealthIssue: &APIMachineHealthIssue{
+					Category: HealthIssueSoftware,
+					Summary:  cutil.GetPtr("driver service failed"),
+					Details:  cutil.GetPtr("service exited repeatedly"),
+				},
+			},
+			wantCategory: "SOFTWARE",
+			wantErr:      false,
 		},
 	}
 	for _, tt := range tests {
@@ -913,7 +1124,7 @@ func TestAPIMachineUpdateRequest_ToInsertHealthReportProto(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal([]byte(alert.Message), &payload))
 			assert.Equal(t, *mhi.Details, payload.Details)
-			assert.Equal(t, ValidHealthIssueCategoriesMap[mhi.Category], payload.IssueCategory)
+			assert.Equal(t, tt.wantCategory, payload.IssueCategory)
 			assert.Equal(t, *mhi.Summary, payload.Summary)
 		})
 	}
@@ -945,6 +1156,51 @@ func TestAPIMachineUpdateRequest_ToRemoveHealthReportProto(t *testing.T) {
 			require.NotNil(t, got.MachineId)
 			assert.Equal(t, tt.machineID, got.MachineId.Id)
 			assert.Equal(t, tt.wantSource, got.GetSource())
+		})
+	}
+}
+
+// TestAPIMachineLldpNeighbor_MedInventoryJSON proves the wire contract of
+// lldpNeighbors[].medInventory: always rendered, as null when the neighbor does
+// not advertise an LLDP-MED inventory.
+func TestAPIMachineLldpNeighbor_MedInventoryJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		lldp *corev1.LldpSwitchData
+		want string
+	}{
+		{
+			name: "renders null when not advertised",
+			lldp: &corev1.LldpSwitchData{Name: "leaf-switch-01"},
+			want: `null`,
+		},
+		{
+			name: "renders object when advertised",
+			lldp: &corev1.LldpSwitchData{
+				Name: "peer-dpu-01",
+				MedInventory: &corev1.LldpMedInventory{
+					Serial:       cutil.GetPtr("SN0000000002"),
+					Manufacturer: cutil.GetPtr("https://www.mellanox.com"),
+					Model:        cutil.GetPtr("BlueField-3 DPU"),
+				},
+			},
+			want: `{"serial":"SN0000000002","manufacturer":"https://www.mellanox.com","model":"BlueField-3 DPU"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			neighbor := APIMachineLldpNeighbor{}
+			neighbor.FromProto(&corev1.InterfaceLldp{MacAddress: "02:00:00:00:01:b0", Lldp: tt.lldp})
+
+			encoded, err := json.Marshal(neighbor)
+			require.NoError(t, err)
+
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &fields))
+			medInventory, found := fields["medInventory"]
+			require.True(t, found)
+			assert.JSONEq(t, tt.want, string(medInventory))
 		})
 	}
 }

@@ -25,8 +25,33 @@ import (
 
 var runes = []rune("abcdefghijklmnopqrstuvwxyz0123456789")
 
-// mockSitePrefixContextKey prevents SitePrefix fixtures from colliding with
-// the string context keys used by other mock methods.
+// mockContextKey isolates mock gRPC settings from caller-owned context values.
+type mockContextKey uint8
+
+const (
+	// MockWantCount controls the number of inventory items returned by the mocks.
+	MockWantCount mockContextKey = iota
+	// MockVPCPeeringWantCount controls peering inventory independently of VPC inventory.
+	MockVPCPeeringWantCount
+	// MockWantError injects an error from the mock gRPC clients.
+	MockWantError
+	// MockWantID supplies the identifier returned by the mock gRPC clients.
+	MockWantID
+	// MockWantResponse supplies a response returned by the mock Flow client.
+	MockWantResponse
+	// MockWantDeletedFilter specifies the deletion filter expected by the mock.
+	MockWantDeletedFilter
+	// MockInstancePadBytes controls padding added to mock instance responses.
+	MockInstancePadBytes
+	// MockMaxRequestIDs limits identifiers accepted by the mock instance client.
+	MockMaxRequestIDs
+	// MockDropInstancesPerPage omits instances from each mock inventory page.
+	MockDropInstancesPerPage
+	// MockSiteFabricPrefixes supplies the mock Core runtime configuration.
+	MockSiteFabricPrefixes
+)
+
+// mockSitePrefixContextKey isolates SitePrefix fixtures from other mock settings.
 type mockSitePrefixContextKey uint8
 
 const (
@@ -137,7 +162,7 @@ func (mcgsc *MockCoreGrpcServiceClient) Version(ctx context.Context, in *corev1.
 	// Core reports the runtime config only when the request asks for it, so a
 	// caller that omits DisplayConfig gets BuildInfo with no RuntimeConfig.
 	if in.GetDisplayConfig() {
-		siteFabricPrefixes, hasSiteFabricPrefixes := ctx.Value("siteFabricPrefixes").([]string)
+		siteFabricPrefixes, hasSiteFabricPrefixes := ctx.Value(MockSiteFabricPrefixes).([]string)
 		maxFindByIDs, hasMaxFindByIDs := ctx.Value(mockSitePrefixMaxFindByIDsKey).(uint32)
 		if hasSiteFabricPrefixes || hasMaxFindByIDs {
 			out.RuntimeConfig = &corev1.RuntimeConfig{
@@ -172,13 +197,13 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteVpc(ctx context.Context, in *corev
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindVpcIds(ctx context.Context, in *corev1.VpcSearchFilter, opts ...grpc.CallOption) (*corev1.VpcIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve vpc ids")
 	}
 
 	out := &corev1.VpcIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.VpcIds = append(out.VpcIds, &corev1.VpcId{Value: uuid.NewString()})
@@ -189,7 +214,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindVpcIds(ctx context.Context, in *core
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindVpcsByIds(ctx context.Context, in *corev1.VpcsByIdsRequest, opts ...grpc.CallOption) (*corev1.VpcList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve vpcs")
 	}
@@ -220,13 +245,13 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteNetworkSegment(ctx context.Context
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindNetworkSegmentIds(ctx context.Context, in *corev1.NetworkSegmentSearchFilter, opts ...grpc.CallOption) (*corev1.NetworkSegmentIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve network segment ids")
 	}
 
 	out := &corev1.NetworkSegmentIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.NetworkSegmentsIds = append(out.NetworkSegmentsIds, &corev1.NetworkSegmentId{Value: uuid.NewString()})
@@ -237,7 +262,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindNetworkSegmentIds(ctx context.Contex
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindNetworkSegmentsByIds(ctx context.Context, in *corev1.NetworkSegmentsByIdsRequest, opts ...grpc.CallOption) (*corev1.NetworkSegmentList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve network segments")
 	}
@@ -281,13 +306,13 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteIBPartition(ctx context.Context, i
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindIBPartitionIds(ctx context.Context, in *corev1.IBPartitionSearchFilter, opts ...grpc.CallOption) (*corev1.IBPartitionIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve ib partition ids")
 	}
 
 	out := &corev1.IBPartitionIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.IbPartitionIds = append(out.IbPartitionIds, &corev1.IBPartitionId{Value: uuid.NewString()})
@@ -298,7 +323,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindIBPartitionIds(ctx context.Context, 
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindIBPartitionsByIds(ctx context.Context, in *corev1.IBPartitionsByIdsRequest, opts ...grpc.CallOption) (*corev1.IBPartitionList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve ib partitions")
 	}
@@ -317,13 +342,13 @@ func (mcgsc *MockCoreGrpcServiceClient) FindIBPartitionsByIds(ctx context.Contex
 
 /* SpectrumX Partition mock methods */
 func (mcgsc *MockCoreGrpcServiceClient) FindSpxPartitionIds(ctx context.Context, in *corev1.SpxPartitionSearchFilter, opts ...grpc.CallOption) (*corev1.SpxPartitionIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve spx partition ids")
 	}
 
 	out := &corev1.SpxPartitionIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.SpxPartitionIds = append(out.SpxPartitionIds, &corev1.SpxPartitionId{Value: uuid.NewString()})
@@ -334,7 +359,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindSpxPartitionIds(ctx context.Context,
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindSpxPartitionsByIds(ctx context.Context, in *corev1.SpxPartitionsByIdsRequest, opts ...grpc.CallOption) (*corev1.SpxPartitionList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve spx partitions")
 	}
@@ -352,7 +377,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindSpxPartitionsByIds(ctx context.Conte
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) CreateSpxPartition(ctx context.Context, in *corev1.SpxPartitionCreationRequest, opts ...grpc.CallOption) (*corev1.SpxPartition, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to create spx partition")
 	}
 
@@ -368,7 +393,7 @@ func (mcgsc *MockCoreGrpcServiceClient) CreateSpxPartition(ctx context.Context, 
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) DeleteSpxPartition(ctx context.Context, in *corev1.SpxPartitionDeletionRequest, opts ...grpc.CallOption) (*corev1.SpxPartitionDeletionResult, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to delete spx partition")
 	}
 
@@ -403,7 +428,7 @@ func (mcgsc *MockCoreGrpcServiceClient) UpdateInstanceConfig(ctx context.Context
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) ReleaseInstance(ctx context.Context, in *corev1.InstanceReleaseRequest, opts ...grpc.CallOption) (*corev1.InstanceReleaseResult, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.NotFound {
 			return nil, status.Error(codes.NotFound, "instance not found: ")
@@ -414,13 +439,13 @@ func (mcgsc *MockCoreGrpcServiceClient) ReleaseInstance(ctx context.Context, in 
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindInstanceIds(ctx context.Context, in *corev1.InstanceSearchFilter, opts ...grpc.CallOption) (*corev1.InstanceIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve instance ids")
 	}
 
 	out := &corev1.InstanceIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.InstanceIds = append(out.InstanceIds, &corev1.InstanceId{Value: uuid.NewString()})
@@ -431,14 +456,14 @@ func (mcgsc *MockCoreGrpcServiceClient) FindInstanceIds(ctx context.Context, in 
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindInstancesByIds(ctx context.Context, in *corev1.InstancesByIdsRequest, opts ...grpc.CallOption) (*corev1.InstanceList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve instances")
 	}
 
 	// Stands in for a response that outgrows the gRPC client receive limit, which is what makes
 	// the inventory pager step its site page size down and ask for fewer Instances.
-	maxRequestIDs, ok := ctx.Value("maxRequestIDs").(int)
+	maxRequestIDs, ok := ctx.Value(MockMaxRequestIDs).(int)
 	if ok && in != nil && len(in.InstanceIds) > maxRequestIDs {
 		return nil, status.Errorf(codes.ResourceExhausted,
 			"grpc: received message larger than max (%v IDs requested, mock accepts %v)", len(in.InstanceIds), maxRequestIDs)
@@ -446,7 +471,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindInstancesByIds(ctx context.Context, 
 
 	// Inflates every Instance so a published inventory page can outgrow the Temporal blob budget.
 	var padding *string
-	padBytes, _ := ctx.Value("instancePadBytes").(int)
+	padBytes, _ := ctx.Value(MockInstancePadBytes).(int)
 	if padBytes > 0 {
 		pad := strings.Repeat("a", padBytes)
 		padding = &pad
@@ -454,7 +479,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindInstancesByIds(ctx context.Context, 
 
 	// Stands in for Instances deleted between FindInstanceIds and FindInstancesByIds, which is
 	// how Core comes to return fewer Instances than the IDs asked for.
-	dropPerPage, _ := ctx.Value("dropInstancesPerPage").(int)
+	dropPerPage, _ := ctx.Value(MockDropInstancesPerPage).(int)
 
 	out := &corev1.InstanceList{}
 	if in != nil {
@@ -485,7 +510,7 @@ func (mcgsc *MockCoreGrpcServiceClient) SetMaintenance(ctx context.Context, in *
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) UpdateMachineMetadata(ctx context.Context, in *corev1.MachineMetadataUpdateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to update machine metadata")
 	}
@@ -495,7 +520,7 @@ func (mcgsc *MockCoreGrpcServiceClient) UpdateMachineMetadata(ctx context.Contex
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) InsertMachineHealthReport(ctx context.Context, in *corev1.InsertMachineHealthReportRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to insert machine health report")
 	}
@@ -505,7 +530,7 @@ func (mcgsc *MockCoreGrpcServiceClient) InsertMachineHealthReport(ctx context.Co
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) RemoveMachineHealthReport(ctx context.Context, in *corev1.RemoveMachineHealthReportRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to remove machine health report")
 	}
@@ -515,7 +540,7 @@ func (mcgsc *MockCoreGrpcServiceClient) RemoveMachineHealthReport(ctx context.Co
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindMachineIds(ctx context.Context, in *corev1.MachineSearchConfig, opts ...grpc.CallOption) (*corev1.MachineIdList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve machine ids")
@@ -524,7 +549,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindMachineIds(ctx context.Context, in *
 
 	out := &corev1.MachineIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.MachineIds = append(out.MachineIds, &corev1.MachineId{Id: uuid.NewString()})
@@ -535,7 +560,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindMachineIds(ctx context.Context, in *
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindMachinesByIds(ctx context.Context, in *corev1.MachinesByIdsRequest, opts ...grpc.CallOption) (*corev1.MachineList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve machines by ids")
@@ -580,13 +605,13 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteTenantKeyset(ctx context.Context, 
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindTenantKeysetIds(ctx context.Context, in *corev1.TenantKeysetSearchFilter, opts ...grpc.CallOption) (*corev1.TenantKeysetIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve tenant keyset ids")
 	}
 
 	out := &corev1.TenantKeysetIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		orgID := uuid.NewString()
 		for range count {
@@ -598,7 +623,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindTenantKeysetIds(ctx context.Context,
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindTenantKeysetsByIds(ctx context.Context, in *corev1.TenantKeysetsByIdsRequest, opts ...grpc.CallOption) (*corev1.TenantKeySetList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve tenant keysets")
 	}
@@ -636,12 +661,12 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteOsImage(ctx context.Context, in *c
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) ListOsImage(ctx context.Context, in *corev1.ListOsImageRequest, opts ...grpc.CallOption) (*corev1.ListOsImageResponse, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve os image list")
 	}
 
 	out := &corev1.ListOsImageResponse{}
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		id := uuid.NewString()
 		for range count {
@@ -676,13 +701,13 @@ func (mcgsc *MockCoreGrpcServiceClient) UpdateTenant(ctx context.Context, in *co
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindTenantOrganizationIds(ctx context.Context, in *corev1.TenantSearchFilter, opts ...grpc.CallOption) (*corev1.TenantOrganizationIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve Tenant organization ids")
 	}
 
 	out := &corev1.TenantOrganizationIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.TenantOrganizationIds = append(out.TenantOrganizationIds, randSeq(10))
@@ -693,7 +718,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindTenantOrganizationIds(ctx context.Co
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindTenantsByOrganizationIds(ctx context.Context, in *corev1.TenantByOrganizationIdsRequest, opts ...grpc.CallOption) (*corev1.TenantList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve Tenants")
 	}
@@ -741,13 +766,13 @@ func (mcgsc *MockCoreGrpcServiceClient) RemoveMachineInstanceTypeAssociation(ctx
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindInstanceTypeIds(ctx context.Context, in *corev1.FindInstanceTypeIdsRequest, opts ...grpc.CallOption) (*corev1.FindInstanceTypeIdsResponse, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve InstanceType ids")
 	}
 
 	out := &corev1.FindInstanceTypeIdsResponse{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.InstanceTypeIds = append(out.InstanceTypeIds, randSeq(10))
@@ -758,7 +783,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindInstanceTypeIds(ctx context.Context,
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindInstanceTypesByIds(ctx context.Context, in *corev1.FindInstanceTypesByIdsRequest, opts ...grpc.CallOption) (*corev1.FindInstanceTypesByIdsResponse, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve InstanceTypes")
 	}
@@ -849,16 +874,16 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteVpcPrefix(ctx context.Context, in 
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) SearchVpcPrefixes(ctx context.Context, in *corev1.VpcPrefixSearchQuery, opts ...grpc.CallOption) (*corev1.VpcPrefixIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve vpcprefix ids")
 	}
-	if wantDeletedFilter, ok := ctx.Value("wantDeletedFilter").(corev1.DeletedFilter); ok && in.GetDeleted() != wantDeletedFilter {
+	if wantDeletedFilter, ok := ctx.Value(MockWantDeletedFilter).(corev1.DeletedFilter); ok && in.GetDeleted() != wantDeletedFilter {
 		return nil, status.Errorf(codes.InvalidArgument, "expected deleted filter %s, got %s", wantDeletedFilter, in.GetDeleted())
 	}
 
 	out := &corev1.VpcPrefixIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.VpcPrefixIds = append(out.VpcPrefixIds, &corev1.VpcPrefixId{Value: uuid.NewString()})
@@ -869,11 +894,11 @@ func (mcgsc *MockCoreGrpcServiceClient) SearchVpcPrefixes(ctx context.Context, i
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetVpcPrefixes(ctx context.Context, in *corev1.VpcPrefixGetRequest, opts ...grpc.CallOption) (*corev1.VpcPrefixList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve vpcprefixes")
 	}
-	if wantDeletedFilter, ok := ctx.Value("wantDeletedFilter").(corev1.DeletedFilter); ok && in.GetDeleted() != wantDeletedFilter {
+	if wantDeletedFilter, ok := ctx.Value(MockWantDeletedFilter).(corev1.DeletedFilter); ok && in.GetDeleted() != wantDeletedFilter {
 		return nil, status.Errorf(codes.InvalidArgument, "expected deleted filter %s, got %s", wantDeletedFilter, in.GetDeleted())
 	}
 
@@ -897,7 +922,7 @@ func (mcgsc *MockCoreGrpcServiceClient) CreateVpcPeering(ctx context.Context, in
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) DeleteVpcPeering(ctx context.Context, in *corev1.VpcPeeringDeletionRequest, opts ...grpc.CallOption) (*corev1.VpcPeeringDeletionResult, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to delete vpc peering")
 	}
 
@@ -905,13 +930,13 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteVpcPeering(ctx context.Context, in
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindVpcPeeringIds(ctx context.Context, in *corev1.VpcPeeringSearchFilter, opts ...grpc.CallOption) (*corev1.VpcPeeringIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve vpc peering ids")
 	}
 
 	out := &corev1.VpcPeeringIdList{}
 
-	count, ok := ctx.Value("WantCount").(int)
+	count, ok := ctx.Value(MockVPCPeeringWantCount).(int)
 	if ok {
 		for range count {
 			out.VpcPeeringIds = append(out.VpcPeeringIds, &corev1.VpcPeeringId{Value: uuid.NewString()})
@@ -922,7 +947,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindVpcPeeringIds(ctx context.Context, i
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindVpcPeeringsByIds(ctx context.Context, in *corev1.VpcPeeringsByIdsRequest, opts ...grpc.CallOption) (*corev1.VpcPeeringList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve vpc peerings")
 	}
@@ -942,7 +967,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindVpcPeeringsByIds(ctx context.Context
 /* Machine Validation Test mock methods */
 func (mcgsc *MockCoreGrpcServiceClient) AddMachineValidationTest(ctx context.Context, in *corev1.MachineValidationTestAddRequest, opts ...grpc.CallOption) (*corev1.MachineValidationTestAddUpdateResponse, error) {
 	out := new(corev1.MachineValidationTestAddUpdateResponse)
-	id, ok := ctx.Value("wantID").(string)
+	id, ok := ctx.Value(MockWantID).(string)
 	if ok {
 		out.TestId = id
 		out.Version = "version-1"
@@ -1029,13 +1054,13 @@ func (mcgsc *MockCoreGrpcServiceClient) GetNetworkSecurityGroupPropagationStatus
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindNetworkSecurityGroupIds(ctx context.Context, in *corev1.FindNetworkSecurityGroupIdsRequest, opts ...grpc.CallOption) (*corev1.FindNetworkSecurityGroupIdsResponse, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve NetworkSecurityGroup ids")
 	}
 
 	out := &corev1.FindNetworkSecurityGroupIdsResponse{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.NetworkSecurityGroupIds = append(out.NetworkSecurityGroupIds, randSeq(10))
@@ -1046,7 +1071,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindNetworkSecurityGroupIds(ctx context.
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindNetworkSecurityGroupsByIds(ctx context.Context, in *corev1.FindNetworkSecurityGroupsByIdsRequest, opts ...grpc.CallOption) (*corev1.FindNetworkSecurityGroupsByIdsResponse, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve NetworkSecurityGroups")
 	}
@@ -1101,7 +1126,7 @@ func (mcgsc *MockCoreGrpcServiceClient) UpdateExpectedMachine(ctx context.Contex
 
 func (mcgsc *MockCoreGrpcServiceClient) CreateExpectedMachines(ctx context.Context, in *corev1.BatchExpectedMachineOperationRequest, opts ...grpc.CallOption) (*corev1.BatchExpectedMachineOperationResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
@@ -1143,7 +1168,7 @@ func (mcgsc *MockCoreGrpcServiceClient) CreateExpectedMachines(ctx context.Conte
 
 func (mcgsc *MockCoreGrpcServiceClient) UpdateExpectedMachines(ctx context.Context, in *corev1.BatchExpectedMachineOperationRequest, opts ...grpc.CallOption) (*corev1.BatchExpectedMachineOperationResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
@@ -1184,7 +1209,7 @@ func (mcgsc *MockCoreGrpcServiceClient) UpdateExpectedMachines(ctx context.Conte
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedMachines(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*corev1.ExpectedMachineList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve machine ids")
@@ -1194,7 +1219,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedMachines(ctx context.Conte
 	out := &corev1.ExpectedMachineList{}
 
 	// we generate predictable unique IDs and values
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		mac, _ := net.ParseMAC("02:00:00:00:00:00")
 		for range count {
@@ -1222,7 +1247,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetExpectedMachine(ctx context.Context, 
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedMachinesLinked(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*corev1.LinkedExpectedMachineList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve linked expected machines")
@@ -1232,7 +1257,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedMachinesLinked(ctx context
 	out := &corev1.LinkedExpectedMachineList{}
 
 	// Generate linked machines based on the count in context
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		mac, _ := net.ParseMAC("02:00:00:00:00:00")
 		for range count {
@@ -1291,7 +1316,7 @@ func (mcgsc *MockCoreGrpcServiceClient) UpdateExpectedPowerShelf(ctx context.Con
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedPowerShelves(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*corev1.ExpectedPowerShelfList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve expected power shelves")
@@ -1300,7 +1325,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedPowerShelves(ctx context.C
 
 	out := &corev1.ExpectedPowerShelfList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		mac, _ := net.ParseMAC("02:00:00:00:00:00")
 		for range count {
@@ -1319,7 +1344,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedPowerShelves(ctx context.C
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedPowerShelvesLinked(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*corev1.LinkedExpectedPowerShelfList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve linked expected power shelves")
@@ -1328,7 +1353,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedPowerShelvesLinked(ctx con
 
 	out := &corev1.LinkedExpectedPowerShelfList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		mac, _ := net.ParseMAC("02:00:00:00:00:00")
 		for range count {
@@ -1386,7 +1411,7 @@ func (mcgsc *MockCoreGrpcServiceClient) UpdateExpectedSwitch(ctx context.Context
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedSwitches(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*corev1.ExpectedSwitchList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve expected switches")
@@ -1395,7 +1420,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedSwitches(ctx context.Conte
 
 	out := &corev1.ExpectedSwitchList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		mac, _ := net.ParseMAC("02:00:00:00:00:00")
 		for range count {
@@ -1414,7 +1439,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedSwitches(ctx context.Conte
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedSwitchesLinked(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*corev1.LinkedExpectedSwitchList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve linked expected switches")
@@ -1423,7 +1448,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedSwitchesLinked(ctx context
 
 	out := &corev1.LinkedExpectedSwitchList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		mac, _ := net.ParseMAC("02:00:00:00:00:00")
 		for range count {
@@ -1472,7 +1497,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetExpectedRack(ctx context.Context, in 
 	if in.RackId == "" {
 		return nil, status.Error(codes.Internal, "ID not provided for GetExpectedRack")
 	}
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve expected rack")
@@ -1486,7 +1511,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetExpectedRack(ctx context.Context, in 
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedRacks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*corev1.ExpectedRackList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		if status.Code(err) == codes.Internal {
 			return nil, status.Error(codes.Internal, "failed to retrieve expected racks")
@@ -1495,7 +1520,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetAllExpectedRacks(ctx context.Context,
 
 	out := &corev1.ExpectedRackList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.ExpectedRacks = append(out.ExpectedRacks, &corev1.ExpectedRack{
@@ -1528,7 +1553,7 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteAllExpectedRacks(ctx context.Conte
 
 /* SKU mock methods */
 func (mcgsc *MockCoreGrpcServiceClient) FindSkusByIds(ctx context.Context, in *corev1.SkusByIdsRequest, opts ...grpc.CallOption) (*corev1.SkuList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve skus")
 	}
@@ -1546,13 +1571,13 @@ func (mcgsc *MockCoreGrpcServiceClient) FindSkusByIds(ctx context.Context, in *c
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) GetAllSkuIds(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*corev1.SkuIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve sku ids")
 	}
 
 	out := &corev1.SkuIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.Ids = append(out.Ids, uuid.NewString())
@@ -1623,12 +1648,12 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteDpuExtensionService(ctx context.Co
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindDpuExtensionServiceIds(ctx context.Context, in *corev1.DpuExtensionServiceSearchFilter, opts ...grpc.CallOption) (*corev1.DpuExtensionServiceIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve dpu extension service ids")
 	}
 
 	out := &corev1.DpuExtensionServiceIdList{}
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.ServiceIds = append(out.ServiceIds, uuid.NewString())
@@ -1653,7 +1678,7 @@ func (mcgsc *MockCoreGrpcServiceClient) GetDpuExtensionServiceVersionsInfo(ctx c
 	out := &corev1.DpuExtensionServiceVersionInfoList{
 		VersionInfos: []*corev1.DpuExtensionServiceVersionInfo{},
 	}
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.VersionInfos = append(out.VersionInfos, &corev1.DpuExtensionServiceVersionInfo{
@@ -1692,13 +1717,13 @@ func (mcgsc *MockCoreGrpcServiceClient) DeleteNVLinkLogicalPartition(ctx context
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindNVLinkLogicalPartitionIds(ctx context.Context, in *corev1.NVLinkLogicalPartitionSearchFilter, opts ...grpc.CallOption) (*corev1.NVLinkLogicalPartitionIdList, error) {
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve nvlink logical partition ids")
 	}
 
 	out := &corev1.NVLinkLogicalPartitionIdList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.PartitionIds = append(out.PartitionIds, &corev1.NVLinkLogicalPartitionId{Value: uuid.NewString()})
@@ -1709,7 +1734,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindNVLinkLogicalPartitionIds(ctx contex
 }
 
 func (mcgsc *MockCoreGrpcServiceClient) FindNVLinkLogicalPartitionsByIds(ctx context.Context, in *corev1.NVLinkLogicalPartitionsByIdsRequest, opts ...grpc.CallOption) (*corev1.NVLinkLogicalPartitionList, error) {
-	err, ok := ctx.Value("wantError").(error)
+	err, ok := ctx.Value(MockWantError).(error)
 	if ok {
 		return nil, status.Error(status.Code(err), "failed to retrieve nvlink logical partitions")
 	}
@@ -1729,7 +1754,7 @@ func (mcgsc *MockCoreGrpcServiceClient) FindNVLinkLogicalPartitionsByIds(ctx con
 func (mcgsc *MockCoreGrpcServiceClient) NVLinkLogicalPartitionsForTenant(ctx context.Context, in *corev1.TenantSearchQuery, opts ...grpc.CallOption) (*corev1.NVLinkLogicalPartitionList, error) {
 	out := &corev1.NVLinkLogicalPartitionList{}
 
-	count, ok := ctx.Value("wantCount").(int)
+	count, ok := ctx.Value(MockWantCount).(int)
 	if ok {
 		for range count {
 			out.Partitions = append(out.Partitions, &corev1.NVLinkLogicalPartition{
@@ -1880,12 +1905,12 @@ func (mfgsc *MockFlowGrpcServiceClient) PatchRack(ctx context.Context, in *flowv
 
 func (mfgsc *MockFlowGrpcServiceClient) GetRackInfoByID(ctx context.Context, in *flowv1.GetRackInfoByIDRequest, opts ...grpc.CallOption) (*flowv1.GetRackInfoResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
 	// Check for custom response via context
-	if resp, ok := ctx.Value("wantResponse").(*flowv1.GetRackInfoResponse); ok {
+	if resp, ok := ctx.Value(MockWantResponse).(*flowv1.GetRackInfoResponse); ok {
 		return resp, nil
 	}
 
@@ -1912,12 +1937,12 @@ func (mfgsc *MockFlowGrpcServiceClient) GetRackInfoBySerial(ctx context.Context,
 
 func (mfgsc *MockFlowGrpcServiceClient) GetListOfRacks(ctx context.Context, in *flowv1.GetListOfRacksRequest, opts ...grpc.CallOption) (*flowv1.GetListOfRacksResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
 	// Check for custom response via context
-	if resp, ok := ctx.Value("wantResponse").(*flowv1.GetListOfRacksResponse); ok {
+	if resp, ok := ctx.Value(MockWantResponse).(*flowv1.GetListOfRacksResponse); ok {
 		return resp, nil
 	}
 
@@ -1930,12 +1955,12 @@ func (mfgsc *MockFlowGrpcServiceClient) GetListOfRacks(ctx context.Context, in *
 /* Component mock methods */
 func (mfgsc *MockFlowGrpcServiceClient) GetComponentInfoByID(ctx context.Context, in *flowv1.GetComponentInfoByIDRequest, opts ...grpc.CallOption) (*flowv1.GetComponentInfoResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
 	// Check for custom response via context
-	if resp, ok := ctx.Value("wantResponse").(*flowv1.GetComponentInfoResponse); ok {
+	if resp, ok := ctx.Value(MockWantResponse).(*flowv1.GetComponentInfoResponse); ok {
 		return resp, nil
 	}
 
@@ -1960,12 +1985,12 @@ func (mfgsc *MockFlowGrpcServiceClient) GetComponentInfoBySerial(ctx context.Con
 
 func (mfgsc *MockFlowGrpcServiceClient) GetComponents(ctx context.Context, in *flowv1.GetComponentsRequest, opts ...grpc.CallOption) (*flowv1.GetComponentsResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
 	// Check for custom response via context
-	if resp, ok := ctx.Value("wantResponse").(*flowv1.GetComponentsResponse); ok {
+	if resp, ok := ctx.Value(MockWantResponse).(*flowv1.GetComponentsResponse); ok {
 		return resp, nil
 	}
 
@@ -1978,12 +2003,12 @@ func (mfgsc *MockFlowGrpcServiceClient) GetComponents(ctx context.Context, in *f
 
 func (mfgsc *MockFlowGrpcServiceClient) ValidateComponents(ctx context.Context, in *flowv1.ValidateComponentsRequest, opts ...grpc.CallOption) (*flowv1.ValidateComponentsResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
 	// Check for custom response via context
-	if resp, ok := ctx.Value("wantResponse").(*flowv1.ValidateComponentsResponse); ok {
+	if resp, ok := ctx.Value(MockWantResponse).(*flowv1.ValidateComponentsResponse); ok {
 		return resp, nil
 	}
 
@@ -2001,12 +2026,12 @@ func (mfgsc *MockFlowGrpcServiceClient) ValidateComponents(ctx context.Context, 
 /* Component mutation mock methods */
 func (mfgsc *MockFlowGrpcServiceClient) AddComponent(ctx context.Context, in *flowv1.AddComponentRequest, opts ...grpc.CallOption) (*flowv1.AddComponentResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
 	// Check for custom response via context
-	if resp, ok := ctx.Value("wantResponse").(*flowv1.AddComponentResponse); ok {
+	if resp, ok := ctx.Value(MockWantResponse).(*flowv1.AddComponentResponse); ok {
 		return resp, nil
 	}
 
@@ -2018,12 +2043,12 @@ func (mfgsc *MockFlowGrpcServiceClient) AddComponent(ctx context.Context, in *fl
 
 func (mfgsc *MockFlowGrpcServiceClient) PatchComponent(ctx context.Context, in *flowv1.PatchComponentRequest, opts ...grpc.CallOption) (*flowv1.PatchComponentResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 
 	// Check for custom response via context
-	if resp, ok := ctx.Value("wantResponse").(*flowv1.PatchComponentResponse); ok {
+	if resp, ok := ctx.Value(MockWantResponse).(*flowv1.PatchComponentResponse); ok {
 		return resp, nil
 	}
 
@@ -2035,7 +2060,7 @@ func (mfgsc *MockFlowGrpcServiceClient) PatchComponent(ctx context.Context, in *
 
 func (mfgsc *MockFlowGrpcServiceClient) DeleteComponent(ctx context.Context, in *flowv1.DeleteComponentRequest, opts ...grpc.CallOption) (*flowv1.DeleteComponentResponse, error) {
 	// Check for error injection via context
-	if err, ok := ctx.Value("wantError").(error); ok {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, err
 	}
 

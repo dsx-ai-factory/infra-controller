@@ -353,6 +353,56 @@ func ListTasksForRackByStatus(
 	return tasks, err
 }
 
+// ListPowerTasksForRack returns every Waiting, Pending, or Running power task
+// for the rack, ordered by creation time and then UUID, both ascending. Only
+// fields used by power details are loaded. More than MaxPowerTasksPerRack
+// records returns PowerTaskLimitError and no tasks, so an incomplete list
+// cannot look like the complete queue.
+func ListPowerTasksForRack(
+	ctx context.Context,
+	idb bun.IDB,
+	rackID uuid.UUID,
+) ([]Task, error) {
+	tasks := make([]Task, 0)
+	err := idb.NewSelect().
+		Model(&tasks).
+		Column("id", "type", "rack_id", "information", "attributes", "status", "created_at", "updated_at", "started_at").
+		Where("rack_id = ?", rackID).
+		Where("type = ?", taskcommon.TaskTypePowerControl).
+		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
+		OrderExpr("created_at ASC, id ASC").
+		Limit(taskcommon.MaxPowerTasksPerRack + 1).
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) > taskcommon.MaxPowerTasksPerRack {
+		return nil, &taskcommon.PowerTaskLimitError{RackID: rackID}
+	}
+
+	return tasks, nil
+}
+
+// ListTaskContextForRack loads nonterminal metadata in creation/UUID order.
+// No operation payloads or reports are read. Overflow returns no partial list.
+func ListTaskContextForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID) ([]Task, error) {
+	tasks := make([]Task, 0)
+	err := idb.NewSelect().Model(&tasks).
+		Column("id", "type", "rack_id", "attributes", "status", "created_at").
+		Where("rack_id = ?", rackID).
+		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
+		OrderExpr("created_at ASC, id ASC").
+		Limit(taskcommon.MaxTaskContextPerRack + 1).
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) > taskcommon.MaxTaskContextPerRack {
+		return nil, &taskcommon.TaskContextLimitError{RackID: rackID}
+	}
+	return tasks, nil
+}
+
 // ListTasksForRacksByStatus returns tasks for the requested racks matching any
 // of the given statuses.
 func ListTasksForRacksByStatus(

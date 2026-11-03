@@ -16,7 +16,6 @@
  */
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,6 +32,7 @@ use clap::Parser;
 use duration_str::deserialize_duration;
 use eyre::Context;
 use mac_address::MacAddress;
+use nmxc_mock::NmxcMockConfig;
 use rms_mock::RmsMockConfig;
 use rpc::forge::DesiredFirmwareVersionEntry;
 use rpc::forge_tls_client::ForgeClientConfig;
@@ -513,6 +513,17 @@ pub struct MachineATronConfig {
     #[serde(default)]
     pub dhcp: DhcpType,
 
+    /// Periodic host/DPU BMC lease renewal, default 900 seconds.
+    /// First renewals spread over [0, interval), then each interval has +/-10% jitter.
+    /// Like scout polling, this interval is not scaled by `acceleration_factor`.
+    /// Zero disables periodic renewal. Changes take effect after restarting MAT.
+    #[serde(
+        default = "default_bmc_dhcp_renewal_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub bmc_dhcp_renewal_interval: Duration,
+
     #[serde(default = "default_bmc_mock_port")]
     pub bmc_mock_port: u16,
 
@@ -571,7 +582,8 @@ pub struct MachineATronConfig {
     )]
     pub api_refresh_interval: Duration,
 
-    /// Delay before a simulated Scout reconnects after its stream closes or fails.
+    /// Delay before a simulated Scout reopens its stream after it closes or fails. A denied
+    /// stream is not reopened.
     #[serde(
         default = "default_scout_stream_reconnect_interval",
         deserialize_with = "deserialize_duration",
@@ -602,9 +614,35 @@ pub struct MachineATronConfig {
 
     /// The hosted RMS mock. Unlike the UFM mock this has no `enabled`
     /// flag: the services are always mounted, and NICo reaches them only when
-    /// it is configured with an `rms.api_url` pointing here.
-    #[serde(default)]
+    /// it is configured with an `rms.api_url` pointing here. MAT defaults
+    /// `max_terminal_jobs` to 100,000, including when only other RMS fields are set.
+    #[serde(
+        default = "default_rms_mock_config",
+        deserialize_with = "deserialize_rms_mock_config"
+    )]
     pub rms_mock: RmsMockConfig,
+
+    /// The hosted NMX-C mock, always mounted like the RMS mock. NICo reaches
+    /// it at a simulated switch's NVOS address, so nothing here names it.
+    #[serde(default)]
+    pub nmxc_mock: NmxcMockConfig,
+}
+
+fn default_rms_mock_config() -> RmsMockConfig {
+    RmsMockConfig {
+        max_terminal_jobs: 100_000,
+        ..RmsMockConfig::default()
+    }
+}
+
+fn deserialize_rms_mock_config<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RmsMockConfig, D::Error> {
+    let mut fields = serde_json::Map::deserialize(deserializer)?;
+    fields
+        .entry("max_terminal_jobs".to_string())
+        .or_insert(serde_json::Value::from(100_000));
+    serde_json::from_value(serde_json::Value::Object(fields)).map_err(serde::de::Error::custom)
 }
 
 impl MachineATronConfig {
@@ -614,7 +652,18 @@ impl MachineATronConfig {
             .map(|host| HostPortPair::HostAndPort(host.clone(), self.bmc_mock_port).to_string())
     }
 
+    /// Checks the invariants serde cannot express, such as the UFM mock settings
+    /// and the UDP relay addresses.
     pub fn validate(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            tokio::time::Instant::now()
+                .checked_add(
+                    self.bmc_dhcp_renewal_interval
+                        .saturating_add(self.bmc_dhcp_renewal_interval / 10)
+                )
+                .is_some(),
+            "BMC DHCP renewal interval must fit within the monotonic clock"
+        );
         if let Some(ufm_mock) = self.ufm_mock.as_ref() {
             ufm_mock.validate()?;
         }
@@ -690,6 +739,9 @@ impl MachineATronConfig {
         Ok(())
     }
 
+    /// Expands the configuration into concrete devices: the standalone machines plus
+    /// one machine per rack unit of every configured rack, with each rack's
+    /// registration. Fails on an invalid configuration.
     pub(crate) fn resolved_device_configs(&self) -> eyre::Result<ResolvedDeviceConfigs> {
         self.validate()?;
 
@@ -806,13 +858,14 @@ impl MachineATronConfig {
             // Write-then-rename so a crash mid-write can never leave a
             // truncated snapshot behind.
             let final_path = devices_persist_dir.join(format!("{config_section}.json"));
-            let tmp_path = devices_persist_dir.join(format!("{config_section}.json.tmp"));
-            std::fs::write(&tmp_path, serde_json::to_vec(&persisted_devices)?)?;
-            // Snapshots hold plaintext BMC passwords (`bmc_accounts`), so lock
-            // them to owner-only rather than trusting the process umask
-            // (issue #5966, CWE-732). The mode carries across the rename.
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-            std::fs::rename(&tmp_path, &final_path)?;
+            let bytes = serde_json::to_vec(&persisted_devices)?;
+            match bmc_mock::persistence::atomic_write(&final_path, &bytes) {
+                Ok(()) => {}
+                Err(error @ bmc_mock::persistence::PersistenceError::Replaced { .. }) => {
+                    tracing::warn!(error = %error, "MAT snapshot saved with uncertain crash durability");
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
 
         Ok(())
@@ -884,19 +937,22 @@ pub struct PersistedDevice {
     /// the versions last observed, not the operator-configured starting point.
     #[serde(default)]
     pub active_host_firmware: Option<HostFirmwareVersions>,
-    /// Current BMC account passwords at the time this snapshot was taken.
-    /// Restored on restart so a rotated password survives a pod restart
-    /// instead of resetting to the factory default (issue #5966).
-    ///
-    /// `None` means the credentials are simply absent from this snapshot — e.g.
-    /// a legacy snapshot written before this field existed, or a device type
-    /// that never populates it. This is not an error: the configured or
-    /// factory-default credentials remain in effect rather than being cleared.
-    ///
-    /// Power shelves are intentionally excluded from credential restoration
-    /// entirely, so they never populate this field.
-    #[serde(default)]
-    pub bmc_accounts: Option<Vec<bmc_mock::BmcAccountCredential>>,
+    /// Portable BMC state, including accounts and the factory-reset generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bmc_state: Option<bmc_mock::persistence::PersistedBmcState>,
+    /// A switch's NVOS administrator as the last completed password rotation
+    /// left it, so a restart keeps accepting what NICo stores. Only a switch
+    /// whose profile serves an NVOS populates this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvos_admin: Option<PersistedNvosAdmin>,
+}
+
+/// The NVOS user a switch's NVUE API authenticates, with the password a
+/// rotation last set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedNvosAdmin {
+    pub username: String,
+    pub password: String,
 }
 
 impl PersistedDevice {
@@ -920,17 +976,9 @@ pub struct PersistedDpuMachine {
     pub serial: String,
     pub installed_os: OsImage,
     pub dpu_index: u8,
-    /// Current BMC account passwords for this DPU at the time this snapshot was
-    /// taken. Restored on restart so a rotated password survives a pod restart
-    /// instead of resetting to the factory default (issue #5966).
-    ///
-    /// `None` means the credentials are simply absent from this snapshot — e.g.
-    /// a legacy snapshot written before this field existed, or a device type
-    /// that never populates it. This is not an error: the configured or
-    /// factory-default credentials remain in effect rather than being cleared.
-    /// See also [`PersistedDevice::bmc_accounts`].
-    #[serde(default)]
-    pub bmc_accounts: Option<Vec<bmc_mock::BmcAccountCredential>>,
+    /// Portable BMC state for this DPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bmc_state: Option<bmc_mock::persistence::PersistedBmcState>,
     #[serde(flatten)]
     pub settings: DpuSettings,
 }
@@ -1001,6 +1049,10 @@ fn default_acceleration_factor() -> f64 {
 
 fn default_scout_run_interval() -> Duration {
     Duration::from_secs(60)
+}
+
+fn default_bmc_dhcp_renewal_interval() -> Duration {
+    Duration::from_secs(900)
 }
 
 fn default_scout_stream_reconnect_interval() -> Duration {
@@ -1179,6 +1231,86 @@ scout_run_interval = "5s"
     }
 
     #[test]
+    fn bmc_renewal_interval_defaults_and_overrides() {
+        check_values(
+            [
+                Check {
+                    scenario: "omitted",
+                    input: None,
+                    expect: Duration::from_secs(900),
+                },
+                Check {
+                    scenario: "explicit default",
+                    input: Some("900s"),
+                    expect: Duration::from_secs(900),
+                },
+                Check {
+                    scenario: "test interval",
+                    input: Some("250ms"),
+                    expect: Duration::from_millis(250),
+                },
+                Check {
+                    scenario: "disabled",
+                    input: Some("0s"),
+                    expect: Duration::ZERO,
+                },
+            ],
+            |value| {
+                let mut config = serde_json::to_value(rack_config()).unwrap();
+                config
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("bmc_dhcp_renewal_interval");
+                if let Some(value) = value {
+                    config["bmc_dhcp_renewal_interval"] = value.into();
+                }
+                let config = serde_json::from_value::<MachineATronConfig>(config).unwrap();
+                config.validate().unwrap();
+                config.bmc_dhcp_renewal_interval
+            },
+        );
+        let mut config = rack_config();
+        config.bmc_dhcp_renewal_interval = Duration::MAX;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rms_retention_defaults_allow_partial_configuration_and_explicit_overrides() {
+        check_values(
+            [
+                Check {
+                    scenario: "no RMS table",
+                    input: None,
+                    expect: 100_000,
+                },
+                Check {
+                    scenario: "partial RMS table",
+                    input: Some("version_string = 'custom'"),
+                    expect: 100_000,
+                },
+                Check {
+                    scenario: "explicit count target",
+                    input: Some("max_terminal_jobs = 17"),
+                    expect: 17,
+                },
+            ],
+            |rms_table| {
+                let mut table = toml::Table::try_from(rack_config()).unwrap();
+                table.remove("rms_mock");
+                if let Some(rms_table) = rms_table {
+                    table.insert(
+                        "rms_mock".to_string(),
+                        toml::Value::Table(toml::from_str(rms_table).unwrap()),
+                    );
+                }
+                let config: MachineATronConfig = table.try_into().unwrap();
+                assert_eq!(config.rms_mock.min_terminal_retention_secs, 3_600);
+                config.rms_mock.max_terminal_jobs
+            },
+        );
+    }
+
+    #[test]
     fn machine_config_dpf_enabled_defaults_to_true() {
         assert!(rack_config().machines["config"].dpf_enabled);
     }
@@ -1231,6 +1363,7 @@ scout_run_interval = "5s"
         }
     }
 
+    /// A configuration with two WiWynn GB200 NVL72 racks and no standalone machines.
     fn gb200_rack_config() -> MachineATronConfig {
         let mut config = rack_config();
         let template = config.machines["config"].clone();
@@ -1248,6 +1381,7 @@ scout_run_interval = "5s"
         config
     }
 
+    /// A configuration with two Lenovo GB300 NVL72 racks and no standalone machines.
     fn gb300_rack_config() -> MachineATronConfig {
         let mut config = rack_config();
         let template = config.machines["config"].clone();
@@ -1279,6 +1413,7 @@ scout_run_interval = "5s"
         assert_eq!(round_tripped, cfg);
     }
 
+    /// Rack sections serialise with their `type` tag and parse back unchanged.
     #[test]
     fn rack_configs_round_trip() {
         check_cases(
@@ -1319,6 +1454,8 @@ scout_run_interval = "5s"
         );
     }
 
+    /// Each rack model expands to the member count, hardware types and profile
+    /// of its design.
     #[test]
     fn rack_models_expand_their_managed_hardware() {
         #[derive(Debug)]
@@ -2014,6 +2151,7 @@ server_address = "127.0.0.1:6767""#,
         assert_relay_name_compatibility(lenovo_gb300_rack_from_machine(&machine));
     }
 
+    /// Invalid rack sections are rejected with a message naming the bad reference.
     #[test]
     fn rack_references_are_validated() {
         let standalone = rack_config();
@@ -2140,39 +2278,20 @@ server_address = "127.0.0.1:6767""#,
             tpm_ek_certificate: None,
             hw_mac_addr_pool: None,
             active_host_firmware: None,
-            bmc_accounts: None,
+            bmc_state: None,
+            nvos_admin: None,
         }
     }
 
     #[test]
-    fn persisted_device_bmc_accounts_round_trip() {
+    fn persisted_device_portable_bmc_state_round_trip() {
         let mut device = persisted_device_fixture();
-        device.bmc_accounts = Some(vec![bmc_mock::BmcAccountCredential {
-            account_id: "1".to_string(),
-            username: "root".to_string(),
-            password: "rotated-password".to_string(),
-        }]);
-
-        let json = serde_json::to_string(&device).unwrap();
-        let restored: PersistedDevice = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.bmc_accounts, device.bmc_accounts);
-    }
-
-    #[test]
-    fn persisted_device_snapshot_without_bmc_accounts_still_loads() {
-        // Snapshots written by pre-#5966 machine-a-tron versions have no
-        // bmc_accounts field and must keep loading.
-        let device = persisted_device_fixture();
-        let mut json = serde_json::to_value(&device).unwrap();
-        assert!(
-            json.as_object_mut()
-                .unwrap()
-                .remove("bmc_accounts")
-                .is_some()
-        );
-
+        device.bmc_state = Some(serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "accounts": [{ "id":"1", "username":"renamed", "password":"rotated", "factory_default_password":"default", "role_id":"Administrator" }]
+        })).unwrap());
+        let json = serde_json::to_value(&device).unwrap();
         let restored: PersistedDevice = serde_json::from_value(json).unwrap();
-        assert_eq!(restored.bmc_accounts, None);
-        assert_eq!(restored.serial, device.serial);
+        assert_eq!(restored.bmc_state, device.bmc_state);
     }
 }

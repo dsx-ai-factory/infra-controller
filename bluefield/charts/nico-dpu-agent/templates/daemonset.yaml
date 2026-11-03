@@ -14,7 +14,8 @@
 {{- $supplementalCmKey := default "supplemental.json" (get $supplementalNetworkConfig "key") -}}
 {{- /* The agent's config.toml is needed by any section that sets a key in it. */ -}}
 {{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
-{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled -}}
+{{- $fmdsNetworkingConfigured := ne .Values.fmds.networkingAddresses nil -}}
+{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled $fmdsNetworkingConfigured -}}
 {{- $podAnnotations := .Values.serviceDaemonSet.annotations -}}
 {{- if $agentConfigEnabled -}}
 {{- $podAnnotations = omit $podAnnotations "checksum/machine-identity-config" -}}
@@ -232,6 +233,14 @@ spec:
             - name: host-grpc-socket-dir
               mountPath: /var/run/dpf/weave/grpc
               readOnly: true
+            {{- if .Values.xplaneMaintenance.enabled }}
+            - name: xplane-socket-dir
+              mountPath: /var/run/xplane
+              readOnly: true
+            - name: xplane-netdev-mapping
+              mountPath: /etc/nico/xplane
+              readOnly: true
+            {{- end }}
         - name: nico-lldp-sidecar
           securityContext:
             privileged: false
@@ -327,6 +336,16 @@ spec:
           hostPath:
             path: /var/run/dpf/weave/grpc
             type: DirectoryOrCreate
+        {{- if .Values.xplaneMaintenance.enabled }}
+        - name: xplane-socket-dir
+          hostPath:
+            path: /var/run/xplane
+            type: DirectoryOrCreate
+        - name: xplane-netdev-mapping
+          hostPath:
+            path: /etc/nico/xplane
+            type: DirectoryOrCreate
+        {{- end }}
         {{- if eq $bootstrapCaSource "mounted" }}
         - name: bootstrap-ca-source
           {{- if eq $bootstrapCaObjectKind "Secret" }}

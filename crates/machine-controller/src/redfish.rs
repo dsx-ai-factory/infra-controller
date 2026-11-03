@@ -96,37 +96,41 @@ pub async fn host_power_control_with_location(
         trigger_location = %trigger_location,
         "Host Power Control"
     );
-    ctx.pending_db_writes
-        .push(MachineWriteOp::UpdateRebootRequestedTime {
-            machine_id: machine.id.into(),
-            mode: machine_last_reboot_requested_mode(action),
-            time: Utc::now(),
-        });
+    let requested_at = Utc::now();
+    // Boot-latched policy waits use these timestamps as accepted boot requests.
+    let record_after_success = matches!(
+        action,
+        SystemPowerControl::ForceRestart
+            | SystemPowerControl::GracefulRestart
+            | SystemPowerControl::On
+    );
+    if !record_after_success {
+        ctx.pending_db_writes
+            .push(MachineWriteOp::UpdateRebootRequestedTime {
+                machine_id: machine.id.into(),
+                mode: machine_last_reboot_requested_mode(action),
+                time: requested_at,
+            });
+    }
 
     if (action == SystemPowerControl::GracefulRestart)
         || (action == SystemPowerControl::ForceRestart)
     {
-        let power_result: Result<PowerState, RedfishError> = redfish_client.get_power_state().await;
-        if let Ok(power_state) = power_result {
+        let power_state = redfish_client.get_power_state().await?;
+        tracing::info!(
+            machine_id = machine.id.to_string(),
+            action = power_state.to_string(),
+            "Host Power State"
+        );
+        if power_state == PowerState::Off {
             tracing::info!(
                 machine_id = machine.id.to_string(),
-                action = power_state.to_string(),
-                "Host Power State"
+                action = "Manual intervention required to initiate power-on".to_string(),
+                "Host Power Action"
             );
-            if power_state == PowerState::Off {
-                tracing::info!(
-                    machine_id = machine.id.to_string(),
-                    action = "Manual intervention required to initiate power-on".to_string(),
-                    "Host Power Action"
-                );
-                /* // reserve for future proactive power on action
-                redfish_client
-                .power(SystemPowerControl::On)
-                .await?
-                */
-            } else {
-                redfish_client.power(action).await?
-            }
+            return Ok(());
+        } else {
+            redfish_client.power(action).await?
         }
     } else if action == SystemPowerControl::ACPowercycle {
         let power_state = redfish_client.get_power_state().await?;
@@ -138,9 +142,35 @@ pub async fn host_power_control_with_location(
             );
             redfish_client.power(SystemPowerControl::ForceOff).await?;
         }
-        redfish_client.power(action).await?
+        match redfish_client.power(action).await {
+            // The BMC has no AC power cycle action. Treat it like a BMC without
+            // AC power cycle support: the host stays off.
+            Err(RedfishError::NotSupported(error)) => {
+                tracing::warn!(
+                    machine_id = machine.id.to_string(),
+                    %error,
+                    "ACPowercycle is not supported, leaving host powered off"
+                );
+                ctx.pending_db_writes
+                    .push(MachineWriteOp::UpdateRebootRequestedTime {
+                        machine_id: machine.id.into(),
+                        mode: machine_last_reboot_requested_mode(SystemPowerControl::ForceOff),
+                        time: requested_at,
+                    });
+            }
+            result => result?,
+        }
     } else {
         redfish_client.power(action).await?
+    }
+
+    if record_after_success {
+        ctx.pending_db_writes
+            .push(MachineWriteOp::UpdateRebootRequestedTime {
+                machine_id: machine.id.into(),
+                mode: machine_last_reboot_requested_mode(action),
+                time: requested_at,
+            });
     }
 
     Ok(())

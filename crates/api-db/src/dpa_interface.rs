@@ -28,6 +28,7 @@ use model::dpa_interface::{
     DpaInterface, DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaSearchConfig,
     NewDpaInterface,
 };
+use model::pci::PciBdfOrderingKey;
 use sqlx::PgConnection;
 
 use super::DatabaseError;
@@ -63,10 +64,10 @@ pub async fn persist(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// ensure inserts a new interface if one doesn't already exist for
-/// the given (machine_id, mac_address), or returns the existing one if
-/// it does. This makes it so repeated processing of device reports from
-/// scout are handled gracefully.
+/// Ensure an interface exists for the given `(machine_id, mac_address)`.
+/// An existing live interface may replace its `/dev/mst/` locator with a
+/// reported lowercase `dddd:bb:dd.f` PCI BDF. All other existing locators and
+/// interface state are preserved, including on reports from older Scouts.
 pub async fn ensure(
     value: NewDpaInterface,
     txn: &mut PgConnection,
@@ -76,9 +77,22 @@ pub async fn ensure(
     let state_version = ConfigVersion::initial();
     let state = DpaInterfaceControllerState::Provisioning;
     let description = value.device_description.unwrap_or_default();
+    // The shared parser owns PCI numeric bounds; the layout check restricts
+    // this one-way locator upgrade to Scout's canonical spelling.
+    let is_canonical_pci_name = matches!(
+        value.pci_name.as_bytes(),
+        [_, _, _, _, b':', _, _, b':', _, _, b'.', _]
+    ) && value
+        .pci_name
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b':' | b'.'))
+        && PciBdfOrderingKey::from_bdf(&value.pci_name).is_ok();
 
     let insert_query = "INSERT INTO dpa_interfaces (machine_id, mac_address, network_config_version, network_config, controller_state_version, controller_state, device_type, pci_name, device_description, interface_type)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (machine_id, mac_address) DO NOTHING RETURNING row_to_json(dpa_interfaces.*)";
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (machine_id, mac_address) DO UPDATE SET pci_name = EXCLUDED.pci_name
+            WHERE dpa_interfaces.deleted IS NULL AND dpa_interfaces.pci_name LIKE '/dev/mst/%' AND $11
+            RETURNING row_to_json(dpa_interfaces.*)";
 
     let result: Option<DpaInterface> = sqlx::query_as(insert_query)
         .bind(value.machine_id.to_string())
@@ -91,17 +105,17 @@ pub async fn ensure(
         .bind(value.pci_name)
         .bind(description)
         .bind(value.interface_type)
+        .bind(is_canonical_pci_name)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(insert_query, e))?;
 
-    // A new interface was inserted, return it!
+    // Return the inserted interface or the existing interface with its locator upgraded.
     if let Some(interface) = result {
         return Ok(interface);
     }
 
-    // ...nope, we got nothin. Fetch and return
-    // the existing interface instead.
+    // A locator that does not qualify for upgrade stays on the existing live interface.
     let select_query = "SELECT row_to_json(m.*) FROM (SELECT * FROM dpa_interfaces WHERE deleted IS NULL AND machine_id = $1 AND mac_address = $2) m";
     sqlx::query_as(select_query)
         .bind(value.machine_id)
@@ -321,6 +335,25 @@ pub async fn find_by_machine_id(
     };
 
     Ok(results)
+}
+
+/// Load a host's SVPC cards while locking each row for observation merging.
+/// The caller must keep this transaction through the dependent card-state writes;
+/// ID ordering prevents concurrent multi-card reports from reversing lock order.
+pub async fn find_svpc_by_machine_id_for_update(
+    txn: &mut PgConnection,
+    machine_id: HostMachineId,
+) -> Result<Vec<DpaInterface>, DatabaseError> {
+    let query = "SELECT row_to_json(card.*) FROM (
+        SELECT * FROM dpa_interfaces
+        WHERE deleted IS NULL AND machine_id = $1 AND interface_type = 'Svpc'
+        ORDER BY id FOR UPDATE
+    ) card";
+    sqlx::query_as(query)
+        .bind(machine_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Batch-load DPA interfaces for many machines in a single query.
@@ -654,13 +687,66 @@ mod test {
     };
     use mac_address::MacAddress;
     use model::dpa_interface::{
-        DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType, DpaSearchConfig,
-        NewDpaInterface,
+        CardState, DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType,
+        DpaLockMode, DpaSearchConfig, NewDpaInterface,
     };
     use model::machine::ManagedHostState;
 
     use super::{DpaNetworkConfigNotCurrent, try_update_network_config};
     use crate::{ConditionalWrite, machine};
+
+    /// The observation loader must return only this host's SVPC cards in ID
+    /// order. Fixed IDs keep insertion order from accidentally proving sorting.
+    #[crate::sqlx_test]
+    async fn locked_svpc_query_returns_exact_membership_in_id_order(pool: sqlx::PgPool) {
+        let hosts: [MachineId; 2] = [1, 2].map(|byte| {
+            GenericMachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [byte; 32],
+                MachineType::Host,
+            )
+            .try_into()
+            .unwrap()
+        });
+        let mut txn = pool.begin().await.unwrap();
+        for host in hosts {
+            machine::create(&mut txn, None, &host, ManagedHostState::Ready, None, 2)
+                .await
+                .unwrap();
+        }
+        for (ordinal, host, interface_type) in [
+            (2, hosts[0], DpaInterfaceType::Svpc),
+            (1, hosts[0], DpaInterfaceType::Svpc),
+            (3, hosts[0], DpaInterfaceType::Astra),
+            (4, hosts[1], DpaInterfaceType::Svpc),
+        ] {
+            let id = DpaInterfaceId::from(uuid::Uuid::from_u128(u128::from(ordinal)));
+            sqlx::query(
+                "INSERT INTO dpa_interfaces
+                 (id, machine_id, mac_address, device_type, pci_name, interface_type)
+                 VALUES ($1, $2, $3, 'SuperNIC', $4, $5)",
+            )
+            .bind(id)
+            .bind(host)
+            .bind(MacAddress::from([0, 0x11, 0x22, 0x33, 0x44, ordinal]))
+            .bind(format!("0000:{ordinal:02x}:00.0"))
+            .bind(interface_type)
+            .execute(&mut *txn)
+            .await
+            .unwrap();
+        }
+        txn.commit().await.unwrap();
+
+        let mut txn = pool.begin().await.unwrap();
+        let cards = super::find_svpc_by_machine_id_for_update(&mut txn, hosts[0])
+            .await
+            .unwrap();
+        assert_eq!(
+            cards.iter().map(|card| card.id).collect::<Vec<_>>(),
+            [1, 2].map(|id| DpaInterfaceId::from(uuid::Uuid::from_u128(id)))
+        );
+        txn.commit().await.unwrap();
+    }
 
     /// Query-count regression guard for the batched DPA-interface loader.
     ///
@@ -1165,6 +1251,138 @@ mod test {
         assert_eq!(second.mac_address, first.mac_address);
 
         Ok(())
+    }
+
+    /// `ensure` must preserve established card state when a report cannot
+    /// upgrade its locator. Astra inventory also shares this conflict path.
+    #[crate::sqlx_test]
+    async fn ensure_preserves_state_for_rejected_locator_changes(pool: sqlx::PgPool) {
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")
+                .unwrap();
+        let mut txn = pool.begin().await.unwrap();
+        machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        for (scenario, mac_tail, interface_type, saved_locator, reported_locator) in [
+            (
+                "uppercase BDF cannot upgrade MST locator",
+                1,
+                DpaInterfaceType::Svpc,
+                "/dev/mst/mt41692_pciconf0",
+                "0000:CC:00.0",
+            ),
+            (
+                "out-of-range function cannot upgrade MST locator",
+                2,
+                DpaInterfaceType::Svpc,
+                "/dev/mst/mt41692_pciconf0",
+                "0000:cc:00.8",
+            ),
+            (
+                "SVPC report cannot replace an existing Astra interface",
+                3,
+                DpaInterfaceType::Astra,
+                "0000:cc:00.0",
+                "0000:dd:00.0",
+            ),
+        ] {
+            let mut txn = pool.begin().await.unwrap();
+            let mut card = super::persist(
+                NewDpaInterface {
+                    machine_id,
+                    mac_address: MacAddress::from([0, 0x11, 0x22, 0x33, 0x44, mac_tail]),
+                    device_type: "BlueField3".into(),
+                    pci_name: saved_locator.into(),
+                    device_description: Some("retained description".into()),
+                    interface_type,
+                },
+                &mut txn,
+            )
+            .await
+            .unwrap();
+            // Non-default values expose an upsert that replaces the row or
+            // resets its controller/network versions while changing inventory.
+            assert_eq!(
+                super::try_update_controller_state(
+                    &mut txn,
+                    card.id,
+                    card.controller_state.version,
+                    card.controller_state.version.increment(),
+                    &DpaInterfaceControllerState::Assigned,
+                )
+                .await
+                .unwrap(),
+                ConditionalWrite::Applied(())
+            );
+            assert_eq!(
+                super::try_update_network_config(
+                    &mut txn,
+                    &card.id,
+                    card.network_config.version,
+                    &DpaInterfaceNetworkConfig {
+                        use_admin_network: Some(false),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+                ConditionalWrite::Applied(card.id)
+            );
+            card.card_state = Some(CardState {
+                lockmode: Some(DpaLockMode::Locked),
+                profile: Some("retained-profile".into()),
+                profile_synced: Some(true),
+                ..Default::default()
+            });
+            super::update_card_state(&mut txn, card.clone())
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+            let row_query = "SELECT to_jsonb(dpa_interfaces) FROM dpa_interfaces WHERE id = $1";
+            let before: serde_json::Value = sqlx::query_scalar(row_query)
+                .bind(card.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+            let mut txn = pool.begin().await.unwrap();
+            let reported = super::ensure(
+                NewDpaInterface {
+                    machine_id,
+                    mac_address: card.mac_address,
+                    device_type: "SuperNIC".into(),
+                    pci_name: reported_locator.into(),
+                    device_description: Some("replacement description".into()),
+                    interface_type: DpaInterfaceType::Svpc,
+                },
+                &mut txn,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reported.id, card.id, "{scenario}");
+            assert_eq!(reported.pci_name, saved_locator, "{scenario}");
+            assert_eq!(reported.interface_type, interface_type, "{scenario}");
+            txn.commit().await.unwrap();
+
+            // Reload the whole row so an ignored conflicting report cannot
+            // silently change any saved state or version alongside the locator.
+            let after: serde_json::Value = sqlx::query_scalar(row_query)
+                .bind(card.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(after, before, "{scenario}");
+        }
     }
 
     // test_device_info_roundtrip is a super basic test that inserts

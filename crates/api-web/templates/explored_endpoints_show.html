@@ -51,6 +51,7 @@
 			<th>Preingestion State</th>
 			<th data-sortable-type="numeric">Exploration Latency</th>
 			<th>Last Exploration Error</th>
+			<th>Exploration Pause</th>
 		</tr>
 	</thead>
 	<tbody>
@@ -80,12 +81,14 @@
 				</form>
 				{% endif %}
 			</td>
+			<td>{% if ep.exploration_paused_for_dpf %}DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared{% endif %}</td>
 		</tr>
 		{% endfor %}
 	</tbody>
 	<tfoot>
 		<tr>
 			<th>{{ endpoints.len() }} item{% if endpoints.len() != 1 %}s{% endif %}</th>
+			<th></th>
 			<th></th>
 			<th></th>
 			<th></th>

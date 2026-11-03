@@ -945,32 +945,57 @@ func StringQueryInfoTo(info *dbquery.StringQueryInfo) *pb.StringQueryInfo {
 	}
 }
 
-// OrderByFrom converts a protobuf OrderBy to an internal OrderBy
-func OrderByFrom(ob *pb.OrderBy) *dbquery.OrderBy {
+// RackOrderByFrom converts and validates a rack OrderBy.
+func RackOrderByFrom(ob *pb.OrderBy) (*dbquery.OrderBy, error) {
 	if ob == nil {
-		return nil
+		return nil, nil
 	}
 
-	var column string
-	rackField := ob.GetRackField()
-	componentField := ob.GetComponentField()
-
-	if rackField != pb.RackOrderByField_RACK_ORDER_BY_FIELD_UNSPECIFIED {
-		column = rackOrderByFieldToColumn(rackField)
-	} else if componentField != pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_UNSPECIFIED {
-		column = componentOrderByFieldToColumn(componentField)
-	} else {
-		return nil
+	field, ok := ob.GetField().(*pb.OrderBy_RackField)
+	if !ok {
+		return nil, errors.New("rack order by field is required")
 	}
 
+	column := rackOrderByFieldToColumn(field.RackField)
 	if column == "" {
-		return nil
+		return nil, fmt.Errorf("unsupported rack order by field: %v", field.RackField)
 	}
 
-	return &dbquery.OrderBy{
+	return validatedOrderBy(&dbquery.OrderBy{
+		Column:       column,
+		Direction:    dbquery.OrderDirection(ob.GetDirection()),
+		IsExpression: field.RackField == pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL,
+	})
+}
+
+// ComponentOrderByFrom converts and validates a component OrderBy.
+func ComponentOrderByFrom(ob *pb.OrderBy) (*dbquery.OrderBy, error) {
+	if ob == nil {
+		return nil, nil
+	}
+
+	field, ok := ob.GetField().(*pb.OrderBy_ComponentField)
+	if !ok {
+		return nil, errors.New("component order by field is required")
+	}
+
+	column := componentOrderByFieldToColumn(field.ComponentField)
+	if column == "" {
+		return nil, fmt.Errorf("unsupported component order by field: %v", field.ComponentField)
+	}
+
+	return validatedOrderBy(&dbquery.OrderBy{
 		Column:    column,
 		Direction: dbquery.OrderDirection(ob.GetDirection()),
+	})
+}
+
+func validatedOrderBy(orderBy *dbquery.OrderBy) (*dbquery.OrderBy, error) {
+	if err := orderBy.Validate(); err != nil {
+		return nil, err
 	}
+
+	return orderBy, nil
 }
 
 // QueryType represents the type of query (rack or component)
@@ -1689,5 +1714,24 @@ func QueueOptionsFrom(
 		return operation.ConflictStrategyQueue, timeout
 	default:
 		return operation.ConflictStrategyReject, timeout
+	}
+}
+
+// TaskKindTo describes a task without its operation payload. Stored task types
+// without a known API kind map to Unspecified.
+func TaskKindTo(kind taskcommon.TaskType) pb.TaskKind {
+	switch kind {
+	case taskcommon.TaskTypePowerControl:
+		return pb.TaskKind_TASK_KIND_POWER_CONTROL
+	case taskcommon.TaskTypeFirmwareControl:
+		return pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL
+	case taskcommon.TaskTypeBringUp:
+		return pb.TaskKind_TASK_KIND_BRING_UP
+	case taskcommon.TaskTypeDecommission:
+		return pb.TaskKind_TASK_KIND_DECOMMISSION
+	case taskcommon.TaskTypeInjectExpectation:
+		return pb.TaskKind_TASK_KIND_INJECT_EXPECTATION
+	default:
+		return pb.TaskKind_TASK_KIND_UNSPECIFIED
 	}
 }

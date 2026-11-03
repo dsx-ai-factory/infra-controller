@@ -73,6 +73,7 @@ func buildTemplatedProxyFixture(t *testing.T) *templatedProxyFixture {
 
 	tenant := testMachineBuildTenant(t, dbSession, tnOrg, "tmpl-proxy-tenant")
 	testBuildTenantSiteAssociation(t, dbSession, tnOrg, tenant.ID, site.ID, tnu.ID)
+	common.TestBuildAllocation(t, dbSession, site, tenant, "tmpl-proxy-allocation", ipu)
 
 	templateDAO := cdbm.NewIpxeTemplateDAO(dbSession)
 	tmpl, err := templateDAO.Create(ctx, nil, cdbm.IpxeTemplateCreateInput{

@@ -22,7 +22,7 @@ NS="${KEYCLOAK_NS:-nico-rest}"
 # KEYCLOAK_DB_* — target database for Keycloak. Defaults to the legacy
 # standalone postgres.postgres StatefulSet. setup.sh exports these pointing
 # at nico-pg-cluster instead when helm-prereqs/values.yaml::keycloak.useHaPostgres
-# is true (see phase 7d), along with KEYCLOAK_DB_PASSWORD_SECRET_NAME/KEY
+# resolves to true (see phase 7d), along with KEYCLOAK_DB_PASSWORD_SECRET_NAME/KEY
 # pointing at the ESO-synced nico-keycloak-pg-creds Secret.
 : "${KEYCLOAK_DB_HOST:=postgres.postgres}"
 : "${KEYCLOAK_DB_NAME:=keycloak}"
@@ -32,7 +32,7 @@ export KEYCLOAK_DB_HOST KEYCLOAK_DB_NAME KEYCLOAK_DB_USER
 # KEYCLOAK_DB_SSLMODE — postgres.postgres never terminates TLS, so PgJDBC's
 # default sslmode ("prefer") would silently connect in plaintext there;
 # "disable" makes that explicit instead of implicit. nico-pg-cluster's
-# pg_hba.conf requires TLS, so setup.sh's opt-in path exports "require" here.
+# pg_hba.conf requires TLS, so setup.sh's nico-pg-cluster path exports "require" here.
 # Neither mode validates the server certificate/hostname (that needs a
 # truststore wired to the operator's CA, not done here) — "require" is
 # encrypted-but-unauthenticated, an improvement over the legacy path's plain
@@ -73,7 +73,7 @@ if [[ "${KEYCLOAK_DB_HOST}" == "postgres.postgres" ]]; then
 else
     # nico-pg-cluster path: the Zalando operator already created the
     # keycloak.nico user and keycloak database (helm-prereqs/templates/postgresql.yaml,
-    # gated on keycloak.useHaPostgres) — nothing to provision here. setup.sh phase
+    # unless keycloak.useHaPostgres is false), so there's nothing to provision here. setup.sh phase
     # 7d already exported KEYCLOAK_DB_PASSWORD_SECRET_NAME/KEY pointing at
     # the ESO-synced nico-keycloak-pg-creds Secret in this namespace.
     echo "  Using nico-pg-cluster (${KEYCLOAK_DB_HOST}/${KEYCLOAK_DB_NAME}) — database already provisioned by the postgres operator"

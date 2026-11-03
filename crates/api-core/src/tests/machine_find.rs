@@ -14,25 +14,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::error::Error as _;
 use std::net::IpAddr;
 
 use carbide_uuid::machine::{
-    MACHINE_ID_PREFIX_LENGTH, MachineId, MachineType, StableHostMachineId,
+    MACHINE_ID_PREFIX_LENGTH, MachineId, MachineIdSource, MachineType, StableHostMachineId,
 };
 use carbide_uuid::rack::RackId;
 use common::api_fixtures::dpu::create_dpu_machine;
 use common::api_fixtures::{create_managed_host, create_test_env, site_explorer};
-use db::ObjectFilter;
+use db::{AnnotatedSqlxError, ObjectFilter};
+use health_report::{
+    HealthAlertClassification, HealthProbeAlert, HealthReport, HealthReportApplyMode,
+};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::expected_machine::ExpectedMachineData;
 use model::hardware_info::HardwareInfo;
+use model::machine::ManagedHostState;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{AssociateMachinesWithInstanceTypeRequest, FindInstanceTypeIdsRequest};
 
+use crate::errors::{CarbideError, CarbideErrorWithLocation};
 use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
 use crate::test_support::mac_address_pool::DPU_OOB_MAC_ADDRESS_POOL;
 use crate::tests::common;
@@ -41,6 +47,94 @@ use crate::tests::common::api_fixtures::{
     create_managed_host_multi_dpu, create_managed_host_with_config,
 };
 use crate::tests::sku::tests::FULL_SKU_DATA;
+
+#[crate::sqlx_test]
+async fn test_update_machine_metadata_preserves_snapshot_decode_error(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
+
+    // Corrupt persisted state so `load_machine` fails after acquiring its transaction.
+    let updated = sqlx::query("UPDATE machines SET controller_state = '{}'::jsonb WHERE id = $1")
+        .bind(dpu_machine_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+
+    let error = env
+        .api
+        .update_machine_metadata(tonic::Request::new(
+            rpc::forge::MachineMetadataUpdateRequest {
+                machine_id: Some(dpu_machine_id.into()),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "machine-with-invalid-state".to_string(),
+                    ..Default::default()
+                }),
+                if_version_match: None,
+            },
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
+    );
+    let source = error
+        .source()
+        .expect("status should retain its error source")
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .expect("status source should retain the CarbideError");
+    // `Machine::from_row` decodes the whole snapshot from column 0.
+    assert!(matches!(
+        &source.error,
+        CarbideError::DBError(AnnotatedSqlxError {
+            source: sqlx::Error::ColumnDecode { index, .. },
+            ..
+        }) if index == "0"
+    ));
+    assert_eq!(
+        error.metadata().get("nico-error-text").unwrap(),
+        error.message()
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_update_machine_metadata_preserves_not_found(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let missing_machine_id = MachineId::new(MachineIdSource::Tpm, [255; 32], MachineType::Dpu);
+
+    let error = env
+        .api
+        .update_machine_metadata(tonic::Request::new(
+            rpc::forge::MachineMetadataUpdateRequest {
+                machine_id: Some(missing_machine_id),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "missing-machine".to_string(),
+                    ..Default::default()
+                }),
+                if_version_match: None,
+            },
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(
+        error.message(),
+        format!("machine not found: {missing_machine_id}")
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-404"
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-text").unwrap(),
+        error.message()
+    );
+}
 
 #[crate::sqlx_test]
 async fn test_find_machine_by_id(pool: sqlx::PgPool) {
@@ -72,6 +166,152 @@ async fn test_find_machine_by_id(pool: sqlx::PgPool) {
             .unwrap()
             .is_none()
     );
+}
+
+#[crate::sqlx_test]
+async fn test_find_machines_by_ids_returns_unassociated_dpus(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let dpu_id = create_dpu_machine(&env, &host_config).await;
+    let machine_id: MachineId = dpu_id.into();
+    let missing_id = MachineId::new(MachineIdSource::Tpm, [255; 32], MachineType::Dpu);
+
+    let neighbor = model::lldp::LldpNeighbor {
+        local_mac_address: "02:00:00:00:00:42".parse().unwrap(),
+        local_port: "p0".to_string(),
+        chassis_id_type: "mac".to_string(),
+        chassis_id_value: "02:00:00:00:00:43".to_string(),
+        remote_port_type: "ifname".to_string(),
+        remote_port_value: "swp1".to_string(),
+        system_name: "switch".to_string(),
+        system_description: String::new(),
+        management_addresses: Vec::new(),
+        med_serial: None,
+        med_manufacturer: None,
+        med_model: None,
+    };
+
+    let mut txn = env.pool.begin().await.unwrap();
+
+    // Remove the fixture's predicted-host association while retaining the DPU row.
+    sqlx::query("UPDATE machine_interfaces SET attached_dpu_machine_id = NULL WHERE attached_dpu_machine_id = $1 AND machine_id != $1")
+        .bind(dpu_id)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+
+    let dpu = db::machine::find_one(&mut *txn, &dpu_id, MachineSearchConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
+
+    db::machine::advance(&dpu, &mut txn, &ManagedHostState::Created, None)
+        .await
+        .unwrap();
+
+    db::machine_lldp_neighbor::replace_all(&mut txn, &machine_id, std::slice::from_ref(&neighbor))
+        .await
+        .unwrap();
+
+    assert!(
+        db::machine::lookup_host_machine_ids_by_dpu_ids(&mut *txn, &[dpu_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    txn.commit().await.unwrap();
+
+    let ids = env
+        .api
+        .find_machine_ids(tonic::Request::new(rpc::forge::MachineSearchConfig {
+            include_dpus: true,
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .machine_ids;
+
+    assert!(ids.contains(&machine_id));
+
+    let mut exclusion = HealthReport::empty("test-sla-exclusion".to_string());
+
+    exclusion.alerts.push(HealthProbeAlert {
+        classifications: vec![HealthAlertClassification::exclude_from_state_machine_sla()],
+        ..HealthProbeAlert::missing_report()
+    });
+
+    let cases = [
+        ("history omitted", false, None, true),
+        ("history included", true, None, true),
+        (
+            "merged SLA exclusion",
+            true,
+            Some((HealthReportApplyMode::Merge, exclusion)),
+            false,
+        ),
+        (
+            "replacement overrides merged exclusion",
+            true,
+            Some((
+                HealthReportApplyMode::Replace,
+                HealthReport::empty("test-replace".to_string()),
+            )),
+            true,
+        ),
+    ];
+
+    for (label, include_history, health_override, has_sla) in cases {
+        if let Some((mode, report)) = health_override {
+            let mut txn = env.pool.begin().await.unwrap();
+
+            db::machine::insert_health_report(&mut txn, &machine_id, mode, &report, false)
+                .await
+                .unwrap();
+
+            txn.commit().await.unwrap();
+        }
+
+        let machines = env
+            .api
+            .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
+                machine_ids: vec![machine_id, missing_id],
+                include_history,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .machines;
+
+        assert_eq!(machines.len(), 1, "{label}");
+
+        let standalone = machines
+            .iter()
+            .find(|machine| machine.id == Some(machine_id))
+            .expect(label);
+
+        let status = standalone.status.as_ref().unwrap();
+
+        assert_eq!(status.associated_host_machine_id, None, "{label}");
+        assert_eq!(!standalone.events.is_empty(), include_history, "{label}");
+
+        assert_eq!(
+            status.lldp_neighbors,
+            vec![rpc::forge::InterfaceLldp::from(neighbor.clone())],
+            "{label}"
+        );
+
+        let sla = standalone.state_sla.as_ref().expect(label);
+
+        assert_eq!(
+            status.lifecycle.as_ref().unwrap().sla.as_ref(),
+            Some(sla),
+            "{label}"
+        );
+
+        assert_eq!(sla.sla.is_some(), has_sla, "{label}");
+    }
 }
 
 #[crate::sqlx_test]

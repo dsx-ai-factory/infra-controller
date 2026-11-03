@@ -48,7 +48,7 @@ Create a SpectrumX Partition for the org.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-The Tenant must be associated with the Site and hold an Allocation on it. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
+The Tenant must have an Allocation or TargetedInstanceCreation on the Site. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -191,7 +191,9 @@ Delete a specific SpectrumX Partition by ID.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-Tenant must own the Partition. The request is rejected while any Instance is still attached to the Partition. The Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
+Tenant must own the Partition. The request is rejected with `400` while the API lists an attached Instance and `412` when the Site reports remaining attachments, including on terminating Instances. A rejected deletion leaves the Partition and its status history unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+
+Once deletion is accepted, the Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -293,6 +295,17 @@ func (a *SpectrumXPartitionAPIService) DeleteSpectrumxPartitionExecute(r ApiDele
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

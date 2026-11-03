@@ -7,11 +7,11 @@
 package ipam
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/context"
 )
 
 func Test_ReadPrefix(t *testing.T) {

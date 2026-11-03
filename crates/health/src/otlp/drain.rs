@@ -22,7 +22,7 @@ use tonic::transport::Channel;
 use super::collector_logs::ExportLogsServiceRequest;
 use super::collector_logs::logs_service_client::LogsServiceClient;
 use super::convert::build_export_request;
-use super::{OtlpExport, OtlpSignal, run_drain};
+use super::{OtlpExport, OtlpExportResponse, OtlpSignal, run_drain};
 use crate::config::OtlpTargetConfig;
 use crate::sink::otlp::OtlpQueue;
 use crate::sink::{CollectorEvent, EventContext};
@@ -77,7 +77,14 @@ impl OtlpExport for LogsExport {
         prost::Message::encoded_len(request)
     }
 
-    async fn send(&mut self, request: Self::Request) -> Result<(), tonic::Status> {
-        self.client.export(request).await.map(drop)
+    async fn send(&mut self, request: Self::Request) -> Result<OtlpExportResponse, tonic::Status> {
+        let response = self.client.export(request).await?.into_inner();
+
+        Ok(response
+            .partial_success
+            .map_or_else(OtlpExportResponse::default, |partial| OtlpExportResponse {
+                rejected_records: partial.rejected_log_records,
+                error_message: partial.error_message,
+            }))
     }
 }

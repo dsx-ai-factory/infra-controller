@@ -31,7 +31,7 @@ use db::ConditionalWrite;
 use db::resource_pool::ResourcePoolAllocationNotOwned;
 use libredfish::SystemPowerControl;
 use model::bmc_info::BmcInfo;
-use model::bmc_suppression::BmcSuppressionSubsystem;
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
 use model::hardware_info::MachineNvLinkInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
@@ -153,6 +153,29 @@ pub(crate) async fn find_machines_by_ids(
     )
     .await?;
 
+    // A DPU can exist without a host association and therefore have no managed-host snapshot.
+    let standalone_dpu_ids = machine_ids
+        .iter()
+        .filter_map(|machine_id| match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Dpu(dpu_id) if !snapshots.contains_key(machine_id) => Some(dpu_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let standalone_dpus = if standalone_dpu_ids.is_empty() {
+        Vec::new()
+    } else {
+        db::machine::find(
+            &mut txn,
+            db::ObjectFilter::List(&standalone_dpu_ids),
+            MachineSearchConfig {
+                include_history: request.include_history,
+                ..Default::default()
+            },
+        )
+        .await?
+    };
+
     // SpectrumX attachment selectors are live DPA-interface inventory, not a
     // signal that SpectrumX is enabled or fully ready at the site. Load all
     // requested hosts' device-description groups in one narrow, aggregated query.
@@ -167,7 +190,7 @@ pub(crate) async fn find_machines_by_ids(
         db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
             .await?;
 
-    let lldp_neighbors_by_machine =
+    let mut lldp_neighbors_by_machine =
         db::machine_lldp_neighbor::find_by_machine_ids(&mut txn, &machine_ids).await?;
 
     txn.commit().await?;
@@ -177,12 +200,63 @@ pub(crate) async fn find_machines_by_ids(
             .machine_state_controller
             .failure_retry_time,
     );
-    Ok(Response::new(snapshot_map_to_rpc_machines(
-        snapshots,
-        &sla_config,
-        spectrum_x_capabilities_by_machine,
-        lldp_neighbors_by_machine,
-    )))
+
+    let mut response =
+        snapshot_map_to_rpc_machines(snapshots, &sla_config, spectrum_x_capabilities_by_machine);
+
+    // Standalone DPUs have no aggregate host health, so their SLA uses their own
+    // state and health reports. A replacement report overrides all merged reports.
+    for dpu in standalone_dpus {
+        let mut merged_health = health_report::HealthReport::empty(String::new());
+
+        let health = if let Some(report) = dpu.health_reports.replace.as_ref() {
+            report
+        } else {
+            for report in dpu.health_reports.merges.values() {
+                merged_health.merge(report);
+            }
+
+            &merged_health
+        };
+
+        let sla = model::machine::state_sla(
+            &dpu.id,
+            &dpu.state.value,
+            &dpu.state.version,
+            health,
+            &sla_config,
+        )
+        .into();
+
+        // The direct conversion leaves the host association unset and does not
+        // calculate an SLA. Keep the flat and structured SLA fields consistent.
+        let mut machine: rpc::Machine = dpu.into();
+        machine.state_sla = Some(sla);
+
+        if let Some(lifecycle) = machine
+            .status
+            .as_mut()
+            .and_then(|status| status.lifecycle.as_mut())
+        {
+            lifecycle.sla = Some(sla);
+        }
+
+        response.machines.push(machine);
+    }
+
+    // LLDP is independent of host association and applies to both snapshot-backed
+    // machines and standalone DPUs.
+    for machine in &mut response.machines {
+        if let Some(neighbors) = machine
+            .id
+            .and_then(|id| lldp_neighbors_by_machine.remove(&id))
+        {
+            machine.status.get_or_insert_default().lldp_neighbors =
+                neighbors.into_iter().map(Into::into).collect();
+        }
+    }
+
+    Ok(Response::new(response))
 }
 
 pub(crate) async fn find_machine_state_histories(
@@ -389,11 +463,11 @@ async fn force_delete_cleanup_txn(
     let _admin_admission = db::machine_interface::admin_lock_admission().await;
     let mut txn = api.txn_begin().await?;
 
-    // Advisory-lock the admin segments before any row locks so the deletion
-    // follows the allocator lock order -- segment advisory lock first, then
-    // machine interface/address rows (the convention
+    // Advisory-lock the admin segments exclusively before any row locks so
+    // the deletion follows the allocator lock order -- segment advisory lock
+    // first, then machine interface/address rows (the convention
     // `reconcile_admin_addresses_for_host` documents). This serializes the
-    // deletion against the allocator, reconcile, and discovery transactions
+    // deletion against the creation, allocation, and reconcile transactions
     // that hold those locks while they touch interface rows, so the two
     // sides can't hold segment locks and interface rows in opposite orders.
     // All admin segments, rather than a set computed from this machine's
@@ -724,6 +798,9 @@ pub(crate) async fn admin_force_delete_machine(
 
     let mut txn = api.txn_begin().await?;
 
+    // Serialize the Admin switch with routing-policy writers and other
+    // force-delete calls. Take the routing lock before any Machine row locks.
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
     let machine = match db::machine::find_by_query(&mut txn, query).await? {
         Some(machine) => machine,
         None => {
@@ -847,33 +924,146 @@ pub(crate) async fn admin_force_delete_machine(
 
     // So far we only inspected state - now we start the deletion process
     // TODO: In the new model we might just need to move one Machine to this state
+    let mut network_ready = true;
     let instance_id = if let Some(host_machine) = &host_machine {
-        // Write to the machine row before fetching the instance, to lock it in case
-        // allocate_instance is running at the same time.
-        db::machine::advance(
-            host_machine,
-            &mut txn,
-            &ManagedHostState::ForceDeletion,
-            None,
+        let already_force_deleting =
+            matches!(host_machine.state.value, ManagedHostState::ForceDeletion);
+        // Advance locks the host before reading its Instance or network version.
+        // Polling calls take that lock explicitly without duplicating state history.
+        if !already_force_deleting {
+            db::machine::advance(
+                host_machine,
+                &mut txn,
+                &ManagedHostState::ForceDeletion,
+                None,
+            )
+            .await?;
+        } else {
+            db::machine::find_one(
+                &mut txn,
+                &host_machine.id,
+                MachineSearchConfig {
+                    for_update: true,
+                    ..MachineSearchConfig::default()
+                },
+            )
+            .await?
+            .ok_or(CarbideError::NotFoundError {
+                kind: "machine",
+                id: host_machine.id.to_string(),
+            })?;
+        }
+        let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
+        if let Some(instance_id) = instance_id {
+            response.instance_id = instance_id.to_string();
+
+            // The Machine lock makes concurrent Instance allocation visible because service-VPC
+            // activation takes the same lock before storing an attachment's service interfaces.
+            // TODO(#6133): Validate observed external cleanup before reclaiming the final
+            // attachment and allowing force deletion to advance.
+            // Without explicit orphan consent, rejecting before commit rolls back ForceDeletion
+            // and leaves endpoint cleanup owned by the retained Instance service attachments.
+            if !request.allow_delete_with_orphaned_dpf_crds
+                && !db::instance::find_service_vpc_memberships(&mut txn, instance_id)
+                    .await?
+                    .is_empty()
+            {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "instance {instance_id} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
+                ))
+                .into());
+            }
+        }
+        // Record the opt-in before requesting Admin. Retries must keep waiting
+        // even if the Instance is gone or the caller omits the option.
+        let requires_admin_ack = db::machine::record_force_delete_admin_ack_requirement(
+            txn.as_mut(),
+            &host_machine.id,
+            request.wait_for_instance_dpu && instance_id.is_some(),
         )
         .await?;
-        let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
-        if let Some(instance_id) = &instance_id {
-            response.instance_id = instance_id.to_string();
+        if requires_admin_ack {
+            let snapshot = db::managed_host::load_snapshot(
+                &mut txn,
+                &host_machine.id,
+                LoadSnapshotOptions::default(),
+            )
+            .await?
+            .ok_or(CarbideError::NotFoundError {
+                kind: "machine",
+                id: host_machine.id.to_string(),
+            })?;
+            network_ready = snapshot.managed_host_network_config_version_synced();
+            if !snapshot.use_admin_network() {
+                let mut admin_config = snapshot.host_snapshot.network_config.value.clone();
+                admin_config.use_admin_network = Some(true);
+                // The Machine row is locked, so its version cannot change
+                // between loading the snapshot and this update.
+                if let ConditionalWrite::NotApplied(_) = db::machine::try_update_network_config(
+                    txn.as_mut(),
+                    &host_machine.id,
+                    snapshot.host_snapshot.network_config.version,
+                    &admin_config,
+                )
+                .await?
+                {
+                    return Err(CarbideError::Internal {
+                        message: format!(
+                            "network configuration update for machine {} returned no row \
+                             at version {} while the machine record was locked",
+                            host_machine.id, snapshot.host_snapshot.network_config.version,
+                        ),
+                    }
+                    .into());
+                }
+                if api
+                    .runtime_config
+                    .dpu_config
+                    .restart_ovs_on_use_admin_network_change
+                {
+                    carbide_machine_controller::handler::process_dpu_use_admin_network_state_change(
+                        txn.as_mut(),
+                        &snapshot,
+                    )
+                    .await?;
+                }
+                network_ready = false;
+            }
         }
         instance_id
     } else {
         None
     };
     for dpu_machine in dpu_machines.iter() {
-        db::machine::advance(
-            dpu_machine,
-            &mut txn,
-            &ManagedHostState::ForceDeletion,
-            None,
-        )
-        .await?;
+        if !matches!(dpu_machine.state.value, ManagedHostState::ForceDeletion) {
+            db::machine::advance(
+                dpu_machine,
+                &mut txn,
+                &ManagedHostState::ForceDeletion,
+                None,
+            )
+            .await?;
+        }
     }
+
+    // ForceDeletion bypasses the controller's provisioning-exit cleanup.
+    // Preserve independently requested suppressions unless their deletion is opted into.
+    let bmc_macs = host_machine
+        .iter()
+        .filter_map(|machine| machine.status.bmc_info.mac)
+        .chain(
+            dpu_machines
+                .iter()
+                .filter_map(|machine| machine.status.bmc_info.mac),
+        )
+        .collect::<Vec<_>>();
+    db::bmc_suppression::delete_many_for_source(
+        &mut txn,
+        &bmc_macs,
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await?;
 
     if let Some(instance_id) = instance_id {
         // Record the current IB memberships after acquiring the Machine lock,
@@ -890,9 +1080,23 @@ pub(crate) async fn admin_force_delete_machine(
     // avoid holding a long-running transaction while we issue redfish calls.
     txn.commit().await?;
 
+    if !network_ready {
+        response.all_done = false;
+        return Ok(Response::new(response));
+    }
+
     // Note: The following deletion steps are all ordered in an idempotent fashion
     if let Some(instance_id) = instance_id {
-        crate::handlers::instance::force_delete_instance(instance_id, api, &mut response).await?;
+        crate::handlers::instance::force_delete_instance(
+            instance_id,
+            api,
+            &mut response,
+            request.allow_delete_with_orphaned_dpf_crds,
+        )
+        .await?;
+        if !response.all_done {
+            return Ok(Response::new(response));
+        }
     }
 
     if let Some(machine) = &host_machine {
@@ -1024,20 +1228,34 @@ pub(crate) async fn admin_force_delete_machine(
         if let Some(ref ops) = api.dpf_sdk
             && !dpu_machines.is_empty()
         {
-            let host_dpf_id = machine
-                .dpf_id()
-                .ok_or_else(|| CarbideError::internal("BMC MAC not set for host".to_string()))?;
-            let dpu_device_names: Vec<String> = dpu_machines
-                .iter()
-                .map(|d| {
-                    d.dpf_id().ok_or_else(|| {
-                        CarbideError::internal("BMC MAC not set for DPU".to_string())
+            let cleanup_result: Result<(), CarbideError> = async {
+                let host_dpf_id = machine.dpf_id().ok_or_else(|| {
+                    CarbideError::internal("BMC MAC not set for host".to_string())
+                })?;
+                let dpu_device_names: Vec<String> = dpu_machines
+                    .iter()
+                    .map(|dpu| {
+                        dpu.dpf_id().ok_or_else(|| {
+                            CarbideError::internal("BMC MAC not set for DPU".to_string())
+                        })
                     })
-                })
-                .collect::<Result<_, _>>()?;
-            ops.force_delete_host(&host_dpf_id, &dpu_device_names)
-                .await
-                .map_err(CarbideError::DpfError)?;
+                    .collect::<Result<_, _>>()?;
+                ops.force_delete_host(&host_dpf_id, &dpu_device_names)
+                    .await
+                    .map_err(CarbideError::DpfError)
+            }
+            .await;
+
+            if let Err(error) = cleanup_result {
+                if !request.allow_delete_with_orphaned_dpf_crds {
+                    return Err(error.into());
+                }
+                tracing::warn!(
+                    machine_id = %machine.id,
+                    error = %error,
+                    "Continuing force deletion with explicitly orphaned DPF resources",
+                );
+            }
         }
     }
 
@@ -1114,7 +1332,6 @@ fn snapshot_map_to_rpc_machines(
         HostMachineId,
         Vec<db::dpa_interface::SpectrumXDeviceCapability>,
     >,
-    mut lldp_neighbors_by_machine: HashMap<MachineId, Vec<model::lldp::LldpNeighbor>>,
 ) -> rpc::MachineList {
     let mut result = rpc::MachineList {
         machines: Vec::with_capacity(snapshots.len()),
@@ -1131,10 +1348,6 @@ fn snapshot_map_to_rpc_machines(
         if let Some(mut rpc_machine) =
             snapshot.into_rpc_machine_state(dpu_machine_id.as_ref(), sla_config)
         {
-            if let Some(neighbors) = lldp_neighbors_by_machine.remove(&machine_id) {
-                rpc_machine.status.get_or_insert_default().lldp_neighbors =
-                    neighbors.into_iter().map(Into::into).collect();
-            }
             if let Some(spectrum_x_capabilities) = spectrum_x_capabilities
                 && !spectrum_x_capabilities.is_empty()
             {
@@ -1219,9 +1432,9 @@ pub(crate) async fn get_machine_position_info(
     }
     let mut txn = api.txn_begin().await?;
 
-    // Translate the machine IDs to BMC IPs.
-    // Note: Machines without linked BMC interfaces will be silently omitted from the result,
-    // consistent with how find_machines_by_ids handles missing machines.
+    // Translate the machine IDs to BMC IPs. Machines without a usable selected
+    // BMC interface are omitted, consistent with how find_machines_by_ids
+    // handles missing machines.
     let pairs =
         db::machine_topology::find_machine_bmc_pairs_by_machine_id(&mut txn, request.machine_ids)
             .await?;
@@ -1265,12 +1478,15 @@ pub(crate) async fn get_machine_position_info(
             .iter()
             .map(|(machine_id, ip_opt)| {
                 let endpoint = ip_opt.as_ref().and_then(|ip| as_hashmap.get(ip));
+                let position = endpoint
+                    .map(|ep| ep.report.rack_position())
+                    .unwrap_or_default();
                 rpc::MachinePositionInfo {
                     machine_id: Some(*machine_id),
-                    physical_slot_number: endpoint.and_then(|ep| ep.report.physical_slot_number),
-                    compute_tray_index: endpoint.and_then(|ep| ep.report.compute_tray_index),
-                    topology_id: endpoint.and_then(|ep| ep.report.topology_id),
-                    revision_id: endpoint.and_then(|ep| ep.report.revision_id),
+                    physical_slot_number: position.physical_slot_number,
+                    compute_tray_index: position.compute_tray_index,
+                    topology_id: position.topology_id,
+                    revision_id: position.revision_id,
                     switch_id: endpoint.and_then(|ep| ep.report.switch_id),
                     power_shelf_id: endpoint.and_then(|ep| ep.report.power_shelf_id),
                 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,33 +61,74 @@ func TestRPCServerMetrics_StreamServerInterceptor(t *testing.T) {
 	))
 }
 
-func TestServer_ServesAndShutsDown(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	metric := prometheus.NewGauge(prometheus.GaugeOpts{Name: "flow_test_metric"})
-	registry.MustRegister(metric)
-	metric.Set(1)
+func TestServer_Serve(t *testing.T) {
+	tests := []struct {
+		name            string
+		method          string
+		wantStatus      int
+		wantAllow       string
+		wantBody        string
+		wantCollections int32
+	}{
+		{
+			name:            "GET collects metrics",
+			method:          http.MethodGet,
+			wantStatus:      http.StatusOK,
+			wantBody:        "# HELP flow_test_metric Test metric.\n# TYPE flow_test_metric gauge\nflow_test_metric 1\n",
+			wantCollections: 1,
+		},
+		{
+			name:            "HEAD returns no response body",
+			method:          http.MethodHead,
+			wantStatus:      http.StatusOK,
+			wantCollections: 1,
+		},
+		{
+			name:       "POST is rejected before collection",
+			method:     http.MethodPost,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantAllow:  "GET, HEAD",
+			wantBody:   "Method Not Allowed\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var collections atomic.Int32
+			registry := prometheus.NewRegistry()
+			registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: "flow_test_metric",
+				Help: "Test metric.",
+			}, func() float64 {
+				collections.Add(1)
+				return 1
+			}))
 
-	server, err := NewServer("127.0.0.1:0", registry)
-	require.NoError(t, err)
+			server, err := NewServer("127.0.0.1:0", registry)
+			require.NoError(t, err)
+			serveErr := make(chan error, 1)
+			go func() { serveErr <- server.Serve() }()
+			t.Cleanup(func() {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				require.NoError(t, server.Shutdown(shutdownCtx))
+				require.NoError(t, <-serveErr)
+			})
 
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- server.Serve() }()
+			request, err := http.NewRequestWithContext(t.Context(), test.method, "http://"+server.Addr().String()+"/metrics", nil)
+			require.NoError(t, err)
+			client := &http.Client{Timeout: 5 * time.Second}
+			response, err := client.Do(request)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
 
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+server.Addr().String()+"/metrics", nil)
-	require.NoError(t, err)
-	client := &http.Client{Timeout: 5 * time.Second}
-	response, err := client.Do(request)
-	require.NoError(t, err)
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, response.StatusCode)
-	assert.Contains(t, string(body), "flow_test_metric 1")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	require.NoError(t, server.Shutdown(shutdownCtx))
-	require.NoError(t, <-serveErr)
+			assert.Equal(t, test.wantStatus, response.StatusCode)
+			assert.Equal(t, test.wantAllow, response.Header.Get("Allow"))
+			assert.Equal(t, test.wantBody, string(body))
+			assert.Equal(t, test.wantCollections, collections.Load())
+		})
+	}
 }
 
 func TestNewRegistry_RegistersRuntimeAndRPCMetrics(t *testing.T) {

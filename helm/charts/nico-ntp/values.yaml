@@ -41,6 +41,10 @@ externalService:
   # Service's primary family (the first entry) cannot be changed in place.
   ipFamilyPolicy: ""
   ipFamilies: []
+  # Local preserves client source IPs. MetalLB only lets Local Services share
+  # an IP with Services that select the same pods, so each NTP replica keeps
+  # its own IP under Local. Set "" to use the Kubernetes default (Cluster).
+  externalTrafficPolicy: Local
   # Per-pod annotations applied to the corresponding nico-ntp-external-{i}
   # LoadBalancer Service. The list is indexed in pod order; entry [0] goes on
   # the Service backing pod nico-ntp-0, [1] on nico-ntp-1, etc.

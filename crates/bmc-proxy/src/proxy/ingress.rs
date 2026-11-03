@@ -42,15 +42,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::add_extension::AddExtensionLayer;
 
 use crate::config::TlsConfig;
-use crate::proxy::{BmcProxyError, BmcProxyState};
-
-/// Successful loads schedule the next TLS configuration reload after this
-/// interval. A new TCP connection triggers the reload once it is due.
-const TLS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
-
-/// After a failed reload, wait at least this long before retrying on a new TCP
-/// connection. Keep using the previous identity and client trust roots.
-const TLS_RELOAD_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+use crate::proxy::{BmcProxyError, BmcProxyState, TLS_REFRESH_INTERVAL, TLS_RELOAD_RETRY_INTERVAL};
 
 /// Deadline for completing TLS, measured from TCP acceptance and including any
 /// reload wait. Expiry closes the connection. This timer does not limit the
@@ -776,6 +768,7 @@ mod tests {
             identity_keyfile_path: key_path.to_str().expect("key path").to_string(),
             root_cafile_path: format!("{fixtures}ca.crt"),
             admin_root_cafile_path: format!("{fixtures}ca.crt"),
+            switch: None,
         };
         let mut tls = RefreshableTlsAcceptor::new(config.clone())
             .await

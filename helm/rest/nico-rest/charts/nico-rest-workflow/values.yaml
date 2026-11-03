@@ -80,6 +80,16 @@ config:
       caPath: /var/secrets/temporal/certs/ca.crt
       disableHostVerification: false
     encryptionKeyPath: /var/secrets/temporal/encryption-key
+    # Only the site worker reads these, since it serves the `site` namespace.
+    siteNamespace:
+      # Retention the site worker applies to the `site` namespace on startup. It covers every
+      # closed workflow, so it's how long failed, canceled, terminated, and timed out runs are kept.
+      # `0` leaves the namespace retention unchanged.
+      retention: 72h
+      # How long a successful inventory workflow is kept before the site worker deletes it. It has
+      # to be shorter than a nonzero `retention`, otherwise the cloud and site workers exit on
+      # startup. `0` keeps it for the full `retention`.
+      successfulInventoryRetention: 24h
   # Site Manager endpoint the cloud worker calls to rotate Site Agent Temporal certificates.
   siteManager:
     svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"

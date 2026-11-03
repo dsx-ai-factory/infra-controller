@@ -490,8 +490,31 @@ func (f *NICoServerImpl) FindMachineIds(ctx context.Context, req *corev1.Machine
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
 	}
 	response := corev1.MachineIdList{}
-	for id := range f.m {
+	for id, m := range f.m {
+		// Mirror core: DPUs are excluded unless include_dpus is set, and
+		// hosts are excluded when exclude_hosts is set.
+		isDpu := m.MachineType == corev1.MachineType_DPU
+		if (isDpu && !req.IncludeDpus) || (!isDpu && req.ExcludeHosts) {
+			continue
+		}
 		response.MachineIds = append(response.MachineIds, &corev1.MachineId{Id: id})
+	}
+
+	return &response, nil
+}
+
+func (f *NICoServerImpl) FindMachinesByIds(ctx context.Context, req *corev1.MachinesByIdsRequest) (*corev1.MachineList, error) {
+	if req == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
+	}
+	response := corev1.MachineList{}
+	for _, mid := range req.MachineIds {
+		if mid == nil {
+			continue
+		}
+		if m, ok := f.m[mid.Id]; ok {
+			response.Machines = append(response.Machines, m)
+		}
 	}
 
 	return &response, nil
@@ -1055,6 +1078,7 @@ func (f *NICoServerImpl) DeleteAllExpectedRacks(ctx context.Context, req *emptyp
 // LoadTestMachines loads test machines into the server
 func (f *NICoServerImpl) LoadTestMachines() {
 	nid := uuid.NewString()
+	dpuID := uuid.NewString()
 
 	var memSize uint32 = 16384
 
@@ -1062,10 +1086,43 @@ func (f *NICoServerImpl) LoadTestMachines() {
 		Id:    &corev1.MachineId{Id: nid},
 		State: "Ready",
 		Status: &corev1.MachineStatus{
+			LldpNeighbors: []*corev1.InterfaceLldp{
+				{
+					MacAddress: "02:00:00:00:01:B0",
+					Lldp: &corev1.LldpSwitchData{
+						Name:            "mock-leaf-switch-01",
+						Description:     "Mock LLDP neighbor (leaf switch)",
+						LocalPort:       "enp1s0np0",
+						IpAddress:       []string{"10.0.2.194", "fe80::ff:fe00:1d4"},
+						IdType:          "mac",
+						IdValue:         "02:00:00:00:01:d4",
+						RemotePortType:  "ifname",
+						RemotePortValue: "swp1",
+						MedInventory: &corev1.LldpMedInventory{
+							Serial:       getStrPtr("SN0000000002"),
+							Manufacturer: getStrPtr("https://www.mellanox.com"),
+							Model:        getStrPtr("BlueField-3 DPU"),
+						},
+					},
+				},
+				{
+					MacAddress: "02:00:00:00:01:B1",
+					Lldp: &corev1.LldpSwitchData{
+						Name:            "mock-leaf-switch-02",
+						Description:     "Mock LLDP neighbor (leaf switch)",
+						LocalPort:       "enp1s0np1",
+						IpAddress:       []string{"10.0.2.195"},
+						IdType:          "mac",
+						IdValue:         "02:00:00:00:01:d5",
+						RemotePortType:  "ifname",
+						RemotePortValue: "swp2",
+					},
+				},
+			},
 			Interfaces: []*corev1.MachineInterface{
 				{
 					Id:                   &corev1.MachineInterfaceId{Value: uuid.NewString()},
-					AttachedDpuMachineId: &corev1.MachineId{Id: uuid.NewString()},
+					AttachedDpuMachineId: &corev1.MachineId{Id: dpuID},
 					MachineId:            &corev1.MachineId{Id: nid},
 					SegmentId:            &corev1.NetworkSegmentId{Value: uuid.NewString()},
 					Hostname:             "nico.nvidia.com",
@@ -1300,6 +1357,70 @@ func (f *NICoServerImpl) LoadTestMachines() {
 			},
 		},
 	}
+
+	// DPU attached to the host above. Core excludes DPUs from FindMachineIds
+	// unless include_dpus is set, so it is only reachable through
+	// FindMachinesByIds (the GetDpuMachines path).
+	f.m[dpuID] = &corev1.Machine{
+		Id:          &corev1.MachineId{Id: dpuID},
+		MachineType: corev1.MachineType_DPU,
+		State:       "Ready",
+		Status: &corev1.MachineStatus{
+			DpuAgentVersion:         getStrPtr("mock-dpu-agent"),
+			AssociatedHostMachineId: &corev1.MachineId{Id: nid},
+			LldpNeighbors: []*corev1.InterfaceLldp{
+				{
+					MacAddress: "02:00:00:00:02:A0",
+					Lldp: &corev1.LldpSwitchData{
+						Name:            "mock-dpu-leaf-switch-01",
+						Description:     "Mock LLDP neighbor seen from the DPU",
+						LocalPort:       "p0",
+						IpAddress:       []string{"10.0.3.1"},
+						IdType:          "mac",
+						IdValue:         "02:00:00:00:02:d4",
+						RemotePortType:  "ifname",
+						RemotePortValue: "swp10",
+					},
+				},
+				{
+					MacAddress: "02:00:00:00:02:A1",
+					Lldp: &corev1.LldpSwitchData{
+						Name:            "mock-peer-dpu-01",
+						Description:     "Mock LLDP-MED neighbor seen from the DPU (another DPU)",
+						LocalPort:       "p1",
+						IpAddress:       []string{"10.0.3.2"},
+						IdType:          "mac",
+						IdValue:         "02:00:00:00:02:d5",
+						RemotePortType:  "mac",
+						RemotePortValue: "02:00:00:00:02:d5",
+						MedInventory: &corev1.LldpMedInventory{
+							Serial:       getStrPtr("SN0000000003"),
+							Manufacturer: getStrPtr("https://www.mellanox.com"),
+							Model:        getStrPtr("BlueField-3 DPU"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Second host that has not reported any LLDP neighbors, so the REST
+	// `metadata.lldpNeighbors: []` case is reachable in the dev environment.
+	quietID := uuid.NewString()
+	f.m[quietID] = &corev1.Machine{
+		Id:    &corev1.MachineId{Id: quietID},
+		State: "Ready",
+		Status: &corev1.MachineStatus{
+			DiscoveryInfo: &corev1.DiscoveryInfo{
+				MachineType: "server",
+				DmiData: &corev1.DmiData{
+					SysVendor:     "Mock Vendor",
+					ProductName:   "Mock Server (no LLDP)",
+					ProductSerial: "MOCK-NO-LLDP-0001",
+				},
+			},
+		},
+	}
 }
 
 // ~~~~~ Machine Identity mock methods ~~~~~ //
@@ -1328,11 +1449,6 @@ func generateES256KeyMaterial() (*identityKeyMaterial, error) {
 	}, nil
 }
 
-// jwksDocumentForKey returns a one-key JWKS JSON document.
-func jwksDocumentForKey(km *identityKeyMaterial, use string) (string, error) {
-	return jwksDocumentForKeys([]*identityKeyMaterial{km}, use)
-}
-
 // jwksDocumentForKeys returns a JWKS JSON document for the supplied keys
 // (two during a rotation overlap window; one in steady state).
 func jwksDocumentForKeys(kms []*identityKeyMaterial, use string) (string, error) {
@@ -1341,9 +1457,15 @@ func jwksDocumentForKeys(kms []*identityKeyMaterial, use string) (string, error)
 		if km == nil || km.privateKey == nil {
 			return "", fmt.Errorf("nil key material")
 		}
-		pub := km.privateKey.PublicKey
-		xb := pub.X.FillBytes(make([]byte, p256CoordinateLen))
-		yb := pub.Y.FillBytes(make([]byte, p256CoordinateLen))
+		encoded, err := km.privateKey.PublicKey.Bytes()
+		if err != nil {
+			return "", fmt.Errorf("encode public key: %w", err)
+		}
+		if len(encoded) != 1+2*p256CoordinateLen {
+			return "", fmt.Errorf("expected P-256 public key, got %d encoded bytes", len(encoded))
+		}
+		xb := encoded[1 : 1+p256CoordinateLen]
+		yb := encoded[1+p256CoordinateLen:]
 		jwks = append(jwks, map[string]string{
 			"kty": "EC",
 			"crv": "P-256",

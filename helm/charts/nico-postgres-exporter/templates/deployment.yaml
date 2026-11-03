@@ -1,0 +1,89 @@
+{{- if and .Values.enabled .Values.exporter.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nico-postgres-exporter.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nico-postgres-exporter.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nico-postgres-exporter.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-postgres-exporter.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: exporter
+          image: {{ printf "%s:%s" (required "image.repository is required when the exporter is enabled" .Values.image.repository) (required "image.tag is required when the exporter is enabled" .Values.image.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/nico-postgres-exporter"]
+          env:
+            - name: PGHOST
+              value: {{ required "database.host is required when the exporter is enabled" .Values.database.host | quote }}
+            - name: PGPORT
+              value: {{ .Values.database.port | quote }}
+            - name: PGDATABASE
+              value: {{ required "database.name is required when the exporter is enabled" .Values.database.name | quote }}
+            - name: PGSSLMODE
+              value: {{ .Values.database.sslMode | quote }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "database.credentialsSecret is required when the exporter is enabled" .Values.database.credentialsSecret | quote }}
+                  key: {{ .Values.database.usernameKey | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.credentialsSecret | quote }}
+                  key: {{ .Values.database.passwordKey | quote }}
+            {{- if .Values.database.sslRootCertSecret.name }}
+            - name: PGSSLROOTCERT
+              value: /var/run/secrets/postgres-ca/ca.crt
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.database.sslRootCertSecret.name }}
+          volumeMounts:
+            - name: postgres-ca
+              mountPath: /var/run/secrets/postgres-ca
+              readOnly: true
+          {{- end }}
+      {{- if .Values.database.sslRootCertSecret.name }}
+      volumes:
+        - name: postgres-ca
+          secret:
+            secretName: {{ .Values.database.sslRootCertSecret.name | quote }}
+            items:
+              - key: {{ .Values.database.sslRootCertSecret.key | quote }}
+                path: ca.crt
+      {{- end }}
+{{- end }}

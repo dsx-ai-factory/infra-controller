@@ -9,6 +9,7 @@ package ipam
 import (
 	"context"
 	dbsql "database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -112,7 +113,12 @@ func TestBundbGetIDB(t *testing.T) {
 	defer dbbun.close()
 	testSetupSchema(t, dbbun)
 	tx, err := dbSession.BeginTx(ctx, &dbsql.TxOptions{})
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, dbsql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 	dbbun.userTx = &tx
 	assert.Nil(t, err)
 	tests := []struct {
@@ -153,7 +159,12 @@ func TestBundbBeginTx(t *testing.T) {
 	defer dbbun.close()
 	testSetupSchema(t, dbbun)
 	tx, err := dbSession.BeginTx(ctx, &dbsql.TxOptions{})
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, dbsql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 	dbbun.userTx = &tx
 	assert.Nil(t, err)
 	tests := []struct {
@@ -180,7 +191,7 @@ func TestBundbBeginTx(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectUserTx, temptx == &tx)
 			if !tc.expectUserTx {
-				temptx.Rollback()
+				assert.NoError(t, temptx.Rollback())
 			}
 			if tc.zeroUserTx {
 				tc.Bundb.userTx = nil
@@ -282,7 +293,7 @@ func TestBundbReadPrefix(t *testing.T) {
 	assert.Nil(t, err)
 	defer dbbun.close()
 	testSetupSchema(t, dbbun)
-	dbbun.DeleteAllPrefixesFromAllNamespaces(ctx)
+	require.NoError(t, dbbun.DeleteAllPrefixesFromAllNamespaces(ctx))
 	dumpConnectionCount(t, dbbun)
 	db := dbbun.db
 	tx, err := db.BeginTx(ctx, &dbsql.TxOptions{})
@@ -312,7 +323,7 @@ func TestBundbReadPrefix(t *testing.T) {
 	p, err = apiDbSession.ReadPrefix(ctx, "12.0.0.0/16", "a")
 	assert.NotNil(t, err)
 	t.Logf("error: %v\n", err)
-	ps, err = apiDbSession.ReadAllPrefixes(ctx, "a")
+	_, err = apiDbSession.ReadAllPrefixes(ctx, "a")
 	assert.NotNil(t, err)
 	t.Logf("error: %v\n", err)
 	dumpConnectionCount(t, dbbun)
@@ -325,7 +336,7 @@ func TestBundbReadAllPrefixes(t *testing.T) {
 	assert.Nil(t, err)
 	defer dbbun.close()
 	testSetupSchema(t, dbbun)
-	dbbun.DeleteAllPrefixesFromAllNamespaces(ctx)
+	require.NoError(t, dbbun.DeleteAllPrefixesFromAllNamespaces(ctx))
 	dumpConnectionCount(t, dbbun)
 	db := dbbun.db
 	tx, err := db.BeginTx(ctx, &dbsql.TxOptions{})
@@ -357,11 +368,12 @@ func TestBundbReadAllPrefixes(t *testing.T) {
 	require.Equal(t, 0, len(ps))
 
 	err = tx.Commit()
-	p, err = apiDbSession.CreatePrefix(ctx, prefix, prefix.Namespace)
+	require.NoError(t, err)
+	_, err = apiDbSession.CreatePrefix(ctx, prefix, prefix.Namespace)
 	require.NotNil(t, err)
 	_, err = apiDbSession.DeletePrefix(ctx, prefix, prefix.Namespace)
 	require.NotNil(t, err)
-	ps, err = apiDbSession.ReadAllPrefixCidrs(ctx, "")
+	_, err = apiDbSession.ReadAllPrefixCidrs(ctx, "")
 	require.NotNil(t, err)
 	_, err = apiDbSession.ReadAllPrefixes(ctx, "")
 	require.NotNil(t, err)
@@ -378,7 +390,7 @@ func TestBundbUpdatePrefix(t *testing.T) {
 	assert.Nil(t, err)
 	defer dbbun.close()
 	testSetupSchema(t, dbbun)
-	dbbun.DeleteAllPrefixesFromAllNamespaces(ctx)
+	require.NoError(t, dbbun.DeleteAllPrefixesFromAllNamespaces(ctx))
 	dumpConnectionCount(t, dbbun)
 
 	tx, err := dbSession.BeginTx(ctx, &dbsql.TxOptions{})
@@ -431,7 +443,7 @@ func TestBundbConcurrentAcquirePrefix(t *testing.T) {
 	dumpConnectionCount(t, dbbun)
 	assert.Nil(t, err)
 
-	dbbun.DeleteAllPrefixesFromAllNamespaces(ctx)
+	require.NoError(t, dbbun.DeleteAllPrefixesFromAllNamespaces(ctx))
 
 	ipamerBun := NewWithStorage(dbbun)
 
@@ -474,7 +486,7 @@ func TestBundbConcurrentAcquireIP(t *testing.T) {
 	testSetupSchema(t, dbbun)
 
 	dumpConnectionCount(t, dbbun)
-	dbbun.DeleteAllPrefixesFromAllNamespaces(ctx)
+	require.NoError(t, dbbun.DeleteAllPrefixesFromAllNamespaces(ctx))
 
 	ipamerBun := NewWithStorage(dbbun)
 	const parentCidr = "2.7.0.0/16"

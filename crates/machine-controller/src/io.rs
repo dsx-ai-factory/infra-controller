@@ -177,6 +177,7 @@ impl StateControllerIO for MachineStateControllerIO {
                 MachineState::Discovered { .. } => "discovered",
                 MachineState::WaitingForLockdown { .. } => "waitingforlockdown",
                 MachineState::EnableIpmiOverLan => "enableipmioverlan",
+                MachineState::DisableOnboardNics { .. } => "disableonboardnics",
                 MachineState::Measuring { .. } => "machinestatemeasuring",
                 MachineState::SpdmMeasuring { .. } => "machinestatespdmmeasuring",
             }
@@ -354,7 +355,7 @@ impl StateControllerIO for MachineStateControllerIO {
             ManagedHostState::Maintenance { operation, .. } => {
                 let op = match operation {
                     MachineMaintenanceOperation::PowerOn => "power_on",
-                    MachineMaintenanceOperation::PowerOff => "power_off",
+                    MachineMaintenanceOperation::PowerOff { .. } => "power_off",
                     MachineMaintenanceOperation::Reset => "reset",
                     MachineMaintenanceOperation::ChassisReset { .. } => "chassis_reset",
                 };

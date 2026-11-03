@@ -16,11 +16,10 @@
  */
 use std::path::PathBuf;
 
-use eyre::Context;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::pretty_cmd;
+use super::{run_ip_command, use_networking_fixture};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct IpLink {
@@ -50,7 +49,7 @@ impl IpLink {
         })
     }
     async fn ip_links() -> eyre::Result<String> {
-        if cfg!(test) || std::env::var("NO_DPU_ARMOS_INTERFACE").is_ok() {
+        if use_networking_fixture("NO_DPU_ARMOS_INTERFACE") {
             let test_data_dir = PathBuf::from(crate::dpu::ARMOS_TEST_DATA_DIR);
 
             std::fs::read_to_string(test_data_dir.join("iplink.json")).map_err(|e| {
@@ -58,18 +57,9 @@ impl IpLink {
                 eyre::eyre!("could not read iplink.json: {}", e)
             })
         } else {
-            let mut cmd = tokio::process::Command::new("bash");
-            cmd.args(vec!["-c", "ip -j link show"]);
-            cmd.kill_on_drop(true);
-
-            let cmd_str = pretty_cmd(cmd.as_std());
-
-            let output = tokio::time::timeout(crate::dpu::COMMAND_TIMEOUT, cmd.output())
-                .await
-                .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
-
-            let fout = String::from_utf8_lossy(&output.stdout).to_string();
-            Ok(fout)
+            let mut cmd = tokio::process::Command::new("ip");
+            cmd.args(["-j", "link", "show"]);
+            run_ip_command(cmd).await
         }
     }
 }

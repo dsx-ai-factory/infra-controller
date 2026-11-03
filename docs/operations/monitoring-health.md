@@ -114,17 +114,31 @@ client_key = "/var/run/secrets/spiffe.io/tls.key"
 api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
 ```
 
-Static BMC endpoints are supported for local, mock, or special deployments:
+Static BMC endpoints use a shared credentials file for local, mock, or special deployments:
 
 ```toml
+[endpoint_sources]
+static_credentials_file = "/run/secrets/bmc/credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.0.1"
 port = 443
 mac = "aa:bb:cc:dd:ee:ff"
-username = "admin"
-password = "secret"
+credentials_profile = "bmc"
 labels = { site = "rno-dev7", cluster = "cluster-01", environment = "development" }
 ```
+
+Static endpoints reject inline `username` and `password` fields. Move those
+values into the shared file and select a profile, or supply a per-MAC override.
+The JSON file contains optional `profiles` (named username/password sets) and
+`overrides` (partial credentials keyed by MAC, ignoring letter case). Each field
+uses the per-MAC override first, then the explicitly selected profile; there is
+no default profile. A username must resolve; passwords are optional.
+
+Replace the file atomically. File events and 60-second polling reload the cached
+credentials; failed reloads retain the last valid snapshot. Collectors refresh
+credentials after authentication fails. Target lists and profile selections in
+the main configuration still require a restart.
 
 Configure direct switch host endpoints separately when desired:
 
@@ -133,16 +147,14 @@ Configure direct switch host endpoints separately when desired:
 ip = "10.0.1.2"
 port = 443
 mac = "11:22:33:44:55:77"
-username = "admin"
-password = "secret"
+credentials_profile = "switch"
 switch = { serial = "SN-SWITCH-HOST-001", is_primary = true }
 ```
 
 This list is optional. Each entry requires `switch` metadata. The
 `endpoint_role` field defaults to `host`, and only `host` is accepted in this
 list. Switch host entries under `static_bmc_endpoints` use the same `host`
-default when `endpoint_role` is omitted. MAC addresses in
-`static_switch_host_endpoints` must be unique across both static lists.
+default when `endpoint_role` is omitted. MAC addresses must be unique across both static lists.
 
 For a switch host entry, `port` selects the NVUE REST HTTPS port and defaults
 to `443`. The gNMI and NMX-C ports use the global
@@ -275,16 +287,77 @@ On the Prometheus endpoint, series carry entity labels (`processor_id`,
 standard identity labels added by the sink (`machine_id`, `endpoint_ip`,
 `serial_number`, `rack_id`, ...), with `collector_type="metrics_collector"`.
 
-The OTLP sink (`[sinks.otlp]`) emits the same metric *names*, but places the
-identity context on OTLP resource attributes rather than datapoint labels;
-whether those appear as query labels depends on the backend (VictoriaMetrics,
-for example, flattens resource attributes onto every series).
+The OTLP sink (`[sinks.otlp]`) emits the same metric *names* and puts the
+identity context in two places: on OTLP resource attributes, and on each
+datapoint under the Prometheus sink's label names, custom endpoint labels
+included. A backend that keeps resource attributes off its series, such as the
+OpenTelemetry Collector's Prometheus exporter with its default settings, still
+gets every identity label. A backend that flattens resource attributes onto
+every series, such as VictoriaMetrics, also shows the resource attributes whose
+names differ, for example `switch_serial_number` beside `serial_number`, with
+the same value.
 
 Entity discovery runs as its own periodic task (`[collectors.discovery]`,
 always on) that walks each BMC's Redfish Systems and Chassis trees and
 publishes an inventory snapshot; the metrics collector only reads that
 snapshot. Until the first discovery pass completes, the metrics collector
 emits nothing.
+
+### OTLP Ingress and Egress Rates
+
+The hardware health service exposes ingress and acknowledged egress counters on
+its `/metrics` endpoint. Each counter has a `target` label containing the
+configured OTLP endpoint and a `signal` label with the value `logs` or `metrics`.
+Each configured target exposes both counters for both signals, including when
+the target is idle. The counters are cumulative and reset to zero when the
+service restarts. Their names are fixed and do not use `metrics.prefix`.
+
+| Counter | Meaning |
+| --- | --- |
+| `carbide_health_otlp_ingress_records_total` | Log records or metric samples accepted into a target queue, including replacements and insertions that evict an older entry. |
+| `carbide_health_otlp_egress_records_total` | Log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections. |
+
+For `metrics`, each exported sample contributes one data point to the request.
+Filtered events and collection markers do not count as ingress. Sending the same
+record to multiple targets increments ingress once for each target. Failed
+attempts do not count as egress; successful retries and split requests count only
+their acknowledged records.
+
+Partial-success responses are not retried. If the receiver reports a negative
+rejection count or rejects more records or data points than the request contains,
+the service logs a warning and does not increment egress for that response.
+
+Calculate ingress in records per second:
+
+```promql
+sum by (target, signal) (
+  rate(carbide_health_otlp_ingress_records_total[5m])
+)
+```
+
+Calculate acknowledged egress in records per second:
+
+```promql
+sum by (target, signal) (
+  rate(carbide_health_otlp_egress_records_total[5m])
+)
+```
+
+Both queries sum rates across service instances with the same target and signal.
+The units are log records per second for `logs` and metric samples or data points
+per second for `metrics`. The `[5m]` range averages each rate over five minutes.
+Add scrape-label selectors to restrict either query to a specific instance.
+
+Ingress minus egress is not queue growth: queue replacements, capacity evictions,
+receiver rejections, export failures, and buffered or in-flight records affect
+the difference. Compare the rates with `carbide_health_otlp_queue_depth`,
+`carbide_health_otlp_queue_dropped_total`, and
+`carbide_health_otlp_export_failures_total`, plus the replacement counters
+`{prefix}_otlp_sink_replaced_total` and
+`{prefix}_otlp_sink_metrics_replaced_total`, where `{prefix}` is `metrics.prefix`.
+Queue depth excludes buffered and in-flight batches. Egress measures receiver
+acknowledgment, not unique delivery or downstream storage: a receiver can accept
+a request whose response is lost before a retry.
 
 ### Hardware Health Logs
 

@@ -3,6 +3,8 @@ templates:
   - certificate.yaml
 tests:
   - it: should create a certificate with default values
+    release:
+      namespace: nico-system
     asserts:
       - isKind:
           of: Certificate
@@ -12,6 +14,12 @@ tests:
       - equal:
           path: spec.secretName
           value: nico-machine-a-tron-mat-0-tls
+      - contains:
+          path: spec.dnsNames
+          content: mat-mock.nvidia.com
+      - contains:
+          path: spec.dnsNames
+          content: nico-machine-a-tron-mat-0-bmc-mock.nico-system.svc.cluster.local
 
   - it: should use custom certificate settings
     set:
@@ -22,6 +30,12 @@ tests:
     asserts:
       - isKind:
           of: Certificate
+      - contains:
+          path: spec.dnsNames
+          content: extra.example.com
+      - notContains:
+          path: spec.dnsNames
+          content: mat-mock.nvidia.com
 
   - it: should create per-pod certificates in multi-pod mode
     set:

@@ -97,7 +97,7 @@ Reports BMC Redfish leak detector observations. The target identifies the
 detector. Warning and critical detector states use the `LeakDetector`
 classification, while a detector that cannot be read uses `SensorFailure`.
 Configured leak processing can derive tray-level and rack-level alerts with the
-`Leak` classification from these observations.
+`TrayLeak` and `RackLeak` classifications from these observations.
 
 ### `NvueLeakage`
 
@@ -110,7 +110,9 @@ unavailable, missing, or unrecognized sensor state uses `SensorFailure`.
 
 The DSX Exchange consumer maps Building Management System (BMS) leak events to
 rack health reports. The target is the rack ID. Active events prevent
-allocations and use the `SensorCritical` and `Hardware` classifications.
+allocations and use the `SensorCritical` and `Hardware` classifications. The
+leak-detection probe also uses `RackLeak`; the sensor-fault probe does not,
+because it does not establish that a leak is active.
 
 ### `BmsLeakDetectRack`
 
@@ -120,10 +122,6 @@ Indicates that BMS reported a rack-level leak.
 
 Indicates that BMS reported a rack-level leak sensor fault.
 
-### `BmsLeakDetectRackTray`
-
-Indicates that BMS reported a rack-tray leak.
-
 ## NVLink domain health probe identifiers
 
 ### `NmxControllerHealth`
@@ -131,6 +129,78 @@ Indicates that BMS reported a rack-tray leak.
 Indicates that NMX-C reported `Unhealthy` or `UnhealthyDbCorrupted` controller
 health for an NVLink domain. A `Healthy` report clears the probe. `Degraded` and
 `Unknown` do not generate a domain health report.
+
+## NVLink GPU health probe identifiers
+
+### `NvlinkUnhealthy`
+
+Raised when NMX-C reports a GPU in the host's NVLink inventory as `Degraded`,
+`NoNvlink`, or `DegradedBw`. The NVLink partition monitor writes a `Merge` report
+under the source `nvlink-partition-monitor`. Its alerts carry
+[`PreventAllocations`](health_alert_classifications.md#preventallocations),
+blocking normal tenant allocation while they remain in aggregate host health.
+Targeted allocation with `allow_unhealthy_machine` can bypass this health check.
+A host-level `Replace` health report takes precedence over the monitor's merge
+report. The monitor only updates its merge entry; it leaves replace overrides
+unchanged, including one with the same source name.
+
+The report carries one alert per affected GPU. Each alert's `target` is the
+GPU's NMX-C UID, and its `message` names the health state NMX-C reported
+(`degraded`, `no_nvlink`, or `degraded_bw`). An affected GPU stays in the report
+until NMX-C reports that same GPU `Healthy` and its UID still appears in the
+host's NVLink inventory. `Unknown` health, or the GPU being absent from the
+response, keeps it flagged. NMX-C represents a GPU under rediscovery as UID `0`
+with `Unknown` health, so a healthy sibling GPU never clears an affected one.
+GPUs that were never flagged create no alert while `Unknown` or absent. UID `0`
+is never treated as an identity on either side: NMX-C rows with UID `0` are
+ignored, and an inventory entry whose stored UID is `0` (an unparseable fabric
+GUID at discovery) is never evaluated. A failure of the pass's initial
+partition-list fetch or of the GPU-health query prevents reevaluation. The
+alert evaluation runs before the pass's later post-operation partition-list
+refresh, so a failure of that refresh does not mean the stored report was
+retained; it may already have been set or cleared on that pass. The two
+fetches are told apart by the `nmxc_connect_err` field of the monitor's
+per-pass metrics summary log and by the `error` label on
+`carbide_nvlink_partition_monitor_nmxc_connect_error_count`, which read
+`Failed to get NMX-C partition info list when updating db` for the later
+refresh. A failed health-report
+write leaves the stored report unchanged until the next pass retries it; each such failure increments
+`carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total`
+(label `write`: `set` or `clear`) and logs the machine ID and error. An alert
+can therefore reflect an earlier fault rather than a
+current unhealthy observation. The stored report is rewritten only when the set
+of affected GPUs or their classifications changes, so an alert's `message` label
+may lag a GPU that moves between unhealthy states until the set next changes.
+If the stored copy of an alert loses `PreventAllocations` (for example, through
+a manual edit of this source's report), the monitor restores it on the next pass
+for as long as the alert is retained, including while NMX-C reports that GPU
+`Unknown` or omits it.
+
+The monitor removes its merge report once every affected GPU's alert has
+cleared. Replacing a GPU with a different UID does not clear the old GPU's
+alert, even if the replacement reports `Healthy`. If an affected UID has left
+the host's inventory, automatic recovery cannot clear it; after confirming the
+fault was resolved, remove the report manually.
+
+To clear it manually, for example after confirming the fault was resolved
+outside NICo:
+
+```bash
+nico-admin-cli machine health-report remove <machine-id> nvlink-partition-monitor
+```
+
+This removes the whole report for that source, including all affected GPU
+alerts. If both `Replace` and `Merge` reports use this source name, the command
+removes the replace report first; run it again to remove the merge report.
+
+The monitor re-evaluates on each successful GPU-health query, which runs when
+a machine group is checked: every pass (`nvlink_config.monitor_run_interval`,
+default `60s`) for a group whose inputs changed, and otherwise at its full check
+(`nvlink_config.partition_monitor_full_check_interval`, default `10m`). If NMX-C still reports an
+unhealthy GPU matching the host's inventory, the monitor re-asserts the alert
+with a new `in_alert_since` after manual removal. Use removal for resolved
+faults whose alerts the monitor can no longer clear, such as a replaced GPU or
+a host that has left the NVLink inventory.
 
 ## DPU related health probe identifiers
 

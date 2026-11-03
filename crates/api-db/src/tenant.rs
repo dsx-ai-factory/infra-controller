@@ -17,7 +17,10 @@
 
 use config_version::ConfigVersion;
 use model::metadata::Metadata;
-use model::tenant::{Tenant, TenantPublicKeyValidationRequest};
+use model::nic_firmware::NicFirmwareProfileId;
+use model::tenant::{
+    Tenant, TenantNicFirmwareConfig, TenantOrganizationId, TenantPublicKeyValidationRequest,
+};
 use sqlx::PgConnection;
 
 use super::ObjectFilter;
@@ -25,6 +28,9 @@ use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 type OrganizationID = String;
+
+#[cfg(test)]
+mod nic_firmware_tests;
 
 pub async fn create_and_persist(
     organization_id: String,
@@ -69,6 +75,84 @@ pub async fn find<S: AsRef<str>>(
 
     Ok(results)
 }
+
+/// `find_nic_firmware_config` reads the selection and shared tenant version
+/// without locking the row. A missing tenant returns `None`.
+pub async fn find_nic_firmware_config(
+    db: impl DbReader<'_>,
+    organization_id: &TenantOrganizationId,
+) -> DatabaseResult<Option<TenantNicFirmwareConfig>> {
+    let query = "SELECT organization_id, nic_firmware_profile_id, version
+        FROM tenants WHERE organization_id = $1";
+    sqlx::query_as(query)
+        .bind(organization_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `set_nic_firmware_config` sets or clears a selection on an existing tenant.
+/// Every successful write increments the shared tenant version, including a
+/// repeated selection or a clear when no profile is selected.
+///
+/// A selected profile's existence is checked before the tenant and its token.
+/// Missing profiles or tenants return `NotFoundError`; stale tokens return
+/// `ConcurrentModificationError`. No tenant hardware is bound here.
+///
+/// The connection must belong to an open `READ COMMITTED` transaction held
+/// through commit. The locking reads recheck committed row state after waiting,
+/// so a completed profile deletion returns `NotFoundError` and a tenant update
+/// is compared against its new token. Autocommit does not retain these locks.
+pub async fn set_nic_firmware_config(
+    txn: &mut PgConnection,
+    organization_id: &TenantOrganizationId,
+    profile_id: Option<&NicFirmwareProfileId>,
+    expected_version: ConfigVersion,
+) -> DatabaseResult<TenantNicFirmwareConfig> {
+    if let Some(profile_id) = profile_id {
+        // Check the profile before the tenant token and retain it through commit.
+        // If a concurrent deletion commits first, report NotFoundError here.
+        let query = "SELECT id FROM nic_firmware_profiles WHERE id = $1 FOR SHARE";
+        sqlx::query_scalar::<_, NicFirmwareProfileId>(query)
+            .bind(profile_id)
+            .fetch_optional(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?
+            .ok_or_else(|| DatabaseError::NotFoundError {
+                kind: "NIC firmware profile",
+                id: profile_id.to_string(),
+            })?;
+    }
+
+    let query = "SELECT version FROM tenants WHERE organization_id = $1 FOR UPDATE";
+    let version: ConfigVersion = sqlx::query_scalar(query)
+        .bind(organization_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "tenant",
+            id: organization_id.to_string(),
+        })?;
+    if version != expected_version {
+        return Err(DatabaseError::ConcurrentModificationError(
+            "tenant",
+            expected_version.to_string(),
+        ));
+    }
+
+    let query = "UPDATE tenants SET nic_firmware_profile_id = $1, version = $2
+        WHERE organization_id = $3
+        RETURNING organization_id, nic_firmware_profile_id, version";
+    sqlx::query_as(query)
+        .bind(profile_id)
+        .bind(expected_version.increment())
+        .bind(organization_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Expects locking/coordination and the check for organization_id's
 /// existence to be handled by the caller.
 pub async fn update(

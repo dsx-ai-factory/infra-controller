@@ -120,7 +120,18 @@ func (asur APISkuUpdateRequest) ApplyMetadataToProto(current *corev1.Sku) *corev
 	return updated
 }
 
-// ToReplacementProto converts a component PATCH into Core's current SKU format.
+// ToComponentReplacementProto converts a component PATCH without filling in omitted metadata.
+func (asur APISkuUpdateRequest) ToComponentReplacementProto() *corev1.ReplaceSkuComponentsRequest {
+	return &corev1.ReplaceSkuComponentsRequest{
+		SkuId:         asur.SkuID,
+		Components:    asur.Components.ToProto(),
+		SchemaVersion: CoreSkuSchemaVersion,
+		Description:   asur.Description,
+		DeviceType:    asur.DeviceType,
+	}
+}
+
+// ToReplacementProto converts a component PATCH for Core's full replacement RPC.
 func (asur APISkuUpdateRequest) ToReplacementProto(current *corev1.Sku) *corev1.Sku {
 	updated := asur.ApplyMetadataToProto(current)
 	updated.SchemaVersion = CoreSkuSchemaVersion

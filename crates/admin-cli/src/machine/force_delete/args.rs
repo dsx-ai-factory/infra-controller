@@ -90,9 +90,21 @@ pub(crate) struct Args {
     #[clap(
         long,
         action,
-        help = "Delete machine with allocated instance. This flag acknowledges destroying the user instance as well."
+        help = "Acknowledge deleting a machine with an allocated instance",
+        long_help = "Acknowledge deleting a machine with an allocated instance. The CLI checks for an instance only for machine-ID queries, not hostname, MAC, or IP queries. The API does not enforce this consent flag.\n\n\
+            Before deleting a host by any identifier, remove its instance type association; this flag does not bypass that check."
     )]
     pub(super) allow_delete_with_instance: bool,
+
+    #[clap(
+        long,
+        action,
+        help = "Wait for all attached DPUs to acknowledge Admin networking for an allocated instance",
+        long_help = "Wait for all attached DPUs to acknowledge the Admin network configuration before deleting a host that has an instance when force deletion starts. Disabled by default; a fresh deletion without this flag does not wait for DPU acknowledgements. A fresh deletion without an instance does not wait.\n\n\
+            Once recorded, the wait survives retries; omitting this flag cannot cancel it. Only servers supporting this option enforce a recorded wait. An older server can complete deletion without acknowledgement, even if a newer server already recorded the wait.\n\n\
+            An unavailable DPU can prevent completion indefinitely. The CLI waits 5 seconds between polling calls, with a nominal 20-minute retry limit. It checks the limit after RPC calls, so slow calls can extend the total time. A timeout does not cancel deletion. This flag does not replace --allow-delete-with-instance."
+    )]
+    wait_for_instance_dpu: bool,
 
     #[clap(
         long,
@@ -113,6 +125,7 @@ impl From<&Args> for AdminForceDeleteMachineRequest {
             delete_bmc_suppressions: args.delete_bmc_suppressions,
             delete_retained_boot_interfaces: args.delete_retained_boot_interfaces,
             release_preserved_addresses: args.release_preserved_addresses,
+            wait_for_instance_dpu: args.wait_for_instance_dpu,
         }
     }
 }
@@ -130,6 +143,33 @@ mod tests {
     #[test]
     fn arg_config_is_valid() {
         Args::command().debug_assert();
+    }
+
+    #[test]
+    fn instance_dpu_wait_is_opt_in_and_does_not_grant_deletion_consent() {
+        scenarios!(
+            run = |extra: &[&str]| {
+                let argv = ["force-delete", "--machine", MACHINE]
+                    .into_iter()
+                    .chain(extra.iter().copied());
+                Args::try_parse_from(argv)
+                    .map(|args| {
+                        let request = AdminForceDeleteMachineRequest::from(&args);
+                        (request.wait_for_instance_dpu, args.allow_delete_with_instance)
+                    })
+                    .map_err(drop)
+            };
+            "omitting the wait flag preserves cleanup without acknowledgements" {
+                [].as_slice() => Yields((false, false)),
+            }
+            "waiting does not grant consent to delete an allocated instance" {
+                ["--wait-for-instance-dpu"].as_slice() => Yields((true, false)),
+            }
+            "waiting and deletion consent can be requested together" {
+                ["--allow-delete-with-instance", "--wait-for-instance-dpu"].as_slice()
+                    => Yields((true, true)),
+            }
+        );
     }
 
     #[test]

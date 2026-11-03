@@ -89,6 +89,9 @@ type CoreGrpcClientConfig struct {
 	ClientKeyPath string
 	// client metrics interface
 	ClientMetrics Metrics
+	// OnRPCFinish observes each completed RPC once, including stream termination.
+	// It must be safe for concurrent calls; nil disables the callback.
+	OnRPCFinish func(error) `json:"-"`
 }
 
 // NewCoreGrpcClient creates a new Core gRPC client, this is called by Site Agent startup code and cert reload routine
@@ -181,6 +184,10 @@ func NewCoreGrpcClient(config *CoreGrpcClientConfig) (client *CoreGrpcClient, er
 	}
 
 	client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(coreGrpcMaxRecvMsgSize)))
+
+	if config.OnRPCFinish != nil {
+		client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.OnFinish(config.OnRPCFinish)))
+	}
 
 	// configure interceptors
 	var unaryInterceptors []grpc.UnaryClientInterceptor
@@ -332,14 +339,14 @@ func (cac *CoreGrpcAtomicClient) CheckAndReloadCerts(initialClientCertMD5, initi
 			reloadStarted = time.Now()
 			reloadBackoff = CoreGrpcConnectionBackoffInitial
 		} else if time.Since(reloadStarted) >= CoreGrpcConnectionRetryTimeout {
-			panic(fmt.Errorf("Core gRPC: failed to reinitialize gRPC client with new certificates within %s",
+			panic(fmt.Errorf("core gRPC: failed to reinitialize gRPC client with new certificates within %s",
 				CoreGrpcConnectionRetryTimeout))
 		}
 
 		newClient, err := NewCoreGrpcClient(cac.Config)
 		if err != nil {
 			if time.Since(reloadStarted) >= CoreGrpcConnectionRetryTimeout {
-				panic(fmt.Errorf("Core gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
+				panic(fmt.Errorf("core gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
 					CoreGrpcConnectionRetryTimeout, err))
 			}
 			logger.Error().Err(err).Dur("RetryIn", reloadBackoff).Msg("Failed to reinitialize gRPC client with new certificates, retrying")
@@ -460,11 +467,7 @@ func equalMD5(a, b []byte) bool {
 
 func SliceToChunks[T any](slice []T, chunkSize int) (chunks [][]T) {
 	chunks = [][]T{}
-	for {
-		if len(slice) == 0 {
-			break
-		}
-
+	for len(slice) != 0 {
 		if len(slice) < chunkSize {
 			chunkSize = len(slice)
 		}

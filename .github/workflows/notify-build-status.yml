@@ -61,11 +61,10 @@ jobs:
     steps:
       - name: Analyze Build Results
         id: analyze
+        env:
+          NEEDS_CONTEXT: ${{ inputs.needs-context }}
         run: |
-          # Write needs context to file to avoid shell interpretation issues with nested JSON
-          cat > /tmp/needs.json << 'NEEDS_EOF'
-          ${{ inputs.needs-context }}
-          NEEDS_EOF
+          printf '%s' "$NEEDS_CONTEXT" > /tmp/needs.json
 
           # Count job results (only look at .result field to avoid nested JSON issues)
           TOTAL=$(jq -r 'length' /tmp/needs.json)
@@ -112,7 +111,7 @@ jobs:
 
       - name: Notify Slack - Build Success
         if: steps.analyze.outputs.status == 'success' && inputs.notify-on-success
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}
@@ -182,7 +181,7 @@ jobs:
 
       - name: Notify Slack - Partial Failure
         if: steps.analyze.outputs.status == 'partial' && inputs.notify-on-partial
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}
@@ -259,7 +258,7 @@ jobs:
 
       - name: Notify Slack - Build Failure
         if: steps.analyze.outputs.status == 'failure' && inputs.notify-on-failure
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}

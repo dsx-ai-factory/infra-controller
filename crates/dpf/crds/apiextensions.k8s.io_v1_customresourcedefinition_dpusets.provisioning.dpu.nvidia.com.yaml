@@ -148,7 +148,7 @@ spec:
                 description: |-
                   Select the DPU with specific labels
 
-                  Deprecated: This field is deprecated and will be removed with v26.7.0. Use DPUDeviceSelector instead.
+                  Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUDeviceSelector instead.
                 type: object
               dpuTemplate:
                 description: Object that describes the DPU that will be created if
@@ -375,7 +375,7 @@ spec:
                         description: |-
                           MaxUnavailable is the maximum number of DPUs that can be unavailable during the update.
 
-                          Deprecated: This field is deprecated and will be removed with v26.7.0.
+                          Deprecated: This field is deprecated and will be removed with v31.0.0.
                         x-kubernetes-int-or-string: true
                     type: object
                   type:
@@ -454,6 +454,32 @@ spec:
                   - type
                   type: object
                 type: array
+              dpuReconfig:
+                description: |-
+                  DPUReconfig is the in-place reconfig round owned by the DPUSet controller.
+                  The user starts a round with annotation provisioning.dpu.nvidia.com/inplace-reconfig=true.
+                  Nil means no round has started.
+                properties:
+                  active:
+                    description: Active is true while this annotation round is not
+                      finished.
+                    type: boolean
+                  round:
+                    description: |-
+                      Round identifies the current or last round. It increases by one when a new
+                      annotation round starts and is not reset when the annotation is removed.
+                      Zero means no round has started.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  startedAt:
+                    description: |-
+                      StartedAt is when this round became active. It distinguishes a DPU that was
+                      already Ready before the round from one that first becomes Ready during it.
+                      The controller sets it with round and active, and never leaves it zero.
+                    format: date-time
+                    type: string
+                type: object
               dpuStatistics:
                 additionalProperties:
                   type: integer

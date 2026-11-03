@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -35,7 +34,7 @@ func TestAPIOperatingSystemCreateRequest_Validate(t *testing.T) {
 		},
 		{
 			desc:      "error when userData exceeds max length",
-			obj:       APIOperatingSystemCreateRequest{Name: "abc", InfrastructureProviderID: nil, TenantID: cutil.GetPtr(uuid.New().String()), IpxeScript: cutil.GetPtr("ipxe"), UserData: cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)), IsCloudInit: true, AllowOverride: false},
+			obj:       APIOperatingSystemCreateRequest{Name: "abc", InfrastructureProviderID: nil, TenantID: cutil.GetPtr(uuid.New().String()), IpxeScript: cutil.GetPtr("ipxe"), UserData: cutil.GetPtr(strings.Repeat("a", cdmu.MaxUserDataBytes+1)), IsCloudInit: true, AllowOverride: false},
 			expectErr: true,
 		},
 		{
@@ -254,7 +253,7 @@ func TestAPIOperatingSystemUpdateRequest_Validate(t *testing.T) {
 	}{
 		{
 			desc:       "error when userData exceeds max length",
-			obj:        APIOperatingSystemUpdateRequest{UserData: cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1))},
+			obj:        APIOperatingSystemUpdateRequest{UserData: cutil.GetPtr(strings.Repeat("a", cdmu.MaxUserDataBytes+1))},
 			existingOS: existingIpxeBasedOS,
 			expectErr:  true,
 		},
@@ -417,7 +416,28 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 		fields       fields
 		phoneHomeUrl *string
 		wantErr      bool
+		wantDetail   string
 	}{
+		{
+			name: "reject scalar autoinstall with mapping detail",
+			fields: fields{
+				UserData:         cutil.GetPtr("#cloud-config\nautoinstall: private-value\n"),
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: cutil.GetPtr("http://localhost/local"),
+			wantErr:      true,
+			wantDetail:   "autoinstall must be a mapping to insert phone-home",
+		},
+		{
+			name: "reject scalar autoinstall user-data with mapping detail",
+			fields: fields{
+				UserData:         cutil.GetPtr("#cloud-config\nautoinstall:\n  user-data: private-value\n"),
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: cutil.GetPtr("http://localhost/local"),
+			wantErr:      true,
+			wantDetail:   "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name: "test valid Operating System PhoneHome enabled create request when userData is nil",
 			fields: fields{
@@ -464,7 +484,7 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 				Description:       cutil.GetPtr("Test description"),
 				TenantID:          cutil.GetPtr(uuid.NewString()),
 				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
-				UserData:          cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes-10)),
+				UserData:          cutil.GetPtr("a: " + strings.Repeat("b", cdmu.MaxUserDataBytes-10)),
 				PhoneHomeEnabled:  cutil.GetPtr(true),
 			},
 			wantErr:      true,
@@ -529,7 +549,7 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 				Description:       cutil.GetPtr("Test description"),
 				TenantID:          cutil.GetPtr(uuid.NewString()),
 				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
-				UserData:          cutil.GetPtr(util.TestCommonCloudInit),
+				UserData:          cutil.GetPtr(cdmu.TestCommonCloudInit),
 				PhoneHomeEnabled:  cutil.GetPtr(true),
 			},
 			wantErr:      false,
@@ -553,6 +573,13 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 				t.Errorf("APIOperatingSystemCreateRequest.ValidateAndSetUserData() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
 			}
 
+			if tt.wantDetail != "" {
+				require.Error(t, err)
+				encoded, marshalErr := json.Marshal(err)
+				require.NoError(t, marshalErr)
+				assert.JSONEq(t, `{"userData":"`+tt.wantDetail+`"}`, string(encoded))
+				assert.Equal(t, tt.fields.UserData, icr.UserData)
+			}
 			if err != nil {
 				return
 			}
@@ -562,8 +589,8 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 				assert.Contains(t, *icr.UserData, *tt.phoneHomeUrl)
 				// split string into new line and make sure always first line is #cloud-config
 				lines := strings.Split(*icr.UserData, "\n")
-				assert.Equal(t, util.SiteCloudConfig, lines[0])
-				assert.NotEqual(t, util.SiteCloudConfig, lines[1])
+				assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+				assert.NotEqual(t, cdmu.SiteCloudConfig, lines[1])
 			}
 		})
 	}
@@ -774,7 +801,7 @@ phone_home:
 		ID:               uuid.New(),
 		Name:             "ab",
 		IpxeScript:       cutil.GetPtr("original ipxe"),
-		UserData:         cutil.GetPtr(util.TestCommonPhoneHomeOnlyCloudInit),
+		UserData:         cutil.GetPtr(cdmu.TestCommonPhoneHomeOnlyCloudInit),
 		PhoneHomeEnabled: false,
 		Status:           cdbm.OperatingSystemStatusReady,
 		Type:             cdbm.OperatingSystemTypeIPXE,
@@ -785,7 +812,7 @@ phone_home:
 		ID:               uuid.New(),
 		Name:             "ab",
 		IpxeScript:       cutil.GetPtr("original ipxe"),
-		UserData:         cutil.GetPtr(util.TestCommonXMLUserData),
+		UserData:         cutil.GetPtr(cdmu.TestCommonXMLUserData),
 		PhoneHomeEnabled: false,
 		Status:           cdbm.OperatingSystemStatusReady,
 		Type:             cdbm.OperatingSystemTypeIPXE,
@@ -821,8 +848,33 @@ phone_home:
 		userDataSearches         []string
 		userDataNegativeSearches []string
 		wantErr                  bool
+		wantDetail               string
 		existingOS               *cdbm.OperatingSystem
 	}{
+		{
+			name: "reject stored scalar autoinstall with mapping detail",
+			fields: fields{
+				PhoneHomeEnabled: cutil.GetPtr(true),
+			},
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				UserData: cutil.GetPtr("#cloud-config\nautoinstall: private-value\n"),
+			},
+			wantErr:    true,
+			wantDetail: "autoinstall must be a mapping to insert phone-home",
+		},
+		{
+			name: "reject supplied scalar autoinstall user-data with mapping detail",
+			fields: fields{
+				UserData: cutil.GetPtr("#cloud-config\nautoinstall:\n  user-data: private-value\n"),
+			},
+			phoneHomeUrl: "http://localhost/local",
+			existingOS: &cdbm.OperatingSystem{
+				PhoneHomeEnabled: true,
+			},
+			wantErr:    true,
+			wantDetail: "autoinstall user-data must be a mapping to insert phone-home",
+		},
 		{
 			name: "test valid Operating System PhoneHome disabled update request when userData is nil and existing OS has enabled",
 			fields: fields{
@@ -850,7 +902,7 @@ phone_home:
 				ID:               uuid.New(),
 				Name:             "ab",
 				IpxeScript:       cutil.GetPtr("original ipxe"),
-				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", cdmu.MaxUserDataBytes)),
 				PhoneHomeEnabled: false,
 				Status:           cdbm.OperatingSystemStatusReady,
 				Type:             cdbm.OperatingSystemTypeIPXE,
@@ -1092,7 +1144,7 @@ phone_home:
 				ID:               uuid.New(),
 				Name:             "ab",
 				IpxeScript:       cutil.GetPtr("original ipxe"),
-				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", cdmu.MaxUserDataBytes)),
 				PhoneHomeEnabled: false,
 				Status:           cdbm.OperatingSystemStatusReady,
 				Type:             cdbm.OperatingSystemTypeIPXE,
@@ -1112,7 +1164,7 @@ phone_home:
 				ID:               uuid.New(),
 				Name:             "ab",
 				IpxeScript:       cutil.GetPtr("original ipxe"),
-				UserData:         cutil.GetPtr(util.TestCommonXMLUserData + strings.Repeat("<!-- pad -->", util.MaxUserDataBytes/12)),
+				UserData:         cutil.GetPtr(cdmu.TestCommonXMLUserData + strings.Repeat("<!-- pad -->", cdmu.MaxUserDataBytes/12)),
 				PhoneHomeEnabled: false,
 				Status:           cdbm.OperatingSystemStatusReady,
 				Type:             cdbm.OperatingSystemTypeIPXE,
@@ -1133,6 +1185,12 @@ phone_home:
 			err := osur.ValidateAndSetUserData(tt.phoneHomeUrl, tt.existingOS)
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantDetail != "" {
+					encoded, marshalErr := json.Marshal(err)
+					require.NoError(t, marshalErr)
+					assert.JSONEq(t, `{"userData":"`+tt.wantDetail+`"}`, string(encoded))
+					assert.Equal(t, tt.fields.UserData, osur.UserData)
+				}
 				return
 			} else {
 				require.NoError(t, err)
@@ -1160,9 +1218,9 @@ phone_home:
 				assert.Contains(t, *osur.UserData, tt.phoneHomeUrl)
 				// split string into new line and make sure always first line is #cloud-config
 				lines := strings.Split(*osur.UserData, "\n")
-				assert.Equal(t, util.SiteCloudConfig, lines[0])
-				assert.Equal(t, util.SiteCloudConfig, lines[0])
-				assert.NotEqual(t, util.SiteCloudConfig, lines[1])
+				assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+				assert.Equal(t, cdmu.SiteCloudConfig, lines[0])
+				assert.NotEqual(t, cdmu.SiteCloudConfig, lines[1])
 			}
 
 			if osur.PhoneHomeEnabled != nil && !*osur.PhoneHomeEnabled {

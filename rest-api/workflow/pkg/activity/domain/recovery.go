@@ -25,24 +25,33 @@ type ManageDomain struct {
 }
 
 // ReconcileReservedDomains executes only durable, previously authorized
-// reserved-ID intents, claiming one row per tick so its lease cannot expire
-// while an earlier row waits on a Site RPC. No arbitrary legacy DNS name is
-// claimed as tenant-owned. Each batch and Site request has a finite bound.
+// reserved-ID intents. The 100-second sweep fits inside the two-minute cron
+// interval. Claiming one row per attempt leaves its two-minute lease longer
+// than the 65-second Site request and three-second claim release.
 func (m ManageDomain) ReconcileReservedDomains(ctx context.Context) error {
 	dao := cdbm.NewDomainDAO(m.DB)
-	due, err := dao.ClaimRecovery(ctx, 1, 120*time.Second)
-	if err != nil {
-		return err
-	}
-	for i := range due {
-		opCtx, cancel := context.WithTimeout(ctx, 65*time.Second)
-		err := m.reconcileOne(opCtx, dao, &due[i])
+	sweepCtx, cancel := context.WithTimeout(ctx, 100*time.Second)
+	defer cancel()
+
+	for sweepCtx.Err() == nil {
+		due, err := dao.ClaimRecovery(sweepCtx, 1, 120*time.Second)
+		if err != nil {
+			if sweepCtx.Err() != nil {
+				break
+			}
+			return err
+		}
+		if len(due) == 0 {
+			return nil
+		}
+		opCtx, cancel := context.WithTimeout(sweepCtx, 65*time.Second)
+		err = m.reconcileOne(opCtx, dao, &due[0])
 		cancel()
 		if err != nil {
-			log.Warn().Err(err).Str("domainID", due[i].ID.String()).Msg("reserved Domain remains pending")
+			log.Warn().Err(err).Str("domainID", due[0].ID.String()).Msg("reserved Domain remains pending")
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *cdbm.Domain) error {
@@ -62,7 +71,7 @@ func (m ManageDomain) reconcileOne(ctx context.Context, dao cdbm.DomainDAO, d *c
 	if _, err := cdbm.NewTenantSiteDAO(m.DB).GetByTenantIDAndSiteID(ctx, nil, *d.TenantID, *d.SiteID, nil); err != nil {
 		return fmt.Errorf("Domain owner lost Site access: %w", err)
 	}
-	site, err := cdbm.NewSiteDAO(m.DB).GetByID(ctx, nil, *d.SiteID, nil, false)
+	site, err := cdbm.NewSiteDAO(m.DB).GetByID(ctx, nil, *d.SiteID, nil, false, false)
 	if err != nil {
 		return err
 	}

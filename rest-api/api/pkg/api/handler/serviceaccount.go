@@ -11,6 +11,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -21,12 +22,14 @@ import (
 // GetCurrentServiceAccountHandler is the API Handler for getting the current Service Account
 type GetCurrentServiceAccountHandler struct {
 	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewGetCurrentServiceAccountHandler initializes and returns a new handler for getting the current Service Account
-func NewGetCurrentServiceAccountHandler(dbSession *cdb.Session) GetCurrentServiceAccountHandler {
+func NewGetCurrentServiceAccountHandler(dbSession *cdb.Session, scp *sc.ClientPool) GetCurrentServiceAccountHandler {
 	return GetCurrentServiceAccountHandler{
 		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -159,14 +162,14 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 		}
 	} else if tas[0].Status != cdbm.TenantAccountStatusReady || !tas[0].Config.TargetedInstanceCreation {
 		statusChanged := tas[0].Status != cdbm.TenantAccountStatusReady
+		accountConfig := tas[0].Config
+		accountConfig.TargetedInstanceCreation = true
 		sdDAO := cdbm.NewStatusDetailDAO(gcsah.dbSession)
 		serr = cdb.WithTx(ctx, gcsah.dbSession, func(tx *cdb.Tx) error {
 			_, derr := taDAO.Update(ctx, tx, cdbm.TenantAccountUpdateInput{
 				TenantAccountID: tas[0].ID,
 				Status:          cutil.GetPtr(cdbm.TenantAccountStatusReady),
-				Config: &cdbm.TenantAccountConfig{
-					TargetedInstanceCreation: true,
-				},
+				Config:          &accountConfig,
 			})
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error updating Tenant Account capabilities for org")
@@ -190,6 +193,11 @@ func (gcsah GetCurrentServiceAccountHandler) Handle(c echo.Context) error {
 		if serr != nil {
 			return common.HandleTxError(c, logger, serr, "Failed to update Tenant Account, DB transaction error")
 		}
+	}
+
+	err = ensurePrivilegedTenantSites(ctx, gcsah.dbSession, gcsah.scp, logger, tn, dbUser.ID)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to ensure privileged Tenant/Site associations")
 	}
 
 	// Create response

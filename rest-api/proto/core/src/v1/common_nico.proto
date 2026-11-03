@@ -50,9 +50,16 @@ message Uint32List {
   repeated uint32 items = 1;
 }
 
+// A BGP route target. `vni` is the route-target local-administrator component,
+// not a VXLAN-validity assertion. An absent `vni` with `vni_self` false means
+// legacy literal zero. A two-byte ASN permits a four-byte local administrator.
+// A four-byte ASN requires a local administrator no greater than 65535.
 message RouteTarget {
   uint32 asn = 1;
-  uint32 vni = 2;
+  optional uint32 vni = 2;
+  // Resolve from the current VPC's L3 VNI. Mutually exclusive with `vni`;
+  // effective and DPU-bound profiles always clear this field.
+  bool vni_self = 3;
 }
 
 // A list of route targets. Unlike a repeated field, this message can be optional,

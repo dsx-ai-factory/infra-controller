@@ -1,4 +1,4 @@
-# Machine-a-tron Build and Deployment Guide <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Machine-a-tron Build and Deployment Guide <Badge intent="info">v2.1</Badge>
 
 machine-a-tron is a bare-metal simulator for NICo testing. It hosts mock Data
 Processing Units (DPUs) and servers behind Redfish Baseboard Management
@@ -38,22 +38,18 @@ guide explains each step.
    ```bash
    DPF_SIM_IMAGE="${NICO_IMAGE_REGISTRY}/dpf-sim-controller:$(git rev-parse --short HEAD)"
    make -C dev/k8s/dpf-sim-controller image  IMG="${DPF_SIM_IMAGE}"
-   make -C dev/k8s/dpf-sim-controller deploy IMG="${DPF_SIM_IMAGE}"
-   ```
-
-   For a registry that requires credentials, create the pull Secret in
-   `dpf-operator-system` before `make deploy` and add
-   `PULL_SECRET=dpf-sim-pull` to the deploy line. The `machine-a-tron-pull`
-   Secret in `nico-mat` does not serve the simulator:
-
-   ```bash
    kubectl create namespace dpf-operator-system --dry-run=client -o yaml | kubectl apply -f -
-   kubectl -n dpf-operator-system create secret docker-registry dpf-sim-pull \
-     --docker-server="${NICO_IMAGE_REGISTRY%%/*}" \
-     --docker-username="${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
-     --docker-password="${REGISTRY_PULL_SECRET}" \
-     --dry-run=client -o yaml | kubectl apply -f -
+   make -C dev/k8s/dpf-sim-controller deploy DPF_NAMESPACE=dpf-operator-system IMG="${DPF_SIM_IMAGE}"
    ```
+
+   `DPF_NAMESPACE` on the `make` line overrides a namespace the Makefile
+   remembers from an earlier deploy. For a registry that requires credentials,
+   create the pull Secret in `dpf-operator-system` after the namespace and
+   before `make deploy` with the command in
+   [Namespace and Pull Secret](#namespace-and-pull-secret), changing `-n` to
+   `dpf-operator-system` and the Secret name to `dpf-sim-pull`, and add
+   `PULL_SECRET=dpf-sim-pull` to the deploy line. The `machine-a-tron-pull`
+   Secret in `nico-mat` does not serve the simulator.
 
    On a site that already runs the real DPF operator, remove it first. Refer
    to the
@@ -96,16 +92,15 @@ The table was measured on a 3-node development cluster with a
 development-sized PostgreSQL at 4,500 hosts with 2 DPUs each (13,500 BMC
 endpoints and machines). The `[site_explorer]` values were `run_interval`
 120 s, `concurrent_explorations` 100, `explorations_per_run` 120, and
-`machines_created_per_run` 40. `nico-core-simulation.yaml` ships 30 s, 400,
-360, and 100, which raise the creation ceiling from 1,200 to 12,000 hosts per
-hour. With the shipped values a 4,500-host run finished in about 3 to 3.5 hours
-at 80 to 100 machines per minute. Expect shorter sweep and creation phases than
-the table shows.
+`machines_created_per_run` 40. `nico-core-simulation.yaml` ships 30 s, 300,
+2000, and 1000. With the shipped values a 4,500-host run finished in about 3
+to 3.5 hours at 80 to 100 machines per minute. Expect shorter sweep and
+creation phases than the table shows.
 
 | Phase | Duration | Notes |
 |-------|----------|-------|
 | Deploy + DHCP registration | ~60-90 min | ~150-180 interfaces/min while 13.5k mock FSMs boot |
-| Exploration sweep | ~3-5 h | Overlaps DHCP. Explores up to `explorations_per_run` endpoints per cycle (120 when measured, 360 in the simulation values) |
+| Exploration sweep | ~3-5 h | Overlaps DHCP. Explores up to `explorations_per_run` endpoints per cycle (120 when measured, 2000 in the simulation values) |
 | Preingestion | tracks the sweep | ~90% conversion, completes shortly after it |
 | Identification + creation | final ~2-3 h | Hosts identify in waves. Creation drains at ~150-300 machines per 120 s explore cycle |
 | **End to end** | **~6-9 h, unattended** | 100 hosts ≈ 12 min and 1000 hosts ≈ 25 min, for calibration |
@@ -201,14 +196,18 @@ configuration JSON to a mode-0600 temporary file and passes it with
 kubectl create namespace nico-mat --dry-run=client -o yaml | kubectl apply -f -
 kubectl label namespace nico-mat nico.nvidia.com/managed=true --overwrite
 
-# Image pull secret (replace the variables with your registry login)
-kubectl create secret docker-registry machine-a-tron-pull \
-  -n nico-mat \
-  --docker-server="${NICO_IMAGE_REGISTRY%%/*}" \
-  --docker-username="${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
-  --docker-password="${REGISTRY_PULL_SECRET}" \
+# Image pull Secret (replace the variables with your registry login)
+kubectl -n nico-mat create secret generic machine-a-tron-pull \
+  --type=kubernetes.io/dockerconfigjson \
+  --from-file=.dockerconfigjson=<(printf '{"auths":{"%s":{"auth":"%s"}}}' "${NICO_IMAGE_REGISTRY%%/*}" \
+    "$(printf '%s:%s' "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" "${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')") \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+The Secret holds only an `auth` entry, the base64 of `user:password`, so a
+quote or backslash in the key cannot break the JSON, and the key passes through
+a process substitution fed by the shell's `printf` builtin rather than through
+a process argument.
 
 A pull Secret created this way survives `helm uninstall`, so a redeploy does
 not need the registry key again. The chart-created one is removed with the
@@ -241,8 +240,9 @@ Unified Extensible Firmware Interface (UEFI) defaults. `siteCredentials` in
 nico-api reads as its credential file ahead of Vault. This is the only
 supported path on a machine-a-tron site. Refer to
 [Site Credentials Secret](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#site-credentials-secret)
-for the values. Neither Core values template mounts the Secret, so add the
-reference to your copy of `nico-core-simulation.yaml`:
+for the values. `nico-core-10k-hosts.yaml` already carries the reference.
+`nico-core.yaml` and `nico-core-simulation.yaml` do not, so add it to your copy
+of either:
 
 ```yaml
 nico-api:
@@ -471,14 +471,19 @@ restart the same way. Then delete the rack with
 
 The chart can shard the simulated fleet across several machine-a-tron pods.
 The `mat-k8s-controller` creates a Service for each BMC, publishing the BMC IP
-assigned by NICo DHCP as the Service's `externalIPs`. NICo dials each BMC IP
-directly, with no `bmc_proxy`. Validated profiles live in `helm-prereqs/values/`:
+assigned by NICo DHCP as the Service's `externalIPs`, or, with
+`mat-k8s-controller.config.serviceGranularity: pod`, two Services per pod that
+carry every BMC and every NVOS address of that pod (refer to the chart README
+section Per-pod Services). NICo dials each BMC IP directly, with no
+`bmc_proxy`. Validated profiles live in `helm-prereqs/values/`:
 
 | Values file | Fleet |
 |---|---|
 | `machine-a-tron-scale.yaml` | 100 hosts x 2 DPUs in one pod |
 | `machine-a-tron-multipod.yaml` | 2 pods x 100 hosts x 2 DPUs |
 | `machine-a-tron-10racks.yaml` | 10 GB200 NVL72 racks, one per pod, behind the protocol gateway (180 hosts x 2 DPUs, 90 switches, 80 power shelves) |
+| `machine-a-tron-250racks.yaml` | 250 GB200 NVL72 racks, 25 per pod across 10 pods, behind the protocol gateway (4,500 hosts x 2 DPUs, 2,250 switches, 2,000 power shelves) |
+| `machine-a-tron-556racks.yaml` | 556 GB200 NVL72 racks, 24 or 25 per pod across 23 pods, behind the protocol gateway with per-pod Services (10,008 hosts x 2 DPUs, 5,004 switches, 4,448 power shelves). Core values: `nico-core-10k-hosts.yaml` |
 | `machine-a-tron-scale-4500.yaml` | 4,500 hosts x 2 DPUs across 3 pods, one BMC segment per pod |
 | `machine-a-tron-scale-4500-proxy.yaml` | 4,500 hosts x 2 DPUs in one pod behind one shared proxy Service, without the controller |
 
@@ -491,7 +496,8 @@ SPIFFE URI). Controller Mode adds the following requirements:
    clusterIPs. All pods can share the same relay address. NICo assigns unique
    IPs from the network. Neither the chart nor the controller checks this, so
    run the preflight before every install. It resolves each
-   `bmcDhcpRelayAddress` to its `[networks.*]` prefix, reads the ServiceCIDR
+   `bmcDhcpRelayAddress`, and each `underlayDhcpRelayAddress` where set, to
+   its `[networks.*]` prefix, reads the ServiceCIDR
    from the cluster (or `SCALE_SERVICE_CIDRS`), and exits nonzero on an
    overlap:
 
@@ -509,13 +515,23 @@ SPIFFE URI). Controller Mode adds the following requirements:
    them: `allow_insecure_discovery = true`, `[networks.simulated-oob]`
    (`10.200.0.0/18`, gateway `10.200.0.1`, the `bmcDhcpRelayAddress` of the
    profiles), `[networks.simulated-admin]`, and `[networks.simulated-underlay]`
-   (`10.104.0.0/18`, gateway `10.104.0.1`, the `underlayDhcpRelayAddress`).
+   (`10.201.0.0/18`, gateway `10.201.0.1`, the `underlayDhcpRelayAddress`).
    The 3-pod 4,500-host profile needs one extra `[networks.mat-bmc-N]` stanza
    per pod, listed in its header. Declare networks before nico-api first
    starts. Refer to [Established Sites](#established-sites) otherwise.
 
 1. **Leave `site_explorer.bmc_proxy` unset.** The Redfish client dials each
    BMC IP directly.
+
+1. **The NVOS network has the same constraints as the BMC network.** The
+   controller publishes each simulated NVLink switch's NVOS lease (from the
+   `underlayDhcpRelayAddress` network, `[networks.simulated-underlay]` in the
+   profiles) as the `externalIPs` of a `mat-nvos-*` Service, through which
+   NICo reaches machine-a-tron's hosted NMX-C mock on port 9370 and the
+   switch's NVUE REST API mock on port 443. The preflight
+   checks that network alongside the BMC network. `nico-core-simulation.yaml`
+   ships the matching `[nvlink_config]`; refer to
+   [Machine-a-tron NMX-C Mock](machine-a-tron-nmxc-mock.md).
 
 1. **Keep the BMC passwords pinned.** The chart pins every mock BMC to the
    site root it reads from the site credentials Secret, so install the Secret
@@ -596,70 +612,62 @@ switches, and 8 power shelves, 71 BMCs in total. One machine-a-tron pod is
 sized for about 25 racks, so a 250-rack site runs 10 pods behind the protocol
 gateway. The gateway serves one Unified Fabric Manager (UFM) API and one RMS
 API for all of them. Each pod declares its racks under `racks` with rack ids
-that are unique across pods. The values below layer on
-`machine-a-tron-multipod.yaml`, whose 100-host `compute` groups must be nulled
-so they do not deep-merge into the rack pods:
+that are unique across pods. `machine-a-tron-250racks.yaml` ships this fleet,
+10 pods of 25 racks each, in the shape of `machine-a-tron-10racks.yaml`:
 
 ```yaml
-mat-k8s-controller:
-  enabled: true
-  gateway:
-    enabled: true
-  config:
-    insecureSkipVerify: true
-
-persistence:
-  enabled: true  # simulator state survives pod restarts
-
 pods:
-  default: null
   mat-0:
     machines:
       rack-machines: null  # the chart's example group
-      compute: null        # the profile's 100-host group
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
         rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids: [rack-001, rack-002, rack-003]  # 25 ids per pod
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-1:
-    machines:
-      compute: null
+    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
         rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids: [rack-026, rack-027, rack-028]
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   # mat-2 to mat-9 follow the same pattern
 ```
 
-Install with both files. Check first that the render carries no machine
-group, so the count prints 0:
+Install it like the 10-rack file. Check first that the render carries no
+machine group, so the count prints 0:
 
 ```bash
 helm template nico-machine-a-tron helm/charts/nico-machine-a-tron \
-  -f helm-prereqs/values/machine-a-tron-multipod.yaml -f racks-250.yaml \
+  -f helm-prereqs/values/machine-a-tron-250racks.yaml \
   | grep -c '^ *\[machines\.'
+python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-250racks.yaml \
+  --site-config helm-prereqs/values/nico-core-simulation.yaml &&
 helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
   -n nico-mat --create-namespace --qps 15 --burst-limit 30 \
+  --set createNamespace=false \
   --set image.repository="${NICO_IMAGE_REGISTRY}/machine-a-tron" \
   --set image.tag="${TAG}" \
   --set mat-k8s-controller.image.repository="${NICO_IMAGE_REGISTRY}/mat-k8s-controller" \
   --set mat-k8s-controller.image.tag="${CONTROLLER_TAG}" \
-  -f helm-prereqs/values/machine-a-tron-multipod.yaml -f racks-250.yaml
+  -f helm-prereqs/values/machine-a-tron-250racks.yaml
 ```
 
 `helm template` again omits the `host_bmc_password` and `dpu_bmc_password`
 lines. The site credentials lookup adds them when the install renders against
 the cluster.
 
-The `resources` block comes from the multipod profile, which sizes 2Gi of
-memory for 300 BMCs per pod. Raise it for 1,775 BMCs per pod.
-`machine-a-tron-scale-4500.yaml` allots 8Gi to pods of up to 8,100 BMCs.
+The shipped `resources` block limits each pod to 4 CPUs and 6Gi of memory for
+1,775 BMCs (requests 1 CPU and 2Gi). For comparison, `machine-a-tron-multipod.yaml`
+sizes 2Gi for 300 BMCs per pod and `machine-a-tron-scale-4500.yaml` allots 8Gi
+to pods of up to 8,100 BMCs. The profile leaves `persistence.enabled` at the
+chart default, so a restarted pod repeats its 25-rack registration (about
+30 min) and the machines it already created are re-reported, not re-created.
 
 The Core side needs `nico-api.rms.apiUrl` pointed at the gateway Service. The
 nico-api chart ships the `GB200_NVL72R1_C2G4_WIWYNN` profile that nico-api
@@ -706,7 +714,7 @@ and pool in the Core values from the fleet:
 |---|---|---|
 | `[networks.simulated-oob]` (BMC DHCP) | hosts x (1 + DPUs per host). A GB200 NVL72 rack needs 71 (18 x 3 + 9 + 8) | `10.200.0.0/18`, 16,382 usable |
 | `[networks.simulated-admin]` (host PF at creation) | hosts x (DPUs per host + 1) | `10.102.0.0/18` |
-| `[networks.simulated-underlay]` (DPU OOB and switch NVOS DHCP) | hosts x DPUs per host + switches | `10.104.0.0/18` |
+| `[networks.simulated-underlay]` (DPU OOB and switch NVOS DHCP) | hosts x DPUs per host + switches | `10.201.0.0/18` |
 | `[pools.lo-ip]` | one per machine: hosts + DPUs | 16,382 addresses |
 | `[pools.fnn-asn]` | one per DPU | 18,000 |
 
@@ -714,10 +722,11 @@ Usable addresses per prefix = 2^(32 - mask) - reserve_first - 1 (the gateway).
 A `/28` with `reserve_first = 2` yields 13 usable, and a `/18` with
 `reserve_first = 1` yields 16,382. The shipped prefixes fit 4,500 hosts x 2
 DPUs (13,500 BMCs). A 250-rack site needs 17,750 BMC addresses, so widen
-`[networks.simulated-oob]` to a `/17` before nico-api first starts. Do not
-widen further than needed. The allocator materializes the whole host space per
-request while holding the fleet-wide admin-segment lock, about three times
-slower at a `/16` than at a `/18`.
+`[networks.simulated-oob]` to a `/17` before nico-api first starts. The
+556-rack fleet needs 39,476, which `nico-core-10k-hosts.yaml` ships as a
+`/16`. Do not widen further than needed. The allocator materializes the whole
+host space per request while holding the fleet-wide admin-segment lock, about
+three times slower at a `/16` than at a `/18`.
 
 Symptoms of overflow: `No IP addresses left in prefix ...` with machines stuck
 in `BmcInit` (OOB), `No IP addresses left in prefix <admin-cidr>` at creation
@@ -844,9 +853,36 @@ For a from-scratch reset on a simulation-only site, truncate the machine graph
 directly on the Patroni primary (`psql -d nico_system_nico -v ON_ERROR_STOP=1`).
 Every machine on the cluster is assumed to be simulated. Never run this
 against a site with real inventory. CASCADE does not reach the rack, switch,
-and power-shelf tables, so the list names them. `resource_pool` holds the
-`[pools.*]` allocations without a foreign key to the machine graph, so the
-UPDATE frees them. The `machine_interfaces_deletion` singleton must survive:
+and power-shelf tables, so the list names them.
+
+Use this SQL reset only when no pool allocations belong to VPCs, network
+segments, IB partitions, or SPX partitions. Their owners survive the truncate,
+but the pool UPDATE frees their values too. Remove those resources through
+their normal APIs first, or use the product cleanup path above. To confirm
+that no such allocations remain, run the following query. It must return no
+rows:
+
+```sql
+SELECT state->>'owner_type' AS owner_type, count(*)
+FROM resource_pool
+WHERE state->>'state' = 'allocated' AND state->>'owner_type' <> 'machine'
+GROUP BY 1;
+```
+
+`resource_pool` holds the `[pools.*]` inventory without a foreign key to the
+machine graph. The table lock prevents allocation writers from changing it
+between the DELETE and UPDATE. The DELETE removes allocation records for the
+Integrated backend (NICo's database) before the UPDATE clears `allocated`.
+The next run can then allocate those values again. These steps leave remote
+provider allocations and their retry records alone. The
+`machine_interfaces_deletion` singleton must survive.
+
+The allocation-record DELETE requires the schema from
+[PR #7708](https://github.com/dsx-ai-factory/infra-controller/pull/7708).
+If `\d resource_pool_allocations` reports that the table does not exist, omit
+that DELETE. This reset update is tracked in
+[task #7821](https://github.com/dsx-ai-factory/infra-controller/issues/7821),
+part of [allocation tracking](https://github.com/dsx-ai-factory/infra-controller/issues/7135).
 
 ```sql
 BEGIN;
@@ -855,6 +891,9 @@ TRUNCATE machines, machine_interfaces, explored_endpoints, explored_managed_host
   expected_rack_groups, expected_switches, expected_power_shelves,
   rack_health_history, switch_health_history, power_shelf_health_history
   RESTART IDENTITY CASCADE;
+LOCK TABLE resource_pool IN EXCLUSIVE MODE;
+DELETE FROM resource_pool_allocations USING resource_pool
+WHERE integrated_resource_id = resource_pool.id AND resource_pool.allocated IS NOT NULL;
 UPDATE resource_pool SET allocated = NULL, state = '{"state": "free"}' WHERE allocated IS NOT NULL;
 UPDATE machine_interfaces_deletion SET last_deletion = now() WHERE id = 1;
 INSERT INTO machine_interfaces_deletion (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
@@ -874,6 +913,11 @@ for kind in dpudevices dpunodes dpus dpunodemaintenances; do
   kubectl delete --raw "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/dpf-operator-system/${kind}"
 done
 ```
+
+At tens of thousands of objects one call can return before every object is
+gone. Rerun the loop until
+`kubectl get <kind> -n dpf-operator-system --no-headers | wc -l` prints 0 for
+each kind.
 
 `make -C dev/k8s/dpf-sim-controller undeploy` removes the simulator itself and
 leaves the DPF CRDs in place.

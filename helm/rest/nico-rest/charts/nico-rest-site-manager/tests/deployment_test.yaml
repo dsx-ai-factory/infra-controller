@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: nico-rest-cert-manager endpoint configurability
+templates:
+  - deployment.yaml
+release:
+  namespace: nico-rest
+set:
+  # Provided by the nico-rest parent chart at render time; set here so the
+  # subchart's deployment template renders standalone under helm-unittest.
+  global.image.repository: nvcr.io/nico
+  global.image.tag: latest
+  global.image.pullPolicy: IfNotPresent
+  global.imagePullSecrets:
+    - name: image-pull-secret
+tests:
+  - it: targets nico-rest-cert-manager in the release namespace by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --creds-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --creds-manager-ca-path=/etc/credsmgr-ca/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tls-certs
+            mountPath: /etc/tls
+            readOnly: true
+
+  # nico-rest-cert-manager carries its own namespaceOverride and stays where it
+  # is when this chart moves, so the endpoint must not follow site-manager into
+  # the new namespace, where no such Service resolves.
+  - it: keeps the release namespace when only site-manager is relocated
+    set:
+      namespaceOverride: nico-rest-staging
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --creds-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+
+  # Trust has to come from the CA that signs nico-rest-cert-manager's listener,
+  # not from whichever issuer produced this service's own serving certificate.
+  # Those are separate settings and the chart cannot assume they agree.
+  - it: trusts the cert-manager signing CA rather than its own serving issuer
+    set:
+      certificate:
+        enabled: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --creds-manager-ca-path=/etc/credsmgr-ca/ca.crt
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: credsmgr-ca
+            secret:
+              secretName: ca-signing-secret
+              items:
+                - key: tls.crt
+                  path: ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: credsmgr-ca
+            mountPath: /etc/credsmgr-ca
+            readOnly: true
+
+  - it: honours an explicit args.credsManagerUrl
+    set:
+      args:
+        credsManagerUrl: https://credsmgr.override.example.com:8443
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --creds-manager-url=https://credsmgr.override.example.com:8443

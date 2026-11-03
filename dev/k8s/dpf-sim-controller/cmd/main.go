@@ -55,12 +55,40 @@ func main() {
 	flag.DurationVar(&osInstall, "os-install-dwell", 0,
 		"time a DPU lingers in OS Installing; 0 (default) means the same as --phase-dwell.\n"+
 			"A real BFB install takes minutes; set this to hold NICo in its DPF wait state that long")
+	var (
+		redfishInstall  bool
+		bmcSecretName   string
+		bmcUsername     string
+		installTimeout  time.Duration
+		installPoll     time.Duration
+		bmcRequestLimit time.Duration
+	)
+	flag.BoolVar(&redfishInstall, "redfish-os-install", false,
+		"install the managed BFB in OS Installing through the DPU BMC's Redfish (UpdateService.SimpleUpdate)\n"+
+			"and wait for the task, as the real DPF operator does. Needs a network path from this pod to the DPU\n"+
+			"BMCs in DPUDevice spec.bmcIp:bmcPort. Off by default: the phase only dwells")
+	flag.StringVar(&bmcSecretName, "bmc-secret-name", controller.DefaultBMCSecretName,
+		"Secret in the DPF namespace holding the shared DPU BMC password under key 'password'")
+	flag.StringVar(&bmcUsername, "bmc-username", controller.DefaultBMCUsername,
+		"DPU BMC account used with the shared password")
+	flag.DurationVar(&installTimeout, "os-install-timeout", 45*time.Minute,
+		"how long OS Installing may take with --redfish-os-install before the DPU moves to Error")
+	flag.DurationVar(&installPoll, "os-install-poll-interval", 10*time.Second,
+		"how often an accepted BFB install task is polled with --redfish-os-install")
+	flag.DurationVar(&bmcRequestLimit, "bmc-request-timeout", 30*time.Second,
+		"timeout of each Redfish request to a DPU BMC with --redfish-os-install")
 	var reconcileConcurrency int
 	flag.IntVar(&reconcileConcurrency, "reconcile-concurrency", 16,
 		"parallel reconcile workers (fleet-scale walks serialize on one)")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if redfishInstall && (installTimeout <= 0 || installPoll <= 0 || bmcRequestLimit <= 0) {
+		fmt.Fprintf(os.Stderr, "invalid --os-install-timeout %v, --os-install-poll-interval %v or --bmc-request-timeout %v: must be > 0\n",
+			installTimeout, installPoll, bmcRequestLimit)
+		os.Exit(2)
+	}
 
 	// A negative dwell collapses every RequeueAfter/dwell gate into an
 	// immediate hot-loop retry; zero (advance as fast as reconciles land) is
@@ -116,14 +144,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.DPUDeviceReconciler{
+	reconciler := &controller.DPUDeviceReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
 		Namespace:      dpfNamespace,
 		PhaseDwell:     phaseDwell,
 		OSInstallDwell: osInstall,
 		Concurrency:    reconcileConcurrency,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if redfishInstall {
+		reconciler.OSInstall = &controller.OSInstallConfig{
+			SecretName:     bmcSecretName,
+			Username:       bmcUsername,
+			Timeout:        installTimeout,
+			PollInterval:   installPoll,
+			RequestTimeout: bmcRequestLimit,
+		}
+		// Uncached: the cache would watch every Secret in the namespace.
+		reconciler.SecretReader = mgr.GetAPIReader()
+	}
+	if err = reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DPUDevice")
 		os.Exit(1)
 	}
@@ -131,7 +171,7 @@ func main() {
 	_ = mgr.AddHealthzCheck("healthz", healthz.Ping)
 	_ = mgr.AddReadyzCheck("readyz", healthz.Ping)
 
-	setupLog.Info("starting dpf-sim-controller", "dpfNamespace", dpfNamespace, "phaseDwell", phaseDwell, "osInstallDwell", osInstall)
+	setupLog.Info("starting dpf-sim-controller", "dpfNamespace", dpfNamespace, "phaseDwell", phaseDwell, "osInstallDwell", osInstall, "redfishOSInstall", redfishInstall)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager exited")
 		os.Exit(1)

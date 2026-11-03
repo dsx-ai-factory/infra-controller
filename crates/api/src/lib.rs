@@ -42,4 +42,4 @@ mod run;
 pub use carbide_api_core::AdminUiRoutesBuilder;
 pub use command_line::{Command, Options};
 pub use postgres::postgres_connect_options;
-pub use run::{ApiServerAddresses, run};
+pub use run::{ApiServerAddresses, ApiServerReady, run};

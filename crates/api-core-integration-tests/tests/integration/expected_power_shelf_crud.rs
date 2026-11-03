@@ -113,6 +113,122 @@ async fn test_add_expected_power_shelf(pool: sqlx::PgPool) {
 }
 
 #[sqlx_test]
+async fn expected_power_shelf_writes_reject_invalid_addresses_without_mutation(pool: sqlx::PgPool) {
+    #[derive(Debug)]
+    enum Operation {
+        Add,
+        Update,
+        ReplaceAll,
+    }
+
+    const NOT_SINGLE_INTERFACE: &str =
+        "must not be an unspecified, multicast or IPv4 limited-broadcast address";
+
+    let env = create_test_env(pool).await;
+    env.api()
+        .add_expected_power_shelf(tonic::Request::new(rpc::forge::ExpectedPowerShelf {
+            bmc_mac_address: "02:00:00:fe:02:01".to_string(),
+            bmc_username: "ADMIN".into(),
+            bmc_password: "PASS".into(),
+            shelf_serial_number: "BMC-IP-VALIDATION".into(),
+            bmc_ip_address: "192.0.2.10".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect("add baseline power shelf");
+    let before = env
+        .api()
+        .get_all_expected_power_shelves(tonic::Request::new(()))
+        .await
+        .expect("read baseline power shelves")
+        .into_inner();
+
+    // Malformed addresses fail request conversion. Addresses that cannot
+    // identify one interface fail the power shelf validator, which add,
+    // replace-all and the update transaction each call.
+    for (operation, bmc_ip_address, message) in [
+        (
+            Operation::Add,
+            "not-an-ip",
+            "IP address not-an-ip is not valid".to_string(),
+        ),
+        (
+            Operation::Update,
+            "not-an-ip",
+            "IP address not-an-ip is not valid".to_string(),
+        ),
+        (
+            Operation::ReplaceAll,
+            "not-an-ip",
+            "IP address not-an-ip is not valid".to_string(),
+        ),
+        (
+            Operation::Add,
+            "0.0.0.0",
+            format!("bmc_ip_address 0.0.0.0 {NOT_SINGLE_INTERFACE}"),
+        ),
+        (
+            Operation::Update,
+            "255.255.255.255",
+            format!("bmc_ip_address 255.255.255.255 {NOT_SINGLE_INTERFACE}"),
+        ),
+        (
+            Operation::ReplaceAll,
+            "0.0.0.0",
+            format!("bmc_ip_address 0.0.0.0 {NOT_SINGLE_INTERFACE}"),
+        ),
+    ] {
+        let mut invalid = before.expected_power_shelves[0].clone();
+        invalid.bmc_ip_address = bmc_ip_address.to_string();
+        invalid.shelf_serial_number = "MUST-NOT-PERSIST".to_string();
+        let result = match operation {
+            Operation::Add => {
+                invalid.expected_power_shelf_id = None;
+                invalid.bmc_mac_address = "02:00:00:fe:02:02".to_string();
+                env.api()
+                    .add_expected_power_shelf(tonic::Request::new(invalid))
+                    .await
+            }
+            Operation::Update => {
+                env.api()
+                    .update_expected_power_shelf(tonic::Request::new(invalid))
+                    .await
+            }
+            Operation::ReplaceAll => {
+                let first = rpc::forge::ExpectedPowerShelf {
+                    expected_power_shelf_id: None,
+                    bmc_mac_address: "02:00:00:fe:02:02".to_string(),
+                    shelf_serial_number: "FIRST-REPLACEMENT".to_string(),
+                    ..before.expected_power_shelves[0].clone()
+                };
+                invalid.expected_power_shelf_id = None;
+                invalid.bmc_mac_address = "02:00:00:fe:02:03".to_string();
+                // The handler deletes the old inventory and inserts `first`
+                // before converting `invalid`, so both writes must roll back.
+                env.api()
+                    .replace_all_expected_power_shelves(tonic::Request::new(
+                        ExpectedPowerShelfList {
+                            expected_power_shelves: vec![first, invalid],
+                        },
+                    ))
+                    .await
+            }
+        };
+        let case = format!("{operation:?} {bmc_ip_address}");
+        let error = result.expect_err("invalid BMC IP must be rejected");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{case}");
+        assert_eq!(error.message(), message, "{case}");
+        let after = env
+            .api()
+            .get_all_expected_power_shelves(tonic::Request::new(()))
+            .await
+            .expect("read power shelves after rejected write")
+            .into_inner();
+        assert_eq!(after, before, "{case} must not alter inventory");
+    }
+}
+
+#[sqlx_test]
 async fn test_delete_expected_power_shelf(pool: sqlx::PgPool) {
     let mut conn = pool.acquire().await.unwrap();
     let shelves = create_expected_power_shelves(&mut conn).await;

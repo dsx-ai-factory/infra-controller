@@ -38,7 +38,8 @@ const (
 	// TenantReportedIssueAlertID is the ID of the tenant-reported issue health alert.
 	MachineTenantReportedIssueAlertID = "tenant-reported"
 	// MachineHealthIssueSummaryMaxLength is the maximum length of the summary of the MachineHealthIssue.
-	MachineHealthIssueSummaryMaxLength = 512
+	// Shared with the Instance delete health issue; Core proto does not constrain either field.
+	MachineHealthIssueSummaryMaxLength = 1024
 	// MachineHealthIssueDetailsMaxLength is the maximum length of the details of the MachineHealthIssue.
 	MachineHealthIssueDetailsMaxLength = 8192
 )
@@ -59,6 +60,8 @@ const (
 )
 
 // ValidHealthIssueCategories lists accepted HealthIssue.category values for online repair.
+// Online repair stores these values as strings in a HealthProbeAlert payload rather
+// than converting them through Core's IssueCategory enum.
 var ValidHealthIssueCategoriesMap = map[string]string{
 	HealthIssueHardware:    "HARDWARE",
 	HealthIssueNetwork:     "NETWORK",
@@ -68,7 +71,8 @@ var ValidHealthIssueCategoriesMap = map[string]string{
 	HealthIssueOther:       "OTHER",
 }
 
-// APIMachineHealthIssue describes the tenant-reported issue when requesting online repair.
+// APIMachineHealthIssue describes a tenant-reported machine issue.
+// Online repair and Instance deletion apply endpoint-specific validation.
 type APIMachineHealthIssue struct {
 	// Category is the type of the issue
 	Category string `json:"category"`
@@ -538,6 +542,79 @@ func (ib *APIMachineInfiniBandInterface) FromProto(protoIB *corev1.InfinibandInt
 	}
 }
 
+// APIMachineLldpMedInventory is the LLDP-MED inventory advertised by an LLDP neighbor
+type APIMachineLldpMedInventory struct {
+	// Serial is the serial number advertised by the neighbor
+	Serial *string `json:"serial"`
+	// Manufacturer is the manufacturer advertised by the neighbor
+	Manufacturer *string `json:"manufacturer"`
+	// Model is the model advertised by the neighbor
+	Model *string `json:"model"`
+}
+
+// FromProto populates an APIMachineLldpMedInventory from its protobuf form.
+func (mi *APIMachineLldpMedInventory) FromProto(protoMI *corev1.LldpMedInventory) {
+	if protoMI == nil {
+		return
+	}
+	mi.Serial = protoMI.Serial
+	mi.Manufacturer = protoMI.Manufacturer
+	mi.Model = protoMI.Model
+}
+
+// APIMachineLldpNeighbor is the data structure to capture API representation of an LLDP neighbor
+// observed on one of the Machine's NICs
+type APIMachineLldpNeighbor struct {
+	// MacAddress is the MAC address of the Machine's own NIC on which the neighbor was observed
+	MacAddress string `json:"macAddress"`
+	// LocalPort is the name of the Machine's local interface on which the neighbor was observed
+	LocalPort string `json:"localPort"`
+	// Name is the system name advertised by the neighbor
+	Name string `json:"name"`
+	// Description is the system description advertised by the neighbor
+	Description string `json:"description"`
+	// IpAddresses are the management addresses advertised by the neighbor
+	IpAddresses []string `json:"ipAddresses"`
+	// ChassisIdType is the LLDP chassis id subtype advertised by the neighbor (e.g. "mac", "local")
+	ChassisIdType string `json:"chassisIdType"`
+	// ChassisIdValue is the LLDP chassis id value advertised by the neighbor
+	ChassisIdValue string `json:"chassisIdValue"`
+	// RemotePortType is the LLDP port id subtype advertised by the neighbor (e.g. "ifname", "mac")
+	RemotePortType string `json:"remotePortType"`
+	// RemotePortValue is the LLDP port id value advertised by the neighbor
+	RemotePortValue string `json:"remotePortValue"`
+	// MedInventory is the LLDP-MED inventory advertised by the neighbor, or null when the
+	// neighbor does not advertise one.
+	MedInventory *APIMachineLldpMedInventory `json:"medInventory"`
+}
+
+// FromProto populates an APIMachineLldpNeighbor from its protobuf form.
+func (n *APIMachineLldpNeighbor) FromProto(protoN *corev1.InterfaceLldp) {
+	if protoN == nil {
+		return
+	}
+	n.MacAddress = protoN.MacAddress
+	n.IpAddresses = []string{}
+	lldp := protoN.Lldp
+	if lldp == nil {
+		return
+	}
+	n.LocalPort = lldp.LocalPort
+	n.Name = lldp.Name
+	n.Description = lldp.Description
+	if len(lldp.IpAddress) > 0 {
+		n.IpAddresses = append(n.IpAddresses, lldp.IpAddress...)
+	}
+	n.ChassisIdType = lldp.IdType
+	n.ChassisIdValue = lldp.IdValue
+	n.RemotePortType = lldp.RemotePortType
+	n.RemotePortValue = lldp.RemotePortValue
+	if lldp.MedInventory != nil {
+		n.MedInventory = &APIMachineLldpMedInventory{}
+		n.MedInventory.FromProto(lldp.MedInventory)
+	}
+}
+
 // APIMachineLifecycleState is the data structure to capture API representation of Machine lifecycle state
 type APIMachineLifecycleState struct {
 	// Value is the current lifecycle state value
@@ -553,17 +630,91 @@ type APIMachineLifecycleState struct {
 // APIMachineMetadata is the data structure to capture API representation of a Machine's Metadata Info
 type APIMachineMetadata struct {
 	// DMIData is the DMI data of the machine
-	DMIData *APIDMIData `json:"dmiData,omitempty"`
+	DMIData *APIDMIData `json:"dmiData"`
 	// BMCInfo is the BMC Info of the machine
-	BMCInfo *APIBMCInfo `json:"bmcInfo,omitempty"`
+	BMCInfo *APIBMCInfo `json:"bmcInfo"`
 	// GPUInfo is the list of GPUs for the machine
-	GPUs []APIMachineGPUInfo `json:"gpus,omitempty"`
+	GPUs []APIMachineGPUInfo `json:"gpus"`
 	// NetworkInterfaces is the list of Ethernet interfaces of the machine
-	NetworkInterfaces []APIMachineNetworkInterface `json:"networkInterfaces,omitempty"`
+	NetworkInterfaces []APIMachineNetworkInterface `json:"networkInterfaces"`
 	// InfiniBandInterfaces is the list of InfiniBand interfaces of the machine
-	InfiniBandInterfaces []APIMachineInfiniBandInterface `json:"infinibandInterfaces,omitempty"`
+	InfiniBandInterfaces []APIMachineInfiniBandInterface `json:"infinibandInterfaces"`
 	// LifecycleState is the machine lifecycle state details
-	LifecycleState *APIMachineLifecycleState `json:"lifecycleState,omitempty"`
+	LifecycleState *APIMachineLifecycleState `json:"lifecycleState"`
+	// LldpNeighbors is the list of LLDP neighbors observed on the machine's NICs, as last reported by the machine.
+	// Always rendered, as [] when the machine has not reported any neighbors.
+	LldpNeighbors []APIMachineLldpNeighbor `json:"lldpNeighbors"`
+}
+
+// FromProto populates Machine metadata and normalizes supported inventory
+// collections to empty arrays when Core omits them.
+func (m *APIMachineMetadata) FromProto(machine *corev1.Machine) {
+	m.DMIData = nil
+	m.BMCInfo = nil
+	m.GPUs = []APIMachineGPUInfo{}
+	m.NetworkInterfaces = []APIMachineNetworkInterface{}
+	m.InfiniBandInterfaces = []APIMachineInfiniBandInterface{}
+	m.LifecycleState = nil
+	m.LldpNeighbors = []APIMachineLldpNeighbor{}
+	if machine == nil {
+		return
+	}
+
+	if machine.BmcInfo != nil {
+		m.BMCInfo = &APIBMCInfo{}
+		m.BMCInfo.FromProto(machine.BmcInfo)
+	}
+
+	discoveryInfo := machine.GetStatus().GetDiscoveryInfo()
+	if discoveryInfo != nil {
+		if discoveryInfo.DmiData != nil {
+			m.DMIData = &APIDMIData{}
+			m.DMIData.FromProto(discoveryInfo.DmiData)
+		}
+
+		for _, gpuInfo := range discoveryInfo.Gpus {
+			apiGPUInfo := APIMachineGPUInfo{}
+			apiGPUInfo.FromProto(gpuInfo)
+			m.GPUs = append(m.GPUs, apiGPUInfo)
+		}
+
+		for _, networkInterface := range discoveryInfo.NetworkInterfaces {
+			apiNetworkInterface := APIMachineNetworkInterface{}
+			apiNetworkInterface.FromProto(networkInterface)
+			m.NetworkInterfaces = append(m.NetworkInterfaces, apiNetworkInterface)
+		}
+
+		for _, infinibandInterface := range discoveryInfo.InfinibandInterfaces {
+			apiInfiniBandInterface := APIMachineInfiniBandInterface{}
+			apiInfiniBandInterface.FromProto(infinibandInterface)
+			m.InfiniBandInterfaces = append(m.InfiniBandInterfaces, apiInfiniBandInterface)
+		}
+	}
+
+	m.LifecycleState = &APIMachineLifecycleState{
+		Value:      machine.State,
+		IsAboveSLA: machine.GetStateSla().GetTimeInStateAboveSla(),
+		SLASeconds: machine.GetStateSla().GetSla().GetSeconds(),
+	}
+	if events := machine.GetEvents(); len(events) > 0 {
+		for _, event := range events {
+			if event.GetVersion() == machine.GetStateVersion() {
+				if ts := event.GetTime(); ts != nil {
+					m.LifecycleState.Updated = new(ts.AsTime())
+				}
+				break
+			}
+		}
+	}
+
+	for _, protoNeighbor := range machine.GetStatus().GetLldpNeighbors() {
+		if protoNeighbor == nil {
+			continue
+		}
+		neighbor := APIMachineLldpNeighbor{}
+		neighbor.FromProto(protoNeighbor)
+		m.LldpNeighbors = append(m.LldpNeighbors, neighbor)
+	}
 }
 
 // NewAPIMachine accepts a DB layer Machine object and returns an API object
@@ -653,70 +804,7 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 	// Only Provider Admin can see the metadata
 	if dbm.Metadata != nil && includeMetadata && isProviderOrPrivilegedTenant {
 		apim.Metadata = &APIMachineMetadata{}
-
-		// Get the Machine json body
-		machine := dbm.Metadata
-		discoveryInfo := machine.GetStatus().GetDiscoveryInfo()
-		// BMCInfo
-		if machine.BmcInfo != nil {
-			apim.Metadata.BMCInfo = &APIBMCInfo{}
-			apim.Metadata.BMCInfo.FromProto(machine.BmcInfo)
-		}
-
-		if discoveryInfo != nil {
-			// DMIData
-			if discoveryInfo.DmiData != nil {
-				apim.Metadata.DMIData = &APIDMIData{}
-				apim.Metadata.DMIData.FromProto(discoveryInfo.DmiData)
-			}
-
-			// GPUInfo
-			if len(discoveryInfo.Gpus) > 0 {
-				apim.Metadata.GPUs = []APIMachineGPUInfo{}
-				for _, gpuInfo := range discoveryInfo.Gpus {
-					lgpuInfo := APIMachineGPUInfo{}
-					lgpuInfo.FromProto(gpuInfo)
-					apim.Metadata.GPUs = append(apim.Metadata.GPUs, lgpuInfo)
-				}
-			}
-
-			// Machine Network Interface Info
-			if len(discoveryInfo.NetworkInterfaces) > 0 {
-				apim.Metadata.NetworkInterfaces = []APIMachineNetworkInterface{}
-				for _, nwiInfo := range discoveryInfo.NetworkInterfaces {
-					lnwiInfo := APIMachineNetworkInterface{}
-					lnwiInfo.FromProto(nwiInfo)
-					apim.Metadata.NetworkInterfaces = append(apim.Metadata.NetworkInterfaces, lnwiInfo)
-				}
-			}
-
-			// Machine InfiniBand Interface Info
-			if len(discoveryInfo.InfinibandInterfaces) > 0 {
-				apim.Metadata.InfiniBandInterfaces = []APIMachineInfiniBandInterface{}
-				for _, ibiInfo := range discoveryInfo.InfinibandInterfaces {
-					libiInfo := APIMachineInfiniBandInterface{}
-					libiInfo.FromProto(ibiInfo)
-					apim.Metadata.InfiniBandInterfaces = append(apim.Metadata.InfiniBandInterfaces, libiInfo)
-				}
-			}
-		}
-
-		// machine lifecycle state
-		apim.Metadata.LifecycleState = &APIMachineLifecycleState{
-			Value:      machine.State,
-			IsAboveSLA: machine.GetStateSla().GetTimeInStateAboveSla(),
-			SLASeconds: machine.GetStateSla().GetSla().GetSeconds(),
-		}
-		if events := machine.GetEvents(); len(events) > 0 {
-			for _, event := range events {
-				if event.GetVersion() == machine.GetStateVersion() {
-					if ts := event.GetTime(); ts != nil {
-						apim.Metadata.LifecycleState.Updated = new(ts.AsTime())
-					}
-					break
-				}
-			}
-		}
+		apim.Metadata.FromProto(dbm.Metadata.Machine)
 	}
 
 	apim.Health = nil

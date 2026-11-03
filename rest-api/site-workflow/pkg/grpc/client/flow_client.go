@@ -82,6 +82,9 @@ type FlowGrpcClientConfig struct {
 	ClientKeyPath string
 	// client metrics interface
 	ClientMetrics Metrics
+	// OnRPCFinish observes each completed RPC once, including stream termination.
+	// It must be safe for concurrent calls; nil disables the callback.
+	OnRPCFinish func(error) `json:"-"`
 }
 
 // NewFlowGrpcClient creates a new Flow gRPC client, this is called by Site Agent startup code and cert reload routine
@@ -181,6 +184,10 @@ func NewFlowGrpcClient(config *FlowGrpcClientConfig) (client *FlowGrpcClient, er
 	default:
 		log.Error().Err(ErrFlowGrpcClientInvalidSecureOpts).Msg("FlowGrpcClient: Invalid dial options")
 		return nil, ErrFlowGrpcClientInvalidSecureOpts
+	}
+
+	if config.OnRPCFinish != nil {
+		client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.OnFinish(config.OnRPCFinish)))
 	}
 
 	// Configure interceptors
@@ -352,14 +359,14 @@ func (fgac *FlowGrpcAtomicClient) CheckAndReloadCerts(initialClientCertMD5, init
 			reloadStarted = time.Now()
 			reloadBackoff = FlowGrpcConnectionBackoffInitial
 		} else if time.Since(reloadStarted) >= FlowGrpcConnectionRetryTimeout {
-			panic(fmt.Errorf("Flow gRPC: failed to reinitialize gRPC client with new certificates within %s",
+			panic(fmt.Errorf("flow gRPC: failed to reinitialize gRPC client with new certificates within %s",
 				FlowGrpcConnectionRetryTimeout))
 		}
 
 		newClient, err := NewFlowGrpcClient(fgac.Config)
 		if err != nil {
 			if time.Since(reloadStarted) >= FlowGrpcConnectionRetryTimeout {
-				panic(fmt.Errorf("Flow gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
+				panic(fmt.Errorf("flow gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
 					FlowGrpcConnectionRetryTimeout, err))
 			}
 			logger.Error().Err(err).Dur("RetryIn", reloadBackoff).Msg("Failed to reinitialize gRPC client with new certificates, retrying")

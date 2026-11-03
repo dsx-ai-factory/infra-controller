@@ -35,6 +35,16 @@ nico-api:
       type = "underlay"
       prefix = "10.200.0.0/16"
       gateway = "10.200.255.254"
+
+      [networks.simulated-underlay]
+      type = "underlay"
+      prefix = "10.202.0.0/18"
+      gateway = "10.202.0.1"
+
+      [networks.nvos-inside-servicecidr]
+      type = "underlay"
+      prefix = "10.233.1.0/24"
+      gateway = "10.233.1.1"
 """
 
 # A fake kubectl answers each ServiceCIDR source from an environment variable and records its calls.
@@ -52,8 +62,12 @@ printf '%s' "$out"
 """
 
 
-def machines_values(relay="10.200.0.1", key="bmcDhcpRelayAddress"):
-    return f"pods:\n  mat-0:\n    machines:\n      compute:\n        hwType: dell_poweredge_r750\n        hostCount: 10\n        {key}: \"{relay}\"\n"
+def machines_values(relay="10.200.0.1", key="bmcDhcpRelayAddress", underlay=None, underlay_key="underlayDhcpRelayAddress"):
+    """Values for one machine-a-tron pod with a BMC relay and an optional underlay relay."""
+    values = f"pods:\n  mat-0:\n    machines:\n      compute:\n        hwType: dell_poweredge_r750\n        hostCount: 10\n        {key}: \"{relay}\"\n"
+    if underlay is not None:
+        values += f"        {underlay_key}: \"{underlay}\"\n"
+    return values
 
 
 class MatServiceCidrTest(unittest.TestCase):
@@ -94,6 +108,19 @@ pods:
             # The deprecated alias still names the BMC relay.
             ("deprecated alias", machines_values(key="oobDhcpRelayAddress"), ["10.96.0.0/12"], [],
              ["10.200.0.0/18"], []),
+            # Switch NVOS leases are published as externalIPs too, so the underlay relay's network is checked.
+            ("NVOS network checked alongside the BMC network", machines_values(underlay="10.202.0.1"),
+             ["10.96.0.0/12"], [], ["10.200.0.0/18", "10.202.0.0/18"], []),
+            ("NVOS network overlap", machines_values(underlay="10.233.1.1"), ["10.233.0.0/18"], [],
+             ["10.200.0.0/18", "10.233.1.0/24"],
+             ["NVOS network 10.233.1.0/24 overlaps the cluster ServiceCIDR 10.233.0.0/18"]),
+            ("unresolved NVOS relay", machines_values(underlay="10.250.0.1"), ["10.96.0.0/12"], [],
+             ["10.200.0.0/18"],
+             ["pods.mat-0.machines.compute: cannot determine the NVOS network of relay 10.250.0.1; "
+              "declare its [networks.*] prefix in the site config or set SCALE_BMC_PREFIXES"]),
+            # The underlay relay's deprecated alias names it too; an unset underlay relay is not an error.
+            ("NVOS deprecated alias", machines_values(underlay="10.202.0.1", underlay_key="adminDhcpRelayAddress"),
+             ["10.96.0.0/12"], [], ["10.200.0.0/18", "10.202.0.0/18"], []),
             # Null pods and null groups disable chart defaults and carry no relay.
             ("null pods and groups", "pods:\n  default: null\n  mat-0:\n    machines:\n      rack-machines: null\n",
              ["10.96.0.0/12"], [], [], []),
@@ -161,19 +188,19 @@ pods:
         dump = '"--service-cluster-ip-range=10.96.0.0/12",\n'
         cases = [
             # SCALE_SERVICE_CIDRS wins and kubectl is never called.
-            ("environment", {"SCALE_SERVICE_CIDRS": "10.96.0.0/12"}, 0, "OK: BMC networks 10.200.0.0/18 are outside the ServiceCIDR 10.96.0.0/12", []),
+            ("environment", {"SCALE_SERVICE_CIDRS": "10.96.0.0/12"}, 0, "OK: BMC/NVOS networks 10.200.0.0/18 are outside the ServiceCIDR 10.96.0.0/12", []),
             # ServiceCIDR objects are the first cluster source.
             ("ServiceCIDR objects", {"FAKE_SERVICECIDRS": "10.96.0.0/12 fd00::/108"}, 0,
-             "OK: BMC networks 10.200.0.0/18 are outside the ServiceCIDR 10.96.0.0/12 fd00::/108",
+             "OK: BMC/NVOS networks 10.200.0.0/18 are outside the ServiceCIDR 10.96.0.0/12 fd00::/108",
              ["get servicecidrs -o jsonpath={.items[*].spec.cidrs[*]}"]),
             # kubeadm's ClusterConfiguration is the fallback, with comma-separated families split.
             ("kubeadm-config", {"FAKE_KUBEADM": kubeadm}, 0,
-             "OK: BMC networks 10.200.0.0/18 are outside the ServiceCIDR 10.233.0.0/18 fd85::/108",
+             "OK: BMC/NVOS networks 10.200.0.0/18 are outside the ServiceCIDR 10.233.0.0/18 fd85::/108",
              ["get servicecidrs -o jsonpath={.items[*].spec.cidrs[*]}",
               "get cm kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}"]),
             # The apiserver flag is the last resort.
             ("apiserver flag", {"FAKE_DUMP": dump}, 0,
-             "OK: BMC networks 10.200.0.0/18 are outside the ServiceCIDR 10.96.0.0/12",
+             "OK: BMC/NVOS networks 10.200.0.0/18 are outside the ServiceCIDR 10.96.0.0/12",
              ["get servicecidrs -o jsonpath={.items[*].spec.cidrs[*]}",
               "get cm kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}",
               "cluster-info dump"]),
@@ -214,10 +241,10 @@ pods:
         with tempfile.TemporaryDirectory() as directory:
             values = Path(directory) / "mat-values.yaml"
             cases = [
-                ("invalid YAML", "pods: [\n", [], "Cannot check the machine-a-tron BMC networks"),
+                ("invalid YAML", "pods: [\n", [], "Cannot check the machine-a-tron BMC/NVOS networks"),
                 ("missing PyYAML", "{}", ["-I", "-S"], "requires PyYAML"),
                 ("placeholder relay", machines_values("FILL_IN"), [],
-                 "Cannot check the machine-a-tron BMC networks: pods.mat-0.machines.compute.bmcDhcpRelayAddress 'FILL_IN'"),
+                 "Cannot check the machine-a-tron BMC/NVOS networks: pods.mat-0.machines.compute.bmcDhcpRelayAddress 'FILL_IN'"),
             ]
             env = {**os.environ, "SCALE_SERVICE_CIDRS": "10.96.0.0/12"}
             for name, contents, flags, diagnostic in cases:

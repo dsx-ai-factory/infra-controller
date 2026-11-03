@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,7 +115,7 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	e.Use(middleware.Secure())
 
 	// Limit request body size to prevent OOM from oversized payloads
-	e.Use(echoMiddleware.BodyLimit("10M"))
+	e.Use(echoMiddleware.BodyLimit(strconv.Itoa(cerr.MaxRequestBodyBytes)))
 
 	// Rate limiter middleware (if enabled)
 	rateLimiterConfig := cfg.GetRateLimiterConfig()
@@ -164,7 +165,9 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		// Bootstrap resolves the exported service.name independently, with
 		// OTEL_SERVICE_NAME taking precedence over the config fallback. This name
 		// identifies the HTTP server to the Echo instrumentation only.
-		e.Use(otelecho.Middleware(cfg.GetAPIName(), otelecho.WithSkipper(skipTracingRoutes)))
+		e.Use(otelecho.Middleware(cfg.GetAPIName(), otelecho.WithSkipper(func(c echo.Context) bool {
+			return skipTracingRoutes(c, dbSession)
+		})))
 	}
 
 	// Sentry middleware
@@ -211,7 +214,7 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 
 	// Routes
 	// Common routes are service oriented e.g. health
-	commonAPIRoutes := api.NewSystemAPIRoutes()
+	commonAPIRoutes := api.NewSystemAPIRoutes(dbSession)
 	for _, commonAPIRoute := range commonAPIRoutes {
 		// Register route
 		e.Add(commonAPIRoute.Method, commonAPIRoute.Path, commonAPIRoute.Handler.Handle)
@@ -270,6 +273,18 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	return e
 }
 
+// metricsMethodLabel returns the request method when it is a standard HTTP
+// method, and "unknown" otherwise, matching promhttp's bounded label behavior.
+func metricsMethodLabel(c echo.Context, _ error) string {
+	method := c.Request().Method
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return method
+	}
+	return "unknown"
+}
+
 func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 	ep := echo.New()
 	ep.HideBanner = true
@@ -279,6 +294,13 @@ func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 		// its own "echo" for an empty one.
 		Subsystem: namespace,
 		Skipper:   api.MetricsURLSkipper,
+		// echoprometheus otherwise takes host and method from the request, and
+		// the caller controls both. Keep the published labels but bound their
+		// values so unauthenticated requests cannot create unbounded time series.
+		LabelFuncs: map[string]echoPrometheus.LabelValueFunc{
+			"host":   func(echo.Context, error) string { return namespace },
+			"method": metricsMethodLabel,
+		},
 	}
 
 	p := echoPrometheus.NewMiddlewareWithConfig(conf)
@@ -291,6 +313,6 @@ func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 }
 
 // skipTracingRoutes returns true if the route should be skipped for tracing
-func skipTracingRoutes(c echo.Context) bool {
-	return api.IsSystemRoute(c.Path())
+func skipTracingRoutes(c echo.Context, dbSession *cdb.Session) bool {
+	return api.IsSystemRoute(c.Path(), dbSession)
 }

@@ -23,14 +23,14 @@ use ::db::{DatabaseError, Transaction};
 use config_version::Versioned;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use rand::RngExt;
 use sqlx_query_tracing::SqlxQueryDataAggregation;
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::db;
+use super::{ObjectIdsFromDatabase, db};
 use crate::CheckApplied;
 use crate::config::IterationConfig;
 use crate::db_write_batch::DbWriteBatch;
@@ -74,6 +74,10 @@ pub(super) struct StateProcessor<IO: StateControllerIO> {
     pub(super) per_object_state: Option<PerObjectStateRecorder>,
 
     pub(super) object_metrics: HashMap<IO::ObjectId, CollectedMetrics<IO>>,
+    /// The latest complete database object-ID list used only to decide which
+    /// retained measurements contribute to aggregate metrics.
+    pub(super) object_ids_from_database:
+        Option<tokio::sync::watch::Receiver<Option<ObjectIdsFromDatabase<IO::ObjectId>>>>,
     pub(super) cancel_token: CancellationToken,
     pub(super) iteration_config: IterationConfig,
     /// Object handling tasks currently executing. Keeping them in a JoinSet ensures
@@ -277,9 +281,20 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let now = std::time::Instant::now();
         self.last_metric_emission_time = now;
 
+        // Filter totals using the latest ID list without removing cache entries.
+        // A newly processed ID may appear in the next database listing.
+        let object_ids_from_database = self
+            .object_ids_from_database
+            .as_ref()
+            .and_then(|receiver| receiver.borrow().clone());
         let mut aggregate = IterationMetrics::<IO>::default();
-        for object_metrics in self.object_metrics.values() {
-            aggregate.merge_object_handling_metrics(&object_metrics.metrics);
+        for (object_id, object_metrics) in &self.object_metrics {
+            if object_ids_from_database
+                .as_ref()
+                .is_none_or(|object_ids_from_database| object_ids_from_database.contains(object_id))
+            {
+                aggregate.merge_object_handling_metrics(&object_metrics.metrics);
+            }
         }
 
         // Remove metrics that have not been refreshed for the configured time
@@ -376,20 +391,29 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                     count
                 }
                 Err(_) => {
-                    tracing::error!(
-                        in_flight_task_count = self.object_tasks.len(),
-                        "Timed out waiting for state controller object handling tasks to complete"
+                    // If we timed out after `max_duration`, it means tasks are still running. This
+                    // isn't an error unless these tasks exceed the max object wait time, which is
+                    // logged elsewhere. `max_duration` might be the controller iteration time,
+                    // which is shorter than the max object wait time and is not an error to exceed.
+                    let in_flight_task_count = self.object_tasks.len();
+                    tracing::info!(
+                        in_flight_task_count,
+                        "{in_flight_task_count} tasks still running after iteration"
                     );
                     0
                 }
             };
 
-        if total_completions > 0
-            && let Some(emitter) = &self.metric_emitter
-        {
+        if let Some(emitter) = &self.metric_emitter {
+            if total_completions > 0 {
+                emitter
+                    .completed_tasks_counter
+                    .add(total_completions as u64, &[]);
+            }
+
             emitter
-                .completed_tasks_counter
-                .add(total_completions as u64, &[]);
+                .running_tasks_gauge
+                .record(self.object_tasks.len() as u64, &[]);
         }
 
         total_completions
@@ -526,6 +550,8 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
             .map(|id| id.to_string())
             .collect();
 
+        // Replace completed claims with requested follow-up entries in one transaction so a failed
+        // commit cannot lose queued work.
         let mut txn = Transaction::begin(&self.pool).await?;
         let num_deleted = db::delete_queued_objects(
             &mut txn,
@@ -563,12 +589,12 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         // and remove them later in order to not forget about these in case there
         // is a transient database error
         self.completed_objects.insert(task_result.object_id.clone());
-        // If the state handler returned `Transition`, then run the handler again
-        // as soon as possible. An invalidated iteration also needs a fresh
-        // snapshot before it can make progress.
+        // Requeue transitions, invalidated snapshots, and committed Wait requests immediately so
+        // follow-up work does not depend on periodic scanning.
         if allow_requeue
             && (task_result.metrics.common.next_state.is_some()
-                || task_result.metrics.common.iteration_invalidated)
+                || task_result.metrics.common.iteration_invalidated
+                || task_result.metrics.common.requeue_immediately)
         {
             self.requeue_objects.insert(task_result.object_id.clone());
         }
@@ -800,7 +826,8 @@ async fn process_object<IO: StateControllerIO>(
         };
 
         if is_success {
-            // Commit transaction only when handler returned the Success.
+            // Commit handler state and outcome before exporting any follow-up scheduling request
+            // so the next pass cannot read uncommitted results.
             if !matches!(handler_outcome, Ok(StateHandlerOutcome::Deleted { .. })) {
                 let db_outcome =
                     PersistentStateHandlerOutcome::from_result(handler_outcome.as_ref());
@@ -820,6 +847,15 @@ async fn process_object<IO: StateControllerIO>(
         // Only emit the next state as metric if the transaction was actually
         // committed and we are sure we reached the next state
         metrics.common.next_state = next_state;
+        // Export the committed Wait request to queue finalization without persisting scheduling
+        // policy.
+        metrics.common.requeue_immediately = matches!(
+            &handler_outcome,
+            Ok(StateHandlerOutcome::Wait {
+                requeue_immediately: true,
+                ..
+            })
+        );
         if metrics.common.next_state.is_some() {
             metrics.common.state_entered_at = next_state_entered_at;
             metrics.common.sla = next_state_sla;
@@ -942,6 +978,8 @@ pub(super) struct ProcessorMetricsEmitter {
     completed_tasks_counter: Counter<u64>,
     requeued_tasks_counter: Counter<u64>,
     errored_tasks_counter: Counter<u64>,
+    /// How many tasks are currently running in the queue
+    running_tasks_gauge: Gauge<u64>,
     db: sqlx_query_tracing::DatabaseMetricEmitters,
 }
 
@@ -952,7 +990,7 @@ impl ProcessorMetricsEmitter {
         let iteration_latency = meter
             .f64_histogram(format!("{object_type}_iteration_latency"))
             .with_description(format!(
-                "The elapsed time in the last state processor iteration to handle objects of type {object_type}"
+                "Elapsed time of each completed state processor iteration for objects of type {object_type}"
             ))
             .with_unit("ms")
             .build();
@@ -985,6 +1023,13 @@ impl ProcessorMetricsEmitter {
             ))
             .build();
 
+        let running_tasks_gauge = meter
+            .u64_gauge(format!("{object_type}_object_tasks_running"))
+            .with_description(format!(
+                "Number of object handling tasks currently running of type {object_type}"
+            ))
+            .build();
+
         Self {
             iteration_latency,
             db,
@@ -992,6 +1037,7 @@ impl ProcessorMetricsEmitter {
             completed_tasks_counter,
             requeued_tasks_counter,
             errored_tasks_counter,
+            running_tasks_gauge,
         }
     }
 

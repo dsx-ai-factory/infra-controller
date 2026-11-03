@@ -83,12 +83,13 @@ func executeWorkflow(
 		)
 	}
 
+	executionTimeout := workflow.ExecutionTimeout(&req.Info, typedInfo, desc.Timeout)
 	r, err := client.ExecuteWorkflow(
 		ctx,
 		temporalclient.StartWorkflowOptions{
 			TaskQueue:                WorkflowQueue,
 			ID:                       req.Info.TaskID.String(),
-			WorkflowExecutionTimeout: desc.Timeout,
+			WorkflowExecutionTimeout: executionTimeout,
 		},
 		desc.WorkflowName,
 		req.Info,
@@ -103,7 +104,8 @@ func executeWorkflow(
 		RunID:      r.GetRunID(),
 	}
 
-	log.Info().Msgf("Temporal workflow %s started", executionID.String())
+	log.Info().Dur("execution_timeout", executionTimeout).
+		Msgf("Temporal workflow %s started", executionID.String())
 
 	encodedExecutionID, err := executionID.Encode()
 	if err != nil {

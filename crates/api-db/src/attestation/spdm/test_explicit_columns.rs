@@ -15,8 +15,11 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::{MachineIdSource, MachineInterfaceId, MachineType};
+use std::net::IpAddr;
+
+use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, MachineType};
 use carbide_uuid::network::NetworkSegmentId;
+use chrono::{Duration, Utc};
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
 use model::attestation::spdm::SlotInfo;
@@ -46,6 +49,157 @@ async fn spdm_snapshot_survives_added_columns(
     migration.commit().await?;
 
     exercise_snapshot(&mut api_connection).await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn spdm_snapshot_uses_topology_selected_bmc(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // `machine_interface_id` selects the BMC for an SPDM snapshot. If that
+    // interface becomes unavailable, the attestation remains loadable without
+    // falling back to another BMC. A topology without an ID still uses an
+    // attached BMC.
+    let mut txn = pool.begin().await?;
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x70; 32],
+        MachineType::Host,
+    );
+    crate::machine::create(
+        txn.as_mut(),
+        None,
+        &machine_id,
+        ManagedHostState::Ready,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    let segment_id: NetworkSegmentId = sqlx::query_scalar(
+        "INSERT INTO network_segments (name, version, network_segment_type)
+         VALUES ('selector-spdm-bmc', 'V1-T0', 'tenant') RETURNING id",
+    )
+    .fetch_one(txn.as_mut())
+    .await?;
+
+    let selected_created = Utc::now();
+    let stale_interface_id = insert_bmc_interface(
+        txn.as_mut(),
+        machine_id,
+        segment_id,
+        "stale-bmc",
+        "02:00:00:00:70:68".parse()?,
+        "192.0.2.70".parse()?,
+        selected_created - Duration::days(1),
+    )
+    .await?;
+    let selected_interface_id = insert_bmc_interface(
+        txn.as_mut(),
+        machine_id,
+        segment_id,
+        "selected-bmc",
+        "02:00:00:00:70:69".parse()?,
+        "192.0.2.71".parse()?,
+        selected_created,
+    )
+    .await?;
+
+    let topology = TopologyData {
+        discovery_data: DiscoveryData {
+            info: Default::default(),
+        },
+        bmc_info: BmcInfo {
+            machine_interface_id: Some(selected_interface_id),
+            port: Some(8443),
+            ..Default::default()
+        },
+    };
+    sqlx::query("INSERT INTO machine_topologies (machine_id, topology) VALUES ($1, $2)")
+        .bind(machine_id)
+        .bind(sqlx::types::Json(topology))
+        .execute(txn.as_mut())
+        .await?;
+
+    let attestation = SpdmDeviceAttestation {
+        machine_id,
+        device_id: "selector-device".to_string(),
+        bmc_info: Default::default(),
+        nonce: "11111111-2222-3333-4444-666666666666".parse()?,
+        state: SpdmAttestationState::FetchMetadata,
+        state_version: "V1-T0".parse()?,
+        state_outcome: None,
+        metadata: None,
+        ca_certificate_link: None,
+        ca_certificate: None,
+        evidence_target: None,
+        evidence: None,
+        started_at: Utc::now(),
+        cancelled_at: None,
+        completed_at: None,
+    };
+    insert_device_attestations(txn.as_mut(), &machine_id, vec![attestation.clone()]).await?;
+
+    let selected =
+        load_snapshot_for_machine_and_device_id(txn.as_mut(), &machine_id, &attestation.device_id)
+            .await?;
+    assert_eq!(
+        selected.bmc_info,
+        BmcInfo {
+            machine_interface_id: Some(selected_interface_id),
+            ip: Some("192.0.2.71".parse()?),
+            port: Some(8443),
+            mac: Some("02:00:00:00:70:69".parse()?),
+            ..Default::default()
+        }
+    );
+
+    sqlx::query(
+        "UPDATE machine_interfaces
+         SET machine_id = NULL, association_type = 'None'
+         WHERE id = $1",
+    )
+    .bind(selected_interface_id)
+    .execute(txn.as_mut())
+    .await?;
+    let unavailable =
+        load_snapshot_for_machine_and_device_id(txn.as_mut(), &machine_id, &attestation.device_id)
+            .await?;
+    assert_eq!(
+        unavailable.bmc_info,
+        BmcInfo {
+            machine_interface_id: Some(selected_interface_id),
+            port: Some(8443),
+            ..Default::default()
+        }
+    );
+
+    sqlx::query(
+        "UPDATE machine_topologies
+         SET topology = jsonb_set(
+             topology,
+             '{bmc_info,machine_interface_id}',
+             'null'::jsonb
+         )
+         WHERE machine_id = $1",
+    )
+    .bind(machine_id)
+    .execute(txn.as_mut())
+    .await?;
+    let fallback =
+        load_snapshot_for_machine_and_device_id(txn.as_mut(), &machine_id, &attestation.device_id)
+            .await?;
+    assert_eq!(
+        fallback.bmc_info,
+        BmcInfo {
+            machine_interface_id: Some(stale_interface_id),
+            ip: Some("192.0.2.70".parse()?),
+            port: Some(8443),
+            mac: Some("02:00:00:00:70:68".parse()?),
+            ..Default::default()
+        }
+    );
+
+    txn.rollback().await?;
     Ok(())
 }
 
@@ -181,4 +335,34 @@ async fn exercise_snapshot(
     );
     txn.rollback().await?;
     Ok(())
+}
+
+/// Adds an addressed BMC fixture with a controlled creation time for selection
+/// checks.
+async fn insert_bmc_interface(
+    txn: &mut PgConnection,
+    machine_id: MachineId,
+    segment_id: NetworkSegmentId,
+    hostname: &str,
+    mac_address: MacAddress,
+    ip_address: IpAddr,
+    created: chrono::DateTime<Utc>,
+) -> Result<MachineInterfaceId, Box<dyn std::error::Error>> {
+    let interface_id = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces
+         (machine_id, association_type, segment_id, mac_address,
+          primary_interface, hostname, interface_type, created)
+         VALUES ($1, 'Machine', $2, $3, false, $4, 'Bmc', $5)
+         RETURNING id",
+    )
+    .bind(machine_id)
+    .bind(segment_id)
+    .bind(mac_address)
+    .bind(hostname)
+    .bind(created)
+    .fetch_one(&mut *txn)
+    .await?;
+    crate::machine_interface_address::insert(txn, interface_id, ip_address, AllocationType::Dhcp)
+        .await?;
+    Ok(interface_id)
 }
