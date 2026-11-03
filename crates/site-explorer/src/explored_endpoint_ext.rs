@@ -466,6 +466,8 @@ mod tests {
         // BlueField-2 is intentionally not supported by the BMC eth0 offset
         // fallback, so derivation must return None even when an eth0 MAC exists.
         let mut report = load_bf2_ep_report();
+        assert_eq!(report.identify_dpu(), Some(DpuModel::BlueField2));
+        assert_eq!(report.model().as_deref(), Some("bluefield2"));
         for s in report.systems.iter_mut() {
             s.base_mac = None;
         }
@@ -563,6 +565,32 @@ mod tests {
                     scenario: "hyphenated BF3 model falls back to BMC eth0",
                     input: bf3_with_empty_sys_image(BF3_MODEL_VARIANTS[1]),
                     expect: Yields("5c:25:73:9e:ac:c6".parse().unwrap()),
+                },
+                Case {
+                    scenario: "N/A Card1 model allows BF3 BMC model to enable PF0 fallback",
+                    input: {
+                        let mut ep = bf3_with_empty_sys_image("N/A");
+                        ep.report.chassis.push(model::site_explorer::Chassis {
+                            id: "Bluefield_BMC".to_string(),
+                            model: Some("BlueField-3 DPU".to_string()),
+                            ..Default::default()
+                        });
+                        ep
+                    },
+                    expect: Yields("5c:25:73:9e:ac:c6".parse().unwrap()),
+                },
+                Case {
+                    scenario: "conflicting product models do not enable PF0 fallback",
+                    input: {
+                        let mut ep = bf3_with_empty_sys_image(BF3_MODEL_VARIANTS[1]);
+                        ep.report.chassis.push(model::site_explorer::Chassis {
+                            id: "Bluefield_BMC".to_string(),
+                            model: Some("BlueField-2 DPU".to_string()),
+                            ..Default::default()
+                        });
+                        ep
+                    },
+                    expect: Fails,
                 },
                 Case {
                     scenario: "legacy sys-image MAC fails sanitization",
