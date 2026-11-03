@@ -39,7 +39,7 @@ pub(super) fn get_nvidia_smi_data() -> HardwareEnumerationResult<Vec<RpcGpu>> {
                 "clocks.applications.gr,clocks.max.gr,pci.bus_id,",
                 "platform.chassis_serial_number,platform.slot_number,platform.tray_index,",
                 "platform.host_id,platform.module_id,platform.gpu_fabric_guid"
-            )
+            ),
         ])
         .output()?;
 
