@@ -5,84 +5,124 @@ package inventorysync
 
 import (
 	"context"
-	"os"
+	"encoding/json"
+	"errors"
 	"testing"
 
-	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
-// TestSyncSwitchNvosIPs covers the description merge: a resolved NVOS IP is
-// written under nvosIPDescriptionKey while other keys are preserved, and a
-// switch Core has not resolved an NVOS IP for is left untouched.
-func TestSyncSwitchNvosIPs(t *testing.T) {
-	ctx := context.Background()
+type failSwitchNvosPortsClient struct{ nicoapi.Client }
 
-	if os.Getenv("DB_PORT") == "" {
-		log.Warn().Msgf("Not running unit test due to no DB environment specified")
-		t.SkipNow()
+func (c *failSwitchNvosPortsClient) FindSwitchNvosPorts(context.Context, []string) (map[string][]nicoapi.SwitchNvosPort, error) {
+	return nil, errors.New("injected NVOS lookup failure")
+}
+
+func TestSyncSwitchNvosPorts(t *testing.T) {
+	const portsJSON = `[
+		{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[
+			{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.20"},
+			{"addressFamily":"ADDRESS_FAMILY_V6","address":"2001:db8::20"}
+		],"isPrimary":true},
+		{"mac":"00:11:22:33:44:56","servicePort":null,"addresses":[],"isPrimary":false}
+	]`
+	tests := []struct {
+		name            string
+		before          string
+		ports           string
+		fetchError      bool
+		concurrentWrite bool
+		want            string
+	}{
+		{
+			name:   "initialize description with full ports",
+			before: `null`,
+			ports:  portsJSON,
+			want:   `{"nvos_ports":` + portsJSON + `}`,
+		},
+		{
+			name:            "migrate legacy key and preserve concurrent metadata",
+			before:          `{"nvos_ip":"192.0.2.1","operator":"keep"}`,
+			ports:           portsJSON,
+			concurrentWrite: true,
+			want:            `{"nvos_ports":` + portsJSON + `,"operator":"updated"}`,
+		},
+		{
+			name:   "empty snapshot removes stale ports and scalar IP",
+			before: `{"nvos_ip":"192.0.2.1","nvos_ports":` + portsJSON + `,"operator":"keep"}`,
+			ports:  `[]`,
+			want:   `{"nvos_ports":[],"operator":"keep"}`,
+		},
+		{
+			name:   "missing NVOS information preserves stored ports",
+			before: `{"nvos_ports":` + portsJSON + `,"operator":"keep"}`,
+			want:   `{"nvos_ports":` + portsJSON + `,"operator":"keep"}`,
+		},
+		{
+			name:       "failed fetch preserves legacy metadata",
+			before:     `{"nvos_ip":"192.0.2.1","operator":"keep"}`,
+			fetchError: true,
+			want:       `{"nvos_ip":"192.0.2.1","operator":"keep"}`,
+		},
 	}
 
-	dbConf, err := cdb.ConfigFromEnv()
-	assert.Nil(t, err)
-	pool, err := utils.UnitTestDB(ctx, t, dbConf)
-	assert.Nil(t, err)
+	ctx, pool := mirrorTestPool(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := model.Component{
+				Name:         "before",
+				SerialNumber: tt.name,
+				Manufacturer: "TestMfg",
+				Type:         devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch),
+			}
+			require.NoError(t, json.Unmarshal([]byte(tt.before), &component.Description))
+			require.NoError(t, component.Create(ctx, pool.DB))
 
-	grpcMock := nicoapi.NewMockClient()
+			const switchID = "core-switch-id"
+			var client nicoapi.Client = nicoapi.NewMockClient()
+			if tt.ports != "" {
+				var ports []nicoapi.SwitchNvosPort
+				require.NoError(t, json.Unmarshal([]byte(tt.ports), &ports))
+				client.SetSwitchNvosPorts(switchID, ports)
+			}
+			if tt.fetchError {
+				client = &failSwitchNvosPortsClient{Client: client}
+			}
 
-	rack := model.Rack{
-		Name:         "test-rack-nvos",
-		Manufacturer: "TestMfg",
-		SerialNumber: "rack-serial-nvos",
+			wantName := component.Name
+			if tt.concurrentWrite {
+				// Write after the sync's component snapshot was read. Updating
+				// NVOS metadata must preserve these newer, unrelated values.
+				_, err := pool.DB.NewUpdate().Model((*model.Component)(nil)).
+					Set("name = ?", "after").
+					Set("description = jsonb_set(description, '{operator}', '\"updated\"'::jsonb)").
+					Where("id = ?", component.ID).Exec(ctx)
+				require.NoError(t, err)
+				wantName = "after"
+			}
+
+			components := map[string]*model.Component{switchID: &component}
+			syncSwitchNvosPorts(ctx, pool, client, components)
+
+			var stored model.Component
+			require.NoError(t, pool.DB.NewSelect().Model(&stored).Where("id = ?", component.ID).Scan(ctx))
+			data, err := json.Marshal(stored.Description)
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.want, string(data))
+			assert.Equal(t, wantName, stored.Name)
+
+			// JSONB numbers decode into json.Number. A repeated sync must
+			// still recognize equal port data and avoid rewriting the row.
+			var beforeVersion, afterVersion string
+			require.NoError(t, pool.DB.NewSelect().Table("component").ColumnExpr("xmin::text").Where("id = ?", component.ID).Scan(ctx, &beforeVersion))
+			syncSwitchNvosPorts(ctx, pool, client, map[string]*model.Component{switchID: &stored})
+			require.NoError(t, pool.DB.NewSelect().Table("component").ColumnExpr("xmin::text").Where("id = ?", component.ID).Scan(ctx, &afterVersion))
+			assert.Equal(t, beforeVersion, afterVersion, "unchanged inventory must not rewrite the component")
+		})
 	}
-	assert.Nil(t, rack.Create(ctx, pool.DB))
-
-	nvSwitchType := devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch)
-
-	// Switch Core has resolved an NVOS IP for; carries a pre-existing
-	// description key that must survive the merge.
-	resolved := model.Component{
-		SerialNumber: "nvos-serial-1",
-		Manufacturer: "TestMfg",
-		RackID:       rack.ID,
-		Type:         nvSwitchType,
-		Description:  map[string]any{"existing": "keep-me"},
-	}
-	assert.Nil(t, resolved.Create(ctx, pool.DB))
-
-	// Switch without a resolved NVOS endpoint; description must stay nil.
-	unresolved := model.Component{
-		SerialNumber: "nvos-serial-2",
-		Manufacturer: "TestMfg",
-		RackID:       rack.ID,
-		Type:         nvSwitchType,
-	}
-	assert.Nil(t, unresolved.Create(ctx, pool.DB))
-
-	const resolvedSwitchID = "core-switch-id-1"
-	const unresolvedSwitchID = "core-switch-id-2"
-	grpcMock.SetSwitchNvosIP(resolvedSwitchID, "10.130.4.21")
-
-	componentsBySwitchID := map[string]*model.Component{
-		resolvedSwitchID:   &resolved,
-		unresolvedSwitchID: &unresolved,
-	}
-
-	syncSwitchNvosIPs(ctx, pool, grpcMock, componentsBySwitchID)
-
-	var updated model.Component
-	assert.Nil(t, pool.DB.NewSelect().Model(&updated).Where("id = ?", resolved.ID).Scan(ctx))
-	assert.Equal(t, "10.130.4.21", updated.Description[nvosIPDescriptionKey])
-	assert.Equal(t, "keep-me", updated.Description["existing"])
-
-	var untouched model.Component
-	assert.Nil(t, pool.DB.NewSelect().Model(&untouched).Where("id = ?", unresolved.ID).Scan(ctx))
-	_, hasKey := untouched.Description[nvosIPDescriptionKey]
-	assert.False(t, hasKey)
 }

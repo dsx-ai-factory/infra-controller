@@ -5,6 +5,7 @@ package inventorysync
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/rs/zerolog/log"
 
@@ -16,9 +17,10 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-// nvosIPDescriptionKey is the component.description key under which the
-// switch's resolved NVOS host IP is recorded. Core owns the resolution; Flow
-// only mirrors it so the IP is queryable alongside the component.
+// nvosPortsDescriptionKey holds Core's observed NVOS ports as inventory metadata.
+const nvosPortsDescriptionKey = "nvos_ports"
+
+// nvosIPDescriptionKey is the legacy scalar key removed when NVOS ports are synced.
 const nvosIPDescriptionKey = "nvos_ip"
 
 // ---------------------------------------------------------------------------
@@ -97,7 +99,7 @@ func syncNVSwitchesNICo(
 
 	syncSwitchStatuses(ctx, pool, nicoClient, componentsBySwitchID)
 
-	syncSwitchNvosIPs(ctx, pool, nicoClient, componentsBySwitchID)
+	syncSwitchNvosPorts(ctx, pool, nicoClient, componentsBySwitchID)
 
 	log.Info().Msgf("NVSwitch NICo sync: %d drift(s) out of %d expected", len(drifts), len(expectedSwitches))
 	return received, drifts, true
@@ -132,12 +134,11 @@ func syncSwitchStatuses(
 	persistComponentHealthSnapshots(ctx, pool, healthByID, componentsBySwitchID)
 }
 
-// syncSwitchNvosIPs records Core's resolved NVOS host IP for each matched
-// switch in the component's description. Core only reports an NVOS IP once both
-// the NVOS MAC and its assigned address resolve, so switches without one are
-// left untouched rather than having the key cleared. The description merge
-// preserves any other keys (operator-managed metadata, etc.).
-func syncSwitchNvosIPs(
+// syncSwitchNvosPorts mirrors every reported port, including unresolved ports.
+// Missing status and legacy NVOS info, or a failed fetch, leaves metadata untouched;
+// an empty port list replaces stale ports. Only the NVOS keys change, preserving
+// concurrent updates to other description entries and component fields.
+func syncSwitchNvosPorts(
 	ctx context.Context,
 	pool *cdb.Session,
 	nicoClient nicoapi.Client,
@@ -147,27 +148,53 @@ func syncSwitchNvosIPs(
 	if len(ids) == 0 {
 		return
 	}
-	ipsByID, err := nicoClient.FindSwitchNvosIPs(ctx, ids)
+	portsByID, err := nicoClient.FindSwitchNvosPorts(ctx, ids)
 	if err != nil {
-		log.Error().Msgf("Unable to retrieve switch NVOS IPs from NICo: %v", err)
+		log.Error().Msgf("Unable to retrieve switch NVOS ports from NICo: %v", err)
 		return
 	}
-	for switchID, ip := range ipsByID {
+	for switchID, ports := range portsByID {
 		comp, ok := componentsBySwitchID[switchID]
-		if !ok || ip == "" {
+		if !ok {
 			continue
 		}
-		if existing, ok := comp.Description[nvosIPDescriptionKey].(string); ok && existing == ip {
+		if ports == nil {
+			ports = []nicoapi.SwitchNvosPort{}
+		}
+		data, err := json.Marshal(ports)
+		if err != nil {
+			log.Error().Msgf("NVSwitch %s: unable to encode NVOS ports: %v", comp.ID, err)
 			continue
 		}
-		if comp.Description == nil {
-			comp.Description = map[string]any{}
-		}
-		comp.Description[nvosIPDescriptionKey] = ip
-		if err := comp.Patch(ctx, pool.DB); err != nil {
-			log.Error().Msgf("NVSwitch %s: unable to persist NVOS IP %s: %v", comp.ID, ip, err)
+		// Merge against the stored JSONB, not the earlier reconciliation snapshot.
+		// Retire the scalar key when a current port snapshot is available.
+		result, err := pool.DB.NewUpdate().
+			Model((*model.Component)(nil)).
+			Set(
+				"description = jsonb_set((CASE WHEN jsonb_typeof(description) = 'object' THEN description ELSE '{}'::jsonb END) - ?::text, ARRAY[?::text], ?::jsonb, true)",
+				nvosIPDescriptionKey,
+				nvosPortsDescriptionKey,
+				string(data),
+			).
+			Where("id = ?", comp.ID).
+			Where(
+				"description -> ?::text IS DISTINCT FROM ?::jsonb OR jsonb_exists(description, ?::text)",
+				nvosPortsDescriptionKey,
+				string(data),
+				nvosIPDescriptionKey,
+			).
+			Exec(ctx)
+		if err != nil {
+			log.Error().Msgf("NVSwitch %s: unable to persist NVOS ports: %v", comp.ID, err)
 			continue
 		}
-		log.Info().Msgf("NVSwitch %s: recorded NVOS IP %s", comp.ID, ip)
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			log.Error().Msgf("NVSwitch %s: unable to count updated NVOS port rows: %v", comp.ID, err)
+			continue
+		}
+		if rowsAffected > 0 {
+			log.Info().Msgf("NVSwitch %s: synced %d NVOS ports", comp.ID, len(ports))
+		}
 	}
 }
