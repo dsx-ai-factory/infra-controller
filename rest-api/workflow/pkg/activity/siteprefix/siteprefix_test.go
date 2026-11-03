@@ -330,6 +330,9 @@ func (f testFixture) ipBlockStates(t *testing.T, before map[uuid.UUID]cdbm.IPBlo
 	for _, block := range f.blocks(t) {
 		require.Equal(t, block.SitePrefixID == nil || block.TenantID == nil, block.Managed, "managed flag of %s", block.Name)
 		previous, existing := before[block.ID]
+		if !existing && block.TenantID != nil && block.SitePrefixID != nil {
+			require.Equal(t, *block.SitePrefixID, block.ID, "new tenant roots reuse the Core SitePrefix ID")
+		}
 		state := testIPBlockState{
 			cidr:        fmt.Sprintf("%s/%d", block.Prefix, block.PrefixLength),
 			name:        block.Name,
@@ -520,12 +523,14 @@ func (*testSitePrefixLookupHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // testLockAttemptHook cancels every Site fabric lock attempt after failAfter.
 type testLockAttemptHook struct {
+	lockID    uint64
+	completed int
 	failAfter int
 	attempts  int
 }
 
 func (hook *testLockAttemptHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	if !strings.Contains(event.Query, "pg_try_advisory_xact_lock") {
+	if !strings.Contains(event.Query, fmt.Sprintf("pg_try_advisory_xact_lock(%d)", hook.lockID)) {
 		return ctx
 	}
 	hook.attempts++
@@ -537,7 +542,11 @@ func (hook *testLockAttemptHook) BeforeQuery(ctx context.Context, event *bun.Que
 	return ctx
 }
 
-func (*testLockAttemptHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+func (hook *testLockAttemptHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, fmt.Sprintf("pg_try_advisory_xact_lock(%d)", hook.lockID)) && event.Err == nil {
+		hook.completed++
+	}
+}
 
 // testSiteDeletionHook deletes the Site when the second prefix locks it.
 type testSiteDeletionHook struct {
@@ -1624,10 +1633,10 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 					cidr:          "10.0.0.0/24",
 					sitePrefixID:  idA,
 					name:          "tenant-prefix",
-					status:        cdbm.IPBlockStatusReady,
+					status:        cdbm.IPBlockStatusDeleting,
 					tenantOrg:     "tenant",
 					existing:      true,
-					statusDetails: 1,
+					statusDetails: 0,
 				},
 			},
 		},
@@ -1886,10 +1895,15 @@ func TestManageSitePrefix_UpdateSitePrefixesInDB(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { _ = tx.Rollback() }()
 			require.NoError(t, tx.AcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(f.site.InfrastructureProviderID, f.site.ID), false))
-			f.session.DB.AddQueryHook(&testLockAttemptHook{failAfter: tt.failAfter})
+			hook := &testLockAttemptHook{lockID: cdbm.SiteFabricIPBlockLockID(f.site.InfrastructureProviderID, f.site.ID), failAfter: tt.failAfter}
+			f.session.DB.AddQueryHook(hook)
 
 			require.NoError(t, f.manager.UpdateSitePrefixesInDB(ctx, f.site.ID, testSitePrefixInventory(lockReported)))
 			require.Empty(t, f.ipBlockStates(t, nil))
+			require.Positive(t, hook.completed, "must encounter the held fabric lock before cancellation")
+			if tt.failAfter > 0 {
+				require.Greater(t, hook.attempts, hook.completed, "must inject failure after contention")
+			}
 			for _, level := range []string{"warn", "error"} {
 				require.Equal(t, level == tt.wantLogLevel, strings.Contains(output.String(), `"level":"`+level+`"`), level)
 			}

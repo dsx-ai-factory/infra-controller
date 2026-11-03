@@ -21,6 +21,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/uptrace/bun"
 )
 
@@ -77,6 +78,12 @@ var (
 		IPBlockStatusDeleting:     true,
 	}
 )
+
+// SitePrefixIPBlockLockID coordinates a tenant mutation with inventory for one
+// Core prefix. Inventory takes this guard before any Site-wide or row locks.
+func SitePrefixIPBlockLockID(siteID, prefixID uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString("site-prefix-ip-block:" + siteID.String() + ":" + prefixID.String())
+}
 
 // SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
 // prefix import, root IP Block creation, and SitePrefix inventory reconciliation
@@ -186,6 +193,17 @@ func (ipb *IPBlock) ValidateChildPrefixLength(length int) error {
 		return fmt.Errorf("prefix length must be between %d and %d", prefix.Bits(), prefix.Addr().BitLen())
 	}
 	return nil
+}
+
+// ToDeletionRequestProto builds a tenant retirement request for a Core-linked block.
+// The caller validates SitePrefixID and tenant ownership before conversion.
+func (ipb *IPBlock) ToDeletionRequestProto(tenantOrg string) *corev1.SitePrefixDeletionRequest {
+	return &corev1.SitePrefixDeletionRequest{Id: &corev1.SitePrefixId{Value: ipb.SitePrefixID.String()}, TenantOrganizationId: tenantOrg}
+}
+
+// ToSitePrefixesByIdsRequest selects the authoritative Core snapshot of a linked block.
+func (ipb *IPBlock) ToSitePrefixesByIdsRequest() *corev1.SitePrefixesByIdsRequest {
+	return &corev1.SitePrefixesByIdsRequest{SitePrefixIds: []*corev1.SitePrefixId{{Value: ipb.SitePrefixID.String()}}}
 }
 
 // IPBlockCreateInput input parameters for Create method
@@ -614,7 +632,7 @@ func (ipbsd IPBlockSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IPBlock
 		return nil, 0, err
 	}
 
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
+	err = paginator.Query.OrderExpr("ipb.id ASC").Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
 	if err != nil {
 		return nil, 0, err
 	}

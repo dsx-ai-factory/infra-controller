@@ -6,10 +6,12 @@ package model
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
 	otrace "go.opentelemetry.io/otel/trace"
 
@@ -34,6 +36,8 @@ const (
 
 	// SiteOrderByDefault default field to be used for ordering when none specified
 	SiteOrderByDefault = "created"
+
+	siteDeletionTenantIPBlockLockTimeout = 5 * time.Second
 )
 
 var (
@@ -52,6 +56,7 @@ var (
 // Config stays flat so PostgreSQL JSONB concatenation can apply partial
 // updates without replacing unrelated settings.
 type SiteConfig struct {
+	TenantSitePrefix                 bool `json:"tenant_site_prefix"`
 	NetworkSecurityGroup             bool `json:"network_security_group"`
 	NativeNetworking                 bool `json:"native_networking"`
 	VpcSlaac                         bool `json:"vpc_slaac"`
@@ -148,6 +153,7 @@ type SiteCreateInput struct {
 }
 
 type SiteConfigUpdateInput struct {
+	TenantSitePrefix                 *bool `json:"tenant_site_prefix,omitempty"`
 	NetworkSecurityGroup             *bool `json:"network_security_group,omitempty"`
 	NativeNetworking                 *bool `json:"native_networking,omitempty"`
 	VpcSlaac                         *bool `json:"vpc_slaac,omitempty"`
@@ -229,6 +235,8 @@ func (s *Site) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuer
 type SiteDAO interface {
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (*Site, error)
+	// GetByIDForTenantIPBlockMutation fences Site deletion and tenant prefix capability changes.
+	GetByIDForTenantIPBlockMutation(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterInput, page paginator.PageInput, includeRelations []string) (sites []Site, total int, err error)
 	// GetCount returns total count of rows for specified filter
@@ -281,6 +289,63 @@ func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, incl
 	}
 
 	return st, nil
+}
+
+// siteTenantIPBlockLockID coordinates tenant IP Block mutations with Site deletion
+// and explicit tenant prefix capability changes. Routine Site updates do not use it.
+func siteTenantIPBlockLockID(id uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString("site-tenant-ip-blocks:" + id.String())
+}
+
+// Queue exclusive lifecycle writers so later tenant mutations cannot bypass the wait.
+// Deletion bounds admission separately; capability updates can wait for the
+// remaining request budget, so post-lock work may still time out.
+func lockSiteTenantIPBlockMutations(ctx context.Context, tx *db.Tx, id uuid.UUID, timeout time.Duration) (retErr error) {
+	defer func() {
+		var pgErr *pgconn.PgError
+		if retErr != nil && (ctx.Err() != nil || (errors.As(retErr, &pgErr) && pgErr.Code == "55P03")) {
+			retErr = fmt.Errorf("%w: %w", db.ErrXactAdvisoryLockFailed, retErr)
+		}
+	}()
+
+	// A server-side timeout keeps the connection usable for rollback. Cancelling
+	// a shorter child context can close it while the transaction context is live.
+	var previousTimeoutMS int64
+	err := tx.GetBunTx().NewSelect().TableExpr("pg_settings").ColumnExpr("setting::bigint").Where("name = ?", "lock_timeout").Scan(ctx, &previousTimeoutMS)
+	if err != nil {
+		return err
+	}
+	timeoutMS := timeout.Milliseconds()
+	changeTimeout := previousTimeoutMS == 0 || timeoutMS < previousTimeoutMS
+	if changeTimeout {
+		_, err = tx.GetBunTx().ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", timeoutMS))
+		if err != nil {
+			return err
+		}
+	}
+	err = tx.AcquireAdvisoryLock(ctx, siteTenantIPBlockLockID(id), true)
+	if err != nil {
+		return err
+	}
+	// Only successful acquisition leaves a usable transaction for later work.
+	if changeTimeout {
+		_, err = tx.GetBunTx().ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", previousTimeoutMS))
+	}
+	return err
+}
+
+// GetByIDForTenantIPBlockMutation reads an active Site under a shared lifecycle
+// guard. Status is checked at admission; routine status and inventory writers
+// remain free to update the Site while the mutation calls Core.
+func (ssd SiteSQLDAO) GetByIDForTenantIPBlockMutation(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
+	}
+	err := tx.TryAcquireSharedAdvisoryLock(ctx, siteTenantIPBlockLockID(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	return ssd.GetByID(ctx, tx, id, nil, false, false)
 }
 
 func (ssd SiteSQLDAO) setQueryWithFilter(filter SiteFilterInput, query *bun.SelectQuery, siteDAOSpan otrace.Span) (*bun.SelectQuery, error) {
@@ -452,35 +517,21 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 
 	updatedFields := []string{}
 
-	// If Config is not nil, there's a chance we'll need to
-	// do two separate UPDATEs, so we need to make sure we wrap
-	// things in a txn if one wasn't provided.
-	// If we end up with another case like this, we should either
-	// simply create a txn if tx is nil or switch this function to
-	// use SetColumn for all fields.
-
-	// We're going to intentionally close over this variable.
-	// If input.Config == nil OR we were handed a txn by the caller,
-	// then this will do nothing.
-	// Otherwise, this will control whether we should commit/rollback
-	// the txn we created in this function.  We'll set this to true
-	// as the very last step just before we return.
-	commitInternalTx := false
-
-	var err error
+	// Config updates may use two statements and must commit atomically.
 	if input.Config != nil && tx == nil {
-		tx, err = db.BeginTx(ctx, ssd.dbSession, &sql.TxOptions{})
+		var updated *Site
+		err := db.WithTx(ctx, ssd.dbSession, func(inner *db.Tx) error {
+			var err error
+			updated, err = ssd.Update(ctx, inner, input)
+			return err
+		})
+		return updated, err
+	}
+	if input.Config != nil && input.Config.TenantSitePrefix != nil {
+		err := lockSiteTenantIPBlockMutations(ctx, tx, input.SiteID, cutil.WorkflowContextTimeout)
 		if err != nil {
 			return nil, err
 		}
-
-		defer func() {
-			if commitInternalTx {
-				tx.Commit()
-			} else {
-				db.RollbackTx(ctx, tx, &commitInternalTx)
-			}
-		}()
 	}
 
 	st := &Site{
@@ -613,8 +664,6 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 		return nil, err
 	}
 
-	commitInternalTx = true
-
 	return ust, nil
 }
 
@@ -625,7 +674,16 @@ func (ssd SiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retE
 	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
 	cotel.SetAttribute(stDAOSpan, attribute.String("id", id.String()))
 
-	_, err := db.GetIDB(tx, ssd.dbSession).NewDelete().Model((*Site)(nil)).Where("id = ?", id).Exec(ctx)
+	if tx == nil {
+		return db.WithTx(ctx, ssd.dbSession, func(inner *db.Tx) error {
+			return ssd.Delete(ctx, inner, id)
+		})
+	}
+	err := lockSiteTenantIPBlockMutations(ctx, tx, id, siteDeletionTenantIPBlockLockTimeout)
+	if err != nil {
+		return err
+	}
+	_, err = db.GetIDB(tx, ssd.dbSession).NewDelete().Model((*Site)(nil)).Where("id = ?", id).Exec(ctx)
 	if err != nil {
 		return err
 	}
