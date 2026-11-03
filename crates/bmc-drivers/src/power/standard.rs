@@ -54,6 +54,7 @@ where
                 cx.ipmi_restart().await
             }
             other => already_satisfied_is_complete(
+                other,
                 cx.system()
                     .await?
                     .reset(Some(other))
@@ -71,6 +72,7 @@ where
         reset_type: ResetType,
     ) -> Result<DriverOutcome, PlatformError> {
         already_satisfied_is_complete(
+            reset_type,
             cx.chassis_by_id(chassis_id)
                 .await?
                 .ok_or(PlatformError::Unsupported)?
@@ -82,13 +84,25 @@ where
     }
 }
 
-/// BMCs answer a reset that would not change the power state with 409, which
-/// for power control means the requested state already holds.
+/// BMCs answer a reset that would not change the power state with 409. For a
+/// request naming a power state that means the state already holds; for a
+/// restart, power cycle or other transition it means the BMC refused it.
 fn already_satisfied_is_complete(
+    reset_type: ResetType,
     result: Result<DriverOutcome, PlatformError>,
 ) -> Result<DriverOutcome, PlatformError> {
     match result {
-        Err(PlatformError::Bmc { status: 409, .. }) => Ok(DriverOutcome::complete()),
+        Err(PlatformError::Bmc { status: 409, .. })
+            if matches!(
+                reset_type,
+                ResetType::On
+                    | ResetType::ForceOn
+                    | ResetType::ForceOff
+                    | ResetType::GracefulShutdown
+            ) =>
+        {
+            Ok(DriverOutcome::complete())
+        }
         other => other,
     }
 }
@@ -139,6 +153,31 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&request.body).expect("JSON body"),
             json!({"ResetType": "ForceOff"})
         );
+    }
+
+    /// A 409 means the state already holds only for a request naming a power
+    /// state; a refused restart or power cycle stays an error.
+    #[test]
+    fn a_409_completes_only_power_state_requests() {
+        let conflict = || {
+            Err(PlatformError::Bmc {
+                status: 409,
+                message_id: None,
+                message: "already in that state".to_string(),
+            })
+        };
+        for (reset_type, completes) in [
+            (ResetType::On, true),
+            (ResetType::ForceOff, true),
+            (ResetType::ForceRestart, false),
+            (ResetType::PowerCycle, false),
+        ] {
+            assert_eq!(
+                already_satisfied_is_complete(reset_type, conflict()).is_ok(),
+                completes,
+                "{reset_type:?}"
+            );
+        }
     }
 
     #[derive(Default)]

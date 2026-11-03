@@ -15,7 +15,9 @@ use crate::resources::RedfishResourcesExt as _;
 
 /// BlueField-4 has no `ComputerSystem.Reset`; it shuts down and resets its
 /// Arm cores through the card chassis's NVIDIA reset action. Powering off and
-/// on are skipped when the DPU already reports the requested state.
+/// on are skipped when the DPU already reports the requested state. Powering
+/// on is an Arm reset, so it fails rather than guess when the DPU reports no
+/// state, since resetting a running DPU would reboot it.
 pub(crate) struct BlueField4Power;
 
 /// The card chassis whose OEM action resets the Arm cores.
@@ -61,12 +63,13 @@ where
                 }
                 arm_reset(cx, NvidiaChassisResetType::ArmShutdown).await
             }
-            ResetType::On | ResetType::ForceOn => {
-                if current_power_state(cx).await? != Some(PowerState::Off) {
-                    return Ok(DriverOutcome::complete());
-                }
-                arm_reset(cx, NvidiaChassisResetType::ArmReset).await
-            }
+            ResetType::On | ResetType::ForceOn => match current_power_state(cx).await? {
+                Some(PowerState::Off) => arm_reset(cx, NvidiaChassisResetType::ArmReset).await,
+                Some(_) => Ok(DriverOutcome::complete()),
+                None => Err(PlatformError::NotReady {
+                    message: "the DPU reports no power state".to_string(),
+                }),
+            },
             ResetType::ForceRestart | ResetType::GracefulRestart | ResetType::PowerCycle => {
                 arm_reset(cx, NvidiaChassisResetType::ArmReset).await
             }
@@ -88,21 +91,33 @@ mod tests {
 
     /// Each request becomes the Arm reset it maps to on the unadvertised
     /// NVIDIA chassis action, and powering off or on a DPU already in that
-    /// state, or an AC power cycle, sends nothing.
+    /// state, powering on one that reports no state, or an AC power cycle,
+    /// sends nothing.
     #[tokio::test]
     async fn power_requests_reset_the_arm_cores_through_the_card_chassis() {
         for (reset_type, power_state, expected) in [
-            (ResetType::ForceOff, "On", Ok(Some("ArmShutdown"))),
-            (ResetType::GracefulShutdown, "On", Ok(Some("ArmShutdown"))),
-            (ResetType::ForceOff, "Off", Ok(None)),
-            (ResetType::On, "Off", Ok(Some("ArmReset"))),
-            (ResetType::On, "On", Ok(None)),
-            (ResetType::ForceRestart, "On", Ok(Some("ArmReset"))),
-            (ResetType::GracefulRestart, "On", Ok(Some("ArmReset"))),
-            (ResetType::PowerCycle, "Off", Ok(Some("ArmReset"))),
+            (ResetType::ForceOff, Some("On"), Ok(Some("ArmShutdown"))),
+            (
+                ResetType::GracefulShutdown,
+                Some("On"),
+                Ok(Some("ArmShutdown")),
+            ),
+            (ResetType::ForceOff, Some("Off"), Ok(None)),
+            (ResetType::On, Some("Off"), Ok(Some("ArmReset"))),
+            (ResetType::On, Some("On"), Ok(None)),
+            (
+                ResetType::On,
+                None,
+                Err(PlatformError::NotReady {
+                    message: "the DPU reports no power state".to_string(),
+                }),
+            ),
+            (ResetType::ForceRestart, Some("On"), Ok(Some("ArmReset"))),
+            (ResetType::GracefulRestart, Some("On"), Ok(Some("ArmReset"))),
+            (ResetType::PowerCycle, Some("Off"), Ok(Some("ArmReset"))),
             (
                 ResetType::FullPowerCycle,
-                "On",
+                Some("On"),
                 Err(PlatformError::Unsupported),
             ),
         ] {
@@ -154,7 +169,7 @@ mod tests {
                             .map(|value| (ARM_RESET.to_string(), json!({"ResetType": value})))
                             .into_iter()
                             .collect::<Vec<_>>(),
-                        "{reset_type:?} from {power_state}"
+                        "{reset_type:?} from {power_state:?}"
                     );
                 }
                 Err(error) => {

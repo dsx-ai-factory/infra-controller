@@ -241,10 +241,39 @@ fn collect_password_fields(value: &serde_json::Value, strings: &mut Vec<String>)
                 collect_password_fields(value, strings);
             }
         }
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {}
+        serde_json::Value::String(text) => collect_xml_password_attributes(text, strings),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+/// Collects the values of XML attributes whose name contains `password`, as
+/// a Dell Server Configuration Profile import buffer carries them, both as
+/// written and with their XML escapes undone.
+fn collect_xml_password_attributes(text: &str, strings: &mut Vec<String>) {
+    const OPEN: &str = "<Attribute Name=\"";
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        rest = &rest[start + OPEN.len()..];
+        let Some((name, after_name)) = rest.split_once("\">") else {
+            return;
+        };
+        let Some((value, after_value)) = after_name.split_once("</Attribute>") else {
+            return;
+        };
+        rest = after_value;
+        if value.is_empty() || !name.to_ascii_lowercase().contains("password") {
+            continue;
+        }
+        strings.push(value.to_string());
+        let unescaped = value
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&");
+        if unescaped != value {
+            strings.push(unescaped);
+        }
     }
 }
 
@@ -1703,6 +1732,25 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    /// A password inside a Server Configuration Profile import buffer is
+    /// masked like a password field, as written and unescaped; other
+    /// attributes and empty passwords are not.
+    #[test]
+    fn import_buffer_passwords_are_collected_for_masking() {
+        let request = serde_json::json!({
+            "ImportBuffer": concat!(
+                r#"<SystemConfiguration><Component FQDD="BIOS.Setup.1-1">"#,
+                r#"<Attribute Name="OldSetupPassword">a&amp;b</Attribute>"#,
+                r#"<Attribute Name="NewSetupPassword"></Attribute>"#,
+                r#"<Attribute Name="BootMode">Uefi</Attribute>"#,
+                r#"</Component></SystemConfiguration>"#,
+            ),
+        });
+        let mut strings = Vec::new();
+        collect_password_fields(&request, &mut strings);
+        assert_eq!(strings, ["a&amp;b", "a&b"]);
     }
 
     /// A factory BMC refusing its credentials until the password changes
