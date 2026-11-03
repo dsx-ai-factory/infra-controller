@@ -12,7 +12,7 @@ Each NICo component runs an HTTP server exposing a `/metrics` endpoint in Promet
 format. The OpenTelemetry SDK creates metrics using the Meter API, then the
 `opentelemetry-prometheus` exporter bridges them to a Prometheus registry served over HTTP.
 
-The following components expose metrics:
+The following components expose metrics at `/metrics`. Ports shown are defaults:
 
 | Component | Port | Primary metrics |
 |-----------|------|-----------------|
@@ -23,8 +23,14 @@ The following components expose metrics:
 | nico-dhcp | 1089 | IPv4 lease counts, request handling |
 | nico-dhcp6 (opt-in) | 1089 | IPv6 request, drop, and reply counts |
 | nico-dns | 8053 | Query rates, resolution latency |
+| nico-dsx-exchange-consumer | 9009 | Exchange message processing, queue drops |
+| nico-machine-a-tron (UFM mock) | 9090 | UFM mock inventory reconciliation |
 | nico-pxe | 8080 | Boot request counts |
 | nico-ssh-console-rs | 9009 | Console sessions, BMC connections |
+| nico-unbound (exporter) | 9167 | DNS resolver statistics |
+
+The machine-a-tron metrics listener requires `ufmMock.enabled`, and the Unbound exporter
+requires `exporter.enabled` in their respective subcharts. Both are enabled by default.
 
 Health-probe routes vary by component. The nico-api main metrics listener exposes `/health`
 for liveness and `/ready` for readiness. The nico-hardware-health metrics listener (default
