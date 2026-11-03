@@ -160,13 +160,17 @@ type Machine struct {
 	IsAssigned           bool                   `bun:"is_assigned,notnull"` // true when machine is assigned to an Instance
 	Labels               map[string]string      `bun:"labels,type:jsonb"`   // Labels are used to store additional metadata about the machine
 	Status               string                 `bun:"status,notnull"`
-	// IsForceDeletionRequested records accepted Site deletion, including incomplete cleanup.
+	// IsForceDeletionRequested quarantines a Machine before a Site deletion attempt, including unknown outcomes.
 	// Retained records no longer contribute Allocation capacity or return to tenant use.
-	IsForceDeletionRequested bool       `bun:"is_force_deletion_requested,notnull,default:false"`
-	IsMissingOnSite          bool       `bun:"is_missing_on_site,notnull"`
-	Created                  time.Time  `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated                  time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	Deleted                  *time.Time `bun:"deleted,soft_delete"`
+	IsForceDeletionRequested bool `bun:"is_force_deletion_requested,notnull,default:false"`
+	// IsForceDeletionComplete records a confirmed complete Core result, not merely an accepted attempt.
+	IsForceDeletionComplete bool `bun:"is_force_deletion_complete,notnull,default:false"`
+	// ForceDeletionWorkflowID fences an unresolved Core attempt; retries only retrieve this execution.
+	ForceDeletionWorkflowID *string    `bun:"force_deletion_workflow_id"`
+	IsMissingOnSite         bool       `bun:"is_missing_on_site,notnull"`
+	Created                 time.Time  `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated                 time.Time  `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	Deleted                 *time.Time `bun:"deleted,soft_delete"`
 }
 
 // GetControllerState returns the normalized controller state from Machine metadata, or empty when
@@ -216,6 +220,11 @@ func (m *Machine) ToMetadataUpdateRequestProto(labels []*corev1.Label) *corev1.M
 			Labels: labels,
 		},
 	}
+}
+
+// IsForceDeletionQuarantined includes unresolved attempts whose legacy marker an older writer cleared.
+func (m *Machine) IsForceDeletionQuarantined() bool {
+	return m.IsForceDeletionRequested || m.ForceDeletionWorkflowID != nil
 }
 
 // StatusForAssignment combines the observed status with REST assignment. Only
@@ -274,6 +283,8 @@ type MachineUpdateInput struct {
 	IsInMaintenance          *bool
 	IsUsableByTenant         *bool
 	IsForceDeletionRequested *bool
+	IsForceDeletionComplete  *bool
+	ForceDeletionWorkflowID  *string
 	MaintenanceMessage       *string
 	IsNetworkDegraded        *bool
 	NetworkHealthMessage     *string
@@ -289,19 +300,20 @@ type MachineUpdateInput struct {
 
 // MachineClearInput input parameters for Clear method
 type MachineClearInput struct {
-	MachineID             string
-	InstanceTypeID        bool
-	ControllerMachineType bool
-	HwSkuDeviceType       bool
-	Vendor                bool
-	ProductName           bool
-	SerialNumber          bool
-	Metadata              bool
-	MaintenanceMessage    bool
-	Health                bool
-	NetworkHealthMessage  bool
-	DefaultMacAddress     bool
-	Hostname              bool
+	ForceDeletionWorkflowID bool
+	MachineID               string
+	InstanceTypeID          bool
+	ControllerMachineType   bool
+	HwSkuDeviceType         bool
+	Vendor                  bool
+	ProductName             bool
+	SerialNumber            bool
+	Metadata                bool
+	MaintenanceMessage      bool
+	Health                  bool
+	NetworkHealthMessage    bool
+	DefaultMacAddress       bool
+	Hostname                bool
 	// Deleted clears the soft-delete timestamp (undelete)
 	Deleted bool
 	Updated *time.Time
@@ -324,7 +336,9 @@ type MachineFilterInput struct {
 	MachineIDs                []string
 	Labels                    map[string]string
 	IsMissingOnSite           *bool
-	ExcludeMetadata           bool // When true, excludes the metadata JSONB column from SELECT to improve performance on bulk queries
+	// ExcludeForceDeletionRequested removes retained deletion records from placement candidates.
+	ExcludeForceDeletionRequested bool
+	ExcludeMetadata               bool // When true, excludes the metadata JSONB column from SELECT to improve performance on bulk queries
 	// IncludeDeleted returns soft-deleted rows in addition to active ones.
 	IncludeDeleted bool
 }
@@ -432,6 +446,8 @@ type MachineDAO interface {
 	GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter MachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// GetByID returns row for specified ID
 	GetByID(ctx context.Context, tx *db.Tx, machineID string, includeRelations []string, forUpdate bool) (*Machine, error)
+	// GetByIDWithDeleted permits inventory to recheck a soft-deleted row under its lock.
+	GetByIDWithDeleted(ctx context.Context, tx *db.Tx, id string, forUpdate bool) (*Machine, error)
 	// GetCountByStatus returns row counts per status
 	GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID, instanceTypeID *uuid.UUID) (map[string]int, error)
 	// GetCount returns total count of rows for specified filter
@@ -499,7 +515,16 @@ func (msd MachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineCre
 
 // GetByID returns a Machine by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string, forUpdate bool) (_ *Machine, retErr error) {
+func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string, forUpdate bool) (*Machine, error) {
+	return msd.getByID(ctx, tx, id, includeRelations, forUpdate, false)
+}
+
+// GetByIDWithDeleted reads active or deleted rows so restoration rechecks deletion state under the row lock.
+func (msd MachineSQLDAO) GetByIDWithDeleted(ctx context.Context, tx *db.Tx, id string, forUpdate bool) (*Machine, error) {
+	return msd.getByID(ctx, tx, id, nil, forUpdate, true)
+}
+
+func (msd MachineSQLDAO) getByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string, forUpdate, includeDeleted bool) (_ *Machine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineDAOSpan := cotel.StartSpan(ctx, "MachineDAO.GetByID")
 	defer func() { cotel.EndSpan(machineDAOSpan, retErr) }()
@@ -508,6 +533,9 @@ func (msd MachineSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, incl
 	m := &Machine{}
 
 	query := db.GetIDB(tx, msd.dbSession).NewSelect().Model(m).Where("m.id = ?", id)
+	if includeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	if forUpdate {
 		query = query.For("UPDATE")
@@ -624,6 +652,9 @@ func (msd MachineSQLDAO) setQueryWithFilter(filter MachineFilterInput, query *bu
 
 	if filter.IsAssigned != nil {
 		query = query.Where("m.is_assigned = ?", *filter.IsAssigned)
+	}
+	if filter.ExcludeForceDeletionRequested {
+		query = query.Where("m.is_force_deletion_requested = false").Where("m.force_deletion_workflow_id IS NULL")
 	}
 
 	if filter.IsMissingOnSite != nil {
@@ -872,6 +903,10 @@ func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClea
 	}
 
 	updatedFields := []string{}
+	if input.ForceDeletionWorkflowID {
+		m.ForceDeletionWorkflowID = nil
+		updatedFields = append(updatedFields, "force_deletion_workflow_id")
+	}
 	if input.InstanceTypeID {
 		m.InstanceTypeID = nil
 		updatedFields = append(updatedFields, "instance_type_id")
@@ -1010,6 +1045,8 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 	ids := make([]string, 0, len(inputs))
 	columnsSet := make(map[string]bool)
 	forceDeletionUpdates := []*Machine{}
+	forceDeletionCompleteUpdates := []*Machine{}
+	forceDeletionWorkflowUpdates := []*Machine{}
 
 	// Limit per-item tracing to avoid overly-large spans; see db.MaxBatchItemsToTrace for details
 	traceItems := len(inputs)
@@ -1107,6 +1144,14 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 			if addTrace {
 				cotel.SetAttribute(machineDAOSpan, attribute.Bool(prefix+"is_force_deletion_requested", *input.IsForceDeletionRequested))
 			}
+		}
+		if input.IsForceDeletionComplete != nil {
+			m.IsForceDeletionComplete = *input.IsForceDeletionComplete
+			forceDeletionCompleteUpdates = append(forceDeletionCompleteUpdates, m)
+		}
+		if input.ForceDeletionWorkflowID != nil {
+			m.ForceDeletionWorkflowID = input.ForceDeletionWorkflowID
+			forceDeletionWorkflowUpdates = append(forceDeletionWorkflowUpdates, m)
 		}
 		if input.IsUsableByTenant != nil {
 			m.IsUsableByTenant = *input.IsUsableByTenant
@@ -1214,10 +1259,20 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 		return nil, err
 	}
 
-	// Preserve omitted deletion markers in mixed batches, including inventory updates.
-	if len(forceDeletionUpdates) > 0 {
-		_, err = db.GetIDB(tx, msd.dbSession).NewUpdate().Model(&forceDeletionUpdates).
-			Column("is_force_deletion_requested").Bulk().Exec(ctx)
+	// Keep omitted deletion-attempt fields intact in mixed inventory/update batches.
+	for _, update := range []struct {
+		column   string
+		machines []*Machine
+	}{
+		{"is_force_deletion_requested", forceDeletionUpdates},
+		{"is_force_deletion_complete", forceDeletionCompleteUpdates},
+		{"force_deletion_workflow_id", forceDeletionWorkflowUpdates},
+	} {
+		if len(update.machines) == 0 {
+			continue
+		}
+		_, err = db.GetIDB(tx, msd.dbSession).NewUpdate().Model(&update.machines).
+			Column(update.column).Bulk().Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

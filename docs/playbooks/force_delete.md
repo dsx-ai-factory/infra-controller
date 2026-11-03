@@ -17,6 +17,22 @@ To clean the host before removing its records,
 [Force Delete After Decommissioning](../decommissioning/index.md#force-delete-after-decommissioning)
 for the required flags. The recovery steps below do not apply to decommissioning.
 
+## Core Version Requirement
+
+Server-side Instance consent and the Instance Type override require a Core build
+containing [the forced-deletion safeguards in PR #5394](https://github.com/dsx-ai-factory/infra-controller/pull/5394).
+Use the per-server `git_sha` verification procedure in
+[Optional DPU Acknowledgement Wait](#optional-dpu-acknowledgement-wait), checking
+for these changes in each server's build. CLI help or one load-balanced request
+does not establish support on every server.
+
+Older Core ignores unknown protobuf fields: it does not enforce the new
+attached-Instance consent check or support the new Instance Type override.
+REST performs its own checks against REST records before dispatch, but those
+checks do not establish Core's current ownership state or replace Core's
+server-side enforcement. During a mixed-version rollout, use only endpoints
+that reach verified Core builds before relying on these safeguards.
+
 ## Force-Deletion Steps
 
 Use these steps to delete the host's records and restart discovery.
@@ -148,6 +164,58 @@ cancel the deletion.
 If the command stops before completion, resolve the reported error or restore
 DPU communication. Then rerun the same command to resume or confirm completion.
 The machine controller does not finish force deletion in the background.
+
+## REST API Deletion and Retained-Record Recovery
+
+Provider Admins can force-delete a Machine through
+`DELETE /v2/org/{org}/nico/machine/{machineId}?force=true`.
+The Site must be Registered when starting a deletion. An assigned Instance Type
+requires `allowDeleteWithInstanceType=true`. An attached Instance requires
+`allowDeleteWithInstance=true`, which also permits its Instance Type removal.
+A loss of capacity below Allocation Constraints separately requires
+`allowDeleteWithAllocation=true`. These acknowledgments do not wipe tenant data
+or guarantee that the workload stops.
+
+Before contacting Core, REST records the deletion attempt and makes the Machine
+unavailable for automatic, batch, and explicit-ID Instance placement. Retained
+records no longer provide Allocation capacity. An Instance override retains the
+REST records even when no Instance is attached; an Allocation override retains
+them when capacity would be insufficient. Allocation Constraints remain owned
+by their existing owners.
+
+HTTP `202` confirms Site deletion completion. It does not mean retained REST
+records have been removed. HTTP `409` with `Retry-After: 5` means Core confirmed
+incomplete cleanup. Wait at least five seconds and repeat the same forced
+DELETE. The caller must continue the operation; REST does not schedule another
+attempt automatically.
+
+A timeout or transport error leaves the result unknown. Retrying retrieves the
+recorded workflow attempt rather than starting another Core deletion. If its
+history is missing, or a crash happened after recording the attempt but before
+dispatch, the Machine stays unavailable and ordinary deletion is blocked. Give
+the attempt ID from the error to the Site operator for investigation. Do not
+interpret missing history as successful deletion. A definitive Core validation
+or precondition rejection allows a corrected request to start a new attempt.
+
+After confirmed completion, a repeated forced request uses the saved result and
+does not delete Core's newly rediscovered Machine. A failure during REST cleanup
+preserves this completion proof, so retries do not require old workflow history. To recover retained REST
+records without deleting that Machine again:
+
+1. Have the owners remove the retained Instance and all Machine Instance Type
+   associations. Existing quota guards may require the owners to reduce or
+   rebalance Allocation Constraints before unlinking. Wait until the Machine
+   is unassigned; this cleanup does not delete Allocation records.
+2. Send ordinary `DELETE /v2/org/{org}/nico/machine/{machineId}`, with `force`
+   omitted or false and no override options. This returns `202` after REST-only
+   cleanup. It works when Core reports the same ID present, without requiring an
+   intervening missing inventory or the ordinary 24-hour wait.
+3. Allow a later fresh Machine inventory to restore the rediscovered record.
+   Present inventory alone cannot clear a retained deletion marker.
+
+This REST recovery requires saved proof that Site cleanup completed. An
+incomplete or unknown attempt cannot use it. The direct `nico-admin-cli` polling
+and recovery behavior described above is separate from this REST workflow.
 
 ## Reinstall OS Steps
 

@@ -22,6 +22,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -60,6 +61,33 @@ func testMachineInitDB(t *testing.T) *cdb.Session {
 		bundebug.FromEnv("BUNDEBUG"),
 	))
 	return dbSession
+}
+
+type testMachineInventoryReadContextKey struct{}
+
+// testMachineAfterReadHook commits a competing write after inventory has loaded
+// its initial snapshot, before it locks a Machine for restoration.
+type testMachineAfterReadHook struct {
+	siteID    uuid.UUID
+	afterRead func(context.Context) error
+	fired     bool
+	err       error
+}
+
+func (*testMachineAfterReadHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testMachineAfterReadHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if ctx.Value(testMachineInventoryReadContextKey{}) != h || h.afterRead == nil || event.Err != nil ||
+		event.Operation() != "SELECT" || strings.HasPrefix(event.Query, "SELECT count(") ||
+		!strings.Contains(event.Query, `FROM "machine"`) || !strings.Contains(event.Query, h.siteID.String()) {
+		return
+	}
+	afterRead := h.afterRead
+	h.afterRead = nil
+	h.fired = true
+	h.err = afterRead(ctx)
 }
 
 // reset the tables needed for Machine tests
@@ -1786,45 +1814,167 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 		}
 	})
 	t.Run("present inventory preserves retained force-deletion records", func(t *testing.T) {
-		ctx := context.Background()
-		retainedSite := testMachineBuildSite(t, dbSession, ip2, "retained-force-deletion-site", cdbm.SiteStatusRegistered)
-		machine := testMachineBuildMachine(t, dbSession, ip2.ID, retainedSite.ID, &instanceTypeOriginal.ID, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
-		association := testMachineBuildMachineInstanceType(t, dbSession, machine.ID, instanceTypeOriginal.ID)
-		machineDAO := cdbm.NewMachineDAO(dbSession)
-		aged := time.Now().Add(-2 * time.Duration(cutil.DefaultInventoryReceiptInterval))
-		_, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
-			MachineID: machine.ID, IsForceDeletionRequested: cutil.GetPtr(true),
-			IsUsableByTenant: cutil.GetPtr(false), Updated: &aged,
-		})
-		require.NoError(t, err)
-		inventory := &corev1.MachineInventory{
-			Machines: []*corev1.MachineInfo{{Machine: &corev1.Machine{
-				Id: &corev1.MachineId{Id: machine.ID}, State: cdbm.ControllerMachineStateReady,
-				Status: &corev1.MachineStatus{},
-			}}},
-			Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		for _, tc := range []struct {
+			name       string
+			requested  bool
+			complete   bool
+			workflowID *string
+		}{
+			{name: "pending attempt", requested: true, workflowID: cutil.GetPtr("retained-force-attempt")},
+			{name: "completed deletion", requested: true, complete: true},
+			{name: "unresolved ID survives a cleared marker and stale completion", complete: true, workflowID: cutil.GetPtr("retained-force-attempt")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				retainedSite := testMachineBuildSite(t, dbSession, ip2, "retained-force-deletion-site", cdbm.SiteStatusRegistered)
+				machine := testMachineBuildMachine(t, dbSession, ip2.ID, retainedSite.ID, &instanceTypeOriginal.ID, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusReady))
+				association := testMachineBuildMachineInstanceType(t, dbSession, machine.ID, instanceTypeOriginal.ID)
+				machineDAO := cdbm.NewMachineDAO(dbSession)
+				aged := time.Now().Add(-2 * time.Duration(cutil.DefaultInventoryReceiptInterval))
+				_, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+					MachineID: machine.ID, IsForceDeletionRequested: cutil.GetPtr(tc.requested),
+					IsForceDeletionComplete: cutil.GetPtr(tc.complete), ForceDeletionWorkflowID: tc.workflowID,
+					IsUsableByTenant: cutil.GetPtr(false), Updated: &aged,
+				})
+				require.NoError(t, err)
+				inventory := &corev1.MachineInventory{
+					Machines: []*corev1.MachineInfo{{Machine: &corev1.Machine{
+						Id: &corev1.MachineId{Id: machine.ID}, State: cdbm.ControllerMachineStateReady,
+						Status: &corev1.MachineStatus{},
+					}}},
+					Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}
+				manager := NewManageMachine(dbSession, nil)
+				require.NoError(t, manager.UpdateMachinesInDB(ctx, retainedSite.ID.String(), inventory))
+				retained, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, tc.requested, retained.IsForceDeletionRequested)
+				assert.Equal(t, tc.complete, retained.IsForceDeletionComplete)
+				assert.Equal(t, tc.workflowID, retained.ForceDeletionWorkflowID)
+				assert.False(t, retained.IsUsableByTenant)
+				assert.Equal(t, machine.InstanceTypeID, retained.InstanceTypeID)
+				_, err = cdbm.NewMachineInstanceTypeDAO(dbSession).GetByID(ctx, nil, association.ID, nil)
+				require.NoError(t, err)
+			})
 		}
-		manager := NewManageMachine(dbSession, nil)
-		require.NoError(t, manager.UpdateMachinesInDB(ctx, retainedSite.ID.String(), inventory))
-		retained, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
-		require.NoError(t, err)
-		assert.True(t, retained.IsForceDeletionRequested)
-		assert.False(t, retained.IsUsableByTenant)
-		assert.Equal(t, machine.InstanceTypeID, retained.InstanceTypeID)
-		_, err = cdbm.NewMachineInstanceTypeDAO(dbSession).GetByID(ctx, nil, association.ID, nil)
-		require.NoError(t, err)
-		// Deliberate owner cleanup permits a later authoritative reappearance.
-		require.NoError(t, cdbm.NewMachineInstanceTypeDAO(dbSession).Delete(ctx, nil, association.ID, false))
-		require.NoError(t, machineDAO.Delete(ctx, nil, machine.ID, false))
-		_, err = dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).Set("deleted = ?", aged).
-			Where("id = ?", machine.ID).WhereAllWithDeleted().Exec(ctx)
-		require.NoError(t, err)
-		require.NoError(t, manager.UpdateMachinesInDB(ctx, retainedSite.ID.String(), inventory))
-		restored, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
-		require.NoError(t, err)
-		assert.False(t, restored.IsForceDeletionRequested)
-		assert.True(t, restored.IsUsableByTenant)
+	})
 
+	t.Run("soft-deleted force records retain only unresolved attempts", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			requested   bool
+			complete    bool
+			workflowID  *string
+			wantRestore bool
+		}{
+			{name: "unresolved attempt remains quarantined", requested: true, workflowID: cutil.GetPtr("old-attempt")},
+			{name: "confirmed completion releases deletion metadata", requested: true, complete: true, wantRestore: true},
+			{name: "unresolved ID dominates a cleared marker and stale completion", complete: true, workflowID: cutil.GetPtr("old-attempt")},
+			{name: "ordinary unmarked tombstone with stale completion remains restorable", complete: true, wantRestore: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				site := testMachineBuildSite(t, dbSession, ip2, "force-tombstone-site", cdbm.SiteStatusRegistered)
+				machine := testMachineBuildMachine(t, dbSession, ip2.ID, site.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusError))
+				aged := time.Now().Add(-2 * time.Duration(cutil.DefaultInventoryReceiptInterval))
+				// Model a tombstone left by an older writer, including stale attempt metadata.
+				// The supported API cleanup/recovery path is covered by handler tests.
+				_, err := dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).
+					Set("deleted = ?", aged).Set("is_force_deletion_requested = ?", tc.requested).
+					Set("is_force_deletion_complete = ?", tc.complete).Set("is_usable_by_tenant = false").
+					Set("force_deletion_workflow_id = ?", tc.workflowID).Where("id = ?", machine.ID).Exec(ctx)
+				require.NoError(t, err)
+				inventory := &corev1.MachineInventory{
+					Machines: []*corev1.MachineInfo{{Machine: &corev1.Machine{
+						Id: &corev1.MachineId{Id: machine.ID}, State: cdbm.ControllerMachineStateReady,
+						Status: &corev1.MachineStatus{},
+					}}},
+					Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}
+				manager := NewManageMachine(dbSession, nil)
+				require.NoError(t, manager.UpdateMachinesInDB(ctx, site.ID.String(), inventory))
+				persisted, err := cdbm.NewMachineDAO(dbSession).GetByIDWithDeleted(ctx, nil, machine.ID, false)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantRestore, persisted.IsUsableByTenant)
+				if tc.wantRestore {
+					assert.Nil(t, persisted.Deleted)
+					assert.Nil(t, persisted.ForceDeletionWorkflowID)
+					assert.False(t, persisted.IsForceDeletionRequested)
+					assert.False(t, persisted.IsForceDeletionComplete)
+				} else {
+					require.NotNil(t, persisted.Deleted)
+					assert.Equal(t, tc.workflowID, persisted.ForceDeletionWorkflowID)
+					assert.Equal(t, tc.requested, persisted.IsForceDeletionRequested)
+					assert.Equal(t, tc.complete, persisted.IsForceDeletionComplete)
+				}
+			})
+		}
+	})
+
+	t.Run("stale deleted snapshot preserves a newer deletion state", func(t *testing.T) {
+		for _, tc := range []struct {
+			name             string
+			newlySoftDeleted bool
+		}{
+			{name: "restored Machine has a new unresolved force attempt"},
+			{name: "Machine was soft-deleted again after the snapshot", newlySoftDeleted: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				site := testMachineBuildSite(t, dbSession, ip2, "stale-restore-site", cdbm.SiteStatusRegistered)
+				machine := testMachineBuildMachine(t, dbSession, ip2.ID, site.ID, nil, nil, false, nil, false, nil, cutil.GetPtr(cdbm.MachineStatusError))
+				aged := time.Now().Add(-2 * time.Duration(cutil.DefaultInventoryReceiptInterval))
+				_, err := dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).
+					Set("deleted = ?", aged).Set("is_force_deletion_requested = true").
+					Set("is_force_deletion_complete = true").Set("is_usable_by_tenant = false").
+					Where("id = ?", machine.ID).Exec(ctx)
+				require.NoError(t, err)
+				latestStamp := time.Now().UTC().Truncate(time.Microsecond)
+				var latestDeleted *time.Time
+				workflowID := cutil.GetPtr("newer-force-attempt")
+				if tc.newlySoftDeleted {
+					latestDeleted = &latestStamp
+					workflowID = nil
+				}
+				hook := &testMachineAfterReadHook{siteID: site.ID}
+				hook.afterRead = func(writeCtx context.Context) error {
+					_, writeErr := dbSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).
+						Set("deleted = ?", latestDeleted).Set("updated = ?", latestStamp).
+						Set("is_force_deletion_requested = true").Set("is_usable_by_tenant = false").
+						Set("is_force_deletion_complete = ?", tc.newlySoftDeleted).
+						Set("force_deletion_workflow_id = ?", workflowID).
+						Where("id = ?", machine.ID).WhereAllWithDeleted().Exec(writeCtx)
+					return writeErr
+				}
+				dbSession.DB.AddQueryHook(hook)
+				ctx = context.WithValue(ctx, testMachineInventoryReadContextKey{}, hook)
+				inventory := &corev1.MachineInventory{
+					Machines: []*corev1.MachineInfo{{Machine: &corev1.Machine{
+						Id: &corev1.MachineId{Id: machine.ID}, State: cdbm.ControllerMachineStateReady,
+						Status: &corev1.MachineStatus{},
+					}}},
+					Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				}
+				manager := NewManageMachine(dbSession, nil)
+				require.NoError(t, manager.UpdateMachinesInDB(ctx, site.ID.String(), inventory))
+				require.True(t, hook.fired, "competing write must follow the initial snapshot read")
+				require.NoError(t, hook.err)
+				persisted, err := cdbm.NewMachineDAO(dbSession).GetByIDWithDeleted(ctx, nil, machine.ID, false)
+				require.NoError(t, err)
+				assert.True(t, persisted.IsForceDeletionRequested)
+				assert.Equal(t, tc.newlySoftDeleted, persisted.IsForceDeletionComplete)
+				assert.Equal(t, workflowID, persisted.ForceDeletionWorkflowID)
+				assert.False(t, persisted.IsUsableByTenant)
+				assert.True(t, persisted.Updated.Equal(latestStamp))
+				if latestDeleted == nil {
+					assert.Nil(t, persisted.Deleted)
+				} else {
+					require.NotNil(t, persisted.Deleted)
+					assert.True(t, persisted.Deleted.Equal(*latestDeleted))
+				}
+			})
+		}
 	})
 
 }

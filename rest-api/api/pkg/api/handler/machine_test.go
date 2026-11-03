@@ -23,21 +23,27 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	machineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/machine"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 
+	temporalCommon "go.temporal.io/api/common/v1"
 	"go.temporal.io/api/enums/v1"
+	temporalFailure "go.temporal.io/api/failure/v1"
+	"go.temporal.io/api/serviceerror"
 	temporalClient "go.temporal.io/sdk/client"
 	tsdkConverter "go.temporal.io/sdk/converter"
 	tmocks "go.temporal.io/sdk/mocks"
@@ -55,6 +61,20 @@ type failingSiteTemporalClientPool struct {
 
 func (f failingSiteTemporalClientPool) GetClientByID(uuid.UUID) (temporalClient.Client, error) {
 	return nil, f.err
+}
+
+// testMachineCoreFailure preserves the activity provenance used by the real Core proxy.
+func testMachineCoreFailure(cause error) error {
+	converter := tp.GetDefaultFailureConverter()
+	return converter.FailureToError(&temporalFailure.Failure{
+		Message: "Core activity failed",
+		Cause:   converter.ErrorToFailure(swe.WrapErr(cause)),
+		FailureInfo: &temporalFailure.Failure_ActivityFailureInfo{
+			ActivityFailureInfo: &temporalFailure.ActivityFailureInfo{
+				ActivityType: &temporalCommon.ActivityType{Name: "InvokeCoreGRPCOnSite"},
+			},
+		},
+	})
 }
 
 func testMachineInitDB(t *testing.T) *cdb.Session {
@@ -3267,6 +3287,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 		siteClientError     bool
 		coreError           error
 		corePending         bool
+		staleCompletion     bool
 		retainRecords       bool
 		noInstanceType      bool
 		allocationCount     int
@@ -3282,6 +3303,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 		{name: "missing Machine with overrides retains Instance and Allocation records", query: "/?force=true&allowDeleteWithInstanceType=true&allowDeleteWithInstance=true&allowDeleteWithAllocation=true", isMissingOnSite: true, missingFor: time.Hour, hasAttachedInstance: true, allocationCount: 1, allowInstance: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
 		{name: "false force uses regular deletion", query: "/?force=false", wantStatus: http.StatusBadRequest, wantMessage: "Machine exists on Site and cannot be deleted"},
 		{name: "empty force uses regular deletion", query: "/?force=", wantStatus: http.StatusBadRequest, wantMessage: "Machine exists on Site and cannot be deleted"},
+		{name: "old completion without a requested marker starts a fresh Core deletion", query: "/?force=true", noInstanceType: true, staleCompletion: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
 		{name: "unassociated Machine needs only force", query: "/?force=true", noInstanceType: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
 		{name: "both acknowledgments retain Instance and Allocation records", query: "/?force=true&allowDeleteWithInstance=true&allowDeleteWithInstanceType=false&allowDeleteWithAllocation=true", hasAttachedInstance: true, allocationCount: 1, allowInstance: true, retainRecords: true, wantCoreCall: true, wantStatus: http.StatusAccepted},
 		{name: "force alone does not override Instance Type", query: "/?force=true", wantStatus: http.StatusBadRequest, wantMessage: "set allowDeleteWithInstanceType=true"},
@@ -3323,7 +3345,12 @@ func TestMachineHandler_Delete(t *testing.T) {
 				tsc := fixture.SiteClientPool.IDClientMap[fixture.SiteID].(*tmocks.Client)
 				tsc.ExpectedCalls = nil
 				wrun := &tmocks.WorkflowRun{}
-				wrun.On("Get", mock.Anything, mock.Anything).Return(tc.coreError)
+				coreError := tc.coreError
+				_, isGRPCError := status.FromError(coreError)
+				if isGRPCError {
+					coreError = testMachineCoreFailure(coreError)
+				}
+				wrun.On("Get", mock.Anything, mock.Anything).Return(coreError)
 				tsc.On(
 					"ExecuteWorkflow",
 					mock.Anything,
@@ -3404,7 +3431,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 			}
 
 			_, err := cdbm.NewMachineDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
-				MachineID: fixture.MachineID, IsUsableByTenant: cutil.GetPtr(true), IsMissingOnSite: &tc.isMissingOnSite,
+				MachineID: fixture.MachineID, IsUsableByTenant: cutil.GetPtr(true), IsMissingOnSite: &tc.isMissingOnSite, IsForceDeletionComplete: &tc.staleCompletion,
 			})
 			require.NoError(t, err)
 			if tc.missingFor > 0 {
@@ -3443,9 +3470,11 @@ func TestMachineHandler_Delete(t *testing.T) {
 			if tc.wantStatus != http.StatusAccepted || tc.retainRecords {
 				machine, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(context.Background(), nil, fixture.MachineID, nil, false)
 				require.NoError(t, err)
-				require.Equal(t, !tc.retainRecords, machine.IsUsableByTenant)
+				quarantined := tc.retainRecords || tc.wantCoreCall
+				require.Equal(t, !quarantined, machine.IsUsableByTenant)
 				require.Equal(t, tc.isMissingOnSite, machine.IsMissingOnSite)
-				require.Equal(t, tc.retainRecords, machine.IsForceDeletionRequested)
+				require.Equal(t, quarantined, machine.IsForceDeletionRequested)
+				require.Equal(t, tc.retainRecords && !tc.corePending && tc.wantStatus == http.StatusAccepted, machine.IsForceDeletionComplete)
 				if tc.retainRecords {
 					require.NotNil(t, machine.InstanceTypeID)
 				}
@@ -3479,6 +3508,95 @@ func TestMachineHandler_Delete(t *testing.T) {
 			machineInterfaces, _, err := cdbm.NewMachineInterfaceDAO(fixture.DBSession).GetAll(context.Background(), nil, cdbm.MachineInterfaceFilterInput{MachineIDs: []string{fixture.MachineID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 			require.NoError(t, err)
 			require.Empty(t, machineInterfaces)
+		})
+	}
+
+	for _, tc := range []struct {
+		name       string
+		query      string
+		pending    bool
+		allocation bool
+		mixedState bool
+	}{
+		{"Instance override", "/?force=true&allowDeleteWithInstance=true", false, false, false},
+		{"Allocation override", "/?force=true&allowDeleteWithInstanceType=true&allowDeleteWithAllocation=true", false, true, false},
+		{"incomplete cleanup", "/?force=true&allowDeleteWithInstanceType=true", true, false, false},
+		{"mixed writer unresolved attempt", "/?force=true&allowDeleteWithInstance=true&allowDeleteWithAllocation=true", true, true, true},
+	} {
+		t.Run("retained "+tc.name+" excludes Instance placement", func(t *testing.T) {
+			fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminForceDeleteMachineResponse{AllDone: !tc.pending})
+			ctx := context.Background()
+			machineDAO := cdbm.NewMachineDAO(fixture.DBSession)
+			machine, err := machineDAO.GetByID(ctx, nil, fixture.MachineID,
+				[]string{cdbm.InfrastructureProviderRelationName, cdbm.SiteRelationName, cdbm.InstanceTypeRelationName}, false)
+			require.NoError(t, err)
+			common.TestBuildMachineInstanceType(t, fixture.DBSession, machine, machine.InstanceType)
+			_, err = machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+				MachineID: machine.ID, Status: cutil.GetPtr(cdbm.MachineStatusReady), IsAssigned: cutil.GetPtr(false), IsUsableByTenant: cutil.GetPtr(true),
+			})
+			require.NoError(t, err)
+			if tc.allocation {
+				user := fixture.User.(*cdbm.User)
+				tenant := common.TestBuildTenant(t, fixture.DBSession, "retained-tenant", "retained-tenant-org", user)
+				allocation := common.TestBuildAllocation(t, fixture.DBSession, machine.Site, tenant, "retained-allocation", user)
+				common.TestBuildAllocationConstraint(t, fixture.DBSession, allocation, machine.InstanceType, nil, 1, user)
+			}
+			handler := NewDeleteMachineHandler(fixture.DBSession, fixture.SiteClientPool)
+			response := fixture.Request(t, handler.Handle, http.MethodDelete, tc.query, nil, "")
+			wantStatus := http.StatusAccepted
+			if tc.pending {
+				wantStatus = http.StatusConflict
+			}
+			require.Equal(t, wantStatus, response.Code, response.Body.String())
+
+			mixedID := "mixed-writer-" + uuid.NewString()
+			if tc.mixedState {
+				_, err = machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+					MachineID: machine.ID, IsForceDeletionRequested: cutil.GetPtr(false), IsForceDeletionComplete: cutil.GetPtr(true), ForceDeletionWorkflowID: &mixedID,
+				})
+				require.NoError(t, err)
+				ordinary := fixture.Request(t, handler.Handle, http.MethodDelete, "/", nil, "")
+				require.Equal(t, http.StatusConflict, ordinary.Code, ordinary.Body.String())
+				capacity, countErr := common.GetCountOfMachinesForInstanceType(ctx, nil, fixture.DBSession, machine.InstanceType.ID)
+				require.NoError(t, countErr)
+				assert.Zero(t, capacity)
+				stats, statsErr := common.GetInstanceTypeAllocationStats(ctx, fixture.DBSession, zerolog.Nop(), *machine.InstanceType, nil)
+				require.Nil(t, statsErr)
+				assert.Zero(t, stats.UnusedUsable)
+			}
+
+			tx, err := cdb.BeginTx(ctx, fixture.DBSession, nil)
+			require.NoError(t, err)
+			selected, selectionErr := common.GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, fixture.DBSession, machine.InstanceType, nil)
+			require.Nil(t, selected)
+			require.ErrorIs(t, selectionErr, common.ErrInstanceTypeMachineNotFound)
+			require.NoError(t, tx.Rollback())
+
+			tx, err = cdb.BeginTx(ctx, fixture.DBSession, nil)
+			require.NoError(t, err)
+			selectedBatch, batchErr := allocateMachinesForBatch(ctx, tx, fixture.DBSession, machine.InstanceType, 1, false, nil, nil, zerolog.Nop())
+			require.Empty(t, selectedBatch)
+			require.NotNil(t, batchErr)
+			assert.Equal(t, http.StatusConflict, batchErr.Code)
+			assert.Contains(t, batchErr.Message, "available 0")
+			require.NoError(t, tx.Rollback())
+
+			retained, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, !tc.mixedState, retained.IsForceDeletionRequested)
+			assert.False(t, retained.IsAssigned)
+			assert.False(t, retained.IsUsableByTenant)
+			assert.Equal(t, cdbm.MachineStatusReady, retained.Status)
+			if tc.mixedState {
+				client := fixture.SiteClientPool.IDClientMap[fixture.SiteID].(*tmocks.Client)
+				run := &tmocks.WorkflowRun{}
+				run.On("Get", mock.Anything, mock.Anything).Return(serviceerror.NewNotFound("attempt history unavailable"))
+				client.On("GetWorkflow", mock.Anything, mixedID, "").Return(run).Once()
+				retry := fixture.Request(t, handler.Handle, http.MethodDelete, tc.query, nil, "")
+				require.Equal(t, http.StatusServiceUnavailable, retry.Code, retry.Body.String())
+				assert.Contains(t, retry.Body.String(), mixedID)
+				client.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+			}
 		})
 	}
 
@@ -3523,6 +3641,224 @@ func TestMachineHandler_Delete(t *testing.T) {
 		require.Equal(t, 1, preserved.ConstraintValue)
 	})
 
+	t.Run("confirmed retained deletion recovers through ordinary DELETE after present inventory", func(t *testing.T) {
+		fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminForceDeleteMachineResponse{AllDone: true})
+		ctx := context.Background()
+		machineDAO := cdbm.NewMachineDAO(fixture.DBSession)
+		machine, err := machineDAO.GetByID(ctx, nil, fixture.MachineID,
+			[]string{cdbm.InfrastructureProviderRelationName, cdbm.SiteRelationName, cdbm.InstanceTypeRelationName}, false)
+		require.NoError(t, err)
+		association := common.TestBuildMachineInstanceType(t, fixture.DBSession, machine, machine.InstanceType)
+		spare := common.TestBuildMachine(t, fixture.DBSession, machine.InfrastructureProvider, machine.Site, machine.InstanceTypeID, nil, cdbm.MachineStatusReady)
+		common.TestBuildMachineInstanceType(t, fixture.DBSession, spare, machine.InstanceType)
+		user := fixture.User.(*cdbm.User)
+		tenant := common.TestBuildTenant(t, fixture.DBSession, "recovery-tenant", "recovery-tenant-org", user)
+		allocation := common.TestBuildAllocation(t, fixture.DBSession, machine.Site, tenant, "recovery-allocation", user)
+		constraint := common.TestBuildAllocationConstraint(t, fixture.DBSession, allocation, machine.InstanceType, nil, 1, user)
+		vpc := common.TestBuildVPC(t, fixture.DBSession, "recovery-vpc", machine.InfrastructureProvider, tenant, machine.Site, nil, nil, nil, cdbm.VpcStatusReady, user)
+		operatingSystem := common.TestBuildOperatingSystem(t, fixture.DBSession, "recovery-os", tenant, cdbm.OperatingSystemStatusReady, user)
+		instance := common.TestBuildInstance(t, fixture.DBSession, "recovery-instance", tenant.ID, machine.InfrastructureProviderID, machine.SiteID, *machine.InstanceTypeID, vpc.ID, &machine.ID, operatingSystem.ID)
+		handler := NewDeleteMachineHandler(fixture.DBSession, fixture.SiteClientPool)
+		forceQuery := "/?force=true&allowDeleteWithInstance=true"
+		response := fixture.Request(t, handler.Handle, http.MethodDelete, forceQuery, nil, "")
+		require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+
+		// Core reports the same hardware-derived ID without an intervening missing snapshot.
+		inventory := &corev1.MachineInventory{
+			Machines: []*corev1.MachineInfo{{Machine: &corev1.Machine{
+				Id: &corev1.MachineId{Id: machine.ID}, State: cdbm.ControllerMachineStateReady, Status: &corev1.MachineStatus{},
+			}}}, Timestamp: timestamppb.Now(), InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		}
+		manager := machineActivity.NewManageMachine(fixture.DBSession, nil)
+		require.NoError(t, manager.UpdateMachinesInDB(ctx, machine.SiteID.String(), inventory))
+		retained, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+		require.NoError(t, err)
+		assert.False(t, retained.IsMissingOnSite)
+		assert.True(t, retained.IsForceDeletionComplete)
+		assert.True(t, retained.IsForceDeletionRequested)
+		assert.False(t, retained.IsUsableByTenant)
+		_, err = cdbm.NewInstanceDAO(fixture.DBSession).GetByID(ctx, nil, instance.ID, nil)
+		require.NoError(t, err, "force deletion and present inventory preserve the owner Instance")
+		replay := fixture.Request(t, handler.Handle, http.MethodDelete, forceQuery, nil, "")
+		require.Equal(t, http.StatusAccepted, replay.Code, replay.Body.String())
+
+		blocked := fixture.Request(t, handler.Handle, http.MethodDelete, "/", nil, "")
+		require.Equal(t, http.StatusBadRequest, blocked.Code)
+		assert.Contains(t, blocked.Body.String(), "attached to Instance")
+		// Model completed owner cleanup; the Machine cleanup itself must use the supported API.
+		require.NoError(t, cdbm.NewInstanceDAO(fixture.DBSession).Delete(ctx, nil, instance.ID))
+		blocked = fixture.Request(t, handler.Handle, http.MethodDelete, "/", nil, "")
+		require.Equal(t, http.StatusBadRequest, blocked.Code)
+		assert.Contains(t, blocked.Body.String(), "Instance Type")
+		_, err = machineDAO.Clear(ctx, nil, cdbm.MachineClearInput{MachineID: machine.ID, InstanceTypeID: true})
+		require.NoError(t, err)
+		blocked = fixture.Request(t, handler.Handle, http.MethodDelete, "/", nil, "")
+		require.Equal(t, http.StatusBadRequest, blocked.Code)
+		assert.Contains(t, blocked.Body.String(), "Instance Type associations")
+		require.NoError(t, cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).Delete(ctx, nil, association.ID, false))
+		_, err = machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, IsAssigned: cutil.GetPtr(true)})
+		require.NoError(t, err)
+		blocked = fixture.Request(t, handler.Handle, http.MethodDelete, "/", nil, "")
+		require.Equal(t, http.StatusBadRequest, blocked.Code)
+		assert.Contains(t, blocked.Body.String(), "still assigned")
+		_, err = machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: machine.ID, IsAssigned: cutil.GetPtr(false)})
+		require.NoError(t, err)
+
+		cleanup := fixture.Request(t, handler.Handle, http.MethodDelete, "/", nil, "")
+		require.Equal(t, http.StatusAccepted, cleanup.Code, cleanup.Body.String())
+		_, err = machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+		preserved, err := cdbm.NewAllocationConstraintDAO(fixture.DBSession).GetByID(ctx, nil, constraint.ID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 1, preserved.ConstraintValue)
+		client := fixture.SiteClientPool.IDClientMap[fixture.SiteID].(*tmocks.Client)
+		client.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+
+		// A later authoritative inventory can restore the rediscovered Machine after local cleanup.
+		aged := time.Now().Add(-2 * time.Duration(cutil.DefaultInventoryReceiptInterval))
+		_, err = fixture.DBSession.DB.NewUpdate().Model((*cdbm.Machine)(nil)).Set("deleted = ?", aged).
+			Where("id = ?", machine.ID).WhereAllWithDeleted().Exec(ctx)
+		require.NoError(t, err)
+		require.NoError(t, manager.UpdateMachinesInDB(ctx, machine.SiteID.String(), inventory))
+		restored, err := machineDAO.GetByID(ctx, nil, machine.ID, nil, false)
+		require.NoError(t, err)
+		assert.False(t, restored.IsForceDeletionRequested)
+		assert.False(t, restored.IsForceDeletionComplete)
+		assert.Nil(t, restored.ForceDeletionWorkflowID)
+		assert.True(t, restored.IsUsableByTenant)
+	})
+
+	for _, tc := range []struct {
+		name             string
+		firstError       error
+		seedUndispatched bool
+		retryError       error
+		newAttempt       bool
+		staleCompletion  bool
+		ownershipChanged bool
+		wantStatus       int
+		wantComplete     bool
+	}{
+		{name: "timeout resumes the exact completed attempt", firstError: tp.NewTimeoutError(enums.TIMEOUT_TYPE_START_TO_CLOSE, nil), wantStatus: http.StatusAccepted, wantComplete: true},
+		{name: "changed ownership cannot block recording a resumed completion", firstError: tp.NewTimeoutError(enums.TIMEOUT_TYPE_START_TO_CLOSE, nil), ownershipChanged: true, wantStatus: http.StatusBadRequest, wantComplete: true},
+		{name: "expired workflow history stays quarantined", firstError: tp.NewTimeoutError(enums.TIMEOUT_TYPE_START_TO_CLOSE, nil), retryError: serviceerror.NewNotFound("workflow history unavailable"), wantStatus: http.StatusServiceUnavailable},
+		{name: "intent persisted before a crash cannot dispatch on retry", seedUndispatched: true, retryError: serviceerror.NewNotFound("workflow was never started"), wantStatus: http.StatusServiceUnavailable},
+		{name: "transport failure never starts another attempt", firstError: testMachineCoreFailure(status.Error(codes.Unavailable, "connection lost")), retryError: testMachineCoreFailure(status.Error(codes.Unavailable, "connection lost")), wantStatus: http.StatusServiceUnavailable},
+		{name: "definitive rejection allows corrected options in a new attempt", firstError: testMachineCoreFailure(status.Error(codes.FailedPrecondition, "consent required")), newAttempt: true, wantStatus: http.StatusAccepted, wantComplete: true},
+		{name: "stale completion cannot clear a newer attempt", firstError: tp.NewTimeoutError(enums.TIMEOUT_TYPE_START_TO_CLOSE, nil), staleCompletion: true, wantStatus: http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminForceDeleteMachineResponse{AllDone: true})
+			ctx := context.Background()
+			machineDAO := cdbm.NewMachineDAO(fixture.DBSession)
+			handler := NewDeleteMachineHandler(fixture.DBSession, fixture.SiteClientPool)
+			client := fixture.SiteClientPool.IDClientMap[fixture.SiteID].(*tmocks.Client)
+			client.ExpectedCalls = nil
+			query := "/?force=true&allowDeleteWithInstance=true"
+			if tc.ownershipChanged {
+				query = "/?force=true&allowDeleteWithInstanceType=true"
+			}
+			firstID := "undispatched-" + uuid.NewString()
+			if tc.seedUndispatched {
+				_, err := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{
+					MachineID: fixture.MachineID, IsForceDeletionRequested: cutil.GetPtr(true),
+					IsUsableByTenant: cutil.GetPtr(false), ForceDeletionWorkflowID: &firstID,
+				})
+				require.NoError(t, err)
+			} else {
+				firstRun := &tmocks.WorkflowRun{}
+				firstRun.On("Get", mock.Anything, mock.Anything).Return(tc.firstError)
+				client.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+					Run(func(args mock.Arguments) {
+						options := args.Get(1).(temporalClient.StartWorkflowOptions)
+						firstID = options.ID
+						persisted, err := machineDAO.GetByID(ctx, nil, fixture.MachineID, nil, false)
+						require.NoError(t, err)
+						assert.True(t, persisted.IsForceDeletionRequested, "intent must commit before dispatch")
+						assert.False(t, persisted.IsUsableByTenant)
+						require.NotNil(t, persisted.ForceDeletionWorkflowID)
+						assert.Equal(t, firstID, *persisted.ForceDeletionWorkflowID)
+					}).Return(firstRun, nil).Once()
+				firstQuery := query
+				if tc.newAttempt {
+					firstQuery = "/?force=true&allowDeleteWithInstanceType=true"
+				}
+				response := fixture.Request(t, handler.Handle, http.MethodDelete, firstQuery, nil, "")
+				require.NotEqual(t, http.StatusAccepted, response.Code)
+			}
+			before, err := machineDAO.GetByID(ctx, nil, fixture.MachineID, nil, false)
+			require.NoError(t, err)
+			assert.False(t, before.IsForceDeletionComplete)
+			if tc.newAttempt {
+				assert.Nil(t, before.ForceDeletionWorkflowID)
+			} else {
+				require.NotNil(t, before.ForceDeletionWorkflowID)
+				assert.Equal(t, firstID, *before.ForceDeletionWorkflowID)
+			}
+			ordinary := fixture.Request(t, handler.Handle, http.MethodDelete, "/", nil, "")
+			require.Equal(t, http.StatusConflict, ordinary.Code, ordinary.Body.String())
+			if tc.ownershipChanged {
+				_, err = machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: fixture.MachineID, IsAssigned: cutil.GetPtr(true)})
+				require.NoError(t, err)
+			}
+
+			newerID := "newer-" + uuid.NewString()
+			retryRun := &tmocks.WorkflowRun{}
+			retryRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+				if tc.staleCompletion {
+					_, updateErr := machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: fixture.MachineID, ForceDeletionWorkflowID: &newerID})
+					require.NoError(t, updateErr)
+				}
+				args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte(`{"allDone":true}`)
+			}).Return(tc.retryError)
+			if tc.newAttempt {
+				client.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+					Run(func(args mock.Arguments) {
+						assert.NotEqual(t, firstID, args.Get(1).(temporalClient.StartWorkflowOptions).ID)
+						var request corev1.AdminForceDeleteMachineRequest
+						require.NoError(t, protojson.Unmarshal(args.Get(3).(grpcproxy.Request).RequestJSON, &request))
+						assert.True(t, request.AllowDeleteWithInstance)
+					}).Return(retryRun, nil).Once()
+			} else {
+				client.On("GetWorkflow", mock.Anything, firstID, "").Return(retryRun).Once()
+			}
+			retry := fixture.Request(t, handler.Handle, http.MethodDelete, query, nil, "")
+			require.Equal(t, tc.wantStatus, retry.Code, retry.Body.String())
+			after, err := machineDAO.GetByID(ctx, nil, fixture.MachineID, nil, false)
+			require.NoError(t, err)
+			assert.True(t, after.IsForceDeletionRequested)
+			assert.False(t, after.IsUsableByTenant)
+			assert.Equal(t, tc.wantComplete, after.IsForceDeletionComplete)
+			switch {
+			case tc.wantComplete:
+				assert.Nil(t, after.ForceDeletionWorkflowID)
+				if tc.ownershipChanged {
+					assert.True(t, after.IsAssigned, "owner state must remain intact")
+					assert.Contains(t, retry.Body.String(), "Machine is in use by an Instance")
+					_, err = machineDAO.Update(ctx, nil, cdbm.MachineUpdateInput{MachineID: fixture.MachineID, IsAssigned: cutil.GetPtr(false)})
+					require.NoError(t, err)
+				}
+				replay := fixture.Request(t, handler.Handle, http.MethodDelete, query, nil, "")
+				require.Equal(t, http.StatusAccepted, replay.Code, replay.Body.String())
+			case tc.staleCompletion:
+				require.Equal(t, cutil.GetPtr(newerID), after.ForceDeletionWorkflowID)
+			default:
+				require.Equal(t, cutil.GetPtr(firstID), after.ForceDeletionWorkflowID)
+				assert.Contains(t, retry.Body.String(), firstID)
+				assert.Contains(t, retry.Body.String(), "remains unconfirmed")
+			}
+			starts := 1
+			if tc.seedUndispatched {
+				starts = 0
+			}
+			if tc.newAttempt {
+				starts = 2
+			}
+			client.AssertNumberOfCalls(t, "ExecuteWorkflow", starts)
+			client.AssertExpectations(t)
+		})
+	}
+
 	t.Run("incomplete cleanup is explicit and finishes on retry", func(t *testing.T) {
 		response := &corev1.AdminForceDeleteMachineResponse{AllDone: false}
 		fixture := common.NewTestSetupProviderMachineHandlerFixture(t, response)
@@ -3536,6 +3872,10 @@ func TestMachineHandler_Delete(t *testing.T) {
 		first := fixture.Request(t, handler.Handle, http.MethodDelete, query, nil, "")
 		require.Equal(t, http.StatusConflict, first.Code, first.Body.String())
 		require.Equal(t, "5", first.Header().Get("Retry-After"))
+		pending, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(ctx, nil, fixture.MachineID, nil, false)
+		require.NoError(t, err)
+		assert.False(t, pending.IsForceDeletionComplete)
+		assert.Nil(t, pending.ForceDeletionWorkflowID)
 		require.Contains(t, first.Body.String(), "repeat this DELETE request with the same options")
 		_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(ctx, nil, association.ID, nil)
 		require.NoError(t, err)
@@ -3554,7 +3894,7 @@ func TestMachineHandler_Delete(t *testing.T) {
 		client.AssertNumberOfCalls(t, "ExecuteWorkflow", 2)
 	})
 
-	t.Run("cleanup failure rolls back before compatibility retry", func(t *testing.T) {
+	t.Run("cleanup failure preserves completion for local replay without workflow history", func(t *testing.T) {
 		fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminForceDeleteMachineResponse{AllDone: true})
 		handler := NewDeleteMachineHandler(fixture.DBSession, fixture.SiteClientPool)
 		machine, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(
@@ -3610,21 +3950,17 @@ func TestMachineHandler_Delete(t *testing.T) {
 		constraintActive = false
 		tsc := fixture.SiteClientPool.IDClientMap[fixture.SiteID].(*tmocks.Client)
 		tsc.ExpectedCalls = nil
-		wrun := &tmocks.WorkflowRun{}
-		wrun.On("Get", mock.Anything, mock.Anything).Return(status.Error(codes.NotFound, "Machine not found"))
-		tsc.On(
-			"ExecuteWorkflow",
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-			mock.MatchedBy(func(req grpcproxy.Request) bool {
-				*fixture.ProxiedReq = req
-				return true
-			}),
-		).Return(wrun, nil)
+		retained, err := cdbm.NewMachineDAO(fixture.DBSession).GetByID(context.Background(), nil, fixture.MachineID, nil, false)
+		require.NoError(t, err)
+		require.Nil(t, retained.ForceDeletionWorkflowID)
+		require.True(t, retained.IsForceDeletionComplete)
+		require.True(t, retained.IsForceDeletionRequested)
+		// No history lookup is configured: completion must be usable from REST alone.
 
 		retry := fixture.Request(t, handler.Handle, http.MethodDelete, "/?force=true&allowDeleteWithInstanceType=true", nil, "")
 		require.Equal(t, http.StatusAccepted, retry.Code, retry.Body.String())
+		tsc.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+		tsc.AssertNumberOfCalls(t, "GetWorkflow", 0)
 		_, err = cdbm.NewMachineDAO(fixture.DBSession).GetByID(context.Background(), nil, fixture.MachineID, nil, false)
 		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 		_, err = cdbm.NewMachineInstanceTypeDAO(fixture.DBSession).GetByID(context.Background(), nil, machineInstanceType.ID, nil)

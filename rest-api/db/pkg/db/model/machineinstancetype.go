@@ -201,7 +201,8 @@ func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 	if filter.ExcludeForceDeletionRequested {
 		query = query.Join("JOIN machine AS capacity_machine ON capacity_machine.id = mit.machine_id").
 			Where("capacity_machine.deleted IS NULL").
-			Where("capacity_machine.is_force_deletion_requested = false")
+			Where("capacity_machine.is_force_deletion_requested = false").
+			Where("capacity_machine.force_deletion_workflow_id IS NULL")
 	}
 
 	if filter.MachineID != nil {

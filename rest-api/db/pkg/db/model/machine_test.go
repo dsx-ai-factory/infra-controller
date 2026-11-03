@@ -2347,15 +2347,15 @@ func TestMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			}
 		})
 	}
-	t.Run("mixed batch preserves omitted force-deletion marker", func(t *testing.T) {
+	t.Run("mixed batch preserves omitted force-deletion state", func(t *testing.T) {
 		for _, id := range []string{m1.ID, m3.ID} {
-			_, err := msd.Update(ctx, nil, MachineUpdateInput{MachineID: id, IsForceDeletionRequested: cutil.GetPtr(true)})
+			_, err := msd.Update(ctx, nil, MachineUpdateInput{MachineID: id, IsForceDeletionRequested: cutil.GetPtr(true), IsForceDeletionComplete: cutil.GetPtr(true), ForceDeletionWorkflowID: cutil.GetPtr("prior-" + id)})
 			require.NoError(t, err)
 		}
 		updated, err := msd.UpdateMultiple(ctx, nil, []MachineUpdateInput{
 			{MachineID: m1.ID, Status: cutil.GetPtr(MachineStatusError)},
-			{MachineID: m2.ID, IsForceDeletionRequested: cutil.GetPtr(true)},
-			{MachineID: m3.ID, IsForceDeletionRequested: cutil.GetPtr(false)},
+			{MachineID: m2.ID, IsForceDeletionRequested: cutil.GetPtr(true), IsForceDeletionComplete: cutil.GetPtr(false), ForceDeletionWorkflowID: cutil.GetPtr("next-attempt")},
+			{MachineID: m3.ID, IsForceDeletionRequested: cutil.GetPtr(false), IsForceDeletionComplete: cutil.GetPtr(false)},
 		})
 		require.NoError(t, err)
 		require.Len(t, updated, 3)
@@ -2363,7 +2363,18 @@ func TestMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			persisted, readErr := msd.GetByID(ctx, nil, updated[i].ID, nil, false)
 			require.NoError(t, readErr)
 			assert.Equal(t, want, persisted.IsForceDeletionRequested)
+			assert.Equal(t, i == 0, persisted.IsForceDeletionComplete)
+			wantID := "prior-" + persisted.ID
+			if i == 1 {
+				wantID = "next-attempt"
+			}
+			assert.Equal(t, cutil.GetPtr(wantID), persisted.ForceDeletionWorkflowID)
 		}
+		cleared, err := msd.Clear(ctx, nil, MachineClearInput{MachineID: m2.ID, ForceDeletionWorkflowID: true})
+		require.NoError(t, err)
+		assert.Nil(t, cleared.ForceDeletionWorkflowID)
+		assert.True(t, cleared.IsForceDeletionRequested)
+		assert.False(t, cleared.IsForceDeletionComplete)
 	})
 
 }
