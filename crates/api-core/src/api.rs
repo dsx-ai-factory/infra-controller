@@ -156,6 +156,13 @@ impl Forge for Api {
         crate::handlers::rms::get_rms_version(self, request).await
     }
 
+    async fn get_rms_job_status(
+        &self,
+        request: Request<rpc::GetRmsJobStatusRequest>,
+    ) -> Result<Response<rpc::GetRmsJobStatusResponse>, Status> {
+        crate::handlers::rms::get_rms_job_status(self, request).await
+    }
+
     async fn create_domain(
         &self,
         request: Request<CreateDomainRequest>,
@@ -4108,21 +4115,18 @@ impl Forge for Api {
         crate::handlers::component_manager::component_power_control(self, request).await
     }
 
-    async fn component_reset_switch_sdn_factory_default(
+    async fn component_reset(
         &self,
-        request: Request<rpc::ComponentResetSwitchSdnFactoryDefaultRequest>,
-    ) -> Result<Response<rpc::ComponentResetSwitchSdnFactoryDefaultResponse>, Status> {
-        crate::handlers::component_manager::component_reset_switch_sdn_factory_default(
-            self, request,
-        )
-        .await
+        request: Request<rpc::ComponentResetRequest>,
+    ) -> Result<Response<rpc::ComponentResetResponse>, Status> {
+        crate::handlers::component_manager::component_reset(self, request).await
     }
 
-    async fn get_switch_sdn_factory_reset_status(
+    async fn get_component_reset_status(
         &self,
-        request: Request<rpc::GetSwitchSdnFactoryResetStatusRequest>,
-    ) -> Result<Response<rpc::GetSwitchSdnFactoryResetStatusResponse>, Status> {
-        crate::handlers::component_manager::get_switch_sdn_factory_reset_status(self, request).await
+        request: Request<rpc::GetComponentResetStatusRequest>,
+    ) -> Result<Response<rpc::GetComponentResetStatusResponse>, Status> {
+        crate::handlers::component_manager::get_component_reset_status(self, request).await
     }
 
     async fn component_configure_switch_certificate(

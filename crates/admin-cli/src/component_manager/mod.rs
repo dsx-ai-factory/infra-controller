@@ -18,7 +18,7 @@
 pub(crate) mod common;
 mod configure_switch_certificate;
 mod power_control;
-mod sdn_factory_reset;
+mod reset;
 mod status;
 mod update_firmware;
 mod versions;
@@ -56,9 +56,9 @@ pub(crate) enum Cmd {
     )]
     ConfigureSwitchCertificate(configure_switch_certificate::Args),
 
-    #[clap(about = "Reset switch SDN configuration directly through RMS (disrupts fabric traffic)")]
-    ResetSwitchSdnFactoryDefault(sdn_factory_reset::ResetArgs),
+    #[clap(about = "Dispatch a component reset directly (SDN reset disrupts fabric traffic)")]
+    ComponentReset(reset::ResetArgs),
 
-    #[clap(about = "Get the parent and child job result for a switch SDN factory reset")]
-    GetSwitchSdnFactoryResetStatus(sdn_factory_reset::StatusArgs),
+    #[clap(about = "Get reset status by component and action")]
+    GetResetStatus(reset::StatusArgs),
 }

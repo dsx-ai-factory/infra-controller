@@ -135,6 +135,50 @@ the client cert/key, or admin permissions. With credentials configured and
 `DISABLE_TLS_ENFORCEMENT` unset, use `nico-admin-cli machine show` to verify a
 protected, read-only operation. An empty inventory is also a valid result.
 
+## Component reset status
+
+Use [`component-manager component-reset`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-component-reset.md)
+to submit resets directly, and
+[`component-manager get-reset-status`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-reset-status.md)
+to query by device and required action. Only `sdn-factory-reset` on switches is
+implemented. Targets can be switch IDs or BMC MACs, including expected inventory
+before ingestion. SDN reset disrupts fabric traffic and restores SDN defaults
+without reinstalling NVOS. Submission success means accepted and tracked; it does not mean
+the reset completed. Other valid targets can proceed when one target fails.
+Backend submission failures use `INTERNAL_ERROR`; the error text may describe
+rejection or an uncertain outcome. The status code does not distinguish them.
+
+NICo stores the most recently recorded accepted RMS job reference per device
+MAC and reset action. This follows firmware direct-dispatch tracking: references
+survive NICo restarts, but are not operation history or durable completion
+records. A rejected or ambiguous submission leaves the previous reference
+unchanged. If a submission response or reference write fails, status can still
+show an older reset; it does not necessarily describe the latest attempt or all
+work in progress. Concurrent responses can be recorded out of acceptance order.
+
+In the status API, the per-device result and reset state have different meanings:
+
+| Result / reset state | Meaning and next step |
+|---|---|
+| `SUCCESS` / `QUEUED` or `IN_PROGRESS` | The tracked reset is still active. Continue querying status. |
+| `SUCCESS` / `COMPLETED` or `FAILED` | RMS reports a terminal outcome for the tracked reset. Read the error for a failed reset. |
+| `NOT_FOUND` / `UNKNOWN` | NICo cannot resolve the target or has no reference. Read the error; this does not prove no reset occurred. |
+| `UNAVAILABLE` / `UNKNOWN` | Status could not be observed, for example because of a temporary RMS failure. Retry the status query. |
+| `OUTCOME_UNKNOWN` / `UNKNOWN` | The tracked RMS job cannot be found or its outcome cannot be established. Investigate before submitting another reset. |
+
+RMS job expiry or restart can make a previously observed completion unavailable.
+NICo does not retain pending submission intent or provide durable exclusion
+between reset requests. RMS admission applies to its tracked rack/node identity;
+it does not recover forgotten jobs or associate changed node IDs across ingestion.
+
+Do not automatically retry a reset after a submission error: the reset
+may have started even if NICo could not record its job reference. Investigate
+NICo/RMS logs and the device state. For a known job ID, use
+[`backend rms get-job-status`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/backend/backend-rms-get-job-status.md)
+with child records included to inspect the RMS outcome. This diagnostic requires
+the admin CLI role. Retry status queries as needed; another reset must be a
+deliberate action after establishing the outcome of the uncertain attempt.
+
 ## mTLS and authorization
 
 For Vault-issued or operator-managed admin certificates, API trust and
