@@ -635,7 +635,8 @@ func parseTokenResponse(resp *http.Response) (*TokenResponse, error) {
 			Error string `json:"error"`
 		}
 		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&errBody) == nil {
-			if code := tokenErrorCode(errBody.Error); code != "" {
+			code := tokenErrorCode(errBody.Error)
+			if code != "" {
 				return nil, fmt.Errorf("authentication failed (HTTP %d, %s); check OIDC client credentials, scopes, and token endpoint configuration", resp.StatusCode, code)
 			}
 		}

@@ -53,29 +53,50 @@ PY
 
 # Runs curl from inside the cluster via a one-shot pod.
 # This ensures JWT issuer matches the internal Keycloak URL.
-# Deliberately omits -f: on a bad client or secret Keycloak returns the reason in the
-# body, and -f would discard it and leave only a nonzero exit.
+# Keep the response body for the allowlisted OAuth code, but never print it on
+# failure: an endpoint can echo credentials even in its error identifier.
 RESPONSE="$(_curl_config \
     | kubectl run -i --rm --restart=Never --image=curlimages/curl "curl-$$" \
-        -n "${NS}" --quiet -- -s -K - "${TOKEN_URL}")" \
+        -n "${NS}" --quiet -- -s -K - -w $'\n%{http_code}' "${TOKEN_URL}")" \
     || { echo "ERROR: could not reach Keycloak at ${TOKEN_URL}" >&2; exit 1; }
 
-ACCESS_TOKEN="$(printf '%s' "${RESPONSE}" | python3 -c '
-import json, sys
-try:
-    print(json.load(sys.stdin).get("access_token", ""))
-except ValueError:
-    pass
-')"
-
-if [[ -z "${ACCESS_TOKEN}" ]]; then
-    echo "ERROR: no access_token for client ${CLIENT_ID} in realm ${REALM}" >&2
-    echo "  Keycloak said: ${RESPONSE}" >&2
-    echo "  invalid_client means the client does not exist in the realm, or its secret differs." >&2
-    echo "  List the clients that do exist with:" >&2
-    echo "    kubectl -n ${NS} exec deployment/keycloak -- \\" >&2
-    echo "      /opt/keycloak/bin/kcadm.sh get clients -r ${REALM} --fields clientId" >&2
+HTTP_STATUS="${RESPONSE##*$'\n'}"
+if [[ ! "${HTTP_STATUS}" =~ ^[0-9]{3}$ ]]; then
+    echo "ERROR: could not read Keycloak HTTP status" >&2
     exit 1
 fi
+RESPONSE="${RESPONSE%$'\n'*}"
 
-echo "${ACCESS_TOKEN}"
+printf '%s' "${RESPONSE}" | python3 -c '
+import json, sys
+status = sys.argv[1]
+try:
+    response = json.load(sys.stdin)
+except ValueError:
+    response = {}
+if not isinstance(response, dict):
+    response = {}
+token = response.get("access_token")
+if status == "200" and "error" not in response and isinstance(token, str) and token:
+    print(token)
+    sys.exit(0)
+
+# Match the standard OAuth code allowlist in rest-api/cli/pkg/auth.go.
+hints = {
+    "invalid_request": "check the token request parameters",
+    "invalid_client": "check that the client exists in the realm and its secret matches",
+    "invalid_grant": "check the grant credentials and account setup",
+    "unauthorized_client": "check that the client is allowed to use this grant",
+    "unsupported_grant_type": "check that the realm supports the requested grant",
+    "invalid_scope": "check the requested scopes and client permissions",
+    "server_error": "check Keycloak availability and server logs",
+    "temporarily_unavailable": "retry when Keycloak is available",
+}
+code = response.get("error")
+if not isinstance(code, str) or code not in hints:
+    code = ""
+hint = hints.get(code, "check the client, realm, and token endpoint configuration")
+detail = ", " + code if code else ""
+print(f"ERROR: token request failed (HTTP {status}{detail}); {hint}", file=sys.stderr)
+sys.exit(1)
+' "${HTTP_STATUS}"
