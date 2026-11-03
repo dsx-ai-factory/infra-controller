@@ -1142,6 +1142,10 @@ monitor_run_interval = "60s"
 partition_monitor_max_concurrent_groups = 16 # racks or chassis reconciled in parallel per pass, documented range 1 to 256, larger values are accepted with a startup warning
 partition_monitor_full_check_interval = "10m" # racks and chassis whose inputs are unchanged and whose instances are synced are skipped between full checks, GPU health on them refreshes at this interval, "0s" checks every pass
 nmxc_endpoint = "https://nmxc.example.com"
+
+[nvlink_config.switch_reachability]
+# enabled = false # TCP-probes ready switches each pass (NVOS on every switch, NMX-T on primaries); unset follows nvlink_config.enabled
+unreachable_alert_after = 3 # consecutive failed checks before the SwitchUnreachable or NmxtUnreachable switch alert is raised; the first successful check clears it
 # Plus auth + retry settings — see the canonical reference.
 ```
 

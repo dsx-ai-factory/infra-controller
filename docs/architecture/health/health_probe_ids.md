@@ -130,6 +130,44 @@ Indicates that NMX-C reported `Unhealthy` or `UnhealthyDbCorrupted` controller
 health for an NVLink domain. A `Healthy` report clears the probe. `Degraded` and
 `Unknown` do not generate a domain health report.
 
+## Switch reachability health probe identifiers
+
+Both probes are raised by the switch reachability monitor in `nico-api`, which
+runs whenever `nvlink_config.enabled` is `true` unless
+`nvlink_config.switch_reachability.enabled` overrides it. Each pass opens a TCP
+connection to every switch in the `ready` controller state; switches in other
+states, and switches whose NVOS management interface has no IP address yet, are
+not probed and keep no report. Alerts are stored as one `Merge` report on the
+switch under the source `switch-reachability-monitor`, one alert per service,
+each carrying [`Hardware`](health_alert_classifications.md#hardware) only, so
+neither blocks allocations. Each service is debounced separately: its alert is
+raised after `nvlink_config.switch_reachability.unreachable_alert_after`
+consecutive failed checks (default `3`, one per `run_interval`, default `60s`)
+and removed on the first check that connects. Only checks without a stored
+alert count towards the threshold, so removing an alert by hand during an
+ongoing outage suppresses it for another `unreachable_alert_after` checks. The
+alert's `in_alert_since` is the first failed check of the run that raised it. A
+report write that fails is retried on the next pass. A switch that leaves the
+`ready` state or is deleted has its report removed on the next pass. A
+successful TCP connection proves only that the service accepts connections,
+not that it answers requests.
+
+### `SwitchUnreachable`
+
+The switch's NVOS management address did not accept a TCP connection on
+`nvlink_config.switch_reachability.nvos_port` (default `443`). The alert's
+`target` is the probed `address:port` and its `message` includes the last
+connection error.
+
+### `NmxtUnreachable`
+
+The NMX-T telemetry listener on a primary switch did not accept a TCP
+connection on `nvlink_config.switch_reachability.nmx_t_port` (default `9352`).
+Only switches marked `is_primary` host NMX-T, so other switches never receive
+this alert, and a primary that is demoted has the alert removed on the next
+pass while its `SwitchUnreachable` checks continue. The alert's `target` is the probed `address:port` and its
+`message` includes the last connection error.
+
 ## NVLink GPU health probe identifiers
 
 ### `NvlinkUnhealthy`
