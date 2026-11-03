@@ -17,7 +17,6 @@
 
 use carbide_instrument::testing::MetricsCapture;
 use carbide_machine_controller::handler::MAX_NEW_FIRMWARE_REPORTED_RESET_RETRIES;
-use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_test_harness::CarbideConfig;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
@@ -527,7 +526,6 @@ async fn cold_firmware_download_preserves_request_until_check_completes(pool: Pg
 
     // An explicit completed check still clears the request. Use the fixture's
     // installed version so this tests completion without a simulated flash.
-    env.redfish_sim.set_lockdown_has_boot_latched_controls(true);
     config
         .components
         .get_mut(&FirmwareComponentType::Bmc)
@@ -545,7 +543,7 @@ async fn cold_firmware_download_preserves_request_until_check_completes(pool: Pg
     let expected = ManagedHostState::HostInit {
         machine_state: model::machine::MachineState::WaitingForLockdown {
             lockdown_info: model::machine::LockdownInfo {
-                state: model::machine::LockdownState::SetLockdown,
+                state: model::machine::LockdownState::PollingLockdownStatus,
                 mode: model::machine::LockdownMode::Enable,
             },
         },
@@ -554,51 +552,9 @@ async fn cold_firmware_download_preserves_request_until_check_completes(pool: Pg
     assert!(
         env.redfish_sim
             .lockdown_states()
-            .iter()
-            .any(|state| { *state == libredfish::EnabledDisabled::Disabled }),
-        "policy must not be written before persisting the reboot flow"
+            .contains(&libredfish::EnabledDisabled::Enabled),
+        "completed firmware checks must restore lockdown before polling status"
     );
-
-    let timepoint = env.redfish_sim.timepoint();
-    // The wrapper's first read succeeds; the shared restart helper's read fails.
-    env.redfish_sim
-        .fail_power_state_read_after(1, "transient power-state read failure");
-    env.run_single_iteration().await;
-    assert_eq!(mh.host.machine().await.current_state(), &expected);
-    assert!(
-        env.redfish_sim
-            .actions_since(&timepoint)
-            .all_hosts()
-            .is_empty()
-    );
-
-    env.redfish_sim.fail_next_power_action(
-        libredfish::SystemPowerControl::ForceRestart,
-        "transient restart failure",
-    );
-    env.run_single_iteration().await;
-    assert_eq!(mh.host.machine().await.current_state(), &expected);
-    // Even though configured policy now reads enabled, the persisted state
-    // must retry the failed restart rather than declaring lockdown complete.
-    env.run_single_iteration().await;
-    assert!(matches!(
-        mh.host.machine().await.current_state(),
-        ManagedHostState::HostInit {
-            machine_state: model::machine::MachineState::WaitingForLockdown {
-                lockdown_info: model::machine::LockdownInfo {
-                    state: model::machine::LockdownState::TimeWaitForDPUDown,
-                    ..
-                },
-            },
-        }
-    ));
-    let actions = env.redfish_sim.actions_since(&timepoint).all_hosts();
-    assert!(actions.contains(&RedfishSimAction::PowerFailed(
-        libredfish::SystemPowerControl::ForceRestart
-    )));
-    assert!(actions.contains(&RedfishSimAction::Power(
-        libredfish::SystemPowerControl::ForceRestart
-    )));
 
     // A host that is already locked down completes directly into Ready and
     // must also clear its request, without entering the lockdown handoff.

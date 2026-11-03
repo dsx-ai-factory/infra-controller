@@ -97,6 +97,24 @@ impl RemotePoolFixture {
         pools: &[RemotePool],
         route_target_policy: Option<v1::RouteTargetPolicy>,
     ) -> eyre::Result<Self> {
+        Self::start_with_values(
+            database,
+            pools,
+            &[20_001, 20_002, 20_003, 50_001, 50_002],
+            route_target_policy,
+        )
+        .await
+    }
+
+    /// `start_with_values` works like `start_with`, but the provider holds only
+    /// `values`. A value can fit a pool's definition and still be one its consumer
+    /// rejects, such as a VNI wider than 24 bits.
+    pub(in crate::tests) async fn start_with_values(
+        database: PgPool,
+        pools: &[RemotePool],
+        values: &[i64],
+        route_target_policy: Option<v1::RouteTargetPolicy>,
+    ) -> eyre::Result<Self> {
         let alias = pools.first().expect("at least one remote pool").name;
         let mut env = create_test_env_with_overrides(
             database,
@@ -112,10 +130,7 @@ impl RemotePoolFixture {
                     logical_pool: alias.into(),
                 },
                 v1::ValueDomain::Integer,
-                [20_001_i64, 20_002, 20_003, 50_001, 50_002]
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
+                values.iter().copied().map(Into::into).collect(),
                 route_target_policy,
             )?,
             allocations: Arc::default(),

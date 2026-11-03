@@ -21,23 +21,28 @@
 //! states) are counted on the OTel meter as snapshots are delivered; calls
 //! are counted by the gates.
 //!
-//! Label rules: no unit IDs, URLs or regexes in labels. A label set missing
-//! from a newer snapshot is published as 0 for [`RETIRE_AFTER`], then
-//! dropped; a failed read keeps the last snapshot, so it never publishes 0.
-//! Host versions are no labels: exact-version counts wait for the firmware
-//! tests (#8154).
+//! Names, labels and label values follow the shared metric contract,
+//! `carbide_site_health_probe_api::metrics`. A label set missing from a
+//! newer snapshot is published as 0 for [`RETIRE_AFTER`], then dropped; a
+//! failed read keeps the last snapshot, so it never publishes 0.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use carbide_site_health_probe_api::{Family, HostFields, SiteMatch, Stage, Unit, UnitType};
+use carbide_site_health_probe_api::metrics::{
+    EXPECTED_RECORDS, GAUGES, Gauge, HOST_FIRMWARE_REQUESTS, HOST_READ_MODE, HOSTS,
+    HOSTS_UPDATE_ELIGIBLE, IDENTITY_MISMATCHES, LAST_ATTEMPT_FAILED, NONE, PROCESS_START,
+    REST_SITE_MATCH, REST_TOTALS, REST_TOTALS_AVAILABLE, SWEEP_COMPLETE, SWEEP_DURATION,
+    SWEEP_RESULT_COMPLETE, SWEEP_RESULT_INCOMPLETE, SWEEP_START, SWEEPS, UNITS, UNKNOWN,
+    UNKNOWN_STATES, UNRESOLVED_UNITS, flag_label, instance_type_label, model_label, wire,
+};
+use carbide_site_health_probe_api::{Family, SiteMatch, Stage, Unit, UnitType};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Meter};
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
 use prometheus::{GaugeVec, Opts};
-use serde::Serialize;
 use tokio::time::Instant;
 
 use crate::config::HostReadMode;
@@ -45,107 +50,11 @@ use crate::readers::rest_inventory::{REST_RESOURCES, RestTotalsData, SiteMatchDa
 use crate::snapshot::{AnySnapshot, FailureKind, FamilySnapshot, Reader, SnapshotSink, UnitsData};
 use crate::state::store::{ALL_FAMILIES, SnapshotStore};
 
-const PREFIX: &str = "carbide_site_health_probe_";
-
 /// How long a vanished label set is published as 0 before it is dropped.
 pub(crate) const RETIRE_AFTER: Duration = Duration::from_secs(15 * 60);
 
-/// The value of an absent label.
-const UNKNOWN: &str = "unknown";
-const NONE: &str = "none";
-
-/// Every gauge: name without prefix, help, labels.
-const GAUGES: &[(&str, &str, &[&str])] = &[
-    (
-        "units",
-        "Units per type, stage (registered, ready, error) and state, from the newest complete sweep.",
-        &["type", "stage", "state"],
-    ),
-    (
-        "hosts",
-        "Hosts per model, instance type, state, allocatability and update completion.",
-        &[
-            "model",
-            "instance_type",
-            "state",
-            "allocatable",
-            "update_complete",
-        ],
-    ),
-    (
-        "hosts_update_eligible",
-        "Hosts per model and firmware update eligibility (true, false, unknown) with the blocking reason.",
-        &["model", "eligible", "reason"],
-    ),
-    (
-        "host_firmware_requests",
-        "Open host firmware requests per model and initiator (automatic, manual, other).",
-        &["model", "initiator"],
-    ),
-    (
-        "unresolved_units",
-        "Units the probe counts but cannot place, per type (DPUs no host lists).",
-        &["type"],
-    ),
-    (
-        "expected_records",
-        "Expected records per type and whether exactly one device in the census links to them.",
-        &["type", "linked"],
-    ),
-    (
-        "identity_mismatches",
-        "Expected records linked to several devices and devices without a record, per type and kind.",
-        &["type", "kind"],
-    ),
-    (
-        "rest_totals",
-        "REST site totals per resource. Absent while the total is unavailable.",
-        &["resource"],
-    ),
-    (
-        "rest_totals_available",
-        "1 while the REST total of a resource exists, 0 after the site answered 412.",
-        &["resource"],
-    ),
-    (
-        "rest_site_match",
-        "Whether the REST site's machines are this NICo site's (match, mismatch, unknown), one-hot.",
-        &["result"],
-    ),
-    (
-        "sweep_start_timestamp_seconds",
-        "Unix time the sweep behind a family's current snapshot started.",
-        &["reader", "family"],
-    ),
-    (
-        "sweep_complete_timestamp_seconds",
-        "Unix time the sweep behind a family's current snapshot completed.",
-        &["reader", "family"],
-    ),
-    (
-        "sweep_duration_seconds",
-        "Duration of the sweep behind a family's current snapshot.",
-        &["reader", "family"],
-    ),
-    (
-        "last_attempt_failed",
-        "Why the newest attempt to read a family failed (none, timeout, pushback, rpc, unresolved, decode), one-hot.",
-        &["reader", "family", "kind"],
-    ),
-    (
-        "process_start_timestamp_seconds",
-        "Unix time this probe process started.",
-        &[],
-    ),
-    (
-        "host_read_mode",
-        "How host details are read (full, compact), one-hot.",
-        &["mode"],
-    ),
-];
-
 /// Gauges that are never published as 0 for a vanished label set.
-const NOT_RETIRED: &[&str] = &["rest_totals"];
+const NOT_RETIRED: &[&str] = &[REST_TOTALS.name];
 
 const FAILURE_KINDS: [FailureKind; 5] = [
     FailureKind::Timeout,
@@ -155,19 +64,12 @@ const FAILURE_KINDS: [FailureKind; 5] = [
     FailureKind::Decode,
 ];
 
-/// The wire name of an API enum, which is also its label value.
-fn wire<T: Serialize>(value: T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_else(|| UNKNOWN.to_string())
-}
-
 fn flag(value: bool) -> String {
     value.to_string()
 }
 
-fn unix_seconds(at: SystemTime) -> f64 {
+/// Unix seconds as the collector publishes them.
+pub(crate) fn unix_seconds(at: SystemTime) -> f64 {
     at.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
@@ -187,14 +89,6 @@ pub(crate) fn data_of<T: 'static>(snap: &dyn AnySnapshot) -> Option<&T> {
 
 /// Series per gauge name: label values in [`GAUGES`] order, and value.
 pub(crate) type Series = BTreeMap<&'static str, BTreeMap<Vec<String>, f64>>;
-
-/// The label names of the gauge `name`.
-pub(crate) fn gauge_labels(name: &str) -> &'static [&'static str] {
-    GAUGES
-        .iter()
-        .find(|(gauge, _, _)| *gauge == name)
-        .map_or(&[], |(_, _, labels)| *labels)
-}
 
 /// Adds `value` to the series `name{labels}`.
 fn add(series: &mut Series, name: &'static str, labels: Vec<String>, value: f64) {
@@ -217,8 +111,8 @@ pub(crate) struct StateCollector {
     seen: Mutex<HashMap<(&'static str, Vec<String>), Instant>>,
 }
 
-fn gauge_vec(name: &str, help: &str, labels: &[&str]) -> GaugeVec {
-    GaugeVec::new(Opts::new(format!("{PREFIX}{name}"), help), labels)
+fn gauge_vec(gauge: &Gauge) -> GaugeVec {
+    GaugeVec::new(Opts::new(gauge.metric_name(), gauge.help), gauge.labels)
         .expect("valid static gauge definition")
 }
 
@@ -232,10 +126,7 @@ impl StateCollector {
             store,
             process_start: unix_seconds(process_start),
             host_read_mode,
-            prototypes: GAUGES
-                .iter()
-                .map(|(name, help, labels)| gauge_vec(name, help, labels))
-                .collect(),
+            prototypes: GAUGES.iter().map(gauge_vec).collect(),
             seen: Mutex::new(HashMap::new()),
         }
     }
@@ -243,22 +134,17 @@ impl StateCollector {
     /// Every series of one scrape. Each family's snapshot is loaded once.
     fn series(&self) -> Series {
         let mut series = Series::new();
-        set(
-            &mut series,
-            "process_start_timestamp_seconds",
-            vec![],
-            self.process_start,
-        );
+        set(&mut series, PROCESS_START.name, vec![], self.process_start);
         let compact = self.host_read_mode == HostReadMode::Compact;
         set(
             &mut series,
-            "host_read_mode",
+            HOST_READ_MODE.name,
             vec!["full".into()],
             f64::from(u8::from(!compact)),
         );
         set(
             &mut series,
-            "host_read_mode",
+            HOST_READ_MODE.name,
             vec!["compact".into()],
             f64::from(u8::from(compact)),
         );
@@ -275,14 +161,14 @@ impl StateCollector {
                 };
                 set(
                     &mut series,
-                    "last_attempt_failed",
+                    LAST_ATTEMPT_FAILED.name,
                     labels("none"),
                     f64::from(u8::from(failed.is_none())),
                 );
                 for kind in FAILURE_KINDS {
                     set(
                         &mut series,
-                        "last_attempt_failed",
+                        LAST_ATTEMPT_FAILED.name,
                         labels(kind.as_str()),
                         f64::from(u8::from(failed == Some(kind))),
                     );
@@ -295,19 +181,19 @@ impl StateCollector {
             let times = vec![meta.reader.as_str().to_string(), wire(family)];
             set(
                 &mut series,
-                "sweep_start_timestamp_seconds",
+                SWEEP_START.name,
                 times.clone(),
                 unix_seconds(meta.start),
             );
             set(
                 &mut series,
-                "sweep_complete_timestamp_seconds",
+                SWEEP_COMPLETE.name,
                 times.clone(),
                 unix_seconds(meta.end),
             );
             set(
                 &mut series,
-                "sweep_duration_seconds",
+                SWEEP_DURATION.name,
                 times,
                 meta.end
                     .duration_since(meta.start)
@@ -321,7 +207,6 @@ impl StateCollector {
 
     /// How many label sets the retirement rule tracks.
     #[cfg(test)]
-    #[expect(dead_code, reason = "the memory soak tests use it")]
     pub(crate) fn tracked_label_sets(&self) -> usize {
         self.seen.lock().unwrap().len()
     }
@@ -373,7 +258,7 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                     .count();
                 set(
                     series,
-                    "unresolved_units",
+                    UNRESOLVED_UNITS.name,
                     vec![wire(UnitType::Dpu)],
                     unattached as f64,
                 );
@@ -399,7 +284,7 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                         .map_or_else(|| UNKNOWN.to_string(), |r| wire(r.initiator));
                     add(
                         series,
-                        "host_firmware_requests",
+                        HOST_FIRMWARE_REQUESTS.name,
                         vec![model_label(host), initiator],
                         1.0,
                     );
@@ -412,12 +297,12 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                     let total = data.totals.get(&resource).copied().flatten();
                     set(
                         series,
-                        "rest_totals_available",
+                        REST_TOTALS_AVAILABLE.name,
                         vec![wire(resource)],
                         f64::from(u8::from(total.is_some())),
                     );
                     if let Some(total) = total {
-                        set(series, "rest_totals", vec![wire(resource)], total as f64);
+                        set(series, REST_TOTALS.name, vec![wire(resource)], total as f64);
                     }
                 }
             }
@@ -427,7 +312,7 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                 for result in [SiteMatch::Match, SiteMatch::Mismatch, SiteMatch::Unknown] {
                     set(
                         series,
-                        "rest_site_match",
+                        REST_SITE_MATCH.name,
                         vec![wire(result)],
                         f64::from(u8::from(data.result == result)),
                     );
@@ -445,62 +330,45 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
 
 /// `units{type, stage, state}`: every unit is registered; ready and error
 /// units also count under their own stage.
-fn unit_series(units: &[Unit], series: &mut Series) {
+fn unit_series(units: &[Arc<Unit>], series: &mut Series) {
     for unit in units {
         let labels = |stage: Stage| vec![wire(unit.unit_type), wire(stage), unit.state.clone()];
-        add(series, "units", labels(Stage::Registered), 1.0);
+        add(series, UNITS.name, labels(Stage::Registered), 1.0);
         if matches!(unit.stage, Stage::Ready | Stage::Error) {
-            add(series, "units", labels(unit.stage), 1.0);
+            add(series, UNITS.name, labels(unit.stage), 1.0);
         }
     }
 }
 
-/// The `model` label of a host. `/v1/units` filters match this value too, so a
-/// count and a listing of the same filter cannot disagree.
-pub(crate) fn model_label(host: &HostFields) -> String {
-    host.model.clone().unwrap_or_else(|| UNKNOWN.to_string())
-}
-
-/// The `instance_type` label of a host, shared with `/v1/units` like
-/// [`model_label`].
-pub(crate) fn instance_type_label(host: &HostFields) -> String {
-    host.instance_type
-        .clone()
-        .unwrap_or_else(|| NONE.to_string())
-}
-
-fn host_series(units: &[Unit], series: &mut Series) {
+fn host_series(units: &[Arc<Unit>], series: &mut Series) {
     for (unit, host) in units.iter().filter_map(|u| u.host.as_ref().map(|h| (u, h))) {
-        let allocatable = host.allocatable.map_or_else(|| UNKNOWN.to_string(), flag);
         add(
             series,
-            "hosts",
+            HOSTS.name,
             vec![
                 model_label(host),
                 instance_type_label(host),
                 unit.state.clone(),
-                allocatable,
+                flag_label(host.allocatable),
                 flag(host.update_complete),
             ],
             1.0,
         );
-        let eligible = host
-            .update_eligible
-            .map_or_else(|| UNKNOWN.to_string(), flag);
+        let eligible = flag_label(host.update_eligible);
         let reason = host
             .update_blocking_reason
             .clone()
             .unwrap_or_else(|| NONE.to_string());
         add(
             series,
-            "hosts_update_eligible",
+            HOSTS_UPDATE_ELIGIBLE.name,
             vec![model_label(host), eligible, reason],
             1.0,
         );
     }
 }
 
-fn expected_series(units: &[Unit], series: &mut Series) {
+fn expected_series(units: &[Arc<Unit>], series: &mut Series) {
     for unit in units {
         let Some(expected) = &unit.expected else {
             continue;
@@ -508,13 +376,13 @@ fn expected_series(units: &[Unit], series: &mut Series) {
         match unit.unit_type {
             UnitType::ExpectedRecord => add(
                 series,
-                "expected_records",
+                EXPECTED_RECORDS.name,
                 vec![wire(expected.record_type), flag(expected.linked)],
                 1.0,
             ),
             UnitType::IdentityMismatch => add(
                 series,
-                "identity_mismatches",
+                IDENTITY_MISMATCHES.name,
                 vec![wire(expected.record_type), unit.state.clone()],
                 1.0,
             ),
@@ -532,11 +400,11 @@ impl Collector for StateCollector {
         let mut series = self.series();
         self.retire(&mut series);
         let mut families = Vec::new();
-        for (name, help, labels) in GAUGES {
-            let Some(sets) = series.get(name) else {
+        for gauge in GAUGES {
+            let Some(sets) = series.get(gauge.name) else {
                 continue;
             };
-            let gauges = gauge_vec(name, help, labels);
+            let gauges = gauge_vec(gauge);
             for (values, value) in sets {
                 let values: Vec<&str> = values.iter().map(String::as_str).collect();
                 gauges.with_label_values(&values).set(*value);
@@ -560,18 +428,12 @@ impl CountingSink {
         Self {
             store,
             sweeps: meter
-                .u64_counter(format!("{PREFIX}sweeps"))
-                .with_description(
-                    "Reader sweeps per family by result: complete (published) or incomplete \
-                     (the family kept its last snapshot).",
-                )
+                .u64_counter(SWEEPS.name)
+                .with_description(SWEEPS.help)
                 .build(),
             unknown_states: meter
-                .u64_counter(format!("{PREFIX}unknown_states"))
-                .with_description(
-                    "Units published with state other because their state is not in the \
-                     pinned table, per metric and type.",
-                )
+                .u64_counter(UNKNOWN_STATES.name)
+                .with_description(UNKNOWN_STATES.help)
                 .build(),
         }
     }
@@ -584,7 +446,7 @@ impl CountingSink {
             let Some(reader) = reader_of(*family) else {
                 continue;
             };
-            for result in ["complete", "incomplete"] {
+            for result in [SWEEP_RESULT_COMPLETE, SWEEP_RESULT_INCOMPLETE] {
                 self.add_sweeps(0, reader, *family, result);
             }
         }
@@ -627,7 +489,7 @@ fn reader_of(family: Family) -> Option<Reader> {
 
 impl SnapshotSink for CountingSink {
     fn publish(&self, family: Family, snap: Arc<dyn AnySnapshot>) {
-        self.count_sweep(snap.meta().reader, family, "complete");
+        self.count_sweep(snap.meta().reader, family, SWEEP_RESULT_COMPLETE);
         if let Some(data) = units_of(snap.as_ref())
             && data.unknown_states > 0
             && let Some(unit) = data.units.first()
@@ -635,7 +497,7 @@ impl SnapshotSink for CountingSink {
             self.unknown_states.add(
                 data.unknown_states,
                 &[
-                    KeyValue::new("metric", "units"),
+                    KeyValue::new("metric", UNITS.name),
                     KeyValue::new("type", wire(unit.unit_type)),
                 ],
             );
@@ -644,7 +506,7 @@ impl SnapshotSink for CountingSink {
     }
 
     fn failed(&self, reader: Reader, family: Family, kind: FailureKind, error: &str) {
-        self.count_sweep(reader, family, "incomplete");
+        self.count_sweep(reader, family, SWEEP_RESULT_INCOMPLETE);
         self.store.failed(reader, family, kind, error);
     }
 }
@@ -653,8 +515,9 @@ impl SnapshotSink for CountingSink {
 mod tests {
     use std::thread;
 
+    use carbide_site_health_probe_api::metrics::PREFIX;
     use carbide_site_health_probe_api::{
-        FirmwareRequest, Initiator, RecordType, RestResource, Source, VersionSource,
+        FirmwareRequest, HostFields, Initiator, RecordType, RestResource, Source, VersionSource,
     };
 
     use super::*;
@@ -791,6 +654,393 @@ mod tests {
                 data: UnitsData::new(units, 0),
             }),
         );
+    }
+
+    /// Every state metric's name, help, labels and value for one fixed
+    /// site. The shared metric contract must keep each line.
+    const EXPOSITION: &str = r#"
+# HELP carbide_site_health_probe_expected_records Expected records per type and whether exactly one device in the census links to them.
+# TYPE carbide_site_health_probe_expected_records gauge
+carbide_site_health_probe_expected_records{linked="false",type="rack"} 1
+carbide_site_health_probe_expected_records{linked="true",type="host"} 1
+# HELP carbide_site_health_probe_host_firmware_requests Open host firmware requests per model and initiator (automatic, manual, other).
+# TYPE carbide_site_health_probe_host_firmware_requests gauge
+carbide_site_health_probe_host_firmware_requests{initiator="manual",model="gb200"} 1
+carbide_site_health_probe_host_firmware_requests{initiator="unknown",model="r750"} 1
+# HELP carbide_site_health_probe_host_read_mode How host details are read (full, compact), one-hot.
+# TYPE carbide_site_health_probe_host_read_mode gauge
+carbide_site_health_probe_host_read_mode{mode="compact"} 0
+carbide_site_health_probe_host_read_mode{mode="full"} 1
+# HELP carbide_site_health_probe_hosts Hosts per model, instance type, state, allocatability and update completion.
+# TYPE carbide_site_health_probe_hosts gauge
+carbide_site_health_probe_hosts{allocatable="true",instance_type="it-1",model="gb200",state="Ready",update_complete="true"} 1
+carbide_site_health_probe_hosts{allocatable="unknown",instance_type="none",model="gb200",state="Failed",update_complete="false"} 1
+carbide_site_health_probe_hosts{allocatable="unknown",instance_type="none",model="r750",state="HostInitializing",update_complete="false"} 1
+carbide_site_health_probe_hosts{allocatable="unknown",instance_type="none",model="unknown",state="Ready",update_complete="false"} 1
+# HELP carbide_site_health_probe_hosts_update_eligible Hosts per model and firmware update eligibility (true, false, unknown) with the blocking reason.
+# TYPE carbide_site_health_probe_hosts_update_eligible gauge
+carbide_site_health_probe_hosts_update_eligible{eligible="false",model="gb200",reason="in_use"} 1
+carbide_site_health_probe_hosts_update_eligible{eligible="unknown",model="gb200",reason="compact_host_read_missing"} 1
+carbide_site_health_probe_hosts_update_eligible{eligible="unknown",model="r750",reason="compact_host_read_missing"} 1
+carbide_site_health_probe_hosts_update_eligible{eligible="unknown",model="unknown",reason="compact_host_read_missing"} 1
+# HELP carbide_site_health_probe_identity_mismatches Expected records linked to several devices and devices without a record, per type and kind.
+# TYPE carbide_site_health_probe_identity_mismatches gauge
+carbide_site_health_probe_identity_mismatches{kind="ambiguous_link",type="switch"} 1
+# HELP carbide_site_health_probe_last_attempt_failed Why the newest attempt to read a family failed (none, timeout, pushback, rpc, unresolved, decode), one-hot.
+# TYPE carbide_site_health_probe_last_attempt_failed gauge
+carbide_site_health_probe_last_attempt_failed{family="dpu",kind="decode",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="dpu",kind="none",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="dpu",kind="pushback",reader="devices"} 1
+carbide_site_health_probe_last_attempt_failed{family="dpu",kind="rpc",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="dpu",kind="timeout",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="dpu",kind="unresolved",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="expected",kind="decode",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="expected",kind="none",reader="devices"} 1
+carbide_site_health_probe_last_attempt_failed{family="expected",kind="pushback",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="expected",kind="rpc",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="expected",kind="timeout",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="expected",kind="unresolved",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host",kind="decode",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host",kind="none",reader="devices"} 1
+carbide_site_health_probe_last_attempt_failed{family="host",kind="pushback",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host",kind="rpc",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host",kind="timeout",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host",kind="unresolved",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host_firmware_requests",kind="decode",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host_firmware_requests",kind="none",reader="devices"} 1
+carbide_site_health_probe_last_attempt_failed{family="host_firmware_requests",kind="pushback",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host_firmware_requests",kind="rpc",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host_firmware_requests",kind="timeout",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="host_firmware_requests",kind="unresolved",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="instance",kind="decode",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="instance",kind="none",reader="devices"} 1
+carbide_site_health_probe_last_attempt_failed{family="instance",kind="pushback",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="instance",kind="rpc",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="instance",kind="timeout",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="instance",kind="unresolved",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="power_shelf",kind="decode",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="power_shelf",kind="none",reader="devices"} 1
+carbide_site_health_probe_last_attempt_failed{family="power_shelf",kind="pushback",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="power_shelf",kind="rpc",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="power_shelf",kind="timeout",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="power_shelf",kind="unresolved",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="rack",kind="decode",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="rack",kind="none",reader="devices"} 1
+carbide_site_health_probe_last_attempt_failed{family="rack",kind="pushback",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="rack",kind="rpc",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="rack",kind="timeout",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="rack",kind="unresolved",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_site_match",kind="decode",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_site_match",kind="none",reader="rest_inventory"} 1
+carbide_site_health_probe_last_attempt_failed{family="rest_site_match",kind="pushback",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_site_match",kind="rpc",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_site_match",kind="timeout",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_site_match",kind="unresolved",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_totals",kind="decode",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_totals",kind="none",reader="rest_inventory"} 1
+carbide_site_health_probe_last_attempt_failed{family="rest_totals",kind="pushback",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_totals",kind="rpc",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_totals",kind="timeout",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="rest_totals",kind="unresolved",reader="rest_inventory"} 0
+carbide_site_health_probe_last_attempt_failed{family="switch",kind="decode",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="switch",kind="none",reader="devices"} 1
+carbide_site_health_probe_last_attempt_failed{family="switch",kind="pushback",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="switch",kind="rpc",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="switch",kind="timeout",reader="devices"} 0
+carbide_site_health_probe_last_attempt_failed{family="switch",kind="unresolved",reader="devices"} 0
+# HELP carbide_site_health_probe_process_start_timestamp_seconds Unix time this probe process started.
+# TYPE carbide_site_health_probe_process_start_timestamp_seconds gauge
+carbide_site_health_probe_process_start_timestamp_seconds 1000000
+# HELP carbide_site_health_probe_rest_site_match Whether the REST site's machines are this NICo site's (match, mismatch, unknown), one-hot.
+# TYPE carbide_site_health_probe_rest_site_match gauge
+carbide_site_health_probe_rest_site_match{result="match"} 0
+carbide_site_health_probe_rest_site_match{result="mismatch"} 1
+carbide_site_health_probe_rest_site_match{result="unknown"} 0
+# HELP carbide_site_health_probe_rest_totals REST site totals per resource. Absent while the total is unavailable.
+# TYPE carbide_site_health_probe_rest_totals gauge
+carbide_site_health_probe_rest_totals{resource="instance"} 4
+carbide_site_health_probe_rest_totals{resource="machine"} 10
+# HELP carbide_site_health_probe_rest_totals_available 1 while the REST total of a resource exists, 0 after the site answered 412.
+# TYPE carbide_site_health_probe_rest_totals_available gauge
+carbide_site_health_probe_rest_totals_available{resource="instance"} 1
+carbide_site_health_probe_rest_totals_available{resource="machine"} 1
+carbide_site_health_probe_rest_totals_available{resource="rack"} 0
+carbide_site_health_probe_rest_totals_available{resource="tray"} 0
+# HELP carbide_site_health_probe_sweep_complete_timestamp_seconds Unix time the sweep behind a family's current snapshot completed.
+# TYPE carbide_site_health_probe_sweep_complete_timestamp_seconds gauge
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="dpu",reader="devices"} 110
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="expected",reader="devices"} 120
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="host",reader="devices"} 100
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="host_firmware_requests",reader="devices"} 130
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="instance",reader="devices"} 170
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="power_shelf",reader="devices"} 160
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="rack",reader="devices"} 140
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="rest_site_match",reader="rest_inventory"} 100
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="rest_totals",reader="rest_inventory"} 100
+carbide_site_health_probe_sweep_complete_timestamp_seconds{family="switch",reader="devices"} 150
+# HELP carbide_site_health_probe_sweep_duration_seconds Duration of the sweep behind a family's current snapshot.
+# TYPE carbide_site_health_probe_sweep_duration_seconds gauge
+carbide_site_health_probe_sweep_duration_seconds{family="dpu",reader="devices"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="expected",reader="devices"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="host",reader="devices"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="host_firmware_requests",reader="devices"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="instance",reader="devices"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="power_shelf",reader="devices"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="rack",reader="devices"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="rest_site_match",reader="rest_inventory"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="rest_totals",reader="rest_inventory"} 10
+carbide_site_health_probe_sweep_duration_seconds{family="switch",reader="devices"} 10
+# HELP carbide_site_health_probe_sweep_start_timestamp_seconds Unix time the sweep behind a family's current snapshot started.
+# TYPE carbide_site_health_probe_sweep_start_timestamp_seconds gauge
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="dpu",reader="devices"} 100
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="expected",reader="devices"} 110
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="host",reader="devices"} 90
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="host_firmware_requests",reader="devices"} 120
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="instance",reader="devices"} 160
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="power_shelf",reader="devices"} 150
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="rack",reader="devices"} 130
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="rest_site_match",reader="rest_inventory"} 90
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="rest_totals",reader="rest_inventory"} 90
+carbide_site_health_probe_sweep_start_timestamp_seconds{family="switch",reader="devices"} 140
+# HELP carbide_site_health_probe_sweeps_total Reader sweeps per family by result: complete (published) or incomplete (the family kept its last snapshot).
+# TYPE carbide_site_health_probe_sweeps_total counter
+carbide_site_health_probe_sweeps_total{family="dpu",reader="devices",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="dpu",reader="devices",result="incomplete"} 1
+carbide_site_health_probe_sweeps_total{family="expected",reader="devices",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="host",reader="devices",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="host",reader="devices",result="incomplete"} 0
+carbide_site_health_probe_sweeps_total{family="host_firmware_requests",reader="devices",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="instance",reader="devices",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="power_shelf",reader="devices",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="rack",reader="devices",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="rest_site_match",reader="rest_inventory",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="rest_totals",reader="rest_inventory",result="complete"} 1
+carbide_site_health_probe_sweeps_total{family="rest_totals",reader="rest_inventory",result="incomplete"} 0
+carbide_site_health_probe_sweeps_total{family="switch",reader="devices",result="complete"} 1
+# HELP carbide_site_health_probe_units Units per type, stage (registered, ready, error) and state, from the newest complete sweep.
+# TYPE carbide_site_health_probe_units gauge
+carbide_site_health_probe_units{stage="error",state="Failed",type="dpu"} 1
+carbide_site_health_probe_units{stage="error",state="Failed",type="host"} 1
+carbide_site_health_probe_units{stage="ready",state="Ready",type="dpu"} 1
+carbide_site_health_probe_units{stage="ready",state="Ready",type="host"} 2
+carbide_site_health_probe_units{stage="ready",state="ready",type="power_shelf"} 1
+carbide_site_health_probe_units{stage="ready",state="ready",type="rack"} 1
+carbide_site_health_probe_units{stage="registered",state="Failed",type="dpu"} 1
+carbide_site_health_probe_units{stage="registered",state="Failed",type="host"} 1
+carbide_site_health_probe_units{stage="registered",state="HostInitializing",type="host"} 1
+carbide_site_health_probe_units{stage="registered",state="Ready",type="dpu"} 1
+carbide_site_health_probe_units{stage="registered",state="Ready",type="host"} 2
+carbide_site_health_probe_units{stage="registered",state="other",type="switch"} 1
+carbide_site_health_probe_units{stage="registered",state="provisioning",type="instance"} 1
+carbide_site_health_probe_units{stage="registered",state="ready",type="power_shelf"} 1
+carbide_site_health_probe_units{stage="registered",state="ready",type="rack"} 1
+# HELP carbide_site_health_probe_unknown_states_total Units published with state other because their state is not in the pinned table, per metric and type.
+# TYPE carbide_site_health_probe_unknown_states_total counter
+carbide_site_health_probe_unknown_states_total{metric="units",type="switch"} 1
+# HELP carbide_site_health_probe_unresolved_units Units the probe counts but cannot place, per type (DPUs no host lists).
+# TYPE carbide_site_health_probe_unresolved_units gauge
+carbide_site_health_probe_unresolved_units{type="dpu"} 1
+"#;
+
+    /// Every state gauge's descriptor: name, labels in order, help.
+    const DESCRIPTORS: &str = r#"
+carbide_site_health_probe_units [type,stage,state] Units per type, stage (registered, ready, error) and state, from the newest complete sweep.
+carbide_site_health_probe_hosts [model,instance_type,state,allocatable,update_complete] Hosts per model, instance type, state, allocatability and update completion.
+carbide_site_health_probe_hosts_update_eligible [model,eligible,reason] Hosts per model and firmware update eligibility (true, false, unknown) with the blocking reason.
+carbide_site_health_probe_host_firmware_requests [model,initiator] Open host firmware requests per model and initiator (automatic, manual, other).
+carbide_site_health_probe_unresolved_units [type] Units the probe counts but cannot place, per type (DPUs no host lists).
+carbide_site_health_probe_expected_records [type,linked] Expected records per type and whether exactly one device in the census links to them.
+carbide_site_health_probe_identity_mismatches [type,kind] Expected records linked to several devices and devices without a record, per type and kind.
+carbide_site_health_probe_rest_totals [resource] REST site totals per resource. Absent while the total is unavailable.
+carbide_site_health_probe_rest_totals_available [resource] 1 while the REST total of a resource exists, 0 after the site answered 412.
+carbide_site_health_probe_rest_site_match [result] Whether the REST site's machines are this NICo site's (match, mismatch, unknown), one-hot.
+carbide_site_health_probe_sweep_start_timestamp_seconds [reader,family] Unix time the sweep behind a family's current snapshot started.
+carbide_site_health_probe_sweep_complete_timestamp_seconds [reader,family] Unix time the sweep behind a family's current snapshot completed.
+carbide_site_health_probe_sweep_duration_seconds [reader,family] Duration of the sweep behind a family's current snapshot.
+carbide_site_health_probe_last_attempt_failed [reader,family,kind] Why the newest attempt to read a family failed (none, timeout, pushback, rpc, unresolved, decode), one-hot.
+carbide_site_health_probe_process_start_timestamp_seconds [] Unix time this probe process started.
+carbide_site_health_probe_host_read_mode [mode] How host details are read (full, compact), one-hot.
+"#;
+
+    #[test]
+    fn exposition_golden() {
+        let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
+            .expect("metrics setup");
+        let store = Arc::new(SnapshotStore::new(&Paging::default()));
+        setup
+            .registry
+            .register(Box::new(StateCollector::new(
+                Arc::clone(&store),
+                UNIX_EPOCH + Duration::from_secs(1_000_000),
+                HostReadMode::Full,
+            )))
+            .expect("register");
+        let sink = CountingSink::new(Arc::clone(&store), &setup.meter);
+        sink.start_counters(&[Family::Host, Family::Dpu, Family::RestTotals]);
+        let mut hosts = vec![
+            host(1, "Ready", "gb200", "b1"),
+            host(2, "Failed", "gb200", "b1"),
+            host(3, "HostInitializing", "r750", "b2"),
+            host(4, "Ready", "gb200", "b1"),
+        ];
+        // A host with no model is the `unknown` model.
+        if let Some(fields) = hosts[3].host.as_mut() {
+            fields.model = None;
+        }
+        if let Some(fields) = hosts[0].host.as_mut() {
+            fields.instance_type = Some("it-1".to_string());
+            fields.allocatable = Some(true);
+            fields.update_eligible = Some(false);
+            fields.update_blocking_reason = Some("in_use".to_string());
+            fields.update_complete = true;
+        }
+        let firmware = Unit {
+            unit_type: UnitType::HostFirmwareRequest,
+            host: Some(HostFields {
+                open_firmware_request: Some(FirmwareRequest {
+                    initiator: Initiator::Manual,
+                    requested_at: None,
+                    initiated_at: None,
+                }),
+                ..host_fields("gb200", "b1")
+            }),
+            ..unit(
+                UnitType::HostFirmwareRequest,
+                "fm100h00001",
+                "open",
+                Stage::Registered,
+            )
+        };
+        // A request whose initiator is unknown.
+        let unknown_firmware = Unit {
+            unit_type: UnitType::HostFirmwareRequest,
+            host: Some(host_fields("r750", "b2")),
+            ..unit(
+                UnitType::HostFirmwareRequest,
+                "fm100h00003",
+                "open",
+                Stage::Registered,
+            )
+        };
+        let dpus = vec![
+            Unit {
+                dpu: Some(carbide_site_health_probe_api::DpuFields { host_id: None }),
+                ..unit(UnitType::Dpu, "fm100d1", "Ready", Stage::Ready)
+            },
+            unit(UnitType::Dpu, "fm100d2", "Failed", Stage::Error),
+        ];
+        let expected = |id: &str, unit_type, state: &str, record_type, linked| Unit {
+            expected: Some(carbide_site_health_probe_api::ExpectedFields {
+                record_type,
+                linked,
+                device_id: None,
+                bmc_mac: None,
+                explored_address: None,
+            }),
+            ..unit(unit_type, id, state, Stage::Expected)
+        };
+        publish_units(&sink, Family::Host, 1, 100, hosts);
+        publish_units(&sink, Family::Dpu, 1, 110, dpus);
+        publish_units(
+            &sink,
+            Family::Expected,
+            1,
+            120,
+            vec![
+                expected(
+                    "e1",
+                    UnitType::ExpectedRecord,
+                    "linked",
+                    RecordType::Host,
+                    true,
+                ),
+                expected(
+                    "e2",
+                    UnitType::ExpectedRecord,
+                    "unlinked",
+                    RecordType::Rack,
+                    false,
+                ),
+                expected(
+                    "m1",
+                    UnitType::IdentityMismatch,
+                    "ambiguous_link",
+                    RecordType::Switch,
+                    true,
+                ),
+            ],
+        );
+        publish_units(
+            &sink,
+            Family::HostFirmwareRequests,
+            1,
+            130,
+            vec![firmware, unknown_firmware],
+        );
+        publish_units(
+            &sink,
+            Family::PowerShelf,
+            1,
+            160,
+            vec![unit(UnitType::PowerShelf, "ps-1", "ready", Stage::Ready)],
+        );
+        publish_units(
+            &sink,
+            Family::Instance,
+            1,
+            170,
+            vec![unit(
+                UnitType::Instance,
+                "i-1",
+                "provisioning",
+                Stage::Registered,
+            )],
+        );
+        publish_units(
+            &sink,
+            Family::Rack,
+            1,
+            140,
+            vec![unit(UnitType::Rack, "rack-1", "ready", Stage::Ready)],
+        );
+        publish_totals(&sink, 1, None);
+        sink.publish(
+            Family::RestSiteMatch,
+            Arc::new(FamilySnapshot {
+                meta: meta(1, Reader::RestInventory, 100),
+                data: SiteMatchData {
+                    result: SiteMatch::Mismatch,
+                },
+            }),
+        );
+        sink.publish(
+            Family::Switch,
+            Arc::new(FamilySnapshot {
+                meta: meta(1, Reader::Devices, 150),
+                data: UnitsData::new(
+                    vec![unit(UnitType::Switch, "sw-1", "other", Stage::Registered)],
+                    1,
+                ),
+            }),
+        );
+        sink.failed(Reader::Devices, Family::Dpu, FailureKind::Pushback, "slow");
+        let collector = StateCollector::new(Arc::clone(&store), UNIX_EPOCH, HostReadMode::Full);
+        let descs: Vec<String> = collector
+            .desc()
+            .iter()
+            .map(|d| format!("{} [{}] {}", d.fq_name, d.variable_labels.join(","), d.help))
+            .collect();
+        assert_eq!(descs, DESCRIPTORS.trim().lines().collect::<Vec<_>>());
+        let out = exposition(&setup.registry);
+        let got: Vec<&str> = out
+            .lines()
+            .filter(|line| {
+                line.starts_with(PREFIX)
+                    || line.starts_with(&format!("# HELP {PREFIX}"))
+                    || line.starts_with(&format!("# TYPE {PREFIX}"))
+            })
+            .collect();
+        assert_eq!(got, EXPOSITION.trim().lines().collect::<Vec<_>>());
     }
 
     #[test]

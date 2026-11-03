@@ -1568,13 +1568,16 @@ pub async fn update_spx_multiplane_status(
 /// exists or the new timestamp is at least as recent. Comparisons use the
 /// database's timestamp precision. Returns `NotApplied` if the machine is
 /// missing or a newer observation is stored. Callers must validate report
-/// ownership and completeness.
+/// ownership and completeness. Accepted reports get `received_at` from the
+/// database clock; any value supplied by the caller is replaced.
 pub async fn update_mlx_device_observation(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     observation: &MlxDeviceObservation,
 ) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
-    let query = "UPDATE machines SET mlx_device_observation = $1::json WHERE id = $2 AND
+    let query = "UPDATE machines SET mlx_device_observation =
+                    jsonb_set($1::jsonb, '{received_at}', to_jsonb(clock_timestamp()))
+                WHERE id = $2 AND
                 (mlx_device_observation IS NULL
                     OR (mlx_device_observation->>'observed_at')::timestamptz
                         <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
@@ -5107,7 +5110,7 @@ mod test {
                 .execute(txn.as_mut())
                 .await?;
                 let observed_at = observed_at.parse()?;
-                let (result, incoming) = match column {
+                let (result, mut incoming) = match column {
                     "infiniband_status_observation" => {
                         let observation = MachineInfinibandStatusObservation {
                             observed_at,
@@ -5152,6 +5155,7 @@ mod test {
                     "mlx_device_observation" => {
                         let observation = MlxDeviceObservation {
                             observed_at,
+                            received_at: None,
                             devices: Vec::new(),
                         };
                         (
@@ -5177,6 +5181,13 @@ mod test {
                 .bind(machine_id)
                 .fetch_one(txn.as_mut())
                 .await?;
+                // An accepted MLX report also gains the database's receipt time,
+                // which the incoming report cannot know in advance.
+                if column == "mlx_device_observation" && applies {
+                    let _: chrono::DateTime<chrono::Utc> =
+                        serde_json::from_value(persisted["received_at"].clone())?;
+                    incoming["received_at"] = persisted["received_at"].clone();
+                }
                 assert_eq!(
                     persisted,
                     if applies { incoming } else { stored.unwrap() },
@@ -5272,7 +5283,7 @@ mod test {
 
         let machine_id: HostMachineId =
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
-        let observation: MlxDeviceObservation = serde_json::from_value(serde_json::json!({
+        let legacy_json = serde_json::json!({
             "observed_at": "2026-09-16T16:00:00.123456789Z",
             "devices": [
                 {
@@ -5288,7 +5299,9 @@ mod test {
                     "status": "Failed to open device"
                 }
             ]
-        }))?;
+        });
+        let mut observation: MlxDeviceObservation = serde_json::from_value(legacy_json.clone())?;
+        assert_eq!(observation.received_at, None);
         let mut txn = pool.begin().await?;
         assert_eq!(
             update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
@@ -5305,16 +5318,48 @@ mod test {
         )
         .await?;
         assert_eq!(machine.status.mlx_device_observation, None);
+
+        // Historical JSON has no receipt time. Loading it must not invent one
+        // that could satisfy a later controller activation boundary.
+        sqlx::query("UPDATE machines SET mlx_device_observation = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(legacy_json))
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        let legacy = super::find_one(txn.as_mut(), &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("legacy observation host");
+        assert_eq!(
+            legacy.status.mlx_device_observation,
+            Some(observation.clone())
+        );
+
+        // Only the persistence boundary assigns receipt time, independently of
+        // both the Scout timestamp and any value supplied by an internal caller.
+        observation.received_at = Some("2099-01-01T00:00:00Z".parse()?);
+        let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(txn.as_mut())
+            .await?;
         assert_eq!(
             update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
             Applied(())
         );
+        let after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(txn.as_mut())
+            .await?;
         txn.commit().await?;
 
         let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
             .await?
             .expect("fixture host");
-        assert_eq!(machine.status.mlx_device_observation, Some(observation));
+        let saved = machine
+            .status
+            .mlx_device_observation
+            .expect("stored report");
+        assert_eq!(saved.observed_at, observation.observed_at);
+        assert_eq!(saved.devices, observation.devices);
+        let received_at = saved.received_at.expect("database receipt time");
+        assert!(received_at >= before && received_at <= after);
         Ok(())
     }
 
@@ -5343,10 +5388,12 @@ mod test {
 
         let newer = MlxDeviceObservation {
             observed_at: "2026-09-16T16:00:01Z".parse()?,
+            received_at: None,
             devices: Vec::new(),
         };
         let older = MlxDeviceObservation {
             observed_at: "2026-09-16T16:00:00Z".parse()?,
+            received_at: None,
             devices: Vec::new(),
         };
         let mut newer_txn = pool.begin().await?;
@@ -5354,6 +5401,17 @@ mod test {
             update_mlx_device_observation(newer_txn.as_mut(), &machine_id, &newer).await?,
             Applied(())
         );
+        let accepted = super::find_one(
+            newer_txn.as_mut(),
+            &machine_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("newer observation host")
+        .status
+        .mlx_device_observation
+        .expect("accepted report");
+        assert!(accepted.received_at.is_some());
         let mut older_txn = pool.begin().await?;
         let release_newer = async {
             // The older write must reach the locked row before the newer
@@ -5377,7 +5435,7 @@ mod test {
         let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
             .await?
             .expect("fixture host");
-        assert_eq!(machine.status.mlx_device_observation, Some(newer));
+        assert_eq!(machine.status.mlx_device_observation, Some(accepted));
         Ok(())
     }
 

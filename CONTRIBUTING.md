@@ -373,6 +373,16 @@ formatting, dependency-policy, and REST protobuf generation tools. Run the
 focused checks relevant to your change and report their outcomes as described
 above.
 
+#### Publishing PR Images
+
+After reviewing a PR revision (including its workflows and build scripts), a user with effective Write, Maintain, or Admin repository permission can post a new PR conversation comment containing exactly `/ok to push` or `/ok to push <full lowercase commit SHA>`. The command must start the comment. Trailing whitespace is ignored. A bare command selects the PR head when the command handler processes it. Supplying the full SHA explicitly identifies the reviewed revision. Editing a comment does not trigger a request.
+
+The PR must be open, and its `pull-request/<number>` bot mirror must match the requested head. If the mirror is missing or stale, request `/ok to test <sha>` first and wait for the mirror to update. The mirror must contain the publishing workflow changes. Older PRs need to incorporate those changes before dispatch works. The build rechecks the comment, its author's current permissions, the PR head, and the mirror against the captured SHA. New commits require a new publishing request.
+
+The command rebuilds Core images through the existing CI jobs and publishes versions ending in `-pr.<number>.g<short-sha>` to the development registry. PR publishing creates versioned multi-architecture manifests without updating `latest` or `*-latest` aliases, uploading Helm charts, or promoting images to the production registry. Ordinary PR pushes continue to run CI without enabling deployable-image publication.
+
+Each successful image job publishes as it finishes, so a failed or cancelled run can leave a partial set of PR images. A follow-up PR comment links the final run status and the Actions summary containing published image tags and digests. The command authorizes publishing that revision. It does not approve or merge the PR.
+
 ## Pull Request Guidelines
 
 - Provide a clear description of the problem and solution.

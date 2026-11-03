@@ -1,31 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! VPC checks for values and routing policy returned by a pool provider.
+//! VPC and SPX partition checks for VNIs and routing policy returned by a pool
+//! provider.
 
 use model::resource_pool::remote::ProviderRouteTargetPolicy;
 
 use crate::CarbideError;
 
-/// `VNI_SLOT` identifies the VPC's VNI in its allocation request. Each remote
+/// `VNI_SLOT` identifies an entity's VNI in its allocation request. Each remote
 /// request saves it, and ownership lookup matches it, so renaming it would hide
-/// existing VPC allocations from deletion and leave their provider values held.
+/// existing VPC and SPX partition allocations from deletion and leave their
+/// provider values held.
 pub(super) const VNI_SLOT: &str = "vni";
 
 /// `validate` accepts only a usable 24-bit VNI. Provider routing policy is rejected
-/// because VPC creation does not save it or include it in DPU configuration.
+/// because VPC creation does not save it or include it in DPU configuration, and
+/// SPX partitions have no route targets.
 pub(super) fn validate(
     vni: i32,
     route_target_policy: Option<&ProviderRouteTargetPolicy>,
 ) -> Result<(), CarbideError> {
     if route_target_policy.is_some() {
         return Err(CarbideError::FailedPrecondition(
-            "provider route-target policy is not supported for VPC creation".to_owned(),
+            "provider route-target policy is not supported".to_owned(),
         ));
     }
     if !(1..=0x00ff_ffff).contains(&vni) {
         return Err(CarbideError::internal(format!(
-            "VPC VNI provider returned `{vni}`; expected a value between 1 and 16777215",
+            "VNI provider returned `{vni}`; expected a value between 1 and 16777215",
         )));
     }
     Ok(())
@@ -39,8 +42,8 @@ mod tests {
 
     use super::*;
 
-    /// Provider assignments must fit VPC consumers before VPC creation commits
-    /// them. Integrated pools retain their existing value rules.
+    /// Provider assignments must be usable VNIs before VPC or SPX partition
+    /// creation commits them. Integrated pools retain their existing value rules.
     #[test]
     fn provider_assignments_must_be_usable_vnis() {
         check_cases(

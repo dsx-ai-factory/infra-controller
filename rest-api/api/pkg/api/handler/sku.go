@@ -726,12 +726,7 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 		logger.Error().Err(err).Str("skuID", skuID).Msg("error retrieving SKU from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SKU, DB error", nil)
 	}
-	if len(savedSKU.AssociatedMachineIds) > 0 {
-		logger.Warn().Str("skuID", skuID).Msg("SKU is associated with machines and cannot be deleted")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU is associated with machines and cannot be deleted", nil)
-	}
-
-	stc, siteID, apiErr := common.AuthorizeProviderSiteForCore(common.AuthorizeProviderSiteForCoreInput{
+	authInput := common.AuthorizeProviderSiteForCoreInput{
 		Ctx:       ctx,
 		Logger:    logger,
 		DBSession: dsh.dbSession,
@@ -739,7 +734,19 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 		Org:       org,
 		User:      dbUser,
 		SiteID:    savedSKU.SiteID.String(),
-	})
+	}
+	if len(savedSKU.AssociatedMachineIds) > 0 {
+		// Authorize the caller before revealing associations. Rejecting an
+		// in-use SKU needs neither a Registered Site nor a Temporal client.
+		_, apiErr := common.AuthorizeProviderSite(authInput)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+		}
+		logger.Warn().Str("skuID", skuID).Msg("SKU is associated with machines and cannot be deleted")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU is associated with machines and cannot be deleted", nil)
+	}
+
+	stc, siteID, apiErr := common.AuthorizeProviderSiteForCore(authInput)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}

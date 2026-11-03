@@ -78,6 +78,7 @@ pub mod json;
 pub mod machine_id;
 pub mod machine_search_config;
 pub mod network;
+pub mod nic_firmware;
 pub mod nvlink;
 pub mod spx;
 pub mod spx_multiplane;

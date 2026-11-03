@@ -930,7 +930,6 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 
 	type recoveryState struct {
 		manager                ManageDpuExtensionService
-		ip                     *cdbm.InfrastructureProvider
 		site                   *cdbm.Site
 		tenant                 *cdbm.Tenant
 		allocation             *cdbm.Allocation
@@ -1164,37 +1163,9 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 			wantNil: true,
 		},
 		{
-			name: "skips service when tenant does not have Site access",
+			name: "recovers service when tenant does not have Site access",
 			setup: func(t *testing.T, state *recoveryState) {
 				err := cdbm.NewAllocationDAO(dbSession).Delete(ctx, nil, state.allocation.ID)
-				require.NoError(t, err)
-			},
-			wantNil: true,
-		},
-		{
-			name: "skips service when tenant only has a Tenant/Site association",
-			setup: func(t *testing.T, state *recoveryState) {
-				err := cdbm.NewAllocationDAO(dbSession).Delete(ctx, nil, state.allocation.ID)
-				require.NoError(t, err)
-				util.TestBuildTenantSiteAssociation(t, dbSession, state.tenant.Org, state.tenant.ID, state.site.ID, state.user.ID)
-			},
-			wantNil: true,
-		},
-		{
-			name: "recovers service for privileged tenant without Allocation",
-			setup: func(t *testing.T, state *recoveryState) {
-				err := cdbm.NewAllocationDAO(dbSession).Delete(ctx, nil, state.allocation.ID)
-				require.NoError(t, err)
-				_, err = cdbm.NewTenantAccountDAO(dbSession).Create(ctx, nil, cdbm.TenantAccountCreateInput{
-					AccountNumber:             uuid.NewString(),
-					TenantID:                  &state.tenant.ID,
-					TenantOrg:                 state.tenant.Org,
-					InfrastructureProviderID:  state.ip.ID,
-					InfrastructureProviderOrg: state.ip.Org,
-					Status:                    cdbm.TenantAccountStatusReady,
-					Config:                    &cdbm.TenantAccountConfig{TargetedInstanceCreation: true},
-					CreatedBy:                 state.user.ID,
-				})
 				require.NoError(t, err)
 			},
 			check: func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService) {
@@ -1230,7 +1201,6 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 				manager: ManageDpuExtensionService{
 					dbSession: dbSession,
 				},
-				ip:                     ip,
 				site:                   site,
 				tenant:                 tenant,
 				allocation:             allocation,

@@ -81,6 +81,8 @@ impl InternalRBACRules {
         x.perm("FindVpcIds", vec![SiteAgent, ForgeAdminCLI, Machineatron]);
         x.perm("FindVpcsByIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetVpcRoutingState", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindRoutingProfileNames", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindRoutingProfilesByNames", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
@@ -1357,6 +1359,39 @@ mod rbac_rule_tests {
                     allowed,
                     "{method}: {}",
                     principal.as_identifier(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn routing_profile_inventory_permissions() {
+        for (principal, allowed) in [
+            (
+                Principal::ExternalUser(ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".into(),
+                    None,
+                )),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
+                true,
+            ),
+            (Principal::SpiffeServiceIdentifier("nico-dns".into()), false),
+            (Principal::SpiffeMachineIdentifier("dpu".into()), false),
+            (Principal::Anonymous, false),
+        ] {
+            for method in ["FindRoutingProfileNames", "FindRoutingProfilesByNames"] {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(&principal)
+                    ),
+                    allowed,
+                    "{method}: {}",
+                    principal.as_identifier()
                 );
             }
         }

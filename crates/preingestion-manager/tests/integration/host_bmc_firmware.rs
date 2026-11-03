@@ -28,6 +28,7 @@ use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::default_config;
 use libredfish::{PowerState, SystemPowerControl};
+use model::DpuModel;
 use model::firmware::{
     FirmwareComponentType, FirmwareEntry, FirmwareFileArtifact, HostFirmwareConfig,
 };
@@ -819,6 +820,309 @@ async fn test_preingestion_preupdate_powercycling(
             == 1
     );
     txn.commit().await?;
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_preingestion_preupdate_fails_if_host_never_reaches_on_after_restart(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_paused_when_off(true);
+    redfish_sim.set_force_restart_leaves_power_unchanged(true);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a8", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let ip_addr = IpAddr::from_str(&response.address)?;
+
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
+    common::mark_endpoint_bluefield3(&mut txn, ip_addr).await?;
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert_eq!(endpoint.report.identify_dpu(), Some(DpuModel::BlueField3));
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await?;
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert!(matches!(
+        endpoint.preingestion_state,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+    txn.commit().await?;
+
+    let restart_timepoint = redfish_sim.timepoint();
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await?;
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert!(matches!(
+        endpoint.preingestion_state,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::WaitHostBoot,
+            ..
+        }
+    ));
+    txn.commit().await?;
+    assert!(
+        redfish_sim
+            .actions_since(&restart_timepoint)
+            .for_host(&ip_addr.to_string())
+            .contains(&RedfishSimAction::Power(SystemPowerControl::ForceRestart)),
+        "the simulator should accept ForceRestart while leaving the DPU paused"
+    );
+
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await?;
+    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist")
+        .preingestion_state;
+    txn.commit().await?;
+    assert_ne!(state, PreingestionState::RecheckVersions);
+    match state {
+        PreingestionState::Failed { reason } => assert_eq!(
+            reason,
+            "Host never reached On after restart during firmware pre-update reset"
+        ),
+        other => panic!("expected Failed before RecheckVersions, got: {other:?}"),
+    }
+
+    Ok(())
+}
+
+/// A non-DPU host that stays unreachable after the BMC reset fails the pre-update
+/// reset 30 minutes after the reset, without ever being sent On.
+#[sqlx_test]
+async fn test_preingestion_preupdate_fails_if_host_never_powers_on_after_bmc_reset(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_bmc_reset_unavailable_polls(usize::MAX);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a9", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let ip_addr = IpAddr::from_str(&response.address)?;
+
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
+    txn.commit().await?;
+
+    let timepoint = redfish_sim.timepoint();
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await?;
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    txn.commit().await?;
+    assert!(matches!(
+        endpoint.preingestion_state,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await?;
+    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist")
+        .preingestion_state;
+    txn.commit().await?;
+    match state {
+        PreingestionState::Failed { reason } => assert_eq!(
+            reason,
+            "Host did not power on within 30 minutes of the BMC reset"
+        ),
+        other => panic!("expected Failed, got: {other:?}"),
+    }
+    assert!(
+        !redfish_sim
+            .actions_since(&timepoint)
+            .for_host(&ip_addr.to_string())
+            .contains(&RedfishSimAction::Power(SystemPowerControl::On)),
+        "On must not be sent while the BMC is still unavailable"
+    );
+
+    Ok(())
+}
+
+/// A host still reporting PoweringOn at the boot-wait check is rechecked on the
+/// next iteration instead of failing the pre-update reset.
+#[sqlx_test]
+async fn test_preingestion_preupdate_rechecks_host_still_powering_on(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:aa", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let ip_addr = IpAddr::from_str(&response.address)?;
+
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
+    txn.commit().await?;
+
+    async fn state_of(
+        pool: &sqlx::PgPool,
+        ip_addr: IpAddr,
+    ) -> Result<PreingestionState, Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+            .await?
+            .pop()
+            .expect("endpoint should exist")
+            .preingestion_state;
+        txn.commit().await?;
+        Ok(state)
+    }
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+    assert!(matches!(
+        state_of(&pool, ip_addr).await?,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+    mgr.run_single_iteration().await?;
+    assert!(matches!(
+        state_of(&pool, ip_addr).await?,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::WaitHostBoot,
+            ..
+        }
+    ));
+
+    for transient in [PowerState::PoweringOn, PowerState::Reset] {
+        redfish_sim.set_power_state(&ip_addr.to_string(), transient);
+        let mut txn = pool.begin().await?;
+        db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+        txn.commit().await?;
+        mgr.run_single_iteration().await?;
+        assert!(
+            matches!(
+                state_of(&pool, ip_addr).await?,
+                PreingestionState::InitialReset {
+                    phase: InitialResetPhase::WaitHostBoot,
+                    ..
+                }
+            ),
+            "{transient:?} must be rechecked, not failed"
+        );
+    }
+
+    redfish_sim.set_power_state(&ip_addr.to_string(), PowerState::On);
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+    assert_eq!(
+        state_of(&pool, ip_addr).await?,
+        PreingestionState::RecheckVersions
+    );
 
     Ok(())
 }

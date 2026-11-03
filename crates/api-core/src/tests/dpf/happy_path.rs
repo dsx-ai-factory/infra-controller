@@ -228,14 +228,14 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
             .is_some_and(|dpf| dpf.used_for_ingestion)
     );
     let host_node_id = host
-        .bmc_info
+        .bmc
         .as_ref()
         .and_then(|bmc| bmc.mac.as_deref())
         .expect("host BMC MAC must exist")
         .to_ascii_lowercase()
         .replace(':', "-");
     let dpu_device_id = dpu
-        .bmc_info
+        .bmc
         .as_ref()
         .and_then(|bmc| bmc.mac.as_deref())
         .expect("DPU BMC MAC must exist")

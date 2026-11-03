@@ -100,7 +100,7 @@
 		</td></tr>
 		{% endif %}
 	</table>
-	{% if has_complete_bmc_info %}
+	{% if has_complete_bmc_endpoint %}
 	<form method="POST" action="/admin/machine/{{ id }}/boot-interface/reconcile">
 		<span class="action-spinner"></span>
 		<input type="submit" value="Request reconciliation">
@@ -347,19 +347,24 @@
 {% endif %}
 
 <h3 id="bmc_info_view">BMC</h3>
-{% match bmc_info %}
-{% when Some with (bmc_info) %}
-{% set bmc_ip = bmc_info.ip.clone().unwrap_or_default() %}
-{% set bmc_action_redirect_to = Some(format!("/admin/machine/{}#bmc_info_view", self.id)) %}
+{% if bmc.is_some() || bmc_status.is_some() %}
 <table class="detailsview">
+	{% if let Some(bmc) = bmc %}
+	{% set bmc_ip = bmc.ip.clone().unwrap_or_default() %}
 	<tr><th>IP</th><td><a href="/admin/explored-endpoint/{{ bmc_ip }}">{{ bmc_ip }}</a></td></tr>
-	{% if let Some(machine_interface_id) = bmc_info.machine_interface_id %}
+	{% if let Some(machine_interface_id) = bmc.machine_interface_id %}
 	<tr><th>Machine Interface ID</th><td><a href="/admin/interface/{{ machine_interface_id }}">{{ machine_interface_id }}</a></td></tr>
 	{% endif %}
-	<tr><th>Port</th><td>{{ bmc_info.port|option_fmt }}</td></tr>
-	<tr><th>MAC Address</th><td>{{ bmc_info.mac|option_fmt }}</td></tr>
-	<tr><th>Version</th><td>{{ bmc_info.version|option_fmt }}</td></tr>
-	<tr><th>Firmware Version</th><td>{{ bmc_info.firmware_version|option_fmt }}</td></tr>
+	<tr><th>Port</th><td>{{ bmc.port|option_fmt }}</td></tr>
+	<tr><th>MAC Address</th><td>{{ bmc.mac|option_fmt }}</td></tr>
+	{% endif %}
+	{% if let Some(bmc_status) = bmc_status %}
+	<tr><th>Version</th><td>{{ bmc_status.version|option_fmt }}</td></tr>
+	<tr><th>Firmware Version</th><td>{{ bmc_status.firmware_version|option_fmt }}</td></tr>
+	{% endif %}
+	{% if let Some(bmc) = bmc %}
+	{% set bmc_ip = bmc.ip.clone().unwrap_or_default() %}
+	{% set bmc_action_redirect_to = Some(format!("/admin/machine/{}#bmc_info_view", self.id)) %}
 	<tr>
 		<th>Power Actions</th>
 		<td class="action-cell">
@@ -384,10 +389,11 @@
 			{% endif %}
 		</td>
 	</tr>
+	{% endif %}
 </table>
 {% else %}
 Missing BMC Data
-{% endmatch %}
+{% endif %}
 
 <h3>Discovery Info</h3>
 <table class="detailsview">
