@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -835,22 +837,103 @@ func TestLoginCommandConfiguredNvapiKeySkipsAuthnURL(t *testing.T) {
 	require.Equal(t, "nvapi-configured-key", loaded.Auth.APIKey.Token)
 }
 
-func TestExchangeAPIKeyNvapiReturnsKeyDirectly(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := &ConfigFile{
-		Auth: ConfigAuth{
-			APIKey: &ConfigAPIKey{Key: "nvapi-bearer-key"},
+func TestExchangeAPIKey(t *testing.T) {
+	testAPIKeyExchange(t, ExchangeAPIKey)
+}
+
+func TestLoginWithAPIKey(t *testing.T) {
+	testAPIKeyExchange(t, func(cfg *ConfigFile, configPath string) (string, error) {
+		SetConfigPath(configPath)
+		defer SetConfigPath("")
+		err := loginWithAPIKey(cfg, cfg.Auth.APIKey.AuthnURL, cfg.Auth.APIKey.Key)
+		if err != nil {
+			return "", err
+		}
+		return cfg.Auth.APIKey.Token, nil
+	})
+}
+
+func testAPIKeyExchange(t *testing.T, exchange func(*ConfigFile, string) (string, error)) {
+	t.Helper()
+	const secret = "synthetic-ngc-key-6907"
+	tests := []struct {
+		name      string
+		apiKey    string
+		status    int
+		body      string
+		readError error
+		wantToken string
+		wantErr   string
+	}{
+		{name: "bearer key skips HTTP", apiKey: "nvapi-bearer-key", wantToken: "nvapi-bearer-key"},
+		{name: "legacy key saves token", status: http.StatusOK, body: `{"token":"new-token"}`, wantToken: "new-token"},
+		{
+			name:    "credential echo is not read",
+			status:  http.StatusUnauthorized,
+			body:    `{"error":"invalid key","detail":"ApiKey ` + strings.Repeat(secret, 1024) + `"}`,
+			wantErr: "NGC token exchange failed (HTTP 401)",
+		},
+		{
+			name:      "failed response read error is not exposed",
+			status:    http.StatusBadGateway,
+			readError: errors.New("upstream rejected " + secret),
+			wantErr:   "NGC token exchange failed (HTTP 502)",
 		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiKey := tt.apiKey
+			if apiKey == "" {
+				apiKey = secret
+			}
+			cfg := &ConfigFile{Auth: ConfigAuth{APIKey: &ConfigAPIKey{
+				Key: apiKey, Token: "old-token", AuthnURL: "https://auth.example.test/token",
+			}}}
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, SaveConfigToPath(cfg, configPath))
+			before, err := os.ReadFile(configPath)
+			require.NoError(t, err)
+			body := strings.NewReader(tt.body)
+			var responseBody io.Reader = body
+			if tt.readError != nil {
+				responseBody = iotest.ErrReader(tt.readError)
+			}
+			requests := 0
+			originalClient := http.DefaultClient
+			http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests++
+				require.Equal(t, "ApiKey "+apiKey, req.Header.Get("Authorization"))
+				return &http.Response{
+					StatusCode: tt.status,
+					Status:     strconv.Itoa(tt.status) + " " + secret,
+					Body:       io.NopCloser(responseBody),
+				}, nil
+			})}
+			t.Cleanup(func() { http.DefaultClient = originalClient })
 
-	token, err := ExchangeAPIKey(cfg, configPath)
-	require.NoError(t, err)
-	require.Equal(t, "nvapi-bearer-key", token)
-	require.Equal(t, "nvapi-bearer-key", cfg.Auth.APIKey.Token)
-
-	loaded, err := LoadConfigFromPath(configPath)
-	require.NoError(t, err)
-	require.Equal(t, "nvapi-bearer-key", loaded.Auth.APIKey.Token)
+			token, err := exchange(cfg, configPath)
+			if tt.wantErr != "" {
+				require.EqualError(t, err, tt.wantErr)
+				require.Empty(t, token)
+				require.Equal(t, len(tt.body), body.Len(), "failed response body must not be read")
+				require.Equal(t, "old-token", cfg.Auth.APIKey.Token)
+				after, readErr := os.ReadFile(configPath)
+				require.NoError(t, readErr)
+				require.Equal(t, before, after)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tt.wantToken, token)
+				loaded, loadErr := LoadConfigFromPath(configPath)
+				require.NoError(t, loadErr)
+				require.Equal(t, tt.wantToken, loaded.Auth.APIKey.Token)
+			}
+			if tt.apiKey != "" {
+				require.Zero(t, requests)
+			} else {
+				require.Equal(t, 1, requests)
+			}
+		})
+	}
 }
 
 func TestIsNGCBearerAPIKey(t *testing.T) {

@@ -68,8 +68,8 @@ fi
 RESPONSE="${RESPONSE%$'\n'*}"
 
 printf '%s' "${RESPONSE}" | python3 -c '
-import json, sys
-status = sys.argv[1]
+import json, shlex, sys
+status, client_id, realm, namespace = sys.argv[1:]
 try:
     response = json.load(sys.stdin)
 except ValueError:
@@ -98,5 +98,11 @@ if not isinstance(code, str) or code not in hints:
 hint = hints.get(code, "check the client, realm, and token endpoint configuration")
 detail = ", " + code if code else ""
 print(f"ERROR: token request failed (HTTP {status}{detail}); {hint}", file=sys.stderr)
+if code == "invalid_client":
+    print(f"Client: {client_id!r}; realm: {realm!r}", file=sys.stderr)
+    print("List clients: " + shlex.join([
+        "kubectl", "-n", namespace, "exec", "deployment/keycloak", "--",
+        "/opt/keycloak/bin/kcadm.sh", "get", "clients", "-r", realm, "--fields", "clientId",
+    ]), file=sys.stderr)
 sys.exit(1)
-' "${HTTP_STATUS}"
+' "${HTTP_STATUS}" "${CLIENT_ID}" "${REALM}" "${NS}"

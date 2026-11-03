@@ -294,12 +294,13 @@ func ExchangeAPIKey(cfg *ConfigFile, configPath string) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		// An authn endpoint can echo the API key; do not read its error body.
+		return "", fmt.Errorf("NGC token exchange failed (HTTP %d)", resp.StatusCode)
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("NGC token exchange failed (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
 	token := extractNGCToken(body)
@@ -340,12 +341,13 @@ func loginWithAPIKey(cfg *ConfigFile, authnURL, apiKey string) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		// An authn endpoint can echo the API key; do not read its error body.
+		return fmt.Errorf("NGC token exchange failed (HTTP %d)", resp.StatusCode)
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("NGC token exchange failed (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
 	token := extractNGCToken(body)

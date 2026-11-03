@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,17 @@ class KeycloakTokenTest(unittest.TestCase):
             ("null token", 200, {"access_token": None}, "HTTP 200)", 1),
             ("structured token", 200, {"access_token": {"detail": SECRET}}, "HTTP 200)", 1),
         ]
+        operator_realms = {
+            "empty realm uses default": "",
+            "realm with whitespace": "test realm",
+            "realm with quote": "test'realm",
+            "realm with backslash": r"test\realm",
+            "realm with control character": "test\nrealm",
+            "non-ASCII realm": "test-réalm",
+            "realm with shell metacharacters": "test;$(printf unsafe)",
+        }
+        cases.extend((name, 401, {"error": "invalid_client", "error_description": SECRET},
+                      "invalid_client)", 1) for name in operator_realms)
         requests = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -80,6 +92,8 @@ os.execvp("curl", ["curl", *args])
             try:
                 for name, status, body, diagnostic, exit_code in cases:
                     with self.subTest(name=name):
+                        env["KEYCLOAK_REALM"] = operator_realms.get(name, "test-realm")
+                        realm = env["KEYCLOAK_REALM"] or "nico"
                         server.response_status = status
                         server.response_body = body if isinstance(body, str) else json.dumps(body)
                         result = subprocess.run(["bash", str(SCRIPT)], env=env,
@@ -92,6 +106,18 @@ os.execvp("curl", ["curl", *args])
                         else:
                             self.assertEqual(result.stdout, "synthetic-access-token\n")
                             self.assertEqual(result.stderr, "")
+                        if isinstance(body, dict) and body.get("error") == "invalid_client":
+                            self.assertIn(f"Client: 'test-client&+'; realm: {realm!r}", result.stderr)
+                            command = result.stderr.split("List clients: ", 1)[1].strip()
+                            self.assertEqual(shlex.split(command), [
+                                "kubectl", "-n", "test-namespace", "exec", "deployment/keycloak", "--",
+                                "/opt/keycloak/bin/kcadm.sh", "get", "clients", "-r", realm,
+                                "--fields", "clientId",
+                            ])
+                        else:
+                            self.assertNotIn("test-client&+", result.stderr)
+                            self.assertNotIn("test-realm", result.stderr)
+                            self.assertNotIn("kcadm.sh", result.stderr)
                         self.assertEqual(requests[-1], {
                             "grant_type": ["client_credentials"],
                             "client_id": ["test-client&+"],
@@ -100,7 +126,7 @@ os.execvp("curl", ["curl", *args])
                         args = json.loads((tmp_path / "args.json").read_text())
                         self.assertNotIn(SECRET, " ".join(args))
                         self.assertIn("test-namespace", args)
-                        self.assertEqual(args[-1], "http://keycloak.test-namespace:8082/realms/test-realm/protocol/openid-connect/token")
+                        self.assertEqual(args[-1], f"http://keycloak.test-namespace:8082/realms/{realm}/protocol/openid-connect/token")
             finally:
                 server.shutdown()
                 thread.join()
