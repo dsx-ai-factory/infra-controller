@@ -1170,8 +1170,17 @@ function parse_kernel_cmdline_argument() {
 
 # Writes the downloaded image to image_disk and returns qemu-img's status, not tee's.
 function write_image_to_disk() {
+	# OCI registries serve blobs at .../blobs/sha256:<hash>, so the downloaded
+	# image can be named sha256:<hash>. qemu-img parses the text before a colon
+	# as a protocol and fails with "Unknown protocol 'sha256'", so anchor a
+	# bare filename to the working directory.
+	local image_path=$file
+	case "$image_path" in
+		/* | ./*) ;;
+		*) image_path="./$image_path" ;;
+	esac
 	echo "Imaging $file to $image_disk" | tee $log_output
-	qemu-img convert -p -O raw -S 0 "$file" "$image_disk" 2>&1 | tee $log_output
+	qemu-img convert -p -O raw -S 0 "$image_path" "$image_disk" 2>&1 | tee $log_output
 	local ret=${PIPESTATUS[0]}
 	if [ $ret -ne 0 ]; then
 		echo "Imaging failed $ret" | tee $log_output
