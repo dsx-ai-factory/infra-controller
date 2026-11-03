@@ -860,6 +860,28 @@ pub async fn set_vpc_id_and_can_stretch(
     Ok(())
 }
 
+/// Hold a segment's row lock until an attach transaction commits. This keeps
+/// the expected version/source check and a same-target no-op atomic with
+/// competing segment updates (the regular attach already uses version CAS).
+/// A key-share lock from a machine-interface FK check must remain compatible:
+/// attachment subsequently waits for that writer's table lock.
+pub async fn lock_for_attach(txn: &mut PgConnection, id: NetworkSegmentId) -> DatabaseResult<()> {
+    let query =
+        "SELECT id FROM network_segments WHERE id = $1 AND deleted IS NULL FOR NO KEY UPDATE";
+    let found = sqlx::query(query)
+        .bind(id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if found.is_none() {
+        return Err(DatabaseError::NotFoundError {
+            kind: "network segment",
+            id: id.to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub async fn attach_to_vpc(
     value: &NetworkSegment,
     txn: &mut PgConnection,
@@ -1183,6 +1205,41 @@ mod tests {
         .bind(name)
         .fetch_one(pool)
         .await
+    }
+
+    #[crate::sqlx_test]
+    async fn attach_lock_allows_machine_interface_insert(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let segment_id = minimum_segment_data(&pool, "attach-before-interface").await?;
+        let mut attachment = pool.begin().await?;
+        lock_for_attach(attachment.as_mut(), segment_id).await?;
+
+        // Attachment already owns the segment row lock when an interface
+        // writer takes ROW EXCLUSIVE on machine_interfaces. Its FK check must
+        // finish so attachment can subsequently acquire SHARE on that table.
+        let mut writer = pool.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '1s'")
+            .execute(writer.as_mut())
+            .await?;
+        sqlx::query(
+            "INSERT INTO machine_interfaces \
+             (segment_id, mac_address, primary_interface, hostname) \
+             VALUES ($1, '02:00:00:00:56:03', false, 'attach-race-user')",
+        )
+        .bind(segment_id)
+        .execute(writer.as_mut())
+        .await?;
+        writer.commit().await?;
+
+        crate::machine_interface::lock_table_for_segment_reassignment(attachment.as_mut()).await?;
+        assert!(
+            crate::instance_address::segment_has_allocations(attachment.as_mut(), &segment_id)
+                .await?,
+            "the committed interface must prevent segment reassignment"
+        );
+        attachment.rollback().await?;
+        Ok(())
     }
 
     /// Persists one test segment with a single prefix row.
