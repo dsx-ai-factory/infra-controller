@@ -1951,6 +1951,170 @@ async fn machine_validation_calls_are_scoped_to_the_runs_machine(
     Ok(())
 }
 
+#[crate::sqlx_test]
+async fn machine_validation_attempt_log_request_ids(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.machine_validation_config.attempt_logs.enabled = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let unknown_id = uuid::Uuid::new_v4().to_string();
+
+    for (name, value, expected_code) in [
+        (
+            "malformed",
+            Some("not-a-uuid"),
+            tonic::Code::InvalidArgument,
+        ),
+        ("empty", Some(""), tonic::Code::InvalidArgument),
+        ("missing", None, tonic::Code::InvalidArgument),
+        ("unknown", Some(unknown_id.as_str()), tonic::Code::NotFound),
+    ] {
+        let status = env
+            .api
+            .get_machine_validation_attempt_logs(authenticated_admin_request(
+                rpc::forge::MachineValidationAttemptLogGetRequest {
+                    attempt_id: value.map(|value| rpc::common::Uuid {
+                        value: value.to_owned(),
+                    }),
+                    after_sequence: 0,
+                    limit: 1,
+                },
+            ))
+            .await
+            .expect_err(name);
+        assert_eq!(status.code(), expected_code, "{name}");
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn machine_validation_attempt_logs_disabled_skip_id_validation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.machine_validation_config.attempt_logs.enabled = false;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let request = rpc::forge::MachineValidationAttemptLogGetRequest {
+        attempt_id: Some(rpc::common::Uuid {
+            value: "not-a-uuid".to_owned(),
+        }),
+        after_sequence: 0,
+        limit: 1,
+    };
+    let unauthenticated = env
+        .api
+        .get_machine_validation_attempt_logs(tonic::Request::new(request.clone()))
+        .await
+        .expect_err("disabled logs still require authentication");
+    assert_eq!(unauthenticated.code(), tonic::Code::Unauthenticated);
+
+    let logs = env
+        .api
+        .get_machine_validation_attempt_logs(authenticated_admin_request(request))
+        .await?
+        .into_inner();
+    assert!(logs.chunks.is_empty());
+    assert!(!logs.has_more);
+    Ok(())
+}
+
+#[crate::sqlx_test(fixtures("create_machine_validation_tests",))]
+async fn machine_validation_request_ids_are_validated(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rpc::forge::machine_validation_heartbeat_request::Target;
+
+    let env = create_test_env(pool).await;
+    let mh = create_host_with_machine_validation(&env, None, None).await;
+    let (validation_id, run_item_ids, _) =
+        on_demand_run(&env, &mh, "forge_dcgm_long_test", "OnDemand").await;
+    let invalid_id = rpc::common::Uuid {
+        value: "not-a-uuid".to_owned(),
+    };
+    let statuses = [
+        (
+            "get attempt",
+            env.api
+                .get_machine_validation_attempt(authenticated_admin_request(
+                    rpc::forge::MachineValidationAttemptGetRequest {
+                        attempt_id: Some(invalid_id.clone()),
+                    },
+                ))
+                .await
+                .unwrap_err(),
+        ),
+        (
+            "find attempts",
+            env.api
+                .find_machine_validation_attempts(authenticated_admin_request(
+                    rpc::forge::MachineValidationAttemptSearchFilter {
+                        run_item_id: Some(invalid_id.clone()),
+                    },
+                ))
+                .await
+                .unwrap_err(),
+        ),
+        (
+            "find run items",
+            env.api
+                .find_machine_validation_run_items_by_ids(authenticated_machine_request(
+                    rpc::forge::MachineValidationRunItemsByIdsRequest {
+                        run_item_ids: vec![run_item_ids[0].clone(), invalid_id.clone()],
+                    },
+                    mh.host().id,
+                ))
+                .await
+                .unwrap_err(),
+        ),
+        (
+            "append log",
+            env.api
+                .append_machine_validation_attempt_log(authenticated_machine_request(
+                    rpc::forge::MachineValidationAttemptLogAppendRequest {
+                        attempt_id: Some(invalid_id.clone()),
+                        sequence: 1,
+                        stream: rpc::forge::MachineValidationAttemptLogStream::Stdout as i32,
+                        content: "test log".to_owned(),
+                    },
+                    mh.host().id,
+                ))
+                .await
+                .unwrap_err(),
+        ),
+    ];
+    for (name, status) in statuses {
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{name}");
+    }
+
+    for (field, target) in [
+        ("run item id", Target::RunItemId(invalid_id.clone())),
+        ("attempt id", Target::AttemptId(invalid_id)),
+    ] {
+        let request = rpc::forge::MachineValidationHeartbeatRequest {
+            validation_id: Some(validation_id),
+            target: Some(target),
+        };
+        let denied = env
+            .api
+            .heartbeat_machine_validation_run(authenticated_machine_request(
+                request.clone(),
+                mh.dpu().id,
+            ))
+            .await
+            .expect_err("ownership is checked before the target UUID");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied, "{field}");
+
+        let status = env
+            .api
+            .heartbeat_machine_validation_run(authenticated_machine_request(request, mh.host().id))
+            .await
+            .expect_err(field);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{field}");
+    }
+    Ok(())
+}
+
 #[crate::sqlx_test(fixtures("create_machine_validation_tests",))]
 async fn test_machine_validation_m1_persists_selected_test_and_idempotent_result(
     pool: sqlx::PgPool,

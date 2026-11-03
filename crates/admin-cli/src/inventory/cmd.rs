@@ -174,7 +174,7 @@ fn get_bmc_info<'a>(
     }
 
     for machine in machines {
-        let Some(bmc_ip) = machine.bmc_info.as_ref().and_then(|x| x.ip.as_deref()) else {
+        let Some(bmc_ip) = crate::bmc::endpoint(machine).and_then(|endpoint| endpoint.ip) else {
             continue;
         };
 
@@ -375,10 +375,8 @@ fn create_inventory_for_instances<'a>(
 
         used_machines.push(machine.id);
 
-        let bmc_ip = machine
-            .bmc_info
-            .as_ref()
-            .and_then(|x| x.ip.as_deref())
+        let bmc_ip = crate::bmc::endpoint(machine)
+            .and_then(|endpoint| endpoint.ip)
             .unwrap_or_default();
 
         let details = InstanceDetails {
@@ -399,4 +397,58 @@ fn create_inventory_for_instances<'a>(
     }
 
     Ok((tenant_map, used_machines))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(deprecated)] // Older Core responses only populate BmcInfo.
+    fn bmc_inventory_prefers_split_endpoint() {
+        for (scenario, endpoint, legacy_ip, expected) in [
+            (
+                "split wins",
+                Some(::rpc::forge::BmcEndpoint {
+                    ip: Some("192.0.2.10".into()),
+                    ..Default::default()
+                }),
+                Some("192.0.2.20"),
+                Some("192.0.2.10"),
+            ),
+            (
+                "legacy fallback",
+                None,
+                Some("192.0.2.20"),
+                Some("192.0.2.20"),
+            ),
+            (
+                "empty split is authoritative",
+                Some(::rpc::forge::BmcEndpoint::default()),
+                Some("192.0.2.20"),
+                None,
+            ),
+            ("no BMC data", None, None, None),
+        ] {
+            let machine = ::rpc::Machine {
+                bmc: endpoint,
+                bmc_info: legacy_ip.map(|ip| ::rpc::forge::BmcInfo {
+                    ip: Some(ip.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let inventory = get_bmc_info(&[&machine], &[]);
+            assert_eq!(
+                inventory.len(),
+                usize::from(expected.is_some()),
+                "{scenario}"
+            );
+            assert_eq!(
+                inventory.get("Not Found-bmc").map(|info| info.ansible_host),
+                expected,
+                "{scenario}"
+            );
+        }
+    }
 }

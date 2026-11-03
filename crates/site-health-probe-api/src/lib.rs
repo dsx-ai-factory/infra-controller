@@ -367,13 +367,27 @@ pub struct Unit {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HostFields {
+    /// nico-api's name of the host's maker, such as `nvidia`, `dell` or
+    /// `lenovo`: from the explored report under the compact host read, from
+    /// DMI's system vendor without it. `null` for a maker DMI cannot name.
     pub vendor: Option<String>,
+    /// The explored report's model under the compact host read, DMI's
+    /// product name without it. A host without a report has none under the
+    /// compact read.
     pub model: Option<String>,
     pub instance_type: Option<String>,
+    /// From [`Self::version_source`]. The explored report may hold no BMC or
+    /// UEFI version, so the compact read can leave them `null`; firmware
+    /// checks read the full firmware inventory, not these.
     pub bmc_version: Option<String>,
     pub uefi_version: Option<String>,
     pub version_source: VersionSource,
+    /// When nico-api last wrote the explored report, for any reason. It is
+    /// not the time of the last successful exploration.
     pub report_at: Option<DateTime<Utc>>,
+    /// The `Type` of the explored report's last exploration error, such as
+    /// `Unauthorized`, or `other` for a type the probe does not know. Never
+    /// the error's text.
     pub report_error: Option<String>,
     /// `null` until the probe can read allocatability.
     pub allocatable: Option<bool>,

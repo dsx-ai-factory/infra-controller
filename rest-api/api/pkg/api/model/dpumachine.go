@@ -508,10 +508,7 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 		apd.DpuAgentVersion = *protoMachineStatus.DpuAgentVersion
 	}
 
-	if protoMachine.BmcInfo != nil {
-		apd.BMCInfo = &APIBMCInfo{}
-		apd.BMCInfo.FromProto(protoMachine.BmcInfo)
-	}
+	apd.BMCInfo = newAPIBMCInfoFromMachine(protoMachine)
 
 	if protoMachineStatus.GetDiscoveryInfo() != nil && protoMachineStatus.GetDiscoveryInfo().DmiData != nil {
 		apd.DMIData = &APIDMIData{}
