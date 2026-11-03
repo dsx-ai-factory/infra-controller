@@ -151,7 +151,7 @@ tests:
       suites.bogus.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory and history
+          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, store and store-transition
 
   - it: renders the history suite with a ConfigMap capture mount and provenance
     set:
@@ -236,6 +236,158 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: set only one of historyCapture.configMap or historyCapture.existingClaim
+
+  - it: renders the store suite with the store and probe URLs and a token mount
+    set:
+      suites.cluster.enabled: false
+      suites.store.enabled: true
+      probeUrl: http://probe.scale-test.svc:8080
+      store.url: http://prometheus.monitoring.svc:9090
+      store.ingestionDelaySeconds: 30
+      store.tokenSecret: store-bearer
+    asserts:
+      - equal:
+          path: metadata.name
+          value: run-scale-test-store
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/store.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAgainstARealStore$"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_URL
+            value: http://prometheus.monitoring.svc:9090
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+            value: http://probe.scale-test.svc:8080
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_INGESTION_DELAY
+            value: "30"
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_TOKEN_FILE
+            value: /var/run/secrets/store-token/token
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: store-token
+            mountPath: /var/run/secrets/store-token
+            readOnly: true
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: store-token
+            secret:
+              secretName: store-bearer
+          any: true
+
+  - it: renders the store-transition suite with the capture window and a CA mount
+    set:
+      suites.cluster.enabled: false
+      suites.store-transition.enabled: true
+      probeUrl: http://probe.scale-test.svc:8080
+      store.url: http://prometheus.monitoring.svc:9090
+      store.caSecret: store-ca-bundle
+      store.transition:
+        start: "2026-11-04T00:00:00Z"
+        end: "2026-11-04T06:00:00Z"
+        n: "3"
+        targets: "100,200,300"
+        reached: "100,200,300"
+        minTimingErrorSeconds: "90"
+    asserts:
+      - equal:
+          path: metadata.name
+          value: run-scale-test-store-transition
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestControlledTransition$"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_CAPTURE_START
+            value: "2026-11-04T00:00:00Z"
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_CA_FILE
+            value: /var/run/secrets/store-ca/ca.crt
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: store-ca
+            mountPath: /var/run/secrets/store-ca
+            readOnly: true
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: store-ca
+            secret:
+              secretName: store-ca-bundle
+          any: true
+      - notContains:  # this suite sets no delay, so none is emitted (any value fails)
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_INGESTION_DELAY
+          any: true
+
+  # Each rejection fails the whole render, so only the bad value is set; the
+  # leading-zero and overflow forms would pass a digit check fed to Sprig int.
+  - it: rejects a store ingestion delay over 60
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: 61
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "61"
+
+  - it: rejects a negative store ingestion delay
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: -1
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "-1"
+
+  - it: rejects a fractional store ingestion delay
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: 0.5
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "0.5"
+
+  - it: rejects a leading-zero store ingestion delay
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: "08"
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "08"
+
+  - it: rejects a store ingestion delay that overflows an integer
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: "9223372036854775808"
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "9223372036854775808"
 
   - it: fails when the image repository is missing
     set:
