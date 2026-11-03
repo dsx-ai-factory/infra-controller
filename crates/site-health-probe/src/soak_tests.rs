@@ -24,7 +24,9 @@
 //! fail, a request names a gone host, sweeps are cancelled, clients page
 //! across publications and abandon cursors, and every publication is scraped
 //! and JSON-encoded while it lands. Only the API's REST reader flag is
-//! toggled: no REST inventory reader runs here.
+//! toggled: no REST inventory reader runs here. The fake connector hands the
+//! reader pre-projected host rows, so decoding nico-api's protobuf replies is
+//! not covered.
 //!
 //! Pass rule: every sweep ends as planned (complete, the planned families
 //! failed, or cancelled). Every family keeps exactly its current and its kept
@@ -497,6 +499,19 @@ struct Retained {
 }
 
 /// The least-squares slope of `points`, per step.
+/// The sweep counters go through the meter provider, not the state
+/// collector. A scrape that lacks them, or shows them at 0 after sweeps,
+/// means the exporter is dead and the soak does not measure it.
+fn assert_sweeps_scraped(scraped: &[MetricFamily]) {
+    let sweeps: f64 = scraped
+        .iter()
+        .filter(|family| family.name() == "carbide_site_health_probe_sweeps_total")
+        .flat_map(|family| family.get_metric())
+        .map(|metric| metric.counter.value())
+        .sum();
+    assert!(sweeps > 0.0, "the sweep counters are not scraped");
+}
+
 fn slope(points: &[(f64, f64)]) -> f64 {
     let n = points.len() as f64;
     let (sx, sy) = points
@@ -543,6 +558,9 @@ struct Soak {
     sink: Arc<Tracking>,
     collector: Arc<StateCollector>,
     registry: prometheus::Registry,
+    /// Keeps the meter provider alive: when its last handle drops the
+    /// exporter shuts down and the sweep counters stop being scraped.
+    _setup: metrics_endpoint::MetricsSetup,
     nico: Arc<FakeNico>,
     reader: DevicesReader,
     app: axum::Router,
@@ -610,7 +628,8 @@ impl Soak {
             store,
             sink,
             collector,
-            registry: setup.registry,
+            registry: setup.registry.clone(),
+            _setup: setup,
             nico,
             reader,
             app,
@@ -844,12 +863,9 @@ impl Soak {
             let _ = self.store.by_id(family, "expire-now");
         }
         drop(self.registry.gather());
-        let series = self
-            .registry
-            .gather()
-            .iter()
-            .map(|family| family.get_metric().len())
-            .sum();
+        let scraped = self.registry.gather();
+        assert_sweeps_scraped(&scraped);
+        let series = scraped.iter().map(|family| family.get_metric().len()).sum();
         self.nico.clear_calls();
         Quiescent {
             bytes: live_bytes() - self.base.0,
@@ -976,4 +992,5 @@ async fn cursor_pages_its_own_snapshot_across_publications() {
         next = tokio::time::Instant::now() + INTERVAL;
         soak.sweep(k).await;
     }
+    assert_sweeps_scraped(&soak.registry.gather());
 }
