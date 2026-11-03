@@ -124,7 +124,7 @@ Skipping the first rollout lets a new pod write a credential under a KMIP `kek_i
 
 ## Qualified Server Products
 
-A server product is supported only after it passes the checklist below. No product has completed it yet; [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) tracks qualification, and this table is updated as products complete it.
+A server product is supported only after it passes the checklist below. No product has completed it yet; [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) tracks qualification, and this table is updated as products complete it. Continuous integration runs the [startup validation](#what-startup-verifies), a wrap, and an unwrap against [PyKMIP](https://github.com/OpenKMIP/PyKMIP), the reference software KMIP server. That run is an interoperability check, not a qualification, and PyKMIP is not a supported product.
 
 | Product | Version | Negotiated KMIP version | Cipher profile | Authentication | Status |
 |---|---|---|---|---|---|
