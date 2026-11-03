@@ -27,6 +27,7 @@ use carbide_uuid::switch::SwitchId;
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 
+use super::firmware_inventory::FirmwareInventory;
 use super::state_history::StateHistoryTable;
 use super::{Base, filters};
 
@@ -148,6 +149,7 @@ struct SwitchDetail {
     power_state: Option<String>,
     health_status: Option<String>,
     bmc_info: Option<rpc::forge::BmcInfo>,
+    firmware_inventory: FirmwareInventory,
     nvos_ports: Vec<SwitchNvosPortRecord>,
     metadata_detail: super::MetadataDetail,
     health_detail: super::HealthDetail,
@@ -275,6 +277,7 @@ impl SwitchDetail {
             power_state,
             health_status,
             bmc_info: switch.bmc_info,
+            firmware_inventory: FirmwareInventory::default(),
             nvos_ports,
             metadata_detail,
             health_detail,
@@ -317,7 +320,12 @@ pub(super) async fn detail(
         }
     };
 
-    let detail = SwitchDetail::new(switch, history);
+    let mut detail = SwitchDetail::new(switch, history);
+    detail.firmware_inventory = FirmwareInventory::load(
+        &api,
+        detail.bmc_info.as_ref().and_then(|bmc| bmc.ip.as_deref()),
+    )
+    .await;
     (StatusCode::OK, Html(detail.render().unwrap())).into_response()
 }
 
