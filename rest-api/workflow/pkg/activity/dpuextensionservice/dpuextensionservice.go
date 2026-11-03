@@ -121,6 +121,14 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 
 		reportedDpuExtensionServiceIDMap[dpuExtensionService.ID] = true
 
+		deploymentType, typeErr := cdbm.DpuExtensionServiceDeploymentTypeFromProto(controllerDpuExtensionService.DeploymentType)
+		if typeErr != nil || deploymentType != dpuExtensionService.DeploymentType ||
+			(deploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline &&
+				(controllerDpuExtensionService.ServiceType != corev1.DpuExtensionServiceType_DPF_HELM_CHART || controllerDpuExtensionService.DpuTarget != nil)) {
+			slogger.Warn().Err(typeErr).Msg("skipping DPU Extension Service inventory with conflicting immutable deployment type")
+			continue
+		}
+
 		var status *string
 		var statusMessage *string
 		var isMissingOnSite *bool
@@ -329,6 +337,13 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 		return nil
 	}
 
+	deploymentType, typeErr := cdbm.DpuExtensionServiceDeploymentTypeFromProto(controllerDpuExtensionService.DeploymentType)
+	if typeErr != nil || (deploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline &&
+		(controllerDpuExtensionService.ServiceType != corev1.DpuExtensionServiceType_DPF_HELM_CHART || controllerDpuExtensionService.DpuTarget != nil)) {
+		logger.Warn().Err(typeErr).Msg("unable to recover DPU Extension Service with invalid deployment type or target")
+		return nil
+	}
+
 	serviceType := cdbm.DpuExtensionServiceServiceTypeKubernetesPod
 	status := cdbm.DpuExtensionServiceStatusReady
 	statusMessage := dpuExtensionServiceRecoveredMessage
@@ -341,7 +356,7 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 
 		var targetErr error
 		dpuTarget, targetErr = cdbm.DpuExtensionServiceDpuTargetFromProto(controllerDpuExtensionService.DpuTarget)
-		if targetErr != nil || dpuTarget == nil {
+		if targetErr != nil || (deploymentType == cdbm.DpuExtensionServiceDeploymentTypeDemandDriven && dpuTarget == nil) {
 			logger.Warn().Err(targetErr).Msg("unable to create DPU Extension Service found on Site: DPF Helm chart is missing a valid DPU target")
 
 			return nil
@@ -450,6 +465,11 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 			if existingDpuExtensionService.TenantID != tenant.ID {
 				logger.Warn().Msgf("unable to create DPU Extension Service found on Site: tenant organization differs in REST cache and Site record %s", org)
 
+				return nil, nil
+			}
+
+			if existingDpuExtensionService.DeploymentType != deploymentType {
+				logger.Warn().Msg("unable to recover DPU Extension Service: immutable deployment type differs in REST cache and Site record")
 				return nil, nil
 			}
 
@@ -580,6 +600,7 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 				Name:                  recoveredName,
 				Description:           description,
 				ServiceType:           serviceType,
+				DeploymentType:        deploymentType,
 				DpuTarget:             dpuTarget,
 				SiteID:                site.ID,
 				TenantID:              tenant.ID,

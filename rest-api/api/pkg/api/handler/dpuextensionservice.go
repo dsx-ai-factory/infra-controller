@@ -172,6 +172,10 @@ func (cdesh CreateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 	// the DB tx unwinds before we make the second remote call. nil means
 	// no timeout occurred and the normal flow continues.
 	var timeoutResp func() error
+	deploymentType := cdbm.DpuExtensionServiceDeploymentTypeDemandDriven
+	if apiRequest.DeploymentType != nil {
+		deploymentType = *apiRequest.DeploymentType
+	}
 
 	err = cdb.WithTx(ctx, cdesh.dbSession, func(tx *cdb.Tx) error {
 		// Create the DPU Extension Service in DB
@@ -179,14 +183,15 @@ func (cdesh CreateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 			ctx,
 			tx,
 			cdbm.DpuExtensionServiceCreateInput{
-				Name:        apiRequest.Name,
-				Description: apiRequest.Description,
-				ServiceType: apiRequest.ServiceType,
-				DpuTarget:   apiRequest.DpuTarget,
-				SiteID:      site.ID,
-				TenantID:    tenant.ID,
-				Status:      cdbm.DpuExtensionServiceStatusPending,
-				CreatedBy:   dbUser.ID,
+				Name:           apiRequest.Name,
+				Description:    apiRequest.Description,
+				ServiceType:    apiRequest.ServiceType,
+				DeploymentType: deploymentType,
+				DpuTarget:      apiRequest.DpuTarget,
+				SiteID:         site.ID,
+				TenantID:       tenant.ID,
+				Status:         cdbm.DpuExtensionServiceStatusPending,
+				CreatedBy:      dbUser.ID,
 			},
 		)
 		if derr != nil {
@@ -256,6 +261,15 @@ func (cdesh CreateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 			code, uwerr := common.UnwrapWorkflowError(wferr)
 			logger.Error().Err(uwerr).Msg("failed to execute DPU Extension Service creation workflow on Site")
 			return cutil.NewAPIError(code, fmt.Sprintf("Failed to execute DPU Extension Service creation workflow on Site: %s", uwerr), nil)
+		}
+
+		// Confirm Core accepted the requested placement before committing a usable REST registration.
+		if controllerDpuExtensionService == nil {
+			return cutil.NewAPIError(http.StatusInternalServerError, "Core returned no DPU Extension Service", nil)
+		}
+		acceptedType, typeErr := cdbm.DpuExtensionServiceDeploymentTypeFromProto(controllerDpuExtensionService.DeploymentType)
+		if typeErr != nil || acceptedType != deploymentType {
+			return cutil.NewAPIError(http.StatusInternalServerError, "Core returned an unexpected DPU Extension Service deployment type", nil)
 		}
 
 		return nil

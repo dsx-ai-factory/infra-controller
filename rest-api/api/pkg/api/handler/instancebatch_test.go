@@ -539,6 +539,17 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 		wantErr                  bool
 		checkResponse            func(t *testing.T, response []model.APIInstance)
 	}
+	// Baseline intent belongs to the registration and must block instance-scoped deployments.
+	baselineService, baselineErr := cdbm.NewDpuExtensionServiceDAO(dbSession).Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
+		Name:           "baseline-attachment-test",
+		ServiceType:    cdbm.DpuExtensionServiceServiceTypeDpfHelmChart,
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+		TenantID:       tn1.ID, SiteID: st1.ID, CreatedBy: tnu1.ID,
+		Status:         cdbm.DpuExtensionServiceStatusReady,
+		ActiveVersions: []string{"V1-T1761856992374052", "2.0.0"},
+	})
+	require.NoError(t, baselineErr)
+
 	tests := []batchCase{
 		{
 			name: "test batch instance create API endpoint succeeds with valid request",
@@ -1586,6 +1597,38 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:  tnu1,
 				respCode: http.StatusBadRequest,
 				respMsg:  "Could not find DPU Extension Service",
+			},
+			wantErr: false,
+		},
+		// Baseline placement cannot be activated through instance attachment.
+		{
+			name: "rejects baseline service attachment on batch create",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:     "test-batch-dpu-wrong-site",
+					Count:          2,
+					TenantID:       tn1.ID.String(),
+					InstanceTypeID: ist1.ID.String(),
+					VpcID:          vpc1.ID.String(),
+					Interfaces:     createInterfacesForCount(2, subnet1.ID.String()),
+					IpxeScript:     cutil.GetPtr("test script"),
+					DpuExtensionServiceDeployments: []model.APIDpuExtensionServiceDeploymentRequest{
+						{
+							DpuExtensionServiceID: baselineService.ID.String(),
+							Version:               "V1-T1761856992374052",
+						},
+					},
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusBadRequest,
+				respMsg:  "Baseline DPU Extension Services cannot be attached",
 			},
 			wantErr: false,
 		},

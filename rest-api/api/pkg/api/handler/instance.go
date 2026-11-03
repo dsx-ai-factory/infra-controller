@@ -1008,6 +1008,10 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID.String()), nil)
 		}
 
+		if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Baseline DPU Extension Services cannot be attached to Instances", nil)
+		}
+
 		versionFound := false
 		for _, version := range des.ActiveVersions {
 			if version == apiDesd.Version {
@@ -3445,6 +3449,10 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		if des.SiteID != site.ID {
 			logger.Warn().Str("Site ID", site.ID.String()).Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID.String()), nil)
+		}
+
+		if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Baseline DPU Extension Services cannot be attached to Instances", nil)
 		}
 
 		versionFound := false

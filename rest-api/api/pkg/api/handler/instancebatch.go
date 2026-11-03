@@ -898,6 +898,10 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 					fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instances are being created", desID.String()), nil)
 			}
 
+			if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Baseline DPU Extension Services cannot be attached to Instances", nil)
+			}
+
 			// Validate version is in active versions list
 			versionFound := false
 			requestedVersion := apiRequest.DpuExtensionServiceDeployments[i].Version
