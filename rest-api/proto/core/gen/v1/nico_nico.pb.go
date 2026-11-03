@@ -19485,16 +19485,40 @@ func (x *NetworkSegmentDeletionRequest) GetId() *NetworkSegmentId {
 	return nil
 }
 
+// Attaches an operator's host-inband segment or reassigns a SiteAgent's tenant
+// segment. The authenticated caller must have exactly one supported identity:
+// an external administrator or the elektra-site-agent service. Mixed identities
+// and other callers receive PERMISSION_DENIED; the wrong segment kind for an
+// otherwise supported caller receives INVALID_ARGUMENT.
+//
+// Tenant segments must already belong to a live VPC. A move requires source and
+// target VPCs with the same ETHERNET_VIRTUALIZER or deprecated
+// ETHERNET_VIRTUALIZER_WITH_NVUE mode and no segment allocations. Unsupported
+// tenant modes, absent source
+// ownership, allocations, or missing replacement consent return
+// FAILED_PRECONDITION. Unknown or deleted resources return NOT_FOUND.
+//
+// A same-target request returns the segment unchanged after validating caller,
+// mode, and supplied source/version preconditions. It does not require replacement
+// consent or an unused segment. Host-inband attachments retain the operator path's
+// VPC compatibility and prefix-overlap checks.
 type AttachNetworkSegmentToVpcRequest struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	NetworkSegmentId *NetworkSegmentId      `protobuf:"bytes,1,opt,name=network_segment_id,json=networkSegmentId,proto3" json:"network_segment_id,omitempty"`
-	VpcId            *VpcId                 `protobuf:"bytes,2,opt,name=vpc_id,json=vpcId,proto3" json:"vpc_id,omitempty"`
-	AllowReplace     bool                   `protobuf:"varint,3,opt,name=allow_replace,json=allowReplace,proto3" json:"allow_replace,omitempty"`
-	// If present, reject a reassignment from a different source. The REST site
-	// agent uses the version precondition to fence late replies and ABA retries.
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required segment ID; omission is rejected with INVALID_ARGUMENT.
+	NetworkSegmentId *NetworkSegmentId `protobuf:"bytes,1,opt,name=network_segment_id,json=networkSegmentId,proto3" json:"network_segment_id,omitempty"`
+	// Required target VPC ID; omission is rejected with INVALID_ARGUMENT.
+	VpcId *VpcId `protobuf:"bytes,2,opt,name=vpc_id,json=vpcId,proto3" json:"vpc_id,omitempty"`
+	// Explicit consent to replace a different existing VPC attachment. False
+	// when omitted; it does not bypass caller, mode, allocation, or replay checks.
+	AllowReplace bool `protobuf:"varint,3,opt,name=allow_replace,json=allowReplace,proto3" json:"allow_replace,omitempty"`
+	// Optional source VPC precondition. A mismatch returns FAILED_PRECONDITION,
+	// including for a same-target request. Omission skips this source check.
 	ExpectedSourceVpcId *VpcId `protobuf:"bytes,4,opt,name=expected_source_vpc_id,json=expectedSourceVpcId,proto3" json:"expected_source_vpc_id,omitempty"`
-	// Compare against NetworkSegment.status.lifecycle.version, which reflects
-	// the stored network_segments.version (not controller_state_version).
+	// Required for SiteAgent and optional for operators. Omission by SiteAgent or
+	// a malformed value returns INVALID_ARGUMENT. Compare against
+	// NetworkSegment.status.lifecycle.version, which reflects the stored
+	// network_segments.version, not controller_state_version. A mismatch returns
+	// FAILED_PRECONDITION before same-target handling, fencing stale/ABA retries.
 	ExpectedSegmentVersion *string `protobuf:"bytes,5,opt,name=expected_segment_version,json=expectedSegmentVersion,proto3,oneof" json:"expected_segment_version,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache

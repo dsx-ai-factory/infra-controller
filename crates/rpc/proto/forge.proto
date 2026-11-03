@@ -126,6 +126,8 @@ service Forge {
   rpc FindNetworkSegmentIds(NetworkSegmentSearchFilter) returns (NetworkSegmentIdList);
   rpc FindNetworkSegmentsByIds(NetworkSegmentsByIdsRequest) returns (NetworkSegmentList);
   rpc CreateNetworkSegment(NetworkSegmentCreationRequest) returns (NetworkSegment);
+  // Attaches or reassigns a segment under the caller, allocation, and replay
+  // constraints documented by AttachNetworkSegmentToVpcRequest.
   rpc AttachNetworkSegmentToVpc(AttachNetworkSegmentToVpcRequest) returns (NetworkSegment);
   rpc DeleteNetworkSegment(NetworkSegmentDeletionRequest) returns (NetworkSegmentDeletionResult);
   // TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -3528,16 +3530,40 @@ message NetworkSegmentDeletionRequest {
   common.NetworkSegmentId id = 1;
 }
 
+// Attaches an operator's host-inband segment or reassigns a SiteAgent's tenant
+// segment. The authenticated caller must have exactly one supported identity:
+// an external administrator or the elektra-site-agent service. Mixed identities
+// and other callers receive PERMISSION_DENIED; the wrong segment kind for an
+// otherwise supported caller receives INVALID_ARGUMENT.
+//
+// Tenant segments must already belong to a live VPC. A move requires source and
+// target VPCs with the same ETHERNET_VIRTUALIZER or deprecated
+// ETHERNET_VIRTUALIZER_WITH_NVUE mode and no segment allocations. Unsupported
+// tenant modes, absent source
+// ownership, allocations, or missing replacement consent return
+// FAILED_PRECONDITION. Unknown or deleted resources return NOT_FOUND.
+//
+// A same-target request returns the segment unchanged after validating caller,
+// mode, and supplied source/version preconditions. It does not require replacement
+// consent or an unused segment. Host-inband attachments retain the operator path's
+// VPC compatibility and prefix-overlap checks.
 message AttachNetworkSegmentToVpcRequest {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required segment ID; omission is rejected with INVALID_ARGUMENT.
   common.NetworkSegmentId network_segment_id = 1;
+  // Required target VPC ID; omission is rejected with INVALID_ARGUMENT.
   common.VpcId vpc_id = 2;
+  // Explicit consent to replace a different existing VPC attachment. False
+  // when omitted; it does not bypass caller, mode, allocation, or replay checks.
   bool allow_replace = 3;
-  // If present, reject a reassignment from a different source. The REST site
-  // agent uses the version precondition to fence late replies and ABA retries.
+  // Optional source VPC precondition. A mismatch returns FAILED_PRECONDITION,
+  // including for a same-target request. Omission skips this source check.
   common.VpcId expected_source_vpc_id = 4;
-  // Compare against NetworkSegment.status.lifecycle.version, which reflects
-  // the stored network_segments.version (not controller_state_version).
+  // Required for SiteAgent and optional for operators. Omission by SiteAgent or
+  // a malformed value returns INVALID_ARGUMENT. Compare against
+  // NetworkSegment.status.lifecycle.version, which reflects the stored
+  // network_segments.version, not controller_state_version. A mismatch returns
+  // FAILED_PRECONDITION before same-target handling, fencing stale/ABA retries.
   optional string expected_segment_version = 5;
 }
 

@@ -656,6 +656,8 @@ type ForgeClient interface {
 	FindNetworkSegmentIds(ctx context.Context, in *NetworkSegmentSearchFilter, opts ...grpc.CallOption) (*NetworkSegmentIdList, error)
 	FindNetworkSegmentsByIds(ctx context.Context, in *NetworkSegmentsByIdsRequest, opts ...grpc.CallOption) (*NetworkSegmentList, error)
 	CreateNetworkSegment(ctx context.Context, in *NetworkSegmentCreationRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
+	// Attaches or reassigns a segment under the caller, allocation, and replay
+	// constraints documented by AttachNetworkSegmentToVpcRequest.
 	AttachNetworkSegmentToVpc(ctx context.Context, in *AttachNetworkSegmentToVpcRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
 	DeleteNetworkSegment(ctx context.Context, in *NetworkSegmentDeletionRequest, opts ...grpc.CallOption) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -7276,6 +7278,8 @@ type ForgeServer interface {
 	FindNetworkSegmentIds(context.Context, *NetworkSegmentSearchFilter) (*NetworkSegmentIdList, error)
 	FindNetworkSegmentsByIds(context.Context, *NetworkSegmentsByIdsRequest) (*NetworkSegmentList, error)
 	CreateNetworkSegment(context.Context, *NetworkSegmentCreationRequest) (*NetworkSegment, error)
+	// Attaches or reassigns a segment under the caller, allocation, and replay
+	// constraints documented by AttachNetworkSegmentToVpcRequest.
 	AttachNetworkSegmentToVpc(context.Context, *AttachNetworkSegmentToVpcRequest) (*NetworkSegment, error)
 	DeleteNetworkSegment(context.Context, *NetworkSegmentDeletionRequest) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
