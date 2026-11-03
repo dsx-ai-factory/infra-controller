@@ -1634,16 +1634,21 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         assert!(ovs_script.contains("add-br 'br-vf4'"));
         assert!(ovs_script.contains(expected_ovs_marker));
 
-        let expected_labels = InitializationLabeler
+        let selector = deployment.spec.dpus.dpu_sets.as_ref().unwrap()[0]
+            .dpu_node_selector
+            .as_ref()
+            .unwrap();
+        let mut expected_labels = InitializationLabeler
             .node_labels_for_deployment_type(deployment_type)
             .unwrap();
+        expected_labels.remove(DPU_ENABLED_NODE_LABEL);
+        assert_eq!(selector.match_labels.as_ref(), Some(&expected_labels));
+        let selector_json = serde_json::to_value(selector).unwrap();
         assert_eq!(
-            deployment.spec.dpus.dpu_sets.as_ref().unwrap()[0]
-                .dpu_node_selector
-                .as_ref()
-                .and_then(|selector| selector.match_labels.as_ref()),
-            Some(&expected_labels)
+            selector_json["matchExpressions"][0]["key"],
+            DPU_ENABLED_NODE_LABEL
         );
+        assert_eq!(selector_json["matchExpressions"][0]["operator"], "Exists");
 
         // Service-chain ports must expose the exact runtime endpoints for the same inventory.
         let switches = &deployment.spec.service_chains.as_ref().unwrap().switches;

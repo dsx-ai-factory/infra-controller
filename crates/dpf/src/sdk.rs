@@ -174,7 +174,9 @@ pub trait ResourceLabeler: Send + Sync {
     }
 
     /// Node selector labels for a specific deployment type.
-    /// Used by [`build_deployment`] to populate `dpuNodeSelector.matchLabels`.
+    /// Used by [`build_deployment`] to populate the deployment-specific part of
+    /// `dpuNodeSelector.matchLabels`. The DPU-capability label is added separately
+    /// as an `Exists` requirement because NFD emits it with an empty value.
     /// Returns `ConfigError` if no deployment is configured for the requested type.
     fn node_labels_for_deployment_type(
         &self,
@@ -1269,9 +1271,7 @@ pub fn build_deployment(
         })
     };
 
-    let mut node_labels =
-        BTreeMap::from([(DPU_ENABLED_NODE_LABEL.to_string(), "true".to_string())]);
-    node_labels.extend(deployment_node_labels);
+    let dpu_node_selector = build_dpu_node_selector(deployment_node_labels);
 
     DPUDeployment {
         metadata: ObjectMeta {
@@ -1293,10 +1293,7 @@ pub fn build_deployment(
                     dpu_annotations: None,
                     dpu_selector: None,
                     name_suffix: "default".to_string(),
-                    dpu_node_selector: Some(DpuDeploymentDpusDpuSetsDpuNodeSelector {
-                        match_expressions: None,
-                        match_labels: Some(node_labels),
-                    }),
+                    dpu_node_selector: Some(dpu_node_selector),
                     dpu_cluster_selector: None,
                     dpu_device_selector: None,
                     node_selector: None,
@@ -1332,6 +1329,30 @@ pub fn build_deployment(
         },
         status: None,
     }
+}
+
+/// Build a selector that works with both NFD's empty-valued capability label
+/// and deployments whose DPU node label has a value. `matchLabels` requires an
+/// exact value, so `feature.node.kubernetes.io/dpu-enabled: "true"` does not
+/// match NFD's `feature.node.kubernetes.io/dpu-enabled: ""` label.
+pub(crate) fn build_dpu_node_selector(
+    mut deployment_node_labels: BTreeMap<String, String>,
+) -> DpuDeploymentDpusDpuNodeSelector {
+    // This key is a capability marker, not a deployment-specific selector. Keep
+    // it out of matchLabels even if an older caller still supplies it there.
+    deployment_node_labels.remove(DPU_ENABLED_NODE_LABEL);
+
+    let mut selector = json!({
+        "matchExpressions": [{
+            "key": DPU_ENABLED_NODE_LABEL,
+            "operator": "Exists",
+        }],
+    });
+    if !deployment_node_labels.is_empty() {
+        selector["matchLabels"] = json!(deployment_node_labels);
+    }
+
+    serde_json::from_value(selector).expect("static DPU node selector is valid")
 }
 
 // Pair each NIC's br-xplane patch with its Weave-managed brcx bridge patch on br-sfc.
