@@ -5804,7 +5804,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		},
 
 		{
-			name:   "graceful reboot rejected by older Site Agent",
+			name:   "graceful reboot rejected by Agent with typed unsupported-method error",
 			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
 			args: args{
 				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
@@ -5814,6 +5814,18 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 
+		{
+			name:   "graceful reboot preserves older Agent untyped descriptor failure",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
+				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
+				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusInternalServerError,
+				// Reuse the serialized activity envelope to model an Agent that
+				// returns a native wrapped error rather than typed Unimplemented.
+				gracefulError: skuProxyActivityError("InvokeCoreGRPCOnSite", fmt.Errorf("%w: %q on %q", errors.New("unknown proxied gRPC method"), "GracefulRestartInstance", "forge.Forge")),
+			},
+		},
 		{
 			name:   "graceful reboot rejected by older Core",
 			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
