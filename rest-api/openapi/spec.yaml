@@ -7671,6 +7671,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '404':
+          $ref: '#/components/responses/NotFoundError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
